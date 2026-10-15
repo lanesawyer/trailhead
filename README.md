@@ -14,6 +14,8 @@ cargo clippy --all-targets
 cargo fmt --all
 ```
 
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` on every pull request and push to `main`.
+
 ## License
 
 [AGPL-3.0](LICENSE)
