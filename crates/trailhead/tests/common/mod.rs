@@ -34,7 +34,9 @@ impl Instance {
             .env("TRAILHEAD_URL", &self.url)
             .env_remove("TRAILHEAD_TOKEN")
             .env_remove("TRAILHEAD_AGENT")
-            .env_remove("TRAILHEAD_PROJECT");
+            .env_remove("TRAILHEAD_PROJECT")
+            .env_remove("TRAILHEAD_DB")
+            .env_remove("TRAILHEAD_BIND");
         cmd
     }
 
