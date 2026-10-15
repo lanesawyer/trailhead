@@ -29,7 +29,10 @@ impl Instance {
 
     pub fn command(&self) -> Command {
         let mut cmd = Command::new(&self.exe);
-        cmd.env("TRAILHEAD_DATA_DIR", self.dir.path().join("data"))
+        // Run outside any repo so a real .trailhead.toml can't pick the identity.
+        cmd.current_dir(self.dir.path())
+            .env("TRAILHEAD_NO_KEYRING", "1")
+            .env("TRAILHEAD_DATA_DIR", self.dir.path().join("data"))
             .env("TRAILHEAD_CONFIG_DIR", self.dir.path().join("config"))
             .env("TRAILHEAD_URL", &self.url)
             .env_remove("TRAILHEAD_TOKEN")

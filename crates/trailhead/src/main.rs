@@ -1,5 +1,7 @@
 mod client;
+mod creds;
 mod output;
+mod repo;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,12 +12,12 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use client::{ApiError, Client};
+use client::{ApiError, Client, Identity};
 use output::{comment_line, event_line, project_line, s, short_time, task_line, task_list};
 
 /// Trailhead: a headless task engine for humans and agents.
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about, after_help = IDENTITY_HELP)]
 struct Cli {
     /// Print full JSON instead of terse lines.
     #[arg(long, global = true)]
@@ -24,12 +26,26 @@ struct Cli {
     url: String,
     #[arg(long, global = true, env = "TRAILHEAD_TOKEN", hide_env_values = true)]
     token: Option<String>,
-    /// Act as a local agent, using its saved token.
-    #[arg(long = "as", global = true, env = "TRAILHEAD_AGENT")]
+    /// Act as a local agent, using its saved token [env: TRAILHEAD_AGENT].
+    #[arg(long = "as", global = true, value_name = "AGENT")]
     agent: Option<String>,
+    /// Act as yourself, ignoring TRAILHEAD_AGENT and the agent in .trailhead.toml.
+    #[arg(long, global = true, conflicts_with = "agent")]
+    as_me: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
+
+const IDENTITY_HELP: &str = "\
+Identity, first match wins:
+  1. --token / TRAILHEAD_TOKEN
+  2. --as <agent> / TRAILHEAD_AGENT
+  3. agent = \"...\" in the nearest .trailhead.toml at or above the working directory
+  4. your own saved credential
+--as-me skips 2 and 3. A .trailhead.toml may also set project = \"KEY\" as the default -p.
+
+Saved tokens live in the OS keyring when one is available, else in 0600 files in the
+config directory. TRAILHEAD_NO_KEYRING=1 skips the keyring.";
 
 #[derive(Subcommand)]
 enum Cmd {
@@ -63,7 +79,7 @@ enum Cmd {
     Add {
         title: String,
         #[arg(short, long, env = "TRAILHEAD_PROJECT")]
-        project: String,
+        project: Option<String>,
         #[arg(short, long)]
         description: Option<String>,
         /// 1 (urgent) to 4 (low).
@@ -362,7 +378,16 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Server(cmd) => return server(&cli.url, cmd, cli.json).await,
         _ => {}
     }
-    let c = Client::connect(&cli.url, cli.token.clone(), cli.agent.as_deref()).await?;
+    let repo = repo::find(&std::env::current_dir()?)?.unwrap_or_default();
+    let env_agent = std::env::var("TRAILHEAD_AGENT").ok().filter(|a| !a.is_empty());
+    let agent = match (cli.as_me, cli.agent.clone(), env_agent, repo.agent.clone()) {
+        (true, ..) => None,
+        (false, Some(a), ..) | (false, None, Some(a), _) => Some(Identity { name: a, from: None }),
+        (false, None, None, Some(a)) => Some(Identity { name: a, from: Some(repo.path.clone()) }),
+        (false, None, None, None) => None,
+    };
+    let default_project = repo.project.clone();
+    let c = Client::connect(&cli.url, cli.token.clone(), agent.as_ref()).await?;
     let json = cli.json;
     let show = |v: Value, line: &dyn Fn(&Value) -> String| {
         if json { print_json(&v) } else { println!("{}", line(&v)) }
@@ -372,7 +397,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Serve { .. } | Cmd::Server(_) => unreachable!(),
         Cmd::Ready { project, limit } => {
             let mut q = vec![];
-            if let Some(p) = project {
+            if let Some(p) = project.or(default_project) {
                 q.push(("project", p));
             }
             if let Some(n) = limit {
@@ -383,7 +408,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Ls { project, status, parent, all, limit } => {
             let mut q = vec![];
-            if let Some(p) = project {
+            if let Some(p) = project.or(default_project) {
                 q.push(("project", p));
             }
             match (status, all) {
@@ -409,6 +434,8 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Add { title, project, description, priority, parent, due, after, blocks } => {
+            let project =
+                project.or(default_project).context("--project is required (or set project in .trailhead.toml)")?;
             let body = json!({
                 "project": project,
                 "title": title,
@@ -585,9 +612,8 @@ async fn run(cli: Cli) -> Result<()> {
             let v = c.post("agents", body).await?;
             let safe_name = name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
             let saved = if c.local && safe_name {
-                let path = trailhead_server::Paths::from_env().context("no home directory")?.agent_token(&name);
-                trailhead_server::write_secret(&path, s(&v, "secret"))?;
-                Some(path)
+                let paths = trailhead_server::Paths::from_env().context("no home directory")?;
+                Some(creds::save(&paths, creds::Cred::Agent(&name), s(&v, "secret"))?)
             } else {
                 None
             };
@@ -596,7 +622,12 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 println!("agent {} ({})", s(&v["agent"], "name"), s(&v["agent"], "id"));
                 match saved {
-                    Some(path) => println!("token saved to {}; use `trailhead --as {name}`", path.display()),
+                    Some(creds::Saved::Keyring) => {
+                        println!("token saved to the OS keyring; use `trailhead --as {name}`")
+                    }
+                    Some(creds::Saved::File(path)) => {
+                        println!("token saved to {}; use `trailhead --as {name}`", path.display())
+                    }
                     None => println!("token (shown once): {}", s(&v, "secret")),
                 }
             }

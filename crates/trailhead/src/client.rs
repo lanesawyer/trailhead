@@ -6,6 +6,14 @@ use reqwest::{Method, StatusCode, Url};
 use serde_json::Value;
 use trailhead_server::{Paths, modified_ms};
 
+use crate::creds;
+
+/// The agent to act as, and the `.trailhead.toml` that chose it, if one did.
+pub struct Identity {
+    pub name: String,
+    pub from: Option<std::path::PathBuf>,
+}
+
 pub struct Client {
     http: reqwest::Client,
     base: Url,
@@ -34,7 +42,7 @@ pub fn is_local(url: &Url) -> bool {
 
 impl Client {
     /// Connects to the server, starting a local one in the background if needed.
-    pub async fn connect(url: &str, token: Option<String>, agent: Option<&str>) -> Result<Client> {
+    pub async fn connect(url: &str, token: Option<String>, agent: Option<&Identity>) -> Result<Client> {
         let (http, base) = http_and_base(url)?;
         match health(&http, &base).await {
             Some(info) if is_local(&base) && is_stale(&info) => {
@@ -49,22 +57,13 @@ impl Client {
         let paths = Paths::from_env().context("no home directory")?;
         let token = match (token, agent) {
             (Some(t), _) => t,
-            (None, Some(name)) => {
-                let path = paths.agent_token(name);
-                std::fs::read_to_string(&path)
-                    .with_context(|| format!("no saved token for agent {name:?} at {}", path.display()))?
-                    .trim()
-                    .to_string()
-            }
-            (None, None) => {
-                let path = paths.credentials();
-                std::fs::read_to_string(&path)
-                    .with_context(|| {
-                        format!("no token: set TRAILHEAD_TOKEN or run a local server to create {}", path.display())
-                    })?
-                    .trim()
-                    .to_string()
-            }
+            (None, Some(id)) => creds::read(&paths, creds::Cred::Agent(&id.name)).map_err(|e| match &id.from {
+                Some(file) => {
+                    e.context(format!("{} sets agent = {:?}; pass --as-me to act as yourself", file.display(), id.name))
+                }
+                None => e,
+            })?,
+            (None, None) => creds::read(&paths, creds::Cred::User)?,
         };
         let local = is_local(&base);
         Ok(Client { http, base, token, local })
