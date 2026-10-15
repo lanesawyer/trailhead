@@ -76,8 +76,9 @@ impl IntoResponse for ApiError {
         match e {
             Error::BlockedBy(keys) => body["blocked_by"] = json!(keys),
             Error::VersionConflict { current, .. } => body["current_version"] = json!(current),
-            Error::ClaimHeld { holder, expires_at } => {
+            Error::ClaimHeld { holder, holder_id, expires_at } => {
                 body["holder"] = json!(holder);
+                body["holder_id"] = json!(holder_id);
                 body["expires_at"] = json!(expires_at);
             }
             Error::UndoConflict { later_event, .. } => body["later_event"] = json!(later_event),

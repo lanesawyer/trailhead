@@ -33,6 +33,26 @@ pub(crate) async fn any_claim(conn: &Connection, task_id: Uuid) -> Result<Option
     rows.next().await?.map(|r| claim_from_row(&r)).transpose()
 }
 
+/// A `claim_held` error naming the holder, so people and agents can tell who to ask.
+pub(crate) async fn claim_held(conn: &Connection, c: &Claim) -> Error {
+    let id = c.holder_id.to_string();
+    let name = async {
+        let mut rows = conn
+            .query("SELECT name FROM agents WHERE id = ?1 UNION ALL SELECT name FROM users WHERE id = ?1", [id.clone()])
+            .await?;
+        Ok::<_, Error>(match rows.next().await? {
+            Some(row) => Some(row.get::<String>(0)?),
+            None => None,
+        })
+    }
+    .await;
+    Error::ClaimHeld {
+        holder: name.ok().flatten().unwrap_or_else(|| id.clone()),
+        holder_id: id,
+        expires_at: fmt_ts(c.expires_at),
+    }
+}
+
 pub(crate) async fn live_claim(conn: &Connection, task_id: Uuid, now: OffsetDateTime) -> Result<Option<Claim>> {
     Ok(any_claim(conn, task_id).await?.filter(|c| c.expires_at > now))
 }
@@ -142,7 +162,7 @@ impl Store {
             if let Some(c) = &existing
                 && !mine
             {
-                return Err(Error::ClaimHeld { holder: c.holder_id.to_string(), expires_at: fmt_ts(c.expires_at) });
+                return Err(claim_held(&tx.conn, c).await);
             }
             let claimable = task.status == Status::Open || (mine && task.status == Status::InProgress);
             if !claimable {
@@ -178,7 +198,10 @@ impl Store {
                 )
                 .await?;
             let Some(row) = rows.next().await? else {
-                return Err(Error::ClaimHeld { holder: "another actor".into(), expires_at: String::new() });
+                return Err(match live_claim(&tx.conn, task.id, tx.now).await? {
+                    Some(c) => claim_held(&tx.conn, &c).await,
+                    None => Error::Corrupt("claim lost a race it can't lose under the write lock".into()),
+                });
             };
             let claim = claim_from_row(&row)?;
             tx.emit_change(

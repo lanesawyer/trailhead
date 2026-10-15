@@ -78,7 +78,13 @@ async fn expired_claims_free_the_task() {
     let claimed = env.store.claim(&a, &t.key, Some(60)).await.unwrap();
     assert_eq!(claimed.task.status, Status::InProgress);
     assert!(env.ready_keys().await.is_empty());
-    assert!(matches!(env.store.claim(&b, &t.key, None).await, Err(Error::ClaimHeld { .. })));
+    match env.store.claim(&b, &t.key, None).await {
+        Err(Error::ClaimHeld { holder, holder_id, .. }) => {
+            assert_eq!(holder, "a");
+            assert_eq!(holder_id, a.actor_id().to_string());
+        }
+        other => panic!("expected claim_held, got {other:?}"),
+    }
 
     env.advance(40);
     env.store.renew(&a, &t.key, Some(60)).await.unwrap();

@@ -138,7 +138,7 @@ pub(crate) async fn check_claim_access(tx: &Tx, task: &Task) -> Result<Option<Cl
         && c.holder_id != tx.ctx.actor_id()
         && !tx.ctx.is_human()
     {
-        return Err(Error::ClaimHeld { holder: c.holder_id.to_string(), expires_at: fmt_ts(c.expires_at) });
+        return Err(crate::claims::claim_held(&tx.conn, c).await);
     }
     Ok(claim)
 }

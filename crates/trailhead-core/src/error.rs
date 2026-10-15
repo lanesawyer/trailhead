@@ -7,7 +7,7 @@ pub enum Error {
     #[error("{0} not found")]
     NotFound(String),
     #[error("task is claimed by {holder} until {expires_at}")]
-    ClaimHeld { holder: String, expires_at: String },
+    ClaimHeld { holder: String, holder_id: String, expires_at: String },
     #[error("you do not hold a claim on this task")]
     NotClaimHolder,
     #[error("version conflict: expected {expected}, current is {current}")]
