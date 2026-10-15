@@ -392,3 +392,27 @@ async fn scoped_tokens_only_see_their_projects() {
     let r = api.as_human("POST", "/v1/tokens", Some(json!({"name": "x", "agent": "nobody"}))).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn idempotency_keys_belong_to_the_token() {
+    let api = Api::new().await;
+    api.seed().await;
+    let first = api.as_human("POST", "/v1/agents", Some(json!({"name": "bot"}))).await.body["secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second = api
+        .as_human("POST", "/v1/tokens", Some(json!({"name": "bot scoped", "agent": "bot", "projects": ["AUTH"]})))
+        .await
+        .body["secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let body = Some(json!({"project": "AUTH", "title": "same key"}));
+    let a = api.call(Some(&first), "POST", "/v1/tasks", body.clone(), &[("idempotency-key", "k1")]).await;
+    let b = api.call(Some(&second), "POST", "/v1/tasks", body, &[("idempotency-key", "k1")]).await;
+    assert_eq!(a.status, StatusCode::CREATED);
+    assert_eq!(b.status, StatusCode::CREATED);
+    assert!(b.headers.get("idempotent-replayed").is_none());
+    assert_ne!(a.body["key"], b.body["key"]);
+}

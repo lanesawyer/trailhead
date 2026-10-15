@@ -9,7 +9,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use trailhead_core::{Ctx, Error, StoredResponse, idempotency_fingerprint};
+use trailhead_core::{Ctx, Error, StoredResponse, Token, idempotency_fingerprint};
 
 use crate::AppState;
 use crate::auth::BATCH_HEADER;
@@ -41,7 +41,10 @@ pub async fn layer(State(state): State<Arc<AppState>>, req: Request, next: Next)
         }
     };
     // Unauthenticated requests fall through so the handler answers with its usual 401.
-    let Some(ctx) = authenticate(&state, bearer(&req)).await else { return next.run(req).await };
+    let Some((ctx, token)) = authenticate(&state, bearer(&req)).await else { return next.run(req).await };
+    // Keys belong to the token, not just the principal, so a project-scoped token
+    // can't replay a response stored under the same agent's broader token.
+    let key = format!("{}:{key}", token.id);
 
     let (parts, body) = req.into_parts();
     let Ok(bytes) = to_bytes(body, BODY_LIMIT).await else {
@@ -50,7 +53,13 @@ pub async fn layer(State(state): State<Arc<AppState>>, req: Request, next: Next)
     let path = parts.uri.path_and_query().map_or(parts.uri.path(), |p| p.as_str());
     let fingerprint = idempotency_fingerprint(parts.method.as_str(), path, &bytes);
     match state.store.idempotency_begin(&ctx, &key, &fingerprint).await {
-        Ok(Some(stored)) => return replay(stored),
+        Ok(Some(stored)) => {
+            // Replays are cheap, but they still count against the token's limit.
+            if let Err(e) = state.limits.check(&token) {
+                return ApiError(e).into_response();
+            }
+            return replay(stored);
+        }
         Ok(None) => {}
         Err(e) => return ApiError(e).into_response(),
     }
@@ -88,8 +97,8 @@ fn bearer(req: &Request) -> Option<String> {
     Some(h.strip_prefix("Bearer ")?.trim().to_string())
 }
 
-async fn authenticate(state: &AppState, secret: Option<String>) -> Option<Ctx> {
-    state.store.authenticate(&secret?).await.ok()
+async fn authenticate(state: &AppState, secret: Option<String>) -> Option<(Ctx, Token)> {
+    state.store.authenticate_token(&secret?).await.ok()
 }
 
 fn replay(stored: StoredResponse) -> Response {
