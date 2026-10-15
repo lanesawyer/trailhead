@@ -1,0 +1,54 @@
+use crate::model::Status;
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0} not found")]
+    NotFound(String),
+    #[error("task is claimed by {holder} until {expires_at}")]
+    ClaimHeld { holder: String, expires_at: String },
+    #[error("you do not hold a claim on this task")]
+    NotClaimHolder,
+    #[error("version conflict: expected {expected}, current is {current}")]
+    VersionConflict { expected: i64, current: i64 },
+    #[error("blocked by {}", .0.join(", "))]
+    BlockedBy(Vec<String>),
+    #[error("cannot move from {from} to {to}")]
+    InvalidTransition { from: Status, to: Status },
+    #[error("this needs human review before it can be done")]
+    ReviewRequired,
+    #[error("dependency would create a cycle")]
+    DependencyCycle,
+    #[error("cannot undo: {entity} was changed later by event {later_event}")]
+    UndoConflict { entity: String, later_event: i64 },
+    #[error("{0} already exists")]
+    AlreadyExists(String),
+    #[error("invalid input: {0}")]
+    Invalid(String),
+    #[error("database error: {0}")]
+    Db(#[from] libsql::Error),
+    #[error("serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("corrupt data: {0}")]
+    Corrupt(String),
+}
+
+impl Error {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Error::NotFound(_) => "not_found",
+            Error::ClaimHeld { .. } => "claim_held",
+            Error::NotClaimHolder => "not_claim_holder",
+            Error::VersionConflict { .. } => "version_conflict",
+            Error::BlockedBy(_) => "blocked_by",
+            Error::InvalidTransition { .. } => "invalid_transition",
+            Error::ReviewRequired => "review_required",
+            Error::DependencyCycle => "dependency_cycle",
+            Error::UndoConflict { .. } => "undo_conflict",
+            Error::AlreadyExists(_) => "already_exists",
+            Error::Invalid(_) => "invalid",
+            Error::Db(_) | Error::Json(_) | Error::Corrupt(_) => "internal",
+        }
+    }
+}
