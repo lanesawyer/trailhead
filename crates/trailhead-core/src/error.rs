@@ -28,6 +28,10 @@ pub enum Error {
     Unauthorized,
     #[error("forbidden: {0}")]
     Forbidden(String),
+    #[error("this idempotency key was already used for a different request")]
+    IdempotencyKeyReused,
+    #[error("a request with this idempotency key is still in progress")]
+    IdempotencyKeyInFlight,
     #[error("invalid input: {0}")]
     Invalid(String),
     #[error("database error: {0}")]
@@ -53,6 +57,8 @@ impl Error {
             Error::AlreadyExists(_) => "already_exists",
             Error::Unauthorized => "unauthorized",
             Error::Forbidden(_) => "forbidden",
+            Error::IdempotencyKeyReused => "idempotency_key_reused",
+            Error::IdempotencyKeyInFlight => "idempotency_key_in_flight",
             Error::Invalid(_) => "invalid",
             Error::Db(_) | Error::Json(_) | Error::Corrupt(_) => "internal",
         }

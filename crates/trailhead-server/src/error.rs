@@ -66,7 +66,9 @@ impl IntoResponse for ApiError {
             | Error::InvalidTransition { .. }
             | Error::DependencyCycle
             | Error::UndoConflict { .. }
-            | Error::AlreadyExists(_) => StatusCode::CONFLICT,
+            | Error::AlreadyExists(_)
+            | Error::IdempotencyKeyInFlight => StatusCode::CONFLICT,
+            Error::IdempotencyKeyReused => StatusCode::UNPROCESSABLE_ENTITY,
             Error::ReviewRequired | Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::Unauthorized => StatusCode::UNAUTHORIZED,
             Error::Invalid(_) => StatusCode::BAD_REQUEST,

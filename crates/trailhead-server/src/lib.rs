@@ -3,6 +3,7 @@
 
 mod auth;
 mod error;
+mod idempotency;
 mod mcp;
 mod routes;
 mod stream;
@@ -17,6 +18,7 @@ use tower_http::trace::TraceLayer;
 use trailhead_core::{Ctx, Principal, Store};
 
 pub use auth::BATCH_HEADER;
+pub use idempotency::{IDEMPOTENCY_KEY, REPLAYED_HEADER};
 
 /// Port 7241 spells T-R-A-I on a phone keypad.
 pub const DEFAULT_BIND: &str = "127.0.0.1:7241";
@@ -80,6 +82,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/v1", routes::v1())
         .merge(mcp)
         .layer(axum::middleware::from_fn(auth::batch))
+        // Outside `batch`, so a replay carries the original request's batch id.
+        .layer(axum::middleware::from_fn_with_state(state.clone(), idempotency::layer))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

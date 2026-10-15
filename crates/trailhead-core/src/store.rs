@@ -147,13 +147,25 @@ impl Store {
     /// Runs `f` in one immediate transaction. Writes are serialized in-process so
     /// SQLite never has to arbitrate between our own connections.
     pub(crate) async fn write<T>(&self, ctx: &Ctx, f: impl AsyncFnOnce(&Tx) -> Result<T>) -> Result<T> {
+        self.transact(ctx, true, f).await
+    }
+
+    /// Like [`Store::write`], but doesn't wake event streams. For bookkeeping
+    /// that never emits events.
+    pub(crate) async fn write_quiet<T>(&self, ctx: &Ctx, f: impl AsyncFnOnce(&Tx) -> Result<T>) -> Result<T> {
+        self.transact(ctx, false, f).await
+    }
+
+    async fn transact<T>(&self, ctx: &Ctx, notify: bool, f: impl AsyncFnOnce(&Tx) -> Result<T>) -> Result<T> {
         let conn = self.writer.lock().await;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).await?;
         let w = Tx { conn: (*tx).clone(), ctx: ctx.clone(), now: self.now() };
         match f(&w).await {
             Ok(v) => {
                 tx.commit().await?;
-                self.changes.send_modify(|n| *n += 1);
+                if notify {
+                    self.changes.send_modify(|n| *n += 1);
+                }
                 Ok(v)
             }
             Err(e) => {

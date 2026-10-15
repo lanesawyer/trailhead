@@ -250,3 +250,91 @@ async fn event_stream_delivers_new_writes_and_resumes() {
     let res = api.app.clone().oneshot(stream_req(&[], "?task=NOPE-1")).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn idempotency_key_replays_the_first_response() {
+    let api = Api::new().await;
+    api.seed().await;
+    let human = api.human.clone();
+    let body = json!({"project": "AUTH", "title": "once"});
+    let key = [("idempotency-key", "k-1")];
+    let first = api.call(Some(&human), "POST", "/v1/tasks", Some(body.clone()), &key).await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    assert!(first.headers.get("idempotent-replayed").is_none());
+    let again = api.call(Some(&human), "POST", "/v1/tasks", Some(body.clone()), &key).await;
+    assert_eq!(again.status, StatusCode::CREATED);
+    assert_eq!(again.headers["idempotent-replayed"], "true");
+    assert_eq!(again.body, first.body);
+    assert_eq!(again.headers[header::ETAG], first.headers[header::ETAG]);
+    assert_eq!(again.headers[BATCH_HEADER], first.headers[BATCH_HEADER]);
+
+    let tasks = api.as_human("GET", "/v1/tasks?project=AUTH", None).await;
+    assert_eq!(tasks.body.as_array().unwrap().len(), 1, "{}", tasks.body);
+
+    let other = api.call(Some(&human), "POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "x"})), &key).await;
+    assert_eq!(other.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(other.body["error"]["code"], "idempotency_key_reused");
+    let other_path = api.call(Some(&human), "POST", "/v1/projects", Some(body), &key).await;
+    assert_eq!(other_path.body["error"]["code"], "idempotency_key_reused");
+}
+
+#[tokio::test]
+async fn failed_requests_are_not_cached_under_their_key() {
+    let api = Api::new().await;
+    let human = api.human.clone();
+    let body = json!({"project": "AUTH", "title": "early"});
+    let key = [("idempotency-key", "retry-me")];
+    let r = api.call(Some(&human), "POST", "/v1/tasks", Some(body.clone()), &key).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+    api.seed().await;
+    let r = api.call(Some(&human), "POST", "/v1/tasks", Some(body), &key).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert!(r.headers.get("idempotent-replayed").is_none());
+    assert_eq!(r.body["key"], "AUTH-1");
+}
+
+#[tokio::test]
+async fn idempotency_keys_are_scoped_per_actor() {
+    let api = Api::new().await;
+    api.seed().await;
+    let mut secrets = Vec::new();
+    for name in ["a", "b"] {
+        let r = api.as_human("POST", "/v1/agents", Some(json!({"name": name}))).await;
+        secrets.push(r.body["secret"].as_str().unwrap().to_string());
+    }
+    let key = [("idempotency-key", "shared")];
+    let a =
+        api.call(Some(&secrets[0]), "POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "a"})), &key).await;
+    let b =
+        api.call(Some(&secrets[1]), "POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "b"})), &key).await;
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.body);
+    assert_eq!(b.status, StatusCode::CREATED, "{}", b.body);
+    assert!(b.headers.get("idempotent-replayed").is_none());
+    assert_eq!(a.body["key"], "AUTH-1");
+    assert_eq!(b.body["key"], "AUTH-2");
+}
+
+#[tokio::test]
+async fn bad_idempotency_keys_and_reads_are_handled() {
+    let api = Api::new().await;
+    api.seed().await;
+    let human = api.human.clone();
+    let long = "k".repeat(256);
+    let r = api
+        .call(
+            Some(&human),
+            "POST",
+            "/v1/tasks",
+            Some(json!({"project": "AUTH", "title": "t"})),
+            &[("idempotency-key", &long)],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let r = api.call(None, "POST", "/v1/tasks", Some(json!({})), &[("idempotency-key", "k")]).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    for _ in 0..2 {
+        let r = api.call(Some(&human), "GET", "/v1/ready", None, &[("idempotency-key", "read")]).await;
+        assert_eq!(r.status, StatusCode::OK);
+        assert!(r.headers.get("idempotent-replayed").is_none());
+    }
+}
