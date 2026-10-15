@@ -99,6 +99,56 @@ impl Client {
         .into())
     }
 
+    /// Follows `GET /v1/events/stream`, calling `on_event` with each event's JSON.
+    /// Reconnects from the last id seen if the connection drops.
+    pub async fn watch(&self, query: &[(&str, String)], mut on_event: impl FnMut(Value)) -> Result<()> {
+        let url = self.base.join("events/stream")?;
+        let mut last_id: Option<String> = None;
+        loop {
+            let mut req = self.http.get(url.clone()).bearer_auth(&self.token).query(query);
+            // The client's 30s default would cut the stream off.
+            req = req.timeout(Duration::from_secs(60 * 60 * 24 * 365));
+            if let Some(id) = &last_id {
+                req = req.header("last-event-id", id);
+            }
+            let mut res = match req.send().await {
+                Ok(r) if r.status().is_success() => r,
+                Ok(r) => {
+                    let v: Value = r.json().await.unwrap_or_default();
+                    let err = &v["error"];
+                    return Err(ApiError {
+                        code: err["code"].as_str().unwrap_or("unknown").into(),
+                        message: err["message"].as_str().unwrap_or("stream failed").into(),
+                    }
+                    .into());
+                }
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            let mut buf = String::new();
+            while let Ok(Some(chunk)) = res.chunk().await {
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(end) = buf.find("\n\n") {
+                    let frame: String = buf.drain(..end + 2).collect();
+                    let mut data = String::new();
+                    for line in frame.lines() {
+                        if let Some(id) = line.strip_prefix("id:") {
+                            last_id = Some(id.trim().to_string());
+                        } else if let Some(d) = line.strip_prefix("data:") {
+                            data.push_str(d.trim_start());
+                        }
+                    }
+                    if let Ok(v) = serde_json::from_str(&data) {
+                        on_event(v);
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
     pub async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
         self.request(Method::GET, path, query, None).await
     }

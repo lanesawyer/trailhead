@@ -187,6 +187,17 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: i64,
     },
+    /// Follow events live as they happen.
+    Watch {
+        /// Only this task's events.
+        task: Option<String>,
+        /// Comma-separated kind prefixes, e.g. `task.,comment.`.
+        #[arg(short, long)]
+        kinds: Option<String>,
+        /// Replay from after this event id instead of starting now.
+        #[arg(long)]
+        after: Option<i64>,
+    },
     /// Undo an event or batch. With no arguments, undoes your last batch.
     Undo {
         event_id: Option<i64>,
@@ -476,6 +487,26 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 v.as_array().into_iter().flatten().for_each(|e| println!("{}", event_line(e)));
             }
+        }
+        Cmd::Watch { task, kinds, after } => {
+            let mut q = vec![];
+            if let Some(t) = task {
+                q.push(("task", t));
+            }
+            if let Some(k) = kinds {
+                q.push(("kinds", k));
+            }
+            if let Some(a) = after {
+                q.push(("after", a.to_string()));
+            }
+            c.watch(&q, |e| {
+                if json {
+                    println!("{e}");
+                } else {
+                    println!("{}", event_line(&e));
+                }
+            })
+            .await?;
         }
         Cmd::Undo { event_id, batch } => {
             let body = match (event_id, batch) {

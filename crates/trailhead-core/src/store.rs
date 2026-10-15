@@ -57,6 +57,9 @@ pub struct Store {
     /// `:memory:` databases exist per connection, so everything uses the writer.
     in_memory: Option<Connection>,
     clock: Clock,
+    /// Bumped after every committed write. Only a wake-up hint for event
+    /// streams; the events table stays the source of truth.
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 pub(crate) struct ReadConn<'a> {
@@ -107,6 +110,7 @@ impl Store {
             readers: Default::default(),
             in_memory,
             clock: Arc::new(OffsetDateTime::now_utc),
+            changes: tokio::sync::watch::Sender::new(0),
         })
     }
 
@@ -131,6 +135,11 @@ impl Store {
         self
     }
 
+    /// Changes whenever a write commits in this process.
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
     pub(crate) fn now(&self) -> OffsetDateTime {
         (self.clock)()
     }
@@ -144,6 +153,7 @@ impl Store {
         match f(&w).await {
             Ok(v) => {
                 tx.commit().await?;
+                self.changes.send_modify(|n| *n += 1);
                 Ok(v)
             }
             Err(e) => {

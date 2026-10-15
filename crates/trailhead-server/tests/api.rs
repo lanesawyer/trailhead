@@ -199,3 +199,54 @@ async fn reopening_keeps_the_same_cli_token() {
         assert_eq!(std::fs::metadata(&cfg.credentials).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
+
+/// Reads SSE text from a streaming body until `done` says stop, or 5s pass.
+async fn read_sse(body: Body, done: impl Fn(&str) -> bool) -> String {
+    let mut body = body;
+    let mut out = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !done(&out) {
+        let frame = tokio::time::timeout_at(deadline, body.frame()).await.expect("timed out waiting for events");
+        if let Some(Ok(f)) = frame
+            && let Some(data) = f.data_ref()
+        {
+            out.push_str(&String::from_utf8_lossy(data));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn event_stream_delivers_new_writes_and_resumes() {
+    let api = Api::new().await;
+    api.seed().await;
+    let stream_req = |extra: &[(&str, &str)], query: &str| {
+        let mut req = Request::builder()
+            .uri(format!("/v1/events/stream{query}"))
+            .header(header::AUTHORIZATION, format!("Bearer {}", api.human));
+        for (k, v) in extra {
+            req = req.header(*k, *v);
+        }
+        req.body(Body::empty()).unwrap()
+    };
+
+    // A fresh stream starts at "now": the project.created from seeding isn't replayed.
+    let res = api.app.clone().oneshot(stream_req(&[], "")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "text/event-stream");
+    let reader = tokio::spawn(read_sse(res.into_body(), |s| s.contains("event: task.created")));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "live"}))).await;
+    let got = reader.await.unwrap();
+    assert!(!got.contains("project.created"), "{got}");
+    assert!(got.contains("\"title\":\"live\""), "{got}");
+
+    // Resuming replays from the cursor, filtered by kind.
+    let res = api.app.clone().oneshot(stream_req(&[("last-event-id", "0")], "?kinds=project.")).await.unwrap();
+    let got = read_sse(res.into_body(), |s| s.contains("event: project.created")).await;
+    assert!(got.contains("id: 1\n"), "{got}");
+    assert!(!got.contains("task.created"), "{got}");
+
+    let res = api.app.clone().oneshot(stream_req(&[], "?task=NOPE-1")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}

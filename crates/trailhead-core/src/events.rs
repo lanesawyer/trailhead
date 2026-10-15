@@ -53,6 +53,15 @@ pub struct EventFilter {
 }
 
 impl Store {
+    /// The id of the newest event, so a stream can start from "now".
+    pub async fn latest_event_id(&self, ctx: &Ctx) -> Result<i64> {
+        let conn = self.reader()?;
+        let mut rows = conn
+            .query("SELECT coalesce(max(id), 0) FROM events WHERE workspace_id = ?1", [ctx.workspace_id.to_string()])
+            .await?;
+        Ok(rows.next().await?.map(|r| r.get(0)).transpose()?.unwrap_or(0))
+    }
+
     /// Events in id order, oldest first unless `newest_first`.
     pub async fn list_events(&self, ctx: &Ctx, filter: EventFilter) -> Result<Vec<Event>> {
         let conn = self.reader()?;

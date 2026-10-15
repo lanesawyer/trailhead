@@ -5,6 +5,7 @@ mod auth;
 mod error;
 mod mcp;
 mod routes;
+mod stream;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -23,13 +24,19 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:7241";
 pub struct AppState {
     pub store: Store,
     pub info: ServerInfo,
+    /// Flips to true when the server starts shutting down, so long-lived
+    /// streams end instead of holding graceful shutdown open forever.
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl AppState {
     pub fn new(store: Store) -> Self {
-        AppState { store, info: ServerInfo::current(None) }
+        AppState { store, info: ServerInfo::current(None), shutdown: tokio::sync::watch::Sender::new(false) }
     }
 }
+
+/// How long in-flight requests get to finish after a shutdown signal.
+const DRAIN: Duration = Duration::from_secs(10);
 
 /// What `/v1/health` reports, so the CLI can tell which binary a server runs
 /// and restart it after an upgrade.
@@ -165,7 +172,7 @@ pub fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
 /// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first.
 pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Error>> {
     let (store, ctx) = open_local(&cfg).await?;
-    let state = Arc::new(AppState { store, info: ServerInfo::current(Some(cfg.db.clone())) });
+    let state = Arc::new(AppState { info: ServerInfo::current(Some(cfg.db.clone())), ..AppState::new(store) });
     let reaper = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
@@ -184,7 +191,22 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
         std::fs::write(pid_file, format!("{}\n", std::process::id()))?;
     }
     tracing::info!(addr = %cfg.bind, db = %cfg.db.display(), "trailhead listening");
-    let served = axum::serve(listener, router(state)).with_graceful_shutdown(shutdown_signal()).await;
+    let stopping = state.shutdown.clone();
+    let mut stopped = state.shutdown.subscribe();
+    let server = axum::serve(listener, router(state)).with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        stopping.send_replace(true);
+    });
+    let served = tokio::select! {
+        r = server => r,
+        _ = async {
+            stopped.wait_for(|s| *s).await.ok();
+            tokio::time::sleep(DRAIN).await;
+        } => {
+            tracing::warn!("requests still running after {}s; stopping anyway", DRAIN.as_secs());
+            Ok(())
+        }
+    };
     if let Some(pid_file) = &cfg.pid_file
         && std::fs::read_to_string(pid_file).is_ok_and(|p| p.trim() == std::process::id().to_string())
     {

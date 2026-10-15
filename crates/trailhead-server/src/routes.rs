@@ -40,6 +40,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/ready", get(ready))
         .route("/search", get(search))
         .route("/events", get(list_events))
+        .route("/events/stream", get(crate::stream::events))
         .route("/undo", post(undo))
         .route("/revert", post(revert))
         .route("/agents", get(list_agents).post(create_agent))
