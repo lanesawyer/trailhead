@@ -32,3 +32,14 @@ fn auto_start_stop_and_restart_on_new_binary() {
     assert!(!th.dir.path().join("data/server.pid").exists());
     assert_eq!(th.stdout(&["server", "stop"]).trim(), "not running");
 }
+
+#[test]
+fn stop_refuses_a_server_for_another_data_dir() {
+    let a = Instance::new();
+    a.stdout(&["whoami"]);
+    let b = Instance::new();
+    let out = b.command().args(["--url", &a.url, "server", "stop"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to stop it"));
+    assert!(a.pid().is_some(), "a's server should still be running");
+}

@@ -252,8 +252,23 @@ pub fn is_stale(info: &Health) -> bool {
 /// it stopped, or `None` if nothing was running.
 pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32>> {
     let running = health(http, base).await;
-    let pid_file = Paths::from_env().context("no home directory")?.pid_file();
-    let from_file = || std::fs::read_to_string(&pid_file).ok().and_then(|p| p.trim().parse().ok());
+    let paths = Paths::from_env().context("no home directory")?;
+    // Only stop a server that serves this CLI's database, so stopping one
+    // instance can't take down another that happens to answer on the port.
+    let ours = std::env::var_os("TRAILHEAD_DB").map(std::path::PathBuf::from).unwrap_or_else(|| paths.db());
+    if let Some(db) = running.as_ref().and_then(|h| h.db.as_ref())
+        && db != &ours
+    {
+        bail!("the server at {base} serves {}, not this CLI's {}; refusing to stop it", db.display(), ours.display());
+    }
+    let pid_file = paths.pid_file();
+    // A stale pid file may name a pid the OS has since reused for something else.
+    let is_trailhead = |pid: u32| {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map_or(true, |c| String::from_utf8_lossy(&c).contains("trailhead"))
+    };
+    let from_file =
+        || std::fs::read_to_string(&pid_file).ok().and_then(|p| p.trim().parse().ok()).filter(|&pid| is_trailhead(pid));
     let pid = match (&running, running.as_ref().and_then(|h| h.pid).or_else(from_file)) {
         (_, Some(pid)) => pid,
         (None, None) => return Ok(None),
