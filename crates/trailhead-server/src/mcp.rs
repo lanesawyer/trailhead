@@ -23,7 +23,7 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
-    Comment, CommentKind, Ctx, Error, NewComment, NewTask, Status, Task, TaskDetail, TaskFilter, TaskPatch,
+    Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewTask, Status, Task, TaskDetail, TaskFilter, TaskPatch,
 };
 use uuid::Uuid;
 
@@ -401,6 +401,21 @@ impl TrailheadMcp {
         let ctx = ctx_of(&parts)?;
         attempt!(self.state.store.resolve_comment(&ctx, a.comment_id, a.answer).await);
         text("resolved")
+    }
+
+    #[tool(
+        description = "Undo your own most recent change (everything from your last tool call that wrote something). Fails if someone changed the same thing since."
+    )]
+    async fn undo_last(&self, Extension(parts): Extension<Parts>) -> Result<CallToolResult, ErrorData> {
+        let ctx = ctx_of(&parts)?;
+        let store = &self.state.store;
+        let filter =
+            EventFilter { actor_id: Some(ctx.actor_id()), newest_first: true, limit: Some(1), ..Default::default() };
+        let Some(last) = attempt!(store.list_events(&ctx, filter).await).pop() else {
+            return text("nothing to undo");
+        };
+        let report = attempt!(store.undo_batch(&ctx, last.batch_id).await);
+        text(format!("reverted {} change(s)", report.reverted.len()))
     }
 
     #[tool(description = "Full-text search over task titles, descriptions and comments.")]

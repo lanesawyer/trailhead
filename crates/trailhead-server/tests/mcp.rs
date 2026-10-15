@@ -97,6 +97,13 @@ async fn agent_works_a_task_over_mcp() {
     let (_, out) = call(&client, "show", json!({"task": "AUTH-2"})).await;
     assert!(out.contains("[handoff]") && out.contains("done, tests pass"), "{out}");
 
+    let (err, out) = call(&client, "create_task", json!({"project": "AUTH", "title": "oops"})).await;
+    assert!(!err, "{out}");
+    let (err, out) = call(&client, "undo_last", json!({})).await;
+    assert!(!err && out == "reverted 1 change(s)", "{out}");
+    let (_, out) = call(&client, "search", json!({"query": "oops"})).await;
+    assert_eq!(out, "no matches");
+
     let (err, out) = call(&client, "update_task", json!({"task": "AUTH-3", "status": "sideways"})).await;
     assert!(err && out.starts_with("error[invalid]"), "{out}");
 
