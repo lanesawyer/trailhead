@@ -6,6 +6,7 @@ mod error;
 mod idempotency;
 mod mcp;
 mod openapi;
+mod ratelimit;
 mod routes;
 mod stream;
 
@@ -30,11 +31,17 @@ pub struct AppState {
     /// Flips to true when the server starts shutting down, so long-lived
     /// streams end instead of holding graceful shutdown open forever.
     pub shutdown: tokio::sync::watch::Sender<bool>,
+    pub limits: ratelimit::RateLimiter,
 }
 
 impl AppState {
     pub fn new(store: Store) -> Self {
-        AppState { store, info: ServerInfo::current(None), shutdown: tokio::sync::watch::Sender::new(false) }
+        AppState {
+            store,
+            info: ServerInfo::current(None),
+            shutdown: tokio::sync::watch::Sender::new(false),
+            limits: Default::default(),
+        }
     }
 }
 

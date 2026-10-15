@@ -40,6 +40,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("get", "/v1/agents"),
     ("post", "/v1/agents"),
     ("get", "/v1/tokens"),
+    ("post", "/v1/tokens"),
     ("delete", "/v1/tokens/{id}"),
 ];
 

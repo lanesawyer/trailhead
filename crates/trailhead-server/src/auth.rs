@@ -35,7 +35,8 @@ impl FromRequestParts<Arc<AppState>> for Auth {
     async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, ApiError> {
         let header = parts.headers.get(axum::http::header::AUTHORIZATION).and_then(|h| h.to_str().ok());
         let secret = header.and_then(|h| h.strip_prefix("Bearer ")).ok_or(ApiError(Error::Unauthorized))?;
-        let mut ctx = state.store.authenticate(secret.trim()).await?;
+        let (mut ctx, token) = state.store.authenticate_token(secret.trim()).await?;
+        state.limits.check(&token)?;
         if let Some(Batch(id)) = parts.extensions.get::<Batch>() {
             ctx.batch_id = *id;
         }

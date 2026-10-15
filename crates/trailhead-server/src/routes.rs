@@ -10,17 +10,17 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
-    Agent, Claim, ClaimResult, Comment, CommentKind, Dependency, Event, EventFilter, NewComment, NewProject, NewTask,
-    Principal, Project, ProjectPatch, ProjectStatus, Status, Task, TaskDetail, TaskFilter, TaskPatch, Token,
-    UndoReport,
+    Agent, Claim, ClaimResult, Comment, CommentKind, Dependency, Error, Event, EventFilter, NewComment, NewProject,
+    NewTask, Principal, Project, ProjectPatch, ProjectStatus, Status, Task, TaskDetail, TaskFilter, TaskPatch, Token,
+    TokenOptions, UndoReport,
 };
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::{Auth, require_human};
-use crate::error::{ApiResult, Json, Path, Query, invalid};
-use crate::openapi::{CreatedAgent, ErrorBody, Health, Me};
+use crate::error::{ApiError, ApiResult, Json, Path, Query, invalid};
+use crate::openapi::{CreatedAgent, CreatedToken, ErrorBody, Health, Me};
 
 type S = State<Arc<AppState>>;
 
@@ -48,7 +48,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/undo", post(undo))
         .route("/revert", post(revert))
         .route("/agents", get(list_agents).post(create_agent))
-        .route("/tokens", get(list_tokens))
+        .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/{id}", delete(revoke_token))
 }
 
@@ -714,9 +714,25 @@ async fn list_agents(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.list_agents(&ctx).await?)))
 }
 
+/// A token's optional project scope and rate limit.
+#[derive(Deserialize, Default, ToSchema)]
+struct TokenLimits {
+    /// Project keys or ids. Omitted or empty means every project.
+    projects: Option<Vec<String>>,
+    rate_limit_per_minute: Option<i64>,
+}
+
+impl From<TokenLimits> for TokenOptions {
+    fn from(l: TokenLimits) -> Self {
+        TokenOptions { projects: l.projects, rate_limit_per_minute: l.rate_limit_per_minute }
+    }
+}
+
 #[derive(Deserialize, ToSchema)]
 struct CreateAgent {
     name: String,
+    #[serde(flatten)]
+    limits: TokenLimits,
 }
 
 /// Creates an agent and its first token. The secret is only shown here.
@@ -731,8 +747,44 @@ struct CreateAgent {
 async fn create_agent(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateAgent>) -> ApiResult<Response> {
     require_human(&ctx)?;
     let agent = s.store.create_agent(&ctx, &b.name).await?;
-    let (token, secret) = s.store.create_token(&ctx, Principal::Agent(agent.id), &agent.name).await?;
+    let (token, secret) =
+        s.store.create_token_with(&ctx, Principal::Agent(agent.id), &agent.name, b.limits.into()).await?;
     Ok(created(json!({ "agent": agent, "token": token, "secret": secret })))
+}
+
+#[derive(Deserialize, ToSchema)]
+struct CreateToken {
+    name: String,
+    /// Agent name or id. Omitted means a token for the caller.
+    agent: Option<String>,
+    #[serde(flatten)]
+    limits: TokenLimits,
+}
+
+/// Issues a token for the caller or one of their agents. The secret is only shown here.
+#[utoipa::path(
+    post, path = "/v1/tokens", tag = "tokens", request_body = CreateToken,
+    responses(
+        (status = 201, description = "The token and its secret, shown once", body = CreatedToken),
+        (status = 403, description = "forbidden: agents and scoped tokens can't issue tokens", body = ErrorBody),
+        (status = 404, description = "not_found: no such agent", body = ErrorBody),
+    )
+)]
+async fn create_token(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateToken>) -> ApiResult<Response> {
+    require_human(&ctx)?;
+    let principal = match &b.agent {
+        None => Principal::User(ctx.user_id),
+        Some(a) => {
+            let agents = s.store.list_agents(&ctx).await?;
+            let agent = agents
+                .iter()
+                .find(|x| x.owner_user_id == ctx.user_id && (x.name == *a || x.id.to_string() == *a))
+                .ok_or_else(|| ApiError(Error::NotFound(format!("agent {a}"))))?;
+            Principal::Agent(agent.id)
+        }
+    };
+    let (token, secret) = s.store.create_token_with(&ctx, principal, &b.name, b.limits.into()).await?;
+    Ok(created(json!({ "token": token, "secret": secret })))
 }
 
 #[utoipa::path(

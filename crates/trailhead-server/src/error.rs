@@ -72,6 +72,7 @@ impl IntoResponse for ApiError {
             Error::ReviewRequired | Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::Unauthorized => StatusCode::UNAUTHORIZED,
             Error::Invalid(_) => StatusCode::BAD_REQUEST,
+            Error::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Error::Db(_) | Error::Json(_) | Error::Corrupt(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let mut body = json!({ "code": e.code(), "message": e.to_string() });
@@ -84,6 +85,7 @@ impl IntoResponse for ApiError {
                 body["expires_at"] = json!(expires_at);
             }
             Error::UndoConflict { later_event, .. } => body["later_event"] = json!(later_event),
+            Error::RateLimited { retry_after } => body["retry_after"] = json!(retry_after),
             Error::InvalidTransition { from, to } => {
                 body["from"] = json!(from);
                 body["to"] = json!(to);
@@ -93,6 +95,10 @@ impl IntoResponse for ApiError {
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             tracing::error!(error = %e, "internal error");
         }
-        (status, axum::Json(json!({ "error": body }))).into_response()
+        let mut res = (status, axum::Json(json!({ "error": body }))).into_response();
+        if let Error::RateLimited { retry_after } = e {
+            res.headers_mut().insert(axum::http::header::RETRY_AFTER, (*retry_after).into());
+        }
+        res
     }
 }

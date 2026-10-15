@@ -53,7 +53,10 @@ pub async fn auth(State(state): State<Arc<AppState>>, mut req: Request, next: Ne
         .and_then(|h| h.strip_prefix("Bearer "))
         .map(|s| s.trim().to_string());
     let ctx = match secret {
-        Some(s) => state.store.authenticate(&s).await,
+        Some(s) => state.store.authenticate_token(&s).await.and_then(|(ctx, token)| {
+            state.limits.check(&token)?;
+            Ok(ctx)
+        }),
         None => Err(Error::Unauthorized),
     };
     match ctx {

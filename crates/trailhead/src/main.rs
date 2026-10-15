@@ -286,6 +286,12 @@ enum AgentCmd {
     /// Create an agent and print its token (shown once).
     Add {
         name: String,
+        /// Limit the token to these projects (comma-separated keys).
+        #[arg(long, value_delimiter = ',')]
+        projects: Vec<String>,
+        /// Requests per minute the token may make.
+        #[arg(long)]
+        rate_limit: Option<i64>,
     },
 }
 
@@ -569,8 +575,9 @@ async fn run(cli: Cli) -> Result<()> {
                 v.as_array().into_iter().flatten().for_each(|a| println!("{}  {}", s(a, "id"), s(a, "name")));
             }
         }
-        Cmd::Agent(AgentCmd::Add { name }) => {
-            let v = c.post("agents", json!({ "name": name })).await?;
+        Cmd::Agent(AgentCmd::Add { name, projects, rate_limit }) => {
+            let body = json!({ "name": name, "projects": projects, "rate_limit_per_minute": rate_limit });
+            let v = c.post("agents", body).await?;
             let safe_name = name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
             let saved = if c.local && safe_name {
                 let path = trailhead_server::Paths::from_env().context("no home directory")?.agent_token(&name);
@@ -594,10 +601,28 @@ async fn run(cli: Cli) -> Result<()> {
             if json {
                 print_json(&v);
             } else {
+                let projects = c.get("projects", &[("archived", "true".into())]).await?;
+                let key_of = |id: &Value| {
+                    let id = id.as_str().unwrap_or("");
+                    projects
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|p| s(p, "id") == id)
+                        .map_or(id.to_string(), |p| s(p, "key").to_string())
+                };
                 for t in v.as_array().into_iter().flatten() {
                     let revoked = if t["revoked_at"].is_null() { "" } else { "  (revoked)" };
+                    let scope = match t["projects"].as_array() {
+                        Some(ids) => ids.iter().map(key_of).collect::<Vec<_>>().join(","),
+                        None => "all".into(),
+                    };
+                    let limit = match t["rate_limit_per_minute"].as_i64() {
+                        Some(n) => format!("{n}/min"),
+                        None => "unlimited".into(),
+                    };
                     println!(
-                        "{}  {} {}  {}{}",
+                        "{}  {} {}  {}  projects={scope}  rate={limit}{}",
                         s(t, "id"),
                         s(&t["principal"], "kind"),
                         s(&t["principal"], "id"),

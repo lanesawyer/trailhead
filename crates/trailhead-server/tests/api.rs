@@ -338,3 +338,57 @@ async fn bad_idempotency_keys_and_reads_are_handled() {
         assert!(r.headers.get("idempotent-replayed").is_none());
     }
 }
+
+#[tokio::test]
+async fn rate_limited_tokens_get_429_with_retry_after() {
+    let api = Api::new().await;
+    let r = api.as_human("POST", "/v1/agents", Some(json!({"name": "bot", "rate_limit_per_minute": 2}))).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["token"]["rate_limit_per_minute"], 2);
+    let bot = r.body["secret"].as_str().unwrap().to_string();
+    for _ in 0..2 {
+        assert_eq!(api.call(Some(&bot), "GET", "/v1/me", None, &[]).await.status, StatusCode::OK);
+    }
+    let r = api.call(Some(&bot), "GET", "/v1/me", None, &[]).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(r.body["error"]["code"], "rate_limited");
+    let retry: u64 = r.headers[header::RETRY_AFTER].to_str().unwrap().parse().unwrap();
+    assert!((1..=30).contains(&retry), "{retry}");
+    let mcp = api.call(Some(&bot), "POST", "/mcp", Some(json!({})), &[]).await;
+    assert_eq!(mcp.status, StatusCode::TOO_MANY_REQUESTS);
+    // Other tokens have their own budget.
+    assert_eq!(api.as_human("GET", "/v1/me", None).await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn scoped_tokens_only_see_their_projects() {
+    let api = Api::new().await;
+    api.seed().await;
+    api.as_human("POST", "/v1/projects", Some(json!({"key": "WEB", "name": "Web"}))).await;
+    let web = api.as_human("POST", "/v1/tasks", Some(json!({"project": "WEB", "title": "w"}))).await;
+    assert_eq!(web.status, StatusCode::CREATED);
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "a"}))).await;
+    api.as_human("POST", "/v1/agents", Some(json!({"name": "bot"}))).await;
+
+    let r = api.as_human("POST", "/v1/tokens", Some(json!({"name": "ci", "agent": "bot", "projects": ["AUTH"]}))).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["token"]["principal"]["kind"], "agent");
+    let bot = r.body["secret"].as_str().unwrap().to_string();
+
+    let ready = api.call(Some(&bot), "GET", "/v1/ready", None, &[]).await;
+    let keys: Vec<_> = ready.body.as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap()).collect();
+    assert_eq!(keys, vec!["AUTH-1"]);
+    let r = api.call(Some(&bot), "GET", "/v1/tasks/WEB-1", None, &[]).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let r = api.call(Some(&bot), "POST", "/v1/tasks", Some(json!({"project": "WEB", "title": "x"})), &[]).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    assert_eq!(r.body["error"]["code"], "forbidden");
+
+    let tokens = api.as_human("GET", "/v1/tokens", None).await;
+    let ci = tokens.body.as_array().unwrap().iter().find(|t| t["name"] == "ci").unwrap();
+    assert_eq!(ci["projects"].as_array().unwrap().len(), 1);
+    assert!(ci["rate_limit_per_minute"].is_null());
+
+    let r = api.as_human("POST", "/v1/tokens", Some(json!({"name": "x", "agent": "nobody"}))).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+}

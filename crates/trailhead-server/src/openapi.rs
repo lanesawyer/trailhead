@@ -32,6 +32,7 @@ pub const ERROR_CODES: &[&str] = &[
     "forbidden",
     "idempotency_key_reused",
     "idempotency_key_in_flight",
+    "rate_limited",
     "invalid",
     "internal",
 ];
@@ -100,6 +101,14 @@ pub struct Me {
 #[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
 pub struct CreatedAgent {
     agent: trailhead_core::Agent,
+    token: trailhead_core::Token,
+    secret: String,
+}
+
+/// `POST /v1/tokens`. The secret is shown only here.
+#[derive(Serialize, ToSchema)]
+#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
+pub struct CreatedToken {
     token: trailhead_core::Token,
     secret: String,
 }
@@ -201,6 +210,7 @@ impl Modify for Common {
         routes::list_agents,
         routes::create_agent,
         routes::list_tokens,
+        routes::create_token,
         routes::revoke_token,
     ),
     components(schemas(ErrorBody, ErrorDetail))
@@ -245,6 +255,7 @@ mod tests {
             Error::Forbidden(String::new()),
             Error::IdempotencyKeyReused,
             Error::IdempotencyKeyInFlight,
+            Error::RateLimited { retry_after: 0 },
             Error::Invalid(String::new()),
             Error::Corrupt(String::new()),
         ];
