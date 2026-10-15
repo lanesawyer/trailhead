@@ -116,6 +116,9 @@ impl Store {
         if name.trim().is_empty() {
             return Err(Error::Invalid("agent name is empty".into()));
         }
+        if ctx.is_scoped() {
+            return Err(Error::Forbidden("a token scoped to projects can't create agents".into()));
+        }
         let agent = Agent {
             id: Uuid::now_v7(),
             workspace_id: ctx.workspace_id,

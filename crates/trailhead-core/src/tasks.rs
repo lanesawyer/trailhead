@@ -7,11 +7,11 @@ use uuid::Uuid;
 use crate::claims::{drop_claim, live_claim, reap_expired};
 use crate::comments::list_comments_for;
 use crate::db::{fmt_ts, get_enum, get_json, get_opt_ts, get_opt_uuid, get_ts, get_uuid, opt_ts_value, opt_uuid_value};
-use crate::deps::unfinished_blockers;
+use crate::deps::{unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
 use crate::metadata::{merge_patch, validate_path};
 use crate::model::{Claim, Comment, Entity, Status, Task};
-use crate::projects::load_project;
+use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 
 pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at";
@@ -63,6 +63,13 @@ pub(crate) async fn load_task(conn: &Connection, ws: Uuid, r: &str, include_dele
         Some(row) => task_from_row(&row),
         None => Err(Error::NotFound(format!("task {r}"))),
     }
+}
+
+/// [`load_task`] for a task the caller named: one outside the context's project
+/// scope looks like it doesn't exist.
+pub(crate) async fn find_task(conn: &Connection, ctx: &Ctx, r: &str, include_deleted: bool) -> Result<Task> {
+    let task = load_task(conn, ctx.workspace_id, r, include_deleted).await?;
+    if ctx.in_scope(task.project_id) { Ok(task) } else { Err(Error::NotFound(format!("task {r}"))) }
 }
 
 /// Compare-and-swap on `version`. Used by updates and undo alike.
@@ -215,6 +222,7 @@ impl Store {
         self.write(ctx, async |tx| {
             let ws = ctx.workspace_id;
             let project = load_project(&tx.conn, ws, &new.project, false).await?;
+            check_project_write(ctx, &project)?;
             if let (Some(source), Some(ext)) = (&new.source, &new.external_id) {
                 let mut rows = tx
                     .conn
@@ -228,7 +236,7 @@ impl Store {
                 }
             }
             let parent_id = match &new.parent {
-                Some(p) => Some(load_task(&tx.conn, ws, p, false).await?.id),
+                Some(p) => Some(find_task(&tx.conn, ctx, p, false).await?.id),
                 None => None,
             };
             let mut rows = tx
@@ -283,8 +291,7 @@ impl Store {
         expected_version: Option<i64>,
     ) -> Result<Task> {
         self.write(ctx, async |tx| {
-            let ws = ctx.workspace_id;
-            let before = load_task(&tx.conn, ws, task, false).await?;
+            let before = find_task(&tx.conn, ctx, task, false).await?;
             if let Some(v) = expected_version
                 && v != before.version
             {
@@ -318,7 +325,7 @@ impl Store {
             if let Some(parent) = &patch.parent {
                 after.parent_id = match parent {
                     Some(p) => {
-                        let p = load_task(&tx.conn, ws, p, false).await?;
+                        let p = find_task(&tx.conn, ctx, p, false).await?;
                         if p.id == before.id {
                             return Err(Error::Invalid("a task can't be its own parent".into()));
                         }
@@ -364,7 +371,7 @@ impl Store {
     /// Soft delete. Undo brings it back.
     pub async fn delete_task(&self, ctx: &Ctx, task: &str, expected_version: Option<i64>) -> Result<Task> {
         self.write(ctx, async |tx| {
-            let before = load_task(&tx.conn, ctx.workspace_id, task, false).await?;
+            let before = find_task(&tx.conn, ctx, task, false).await?;
             if let Some(v) = expected_version
                 && v != before.version
             {
@@ -390,25 +397,25 @@ impl Store {
 
     pub async fn get_task(&self, ctx: &Ctx, task: &str) -> Result<Task> {
         let conn = self.reader()?;
-        load_task(&conn, ctx.workspace_id, task, false).await
+        find_task(&conn, ctx, task, false).await
     }
 
     pub async fn task_detail(&self, ctx: &Ctx, task: &str) -> Result<TaskDetail> {
         let conn = self.reader()?;
-        let task = load_task(&conn, ctx.workspace_id, task, false).await?;
+        let task = find_task(&conn, ctx, task, false).await?;
         let claim = live_claim(&conn, task.id, self.now()).await?;
-        let blocked_by = unfinished_blockers(&conn, task.id).await?.into_iter().map(|t| t.key).collect();
-        let mut rows = conn
+        let blocked_by = unfinished_blockers(&conn, task.id).await?.iter().map(|t| visible_key(ctx, t)).collect();
+        let rows = conn
             .query(
-                "SELECT t.key FROM dependencies d JOIN tasks t ON t.id = d.blocked_id
-                 WHERE d.blocker_id = ?1 AND t.deleted_at IS NULL ORDER BY t.key",
+                &format!(
+                    "SELECT {} FROM dependencies d JOIN tasks t ON t.id = d.blocked_id
+                     WHERE d.blocker_id = ?1 AND t.deleted_at IS NULL ORDER BY t.key",
+                    prefixed_cols("t")
+                ),
                 [task.id.to_string()],
             )
             .await?;
-        let mut blocks = Vec::new();
-        while let Some(row) = rows.next().await? {
-            blocks.push(row.get(0)?);
-        }
+        let blocks = collect_tasks(rows).await?.iter().map(|t| visible_key(ctx, t)).collect();
         let comments = list_comments_for(&conn, task.id).await?;
         Ok(TaskDetail { task, claim, blocked_by, blocks, comments })
     }
@@ -422,11 +429,11 @@ impl Store {
             sql.push_str(&clause.replace('?', &format!("?{}", params.len())));
         };
         if let Some(p) = &filter.project {
-            let project = load_project(&conn, ctx.workspace_id, p, false).await?;
+            let project = find_project(&conn, ctx, p).await?;
             push(&mut sql, " AND project_id = ?", project.id.to_string().into());
         }
         if let Some(p) = &filter.parent {
-            let parent = load_task(&conn, ctx.workspace_id, p, false).await?;
+            let parent = find_task(&conn, ctx, p, false).await?;
             push(&mut sql, " AND parent_id = ?", parent.id.to_string().into());
         }
         if let Some(d) = filter.due_before {
@@ -436,6 +443,7 @@ impl Store {
             validate_path(path)?;
             push(&mut sql, &format!(" AND CAST(json_extract(metadata, '$.{path}') AS TEXT) = ?"), value.clone().into());
         }
+        sql.push_str(&format!(" AND {}", ctx.scope_sql("project_id")));
         if filter.statuses.is_empty() {
             sql.push_str(" AND status NOT IN ('done', 'cancelled')");
         } else {
@@ -456,21 +464,22 @@ impl Store {
         let conn = self.reader()?;
         self.write(ctx, async |tx| reap_expired(tx, None).await).await?;
         let project_id = match project {
-            Some(p) => Some(load_project(&conn, ctx.workspace_id, p, false).await?.id),
+            Some(p) => Some(find_project(&conn, ctx, p).await?.id),
             None => None,
         };
         let sql = format!(
             "SELECT {} FROM tasks t JOIN projects p ON p.id = t.project_id
              WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND t.status = 'open'
                AND p.deleted_at IS NULL AND p.status = 'active'
-               AND (?2 IS NULL OR t.project_id = ?2)
+               AND (?2 IS NULL OR t.project_id = ?2) AND {}
                AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.task_id = t.id AND c.expires_at > ?3)
                AND NOT EXISTS (
                    SELECT 1 FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
                    WHERE d.blocked_id = t.id AND b.deleted_at IS NULL AND b.status NOT IN ('done', 'cancelled'))
              ORDER BY t.priority, t.due_at IS NULL, t.due_at, t.created_at
              LIMIT ?4",
-            prefixed_cols("t")
+            prefixed_cols("t"),
+            ctx.scope_sql("t.project_id")
         );
         let rows = conn
             .query(
@@ -494,11 +503,12 @@ impl Store {
             return Ok(Vec::new());
         }
         let sql = format!(
-            "SELECT {TASK_COLS} FROM tasks t WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND (
+            "SELECT {TASK_COLS} FROM tasks t WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND {} AND (
                  t.rowid IN (SELECT rowid FROM tasks_fts WHERE tasks_fts MATCH ?2)
                  OR t.id IN (SELECT c.task_id FROM comments c WHERE c.deleted_at IS NULL
                              AND c.rowid IN (SELECT rowid FROM comments_fts WHERE comments_fts MATCH ?2)))
-             ORDER BY t.status IN ('done', 'cancelled'), t.updated_at DESC LIMIT ?3"
+             ORDER BY t.status IN ('done', 'cancelled'), t.updated_at DESC LIMIT ?3",
+            ctx.scope_sql("t.project_id")
         );
         let rows = conn.query(&sql, libsql::params![ctx.workspace_id.to_string(), q, limit.unwrap_or(20)]).await?;
         collect_tasks(rows).await

@@ -5,7 +5,7 @@ use crate::db::fmt_ts;
 use crate::error::{Error, Result};
 use crate::model::{Dependency, Entity, Task};
 use crate::store::{Ctx, Store, Tx};
-use crate::tasks::{TASK_COLS, collect_tasks, load_task};
+use crate::tasks::{TASK_COLS, collect_tasks, find_task};
 
 pub(crate) fn dep_entity_id(blocker: Uuid, blocked: Uuid) -> String {
     format!("{blocker}:{blocked}")
@@ -24,6 +24,14 @@ pub(crate) async fn unfinished_blockers(conn: &Connection, task_id: Uuid) -> Res
         )
         .await?;
     collect_tasks(rows).await
+}
+
+/// Placeholder for a related task outside the caller's scope, so a scoped agent
+/// still learns that something blocks it without learning what.
+pub(crate) const HIDDEN_KEY: &str = "(out of scope)";
+
+pub(crate) fn visible_key(ctx: &Ctx, task: &Task) -> String {
+    if ctx.in_scope(task.project_id) { task.key.clone() } else { HIDDEN_KEY.into() }
 }
 
 pub(crate) async fn insert_dependency(tx: &Tx, d: &Dependency) -> Result<bool> {
@@ -78,8 +86,8 @@ impl Store {
     /// Works across projects.
     pub async fn add_dependency(&self, ctx: &Ctx, blocker: &str, blocked: &str) -> Result<Dependency> {
         self.write(ctx, async |tx| {
-            let blocker = load_task(&tx.conn, ctx.workspace_id, blocker, false).await?;
-            let blocked = load_task(&tx.conn, ctx.workspace_id, blocked, false).await?;
+            let blocker = find_task(&tx.conn, ctx, blocker, false).await?;
+            let blocked = find_task(&tx.conn, ctx, blocked, false).await?;
             if blocker.id == blocked.id {
                 return Err(Error::Invalid("a task can't block itself".into()));
             }
@@ -112,8 +120,8 @@ impl Store {
 
     pub async fn remove_dependency(&self, ctx: &Ctx, blocker: &str, blocked: &str) -> Result<()> {
         self.write(ctx, async |tx| {
-            let blocker = load_task(&tx.conn, ctx.workspace_id, blocker, true).await?;
-            let blocked = load_task(&tx.conn, ctx.workspace_id, blocked, true).await?;
+            let blocker = find_task(&tx.conn, ctx, blocker, true).await?;
+            let blocked = find_task(&tx.conn, ctx, blocked, true).await?;
             let Some(dep) = load_dependency(&tx.conn, blocker.id, blocked.id).await? else {
                 return Err(Error::NotFound(format!("dependency {} -> {}", blocker.key, blocked.key)));
             };
@@ -134,8 +142,10 @@ impl Store {
 
     pub async fn blockers(&self, ctx: &Ctx, task: &str) -> Result<Vec<Task>> {
         let conn = self.reader()?;
-        let task = load_task(&conn, ctx.workspace_id, task, false).await?;
-        unfinished_blockers(&conn, task.id).await
+        let task = find_task(&conn, ctx, task, false).await?;
+        let mut blockers = unfinished_blockers(&conn, task.id).await?;
+        blockers.retain(|b| ctx.in_scope(b.project_id));
+        Ok(blockers)
     }
 }
 

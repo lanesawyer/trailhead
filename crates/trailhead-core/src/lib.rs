@@ -26,5 +26,5 @@ pub use model::*;
 pub use projects::{NewProject, ProjectPatch};
 pub use store::{Clock, Ctx, Store};
 pub use tasks::{NewTask, TaskDetail, TaskFilter, TaskPatch};
-pub use tokens::{Principal, Token};
+pub use tokens::{Principal, Token, TokenOptions};
 pub use undo::{Reverted, Skipped, UndoReport};

@@ -195,6 +195,36 @@ async fn apply(tx: &Tx, events: Vec<Event>, strict: bool) -> Result<UndoReport> 
     Ok(report)
 }
 
+/// Whether every entity the event touched is inside the context's scope.
+async fn event_in_scope(tx: &Tx, e: &Event) -> Result<bool> {
+    let ctx = &tx.ctx;
+    if !ctx.is_scoped() {
+        return Ok(true);
+    }
+    let mut tasks: Vec<String> = e.task_id.map(|t| t.to_string()).into_iter().collect();
+    match e.entity {
+        Entity::Project => return Ok(ctx.in_scope(parse_uuid(&e.entity_id)?)),
+        Entity::Dependency => tasks.extend(e.entity_id.split(':').map(str::to_string)),
+        _ => {}
+    }
+    for t in &tasks {
+        if !ctx.in_scope(load_task(&tx.conn, ctx.workspace_id, t, true).await?.project_id) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Scoped tokens can only undo work entirely inside their projects.
+async fn check_scope(tx: &Tx, events: &[Event]) -> Result<()> {
+    for e in events {
+        if !event_in_scope(tx, e).await? {
+            return Err(Error::Forbidden(format!("event {} touches a project outside this token's scope", e.id)));
+        }
+    }
+    Ok(())
+}
+
 async fn query_events(tx: &Tx, where_clause: &str, params: Vec<libsql::Value>) -> Result<Vec<Event>> {
     let rows =
         tx.conn.query(&format!("SELECT {EVENT_COLS} FROM events WHERE {where_clause} ORDER BY id"), params).await?;
@@ -207,7 +237,7 @@ impl Store {
         self.write(ctx, async |tx| {
             let events =
                 query_events(tx, "workspace_id = ?1 AND id = ?2", vec![tx.ws().into(), event_id.into()]).await?;
-            if events.is_empty() {
+            if events.is_empty() || !event_in_scope(tx, &events[0]).await? {
                 return Err(Error::NotFound(format!("event {event_id}")));
             }
             apply(tx, events, true).await
@@ -227,6 +257,7 @@ impl Store {
             if events.is_empty() {
                 return Err(Error::NotFound(format!("batch {batch_id}")));
             }
+            check_scope(tx, &events).await?;
             apply(tx, events, true).await
         })
         .await
@@ -242,6 +273,7 @@ impl Store {
                 vec![tx.ws().into(), actor_id.to_string().into(), crate::db::fmt_ts(since).into()],
             )
             .await?;
+            check_scope(tx, &events).await?;
             apply(tx, events, false).await
         })
         .await

@@ -82,6 +82,22 @@ pub(crate) async fn load_project(conn: &Connection, ws: Uuid, r: &str, include_d
     }
 }
 
+/// [`load_project`] for reads of a project the caller named: one outside the
+/// context's scope looks like it doesn't exist.
+pub(crate) async fn find_project(conn: &Connection, ctx: &Ctx, r: &str) -> Result<Project> {
+    let project = load_project(conn, ctx.workspace_id, r, false).await?;
+    if ctx.in_scope(project.id) { Ok(project) } else { Err(Error::NotFound(format!("project {r}"))) }
+}
+
+/// Writes that name a project outright are refused rather than hidden.
+pub(crate) fn check_project_write(ctx: &Ctx, project: &Project) -> Result<()> {
+    if ctx.in_scope(project.id) {
+        Ok(())
+    } else {
+        Err(Error::Forbidden(format!("this token can't change project {}", project.key)))
+    }
+}
+
 /// Compare-and-swap on `version`. Used by updates and undo alike.
 pub(crate) async fn save_project(tx: &Tx, before: &Project, after: Project) -> Result<Project> {
     let mut rows = tx
@@ -117,6 +133,9 @@ pub(crate) async fn save_project(tx: &Tx, before: &Project, after: Project) -> R
 
 impl Store {
     pub async fn create_project(&self, ctx: &Ctx, new: NewProject) -> Result<Project> {
+        if ctx.is_scoped() {
+            return Err(Error::Forbidden("a token scoped to projects can't create projects".into()));
+        }
         let key = new.key.trim().to_ascii_uppercase();
         validate_key(&key)?;
         if new.name.trim().is_empty() {
@@ -171,6 +190,7 @@ impl Store {
     ) -> Result<Project> {
         self.write(ctx, async |tx| {
             let before = load_project(&tx.conn, ctx.workspace_id, project, false).await?;
+            check_project_write(ctx, &before)?;
             if let Some(v) = expected_version
                 && v != before.version
             {
@@ -211,13 +231,14 @@ impl Store {
 
     pub async fn get_project(&self, ctx: &Ctx, project: &str) -> Result<Project> {
         let conn = self.reader()?;
-        load_project(&conn, ctx.workspace_id, project, false).await
+        find_project(&conn, ctx, project).await
     }
 
     pub async fn list_projects(&self, ctx: &Ctx, include_archived: bool) -> Result<Vec<Project>> {
         let conn = self.reader()?;
         let sql = format!(
-            "SELECT {PROJECT_COLS} FROM projects WHERE workspace_id = ?1 AND deleted_at IS NULL {} ORDER BY key",
+            "SELECT {PROJECT_COLS} FROM projects WHERE workspace_id = ?1 AND deleted_at IS NULL AND {} {} ORDER BY key",
+            ctx.scope_sql("id"),
             if include_archived { "" } else { "AND status = 'active'" }
         );
         let mut rows = conn.query(&sql, [ctx.workspace_id.to_string()]).await?;

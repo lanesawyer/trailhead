@@ -11,6 +11,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "init", include_str!("../migrations/0001_init.sql")),
     (2, "tokens", include_str!("../migrations/0002_tokens.sql")),
     (3, "idempotency", include_str!("../migrations/0003_idempotency.sql")),
+    (4, "token_scopes", include_str!("../migrations/0004_token_scopes.sql")),
 ];
 
 pub(crate) async fn migrate(conn: &Connection) -> Result<()> {

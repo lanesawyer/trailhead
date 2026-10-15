@@ -6,7 +6,7 @@ use crate::db::{get_enum, get_opt_json, get_opt_uuid, get_ts, get_uuid};
 use crate::error::Result;
 use crate::model::Event;
 use crate::store::{Ctx, Store};
-use crate::tasks::load_task;
+use crate::tasks::find_task;
 
 pub(crate) const EVENT_COLS: &str =
     "id, workspace_id, batch_id, actor_id, on_behalf_of, task_id, entity, entity_id, kind, before, after, undoes, at,
@@ -39,6 +39,19 @@ pub(crate) async fn collect_events(mut rows: libsql::Rows) -> Result<Vec<Event>>
     Ok(out)
 }
 
+/// Events a scoped context may see: those on its projects' tasks, and on the
+/// projects themselves.
+fn scope_sql(ctx: &Ctx) -> String {
+    if !ctx.is_scoped() {
+        return "1".into();
+    }
+    format!(
+        "(task_id IN (SELECT id FROM tasks WHERE {}) OR (entity = 'project' AND {}))",
+        ctx.scope_sql("project_id"),
+        ctx.scope_sql("entity_id")
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EventFilter {
     /// Cursor: only events with a greater id. This is how SSE and webhook
@@ -66,7 +79,7 @@ impl Store {
     pub async fn list_events(&self, ctx: &Ctx, filter: EventFilter) -> Result<Vec<Event>> {
         let conn = self.reader()?;
         let task_id = match &filter.task {
-            Some(t) => Some(load_task(&conn, ctx.workspace_id, t, true).await?.id.to_string()),
+            Some(t) => Some(find_task(&conn, ctx, t, true).await?.id.to_string()),
             None => None,
         };
         let rows = conn
@@ -75,8 +88,9 @@ impl Store {
                     "SELECT {EVENT_COLS} FROM events WHERE workspace_id = ?1
                      AND (?2 IS NULL OR id > ?2) AND (?3 IS NULL OR task_id = ?3)
                      AND (?4 IS NULL OR actor_id = ?4) AND (?5 IS NULL OR batch_id = ?5)
-                     AND (?6 IS NULL OR at >= ?6)
+                     AND (?6 IS NULL OR at >= ?6) AND {}
                      ORDER BY id {} LIMIT ?7",
+                    scope_sql(ctx),
                     if filter.newest_first { "DESC" } else { "ASC" }
                 ),
                 libsql::params![

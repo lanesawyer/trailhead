@@ -34,6 +34,8 @@ pub enum Error {
     IdempotencyKeyInFlight,
     #[error("invalid input: {0}")]
     Invalid(String),
+    #[error("rate limit exceeded; retry in {retry_after}s")]
+    RateLimited { retry_after: u64 },
     #[error("database error: {0}")]
     Db(#[from] libsql::Error),
     #[error("serialization error: {0}")]
@@ -60,6 +62,7 @@ impl Error {
             Error::IdempotencyKeyReused => "idempotency_key_reused",
             Error::IdempotencyKeyInFlight => "idempotency_key_in_flight",
             Error::Invalid(_) => "invalid",
+            Error::RateLimited { .. } => "rate_limited",
             Error::Db(_) | Error::Json(_) | Error::Corrupt(_) => "internal",
         }
     }

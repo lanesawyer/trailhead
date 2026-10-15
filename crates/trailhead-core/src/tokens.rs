@@ -4,8 +4,9 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::db::{get_opt_ts, get_ts, get_uuid};
+use crate::db::{get_opt_json, get_opt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
+use crate::projects::load_project;
 use crate::store::{Ctx, Store};
 
 const TOKEN_PREFIX: &str = "th_";
@@ -29,6 +30,18 @@ pub struct Token {
     pub created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
     pub revoked_at: Option<OffsetDateTime>,
+    /// Projects the token is limited to. `None` means every project.
+    pub projects: Option<Vec<Uuid>>,
+    /// `None` means unlimited.
+    pub rate_limit_per_minute: Option<i64>,
+}
+
+/// Optional limits on a new token.
+#[derive(Debug, Clone, Default)]
+pub struct TokenOptions {
+    /// Project keys or ids. `None` or empty means every project.
+    pub projects: Option<Vec<String>>,
+    pub rate_limit_per_minute: Option<i64>,
 }
 
 fn token_from_row(row: &Row) -> Result<Token> {
@@ -41,10 +54,13 @@ fn token_from_row(row: &Row) -> Result<Token> {
         name: row.get(4)?,
         created_at: get_ts(row, 5)?,
         revoked_at: get_opt_ts(row, 6)?,
+        projects: get_opt_json(row, 7)?.map(serde_json::from_value).transpose()?,
+        rate_limit_per_minute: row.get(8)?,
     })
 }
 
-const TOKEN_COLS: &str = "id, workspace_id, principal_kind, principal_id, name, created_at, revoked_at";
+const TOKEN_COLS: &str =
+    "id, workspace_id, principal_kind, principal_id, name, created_at, revoked_at, projects, rate_limit_per_minute";
 
 fn hash(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
@@ -54,8 +70,27 @@ impl Store {
     /// Issues a bearer token. Humans can issue tokens for themselves and for their own
     /// agents; agents can't issue tokens at all. The secret is only ever returned here.
     pub async fn create_token(&self, ctx: &Ctx, principal: Principal, name: &str) -> Result<(Token, String)> {
+        self.create_token_with(ctx, principal, name, TokenOptions::default()).await
+    }
+
+    /// [`Store::create_token`] with a project scope and rate limit.
+    pub async fn create_token_with(
+        &self,
+        ctx: &Ctx,
+        principal: Principal,
+        name: &str,
+        opts: TokenOptions,
+    ) -> Result<(Token, String)> {
         if !ctx.is_human() {
             return Err(Error::Forbidden("agents can't issue tokens".into()));
+        }
+        if ctx.is_scoped() {
+            return Err(Error::Forbidden("a token scoped to projects can't issue tokens".into()));
+        }
+        if let Some(n) = opts.rate_limit_per_minute
+            && n < 1
+        {
+            return Err(Error::Invalid("rate limit must be at least 1 request per minute".into()));
         }
         let conn = self.reader()?;
         let (kind, pid) = match principal {
@@ -80,14 +115,37 @@ impl Store {
         let id = Uuid::now_v7();
         let token = self
             .write(ctx, async |tx| {
+                let projects = match opts.projects.as_deref() {
+                    None | Some([]) => None,
+                    Some(refs) => {
+                        let mut ids = Vec::new();
+                        for r in refs {
+                            ids.push(load_project(&tx.conn, ctx.workspace_id, r, false).await?.id);
+                        }
+                        ids.sort();
+                        ids.dedup();
+                        Some(serde_json::to_string(&ids)?)
+                    }
+                };
                 let mut rows = tx
                     .conn
                     .query(
                         &format!(
-                            "INSERT INTO tokens (id, workspace_id, principal_kind, principal_id, name, secret_hash, created_at)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING {TOKEN_COLS}"
+                            "INSERT INTO tokens (id, workspace_id, principal_kind, principal_id, name, secret_hash, created_at,
+                             projects, rate_limit_per_minute)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING {TOKEN_COLS}"
                         ),
-                        libsql::params![id.to_string(), tx.ws(), kind, pid.to_string(), name, hash(&secret), tx.now_str()],
+                        libsql::params![
+                            id.to_string(),
+                            tx.ws(),
+                            kind,
+                            pid.to_string(),
+                            name,
+                            hash(&secret),
+                            tx.now_str(),
+                            projects,
+                            opts.rate_limit_per_minute
+                        ],
                     )
                     .await?;
                 token_from_row(&rows.next().await?.expect("RETURNING yields a row"))
@@ -98,6 +156,12 @@ impl Store {
 
     /// Resolves a bearer secret to a context with a fresh batch.
     pub async fn authenticate(&self, secret: &str) -> Result<Ctx> {
+        Ok(self.authenticate_token(secret).await?.0)
+    }
+
+    /// [`Store::authenticate`], also returning the token so a server can apply its
+    /// rate limit. The context carries the token's project scope.
+    pub async fn authenticate_token(&self, secret: &str) -> Result<(Ctx, Token)> {
         if !secret.starts_with(TOKEN_PREFIX) {
             return Err(Error::Unauthorized);
         }
@@ -112,10 +176,15 @@ impl Store {
             return Err(Error::Unauthorized);
         };
         let token = token_from_row(&row)?;
-        match token.principal {
-            Principal::User(u) => Ok(Ctx::user(token.workspace_id, u)),
-            Principal::Agent(a) => self.agent_ctx(token.workspace_id, a).await,
-        }
+        let ctx = match token.principal {
+            Principal::User(u) => Ctx::user(token.workspace_id, u),
+            Principal::Agent(a) => self.agent_ctx(token.workspace_id, a).await?,
+        };
+        let ctx = match &token.projects {
+            Some(p) => ctx.scoped_to(p.clone()),
+            None => ctx,
+        };
+        Ok((ctx, token))
     }
 
     /// Tokens the caller can see: their own and their agents'.

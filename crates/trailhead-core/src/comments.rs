@@ -6,7 +6,7 @@ use crate::db::{fmt_ts, get_enum, get_opt_ts, get_opt_uuid, get_ts, get_uuid, op
 use crate::error::{Error, Result};
 use crate::model::{Comment, CommentKind, Entity, Status};
 use crate::store::{Ctx, Store, Tx};
-use crate::tasks::{load_task, update_status};
+use crate::tasks::{find_task, load_task, update_status};
 
 pub(crate) const COMMENT_COLS: &str =
     "id, workspace_id, task_id, author_id, on_behalf_of, kind, addressed_to, body, resolved_at, created_at, deleted_at";
@@ -154,7 +154,7 @@ impl Store {
             return Err(Error::Invalid("comment body is empty".into()));
         }
         self.write(ctx, async |tx| {
-            let task = load_task(&tx.conn, ctx.workspace_id, task, false).await?;
+            let task = find_task(&tx.conn, ctx, task, false).await?;
             if let Some(to) = new.addressed_to
                 && !principal_exists(&tx.conn, ctx.workspace_id, to).await?
             {
@@ -178,7 +178,9 @@ impl Store {
     pub async fn resolve_comment(&self, ctx: &Ctx, comment_id: Uuid, answer: Option<String>) -> Result<Comment> {
         self.write(ctx, async |tx| {
             let before = load_comment(&tx.conn, ctx.workspace_id, comment_id).await?;
-            if before.deleted_at.is_some() {
+            let hidden = !ctx
+                .in_scope(load_task(&tx.conn, ctx.workspace_id, &before.task_id.to_string(), true).await?.project_id);
+            if before.deleted_at.is_some() || hidden {
                 return Err(Error::NotFound(format!("comment {comment_id}")));
             }
             if before.resolved_at.is_some() {
@@ -224,7 +226,7 @@ impl Store {
 
     pub async fn list_comments(&self, ctx: &Ctx, task: &str) -> Result<Vec<Comment>> {
         let conn = self.reader()?;
-        let task = load_task(&conn, ctx.workspace_id, task, false).await?;
+        let task = find_task(&conn, ctx, task, false).await?;
         list_comments_for(&conn, task.id).await
     }
 }

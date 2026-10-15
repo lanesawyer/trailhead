@@ -23,15 +23,17 @@ pub struct Ctx {
     pub agent_id: Option<Uuid>,
     /// Every write made with this context shares one batch, so it can be undone together.
     pub batch_id: Uuid,
+    /// Projects this context may see and change, from its token. `None` means all.
+    pub projects: Option<Vec<Uuid>>,
 }
 
 impl Ctx {
     pub fn user(workspace_id: Uuid, user_id: Uuid) -> Self {
-        Ctx { workspace_id, user_id, agent_id: None, batch_id: Uuid::now_v7() }
+        Ctx { workspace_id, user_id, agent_id: None, batch_id: Uuid::now_v7(), projects: None }
     }
 
     pub fn agent(workspace_id: Uuid, user_id: Uuid, agent_id: Uuid) -> Self {
-        Ctx { workspace_id, user_id, agent_id: Some(agent_id), batch_id: Uuid::now_v7() }
+        Ctx { workspace_id, user_id, agent_id: Some(agent_id), batch_id: Uuid::now_v7(), projects: None }
     }
 
     /// Same actor, fresh batch.
@@ -45,6 +47,29 @@ impl Ctx {
 
     pub fn is_human(&self) -> bool {
         self.agent_id.is_none()
+    }
+
+    /// Limits the context to these projects.
+    pub fn scoped_to(self, projects: Vec<Uuid>) -> Self {
+        Ctx { projects: Some(projects), ..self }
+    }
+
+    pub fn is_scoped(&self) -> bool {
+        self.projects.is_some()
+    }
+
+    pub fn in_scope(&self, project_id: Uuid) -> bool {
+        self.projects.as_ref().is_none_or(|p| p.contains(&project_id))
+    }
+
+    /// An SQL condition limiting `col` (a project id column) to the scope.
+    /// Ids are UUIDs we formatted ourselves, so inlining them is safe.
+    pub(crate) fn scope_sql(&self, col: &str) -> String {
+        match &self.projects {
+            None => "1".into(),
+            Some(p) if p.is_empty() => "0".into(),
+            Some(p) => format!("{col} IN ({})", p.iter().map(|id| format!("'{id}'")).collect::<Vec<_>>().join(", ")),
+        }
     }
 }
 

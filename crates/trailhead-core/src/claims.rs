@@ -5,13 +5,13 @@ use uuid::Uuid;
 
 use crate::comments::latest_handoff;
 use crate::db::{fmt_ts, get_ts, get_uuid};
-use crate::deps::unfinished_blockers;
+use crate::deps::{unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
 use crate::identity::load_workspace;
 use crate::model::{Claim, Comment, Entity, Status, Task};
 use crate::projects::{load_project, validate_ttl};
 use crate::store::{Ctx, EventIn, Store, Tx};
-use crate::tasks::{load_task, update_status};
+use crate::tasks::{find_task, load_task, update_status};
 
 const CLAIM_COLS: &str = "task_id, workspace_id, holder_id, on_behalf_of, claimed_at, expires_at";
 
@@ -155,7 +155,7 @@ impl Store {
     /// already hold extends the lease.
     pub async fn claim(&self, ctx: &Ctx, task: &str, ttl: Option<i64>) -> Result<ClaimResult> {
         self.write(ctx, async |tx| {
-            let task = load_task(&tx.conn, ctx.workspace_id, task, false).await?;
+            let task = find_task(&tx.conn, ctx, task, false).await?;
             reap_expired(tx, Some(task.id)).await?;
             let task = load_task(&tx.conn, ctx.workspace_id, &task.id.to_string(), false).await?;
             let existing = live_claim(&tx.conn, task.id, tx.now).await?;
@@ -171,7 +171,7 @@ impl Store {
             }
             let blockers = unfinished_blockers(&tx.conn, task.id).await?;
             if !blockers.is_empty() {
-                return Err(Error::BlockedBy(blockers.into_iter().map(|t| t.key).collect()));
+                return Err(Error::BlockedBy(blockers.iter().map(|t| visible_key(ctx, t)).collect()));
             }
             let ttl = resolve_ttl(tx, &task, ttl).await?;
             let expires_at = tx.now + Duration::seconds(ttl);
@@ -228,7 +228,7 @@ impl Store {
     /// Heartbeat. Renew roughly every third of the TTL.
     pub async fn renew(&self, ctx: &Ctx, task: &str, ttl: Option<i64>) -> Result<Claim> {
         self.write(ctx, async |tx| {
-            let task = load_task(&tx.conn, ctx.workspace_id, task, false).await?;
+            let task = find_task(&tx.conn, ctx, task, false).await?;
             let Some(before) = live_claim(&tx.conn, task.id, tx.now).await? else {
                 return Err(Error::NotClaimHolder);
             };
@@ -256,7 +256,7 @@ impl Store {
     /// anyone's claim.
     pub async fn release(&self, ctx: &Ctx, task: &str) -> Result<Task> {
         self.write(ctx, async |tx| {
-            let task = load_task(&tx.conn, ctx.workspace_id, task, false).await?;
+            let task = find_task(&tx.conn, ctx, task, false).await?;
             let Some(claim) = live_claim(&tx.conn, task.id, tx.now).await? else {
                 return Err(Error::NotClaimHolder);
             };
