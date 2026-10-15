@@ -315,7 +315,7 @@ struct CreateTask {
     responses(
         (status = 201, description = "Created", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
         (status = 404, description = "`not_found`: project, parent or dependency", body = ErrorBody),
-        (status = 409, description = "`already_exists` (same `source` and `external_id`) or `dependency_cycle`", body = ErrorBody),
+        (status = 409, description = "`dependency_cycle` from `blocked_by`/`blocks`. Repeating a `source` + `external_id` returns the existing task instead of an error.", body = ErrorBody),
     )
 )]
 async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateTask>) -> ApiResult<Response> {
@@ -380,7 +380,7 @@ struct UpdateTask {
         (status = 200, description = "Updated", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
         (status = 403, description = "`review_required` or `forbidden`", body = ErrorBody),
         (status = 404, description = "`not_found`", body = ErrorBody),
-        (status = 409, description = "`invalid_transition`, `blocked_by`, `claim_held` or `not_claim_holder`", body = ErrorBody),
+        (status = 409, description = "`invalid_transition`, `claim_held` or `not_claim_holder`", body = ErrorBody),
         (status = 412, description = "`version_conflict`", body = ErrorBody),
     )
 )]
@@ -445,7 +445,7 @@ async fn claim(State(s): S, Auth(ctx): Auth, Path(t): Path<String>, b: axum::bod
     responses(
         (status = 200, description = "The extended claim", body = Claim),
         (status = 404, description = "`not_found`", body = ErrorBody),
-        (status = 409, description = "`not_claim_holder`", body = ErrorBody),
+        (status = 409, description = "`claim_lost` (you held it, but it expired or someone else took it) or `not_claim_holder`", body = ErrorBody),
     )
 )]
 async fn renew(State(s): S, Auth(ctx): Auth, Path(t): Path<String>, b: axum::body::Bytes) -> ApiResult<Json<Value>> {
@@ -550,7 +550,7 @@ struct AddBlocker {
     responses(
         (status = 201, description = "Created", body = Dependency),
         (status = 404, description = "`not_found`", body = ErrorBody),
-        (status = 409, description = "`dependency_cycle` or `already_exists`", body = ErrorBody),
+        (status = 409, description = "`dependency_cycle`. Adding an existing dependency returns it unchanged.", body = ErrorBody),
     )
 )]
 async fn add_blocker(

@@ -59,8 +59,12 @@ pub struct ErrorDetail {
     current_version: Option<i64>,
     /// `claim_held`: who holds the claim.
     holder: Option<String>,
+    /// `claim_held`: the holder's user or agent id.
+    holder_id: Option<String>,
     /// `claim_held`: when the claim expires.
     expires_at: Option<String>,
+    /// `rate_limited`: seconds until a request will be accepted (also in `Retry-After`).
+    retry_after: Option<u64>,
     /// `undo_conflict`: the later event that would be overwritten.
     later_event: Option<i64>,
     /// `invalid_transition`: the current status.
