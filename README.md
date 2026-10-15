@@ -4,6 +4,8 @@ A fast, headless task engine that humans and agents share. It owns the task data
 
 There is no app. Every interface is a client: REST under `/v1` for apps people build, MCP at `/mcp` for agents without a shell, and the `trailhead` CLI.
 
+Agents can learn the API from `GET /llms.txt` on any server, and the workflow from the portable skill in [skills/trailhead/SKILL.md](skills/trailhead/SKILL.md).
+
 **Status:** Phase 1 (the core library) is done. Phase 2, the server and CLI, is next. See [docs/PLAN.md](docs/PLAN.md) for the architecture and roadmap.
 
 ## Development
