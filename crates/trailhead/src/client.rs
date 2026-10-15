@@ -149,6 +149,52 @@ impl Client {
         }
     }
 
+    /// Forwards one JSON-RPC message to `/mcp` and returns the messages that come
+    /// back: none for a notification, otherwise the response (plus anything the
+    /// server streamed before it).
+    pub async fn mcp_post(&self, message: &str, protocol_version: Option<&str>) -> Result<Vec<String>> {
+        let url = self.base.join("/mcp")?;
+        let mut req = self
+            .http
+            .post(url)
+            .bearer_auth(&self.token)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .body(message.to_string());
+        if let Some(v) = protocol_version {
+            req = req.header("mcp-protocol-version", v);
+        }
+        let res = req.send().await.context("request to Trailhead failed")?;
+        let status = res.status();
+        let is_sse = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("text/event-stream"));
+        let body = res.text().await?;
+        if !status.is_success() {
+            let v: Value = serde_json::from_str(&body).unwrap_or_default();
+            return Err(ApiError {
+                code: v["error"]["code"].as_str().unwrap_or("http_error").into(),
+                message: v["error"]["message"].as_str().map(String::from).unwrap_or_else(|| format!("HTTP {status}")),
+            }
+            .into());
+        }
+        if body.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        if !is_sse {
+            return Ok(vec![body.trim().to_string()]);
+        }
+        Ok(body
+            .split("\n\n")
+            .map(|frame| {
+                frame.lines().filter_map(|l| l.strip_prefix("data:")).map(str::trim_start).collect::<Vec<_>>().join("")
+            })
+            .filter(|data| !data.is_empty())
+            .collect())
+    }
+
     pub async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
         self.request(Method::GET, path, query, None).await
     }

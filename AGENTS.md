@@ -23,6 +23,8 @@ Work on Trailhead is tracked in Trailhead, in the `TRAIL` project. This is how w
 - **Follow-ups and bugs** you notice become new tasks, not scope creep.
 - **Friction with Trailhead itself** is the most valuable thing to report: file it as a task.
 
+In Claude Code, prefer the `trailhead` MCP tools (`mcp__trailhead__ready`, `claim`, `comment`, `update_task`, …), which act as the `claude` agent; `.mcp.json` runs them through `trailhead --as claude mcp`. Use the CLI for what MCP doesn't cover (undo, revert, agents, tokens, `watch`) and when acting as a different agent.
+
 Agents act through their own identity, never Lane's: pass `--as <agent>` (or set `TRAILHEAD_AGENT`). Claude Code uses `claude`, whose token is already saved locally. Other agent tools should ask Lane to run `trailhead agent add <name>` rather than borrowing `claude` or acting as Lane.
 
 ```sh

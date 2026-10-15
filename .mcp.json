@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "trailhead": {
+      "command": "trailhead",
+      "args": ["--as", "claude", "mcp"]
+    }
+  }
+}

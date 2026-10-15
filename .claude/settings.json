@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(trailhead:*)"
+      "Bash(trailhead:*)",
+      "mcp__trailhead"
     ]
   },
   "hooks": {
@@ -17,5 +18,8 @@
         ]
       }
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "trailhead"
+  ]
 }
