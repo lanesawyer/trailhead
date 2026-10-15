@@ -17,6 +17,7 @@ mod store;
 mod tasks;
 mod tokens;
 mod undo;
+mod webhooks;
 
 pub use claims::{ClaimResult, HeldClaim};
 pub use comments::NewComment;
@@ -30,3 +31,4 @@ pub use store::{Clock, Ctx, Store};
 pub use tasks::{NewTask, TaskDetail, TaskFilter, TaskPatch};
 pub use tokens::{Principal, Token, TokenOptions};
 pub use undo::{Reverted, Skipped, UndoReport};
+pub use webhooks::{MAX_FAILURES as WEBHOOK_MAX_FAILURES, Webhook, WebhookDelivery, webhook_signature};

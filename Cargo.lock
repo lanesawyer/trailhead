@@ -3437,6 +3437,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
+ "hmac",
  "jiff",
  "libsql",
  "serde",
@@ -3460,6 +3461,7 @@ dependencies = [
  "http 1.5.0",
  "http-body-util",
  "keyring",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",

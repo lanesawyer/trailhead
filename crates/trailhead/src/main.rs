@@ -235,6 +235,9 @@ enum Cmd {
     Agent(AgentCmd),
     #[command(subcommand)]
     Token(TokenCmd),
+    /// Outbound webhooks (humans only; in an agent repo, add --as-me).
+    #[command(subcommand)]
+    Webhook(WebhookCmd),
     Whoami,
     /// Speak MCP over stdin/stdout, forwarding to the server's /mcp endpoint.
     /// For MCP clients that launch a command, e.g. `trailhead --as claude mcp`.
@@ -310,6 +313,29 @@ enum AgentCmd {
         /// Requests per minute the token may make.
         #[arg(long)]
         rate_limit: Option<i64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WebhookCmd {
+    Ls,
+    /// Send events to URL, signed with a secret shown once.
+    Add {
+        /// Where to POST events. (Not `url`: that's the global server flag.)
+        #[arg(value_name = "URL")]
+        target: String,
+        /// Comma-separated event kind prefixes, e.g. `task.,comment.created`. Default: everything.
+        #[arg(short, long, value_delimiter = ',')]
+        kinds: Vec<String>,
+    },
+    Rm {
+        id: String,
+    },
+    /// Recent delivery attempts.
+    Log {
+        id: String,
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: i64,
     },
 }
 
@@ -692,6 +718,57 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Token(TokenCmd::Revoke { id }) => show(c.delete(&format!("tokens/{id}")).await?, &|_| "revoked".into()),
+        Cmd::Webhook(WebhookCmd::Ls) => {
+            let v = c.get("webhooks", &[]).await?;
+            if json {
+                print_json(&v);
+            } else {
+                for w in v.as_array().into_iter().flatten() {
+                    let kinds = w["event_kinds"]
+                        .as_array()
+                        .map(|k| k.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(","));
+                    let state = match (w["disabled_at"].as_str(), w["failure_count"].as_i64()) {
+                        (Some(_), _) => "disabled".to_string(),
+                        (None, Some(n)) if n > 0 => format!("failing ({n})"),
+                        _ => "ok".to_string(),
+                    };
+                    let kinds = kinds.filter(|k| !k.is_empty()).unwrap_or_else(|| "all events".into());
+                    println!("{}  {}  [{kinds}]  {state}", s(w, "id"), s(w, "url"));
+                }
+            }
+        }
+        Cmd::Webhook(WebhookCmd::Add { target, kinds }) => {
+            let v = c.post("webhooks", json!({ "url": target, "event_kinds": kinds })).await?;
+            if json {
+                print_json(&v);
+            } else {
+                println!("webhook {}", s(&v["webhook"], "id"));
+                println!("signing secret (shown once): {}", s(&v, "secret"));
+            }
+        }
+        Cmd::Webhook(WebhookCmd::Rm { id }) => {
+            c.delete(&format!("webhooks/{id}")).await?;
+            if !json {
+                println!("deleted");
+            }
+        }
+        Cmd::Webhook(WebhookCmd::Log { id, limit }) => {
+            let v = c.get(&format!("webhooks/{id}/deliveries"), &[("limit", limit.to_string())]).await?;
+            if json {
+                print_json(&v);
+            } else {
+                for d in v.as_array().into_iter().flatten() {
+                    let outcome = match (d["status_code"].as_i64(), d["error"].as_str()) {
+                        (Some(code), None) => code.to_string(),
+                        (code, Some(err)) => {
+                            format!("failed {} {err}", code.map(|c| c.to_string()).unwrap_or_default())
+                        }
+                        _ => "?".into(),
+                    };
+                    println!("{}  event #{}  {outcome}", short_time(s(d, "at")), d["event_id"]);
+                }
+            }
+        }
         Cmd::Whoami => {
             let v = c.get("me", &[]).await?;
             show(v, &|m| match m["agent"].as_object() {
@@ -945,7 +1022,17 @@ async fn serve(bind: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_when_in;
+    use clap::Parser;
+
+    use super::{Cli, Cmd, WebhookCmd, parse_when_in};
+
+    #[test]
+    fn webhook_url_does_not_clobber_the_server_url() {
+        let cli = Cli::try_parse_from(["trailhead", "--url", "http://127.0.0.1:1", "webhook", "add", "http://hook/x"])
+            .unwrap();
+        assert_eq!(cli.url, "http://127.0.0.1:1");
+        assert!(matches!(cli.cmd, Cmd::Webhook(WebhookCmd::Add { ref target, .. }) if target == "http://hook/x"));
+    }
 
     #[test]
     fn dates_end_at_local_midnight_with_that_days_offset() {

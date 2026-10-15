@@ -107,6 +107,14 @@ pub struct CreatedAgent {
     secret: String,
 }
 
+/// `POST /v1/webhooks`. The signing secret is shown only here.
+#[derive(Serialize, ToSchema)]
+#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
+pub struct CreatedWebhook {
+    webhook: trailhead_core::Webhook,
+    secret: String,
+}
+
 /// `POST /v1/tokens`. The secret is shown only here.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
@@ -237,6 +245,10 @@ impl Modify for Common {
         routes::list_tokens,
         routes::my_claims,
         routes::create_token,
+        routes::create_webhook,
+        routes::list_webhooks,
+        routes::delete_webhook,
+        routes::webhook_deliveries,
         routes::revoke_token,
     ),
     components(schemas(ErrorBody, ErrorDetail))

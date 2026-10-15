@@ -10,6 +10,7 @@ mod openapi;
 mod ratelimit;
 mod routes;
 mod stream;
+pub mod webhooks;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -201,6 +202,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
         }
     });
     spawn_archiver(state.clone());
+    webhooks::spawn(state.clone());
     let reminders = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));

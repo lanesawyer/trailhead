@@ -12,7 +12,7 @@ use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
     Agent, Claim, ClaimResult, Comment, CommentKind, Dependency, Error, Event, EventFilter, HeldClaim, NewComment,
     NewProject, NewTask, Principal, Project, ProjectPatch, ProjectStatus, Status, Task, TaskDetail, TaskFilter,
-    TaskPatch, Token, TokenOptions, UndoReport,
+    TaskPatch, Token, TokenOptions, UndoReport, Webhook, WebhookDelivery,
 };
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::auth::{Auth, require_human};
 use crate::error::{ApiError, ApiResult, Json, Path, Query, invalid};
-use crate::openapi::{CreatedAgent, CreatedToken, ErrorBody, Health, Me};
+use crate::openapi::{CreatedAgent, CreatedToken, CreatedWebhook, ErrorBody, Health, Me};
 
 type S = State<Arc<AppState>>;
 
@@ -51,6 +51,9 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/agents", get(list_agents).post(create_agent))
         .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/{id}", delete(revoke_token))
+        .route("/webhooks", get(list_webhooks).post(create_webhook))
+        .route("/webhooks/{id}", delete(delete_webhook))
+        .route("/webhooks/{id}/deliveries", get(webhook_deliveries))
 }
 
 /// Distinguishes an absent field (`None`) from an explicit `null` (`Some(None)`).
@@ -827,4 +830,70 @@ async fn list_tokens(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
 )]
 async fn revoke_token(State(s): S, Auth(ctx): Auth, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.revoke_token(&ctx, id).await?)))
+}
+
+#[derive(Deserialize, ToSchema)]
+struct CreateWebhook {
+    /// Where to POST events.
+    url: String,
+    /// Event kind prefixes, e.g. `["task.", "comment.created"]`. Omitted or empty means every event.
+    #[serde(default)]
+    event_kinds: Vec<String>,
+}
+
+/// Registers a webhook for events from now on. Each delivery is a POST of the
+/// event JSON with `trailhead-signature: t=<unix>,v1=<hex HMAC-SHA256 of "<t>.<body>">`
+/// keyed by the secret, which is shown only here. Delivery is ordered and
+/// at-least-once; failures back off exponentially and 20 in a row disable the
+/// webhook. Humans with unscoped tokens only.
+#[utoipa::path(
+    post, path = "/v1/webhooks", tag = "webhooks", request_body = CreateWebhook,
+    responses(
+        (status = 201, description = "The webhook and its signing secret, shown once", body = CreatedWebhook),
+        (status = 403, description = "`forbidden`: agents and scoped tokens can't manage webhooks", body = ErrorBody),
+    )
+)]
+async fn create_webhook(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateWebhook>) -> ApiResult<Response> {
+    let (webhook, secret) = s.store.create_webhook(&ctx, &b.url, b.event_kinds).await?;
+    Ok(created(json!({ "webhook": webhook, "secret": secret })))
+}
+
+#[utoipa::path(
+    get, path = "/v1/webhooks", tag = "webhooks",
+    responses((status = 200, description = "Webhooks, without secrets", body = Vec<Webhook>))
+)]
+async fn list_webhooks(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
+    Ok(Json(json!(s.store.list_webhooks(&ctx).await?)))
+}
+
+#[utoipa::path(
+    delete, path = "/v1/webhooks/{id}", tag = "webhooks", params(("id" = Uuid, Path, description = "Webhook id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
+async fn delete_webhook(State(s): S, Auth(ctx): Auth, Path(id): Path<Uuid>) -> ApiResult<StatusCode> {
+    s.store.delete_webhook(&ctx, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, IntoParams)]
+struct DeliveryQuery {
+    /// Defaults to 50.
+    limit: Option<i64>,
+}
+
+#[utoipa::path(
+    get, path = "/v1/webhooks/{id}/deliveries", tag = "webhooks",
+    params(("id" = Uuid, Path, description = "Webhook id"), DeliveryQuery),
+    responses((status = 200, description = "Delivery attempts, newest first", body = Vec<WebhookDelivery>))
+)]
+async fn webhook_deliveries(
+    State(s): S,
+    Auth(ctx): Auth,
+    Path(id): Path<Uuid>,
+    Query(q): Query<DeliveryQuery>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(json!(s.store.webhook_deliveries(&ctx, id, q.limit).await?)))
 }
