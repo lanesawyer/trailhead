@@ -1,0 +1,119 @@
+# Trailhead
+
+> Trailhead is a headless task engine that humans and AI agents share. It stores projects and tasks and enforces the rules around them: claims with expiring leases, a ready queue, typed comments for handoffs and questions, dependencies, review, and an event log where every write can be undone. There is no app; every interface is a client of the REST API under `/v1`, the MCP server at `/mcp`, or the `trailhead` CLI.
+
+Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, projects by key (`AUTH`) or UUID. Timestamps are UTC RFC 3339; a due date is `due_at` plus an optional IANA zone in `due_tz`. Priority is 1 (urgent) to 4 (low), default 3. A local server listens on `http://127.0.0.1:7241`.
+
+## Auth
+
+- Send `Authorization: Bearer th_...` on everything except `GET /v1/health`, `GET /v1/openapi.json` and `GET /llms.txt`. `GET /v1/me` says who you are.
+- A token belongs to a user (a human) or an agent. Every agent acts for exactly one user, and every write records both. Agents never use a human's token.
+- Agents can't issue or revoke tokens, create agents, revert, or approve review. Humans can edit, release or finish a task another actor holds; agents can't.
+- A token may be scoped to projects. Anything outside the scope reads as `not_found`; writes naming an out-of-scope project are `forbidden`. A blocker outside the scope shows as `(out of scope)`.
+- A token may have a per-minute rate limit. Over it: `429 rate_limited` with `Retry-After` seconds and `retry_after` in the body.
+
+## Core loop
+
+1. `GET /v1/ready?project=KEY&limit=N` lists open, unclaimed, unblocked tasks in active projects, by priority, then due date, then age. Default limit 20.
+2. Read the project brief (`GET /v1/projects/KEY`, field `brief`): goals, conventions, definition of done.
+3. `POST /v1/tasks/KEY-1/claim` with optional `{"ttl": seconds}` (1 to 86400; default the project's `claim_ttl`, else the workspace's, normally 1800). Moves the task to `in_progress` and returns `{task, claim, handoff}`, where `handoff` is the last handoff comment left on it. Read it. Claiming a task you already hold extends the lease. Only an `open` task can be claimed.
+4. Renew about every third of the TTL: `POST /v1/tasks/KEY-1/renew` (optional `{"ttl"}`). An expired claim is dropped and an `in_progress` task goes back to `open`. `409 claim_lost` on renew means your lease expired or someone else took the task: stop, re-read the task, and claim it again if it is still yours to do. `GET /v1/claims` lists the claims you hold.
+5. Comment as you go: `POST /v1/tasks/KEY-1/comments` with `{"kind", "body", "addressed_to"?}`.
+6. Finish: post a `handoff` comment (what changed, what's left, gotchas), then `PATCH /v1/tasks/KEY-1` with `{"status": "done"}` (or `in_review`). Either releases the claim. To stop without finishing, leave a handoff and `POST /v1/tasks/KEY-1/release`, which returns the task to `open`.
+
+## Comments
+
+`kind` is one of:
+
+- `handoff`: what was done, what's left, gotchas. The latest one comes back with the next claim.
+- `progress`: short status updates.
+- `question`: needs an answer, from a human or another agent (`addressed_to` takes a user or agent id). Moves the task to `needs_input`, out of the ready queue. `POST /v1/comments/{id}/resolve` with optional `{"answer"}` resolves it; the answer is posted as a `note` to the asker. When the last open question resolves, the task returns to `in_progress` if still claimed, else `open`.
+- `decision`: a choice and why, so later agents don't relitigate it.
+- `note`: anything else. The default.
+
+The `description` is the current spec and gets edited; comments are the append-only history.
+
+## Statuses
+
+`open`, `in_progress`, `needs_input`, `in_review`, `done`, `cancelled`. Allowed moves (anything else is `409 invalid_transition` with `from` and `to`):
+
+- `open` -> `in_progress`, `needs_input`, `in_review`, `done`, `cancelled`
+- `in_progress` -> `open`, `needs_input`, `in_review`, `done`, `cancelled`
+- `needs_input` -> `open`, `in_progress`, `cancelled`
+- `in_review` -> `open`, `in_progress`, `needs_input`, `done`, `cancelled`
+- `done`, `cancelled` -> `open`
+
+Moving to anything but `in_progress` or `needs_input` releases the claim.
+
+## Review
+
+A project with `require_review: true` won't let agents set `done`; send work to `in_review` instead. In every project, only a human can move `in_review` to `done`. Agents get `403 review_required`.
+
+## Dependencies
+
+"Blocked" is computed, never stored: a task is blocked while any blocker is not `done` or `cancelled`. Blocked tasks stay out of `ready`, and claiming one is `409 blocked_by` with the blocker keys in `blocked_by`.
+
+- `POST /v1/tasks/KEY-2/blockers` `{"blocker": "KEY-1"}` makes KEY-1 block KEY-2. `GET` lists blockers; `DELETE /v1/tasks/KEY-2/blockers/KEY-1` removes one. Adding an existing dependency returns it unchanged; a cycle is `409 dependency_cycle`.
+- `POST /v1/tasks` takes `blocked_by` and `blocks` arrays. To get help on your own task, create a subtask with `"blocks": ["KEY-1"]` and `"parent": "KEY-1"`; KEY-1 is ready again once the subtask is done.
+
+## Tasks
+
+- `POST /v1/tasks` `{"project", "title", "description"?, "priority"?, "due_at"?, "due_tz"?, "parent"?, "metadata"?, "blocked_by"?, "blocks"?, "source"?, "external_id"?}`. `source` and `external_id` go together; repeating a pair returns the existing task instead of a duplicate.
+- `GET /v1/tasks?project=&status=a,b&parent=&due_before=&metadata=k:v,k2:v2&limit=` defaults to everything not done or cancelled.
+- `GET /v1/tasks/KEY-1` returns `{task, claim, blocked_by, blocks, comments}`.
+- `PATCH /v1/tasks/KEY-1` takes any of `title`, `description`, `status`, `priority`, `due_at`, `due_tz`, `parent`, `metadata` (a JSON merge patch: `null` removes a key). `null` clears `due_at`, `due_tz` and `parent`.
+- `DELETE /v1/tasks/KEY-1` soft-deletes; undo restores it.
+- `GET /v1/search?q=` searches titles, descriptions and comments.
+
+## Concurrency
+
+Task and project reads return `ETag: "<version>"`; `version` increments on every write. Send it back as `If-Match: "<version>"` on `PATCH` or `DELETE` (or `"version"` in a task `PATCH` body). A stale version is `412 version_conflict` with `current_version`: re-read, reapply, retry. Without `If-Match` the write applies unconditionally.
+
+## Idempotency
+
+Any `/v1` write may send `Idempotency-Key` (1-255 characters). A retry with the same key and same request (method, path and query, body) replays the stored 2xx response with `idempotent-replayed: true` instead of running again. The same key on a different request is `422 idempotency_key_reused`; a retry while the first is still running is `409 idempotency_key_in_flight`. Failed requests aren't stored, so retry them with the same key. Keys belong to the token and last 24 hours.
+
+## Undo
+
+Every request is one batch; its id is in the `trailhead-batch` response header. `POST /v1/undo` with `{"batch_id"}` or `{"event_id"}` reverts it, as a new write that can itself be undone. If something it touched changed later it fails with `409 undo_conflict` (`later_event`); past 90 days it is `409 undo_window_expired`. A human can `POST /v1/revert` `{"actor_id", "since"}` to revert everything one actor did since a time, skipping and reporting anything someone else changed afterwards.
+
+## Events
+
+Every write appends an event: `{id, batch_id, actor_id, on_behalf_of, task_id, task_key, entity, entity_id, kind, before, after, undoes, at}`. Kinds: `task.created|updated|deleted`, `claim.acquired|renewed|released|expired`, `comment.created|resolved`, `dependency.added|removed`, `project.created|updated`, `<entity>.reverted`, and the reminders `task.due_soon` (within 24 hours) and `task.overdue`.
+
+- `GET /v1/events?after=ID&task=&actor=&batch=&since=&limit=&newest_first=true&changes_only=true` (`changes_only` hides reminders). `GET /v1/tasks/KEY-1/history` is one task's log.
+- `GET /v1/events/stream?task=&kinds=task.,comment.created` is Server-Sent Events: `id` is the event id, `event` the kind, `data` the event JSON. On reconnect send `Last-Event-ID` (or `?after=`) to resume with nothing missed. With neither, the stream starts after the newest event.
+
+## Compact output
+
+`GET /v1/tasks`, `/v1/ready` and `/v1/search` accept `?fields=key,title,status,version` to trim each task to those fields. Ask for only what you need.
+
+## Errors
+
+Every error is `{"error": {"code", "message", ...}}`. Branch on `code`, which is stable; `message` is for people. Codes and HTTP statuses:
+
+- `invalid` 400: bad input; `message` says what.
+- `unauthorized` 401: missing, invalid or revoked token.
+- `forbidden` 403: not allowed for this caller or token scope.
+- `review_required` 403: an agent tried to set `done` where a human must approve.
+- `not_found` 404: no such thing, or outside your token's scope.
+- `claim_held` 409: someone else holds the claim; `holder`, `holder_id`, `expires_at`.
+- `not_claim_holder` 409: you don't hold a claim on this task.
+- `claim_lost` 409: on renew, your claim expired or someone else took the task; claim it again before continuing.
+- `blocked_by` 409: unfinished blockers, listed in `blocked_by`.
+- `invalid_transition` 409: that status move isn't allowed; `from`, `to`.
+- `dependency_cycle` 409: the dependency would create a cycle.
+- `undo_conflict` 409: something changed after the event; `later_event`.
+- `undo_window_expired` 409: older than the 90-day undo window.
+- `already_exists` 409: a project with that key exists.
+- `idempotency_key_in_flight` 409: a request with this key is still running; retry shortly.
+- `version_conflict` 412: stale `If-Match` or `version`; `current_version`.
+- `idempotency_key_reused` 422: this key was used for a different request.
+- `rate_limited` 429: wait `Retry-After` seconds.
+- `internal` 500: unexpected server error.
+
+## More
+
+- OpenAPI 3.1, every route and schema: `GET /v1/openapi.json`.
+- MCP (streamable HTTP, same bearer tokens): `/mcp`. Tools `ready`, `list_tasks`, `show`, `create_task`, `update_task` (takes a `handoff`), `claim`, `renew`, `release`, `my_claims`, `comment`, `resolve_question`, `search`, `undo_last`. Each call is its own undo batch; errors come back as tool errors `error[code]: message`. Project briefs are resources at `trailhead://projects/KEY/brief`.
+- CLI: `trailhead --as <agent> ready|claim|renew|comment|ask|done -m|release|mine|watch`. `trailhead --as <agent> mcp` bridges MCP over stdio.

@@ -271,7 +271,7 @@ pub async fn serve() -> Response {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use trailhead_core::{Error, Status};
 
     use super::ERROR_CODES;
@@ -305,9 +305,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn error_codes_match_core() {
-        let errors = [
+    /// One of each error, in `ERROR_CODES` order.
+    pub(crate) fn sample_errors() -> Vec<Error> {
+        vec![
             Error::NotFound(String::new()),
             Error::ClaimHeld { holder: String::new(), holder_id: String::new(), expires_at: String::new() },
             Error::NotClaimHolder,
@@ -327,8 +327,12 @@ mod tests {
             Error::RateLimited { retry_after: 0 },
             Error::Invalid(String::new()),
             Error::Corrupt(String::new()),
-        ];
-        let codes: Vec<_> = errors.iter().map(Error::code).collect();
+        ]
+    }
+
+    #[test]
+    fn error_codes_match_core() {
+        let codes: Vec<_> = sample_errors().iter().map(Error::code).collect();
         assert_eq!(codes, ERROR_CODES);
     }
 }

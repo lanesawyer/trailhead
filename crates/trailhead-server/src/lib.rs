@@ -5,6 +5,7 @@ mod auth;
 pub mod creds;
 mod error;
 mod idempotency;
+mod llms;
 mod mcp;
 mod openapi;
 mod ratelimit;
@@ -90,6 +91,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(state.clone(), mcp::auth));
     Router::new()
         .nest("/v1", routes::v1())
+        .route("/llms.txt", axum::routing::get(llms::serve))
         .merge(mcp)
         .layer(axum::middleware::from_fn(auth::batch))
         // Outside `batch`, so a replay carries the original request's batch id.
