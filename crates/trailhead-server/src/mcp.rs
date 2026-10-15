@@ -19,11 +19,12 @@ use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
-    Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewTask, Status, Task, TaskDetail, TaskFilter, TaskPatch,
+    Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewTask, Status, StoredResponse, Task, TaskDetail,
+    TaskFilter, TaskPatch, idempotency_fingerprint,
 };
 use uuid::Uuid;
 
@@ -55,18 +56,23 @@ pub async fn auth(State(state): State<Arc<AppState>>, mut req: Request, next: Ne
     let ctx = match secret {
         Some(s) => state.store.authenticate_token(&s).await.and_then(|(ctx, token)| {
             state.limits.check(&token)?;
-            Ok(ctx)
+            Ok((ctx, token.id))
         }),
         None => Err(Error::Unauthorized),
     };
     match ctx {
-        Ok(ctx) => {
+        Ok((ctx, token)) => {
             req.extensions_mut().insert(ctx);
+            req.extensions_mut().insert(TokenId(token));
             next.run(req).await
         }
         Err(e) => ApiError(e).into_response(),
     }
 }
+
+/// The authenticating token, so idempotency keys belong to it.
+#[derive(Clone, Copy)]
+struct TokenId(Uuid);
 
 #[derive(Clone)]
 pub struct TrailheadMcp {
@@ -181,7 +187,7 @@ pub struct TaskArg {
     task: String,
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CreateArgs {
     /// Project key.
     project: String,
@@ -199,6 +205,10 @@ pub struct CreateArgs {
     blocks: Vec<String>,
     /// RFC 3339 timestamp.
     due_at: Option<String>,
+    /// Optional. Retrying with the same key and arguments returns the first call's
+    /// result instead of doing it twice. Keys last 24 hours.
+    #[serde(default, skip_serializing)]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -220,7 +230,7 @@ pub struct ClaimArgs {
     ttl: Option<i64>,
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CommentArgs {
     task: String,
     body: String,
@@ -229,6 +239,10 @@ pub struct CommentArgs {
     /// User or agent id the comment is for.
     #[schemars(with = "Option<String>")]
     addressed_to: Option<Uuid>,
+    /// Optional. Retrying with the same key and arguments returns the first call's
+    /// result instead of doing it twice. Keys last 24 hours.
+    #[serde(default, skip_serializing)]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -249,6 +263,78 @@ pub struct SearchArgs {
 impl TrailheadMcp {
     fn new(state: Arc<AppState>) -> Self {
         TrailheadMcp { state, tool_router: Self::tool_router() }
+    }
+
+    async fn do_create_task(&self, ctx: &Ctx, a: CreateArgs) -> Result<CallToolResult, ErrorData> {
+        let due_at = attempt!(a.due_at.as_deref().map(parse_time).transpose());
+        let new = NewTask {
+            project: a.project,
+            title: a.title,
+            description: a.description.unwrap_or_default(),
+            priority: a.priority,
+            due_at,
+            parent: a.parent,
+            ..Default::default()
+        };
+        let store = &self.state.store;
+        let task = attempt!(store.create_task(ctx, new).await);
+        for blocker in &a.blocked_by {
+            attempt!(store.add_dependency(ctx, blocker, &task.key).await);
+        }
+        for blocked in &a.blocks {
+            attempt!(store.add_dependency(ctx, &task.key, blocked).await);
+        }
+        text(task_line(&task))
+    }
+
+    async fn do_comment(&self, ctx: &Ctx, a: CommentArgs) -> Result<CallToolResult, ErrorData> {
+        let kind = attempt!(a.kind.as_deref().map(str::parse::<CommentKind>).transpose()).unwrap_or(CommentKind::Note);
+        let new = NewComment { kind, body: a.body, addressed_to: a.addressed_to };
+        let c = attempt!(self.state.store.add_comment(ctx, &a.task, new).await);
+        text(format!("{} {}", c.kind, c.id))
+    }
+
+    /// Runs `run` at most once per idempotency key: a retry with the same key and
+    /// arguments gets the stored result back. Keys share REST's table, namespaced
+    /// by token and by `mcp/<tool>`.
+    async fn idempotent(
+        &self,
+        parts: &Parts,
+        ctx: &Ctx,
+        key: Option<String>,
+        tool: &str,
+        args: &[u8],
+        run: impl Future<Output = Result<CallToolResult, ErrorData>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(key) = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) else { return run.await };
+        if key.len() > 255 {
+            return fail(Error::Invalid("idempotency_key must be 1-255 characters".into()));
+        }
+        let token = parts.extensions.get::<TokenId>().map_or_else(String::new, |t| t.0.to_string());
+        let key = format!("{token}:mcp/{tool}:{key}");
+        let fingerprint = idempotency_fingerprint("MCP", tool, args);
+        let store = &self.state.store;
+        if let Some(stored) = attempt!(store.idempotency_begin(ctx, &key, &fingerprint).await) {
+            return text(String::from_utf8_lossy(&stored.body).into_owned());
+        }
+        let result = run.await;
+        let stored = match &result {
+            Ok(r) if r.is_error != Some(true) => Some(
+                r.content.iter().filter_map(|c| c.as_text().map(|t| t.text.clone())).collect::<Vec<_>>().join("\n"),
+            ),
+            _ => None,
+        };
+        let saved = match stored {
+            Some(out) => {
+                let res = StoredResponse { status: 200, headers: Vec::new(), body: out.into_bytes() };
+                store.idempotency_complete(ctx, &key, &res).await
+            }
+            None => store.idempotency_abandon(ctx, &key).await,
+        };
+        if let Err(e) = saved {
+            tracing::warn!(error = %e, "saving MCP idempotency result failed");
+        }
+        result
     }
 
     #[tool(
@@ -303,25 +389,9 @@ impl TrailheadMcp {
         Parameters(a): Parameters<CreateArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = ctx_of(&parts)?;
-        let due_at = attempt!(a.due_at.as_deref().map(parse_time).transpose());
-        let new = NewTask {
-            project: a.project,
-            title: a.title,
-            description: a.description.unwrap_or_default(),
-            priority: a.priority,
-            due_at,
-            parent: a.parent,
-            ..Default::default()
-        };
-        let store = &self.state.store;
-        let task = attempt!(store.create_task(&ctx, new).await);
-        for blocker in &a.blocked_by {
-            attempt!(store.add_dependency(&ctx, blocker, &task.key).await);
-        }
-        for blocked in &a.blocks {
-            attempt!(store.add_dependency(&ctx, &task.key, blocked).await);
-        }
-        text(task_line(&task))
+        let key = a.idempotency_key.clone();
+        let args = serde_json::to_vec(&a).unwrap_or_default();
+        self.idempotent(&parts, &ctx, key, "create_task", &args, self.do_create_task(&ctx, a)).await
     }
 
     #[tool(description = "Change a task's fields or status. Setting status done or in_review releases your claim.")]
@@ -414,10 +484,9 @@ impl TrailheadMcp {
         Parameters(a): Parameters<CommentArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = ctx_of(&parts)?;
-        let kind = attempt!(a.kind.as_deref().map(str::parse::<CommentKind>).transpose()).unwrap_or(CommentKind::Note);
-        let new = NewComment { kind, body: a.body, addressed_to: a.addressed_to };
-        let c = attempt!(self.state.store.add_comment(&ctx, &a.task, new).await);
-        text(format!("{} {}", c.kind, c.id))
+        let key = a.idempotency_key.clone();
+        let args = serde_json::to_vec(&a).unwrap_or_default();
+        self.idempotent(&parts, &ctx, key, "comment", &args, self.do_comment(&ctx, a)).await
     }
 
     #[tool(description = "Resolve a question comment, optionally answering it.")]

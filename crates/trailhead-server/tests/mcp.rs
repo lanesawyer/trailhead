@@ -145,3 +145,28 @@ async fn reqwest_post(url: &str) -> u16 {
     stream.read_to_string(&mut buf).await.unwrap();
     buf.split_whitespace().nth(1).unwrap().parse().unwrap()
 }
+
+#[tokio::test]
+async fn idempotency_keys_make_mcp_retries_safe() {
+    let s = start().await;
+    let client = connect(&s.url, &s.agent).await;
+    let args = json!({"project": "AUTH", "title": "once", "idempotency_key": "retry-1"});
+    let (err, first) = call(&client, "create_task", args.clone()).await;
+    assert!(!err, "{first}");
+    let (err, again) = call(&client, "create_task", args).await;
+    assert!(!err);
+    assert_eq!(first, again);
+    let (_, found) = call(&client, "search", json!({"query": "once"})).await;
+    assert_eq!(found.lines().count(), 1, "{found}");
+
+    let (err, out) =
+        call(&client, "create_task", json!({"project": "AUTH", "title": "different", "idempotency_key": "retry-1"}))
+            .await;
+    assert!(err && out.starts_with("error[idempotency_key_reused]"), "{out}");
+
+    // The same key in a different tool is a different key.
+    let (err, out) =
+        call(&client, "comment", json!({"task": "AUTH-1", "body": "hi", "idempotency_key": "retry-1"})).await;
+    assert!(!err, "{out}");
+    client.cancel().await.unwrap();
+}
