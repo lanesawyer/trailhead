@@ -512,3 +512,11 @@ async fn lost_claims_are_reported_on_renew() {
     let c = env.agent("c").await;
     assert!(matches!(env.store.renew(&c, &t.key, None).await, Err(Error::NotClaimHolder)));
 }
+
+#[tokio::test]
+async fn agent_names_are_unique() {
+    let env = Env::new().await;
+    env.store.create_agent(&env.human, "bot").await.unwrap();
+    assert!(matches!(env.store.create_agent(&env.human, "bot").await, Err(Error::AlreadyExists(_))));
+    assert!(matches!(env.store.create_agent(&env.human, " bot ").await, Err(Error::AlreadyExists(_))));
+}

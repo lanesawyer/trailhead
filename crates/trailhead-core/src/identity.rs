@@ -119,6 +119,11 @@ impl Store {
         if ctx.is_scoped() {
             return Err(Error::Forbidden("a token scoped to projects can't create agents".into()));
         }
+        // Names are how people and `--as` refer to agents, so they must be unambiguous.
+        let taken = self.list_agents(ctx).await?.iter().any(|a| a.name == name.trim());
+        if taken {
+            return Err(Error::AlreadyExists(format!("agent {:?}", name.trim())));
+        }
         let agent = Agent {
             id: Uuid::now_v7(),
             workspace_id: ctx.workspace_id,
