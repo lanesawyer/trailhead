@@ -195,6 +195,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
             }
         }
     });
+    spawn_archiver(state.clone());
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     if let Some(pid_file) = &cfg.pid_file {
         if let Some(dir) = pid_file.parent() {
@@ -226,6 +227,30 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
     }
     tracing::info!("trailhead stopped");
     Ok(served?)
+}
+
+/// Hourly, moves events older than the undo window to `events_archive`.
+fn spawn_archiver(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        loop {
+            tick.tick().await;
+            let mut total = 0;
+            loop {
+                match state.store.archive_events().await {
+                    Ok(0) => break,
+                    Ok(n) => total += n,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "archiving events failed");
+                        break;
+                    }
+                }
+            }
+            if total > 0 {
+                tracing::info!(events = total, "archived old events");
+            }
+        }
+    });
 }
 
 async fn shutdown_signal() {

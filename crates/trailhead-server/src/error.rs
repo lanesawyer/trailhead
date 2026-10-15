@@ -66,6 +66,7 @@ impl IntoResponse for ApiError {
             | Error::InvalidTransition { .. }
             | Error::DependencyCycle
             | Error::UndoConflict { .. }
+            | Error::UndoWindowExpired(_)
             | Error::AlreadyExists(_)
             | Error::IdempotencyKeyInFlight => StatusCode::CONFLICT,
             Error::IdempotencyKeyReused => StatusCode::UNPROCESSABLE_ENTITY,

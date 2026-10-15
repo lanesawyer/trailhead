@@ -2,11 +2,22 @@ use libsql::Row;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::db::{get_enum, get_opt_json, get_opt_uuid, get_ts, get_uuid};
+use crate::db::{fmt_ts, get_enum, get_opt_json, get_opt_uuid, get_ts, get_uuid};
 use crate::error::Result;
 use crate::model::Event;
 use crate::store::{Ctx, Store};
 use crate::tasks::find_task;
+
+/// Undo and revert reach back this far. Older events move to `events_archive`.
+pub const UNDO_WINDOW: time::Duration = time::Duration::days(90);
+
+/// Events moved per transaction by [`Store::archive_events`].
+const ARCHIVE_BATCH: i64 = 500;
+/// Transactions per [`Store::archive_events`] call, so one call's work stays bounded.
+const ARCHIVE_MAX_BATCHES: usize = 20;
+
+const RAW_COLS: &str =
+    "id, workspace_id, batch_id, actor_id, on_behalf_of, task_id, entity, entity_id, kind, before, after, undoes, at";
 
 pub(crate) const EVENT_COLS: &str =
     "id, workspace_id, batch_id, actor_id, on_behalf_of, task_id, entity, entity_id, kind, before, after, undoes, at,
@@ -41,7 +52,7 @@ pub(crate) async fn collect_events(mut rows: libsql::Rows) -> Result<Vec<Event>>
 
 /// Events a scoped context may see: those on its projects' tasks, and on the
 /// projects themselves.
-fn scope_sql(ctx: &Ctx) -> String {
+pub(crate) fn scope_sql(ctx: &Ctx) -> String {
     if !ctx.is_scoped() {
         return "1".into();
     }
@@ -63,6 +74,8 @@ pub struct EventFilter {
     pub since: Option<OffsetDateTime>,
     pub limit: Option<i64>,
     pub newest_first: bool,
+    /// Also read `events_archive`. Ids are kept on archiving, so order is unchanged.
+    pub include_archived: bool,
 }
 
 impl Store {
@@ -85,11 +98,16 @@ impl Store {
         let rows = conn
             .query(
                 &format!(
-                    "SELECT {EVENT_COLS} FROM events WHERE workspace_id = ?1
+                    "SELECT {EVENT_COLS} FROM {} WHERE workspace_id = ?1
                      AND (?2 IS NULL OR id > ?2) AND (?3 IS NULL OR task_id = ?3)
                      AND (?4 IS NULL OR actor_id = ?4) AND (?5 IS NULL OR batch_id = ?5)
                      AND (?6 IS NULL OR at >= ?6) AND {}
                      ORDER BY id {} LIMIT ?7",
+                    if filter.include_archived {
+                        "(SELECT * FROM events UNION ALL SELECT * FROM events_archive) AS events"
+                    } else {
+                        "events"
+                    },
                     scope_sql(ctx),
                     if filter.newest_first { "DESC" } else { "ASC" }
                 ),
@@ -105,5 +123,50 @@ impl Store {
             )
             .await?;
         collect_events(rows).await
+    }
+
+    /// Moves events older than [`UNDO_WINDOW`] to `events_archive`, in every
+    /// workspace, keeping their ids. Only a prefix of the log by id moves, so an
+    /// event still in `events` never has a later event in the archive, which keeps
+    /// undo's conflict check reading `events` alone. Each batch is its own
+    /// transaction and a call does a bounded amount of work; it returns how many
+    /// events moved, so call again while that equals the bound.
+    pub async fn archive_events(&self) -> Result<usize> {
+        let mut moved = 0;
+        for _ in 0..ARCHIVE_MAX_BATCHES {
+            let cutoff = fmt_ts(self.now() - UNDO_WINDOW);
+            let n = self
+                .maintain(async |conn| {
+                    let mut rows = conn
+                        .query("SELECT id, at FROM events ORDER BY id LIMIT ?1", libsql::params![ARCHIVE_BATCH])
+                        .await?;
+                    let mut last = None;
+                    while let Some(row) = rows.next().await? {
+                        let at: String = row.get(1)?;
+                        if at >= cutoff {
+                            break;
+                        }
+                        last = Some(row.get::<i64>(0)?);
+                    }
+                    drop(rows);
+                    let Some(last) = last else { return Ok(0) };
+                    let n = conn
+                        .execute(
+                            &format!(
+                                "INSERT INTO events_archive ({RAW_COLS}) SELECT {RAW_COLS} FROM events WHERE id <= ?1"
+                            ),
+                            [last],
+                        )
+                        .await?;
+                    conn.execute("DELETE FROM events WHERE id <= ?1", [last]).await?;
+                    Ok(n as usize)
+                })
+                .await?;
+            moved += n;
+            if n < ARCHIVE_BATCH as usize {
+                break;
+            }
+        }
+        Ok(moved)
     }
 }

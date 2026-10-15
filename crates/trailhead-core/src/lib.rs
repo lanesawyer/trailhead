@@ -20,7 +20,7 @@ mod undo;
 pub use claims::ClaimResult;
 pub use comments::NewComment;
 pub use error::{Error, Result};
-pub use events::EventFilter;
+pub use events::{EventFilter, UNDO_WINDOW};
 pub use idempotency::{StoredResponse, idempotency_fingerprint};
 pub use model::*;
 pub use projects::{NewProject, ProjectPatch};

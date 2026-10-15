@@ -22,6 +22,8 @@ pub enum Error {
     DependencyCycle,
     #[error("cannot undo: {entity} was changed later by event {later_event}")]
     UndoConflict { entity: String, later_event: i64 },
+    #[error("cannot undo {0}: it is older than the 90-day undo window")]
+    UndoWindowExpired(String),
     #[error("{0} already exists")]
     AlreadyExists(String),
     #[error("missing or invalid token")]
@@ -56,6 +58,7 @@ impl Error {
             Error::ReviewRequired => "review_required",
             Error::DependencyCycle => "dependency_cycle",
             Error::UndoConflict { .. } => "undo_conflict",
+            Error::UndoWindowExpired(_) => "undo_window_expired",
             Error::AlreadyExists(_) => "already_exists",
             Error::Unauthorized => "unauthorized",
             Error::Forbidden(_) => "forbidden",

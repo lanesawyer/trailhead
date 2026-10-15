@@ -181,6 +181,23 @@ impl Store {
         self.transact(ctx, false, f).await
     }
 
+    /// One immediate transaction outside any workspace, for maintenance that
+    /// emits no events.
+    pub(crate) async fn maintain<T>(&self, f: impl AsyncFnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let conn = self.writer.lock().await;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).await?;
+        match f(&tx).await {
+            Ok(v) => {
+                tx.commit().await?;
+                Ok(v)
+            }
+            Err(e) => {
+                tx.rollback().await.ok();
+                Err(e)
+            }
+        }
+    }
+
     async fn transact<T>(&self, ctx: &Ctx, notify: bool, f: impl AsyncFnOnce(&Tx) -> Result<T>) -> Result<T> {
         let conn = self.writer.lock().await;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).await?;

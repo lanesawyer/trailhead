@@ -577,13 +577,16 @@ async fn remove_blocker(
 
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
-struct Page {
+struct HistoryQuery {
     after: Option<i64>,
     limit: Option<i64>,
+    /// Include events older than 90 days, which have moved to the archive.
+    #[serde(default)]
+    archived: bool,
 }
 
 #[utoipa::path(
-    get, path = "/v1/tasks/{task}/history", tag = "events", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id"), Page),
+    get, path = "/v1/tasks/{task}/history", tag = "events", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id"), HistoryQuery),
     responses(
         (status = 200, description = "The task's events", body = Vec<Event>),
         (status = 404, description = "`not_found`", body = ErrorBody),
@@ -593,9 +596,15 @@ async fn task_history(
     State(s): S,
     Auth(ctx): Auth,
     Path(t): Path<String>,
-    Query(p): Query<Page>,
+    Query(p): Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
-    let filter = EventFilter { task: Some(t), after_id: p.after, limit: p.limit, ..Default::default() };
+    let filter = EventFilter {
+        task: Some(t),
+        after_id: p.after,
+        limit: p.limit,
+        include_archived: p.archived,
+        ..Default::default()
+    };
     Ok(Json(json!(s.store.list_events(&ctx, filter).await?)))
 }
 
@@ -660,6 +669,7 @@ async fn list_events(State(s): S, Auth(ctx): Auth, Query(q): Query<EventQuery>) 
         since: parse_opt_time(q.since.as_deref())?,
         limit: q.limit,
         newest_first: q.newest_first,
+        include_archived: false,
     };
     Ok(Json(json!(s.store.list_events(&ctx, filter).await?)))
 }
@@ -675,7 +685,7 @@ struct UndoBody {
     responses(
         (status = 200, description = "What was reverted", body = UndoReport),
         (status = 404, description = "`not_found`", body = ErrorBody),
-        (status = 409, description = "`undo_conflict`", body = ErrorBody),
+        (status = 409, description = "`undo_conflict`, or `undo_window_expired` for events older than 90 days", body = ErrorBody),
     )
 )]
 async fn undo(State(s): S, Auth(ctx): Auth, Json(b): Json<UndoBody>) -> ApiResult<Json<Value>> {
@@ -697,7 +707,7 @@ struct RevertBody {
 #[utoipa::path(
     post, path = "/v1/revert", tag = "undo", request_body = RevertBody,
     responses(
-        (status = 200, description = "What was reverted and what was skipped because someone else changed it later", body = UndoReport),
+        (status = 200, description = "What was reverted and what was skipped because someone else changed it later. A `since` older than 90 days is clamped to the undo window", body = UndoReport),
         (status = 403, description = "`forbidden`: humans only", body = ErrorBody),
     )
 )]

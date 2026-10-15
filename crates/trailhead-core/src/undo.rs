@@ -9,7 +9,7 @@ use crate::claims::{any_claim, put_claim};
 use crate::comments::{load_comment, save_comment};
 use crate::deps::{insert_dependency, load_dependency, remove_dependency_row};
 use crate::error::{Error, Result};
-use crate::events::{EVENT_COLS, collect_events};
+use crate::events::{EVENT_COLS, UNDO_WINDOW, collect_events, scope_sql};
 use crate::model::{Claim, Comment, Dependency, Entity, Event, Project, Task};
 use crate::projects::{load_project, save_project};
 use crate::store::{Ctx, EventIn, Store, Tx};
@@ -225,6 +225,28 @@ async fn check_scope(tx: &Tx, events: &[Event]) -> Result<()> {
     Ok(())
 }
 
+/// Refuses to undo events older than [`UNDO_WINDOW`], including those already
+/// moved to `events_archive`.
+async fn check_window(
+    tx: &Tx,
+    what: &str,
+    events: &[Event],
+    archive_where: &str,
+    params: Vec<libsql::Value>,
+) -> Result<()> {
+    let cutoff = tx.now - UNDO_WINDOW;
+    if events.iter().any(|e| e.at < cutoff) {
+        return Err(Error::UndoWindowExpired(what.to_string()));
+    }
+    // Scoped like reads, so a scoped token can't learn of events outside its projects.
+    let sql = format!("SELECT 1 FROM events_archive WHERE {archive_where} AND {} LIMIT 1", scope_sql(&tx.ctx));
+    let mut rows = tx.conn.query(&sql, params).await?;
+    if rows.next().await?.is_some() {
+        return Err(Error::UndoWindowExpired(what.to_string()));
+    }
+    Ok(())
+}
+
 async fn query_events(tx: &Tx, where_clause: &str, params: Vec<libsql::Value>) -> Result<Vec<Event>> {
     let rows =
         tx.conn.query(&format!("SELECT {EVENT_COLS} FROM events WHERE {where_clause} ORDER BY id"), params).await?;
@@ -235,9 +257,15 @@ impl Store {
     /// Undoes one event. Fails with `undo_conflict` if the entity changed since.
     pub async fn undo_event(&self, ctx: &Ctx, event_id: i64) -> Result<UndoReport> {
         self.write(ctx, async |tx| {
-            let events =
-                query_events(tx, "workspace_id = ?1 AND id = ?2", vec![tx.ws().into(), event_id.into()]).await?;
-            if events.is_empty() || !event_in_scope(tx, &events[0]).await? {
+            let params = vec![tx.ws().into(), event_id.into()];
+            let events = query_events(tx, "workspace_id = ?1 AND id = ?2", params.clone()).await?;
+            if let Some(e) = events.first()
+                && !event_in_scope(tx, e).await?
+            {
+                return Err(Error::NotFound(format!("event {event_id}")));
+            }
+            check_window(tx, &format!("event {event_id}"), &events, "workspace_id = ?1 AND id = ?2", params).await?;
+            if events.is_empty() {
                 return Err(Error::NotFound(format!("event {event_id}")));
             }
             apply(tx, events, true).await
@@ -248,12 +276,10 @@ impl Store {
     /// Undoes everything from one request or MCP call. All or nothing.
     pub async fn undo_batch(&self, ctx: &Ctx, batch_id: Uuid) -> Result<UndoReport> {
         self.write(ctx, async |tx| {
-            let events = query_events(
-                tx,
-                "workspace_id = ?1 AND batch_id = ?2",
-                vec![tx.ws().into(), batch_id.to_string().into()],
-            )
-            .await?;
+            let params: Vec<libsql::Value> = vec![tx.ws().into(), batch_id.to_string().into()];
+            let events = query_events(tx, "workspace_id = ?1 AND batch_id = ?2", params.clone()).await?;
+            check_window(tx, &format!("batch {batch_id}"), &events, "workspace_id = ?1 AND batch_id = ?2", params)
+                .await?;
             if events.is_empty() {
                 return Err(Error::NotFound(format!("batch {batch_id}")));
             }
@@ -264,9 +290,11 @@ impl Store {
     }
 
     /// Reverts everything `actor_id` did since `since`. Anything someone else has
-    /// touched since is skipped and reported rather than overwritten.
+    /// touched since is skipped and reported rather than overwritten. A `since`
+    /// before the undo window is clamped to it: older events aren't reverted.
     pub async fn revert_actor(&self, ctx: &Ctx, actor_id: Uuid, since: OffsetDateTime) -> Result<UndoReport> {
         self.write(ctx, async |tx| {
+            let since = since.max(tx.now - UNDO_WINDOW);
             let events = query_events(
                 tx,
                 "workspace_id = ?1 AND actor_id = ?2 AND at >= ?3",
