@@ -100,7 +100,7 @@ async fn expired_claims_free_the_task() {
         .unwrap();
     let expired = events.iter().find(|e| e.kind == "claim.expired").unwrap();
     assert_eq!(expired.actor_id, a.actor_id());
-    assert!(matches!(env.store.renew(&a, &t.key, None).await, Err(Error::NotClaimHolder)));
+    assert!(matches!(env.store.renew(&a, &t.key, None).await, Err(Error::ClaimLost(_))));
     env.store.claim(&b, &t.key, None).await.unwrap();
 }
 
@@ -482,4 +482,33 @@ async fn due_tz_must_be_a_real_zone() {
         ..Default::default()
     };
     assert!(matches!(env.store.create_task(&env.human, bad).await, Err(Error::Invalid(_))));
+}
+
+#[tokio::test]
+async fn lost_claims_are_reported_on_renew() {
+    let env = Env::new().await;
+    let t = env.task("lease").await;
+    let a = env.agent("a").await;
+    let b = env.agent("b").await;
+    env.store.claim(&a, &t.key, Some(60)).await.unwrap();
+    let mine = env.store.my_claims(&a).await.unwrap();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(mine[0].key, t.key);
+    assert!(env.store.my_claims(&b).await.unwrap().is_empty());
+
+    // Expired but not yet reaped.
+    env.advance(61);
+    assert!(env.store.my_claims(&a).await.unwrap().is_empty());
+    assert!(matches!(env.store.renew(&a, &t.key, None).await, Err(Error::ClaimLost(ref r)) if r.contains("expired")));
+
+    // Reaped, then taken by someone else.
+    env.store.claim(&b, &t.key, None).await.unwrap();
+    match env.store.renew(&a, &t.key, None).await {
+        Err(Error::ClaimLost(reason)) => assert!(reason.starts_with("b claimed it"), "{reason}"),
+        other => panic!("expected claim_lost, got {other:?}"),
+    }
+
+    // Never held it at all: plain not_claim_holder.
+    let c = env.agent("c").await;
+    assert!(matches!(env.store.renew(&c, &t.key, None).await, Err(Error::NotClaimHolder)));
 }

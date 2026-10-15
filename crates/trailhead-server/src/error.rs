@@ -62,6 +62,7 @@ impl IntoResponse for ApiError {
             Error::VersionConflict { .. } => StatusCode::PRECONDITION_FAILED,
             Error::ClaimHeld { .. }
             | Error::NotClaimHolder
+            | Error::ClaimLost(_)
             | Error::BlockedBy(_)
             | Error::InvalidTransition { .. }
             | Error::DependencyCycle

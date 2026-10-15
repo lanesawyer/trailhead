@@ -10,6 +10,8 @@ pub enum Error {
     ClaimHeld { holder: String, holder_id: String, expires_at: String },
     #[error("you do not hold a claim on this task")]
     NotClaimHolder,
+    #[error("your claim was lost ({0}); claim the task again before continuing")]
+    ClaimLost(String),
     #[error("version conflict: expected {expected}, current is {current}")]
     VersionConflict { expected: i64, current: i64 },
     #[error("blocked by {}", .0.join(", "))]
@@ -52,6 +54,7 @@ impl Error {
             Error::NotFound(_) => "not_found",
             Error::ClaimHeld { .. } => "claim_held",
             Error::NotClaimHolder => "not_claim_holder",
+            Error::ClaimLost(_) => "claim_lost",
             Error::VersionConflict { .. } => "version_conflict",
             Error::BlockedBy(_) => "blocked_by",
             Error::InvalidTransition { .. } => "invalid_transition",

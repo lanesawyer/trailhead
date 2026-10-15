@@ -122,6 +122,8 @@ enum Cmd {
         #[arg(long)]
         ttl: Option<i64>,
     },
+    /// Claims you hold and when they expire.
+    Mine,
     /// Extend your lease.
     Renew {
         task: String,
@@ -489,6 +491,27 @@ async fn run(cli: Cli) -> Result<()> {
                         short_time(s(&v["handoff"], "created_at")),
                         s(&v["handoff"], "body")
                     );
+                }
+            }
+        }
+        Cmd::Mine => {
+            let v = c.get("claims", &[]).await?;
+            if json {
+                print_json(&v);
+            } else {
+                match v.as_array() {
+                    Some(held) if !held.is_empty() => {
+                        for h in held {
+                            println!(
+                                "{:<10} {:<11} until {}  {}",
+                                s(h, "key"),
+                                s(h, "status"),
+                                output::until(s(&h["claim"], "expires_at")),
+                                s(h, "title")
+                            );
+                        }
+                    }
+                    _ => println!("you hold no claims"),
                 }
             }
         }

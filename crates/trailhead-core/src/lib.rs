@@ -18,7 +18,7 @@ mod tasks;
 mod tokens;
 mod undo;
 
-pub use claims::ClaimResult;
+pub use claims::{ClaimResult, HeldClaim};
 pub use comments::NewComment;
 pub use error::{Error, Result};
 pub use events::{EventFilter, UNDO_WINDOW};

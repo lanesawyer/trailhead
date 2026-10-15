@@ -141,6 +141,59 @@ async fn resolve_ttl(tx: &Tx, task: &Task, ttl: Option<i64>) -> Result<i64> {
     Ok(ttl)
 }
 
+/// Tells an agent that renews a lease it no longer holds what happened, so it
+/// stops working on a task someone else may now own.
+async fn lost_or_never_held(tx: &Tx, task: &Task) -> Result<Error> {
+    let me = tx.ctx.actor_id().to_string();
+    if let Some(c) = any_claim(&tx.conn, task.id).await?
+        && c.holder_id.to_string() == me
+    {
+        return Ok(Error::ClaimLost(format!("it expired at {}", fmt_ts(c.expires_at))));
+    }
+    let mut rows = tx
+        .conn
+        .query(
+            "SELECT kind, actor_id, at FROM events WHERE entity = 'claim' AND entity_id = ?1 ORDER BY id DESC LIMIT 1",
+            [task.id.to_string()],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else { return Ok(Error::NotClaimHolder) };
+    let (kind, actor, at): (String, String, String) = (row.get(0)?, row.get(1)?, row.get(2)?);
+    let mut rows = tx
+        .conn
+        .query(
+            "SELECT 1 FROM events WHERE entity = 'claim' AND entity_id = ?1 AND kind = 'claim.acquired' AND actor_id = ?2 LIMIT 1",
+            [task.id.to_string(), me.clone()],
+        )
+        .await?;
+    let held_before = rows.next().await?.is_some();
+    Ok(match kind.as_str() {
+        "claim.expired" if actor == me => Error::ClaimLost(format!("it expired at {at}")),
+        "claim.acquired" | "claim.renewed" if held_before && actor != me => {
+            let taker = match live_claim(&tx.conn, task.id, tx.now).await? {
+                Some(c) => match claim_held(&tx.conn, &c).await {
+                    Error::ClaimHeld { holder, .. } => holder,
+                    _ => actor,
+                },
+                None => actor,
+            };
+            Error::ClaimLost(format!("{taker} claimed it at {at}"))
+        }
+        "claim.released" if held_before && actor != me => Error::ClaimLost(format!("someone else released it at {at}")),
+        _ => Error::NotClaimHolder,
+    })
+}
+
+/// A claim the caller holds, with enough of the task to act on it.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct HeldClaim {
+    pub key: String,
+    pub title: String,
+    pub status: Status,
+    pub claim: Claim,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ClaimResult {
@@ -225,16 +278,43 @@ impl Store {
         .await
     }
 
+    /// Live claims the caller holds, soonest to expire first.
+    pub async fn my_claims(&self, ctx: &Ctx) -> Result<Vec<HeldClaim>> {
+        let conn = self.reader()?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT t.key, t.title, t.status, {} FROM claims c JOIN tasks t ON t.id = c.task_id
+                     WHERE c.workspace_id = ?1 AND c.holder_id = ?2 AND c.expires_at > ?3 AND t.deleted_at IS NULL
+                     ORDER BY c.expires_at",
+                    CLAIM_COLS.split(", ").map(|c| format!("c.{c}")).collect::<Vec<_>>().join(", ")
+                ),
+                [ctx.workspace_id.to_string(), ctx.actor_id().to_string(), fmt_ts(self.now())],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let claim = Claim {
+                task_id: get_uuid(&row, 3)?,
+                workspace_id: get_uuid(&row, 4)?,
+                holder_id: get_uuid(&row, 5)?,
+                on_behalf_of: get_uuid(&row, 6)?,
+                claimed_at: get_ts(&row, 7)?,
+                expires_at: get_ts(&row, 8)?,
+            };
+            out.push(HeldClaim { key: row.get(0)?, title: row.get(1)?, status: crate::db::get_enum(&row, 2)?, claim });
+        }
+        Ok(out)
+    }
+
     /// Heartbeat. Renew roughly every third of the TTL.
     pub async fn renew(&self, ctx: &Ctx, task: &str, ttl: Option<i64>) -> Result<Claim> {
         self.write(ctx, async |tx| {
             let task = find_task(&tx.conn, ctx, task, false).await?;
-            let Some(before) = live_claim(&tx.conn, task.id, tx.now).await? else {
-                return Err(Error::NotClaimHolder);
+            let before = match live_claim(&tx.conn, task.id, tx.now).await? {
+                Some(c) if c.holder_id == ctx.actor_id() => c,
+                _ => return Err(lost_or_never_held(tx, &task).await?),
             };
-            if before.holder_id != ctx.actor_id() {
-                return Err(Error::NotClaimHolder);
-            }
             let ttl = resolve_ttl(tx, &task, ttl).await?;
             let after = Claim { expires_at: tx.now + Duration::seconds(ttl), ..before.clone() };
             put_claim(tx, &after).await?;

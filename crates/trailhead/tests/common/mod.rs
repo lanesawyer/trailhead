@@ -44,7 +44,17 @@ impl Instance {
     }
 
     pub fn run(&self, args: &[&str]) -> Output {
-        self.command().args(args).output().unwrap()
+        // Tests copy the binary while other threads fork, and a fork can briefly
+        // hold the fresh copy open for writing, so exec fails with ETXTBSY.
+        for _ in 0..50 {
+            match self.command().args(args).output() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                r => return r.unwrap(),
+            }
+        }
+        panic!("{} stayed busy", self.exe.display())
     }
 
     pub fn stdout(&self, args: &[&str]) -> String {

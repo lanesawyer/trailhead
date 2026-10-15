@@ -10,9 +10,9 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
-    Agent, Claim, ClaimResult, Comment, CommentKind, Dependency, Error, Event, EventFilter, NewComment, NewProject,
-    NewTask, Principal, Project, ProjectPatch, ProjectStatus, Status, Task, TaskDetail, TaskFilter, TaskPatch, Token,
-    TokenOptions, UndoReport,
+    Agent, Claim, ClaimResult, Comment, CommentKind, Dependency, Error, Event, EventFilter, HeldClaim, NewComment,
+    NewProject, NewTask, Principal, Project, ProjectPatch, ProjectStatus, Status, Task, TaskDetail, TaskFilter,
+    TaskPatch, Token, TokenOptions, UndoReport,
 };
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -42,6 +42,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/tasks/{task}/history", get(task_history))
         .route("/comments/{id}/resolve", post(resolve_comment))
         .route("/ready", get(ready))
+        .route("/claims", get(my_claims))
         .route("/search", get(search))
         .route("/events", get(list_events))
         .route("/events/stream", get(crate::stream::events))
@@ -799,6 +800,14 @@ async fn create_token(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateToken>) 
     };
     let (token, secret) = s.store.create_token_with(&ctx, principal, &b.name, b.limits.into()).await?;
     Ok(created(json!({ "token": token, "secret": secret })))
+}
+
+#[utoipa::path(
+    get, path = "/v1/claims", tag = "claims",
+    responses((status = 200, description = "Live claims you hold, soonest to expire first", body = Vec<HeldClaim>))
+)]
+pub(crate) async fn my_claims(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
+    Ok(Json(json!(s.store.my_claims(&ctx).await?)))
 }
 
 #[utoipa::path(

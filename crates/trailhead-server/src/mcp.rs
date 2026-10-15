@@ -361,6 +361,31 @@ impl TrailheadMcp {
         text(out)
     }
 
+    #[tool(
+        description = "Claims you currently hold and when they expire. Check this after a pause: a lapsed claim means someone else may own the task now."
+    )]
+    async fn my_claims(&self, Extension(parts): Extension<Parts>) -> Result<CallToolResult, ErrorData> {
+        let ctx = ctx_of(&parts)?;
+        let held = attempt!(self.state.store.my_claims(&ctx).await);
+        if held.is_empty() {
+            return text("you hold no claims");
+        }
+        text(
+            held.iter()
+                .map(|h| {
+                    format!(
+                        "{} {} until {} {}",
+                        h.key,
+                        h.status,
+                        h.claim.expires_at.format(&Rfc3339).unwrap_or_default(),
+                        h.title
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
     #[tool(description = "Extend your lease. Renew about every third of the TTL.")]
     async fn renew(
         &self,
