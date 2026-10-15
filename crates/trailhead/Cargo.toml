@@ -15,7 +15,8 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
-time = { workspace = true, features = ["local-offset"] }
+time.workspace = true
+jiff.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]

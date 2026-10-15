@@ -295,14 +295,24 @@ enum TokenCmd {
     Revoke { id: String },
 }
 
+/// RFC 3339 passes through; a bare date means the end of that day in the local
+/// zone, using that day's offset (DST included).
 fn parse_when(s: &str) -> Result<String> {
-    if OffsetDateTime::parse(s, &Rfc3339).is_ok() {
+    parse_when_in(s, output::local_tz())
+}
+
+fn parse_when_in(s: &str, tz: &jiff::tz::TimeZone) -> Result<String> {
+    if s.parse::<jiff::Timestamp>().is_ok() {
         return Ok(s.to_string());
     }
-    let fmt = time::macros::format_description!("[year]-[month]-[day]");
-    let date = time::Date::parse(s, &fmt).with_context(|| format!("{s:?} isn't YYYY-MM-DD or RFC 3339"))?;
-    let end_of_day = date.with_hms(23, 59, 59)?.assume_offset(output::local_offset());
-    Ok(end_of_day.format(&Rfc3339)?)
+    let date: jiff::civil::Date = s.parse().with_context(|| format!("{s:?} isn't YYYY-MM-DD or RFC 3339"))?;
+    let end_of_day = date.at(23, 59, 59, 0).to_zoned(tz.clone())?;
+    Ok(end_of_day.timestamp().to_string())
+}
+
+/// The local IANA zone name, e.g. `America/Los_Angeles`, if the system has one.
+fn local_time_zone() -> Option<String> {
+    output::local_tz().iana_name().map(String::from)
 }
 
 fn read_brief(brief: Option<String>, file: Option<PathBuf>) -> Result<Option<String>> {
@@ -329,7 +339,6 @@ fn print_json(v: &Value) {
 }
 
 fn main() {
-    output::init_local_offset();
     let cli = Cli::parse();
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if let Err(e) = rt.block_on(run(cli)) {
@@ -401,6 +410,7 @@ async fn run(cli: Cli) -> Result<()> {
                 "priority": priority,
                 "parent": parent,
                 "due_at": due.as_deref().map(parse_when).transpose()?,
+                "due_tz": due.as_ref().and_then(|_| local_time_zone()),
                 "blocked_by": after,
                 "blocks": blocks,
             });
@@ -418,7 +428,12 @@ async fn run(cli: Cli) -> Result<()> {
                 body["priority"] = json!(p);
             }
             if let Some(d) = due {
-                body["due_at"] = if d == "none" { Value::Null } else { json!(parse_when(&d)?) };
+                if d == "none" {
+                    body["due_at"] = Value::Null;
+                } else {
+                    body["due_at"] = json!(parse_when(&d)?);
+                    body["due_tz"] = json!(local_time_zone());
+                }
             }
             if let Some(st) = status {
                 body["status"] = json!(st);
@@ -838,4 +853,19 @@ async fn serve(bind: &str) -> Result<()> {
         pid_file: Some(paths.pid_file()),
     };
     trailhead_server::serve_local(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_when_in;
+
+    #[test]
+    fn dates_end_at_local_midnight_with_that_days_offset() {
+        let la = jiff::tz::TimeZone::get("America/Los_Angeles").unwrap();
+        // DST ends 2026-11-01 in the US.
+        assert_eq!(parse_when_in("2026-10-31", &la).unwrap(), "2026-11-01T06:59:59Z");
+        assert_eq!(parse_when_in("2026-11-01", &la).unwrap(), "2026-11-02T07:59:59Z");
+        assert_eq!(parse_when_in("2026-11-01T12:00:00Z", &la).unwrap(), "2026-11-01T12:00:00Z");
+        assert!(parse_when_in("next tuesday", &la).is_err());
+    }
 }

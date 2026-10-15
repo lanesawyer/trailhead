@@ -1,29 +1,23 @@
 use std::sync::OnceLock;
 
+use jiff::tz::TimeZone;
 use serde_json::Value;
-use time::format_description::well_known::Rfc3339;
-use time::{OffsetDateTime, UtcOffset};
 
 pub fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("")
 }
 
-static LOCAL_OFFSET: OnceLock<UtcOffset> = OnceLock::new();
+static LOCAL_TZ: OnceLock<TimeZone> = OnceLock::new();
 
-/// Must run before any threads start: the local offset can't be read safely after.
-pub fn init_local_offset() {
-    LOCAL_OFFSET.get_or_init(|| UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC));
-}
-
-pub fn local_offset() -> UtcOffset {
-    *LOCAL_OFFSET.get().unwrap_or(&UtcOffset::UTC)
+/// The system time zone (honours `TZ`), with DST rules from the zoneinfo database.
+pub fn local_tz() -> &'static TimeZone {
+    LOCAL_TZ.get_or_init(TimeZone::system)
 }
 
 /// `2026-10-15T04:05:00.123Z` -> `2026-10-14 21:05` in local time.
 pub fn short_time(ts: &str) -> String {
-    let fmt = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]");
-    match OffsetDateTime::parse(ts, &Rfc3339) {
-        Ok(t) => t.to_offset(local_offset()).format(&fmt).unwrap_or_else(|_| ts.to_string()),
+    match ts.parse::<jiff::Timestamp>() {
+        Ok(t) => t.to_zoned(local_tz().clone()).strftime("%Y-%m-%d %H:%M").to_string(),
         Err(_) => ts.to_string(),
     }
 }
