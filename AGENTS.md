@@ -14,7 +14,16 @@ Current phase: 2 (server and CLI). Phase 1 core is in `crates/trailhead-core`.
 
 ## Tracking work
 
-Work on Trailhead is tracked in Trailhead, in the `TRAIL` project. Read its brief with `trailhead project show TRAIL`. Agents act through their own identity, never Lane's: pass `--as <agent>` (or set `TRAILHEAD_AGENT`). The `claude` agent's token is already saved locally.
+Work on Trailhead is tracked in Trailhead, in the `TRAIL` project. This is how we dogfood it, so it isn't optional:
+
+- **Start of a session:** run `trailhead --as claude ready -p TRAIL` and read the brief with `trailhead project show TRAIL`.
+- **Before writing code,** claim a task. If what Lane asked for has no task, create one and claim it. Don't do untracked work.
+- **While working,** renew the claim on long tasks, record decisions as `decision` comments, and use `ask` for anything only Lane can answer.
+- **When finished,** close the task with a handoff (`done -m`). If you stop partway, leave a `handoff` and `release` the task so the next agent can pick it up.
+- **Follow-ups and bugs** you notice become new tasks, not scope creep.
+- **Friction with Trailhead itself** is the most valuable thing to report: file it as a task.
+
+Agents act through their own identity, never Lane's: pass `--as <agent>` (or set `TRAILHEAD_AGENT`). Claude Code uses `claude`, whose token is already saved locally. Other agent tools should ask Lane to run `trailhead agent add <name>` rather than borrowing `claude` or acting as Lane.
 
 ```sh
 trailhead --as claude ready -p TRAIL          # what's next
