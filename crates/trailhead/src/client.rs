@@ -6,7 +6,7 @@ use reqwest::{Method, StatusCode, Url};
 use serde_json::Value;
 use trailhead_server::{Paths, modified_ms};
 
-use crate::creds;
+use trailhead_server::creds::Cred;
 
 /// The agent to act as, and the `.trailhead.toml` that chose it, if one did.
 pub struct Identity {
@@ -57,13 +57,26 @@ impl Client {
         let paths = Paths::from_env().context("no home directory")?;
         let token = match (token, agent) {
             (Some(t), _) => t,
-            (None, Some(id)) => creds::read(&paths, creds::Cred::Agent(&id.name)).map_err(|e| match &id.from {
-                Some(file) => {
-                    e.context(format!("{} sets agent = {:?}; pass --as-me to act as yourself", file.display(), id.name))
+            (None, Some(id)) => match paths.creds().read(Cred::Agent(&id.name)) {
+                Some((secret, _)) => secret,
+                None => {
+                    let file = paths.creds().file(Cred::Agent(&id.name));
+                    let msg = format!("no saved token for agent {:?} in the keyring or at {}", id.name, file.display());
+                    match &id.from {
+                        Some(f) => {
+                            bail!("{msg}\n{} sets agent = {:?}; pass --as-me to act as yourself", f.display(), id.name)
+                        }
+                        None => bail!("{msg}"),
+                    }
                 }
-                None => e,
-            })?,
-            (None, None) => creds::read(&paths, creds::Cred::User)?,
+            },
+            (None, None) => match paths.creds().read(Cred::User) {
+                Some((secret, _)) => secret,
+                None => bail!(
+                    "no token: set TRAILHEAD_TOKEN, or run a local server to create {}",
+                    paths.creds().file(Cred::User).display()
+                ),
+            },
         };
         let local = is_local(&base);
         Ok(Client { http, base, token, local })

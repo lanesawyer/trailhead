@@ -2,6 +2,7 @@
 //! adapter over [`trailhead_core::Store`].
 
 mod auth;
+pub mod creds;
 mod error;
 mod idempotency;
 mod mcp;
@@ -120,13 +121,8 @@ impl Paths {
         self.data_dir.join("trailhead.db")
     }
 
-    pub fn credentials(&self) -> PathBuf {
-        self.config_dir.join("credentials")
-    }
-
-    /// Saved agent tokens, used by `trailhead --as <agent>`.
-    pub fn agent_token(&self, name: &str) -> PathBuf {
-        self.config_dir.join("agents").join(name)
+    pub fn creds(&self) -> creds::CredStore {
+        creds::CredStore::new(self.config_dir.clone())
     }
 
     pub fn pid_file(&self) -> PathBuf {
@@ -142,7 +138,7 @@ pub struct LocalConfig {
     pub bind: SocketAddr,
     pub db: PathBuf,
     /// Where the local user's CLI token is kept.
-    pub credentials: PathBuf,
+    pub creds: creds::CredStore,
     pub user_name: String,
     /// Holds the running server's pid while it's up.
     pub pid_file: Option<PathBuf>,
@@ -157,14 +153,22 @@ pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::
     let store = Store::open_local(&cfg.db).await?;
     let (ws, user) = store.bootstrap_local(&cfg.user_name).await?;
     let ctx = Ctx::user(ws.id, user.id);
-    let existing = std::fs::read_to_string(&cfg.credentials).ok();
-    let valid = match existing.as_deref().map(str::trim) {
-        Some(secret) => store.authenticate(secret).await.is_ok_and(|c| c.user_id == user.id && c.is_human()),
+    let existing = cfg.creds.read(creds::Cred::User);
+    let valid = match &existing {
+        Some((secret, _)) => store.authenticate(secret).await.is_ok_and(|c| c.user_id == user.id && c.is_human()),
         None => false,
     };
-    if !valid {
-        let (_, secret) = store.create_token(&ctx, Principal::User(user.id), "local cli").await?;
-        write_secret(&cfg.credentials, &secret)?;
+    match existing {
+        // Still a plaintext file from before keyring support: move it in. If the
+        // keyring isn't reachable the file just gets rewritten in place.
+        Some((secret, creds::Saved::File(_))) if valid && cfg.creds.keyring => {
+            cfg.creds.save(creds::Cred::User, &secret)?;
+        }
+        _ if valid => {}
+        _ => {
+            let (_, secret) = store.create_token(&ctx, Principal::User(user.id), "local cli").await?;
+            cfg.creds.save(creds::Cred::User, &secret)?;
+        }
     }
     Ok((store, ctx))
 }

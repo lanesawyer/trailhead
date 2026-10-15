@@ -6,6 +6,7 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use trailhead_server::creds::{Cred, CredStore};
 use trailhead_server::{AppState, BATCH_HEADER, LocalConfig, open_local, router};
 
 struct Api {
@@ -26,12 +27,12 @@ impl Api {
         let cfg = LocalConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             db: dir.path().join("t.db"),
-            credentials: dir.path().join("credentials"),
+            creds: CredStore { config_dir: dir.path().into(), keyring: false },
             user_name: "lane".into(),
             pid_file: None,
         };
         let (store, _) = open_local(&cfg).await.unwrap();
-        let human = std::fs::read_to_string(&cfg.credentials).unwrap().trim().to_string();
+        let human = std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap().trim().to_string();
         Api { app: router(Arc::new(AppState::new(store))), human, _dir: dir }
     }
 
@@ -185,18 +186,18 @@ async fn reopening_keeps_the_same_cli_token() {
     let cfg = LocalConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
         db: dir.path().join("t.db"),
-        credentials: dir.path().join("credentials"),
+        creds: CredStore { config_dir: dir.path().into(), keyring: false },
         user_name: "lane".into(),
         pid_file: None,
     };
     drop(open_local(&cfg).await.unwrap());
-    let first = std::fs::read_to_string(&cfg.credentials).unwrap();
+    let first = std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap();
     drop(open_local(&cfg).await.unwrap());
-    assert_eq!(first, std::fs::read_to_string(&cfg.credentials).unwrap());
+    assert_eq!(first, std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&cfg.credentials).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(cfg.creds.file(Cred::User)).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
 

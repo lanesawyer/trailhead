@@ -7,6 +7,7 @@ use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
 use trailhead_core::{NewProject, NewTask, Principal};
+use trailhead_server::creds::{Cred, CredStore};
 use trailhead_server::{AppState, LocalConfig, open_local, router};
 
 struct Server {
@@ -21,12 +22,12 @@ async fn start() -> Server {
     let cfg = LocalConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
         db: dir.path().join("t.db"),
-        credentials: dir.path().join("credentials"),
+        creds: CredStore { config_dir: dir.path().into(), keyring: false },
         user_name: "lane".into(),
         pid_file: None,
     };
     let (store, ctx) = open_local(&cfg).await.unwrap();
-    let human = std::fs::read_to_string(&cfg.credentials).unwrap().trim().to_string();
+    let human = std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap().trim().to_string();
     store
         .create_project(
             &ctx,

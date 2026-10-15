@@ -5,6 +5,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
+use trailhead_server::creds::CredStore;
 use trailhead_server::{AppState, LocalConfig, open_local, router};
 
 /// Every (method, path) registered in `routes::v1()`. Add new routes here.
@@ -50,7 +51,7 @@ async fn fetch_doc() -> Value {
     let cfg = LocalConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
         db: dir.path().join("t.db"),
-        credentials: dir.path().join("credentials"),
+        creds: CredStore { config_dir: dir.path().into(), keyring: false },
         user_name: "lane".into(),
         pid_file: None,
     };

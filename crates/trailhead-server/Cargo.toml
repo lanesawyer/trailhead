@@ -19,6 +19,7 @@ uuid.workspace = true
 time.workspace = true
 directories.workspace = true
 rmcp.workspace = true
+keyring.workspace = true
 http.workspace = true
 
 [dev-dependencies]

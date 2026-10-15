@@ -1,5 +1,4 @@
 mod client;
-mod creds;
 mod output;
 mod repo;
 
@@ -14,6 +13,7 @@ use time::format_description::well_known::Rfc3339;
 
 use client::{ApiError, Client, Identity};
 use output::{comment_line, event_line, project_line, s, short_time, task_line, task_list};
+use trailhead_server::creds::{Cred, Saved};
 
 /// Trailhead: a headless task engine for humans and agents.
 #[derive(Parser)]
@@ -636,7 +636,7 @@ async fn run(cli: Cli) -> Result<()> {
             let safe_name = name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
             let saved = if c.local && safe_name {
                 let paths = trailhead_server::Paths::from_env().context("no home directory")?;
-                Some(creds::save(&paths, creds::Cred::Agent(&name), s(&v, "secret"))?)
+                Some(paths.creds().save(Cred::Agent(&name), s(&v, "secret"))?)
             } else {
                 None
             };
@@ -645,10 +645,10 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 println!("agent {} ({})", s(&v["agent"], "name"), s(&v["agent"], "id"));
                 match saved {
-                    Some(creds::Saved::Keyring) => {
+                    Some(Saved::Keyring) => {
                         println!("token saved to the OS keyring; use `trailhead --as {name}`")
                     }
-                    Some(creds::Saved::File(path)) => {
+                    Some(Saved::File(path)) => {
                         println!("token saved to {}; use `trailhead --as {name}`", path.display())
                     }
                     None => println!("token (shown once): {}", s(&v, "secret")),
@@ -936,7 +936,7 @@ async fn serve(bind: &str) -> Result<()> {
     let cfg = trailhead_server::LocalConfig {
         bind: bind.parse().with_context(|| format!("bad bind address {bind}"))?,
         db: std::env::var_os("TRAILHEAD_DB").map(PathBuf::from).unwrap_or_else(|| paths.db()),
-        credentials: paths.credentials(),
+        creds: paths.creds(),
         user_name: std::env::var("USER").unwrap_or_else(|_| "me".into()),
         pid_file: Some(paths.pid_file()),
     };
