@@ -6,10 +6,11 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-trailhead-core.workspace = true
+trailhead-core = { workspace = true, features = ["openapi"] }
 axum.workspace = true
 tokio = { workspace = true, features = ["net", "signal", "fs"] }
 tower-http.workspace = true
+utoipa.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
 serde.workspace = true

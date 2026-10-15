@@ -16,6 +16,7 @@ use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::{load_task, save_task};
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UndoReport {
     pub batch_id: Uuid,
     pub reverted: Vec<Reverted>,
@@ -23,6 +24,7 @@ pub struct UndoReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Reverted {
     pub entity: Entity,
     pub entity_id: String,
@@ -31,6 +33,7 @@ pub struct Reverted {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Skipped {
     pub entity: Entity,
     pub entity_id: String,

@@ -8,6 +8,7 @@ use crate::error::Error;
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $s:literal),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
         #[serde(rename_all = "snake_case")]
         pub enum $name { $($variant),+ }
 
@@ -78,6 +79,7 @@ string_enum!(ProjectStatus {
 });
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Workspace {
     pub id: Uuid,
     pub name: String,
@@ -87,6 +89,7 @@ pub struct Workspace {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct User {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -97,6 +100,7 @@ pub struct User {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Agent {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -107,6 +111,7 @@ pub struct Agent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Project {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -128,6 +133,7 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Task {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -156,6 +162,7 @@ pub struct Task {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Claim {
     pub task_id: Uuid,
     pub workspace_id: Uuid,
@@ -168,6 +175,7 @@ pub struct Claim {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Comment {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -186,6 +194,7 @@ pub struct Comment {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Dependency {
     pub workspace_id: Uuid,
     pub blocker_id: Uuid,
@@ -195,6 +204,7 @@ pub struct Dependency {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Event {
     pub id: i64,
     pub workspace_id: Uuid,

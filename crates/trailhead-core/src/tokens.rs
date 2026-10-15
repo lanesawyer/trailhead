@@ -11,6 +11,7 @@ use crate::store::{Ctx, Store};
 const TOKEN_PREFIX: &str = "th_";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum Principal {
     User(Uuid),
@@ -18,6 +19,7 @@ pub enum Principal {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Token {
     pub id: Uuid,
     pub workspace_id: Uuid,

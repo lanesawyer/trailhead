@@ -185,6 +185,7 @@ pub struct TaskFilter {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TaskDetail {
     pub task: Task,
     pub claim: Option<Claim>,

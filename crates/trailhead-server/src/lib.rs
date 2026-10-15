@@ -5,6 +5,7 @@ mod auth;
 mod error;
 mod idempotency;
 mod mcp;
+mod openapi;
 mod routes;
 mod stream;
 

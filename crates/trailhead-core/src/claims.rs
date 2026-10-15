@@ -142,6 +142,7 @@ async fn resolve_ttl(tx: &Tx, task: &Task, ttl: Option<i64>) -> Result<i64> {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ClaimResult {
     pub task: Task,
     pub claim: Claim,

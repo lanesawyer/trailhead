@@ -19,7 +19,8 @@ use crate::error::{ApiResult, Query};
 const POLL: Duration = Duration::from_secs(2);
 const PAGE: i64 = 100;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct StreamQuery {
     /// Start after this event id. `Last-Event-ID` wins when both are sent.
     /// Without either, the stream starts at the newest event.
@@ -49,6 +50,20 @@ fn to_sse(e: &Event) -> SseEvent {
 
 /// `GET /v1/events/stream`: every event as Server-Sent Events, read from the
 /// events table so a reconnect with `Last-Event-ID` misses nothing.
+#[utoipa::path(
+    get,
+    path = "/v1/events/stream",
+    tag = "events",
+    params(
+        StreamQuery,
+        ("Last-Event-ID" = Option<i64>, Header, description = "Resume after this event id"),
+    ),
+    responses(
+        (status = 200, description = "Server-Sent Events. Each has `id` (the event id), `event` (the kind, e.g. `task.updated`) and `data` (the event as JSON).",
+            content_type = "text/event-stream", body = Event),
+        (status = 404, description = "`not_found`: the `task` filter", body = crate::openapi::ErrorBody),
+    )
+)]
 pub async fn events(
     State(state): State<Arc<AppState>>,
     Auth(ctx): Auth,

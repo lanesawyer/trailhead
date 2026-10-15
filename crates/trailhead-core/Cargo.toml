@@ -16,6 +16,11 @@ time.workspace = true
 sha2.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+utoipa = { workspace = true, optional = true }
+
+[features]
+# Derives `utoipa::ToSchema` on the public model so the server can publish an OpenAPI document.
+openapi = ["dep:utoipa"]
 
 [dev-dependencies]
 tempfile = "3"

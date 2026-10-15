@@ -32,3 +32,4 @@ rmcp = { version = "3.5", default-features = false, features = ["server", "macro
 http = "1"
 futures-util = { version = "0.3", default-features = false }
 jiff = "0.2"
+utoipa = { version = "6", features = ["uuid", "time"] }

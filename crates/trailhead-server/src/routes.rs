@@ -10,20 +10,24 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
-    CommentKind, EventFilter, NewComment, NewProject, NewTask, Principal, ProjectPatch, ProjectStatus, Status,
-    TaskFilter, TaskPatch,
+    Agent, Claim, ClaimResult, Comment, CommentKind, Dependency, Event, EventFilter, NewComment, NewProject, NewTask,
+    Principal, Project, ProjectPatch, ProjectStatus, Status, Task, TaskDetail, TaskFilter, TaskPatch, Token,
+    UndoReport,
 };
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::{Auth, require_human};
 use crate::error::{ApiResult, Json, Path, Query, invalid};
+use crate::openapi::{CreatedAgent, ErrorBody, Health, Me};
 
 type S = State<Arc<AppState>>;
 
 pub fn v1() -> Router<Arc<AppState>> {
     Router::new()
         .route("/health", get(health))
+        .route("/openapi.json", get(crate::openapi::serve))
         .route("/me", get(me))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{project}", get(get_project).patch(update_project))
@@ -114,12 +118,20 @@ fn created(body: impl Serialize) -> Response {
     (StatusCode::CREATED, Json(body)).into_response()
 }
 
+#[utoipa::path(
+    get, path = "/v1/health", tag = "meta", security(()),
+    responses((status = 200, description = "The server is up", body = Health))
+)]
 async fn health(State(s): S) -> Json<Value> {
     let mut v = json!(s.info);
     v["ok"] = json!(true);
     Json(v)
 }
 
+#[utoipa::path(
+    get, path = "/v1/me", tag = "meta",
+    responses((status = 200, description = "The caller", body = Me))
+)]
 async fn me(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
     let user = s.store.get_user(&ctx, ctx.user_id).await?;
     let agent = match ctx.agent_id {
@@ -129,17 +141,22 @@ async fn me(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
     Ok(Json(json!({ "workspace_id": ctx.workspace_id, "user": user, "agent": agent })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ProjectListQuery {
     #[serde(default)]
     archived: bool,
 }
 
+#[utoipa::path(
+    get, path = "/v1/projects", tag = "projects", params(ProjectListQuery),
+    responses((status = 200, description = "Projects", body = Vec<Project>))
+)]
 async fn list_projects(State(s): S, Auth(ctx): Auth, Query(q): Query<ProjectListQuery>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.list_projects(&ctx, q.archived).await?)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct CreateProject {
     key: String,
     name: String,
@@ -151,6 +168,13 @@ struct CreateProject {
     metadata: Option<Value>,
 }
 
+#[utoipa::path(
+    post, path = "/v1/projects", tag = "projects", request_body = CreateProject,
+    responses(
+        (status = 201, description = "Created", body = Project),
+        (status = 409, description = "`already_exists`", body = ErrorBody),
+    )
+)]
 async fn create_project(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateProject>) -> ApiResult<Response> {
     let new = NewProject {
         key: b.key,
@@ -163,12 +187,19 @@ async fn create_project(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateProjec
     Ok(created(s.store.create_project(&ctx, new).await?))
 }
 
+#[utoipa::path(
+    get, path = "/v1/projects/{project}", tag = "projects", params(("project" = String, Path, description = "Project key, e.g. `AUTH`, or id")),
+    responses(
+        (status = 200, description = "The project", body = Project, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
 async fn get_project(State(s): S, Auth(ctx): Auth, Path(p): Path<String>) -> ApiResult<Response> {
     let project = s.store.get_project(&ctx, &p).await?;
     Ok(with_etag(project.version, project))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UpdateProject {
     name: Option<String>,
     brief: Option<String>,
@@ -179,6 +210,15 @@ struct UpdateProject {
     metadata: Option<Value>,
 }
 
+#[utoipa::path(
+    patch, path = "/v1/projects/{project}", tag = "projects", params(("project" = String, Path, description = "Project key, e.g. `AUTH`, or id"), ("If-Match" = Option<String>, Header, description = "Expected version, e.g. `\"3\"`. A stale version gets 412 `version_conflict`.")),
+    request_body = UpdateProject,
+    responses(
+        (status = 200, description = "Updated", body = Project, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+        (status = 412, description = "`version_conflict`", body = ErrorBody),
+    )
+)]
 async fn update_project(
     State(s): S,
     Auth(ctx): Auth,
@@ -198,12 +238,14 @@ async fn update_project(
     Ok(with_etag(project.version, project))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct TaskListQuery {
     project: Option<String>,
     /// Comma-separated. Defaults to everything not done or cancelled.
     status: Option<String>,
     parent: Option<String>,
+    #[param(format = DateTime)]
     due_before: Option<String>,
     /// `key:value` pairs, comma-separated.
     metadata: Option<String>,
@@ -211,6 +253,10 @@ struct TaskListQuery {
     fields: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/v1/tasks", tag = "tasks", params(TaskListQuery),
+    responses((status = 200, description = "Tasks; trimmed to the requested `fields` if set", body = Vec<Task>))
+)]
 async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<TaskListQuery>) -> ApiResult<Json<Value>> {
     let metadata = q
         .metadata
@@ -238,13 +284,14 @@ async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<TaskListQuery>
     Ok(Json(select_fields(&tasks, q.fields.as_deref())?))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct CreateTask {
     project: String,
     title: String,
     #[serde(default)]
     description: String,
     priority: Option<i64>,
+    #[schema(format = DateTime)]
     due_at: Option<String>,
     due_tz: Option<String>,
     parent: Option<String>,
@@ -259,6 +306,14 @@ struct CreateTask {
     blocks: Vec<String>,
 }
 
+#[utoipa::path(
+    post, path = "/v1/tasks", tag = "tasks", request_body = CreateTask,
+    responses(
+        (status = 201, description = "Created", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 404, description = "`not_found`: project, parent or dependency", body = ErrorBody),
+        (status = 409, description = "`already_exists` (same `source` and `external_id`) or `dependency_cycle`", body = ErrorBody),
+    )
+)]
 async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateTask>) -> ApiResult<Response> {
     let new = NewTask {
         project: b.project,
@@ -284,18 +339,26 @@ async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateTask>) ->
     Ok(res)
 }
 
+#[utoipa::path(
+    get, path = "/v1/tasks/{task}", tag = "tasks", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    responses(
+        (status = 200, description = "The task with its claim, dependencies and comments", body = TaskDetail, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
 async fn get_task(State(s): S, Auth(ctx): Auth, Path(t): Path<String>) -> ApiResult<Response> {
     let detail = s.store.task_detail(&ctx, &t).await?;
     Ok(with_etag(detail.task.version, detail))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UpdateTask {
     title: Option<String>,
     description: Option<String>,
     status: Option<Status>,
     priority: Option<i64>,
     #[serde(default, deserialize_with = "nullable")]
+    #[schema(format = DateTime)]
     due_at: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
     due_tz: Option<Option<String>>,
@@ -306,6 +369,17 @@ struct UpdateTask {
     version: Option<i64>,
 }
 
+#[utoipa::path(
+    patch, path = "/v1/tasks/{task}", tag = "tasks", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id"), ("If-Match" = Option<String>, Header, description = "Expected version, e.g. `\"3\"`. A stale version gets 412 `version_conflict`.")),
+    request_body = UpdateTask,
+    responses(
+        (status = 200, description = "Updated", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 403, description = "`review_required` or `forbidden`", body = ErrorBody),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+        (status = 409, description = "`invalid_transition`, `blocked_by`, `claim_held` or `not_claim_holder`", body = ErrorBody),
+        (status = 412, description = "`version_conflict`", body = ErrorBody),
+    )
+)]
 async fn update_task(
     State(s): S,
     Auth(ctx): Auth,
@@ -328,35 +402,77 @@ async fn update_task(
     Ok(with_etag(task.version, task))
 }
 
+#[utoipa::path(
+    delete, path = "/v1/tasks/{task}", tag = "tasks", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id"), ("If-Match" = Option<String>, Header, description = "Expected version, e.g. `\"3\"`. A stale version gets 412 `version_conflict`.")),
+    responses(
+        (status = 200, description = "Soft-deleted; undo restores it", body = Task),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+        (status = 409, description = "`claim_held` or `not_claim_holder`", body = ErrorBody),
+        (status = 412, description = "`version_conflict`", body = ErrorBody),
+    )
+)]
 async fn delete_task(State(s): S, Auth(ctx): Auth, Path(t): Path<String>, headers: HeaderMap) -> ApiResult<Response> {
     let task = s.store.delete_task(&ctx, &t, if_match(&headers)?).await?;
     Ok(Json(task).into_response())
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, ToSchema)]
 struct ClaimBody {
     ttl: Option<i64>,
 }
 
+#[utoipa::path(
+    post, path = "/v1/tasks/{task}/claim", tag = "claims", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    request_body(content = Option<ClaimBody>, description = "Optional; an empty body uses the default TTL"),
+    responses(
+        (status = 200, description = "Claimed, with the last handoff", body = ClaimResult, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+        (status = 409, description = "`claim_held`, `blocked_by` or `invalid_transition`", body = ErrorBody),
+    )
+)]
 async fn claim(State(s): S, Auth(ctx): Auth, Path(t): Path<String>, b: axum::body::Bytes) -> ApiResult<Response> {
     let res = s.store.claim(&ctx, &t, optional_body::<ClaimBody>(&b)?.ttl).await?;
     Ok(with_etag(res.task.version, res))
 }
 
+#[utoipa::path(
+    post, path = "/v1/tasks/{task}/renew", tag = "claims", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    request_body(content = Option<ClaimBody>, description = "Optional; an empty body uses the default TTL"),
+    responses(
+        (status = 200, description = "The extended claim", body = Claim),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+        (status = 409, description = "`not_claim_holder`", body = ErrorBody),
+    )
+)]
 async fn renew(State(s): S, Auth(ctx): Auth, Path(t): Path<String>, b: axum::body::Bytes) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.renew(&ctx, &t, optional_body::<ClaimBody>(&b)?.ttl).await?)))
 }
 
+#[utoipa::path(
+    post, path = "/v1/tasks/{task}/release", tag = "claims", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    responses(
+        (status = 200, description = "Released; the task is open again", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+        (status = 409, description = "`not_claim_holder`", body = ErrorBody),
+    )
+)]
 async fn release(State(s): S, Auth(ctx): Auth, Path(t): Path<String>) -> ApiResult<Response> {
     let task = s.store.release(&ctx, &t).await?;
     Ok(with_etag(task.version, task))
 }
 
+#[utoipa::path(
+    get, path = "/v1/tasks/{task}/comments", tag = "comments", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    responses(
+        (status = 200, description = "Comments, oldest first", body = Vec<Comment>),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
 async fn list_comments(State(s): S, Auth(ctx): Auth, Path(t): Path<String>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.list_comments(&ctx, &t).await?)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct AddComment {
     #[serde(default = "note")]
     kind: CommentKind,
@@ -368,6 +484,13 @@ fn note() -> CommentKind {
     CommentKind::Note
 }
 
+#[utoipa::path(
+    post, path = "/v1/tasks/{task}/comments", tag = "comments", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")), request_body = AddComment,
+    responses(
+        (status = 201, description = "Created", body = Comment),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
 async fn add_comment(
     State(s): S,
     Auth(ctx): Auth,
@@ -379,11 +502,20 @@ async fn add_comment(
     Ok(created(c))
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, ToSchema)]
 struct ResolveBody {
     answer: Option<String>,
 }
 
+#[utoipa::path(
+    post, path = "/v1/comments/{id}/resolve", tag = "comments",
+    params(("id" = Uuid, Path, description = "Comment id")),
+    request_body(content = Option<ResolveBody>, description = "Optional"),
+    responses(
+        (status = 200, description = "The resolved comment", body = Comment),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
 async fn resolve_comment(
     State(s): S,
     Auth(ctx): Auth,
@@ -393,15 +525,30 @@ async fn resolve_comment(
     Ok(Json(json!(s.store.resolve_comment(&ctx, id, optional_body::<ResolveBody>(&b)?.answer).await?)))
 }
 
+#[utoipa::path(
+    get, path = "/v1/tasks/{task}/blockers", tag = "dependencies", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    responses(
+        (status = 200, description = "Tasks blocking this one", body = Vec<Task>),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
 async fn list_blockers(State(s): S, Auth(ctx): Auth, Path(t): Path<String>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.blockers(&ctx, &t).await?)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct AddBlocker {
     blocker: String,
 }
 
+#[utoipa::path(
+    post, path = "/v1/tasks/{task}/blockers", tag = "dependencies", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")), request_body = AddBlocker,
+    responses(
+        (status = 201, description = "Created", body = Dependency),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+        (status = 409, description = "`dependency_cycle` or `already_exists`", body = ErrorBody),
+    )
+)]
 async fn add_blocker(
     State(s): S,
     Auth(ctx): Auth,
@@ -411,6 +558,14 @@ async fn add_blocker(
     Ok(created(s.store.add_dependency(&ctx, &b.blocker, &t).await?))
 }
 
+#[utoipa::path(
+    delete, path = "/v1/tasks/{task}/blockers/{blocker}", tag = "dependencies",
+    params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id"), ("blocker" = String, Path, description = "Blocking task key or id")),
+    responses(
+        (status = 204, description = "Removed"),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
 async fn remove_blocker(
     State(s): S,
     Auth(ctx): Auth,
@@ -420,12 +575,20 @@ async fn remove_blocker(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct Page {
     after: Option<i64>,
     limit: Option<i64>,
 }
 
+#[utoipa::path(
+    get, path = "/v1/tasks/{task}/history", tag = "events", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id"), Page),
+    responses(
+        (status = 200, description = "The task's events", body = Vec<Event>),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
 async fn task_history(
     State(s): S,
     Auth(ctx): Auth,
@@ -436,42 +599,58 @@ async fn task_history(
     Ok(Json(json!(s.store.list_events(&ctx, filter).await?)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ReadyQuery {
     project: Option<String>,
     limit: Option<i64>,
     fields: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/v1/ready", tag = "tasks", params(ReadyQuery),
+    responses((status = 200, description = "Open, unclaimed, unblocked tasks by priority then due date; trimmed to `fields` if set", body = Vec<Task>))
+)]
 async fn ready(State(s): S, Auth(ctx): Auth, Query(q): Query<ReadyQuery>) -> ApiResult<Json<Value>> {
     let tasks = s.store.ready(&ctx, q.project.as_deref(), q.limit).await?;
     Ok(Json(select_fields(&tasks, q.fields.as_deref())?))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct SearchQuery {
     q: String,
     limit: Option<i64>,
     fields: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/v1/search", tag = "tasks", params(SearchQuery),
+    responses((status = 200, description = "Matching tasks; trimmed to `fields` if set", body = Vec<Task>))
+)]
 async fn search(State(s): S, Auth(ctx): Auth, Query(q): Query<SearchQuery>) -> ApiResult<Json<Value>> {
     let tasks = s.store.search(&ctx, &q.q, q.limit).await?;
     Ok(Json(select_fields(&tasks, q.fields.as_deref())?))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct EventQuery {
     after: Option<i64>,
     task: Option<String>,
     actor: Option<Uuid>,
     batch: Option<Uuid>,
+    #[param(format = DateTime)]
     since: Option<String>,
     limit: Option<i64>,
     #[serde(default)]
     newest_first: bool,
 }
 
+#[utoipa::path(
+    get, path = "/v1/events", tag = "events", params(EventQuery),
+    responses((status = 200, description = "Events", body = Vec<Event>))
+)]
 async fn list_events(State(s): S, Auth(ctx): Auth, Query(q): Query<EventQuery>) -> ApiResult<Json<Value>> {
     let filter = EventFilter {
         after_id: q.after,
@@ -485,12 +664,20 @@ async fn list_events(State(s): S, Auth(ctx): Auth, Query(q): Query<EventQuery>) 
     Ok(Json(json!(s.store.list_events(&ctx, filter).await?)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UndoBody {
     event_id: Option<i64>,
     batch_id: Option<Uuid>,
 }
 
+#[utoipa::path(
+    post, path = "/v1/undo", tag = "undo", request_body = UndoBody,
+    responses(
+        (status = 200, description = "What was reverted", body = UndoReport),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+        (status = 409, description = "`undo_conflict`", body = ErrorBody),
+    )
+)]
 async fn undo(State(s): S, Auth(ctx): Auth, Json(b): Json<UndoBody>) -> ApiResult<Json<Value>> {
     let report = match (b.event_id, b.batch_id) {
         (Some(e), None) => s.store.undo_event(&ctx, e).await?,
@@ -500,27 +687,47 @@ async fn undo(State(s): S, Auth(ctx): Auth, Json(b): Json<UndoBody>) -> ApiResul
     Ok(Json(json!(report)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct RevertBody {
     actor_id: Uuid,
+    #[schema(format = DateTime)]
     since: String,
 }
 
+#[utoipa::path(
+    post, path = "/v1/revert", tag = "undo", request_body = RevertBody,
+    responses(
+        (status = 200, description = "What was reverted and what was skipped because someone else changed it later", body = UndoReport),
+        (status = 403, description = "`forbidden`: humans only", body = ErrorBody),
+    )
+)]
 async fn revert(State(s): S, Auth(ctx): Auth, Json(b): Json<RevertBody>) -> ApiResult<Json<Value>> {
     require_human(&ctx)?;
     Ok(Json(json!(s.store.revert_actor(&ctx, b.actor_id, parse_time(&b.since)?).await?)))
 }
 
+#[utoipa::path(
+    get, path = "/v1/agents", tag = "agents",
+    responses((status = 200, description = "Agents", body = Vec<Agent>))
+)]
 async fn list_agents(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.list_agents(&ctx).await?)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct CreateAgent {
     name: String,
 }
 
 /// Creates an agent and its first token. The secret is only shown here.
+#[utoipa::path(
+    post, path = "/v1/agents", tag = "agents", request_body = CreateAgent,
+    responses(
+        (status = 201, description = "The agent, its token and the token's secret", body = CreatedAgent),
+        (status = 403, description = "`forbidden`: humans only", body = ErrorBody),
+        (status = 409, description = "`already_exists`", body = ErrorBody),
+    )
+)]
 async fn create_agent(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateAgent>) -> ApiResult<Response> {
     require_human(&ctx)?;
     let agent = s.store.create_agent(&ctx, &b.name).await?;
@@ -528,10 +735,21 @@ async fn create_agent(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateAgent>) 
     Ok(created(json!({ "agent": agent, "token": token, "secret": secret })))
 }
 
+#[utoipa::path(
+    get, path = "/v1/tokens", tag = "tokens",
+    responses((status = 200, description = "Tokens, without secrets", body = Vec<Token>))
+)]
 async fn list_tokens(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.list_tokens(&ctx).await?)))
 }
 
+#[utoipa::path(
+    delete, path = "/v1/tokens/{id}", tag = "tokens", params(("id" = Uuid, Path, description = "Token id")),
+    responses(
+        (status = 200, description = "The revoked token", body = Token),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
 async fn revoke_token(State(s): S, Auth(ctx): Auth, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.revoke_token(&ctx, id).await?)))
 }
