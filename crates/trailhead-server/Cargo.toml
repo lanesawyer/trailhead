@@ -16,8 +16,11 @@ serde_json.workspace = true
 uuid.workspace = true
 time.workspace = true
 directories.workspace = true
+rmcp.workspace = true
+http.workspace = true
 
 [dev-dependencies]
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

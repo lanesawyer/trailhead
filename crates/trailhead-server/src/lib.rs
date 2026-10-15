@@ -3,6 +3,7 @@
 
 mod auth;
 mod error;
+mod mcp;
 mod routes;
 
 use std::net::SocketAddr;
@@ -65,8 +66,12 @@ pub fn modified_ms(path: &Path) -> Option<u64> {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
+    let mcp = Router::new()
+        .nest_service("/mcp", mcp::service(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), mcp::auth));
     Router::new()
         .nest("/v1", routes::v1())
+        .merge(mcp)
         .layer(axum::middleware::from_fn(auth::batch))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
