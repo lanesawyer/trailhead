@@ -102,3 +102,15 @@ async fn openapi_describes_auth_errors_and_concurrency() {
     assert!(task["created_at"]["format"] == "date-time", "{}", task["created_at"]);
     assert!(doc["paths"]["/v1/events/stream"]["get"]["responses"]["200"]["content"]["text/event-stream"].is_object());
 }
+
+#[tokio::test]
+async fn writes_document_idempotency_keys() {
+    let doc = fetch_doc().await;
+    let post = &doc["paths"]["/v1/tasks"]["post"];
+    let params: Vec<&str> = post["parameters"].as_array().unwrap().iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(params.contains(&"Idempotency-Key"), "{params:?}");
+    assert!(post["responses"]["422"].is_object());
+    assert!(post["responses"]["429"].is_object());
+    let get = &doc["paths"]["/v1/ready"]["get"];
+    assert!(get["parameters"].as_array().is_none_or(|p| p.iter().all(|p| p["name"] != "Idempotency-Key")));
+}

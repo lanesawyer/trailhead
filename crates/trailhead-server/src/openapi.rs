@@ -6,7 +6,7 @@ use axum::body::Bytes;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
-use utoipa::openapi::path::Operation;
+use utoipa::openapi::path::{Operation, ParameterBuilder, ParameterIn};
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::openapi::{
     ContentBuilder, HeaderBuilder, KnownFormat, ObjectBuilder, Ref, RefOr, ResponseBuilder, SchemaFormat, Type,
@@ -152,14 +152,37 @@ impl Modify for Common {
                 )
                 .build()
         };
+        let idempotency_key = ParameterBuilder::new()
+            .name("Idempotency-Key")
+            .parameter_in(ParameterIn::Header)
+            .description(Some(
+                "Optional, 1-255 characters. A retry with the same key and request replays the stored 2xx \
+                 response (with `idempotent-replayed: true`) instead of running again. Keys belong to the token \
+                 and last 24 hours.",
+            ))
+            .schema(Some(ObjectBuilder::new().schema_type(Type::String)))
+            .build();
         for (path, item) in api.paths.paths.iter_mut() {
             let public = PUBLIC.contains(&path.as_str());
+            if !public && path.starts_with("/v1/") {
+                for op in [&mut item.post, &mut item.patch, &mut item.delete].into_iter().flatten() {
+                    op.parameters.get_or_insert_with(Vec::new).push(idempotency_key.clone().into());
+                    let r = &mut op.responses.responses;
+                    r.entry("409".into())
+                        .or_insert_with(|| error("`idempotency_key_in_flight`: the same key is still running").into());
+                    r.entry("422".into()).or_insert_with(|| {
+                        error("`idempotency_key_reused`: the key was used for a different request").into()
+                    });
+                }
+            }
             let ops: [&mut Option<Operation>; 4] = [&mut item.get, &mut item.post, &mut item.patch, &mut item.delete];
             for op in ops.into_iter().flatten() {
                 if !public {
                     let r = &mut op.responses.responses;
                     r.entry("400".into()).or_insert_with(|| error("`invalid`: bad input").into());
                     r.entry("401".into()).or_insert_with(|| error("`unauthorized`: missing or invalid token").into());
+                    r.entry("429".into())
+                        .or_insert_with(|| error("`rate_limited`: over the token's limit; see `Retry-After`").into());
                     r.entry("500".into()).or_insert_with(|| error("`internal`").into());
                 }
                 for r in op.responses.responses.values_mut() {
@@ -240,6 +263,35 @@ mod tests {
     use trailhead_core::{Error, Status};
 
     use super::ERROR_CODES;
+
+    /// Adding an `Error` variant breaks this match until the list below and
+    /// `ERROR_CODES` are updated too.
+    #[allow(dead_code)]
+    fn every_variant_is_listed(e: &Error) {
+        match e {
+            Error::NotFound(_)
+            | Error::ClaimHeld { .. }
+            | Error::NotClaimHolder
+            | Error::ClaimLost(_)
+            | Error::VersionConflict { .. }
+            | Error::BlockedBy(_)
+            | Error::InvalidTransition { .. }
+            | Error::ReviewRequired
+            | Error::DependencyCycle
+            | Error::UndoConflict { .. }
+            | Error::UndoWindowExpired(_)
+            | Error::AlreadyExists(_)
+            | Error::Unauthorized
+            | Error::Forbidden(_)
+            | Error::IdempotencyKeyReused
+            | Error::IdempotencyKeyInFlight
+            | Error::Invalid(_)
+            | Error::RateLimited { .. }
+            | Error::Db(_)
+            | Error::Json(_)
+            | Error::Corrupt(_) => {}
+        }
+    }
 
     #[test]
     fn error_codes_match_core() {
