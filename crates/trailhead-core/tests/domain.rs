@@ -466,3 +466,20 @@ async fn in_memory_store_works() {
     let (ws2, _) = store.bootstrap_local("ignored").await.unwrap();
     assert_eq!(ws.id, ws2.id);
 }
+
+#[tokio::test]
+async fn due_tz_must_be_a_real_zone() {
+    let env = Env::new().await;
+    let due = Some(env.now() + Duration::days(1));
+    let ok =
+        NewTask { title: "ok".into(), due_at: due, due_tz: Some("America/Los_Angeles".into()), ..Default::default() };
+    assert_eq!(env.task_with(ok).await.due_tz.as_deref(), Some("America/Los_Angeles"));
+    let bad = NewTask {
+        project: "AUTH".into(),
+        title: "bad".into(),
+        due_at: due,
+        due_tz: Some("Mars/Olympus_Mons".into()),
+        ..Default::default()
+    };
+    assert!(matches!(env.store.create_task(&env.human, bad).await, Err(Error::Invalid(_))));
+}

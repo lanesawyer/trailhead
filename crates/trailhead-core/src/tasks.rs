@@ -121,6 +121,11 @@ fn validate_due(due_at: Option<OffsetDateTime>, due_tz: &Option<String>) -> Resu
     if due_tz.is_some() && due_at.is_none() {
         return Err(Error::Invalid("due_tz needs due_at".into()));
     }
+    if let Some(tz) = due_tz
+        && jiff::tz::TimeZone::get(tz).is_err()
+    {
+        return Err(Error::Invalid(format!("{tz:?} isn't a known IANA time zone, like America/Los_Angeles")));
+    }
     Ok(())
 }
 
