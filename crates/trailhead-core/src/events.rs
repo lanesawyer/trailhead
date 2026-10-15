@@ -76,6 +76,8 @@ pub struct EventFilter {
     pub newest_first: bool,
     /// Also read `events_archive`. Ids are kept on archiving, so order is unchanged.
     pub include_archived: bool,
+    /// Leave out notifications such as `task.due_soon`, which change nothing.
+    pub changes_only: bool,
 }
 
 impl Store {
@@ -101,7 +103,7 @@ impl Store {
                     "SELECT {EVENT_COLS} FROM {} WHERE workspace_id = ?1
                      AND (?2 IS NULL OR id > ?2) AND (?3 IS NULL OR task_id = ?3)
                      AND (?4 IS NULL OR actor_id = ?4) AND (?5 IS NULL OR batch_id = ?5)
-                     AND (?6 IS NULL OR at >= ?6) AND {}
+                     AND (?6 IS NULL OR at >= ?6) AND {} AND (?8 = 0 OR {})
                      ORDER BY id {} LIMIT ?7",
                     if filter.include_archived {
                         "(SELECT * FROM events UNION ALL SELECT * FROM events_archive) AS events"
@@ -109,6 +111,7 @@ impl Store {
                         "events"
                     },
                     scope_sql(ctx),
+                    crate::reminders::NOT_NOTIFICATION_SQL,
                     if filter.newest_first { "DESC" } else { "ASC" }
                 ),
                 libsql::params![
@@ -119,6 +122,7 @@ impl Store {
                     filter.batch_id.map(|b| b.to_string()),
                     filter.since.map(crate::db::fmt_ts),
                     filter.limit.unwrap_or(100),
+                    filter.changes_only,
                 ],
             )
             .await?;

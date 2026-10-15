@@ -654,6 +654,9 @@ struct EventQuery {
     limit: Option<i64>,
     #[serde(default)]
     newest_first: bool,
+    /// Leave out notifications (`task.due_soon`, `task.overdue`).
+    #[serde(default)]
+    changes_only: bool,
 }
 
 #[utoipa::path(
@@ -670,6 +673,7 @@ async fn list_events(State(s): S, Auth(ctx): Auth, Query(q): Query<EventQuery>) 
         limit: q.limit,
         newest_first: q.newest_first,
         include_archived: false,
+        changes_only: q.changes_only,
     };
     Ok(Json(json!(s.store.list_events(&ctx, filter).await?)))
 }

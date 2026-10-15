@@ -413,7 +413,13 @@ impl TrailheadMcp {
         let ctx = ctx_of(&parts)?;
         let store = &self.state.store;
         let filter =
-            EventFilter { actor_id: Some(ctx.actor_id()), newest_first: true, limit: Some(1), ..Default::default() };
+            EventFilter {
+            actor_id: Some(ctx.actor_id()),
+            newest_first: true,
+            changes_only: true,
+            limit: Some(1),
+            ..Default::default()
+        };
         let Some(last) = attempt!(store.list_events(&ctx, filter).await).pop() else {
             return text("nothing to undo");
         };

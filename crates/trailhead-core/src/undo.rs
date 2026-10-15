@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::events::{EVENT_COLS, UNDO_WINDOW, collect_events, scope_sql};
 use crate::model::{Claim, Comment, Dependency, Entity, Event, Project, Task};
 use crate::projects::{load_project, save_project};
+use crate::reminders::{NOT_NOTIFICATION_SQL, is_notification};
 use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::{load_task, save_task};
 
@@ -146,8 +147,10 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
 
 /// Reverts every entity touched by `events` to its state before the earliest of
 /// them. An entity that someone else changed afterwards is a conflict: `strict`
-/// fails the whole undo, otherwise it's skipped and reported.
+/// fails the whole undo, otherwise it's skipped and reported. Reminders changed
+/// nothing, so they are neither reverted nor count as conflicts.
 async fn apply(tx: &Tx, events: Vec<Event>, strict: bool) -> Result<UndoReport> {
+    let events: Vec<Event> = events.into_iter().filter(|e| !is_notification(&e.kind)).collect();
     let ids: HashSet<i64> = events.iter().map(|e| e.id).collect();
     let mut groups: BTreeMap<(String, String), Vec<Event>> = BTreeMap::new();
     for e in events {
@@ -162,7 +165,9 @@ async fn apply(tx: &Tx, events: Vec<Event>, strict: bool) -> Result<UndoReport> 
         let mut rows = tx
             .conn
             .query(
-                "SELECT id FROM events WHERE entity = ?1 AND entity_id = ?2 AND id > ?3 ORDER BY id",
+                &format!(
+                    "SELECT id FROM events WHERE entity = ?1 AND entity_id = ?2 AND id > ?3 AND {NOT_NOTIFICATION_SQL} ORDER BY id"
+                ),
                 libsql::params![first.entity.as_str(), first.entity_id.clone(), first.id],
             )
             .await?;

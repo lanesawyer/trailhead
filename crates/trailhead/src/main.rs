@@ -540,7 +540,12 @@ async fn run(cli: Cli) -> Result<()> {
                 (None, None) => {
                     let me = c.get("me", &[]).await?;
                     let actor = me["agent"]["id"].as_str().or(me["user"]["id"].as_str()).unwrap_or("").to_string();
-                    let q = [("actor", actor), ("newest_first", "true".into()), ("limit", "1".into())];
+                    let q = [
+                        ("actor", actor),
+                        ("newest_first", "true".into()),
+                        ("changes_only", "true".into()),
+                        ("limit", "1".into()),
+                    ];
                     let last = c.get("events", &q).await?;
                     let Some(b) = last[0]["batch_id"].as_str() else { bail!("nothing to undo") };
                     json!({ "batch_id": b })
