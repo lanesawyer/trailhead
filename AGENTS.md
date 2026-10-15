@@ -35,4 +35,4 @@ trailhead --as claude done TRAIL-3 -m "handoff: what changed, anything surprisin
 trailhead --as claude add "..." -p TRAIL -P 2 # file follow-ups instead of scope-creeping
 ```
 
-`trailhead` is installed from this repo with `cargo install --path crates/trailhead --locked`. The CLI auto-starts a local server that keeps running on the old binary after a reinstall; kill it (`pkill -x trailhead`) so the next command starts the new one.
+`trailhead` is installed from this repo with `cargo install --path crates/trailhead --locked`. The CLI starts a local server in the background and restarts it automatically after a reinstall. `trailhead server status|start|stop|restart` manages it by hand; a dev build (`target/debug/trailhead`) never restarts a server started from a different binary.

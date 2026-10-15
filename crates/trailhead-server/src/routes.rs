@@ -113,8 +113,10 @@ fn created(body: impl Serialize) -> Response {
     (StatusCode::CREATED, Json(body)).into_response()
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
+async fn health(State(s): S) -> Json<Value> {
+    let mut v = json!(s.info);
+    v["ok"] = json!(true);
+    Json(v)
 }
 
 async fn me(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {

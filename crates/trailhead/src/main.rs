@@ -207,6 +207,9 @@ enum Cmd {
     #[command(subcommand)]
     Token(TokenCmd),
     Whoami,
+    /// Manage the local background server.
+    #[command(subcommand)]
+    Server(ServerCmd),
     /// Run the server in the foreground.
     Serve {
         #[arg(long, env = "TRAILHEAD_BIND", default_value = trailhead_server::DEFAULT_BIND)]
@@ -249,6 +252,18 @@ enum ProjectCmd {
         #[arg(long)]
         unarchive: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ServerCmd {
+    /// Is it running, on which binary, and since when.
+    Status,
+    /// Start it in the background if it isn't running.
+    Start,
+    /// Stop it gracefully.
+    Stop,
+    /// Stop it and start it again, e.g. after a rebuild.
+    Restart,
 }
 
 #[derive(Subcommand)]
@@ -313,8 +328,10 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    if let Cmd::Serve { bind } = &cli.cmd {
-        return serve(bind).await;
+    match &cli.cmd {
+        Cmd::Serve { bind } => return serve(bind).await,
+        Cmd::Server(cmd) => return server(&cli.url, cmd, cli.json).await,
+        _ => {}
     }
     let c = Client::connect(&cli.url, cli.token.clone(), cli.agent.as_deref()).await?;
     let json = cli.json;
@@ -323,7 +340,7 @@ async fn run(cli: Cli) -> Result<()> {
     };
 
     match cli.cmd {
-        Cmd::Serve { .. } => unreachable!(),
+        Cmd::Serve { .. } | Cmd::Server(_) => unreachable!(),
         Cmd::Ready { project, limit } => {
             let mut q = vec![];
             if let Some(p) = project {
@@ -664,8 +681,70 @@ async fn project(c: &Client, cmd: ProjectCmd, json: bool) -> Result<()> {
     Ok(())
 }
 
+async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()> {
+    let (http, base) = client::http_and_base(url)?;
+    let local = client::is_local(&base);
+    if !local && !matches!(cmd, ServerCmd::Status) {
+        bail!("{url} isn't a local server; only `trailhead server status` works against it");
+    }
+    match cmd {
+        ServerCmd::Status => match client::health(&http, &base).await {
+            Some(info) if json => print_json(&serde_json::to_value(&info)?),
+            Some(info) => {
+                let mut parts = vec!["running".to_string()];
+                if let Some(pid) = info.pid {
+                    parts.push(format!("pid {pid}"));
+                }
+                if let (Some(h), Some(p)) = (base.host_str(), base.port_or_known_default()) {
+                    parts.push(format!("{h}:{p}"));
+                }
+                if let Some(v) = &info.version {
+                    parts.push(format!("v{v}"));
+                }
+                if let Some(started) = info.started_at.as_deref().and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok())
+                {
+                    let up = OffsetDateTime::now_utc() - started;
+                    let since = short_time(&started.format(&Rfc3339)?);
+                    parts.push(format!("up {}h {}m (since {since})", up.whole_hours(), up.whole_minutes() % 60));
+                }
+                println!("{}", parts.join(" · "));
+                if let Some(exe) = &info.exe {
+                    println!("binary {}", exe.display());
+                }
+                if let Some(db) = &info.db {
+                    println!("db {}", db.display());
+                }
+                if local && client::is_stale(&info) {
+                    println!("the binary has been rebuilt since; the next command restarts the server");
+                }
+            }
+            None if json => print_json(&json!({ "ok": false })),
+            None => println!("not running"),
+        },
+        ServerCmd::Start => match client::health(&http, &base).await {
+            Some(_) => println!("already running"),
+            None => {
+                client::start_local_server(&http, &base).await?;
+                println!("started");
+            }
+        },
+        ServerCmd::Stop => match client::stop_local(&http, &base).await? {
+            Some(pid) => println!("stopped (pid {pid})"),
+            None => println!("not running"),
+        },
+        ServerCmd::Restart => {
+            client::stop_local(&http, &base).await?;
+            client::start_local_server(&http, &base).await?;
+            let pid = client::health(&http, &base).await.and_then(|i| i.pid).map(|p| p.to_string()).unwrap_or_default();
+            println!("restarted (pid {pid})");
+        }
+    }
+    Ok(())
+}
+
 async fn serve(bind: &str) -> Result<()> {
     tracing_subscriber::fmt()
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,tower_http=warn".into()),
         )
@@ -676,6 +755,7 @@ async fn serve(bind: &str) -> Result<()> {
         db: std::env::var_os("TRAILHEAD_DB").map(PathBuf::from).unwrap_or_else(|| paths.db()),
         credentials: paths.credentials(),
         user_name: std::env::var("USER").unwrap_or_else(|_| "me".into()),
+        pid_file: Some(paths.pid_file()),
     };
     trailhead_server::serve_local(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
 }

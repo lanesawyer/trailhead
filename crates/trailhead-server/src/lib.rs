@@ -21,6 +21,47 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:7241";
 
 pub struct AppState {
     pub store: Store,
+    pub info: ServerInfo,
+}
+
+impl AppState {
+    pub fn new(store: Store) -> Self {
+        AppState { store, info: ServerInfo::current(None) }
+    }
+}
+
+/// What `/v1/health` reports, so the CLI can tell which binary a server runs
+/// and restart it after an upgrade.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServerInfo {
+    pub version: String,
+    pub pid: u32,
+    /// The binary this server was started from.
+    pub exe: Option<PathBuf>,
+    /// That binary's modification time when the server started, in Unix milliseconds.
+    pub exe_modified_ms: Option<u64>,
+    pub db: Option<PathBuf>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub started_at: time::OffsetDateTime,
+}
+
+impl ServerInfo {
+    pub fn current(db: Option<PathBuf>) -> Self {
+        let exe = std::env::current_exe().ok();
+        ServerInfo {
+            version: env!("CARGO_PKG_VERSION").into(),
+            pid: std::process::id(),
+            exe_modified_ms: exe.as_deref().and_then(modified_ms),
+            exe,
+            db,
+            started_at: time::OffsetDateTime::now_utc(),
+        }
+    }
+}
+
+pub fn modified_ms(path: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -64,6 +105,10 @@ impl Paths {
         self.config_dir.join("agents").join(name)
     }
 
+    pub fn pid_file(&self) -> PathBuf {
+        self.data_dir.join("server.pid")
+    }
+
     pub fn server_log(&self) -> PathBuf {
         self.data_dir.join("server.log")
     }
@@ -75,6 +120,8 @@ pub struct LocalConfig {
     /// Where the local user's CLI token is kept.
     pub credentials: PathBuf,
     pub user_name: String,
+    /// Holds the running server's pid while it's up.
+    pub pid_file: Option<PathBuf>,
 }
 
 /// Opens the local database, makes sure the workspace, user and a CLI token exist,
@@ -110,10 +157,10 @@ pub fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
     std::io::Write::write_all(&mut opts.open(path)?, format!("{secret}\n").as_bytes())
 }
 
-/// Runs the local server until Ctrl-C.
+/// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first.
 pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Error>> {
     let (store, ctx) = open_local(&cfg).await?;
-    let state = Arc::new(AppState { store });
+    let state = Arc::new(AppState { store, info: ServerInfo::current(Some(cfg.db.clone())) });
     let reaper = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
@@ -125,11 +172,33 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
         }
     });
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
+    if let Some(pid_file) = &cfg.pid_file {
+        if let Some(dir) = pid_file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(pid_file, format!("{}\n", std::process::id()))?;
+    }
     tracing::info!(addr = %cfg.bind, db = %cfg.db.display(), "trailhead listening");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
-            tokio::signal::ctrl_c().await.ok();
-        })
-        .await?;
-    Ok(())
+    let served = axum::serve(listener, router(state)).with_graceful_shutdown(shutdown_signal()).await;
+    if let Some(pid_file) = &cfg.pid_file
+        && std::fs::read_to_string(pid_file).is_ok_and(|p| p.trim() == std::process::id().to_string())
+    {
+        std::fs::remove_file(pid_file).ok();
+    }
+    tracing::info!("trailhead stopped");
+    Ok(served?)
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await.ok();
 }

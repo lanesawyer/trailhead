@@ -193,6 +193,7 @@ Decisions made while building, including where the build refines or departs from
 - **Creating with dependencies (Phase 2).** `POST /v1/tasks` takes `blocked_by` and `blocks`, so an agent can file a blocking subtask in one call.
 - **Local credentials (Phase 2).** On first start the local server bootstraps the workspace and user and writes the user's CLI token to a `0600` file in the config directory. `trailhead agent add` on a local server saves the agent's token under `agents/<name>` there, and `--as <name>` uses it. OS keyring support comes later.
 - **Dates in the CLI (Phase 2).** A date-only due date means the end of that day in local time. `due_tz` isn't set yet.
+- **Local server lifecycle (Phase 2).** `/v1/health` reports the server's pid, binary path and that binary's mtime at startup. When the CLI finds a local server running from its own path but the file on disk is newer, it stops the server with SIGTERM (which drains in-flight requests) and starts a fresh one. A server running a different binary is left alone, so dev builds and the installed CLI don't fight. The pid is also kept in `server.pid` in the data directory.
 - **Deferred to Phase 2.** Idempotency keys (stored and replayed at the server layer), `task.due_soon` reminders, `events_archive` and the 90-day undo window, token scopes and rate limits.
 
 ## Non-goals

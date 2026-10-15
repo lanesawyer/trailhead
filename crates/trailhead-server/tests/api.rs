@@ -28,10 +28,11 @@ impl Api {
             db: dir.path().join("t.db"),
             credentials: dir.path().join("credentials"),
             user_name: "lane".into(),
+            pid_file: None,
         };
         let (store, _) = open_local(&cfg).await.unwrap();
         let human = std::fs::read_to_string(&cfg.credentials).unwrap().trim().to_string();
-        Api { app: router(Arc::new(AppState { store })), human, _dir: dir }
+        Api { app: router(Arc::new(AppState::new(store))), human, _dir: dir }
     }
 
     async fn call(
@@ -75,7 +76,10 @@ impl Api {
 #[tokio::test]
 async fn health_is_open_and_everything_else_needs_a_token() {
     let api = Api::new().await;
-    assert_eq!(api.call(None, "GET", "/v1/health", None, &[]).await.status, StatusCode::OK);
+    let health = api.call(None, "GET", "/v1/health", None, &[]).await;
+    assert_eq!(health.status, StatusCode::OK);
+    assert_eq!(health.body["ok"], true);
+    assert_eq!(health.body["pid"], std::process::id());
     let r = api.call(None, "GET", "/v1/ready", None, &[]).await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
     assert_eq!(r.body["error"]["code"], "unauthorized");
@@ -183,6 +187,7 @@ async fn reopening_keeps_the_same_cli_token() {
         db: dir.path().join("t.db"),
         credentials: dir.path().join("credentials"),
         user_name: "lane".into(),
+        pid_file: None,
     };
     drop(open_local(&cfg).await.unwrap());
     let first = std::fs::read_to_string(&cfg.credentials).unwrap();

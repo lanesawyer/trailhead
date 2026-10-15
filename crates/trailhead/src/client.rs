@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{Method, StatusCode, Url};
 use serde_json::Value;
-use trailhead_server::Paths;
+use trailhead_server::{Paths, modified_ms};
 
 pub struct Client {
     http: reqwest::Client,
@@ -28,20 +28,23 @@ impl std::fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
-fn is_local(url: &Url) -> bool {
+pub fn is_local(url: &Url) -> bool {
     matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
 }
 
 impl Client {
     /// Connects to the server, starting a local one in the background if needed.
     pub async fn connect(url: &str, token: Option<String>, agent: Option<&str>) -> Result<Client> {
-        let base = Url::parse(url).with_context(|| format!("bad server URL {url}"))?.join("/v1/")?;
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
-        if !healthy(&http, &base).await {
-            if !is_local(&base) {
-                bail!("can't reach the Trailhead server at {url}");
+        let (http, base) = http_and_base(url)?;
+        match health(&http, &base).await {
+            Some(info) if is_local(&base) && is_stale(&info) => {
+                eprintln!("note: restarting the local server on the updated trailhead binary");
+                stop_local(&http, &base).await?;
+                start_local_server(&http, &base).await?;
             }
-            start_local_server(&http, &base).await?;
+            Some(_) => {}
+            None if is_local(&base) => start_local_server(&http, &base).await?,
+            None => bail!("can't reach the Trailhead server at {url}"),
         }
         let paths = Paths::from_env().context("no home directory")?;
         let token = match (token, agent) {
@@ -113,14 +116,72 @@ impl Client {
     }
 }
 
-async fn healthy(http: &reqwest::Client, base: &Url) -> bool {
-    let Ok(url) = base.join("health") else { return false };
-    matches!(http.get(url).timeout(Duration::from_secs(2)).send().await, Ok(r) if r.status().is_success())
+pub fn http_and_base(url: &str) -> Result<(reqwest::Client, Url)> {
+    let base = Url::parse(url).with_context(|| format!("bad server URL {url}"))?.join("/v1/")?;
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
+    Ok((http, base))
+}
+
+/// `/v1/health` as the CLI reads it. Every field is optional so an older or newer
+/// server still counts as running.
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct Health {
+    pub version: Option<String>,
+    pub pid: Option<u32>,
+    pub exe: Option<std::path::PathBuf>,
+    pub exe_modified_ms: Option<u64>,
+    pub db: Option<std::path::PathBuf>,
+    pub started_at: Option<String>,
+}
+
+pub async fn health(http: &reqwest::Client, base: &Url) -> Option<Health> {
+    let url = base.join("health").ok()?;
+    let res = http.get(url).timeout(Duration::from_secs(2)).send().await.ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    Some(res.json().await.unwrap_or_default())
+}
+
+/// True when the server runs from this same binary path but the file on disk has
+/// changed since it started, e.g. after `cargo install`. A server started from a
+/// different binary (a dev build, say) is left alone.
+pub fn is_stale(info: &Health) -> bool {
+    let Ok(me) = std::env::current_exe() else { return false };
+    let same_binary = info.exe.as_deref() == Some(me.as_path());
+    same_binary && matches!((modified_ms(&me), info.exe_modified_ms), (Some(now), Some(then)) if now > then)
+}
+
+/// Sends SIGTERM to the local server and waits for it to go away. Returns the pid
+/// it stopped, or `None` if nothing was running.
+pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32>> {
+    let running = health(http, base).await;
+    let pid_file = Paths::from_env().context("no home directory")?.pid_file();
+    let from_file = || std::fs::read_to_string(&pid_file).ok().and_then(|p| p.trim().parse().ok());
+    let pid = match (&running, running.as_ref().and_then(|h| h.pid).or_else(from_file)) {
+        (_, Some(pid)) => pid,
+        (None, None) => return Ok(None),
+        (Some(_), None) => bail!(
+            "a server is answering at {base} but didn't report its pid (it may predate `trailhead server`); stop it by hand"
+        ),
+    };
+    let status = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status()?;
+    if !status.success() {
+        return Ok(None);
+    }
+    for _ in 0..100 {
+        if health(http, base).await.is_none() {
+            return Ok(Some(pid));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(anyhow!("sent SIGTERM to the server (pid {pid}) but it's still answering"))
 }
 
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
 /// after this command exits.
-async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()> {
+pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()> {
     let paths = Paths::from_env().context("no home directory")?;
     std::fs::create_dir_all(&paths.data_dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.server_log())?;
@@ -131,7 +192,7 @@ async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()> {
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     cmd.spawn().context("couldn't start the local server")?;
     for _ in 0..100 {
-        if healthy(http, base).await {
+        if health(http, base).await.is_some() {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
