@@ -14,16 +14,30 @@ pub fn local_tz() -> &'static TimeZone {
     LOCAL_TZ.get_or_init(TimeZone::system)
 }
 
-/// `2026-10-15T04:05:00.123Z` -> `2026-10-14 21:05` in local time.
+/// `2026-10-15T04:05:00.123Z` -> `2026-10-14 21:05 PDT`, in local time with
+/// the zone shown so nobody has to guess whether it's UTC.
 pub fn short_time(ts: &str) -> String {
     match ts.parse::<jiff::Timestamp>() {
-        Ok(t) => t.to_zoned(local_tz().clone()).strftime("%Y-%m-%d %H:%M").to_string(),
+        Ok(t) => t.to_zoned(local_tz().clone()).strftime("%Y-%m-%d %H:%M %Z").to_string(),
         Err(_) => ts.to_string(),
     }
 }
 
+/// `2026-10-15 01:04 PDT (in 29m)`, for deadlines like lease expiry.
+pub fn until(ts: &str) -> String {
+    let Ok(t) = ts.parse::<jiff::Timestamp>() else { return ts.to_string() };
+    let secs = t.as_second() - jiff::Timestamp::now().as_second();
+    let (h, m) = (secs.abs() / 3600, secs.abs() % 3600 / 60);
+    let span = if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") };
+    let rel = if secs >= 0 { format!("in {span}") } else { format!("{span} ago") };
+    format!("{} ({rel})", short_time(ts))
+}
+
 fn short_date(ts: &str) -> String {
-    short_time(ts).chars().take(10).collect()
+    match ts.parse::<jiff::Timestamp>() {
+        Ok(t) => t.to_zoned(local_tz().clone()).strftime("%Y-%m-%d").to_string(),
+        Err(_) => ts.to_string(),
+    }
 }
 
 pub fn task_line(t: &Value) -> String {

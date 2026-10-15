@@ -455,7 +455,7 @@ async fn run(cli: Cli) -> Result<()> {
                 print_json(&v);
             } else {
                 println!("{}", task_line(&v["task"]));
-                println!("claimed until {}", short_time(s(&v["claim"], "expires_at")));
+                println!("claimed until {}", output::until(s(&v["claim"], "expires_at")));
                 if v["handoff"].is_object() {
                     println!(
                         "\nlast handoff ({}):\n{}",
@@ -467,7 +467,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Renew { task, ttl } => {
             let v = c.post(&format!("tasks/{task}/renew"), json!({ "ttl": ttl })).await?;
-            show(v, &|v| format!("claimed until {}", short_time(s(v, "expires_at"))));
+            show(v, &|v| format!("claimed until {}", output::until(s(v, "expires_at"))));
         }
         Cmd::Release { task } => show(c.post(&format!("tasks/{task}/release"), json!({})).await?, &task_line),
         Cmd::Done { task, message } => finish(&c, &task, "done", message, json).await?,
@@ -679,7 +679,11 @@ async fn print_detail(c: &Client, v: &Value) -> Result<()> {
     }
     println!("{}", meta.join(" · "));
     if v["claim"].is_object() {
-        println!("claimed by {} until {}", name(s(&v["claim"], "holder_id")), short_time(s(&v["claim"], "expires_at")));
+        println!(
+            "claimed by {} until {}",
+            name(s(&v["claim"], "holder_id")),
+            output::until(s(&v["claim"], "expires_at"))
+        );
     }
     let keys = |k: &str| v[k].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));
     if let Some(b) = keys("blocked_by").filter(|b| !b.is_empty()) {
