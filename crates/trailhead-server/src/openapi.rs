@@ -30,6 +30,8 @@ pub const ERROR_CODES: &[&str] = &[
     "already_exists",
     "unauthorized",
     "forbidden",
+    "idempotency_key_reused",
+    "idempotency_key_in_flight",
     "invalid",
     "internal",
 ];
@@ -230,7 +232,7 @@ mod tests {
     fn error_codes_match_core() {
         let errors = [
             Error::NotFound(String::new()),
-            Error::ClaimHeld { holder: String::new(), expires_at: String::new() },
+            Error::ClaimHeld { holder: String::new(), holder_id: String::new(), expires_at: String::new() },
             Error::NotClaimHolder,
             Error::VersionConflict { expected: 0, current: 0 },
             Error::BlockedBy(vec![]),
@@ -241,6 +243,8 @@ mod tests {
             Error::AlreadyExists(String::new()),
             Error::Unauthorized,
             Error::Forbidden(String::new()),
+            Error::IdempotencyKeyReused,
+            Error::IdempotencyKeyInFlight,
             Error::Invalid(String::new()),
             Error::Corrupt(String::new()),
         ];
