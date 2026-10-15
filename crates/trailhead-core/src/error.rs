@@ -24,6 +24,10 @@ pub enum Error {
     UndoConflict { entity: String, later_event: i64 },
     #[error("{0} already exists")]
     AlreadyExists(String),
+    #[error("missing or invalid token")]
+    Unauthorized,
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("invalid input: {0}")]
     Invalid(String),
     #[error("database error: {0}")]
@@ -47,6 +51,8 @@ impl Error {
             Error::DependencyCycle => "dependency_cycle",
             Error::UndoConflict { .. } => "undo_conflict",
             Error::AlreadyExists(_) => "already_exists",
+            Error::Unauthorized => "unauthorized",
+            Error::Forbidden(_) => "forbidden",
             Error::Invalid(_) => "invalid",
             Error::Db(_) | Error::Json(_) | Error::Corrupt(_) => "internal",
         }

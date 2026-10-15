@@ -188,6 +188,11 @@ Decisions made while building, including where the build refines or departs from
 - **Questions (Phase 1).** `resolve_comment` answers a question, optionally posting the answer as a note addressed to the asker. When the last open question resolves, the task returns to `in_progress` if still claimed, otherwise `open`.
 - **Priority (Phase 1).** 1 (urgent) to 4 (low), default 3.
 - **Review (Phase 1).** With `require_review`, agents cannot move a task to `done`; only humans can move `in_review` to `done`, in every project.
+- **Requests and batches (Phase 2).** Every HTTP request is one batch; its id comes back in the `trailhead-batch` header so a client can undo exactly what it just did. `trailhead undo` with no arguments undoes the caller's last batch.
+- **Versions in bodies (Phase 2).** `PATCH` accepts `version` in the body as well as `If-Match`, for clients that can't set headers.
+- **Creating with dependencies (Phase 2).** `POST /v1/tasks` takes `blocked_by` and `blocks`, so an agent can file a blocking subtask in one call.
+- **Local credentials (Phase 2).** On first start the local server bootstraps the workspace and user and writes the user's CLI token to a `0600` file in the config directory. `trailhead agent add` on a local server saves the agent's token under `agents/<name>` there, and `--as <name>` uses it. OS keyring support comes later.
+- **Dates in the CLI (Phase 2).** A date-only due date means the end of that day in local time. `due_tz` isn't set yet.
 - **Deferred to Phase 2.** Idempotency keys (stored and replayed at the server layer), `task.due_soon` reminders, `events_archive` and the 90-day undo window, token scopes and rate limits.
 
 ## Non-goals

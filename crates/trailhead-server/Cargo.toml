@@ -1,0 +1,23 @@
+[package]
+name = "trailhead-server"
+description = "Trailhead's HTTP server: REST under /v1"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+trailhead-core.workspace = true
+axum.workspace = true
+tokio = { workspace = true, features = ["net", "signal", "fs"] }
+tower-http.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+time.workspace = true
+directories.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

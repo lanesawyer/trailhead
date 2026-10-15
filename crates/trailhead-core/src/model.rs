@@ -202,6 +202,9 @@ pub struct Event {
     pub actor_id: Uuid,
     pub on_behalf_of: Uuid,
     pub task_id: Option<Uuid>,
+    /// Convenience for display; not stored on the event.
+    #[serde(default)]
+    pub task_key: Option<String>,
     pub entity: Entity,
     pub entity_id: String,
     pub kind: String,

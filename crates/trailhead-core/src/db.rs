@@ -7,7 +7,10 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 
-const MIGRATIONS: &[(i64, &str, &str)] = &[(1, "init", include_str!("../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "init", include_str!("../migrations/0001_init.sql")),
+    (2, "tokens", include_str!("../migrations/0002_tokens.sql")),
+];
 
 pub(crate) async fn migrate(conn: &Connection) -> Result<()> {
     conn.execute(

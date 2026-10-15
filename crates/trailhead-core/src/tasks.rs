@@ -58,7 +58,7 @@ pub(crate) async fn load_task(conn: &Connection, ws: Uuid, r: &str, include_dele
         "SELECT {TASK_COLS} FROM tasks WHERE workspace_id = ?1 AND (id = ?2 OR key = upper(?2)) {}",
         if include_deleted { "" } else { "AND deleted_at IS NULL" }
     );
-    let mut rows = conn.query(&sql, [ws.to_string(), r.to_string()]).await?;
+    let mut rows = conn.query(&sql, [ws.to_string(), r.trim().to_string()]).await?;
     match rows.next().await? {
         Some(row) => task_from_row(&row),
         None => Err(Error::NotFound(format!("task {r}"))),

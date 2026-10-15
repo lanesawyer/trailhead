@@ -9,7 +9,8 @@ use crate::store::{Ctx, Store};
 use crate::tasks::load_task;
 
 pub(crate) const EVENT_COLS: &str =
-    "id, workspace_id, batch_id, actor_id, on_behalf_of, task_id, entity, entity_id, kind, before, after, undoes, at";
+    "id, workspace_id, batch_id, actor_id, on_behalf_of, task_id, entity, entity_id, kind, before, after, undoes, at,
+     (SELECT key FROM tasks WHERE tasks.id = events.task_id)";
 
 pub(crate) fn event_from_row(row: &Row) -> Result<Event> {
     Ok(Event {
@@ -26,6 +27,7 @@ pub(crate) fn event_from_row(row: &Row) -> Result<Event> {
         after: get_opt_json(row, 10)?,
         undoes: row.get(11)?,
         at: get_ts(row, 12)?,
+        task_key: row.get(13)?,
     })
 }
 
@@ -47,10 +49,11 @@ pub struct EventFilter {
     pub batch_id: Option<Uuid>,
     pub since: Option<OffsetDateTime>,
     pub limit: Option<i64>,
+    pub newest_first: bool,
 }
 
 impl Store {
-    /// Events in id order.
+    /// Events in id order, oldest first unless `newest_first`.
     pub async fn list_events(&self, ctx: &Ctx, filter: EventFilter) -> Result<Vec<Event>> {
         let conn = self.reader()?;
         let task_id = match &filter.task {
@@ -64,7 +67,8 @@ impl Store {
                      AND (?2 IS NULL OR id > ?2) AND (?3 IS NULL OR task_id = ?3)
                      AND (?4 IS NULL OR actor_id = ?4) AND (?5 IS NULL OR batch_id = ?5)
                      AND (?6 IS NULL OR at >= ?6)
-                     ORDER BY id LIMIT ?7"
+                     ORDER BY id {} LIMIT ?7",
+                    if filter.newest_first { "DESC" } else { "ASC" }
                 ),
                 libsql::params![
                     ctx.workspace_id.to_string(),
