@@ -6,7 +6,7 @@ There is no app. Every interface is a client: REST under `/v1` for apps people b
 
 Agents can learn the API from `GET /llms.txt` on any server, and the workflow from the portable skill in [skills/trailhead/SKILL.md](skills/trailhead/SKILL.md).
 
-**Status:** Phase 1 (the core library) is done. Phase 2, the server and CLI, is next. See [docs/PLAN.md](docs/PLAN.md) for the architecture and roadmap.
+**Status:** Phases 1 (core) and 2 (server, CLI, MCP) are done; Phase 3 (clients: webhooks, agent docs, integrations) is under way. See [docs/PLAN.md](docs/PLAN.md) for the architecture and roadmap.
 
 ## Development
 

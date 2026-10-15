@@ -84,6 +84,10 @@ Every write appends an event: `{id, batch_id, actor_id, on_behalf_of, task_id, t
 - `GET /v1/events?after=ID&task=&actor=&batch=&since=&limit=&newest_first=true&changes_only=true` (`changes_only` hides reminders). `GET /v1/tasks/KEY-1/history` is one task's log.
 - `GET /v1/events/stream?task=&kinds=task.,comment.created` is Server-Sent Events: `id` is the event id, `event` the kind, `data` the event JSON. On reconnect send `Last-Event-ID` (or `?after=`) to resume with nothing missed. With neither, the stream starts after the newest event.
 
+## Webhooks
+
+Humans with unscoped tokens can register `POST /v1/webhooks {"url", "event_kinds": ["task.", ...]}` (empty kinds means every event); the response carries a `whsec_` signing secret, shown once. Each event is POSTed as its JSON with headers `trailhead-event-id`, `trailhead-event-kind`, `trailhead-webhook-id` and `trailhead-signature: t=<unix>,v1=<hex HMAC-SHA256 of "<t>.<body>">` keyed by the secret; verify it and reject old timestamps. Delivery is ordered and at-least-once (dedupe on the event id). A non-2xx response stops the queue and retries with exponential backoff up to an hour; 20 failures in a row disable the webhook. `GET /v1/webhooks`, `DELETE /v1/webhooks/{id}`, and `GET /v1/webhooks/{id}/deliveries` for the attempt log.
+
 ## Compact output
 
 `GET /v1/tasks`, `/v1/ready` and `/v1/search` accept `?fields=key,title,status,version` to trim each task to those fields. Ask for only what you need.
