@@ -25,7 +25,7 @@ Work on Trailhead is tracked in Trailhead, in the `TRAIL` project. This is how w
 
 In Claude Code, prefer the `trailhead` MCP tools (`mcp__trailhead__ready`, `claim`, `comment`, `update_task`, …), which act as the `claude` agent; `.mcp.json` runs them through `trailhead --as claude mcp`. Use the CLI for what MCP doesn't cover (undo, revert, agents, tokens, `watch`) and when acting as a different agent.
 
-Agents act through their own identity, never Lane's: pass `--as <agent>` (or set `TRAILHEAD_AGENT`). A `.trailhead.toml` with `agent = "<name>"` at or above the working directory does the same; `--as-me` overrides it. Claude Code uses `claude`, whose token is already saved locally. Other agent tools should ask Lane to run `trailhead agent add <name>` rather than borrowing `claude` or acting as Lane.
+Agents act through their own identity, never Lane's: pass `--as <agent>` (or set `TRAILHEAD_AGENT`). A `.trailhead.toml` with `agent = "<name>"` at or above the working directory does the same; `--as-me` overrides it. This repo's `.trailhead.toml` makes `claude` the default here (with `TRAIL` as the default project), so plain `trailhead` commands act as `claude`; Lane uses `--as-me`. Claude Code uses `claude`, whose token is already saved locally. Other agent tools should ask Lane to run `trailhead agent add <name>` rather than borrowing `claude` or acting as Lane.
 
 ```sh
 trailhead --as claude ready -p TRAIL          # what's next
