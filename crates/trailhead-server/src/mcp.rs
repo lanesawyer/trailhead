@@ -36,8 +36,7 @@ const BRIEF_PREFIX: &str = "trailhead://projects/";
 const INSTRUCTIONS: &str = "Trailhead is a shared task engine. Workflow: `ready` to see what's next, \
 read the project's brief resource, `claim` a task before working on it (the last handoff comes back \
 with the claim), `renew` on long work, `comment` with kind `decision` for choices and `question` for \
-anything only a human can answer, and finish with `update_task` status `done` after leaving a \
-`handoff` comment. File follow-ups with `create_task` instead of widening scope.";
+anything only a human can answer, and finish with `update_task` status `done` and a `handoff`. File follow-ups with `create_task` instead of widening scope.";
 
 pub fn service(state: Arc<AppState>) -> StreamableHttpService<TrailheadMcp, LocalSessionManager> {
     let config = StreamableHttpServerConfig::default().with_legacy_session_mode(false).with_json_response(true);
@@ -221,6 +220,9 @@ pub struct UpdateArgs {
     priority: Option<i64>,
     /// The version you last saw; the update fails if the task changed since.
     version: Option<i64>,
+    /// Posted as a `handoff` comment once the update succeeds: what changed, what's
+    /// left, gotchas. Use it when finishing or stepping away.
+    handoff: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -394,7 +396,9 @@ impl TrailheadMcp {
         self.idempotent(&parts, &ctx, key, "create_task", &args, self.do_create_task(&ctx, a)).await
     }
 
-    #[tool(description = "Change a task's fields or status. Setting status done or in_review releases your claim.")]
+    #[tool(
+        description = "Change a task's fields or status. Setting status done or in_review releases your claim. To finish, set status done with a handoff in one call."
+    )]
     async fn update_task(
         &self,
         Extension(parts): Extension<Parts>,
@@ -409,7 +413,12 @@ impl TrailheadMcp {
             priority: a.priority,
             ..Default::default()
         };
-        text(task_line(&attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await)))
+        let task = attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await);
+        if let Some(body) = a.handoff.filter(|b| !b.trim().is_empty()) {
+            let new = NewComment { kind: CommentKind::Handoff, body, addressed_to: None };
+            attempt!(self.state.store.add_comment(&ctx, &task.key, new).await);
+        }
+        text(task_line(&task))
     }
 
     #[tool(description = "Take a lease on a task and start it. Returns the last handoff left on it.")]
