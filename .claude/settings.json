@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(trailhead:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v trailhead >/dev/null || exit 0; echo 'TRAIL work in flight (claim before coding; see AGENTS.md):'; trailhead --as claude ls -p TRAIL -s in_progress,needs_input,in_review 2>&1; echo; echo 'TRAIL ready queue:'; trailhead --as claude ready -p TRAIL 2>&1; true",
+            "timeout": 30,
+            "statusMessage": "Loading TRAIL queue"
+          }
+        ]
+      }
+    ]
+  }
+}
