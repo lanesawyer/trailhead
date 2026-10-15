@@ -412,8 +412,7 @@ impl TrailheadMcp {
     async fn undo_last(&self, Extension(parts): Extension<Parts>) -> Result<CallToolResult, ErrorData> {
         let ctx = ctx_of(&parts)?;
         let store = &self.state.store;
-        let filter =
-            EventFilter {
+        let filter = EventFilter {
             actor_id: Some(ctx.actor_id()),
             newest_first: true,
             changes_only: true,

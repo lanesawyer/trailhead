@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use axum::Router;
 use tower_http::trace::TraceLayer;
-use trailhead_core::{Ctx, Principal, Store};
+use trailhead_core::{Ctx, DEFAULT_REMINDER_WINDOW, Principal, Store};
 
 pub use auth::BATCH_HEADER;
 pub use idempotency::{IDEMPOTENCY_KEY, REPLAYED_HEADER};
@@ -186,6 +186,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
     let (store, ctx) = open_local(&cfg).await?;
     let state = Arc::new(AppState { info: ServerInfo::current(Some(cfg.db.clone())), ..AppState::new(store) });
     let reaper = state.clone();
+    let reminder_ctx = ctx.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
         loop {
@@ -196,6 +197,18 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
         }
     });
     spawn_archiver(state.clone());
+    let reminders = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            if let Err(e) =
+                reminders.store.emit_due_reminders(&reminder_ctx.next_batch(), DEFAULT_REMINDER_WINDOW).await
+            {
+                tracing::warn!(error = %e, "emitting due reminders failed");
+            }
+        }
+    });
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     if let Some(pid_file) = &cfg.pid_file {
         if let Some(dir) = pid_file.parent() {
