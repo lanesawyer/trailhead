@@ -398,7 +398,29 @@ fn print_json(v: &Value) {
     println!("{}", serde_json::to_string_pretty(v).expect("valid json"));
 }
 
+/// Rust ignores SIGPIPE, so `println!` panics once a reader like `head` closes
+/// the pipe. By then the command has done its work; exit like a Unix tool killed
+/// by SIGPIPE instead of printing a panic.
+fn exit_quietly_on_broken_pipe() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        // EPIPE on Unix, ERROR_NO_DATA on Windows.
+        let broken_pipe = msg.contains("(os error 32)") || msg.contains("(os error 232)");
+        if msg.starts_with("failed printing to std") && broken_pipe {
+            std::process::exit(141);
+        }
+        default(info);
+    }));
+}
+
 fn main() {
+    exit_quietly_on_broken_pipe();
     let cli = Cli::parse();
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if let Err(e) = rt.block_on(run(cli)) {
