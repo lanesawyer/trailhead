@@ -16,6 +16,10 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ targe
 bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
 [dependencies]
 trailhead-core.workspace = true
 trailhead-server.workspace = true
