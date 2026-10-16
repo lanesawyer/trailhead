@@ -123,6 +123,10 @@ pub struct Project {
     /// Seconds. Falls back to the workspace default when unset.
     pub claim_ttl: Option<i64>,
     pub require_review: bool,
+    /// Agents allowed to approve review work here (`in_review` → `done`), on top of
+    /// any human. Only humans can change this list.
+    #[serde(default)]
+    pub reviewers: Vec<Uuid>,
     pub version: i64,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,

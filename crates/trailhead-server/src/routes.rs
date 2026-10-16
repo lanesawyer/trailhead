@@ -209,6 +209,9 @@ struct UpdateProject {
     brief: Option<String>,
     status: Option<ProjectStatus>,
     require_review: Option<bool>,
+    /// Agent names or ids that may approve review work in this project (`in_review` → `done`).
+    /// Replaces the list; `[]` clears it. Humans only.
+    reviewers: Option<Vec<String>>,
     #[serde(default, deserialize_with = "nullable")]
     claim_ttl: Option<Option<i64>>,
     metadata: Option<Value>,
@@ -235,6 +238,7 @@ async fn update_project(
         brief: b.brief,
         status: b.status,
         require_review: b.require_review,
+        reviewers: b.reviewers,
         claim_ttl: b.claim_ttl,
         metadata: b.metadata,
     };

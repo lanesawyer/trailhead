@@ -1,0 +1,1 @@
+ALTER TABLE projects ADD COLUMN reviewers TEXT NOT NULL DEFAULT '[]';

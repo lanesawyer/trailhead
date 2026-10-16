@@ -8,7 +8,7 @@ use crate::metadata::merge_patch;
 use crate::model::{Entity, Project, ProjectStatus};
 use crate::store::{Ctx, Store, Tx};
 
-pub(crate) const PROJECT_COLS: &str = "id, workspace_id, key, name, brief, status, metadata, claim_ttl, require_review, version, created_at, updated_at, deleted_at";
+pub(crate) const PROJECT_COLS: &str = "id, workspace_id, key, name, brief, status, metadata, claim_ttl, require_review, version, created_at, updated_at, deleted_at, reviewers";
 
 pub(crate) fn project_from_row(row: &Row) -> Result<Project> {
     Ok(Project {
@@ -25,6 +25,7 @@ pub(crate) fn project_from_row(row: &Row) -> Result<Project> {
         created_at: get_ts(row, 10)?,
         updated_at: get_ts(row, 11)?,
         deleted_at: get_opt_ts(row, 12)?,
+        reviewers: serde_json::from_value(get_json(row, 13)?)?,
     })
 }
 
@@ -44,6 +45,8 @@ pub struct ProjectPatch {
     pub brief: Option<String>,
     pub status: Option<ProjectStatus>,
     pub require_review: Option<bool>,
+    /// Agent names or ids that may approve review work. Humans only.
+    pub reviewers: Option<Vec<String>>,
     pub claim_ttl: Option<Option<i64>>,
     /// RFC 7386 merge patch: `null` removes a key.
     pub metadata: Option<Value>,
@@ -105,7 +108,7 @@ pub(crate) async fn save_project(tx: &Tx, before: &Project, after: Project) -> R
         .query(
             &format!(
                 "UPDATE projects SET name = ?1, brief = ?2, status = ?3, metadata = ?4, claim_ttl = ?5, require_review = ?6,
-                 deleted_at = ?7, version = version + 1, updated_at = ?8
+                 deleted_at = ?7, version = version + 1, updated_at = ?8, reviewers = ?11
                  WHERE id = ?9 AND version = ?10 RETURNING {PROJECT_COLS}"
             ),
             libsql::params![
@@ -119,6 +122,7 @@ pub(crate) async fn save_project(tx: &Tx, before: &Project, after: Project) -> R
                 tx.now_str(),
                 before.id.to_string(),
                 before.version,
+                serde_json::to_string(&after.reviewers)?,
             ],
         )
         .await?;
@@ -211,6 +215,22 @@ impl Store {
             }
             if let Some(r) = patch.require_review {
                 after.require_review = r;
+            }
+            if let Some(names) = &patch.reviewers {
+                if !ctx.is_human() {
+                    return Err(Error::Forbidden("only a human can choose who approves review work".into()));
+                }
+                let agents = crate::identity::agents_in(&tx.conn, ctx.workspace_id).await?;
+                after.reviewers = names
+                    .iter()
+                    .map(|n| {
+                        agents
+                            .iter()
+                            .find(|a| a.name == n.trim() || a.id.to_string() == n.trim())
+                            .map(|a| a.id)
+                            .ok_or_else(|| Error::NotFound(format!("agent {n}")))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
             }
             if let Some(ttl) = patch.claim_ttl {
                 if let Some(t) = ttl {

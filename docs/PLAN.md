@@ -188,7 +188,7 @@ Decisions made while building, including where the build refines or departs from
 - **Events (Phase 1).** `events.id` is an autoincrementing integer and serves as the SSE/webhook cursor.
 - **Questions (Phase 1).** `resolve_comment` answers a question, optionally posting the answer as a note addressed to the asker. When the last open question resolves, the task returns to `in_progress` if still claimed, otherwise `open`.
 - **Priority (Phase 1).** 1 (urgent) to 4 (low), default 3.
-- **Review (Phase 1).** With `require_review`, agents cannot move a task to `done`; only humans can move `in_review` to `done`, in every project.
+- **Review (Phase 1).** With `require_review`, agents cannot move a task to `done`; only humans can move `in_review` to `done`, in every project. **Delegated review (Phase 3):** a human can list agents as a project's `reviewers`. Those agents can approve (`in_review` → `done`, or `done` in a review-required project) like a human. Only humans can change the list, so agents can't grant themselves approval. The other way to finish, used when a project doesn't require review, is unchanged: workers finish with `done` plus a handoff, and the coordinator merges.
 - **Requests and batches (Phase 2).** Every HTTP request is one batch; its id comes back in the `trailhead-batch` header so a client can undo exactly what it just did. `trailhead undo` with no arguments undoes the caller's last batch.
 - **Versions in bodies (Phase 2).** `PATCH` accepts `version` in the body as well as `If-Match`, for clients that can't set headers.
 - **Creating with dependencies (Phase 2).** `POST /v1/tasks` takes `blocked_by` and `blocks`, so an agent can file a blocking subtask in one call.

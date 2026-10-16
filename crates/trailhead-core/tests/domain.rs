@@ -520,3 +520,40 @@ async fn agent_names_are_unique() {
     assert!(matches!(env.store.create_agent(&env.human, "bot").await, Err(Error::AlreadyExists(_))));
     assert!(matches!(env.store.create_agent(&env.human, " bot ").await, Err(Error::AlreadyExists(_))));
 }
+
+#[tokio::test]
+async fn delegated_reviewers_can_approve() {
+    let env = Env::new().await;
+    let worker = env.agent("worker").await;
+    let lead = env.agent("lead").await;
+    let lead_name = vec!["lead".to_string()];
+    // Agents can't hand themselves approval rights.
+    assert!(matches!(
+        env.store
+            .update_project(
+                &lead,
+                "AUTH",
+                ProjectPatch { reviewers: Some(lead_name.clone()), ..Default::default() },
+                None
+            )
+            .await,
+        Err(Error::Forbidden(_))
+    ));
+    let patch = ProjectPatch { require_review: Some(true), reviewers: Some(lead_name), ..Default::default() };
+    let project = env.store.update_project(&env.human, "AUTH", patch, None).await.unwrap();
+    assert_eq!(project.reviewers, vec![lead.agent_id.unwrap()]);
+
+    let t = env.task("needs review").await;
+    env.store.claim(&worker, &t.key, None).await.unwrap();
+    assert!(matches!(
+        env.store.update_task(&worker, &t.key, status(Status::Done), None).await,
+        Err(Error::ReviewRequired)
+    ));
+    env.store.update_task(&worker, &t.key, status(Status::InReview), None).await.unwrap();
+    assert!(matches!(
+        env.store.update_task(&worker, &t.key, status(Status::Done), None).await,
+        Err(Error::ReviewRequired)
+    ));
+    let done = env.store.update_task(&lead, &t.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(done.status, Status::Done);
+}

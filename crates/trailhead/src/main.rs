@@ -284,6 +284,9 @@ enum ProjectCmd {
         brief_file: Option<PathBuf>,
         #[arg(long)]
         review: Option<bool>,
+        /// Comma-separated agents that may approve review work here; "" clears it.
+        #[arg(long, value_delimiter = ',')]
+        reviewers: Option<Vec<String>>,
         #[arg(long)]
         archive: bool,
         #[arg(long)]
@@ -898,8 +901,11 @@ async fn project(c: &Client, cmd: ProjectCmd, json: bool) -> Result<()> {
                 }
             }
         }
-        ProjectCmd::Edit { project, name, brief, brief_file, review, archive, unarchive } => {
+        ProjectCmd::Edit { project, name, brief, brief_file, review, reviewers, archive, unarchive } => {
             let mut body = json!({});
+            if let Some(r) = reviewers {
+                body["reviewers"] = json!(r.into_iter().filter(|n| !n.trim().is_empty()).collect::<Vec<_>>());
+            }
             if let Some(n) = name {
                 body["name"] = json!(n);
             }

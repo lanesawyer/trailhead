@@ -45,6 +45,20 @@ pub(crate) async fn load_workspace(conn: &Connection, id: Uuid) -> Result<Worksp
     }
 }
 
+pub(crate) async fn agents_in(conn: &Connection, ws: Uuid) -> Result<Vec<Agent>> {
+    let mut rows = conn
+        .query(
+            "SELECT id, workspace_id, owner_user_id, name, created_at FROM agents WHERE workspace_id = ?1 ORDER BY created_at",
+            [ws.to_string()],
+        )
+        .await?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        out.push(agent_from_row(&row)?);
+    }
+    Ok(out)
+}
+
 impl Store {
     /// A local install is one workspace with one user. Creates them on first run
     /// and returns the existing pair afterwards.
@@ -152,17 +166,7 @@ impl Store {
 
     pub async fn list_agents(&self, ctx: &Ctx) -> Result<Vec<Agent>> {
         let conn = self.reader()?;
-        let mut rows = conn
-            .query(
-                "SELECT id, workspace_id, owner_user_id, name, created_at FROM agents WHERE workspace_id = ?1 ORDER BY created_at",
-                [ctx.workspace_id.to_string()],
-            )
-            .await?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            out.push(agent_from_row(&row)?);
-        }
-        Ok(out)
+        agents_in(&conn, ctx.workspace_id).await
     }
 
     /// A context for an agent, acting for its owner.
