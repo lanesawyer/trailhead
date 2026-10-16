@@ -8,6 +8,10 @@ Agents can learn the API from `GET /llms.txt` on any server, and the workflow fr
 
 **Status:** Phases 1 (core) and 2 (server, CLI, MCP) are done; Phase 3 (clients: webhooks, agent docs, integrations) is under way. See [docs/PLAN.md](docs/PLAN.md) for the architecture and roadmap.
 
+## Integrations
+
+- [OpenClaw](docs/integrations/openclaw.md): mount Trailhead's MCP server and agent skill.
+
 ## Development
 
 ```sh

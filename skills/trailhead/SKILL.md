@@ -1,6 +1,13 @@
 ---
 name: trailhead
 description: Track work in Trailhead, a task engine shared by humans and agents. Use when a project tracks its work in Trailhead (a .trailhead.toml, trailhead MCP tools, or instructions to use it), to find what's next, claim a task before working on it, renew the claim, record decisions and questions, and finish or step away with a handoff.
+metadata:
+  openclaw:
+    homepage: https://github.com/lanesawyer/trailhead
+    envVars:
+      - name: TRAILHEAD_AGENT
+        required: false
+        description: The Trailhead agent to act as when using the CLI (same as --as).
 ---
 
 # Working in Trailhead
