@@ -12,7 +12,8 @@ fn whoami(th: &Instance, cwd: &std::path::Path, args: &[&str], env: &[(&str, &st
 fn repo_file_picks_agent_and_project_and_flags_override_it() {
     let th = Instance::new();
     th.stdout(&["project", "add", "REPO", "Repo"]);
-    assert!(th.stdout(&["agent", "add", "bot"]).contains("config/agents/bot"));
+    let bot_file = std::path::Path::new("config").join("agents").join("bot");
+    assert!(th.stdout(&["agent", "add", "bot"]).contains(&bot_file.display().to_string()));
     th.stdout(&["agent", "add", "other"]);
 
     let repo = th.dir.path().join("repo");
