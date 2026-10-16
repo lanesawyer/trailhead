@@ -314,7 +314,7 @@ pub(crate) mod tests {
     pub(crate) fn sample_errors() -> Vec<Error> {
         vec![
             Error::NotFound(String::new()),
-            Error::ClaimHeld { holder: String::new(), holder_id: String::new(), expires_at: String::new() },
+            Error::ClaimHeld { holder: String::new(), holder_id: String::new(), expires_at: None },
             Error::NotClaimHolder,
             Error::ClaimLost(String::new()),
             Error::VersionConflict { expected: 0, current: 0 },

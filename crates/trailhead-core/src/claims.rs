@@ -4,7 +4,7 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::comments::latest_handoff;
-use crate::db::{fmt_ts, get_ts, get_uuid};
+use crate::db::{fmt_ts, get_opt_ts, get_ts, get_uuid, opt_ts_value};
 use crate::deps::{unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
 use crate::identity::load_workspace;
@@ -22,7 +22,7 @@ fn claim_from_row(row: &Row) -> Result<Claim> {
         holder_id: get_uuid(row, 2)?,
         on_behalf_of: get_uuid(row, 3)?,
         claimed_at: get_ts(row, 4)?,
-        expires_at: get_ts(row, 5)?,
+        expires_at: get_opt_ts(row, 5)?,
     })
 }
 
@@ -49,12 +49,12 @@ pub(crate) async fn claim_held(conn: &Connection, c: &Claim) -> Error {
     Error::ClaimHeld {
         holder: name.ok().flatten().unwrap_or_else(|| id.clone()),
         holder_id: id,
-        expires_at: fmt_ts(c.expires_at),
+        expires_at: c.expires_at.map(fmt_ts),
     }
 }
 
 pub(crate) async fn live_claim(conn: &Connection, task_id: Uuid, now: OffsetDateTime) -> Result<Option<Claim>> {
-    Ok(any_claim(conn, task_id).await?.filter(|c| c.expires_at > now))
+    Ok(any_claim(conn, task_id).await?.filter(|c| c.is_live(now)))
 }
 
 pub(crate) async fn drop_claim(tx: &Tx, claim: &Claim, kind: &str) -> Result<()> {
@@ -83,7 +83,7 @@ pub(crate) async fn put_claim(tx: &Tx, claim: &Claim) -> Result<()> {
                 claim.holder_id.to_string(),
                 claim.on_behalf_of.to_string(),
                 fmt_ts(claim.claimed_at),
-                fmt_ts(claim.expires_at),
+                opt_ts_value(claim.expires_at),
             ],
         )
         .await?;
@@ -127,7 +127,13 @@ pub(crate) async fn reap_expired(tx: &Tx, task_id: Option<Uuid>) -> Result<usize
     Ok(expired.len())
 }
 
-async fn resolve_ttl(tx: &Tx, task: &Task, ttl: Option<i64>) -> Result<i64> {
+/// When a new or renewed claim lapses. People's claims don't, unless they pass
+/// a TTL: leases exist so a crashed agent's work comes back, and anyone human
+/// can release a forgotten claim by hand.
+async fn expiry(tx: &Tx, task: &Task, ttl: Option<i64>) -> Result<Option<OffsetDateTime>> {
+    if ttl.is_none() && tx.ctx.is_human() {
+        return Ok(None);
+    }
     let ttl = match ttl {
         Some(t) => t,
         None => {
@@ -138,7 +144,7 @@ async fn resolve_ttl(tx: &Tx, task: &Task, ttl: Option<i64>) -> Result<i64> {
         }
     };
     validate_ttl(ttl)?;
-    Ok(ttl)
+    Ok(Some(tx.now + Duration::seconds(ttl)))
 }
 
 /// Tells an agent that renews a lease it no longer holds what happened, so it
@@ -148,7 +154,8 @@ async fn lost_or_never_held(tx: &Tx, task: &Task) -> Result<Error> {
     if let Some(c) = any_claim(&tx.conn, task.id).await?
         && c.holder_id.to_string() == me
     {
-        return Ok(Error::ClaimLost(format!("it expired at {}", fmt_ts(c.expires_at))));
+        let at = c.expires_at.map_or_else(|| "an unknown time".into(), fmt_ts);
+        return Ok(Error::ClaimLost(format!("it expired at {at}")));
     }
     let mut rows = tx
         .conn
@@ -226,8 +233,7 @@ impl Store {
             if !blockers.is_empty() {
                 return Err(Error::BlockedBy(blockers.iter().map(|t| visible_key(ctx, t)).collect()));
             }
-            let ttl = resolve_ttl(tx, &task, ttl).await?;
-            let expires_at = tx.now + Duration::seconds(ttl);
+            let expires_at = expiry(tx, &task, ttl).await?;
             // The WHERE guard makes the claim itself atomic: a live claim held by
             // someone else can never be overwritten, whatever the caller checked.
             let mut rows = tx
@@ -238,7 +244,7 @@ impl Store {
                          ON CONFLICT (task_id) DO UPDATE SET holder_id = excluded.holder_id,
                              on_behalf_of = excluded.on_behalf_of, claimed_at = excluded.claimed_at,
                              expires_at = excluded.expires_at
-                         WHERE claims.expires_at <= ?5 OR claims.holder_id = excluded.holder_id
+                         WHERE (claims.expires_at IS NOT NULL AND claims.expires_at <= ?5) OR claims.holder_id = excluded.holder_id
                          RETURNING {CLAIM_COLS}"
                     ),
                     libsql::params![
@@ -247,7 +253,7 @@ impl Store {
                         ctx.actor_id().to_string(),
                         ctx.user_id.to_string(),
                         tx.now_str(),
-                        fmt_ts(expires_at),
+                        opt_ts_value(expires_at),
                     ],
                 )
                 .await?;
@@ -278,15 +284,17 @@ impl Store {
         .await
     }
 
-    /// Live claims the caller holds, soonest to expire first.
+    /// Live claims the caller holds, soonest to expire first, then those that
+    /// never expire, oldest first.
     pub async fn my_claims(&self, ctx: &Ctx) -> Result<Vec<HeldClaim>> {
         let conn = self.reader()?;
         let mut rows = conn
             .query(
                 &format!(
                     "SELECT t.key, t.title, t.status, {} FROM claims c JOIN tasks t ON t.id = c.task_id
-                     WHERE c.workspace_id = ?1 AND c.holder_id = ?2 AND c.expires_at > ?3 AND t.deleted_at IS NULL
-                     ORDER BY c.expires_at",
+                     WHERE c.workspace_id = ?1 AND c.holder_id = ?2 AND (c.expires_at IS NULL OR c.expires_at > ?3)
+                       AND t.deleted_at IS NULL
+                     ORDER BY c.expires_at IS NULL, c.expires_at, c.claimed_at",
                     CLAIM_COLS.split(", ").map(|c| format!("c.{c}")).collect::<Vec<_>>().join(", ")
                 ),
                 [ctx.workspace_id.to_string(), ctx.actor_id().to_string(), fmt_ts(self.now())],
@@ -300,14 +308,15 @@ impl Store {
                 holder_id: get_uuid(&row, 5)?,
                 on_behalf_of: get_uuid(&row, 6)?,
                 claimed_at: get_ts(&row, 7)?,
-                expires_at: get_ts(&row, 8)?,
+                expires_at: get_opt_ts(&row, 8)?,
             };
             out.push(HeldClaim { key: row.get(0)?, title: row.get(1)?, status: crate::db::get_enum(&row, 2)?, claim });
         }
         Ok(out)
     }
 
-    /// Heartbeat. Renew roughly every third of the TTL.
+    /// Heartbeat. Renew roughly every third of the TTL. Renewing a claim that
+    /// never expires, without a TTL, changes nothing.
     pub async fn renew(&self, ctx: &Ctx, task: &str, ttl: Option<i64>) -> Result<Claim> {
         self.write(ctx, async |tx| {
             let task = find_task(&tx.conn, ctx, task, false).await?;
@@ -315,8 +324,10 @@ impl Store {
                 Some(c) if c.holder_id == ctx.actor_id() => c,
                 _ => return Err(lost_or_never_held(tx, &task).await?),
             };
-            let ttl = resolve_ttl(tx, &task, ttl).await?;
-            let after = Claim { expires_at: tx.now + Duration::seconds(ttl), ..before.clone() };
+            let after = Claim { expires_at: expiry(tx, &task, ttl).await?, ..before.clone() };
+            if after.expires_at.is_none() && before.expires_at.is_none() {
+                return Ok(before);
+            }
             put_claim(tx, &after).await?;
             tx.emit_change(
                 Entity::Claim,

@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
-    Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewTask, Status, StoredResponse, Task, TaskDetail,
-    TaskFilter, TaskPatch, idempotency_fingerprint,
+    Claim, Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewTask, Status, StoredResponse, Task,
+    TaskDetail, TaskFilter, TaskPatch, idempotency_fingerprint,
 };
 use uuid::Uuid;
 
@@ -131,11 +131,19 @@ fn comment_line(c: &Comment) -> String {
     format!("[{tags}] id {}: {}", c.id, c.body)
 }
 
+/// "until <time>", or "since <time>, no expiry" for a claim that never lapses.
+fn lease(c: &Claim) -> String {
+    match c.expires_at {
+        Some(e) => format!("until {}", e.format(&Rfc3339).unwrap_or_default()),
+        None => format!("since {}, no expiry", c.claimed_at.format(&Rfc3339).unwrap_or_default()),
+    }
+}
+
 fn detail_text(d: &TaskDetail) -> String {
     let t = &d.task;
     let mut out = vec![task_line(t)];
     if let Some(c) = &d.claim {
-        out.push(format!("claimed by {} until {}", c.holder_id, c.expires_at.format(&Rfc3339).unwrap_or_default()));
+        out.push(format!("claimed by {} {}", c.holder_id, lease(c)));
     }
     if !d.blocked_by.is_empty() {
         out.push(format!("blocked by {}", d.blocked_by.join(", ")));
@@ -498,11 +506,7 @@ impl TrailheadMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let r = attempt!(self.state.store.claim(&ctx, &a.task, a.ttl).await);
-        let mut out = format!(
-            "{}\nclaimed until {}",
-            task_line(&r.task),
-            r.claim.expires_at.format(&Rfc3339).unwrap_or_default()
-        );
+        let mut out = format!("{}\nclaimed {}", task_line(&r.task), lease(&r.claim));
         if let Some(h) = r.handoff {
             out.push_str(&format!("\n\nlast handoff:\n{}", h.body));
         }
@@ -525,15 +529,7 @@ impl TrailheadMcp {
         }
         text(
             held.iter()
-                .map(|h| {
-                    format!(
-                        "{} {} until {} {}",
-                        h.key,
-                        h.status,
-                        h.claim.expires_at.format(&Rfc3339).unwrap_or_default(),
-                        h.title
-                    )
-                })
+                .map(|h| format!("{} {} {} {}", h.key, h.status, lease(&h.claim), h.title))
                 .collect::<Vec<_>>()
                 .join("\n"),
         )
@@ -550,7 +546,7 @@ impl TrailheadMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let c = attempt!(self.state.store.renew(&ctx, &a.task, a.ttl).await);
-        text(format!("claimed until {}", c.expires_at.format(&Rfc3339).unwrap_or_default()))
+        text(format!("claimed {}", lease(&c)))
     }
 
     #[tool(

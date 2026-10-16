@@ -17,8 +17,8 @@ Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, pro
 
 1. `GET /v1/ready?project=KEY&limit=N` lists open, unclaimed, unblocked tasks in active projects, by priority, then due date, then age. Default limit 20.
 2. Read the project brief (`GET /v1/projects/KEY`, field `brief`): goals, conventions, definition of done.
-3. `POST /v1/tasks/KEY-1/claim` with optional `{"ttl": seconds}` (1 to 86400; default the project's `claim_ttl`, else the workspace's, normally 1800). Moves the task to `in_progress` and returns `{task, claim, handoff}`, where `handoff` is the last handoff comment left on it. Read it. Claiming a task you already hold extends the lease. Only an `open` task can be claimed.
-4. Renew about every third of the TTL: `POST /v1/tasks/KEY-1/renew` (optional `{"ttl"}`). An expired claim is dropped and an `in_progress` task goes back to `open`. `409 claim_lost` on renew means your lease expired or someone else took the task: stop, re-read the task, and claim it again if it is still yours to do. `GET /v1/claims` lists the claims you hold.
+3. `POST /v1/tasks/KEY-1/claim` with optional `{"ttl": seconds}` (1 to 86400; default the project's `claim_ttl`, else the workspace's, normally 1800). Moves the task to `in_progress` and returns `{task, claim, handoff}`, where `handoff` is the last handoff comment left on it. Read it. Claiming a task you already hold extends the lease. Only an `open` task can be claimed. A human's claim without a `ttl` never expires (`expires_at` is `null`): leases exist so a crashed agent's work comes back, and a person can release a forgotten claim by hand.
+4. Renew about every third of the TTL: `POST /v1/tasks/KEY-1/renew` (optional `{"ttl"}`). An expired claim is dropped and an `in_progress` task goes back to `open`. `409 claim_lost` on renew means your lease expired or someone else took the task: stop, re-read the task, and claim it again if it is still yours to do. Renewing a claim that never expires, without a `ttl`, changes nothing. `GET /v1/claims` lists the claims you hold.
 5. Comment as you go: `POST /v1/tasks/KEY-1/comments` with `{"kind", "body", "addressed_to"?}`.
 6. Finish: post a `handoff` comment (what changed, what's left, gotchas), then `PATCH /v1/tasks/KEY-1` with `{"status": "done"}` (or `in_review`). Either releases the claim. To stop without finishing, leave a handoff and `POST /v1/tasks/KEY-1/release`, which returns the task to `open`.
 
@@ -104,7 +104,7 @@ Every error is `{"error": {"code", "message", ...}}`. Branch on `code`, which is
 - `forbidden` 403: not allowed for this caller or token scope.
 - `review_required` 403: an agent tried to set `done` where a human must approve.
 - `not_found` 404: no such thing, or outside your token's scope.
-- `claim_held` 409: someone else holds the claim; `holder`, `holder_id`, `expires_at`.
+- `claim_held` 409: someone else holds the claim; `holder`, `holder_id`, `expires_at` (`null` if it never expires).
 - `not_claim_holder` 409: you don't hold a claim on this task.
 - `claim_lost` 409: on renew, your claim expired or someone else took the task; claim it again before continuing.
 - `blocked_by` 409: unfinished blockers, listed in `blocked_by`.

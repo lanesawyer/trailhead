@@ -6,8 +6,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error("{0} not found")]
     NotFound(String),
-    #[error("task is claimed by {holder} until {expires_at}")]
-    ClaimHeld { holder: String, holder_id: String, expires_at: String },
+    #[error("task is claimed by {holder}{}", expires_at.as_ref().map(|e| format!(" until {e}")).unwrap_or_default())]
+    ClaimHeld { holder: String, holder_id: String, expires_at: Option<String> },
     #[error("you do not hold a claim on this task")]
     NotClaimHolder,
     #[error("your claim was lost ({0}); claim the task again before continuing")]

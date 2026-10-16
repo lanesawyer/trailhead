@@ -517,7 +517,7 @@ impl Store {
              WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND t.status = 'open'
                AND p.deleted_at IS NULL AND p.status = 'active'
                AND (?2 IS NULL OR t.project_id = ?2) AND {}
-               AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.task_id = t.id AND c.expires_at > ?3)
+               AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.task_id = t.id AND (c.expires_at IS NULL OR c.expires_at > ?3))
                AND NOT EXISTS (
                    SELECT 1 FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
                    WHERE d.blocked_id = t.id AND b.deleted_at IS NULL AND b.status NOT IN ('done', 'cancelled'))

@@ -111,14 +111,36 @@ async fn claim_ttl_comes_from_project_then_workspace() {
     let t = env.task("ttl").await;
     let a = env.agent("a").await;
     let c = env.store.claim(&a, &t.key, None).await.unwrap().claim;
-    assert_eq!(c.expires_at - c.claimed_at, Duration::minutes(30));
+    assert_eq!(c.expires_at.unwrap() - c.claimed_at, Duration::minutes(30));
     env.store
         .update_project(&env.human, "AUTH", ProjectPatch { claim_ttl: Some(Some(120)), ..Default::default() }, None)
         .await
         .unwrap();
     let c = env.store.renew(&a, &t.key, None).await.unwrap();
-    assert_eq!(c.expires_at - env.now(), Duration::seconds(120));
+    assert_eq!(c.expires_at.unwrap() - env.now(), Duration::seconds(120));
     assert!(matches!(env.store.renew(&a, &t.key, Some(90_000)).await, Err(Error::Invalid(_))));
+}
+
+#[tokio::test]
+async fn human_claims_never_expire_unless_given_a_ttl() {
+    let env = Env::new().await;
+    let t = env.task("mine").await;
+    let a = env.agent("a").await;
+    let c = env.store.claim(&env.human, &t.key, None).await.unwrap().claim;
+    assert_eq!(c.expires_at, None);
+    env.advance(30 * 86_400);
+    assert_eq!(env.store.reap_expired_claims(&env.human).await.unwrap(), 0);
+    assert!(env.ready_keys().await.is_empty());
+    assert!(matches!(env.store.claim(&a, &t.key, None).await, Err(Error::ClaimHeld { expires_at: None, .. })));
+    assert_eq!(env.store.renew(&env.human, &t.key, None).await.unwrap(), c);
+    let held = env.store.my_claims(&env.human).await.unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].claim.expires_at, None);
+
+    let leased = env.store.renew(&env.human, &t.key, Some(60)).await.unwrap();
+    assert_eq!(leased.expires_at, Some(env.now() + Duration::seconds(60)));
+    env.advance(61);
+    env.store.claim(&a, &t.key, None).await.unwrap();
 }
 
 #[tokio::test]

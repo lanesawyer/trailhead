@@ -442,7 +442,16 @@ async fn run(cli: Cli) -> Result<()> {
                 q.push(("limit", n.to_string()));
             }
             let v = c.get("ready", &q).await?;
-            if json { print_json(&v) } else { task_list(&v, "nothing ready") }
+            if json {
+                print_json(&v)
+            } else {
+                task_list(&v, "nothing ready");
+                // People's claims don't expire, so a forgotten one would hide work for good.
+                let held = c.get("claims", &[]).await?;
+                for h in held.as_array().into_iter().flatten() {
+                    println!("you hold {} ({}), claimed {}", s(h, "key"), s(h, "status"), output::lease(&h["claim"]));
+                }
+            }
         }
         Cmd::Ls { project, status, parent, all, limit } => {
             let mut q = vec![];
@@ -520,7 +529,7 @@ async fn run(cli: Cli) -> Result<()> {
                 print_json(&v);
             } else {
                 println!("{}", task_line(&v["task"]));
-                println!("claimed until {}", output::until(s(&v["claim"], "expires_at")));
+                println!("claimed {}", output::lease(&v["claim"]));
                 if v["handoff"].is_object() {
                     println!(
                         "\nlast handoff ({}):\n{}",
@@ -539,10 +548,10 @@ async fn run(cli: Cli) -> Result<()> {
                     Some(held) if !held.is_empty() => {
                         for h in held {
                             println!(
-                                "{:<10} {:<11} until {}  {}",
+                                "{:<10} {:<11} {}  {}",
                                 s(h, "key"),
                                 s(h, "status"),
-                                output::until(s(&h["claim"], "expires_at")),
+                                output::lease(&h["claim"]),
                                 s(h, "title")
                             );
                         }
@@ -553,7 +562,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Renew { task, ttl } => {
             let v = c.post(&format!("tasks/{task}/renew"), json!({ "ttl": ttl })).await?;
-            show(v, &|v| format!("claimed until {}", output::until(s(v, "expires_at"))));
+            show(v, &|v| format!("claimed {}", output::lease(v)));
         }
         Cmd::Release { task } => show(c.post(&format!("tasks/{task}/release"), json!({})).await?, &task_line),
         Cmd::Done { task, message } => finish(&c, &task, "done", message, json).await?,
@@ -860,11 +869,7 @@ async fn print_detail(c: &Client, v: &Value) -> Result<()> {
     }
     println!("{}", meta.join(" · "));
     if v["claim"].is_object() {
-        println!(
-            "claimed by {} until {}",
-            name(s(&v["claim"], "holder_id")),
-            output::until(s(&v["claim"], "expires_at"))
-        );
+        println!("claimed by {} {}", name(s(&v["claim"], "holder_id")), output::lease(&v["claim"]));
     }
     let keys = |k: &str| v[k].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));
     if let Some(b) = keys("blocked_by").filter(|b| !b.is_empty()) {

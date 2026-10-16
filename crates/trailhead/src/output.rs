@@ -27,10 +27,30 @@ pub fn short_time(ts: &str) -> String {
 pub fn until(ts: &str) -> String {
     let Ok(t) = ts.parse::<jiff::Timestamp>() else { return ts.to_string() };
     let secs = t.as_second() - jiff::Timestamp::now().as_second();
-    let (h, m) = (secs.abs() / 3600, secs.abs() % 3600 / 60);
-    let span = if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") };
-    let rel = if secs >= 0 { format!("in {span}") } else { format!("{span} ago") };
+    let rel = if secs >= 0 { format!("in {}", span(secs)) } else { format!("{} ago", span(secs)) };
     format!("{} ({rel})", short_time(ts))
+}
+
+fn span(secs: i64) -> String {
+    let (d, h, m) = (secs.abs() / 86_400, secs.abs() % 86_400 / 3600, secs.abs() % 3600 / 60);
+    match (d, h) {
+        (0, 0) => format!("{m}m"),
+        (0, _) => format!("{h}h {m}m"),
+        _ => format!("{d}d {h}h"),
+    }
+}
+
+/// "until <when>" for a lease, or "since <when>, no expiry" for a claim that never lapses.
+pub fn lease(claim: &Value) -> String {
+    match claim["expires_at"].as_str() {
+        Some(e) => format!("until {}", until(e)),
+        None => {
+            let since = claim["claimed_at"].as_str().unwrap_or_default();
+            let Ok(t) = since.parse::<jiff::Timestamp>() else { return format!("since {since}, no expiry") };
+            let age = (jiff::Timestamp::now().as_second() - t.as_second()).max(0);
+            format!("since {} ({} ago), no expiry", short_time(since), span(age))
+        }
+    }
 }
 
 fn short_date(ts: &str) -> String {

@@ -49,7 +49,7 @@ The CLI prints one terse line per task; add `--json` for full detail. MCP answer
 
 1. **Start** with `ready` and read the brief: goals, conventions, definition of done.
 2. **Claim before you write code or change anything.** If what you were asked to do has no task, create one and claim it. Don't do untracked work. A claim moves the task to `in_progress` and returns the last handoff left on it: read it before starting.
-3. **Renew** about every third of the TTL (default 30 minutes, so every ~10). Pass a longer `--ttl`/`ttl` (up to 24 hours) when you know the work is long. An expired claim frees the task for someone else.
+3. **Renew** about every third of the TTL (default 30 minutes, so every ~10). Pass a longer `--ttl`/`ttl` (up to 24 hours) when you know the work is long. An expired claim frees the task for someone else. (Claims a person holds don't expire unless they pass a TTL; that's for humans, not agents.)
 4. **Record as you go** with typed comments:
    - `decision`: a choice you made and why, so later workers don't relitigate it.
    - `progress`: short status on long work.

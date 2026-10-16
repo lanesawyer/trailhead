@@ -181,8 +181,15 @@ pub struct Claim {
     pub on_behalf_of: Uuid,
     #[serde(with = "time::serde::rfc3339")]
     pub claimed_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    pub expires_at: OffsetDateTime,
+    /// `None` for a claim that never expires: people's claims, unless they asked for a TTL.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub expires_at: Option<OffsetDateTime>,
+}
+
+impl Claim {
+    pub fn is_live(&self, now: OffsetDateTime) -> bool {
+        self.expires_at.is_none_or(|e| e > now)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
