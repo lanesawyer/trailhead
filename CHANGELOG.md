@@ -4,7 +4,7 @@ All notable changes to Trailhead are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.1.0](https://github.com/lanesawyer/trailhead/releases/tag/v0.1.0) - 2026-10-16
 
 ### Features
 
@@ -63,5 +63,7 @@ All notable changes to Trailhead are documented here. The format follows
 - load the TRAIL queue at session start ([22834e7](https://github.com/lanesawyer/trailhead/commit/22834e711249f0b10320a987360e788e46bb394d))
 - **ci:** run fmt, clippy and tests on GitHub Actions ([f31d6cf](https://github.com/lanesawyer/trailhead/commit/f31d6cf6d669546d97b7357b1bf3fee92992ea8f))
 - default this repo's trailhead identity to claude ([29c4c12](https://github.com/lanesawyer/trailhead/commit/29c4c129e3914f010024de516fab1b6cab0ac0a2))
+- release pipeline with git-cliff changelog and crates.io publishing ([771f0bc](https://github.com/lanesawyer/trailhead/commit/771f0bc85d3a2c94791f5f624970c063e65594b2))
+- **ci:** fold publishing into the release workflow ([e5317eb](https://github.com/lanesawyer/trailhead/commit/e5317eb99a13950a5585765eccee8c3810ec5aa2))
 
 
