@@ -62,7 +62,7 @@ A project's `reviewers` (set by a human: `PATCH /v1/projects/KEY {"reviewers": [
 ## Tasks
 
 - `POST /v1/tasks` `{"project", "title", "description"?, "priority"?, "due_at"?, "due_tz"?, "parent"?, "metadata"?, "blocked_by"?, "blocks"?, "source"?, "external_id"?}`. `source` and `external_id` go together; repeating a pair returns the existing task instead of a duplicate.
-- `GET /v1/tasks?project=&status=a,b&parent=&due_before=&metadata=k:v,k2:v2&limit=` defaults to everything not done or cancelled.
+- `GET /v1/tasks?project=&status=a,b&parent=&due_before=&metadata=k:v,k2:v2&sort=&limit=&offset=` defaults to everything not done or cancelled. `sort` is `priority` (default: priority, then due date, then oldest), `updated_at` or `created_at`, with `-` for newest first; page with `limit` (default 100) and `offset`.
 - `GET /v1/tasks/KEY-1` returns `{task, claim, blocked_by, blocks, comments}`.
 - `PATCH /v1/tasks/KEY-1` takes any of `title`, `description`, `status`, `priority`, `due_at`, `due_tz`, `parent`, `metadata` (a JSON merge patch: `null` removes a key). `null` clears `due_at`, `due_tz` and `parent`.
 - `DELETE /v1/tasks/KEY-1` soft-deletes; undo restores it.
@@ -84,7 +84,7 @@ Every request is one batch; its id is in the `trailhead-batch` response header. 
 
 Every write appends an event: `{id, batch_id, actor_id, on_behalf_of, task_id, task_key, entity, entity_id, kind, before, after, undoes, at}`. Kinds: `task.created|updated|deleted`, `claim.acquired|renewed|released|expired`, `comment.created|resolved`, `dependency.added|removed`, `project.created|updated`, `<entity>.reverted`, and the reminders `task.due_soon` (within 24 hours) and `task.overdue`.
 
-- `GET /v1/events?after=ID&task=&actor=&batch=&since=&limit=&newest_first=true&changes_only=true` (`changes_only` hides reminders). `GET /v1/tasks/KEY-1/history` is one task's log.
+- `GET /v1/events?after=ID&task=&actor=&batch=&since=&limit=&newest_first=true&changes_only=true&kinds=claim.,comment.created` (`changes_only` hides reminders; `kinds` keeps events whose kind starts with one of the prefixes, applied before `limit`). `GET /v1/tasks/KEY-1/history` is one task's log.
 - `GET /v1/events/stream?task=&kinds=task.,comment.created` is Server-Sent Events: `id` is the event id, `event` the kind, `data` the event JSON. On reconnect send `Last-Event-ID` (or `?after=`) to resume with nothing missed. With neither, the stream starts after the newest event.
 
 ## Webhooks

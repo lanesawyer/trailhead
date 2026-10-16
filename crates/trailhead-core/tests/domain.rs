@@ -5,6 +5,7 @@ use serde_json::json;
 use time::Duration;
 use trailhead_core::{
     CommentKind, Error, EventFilter, NewComment, NewProject, NewTask, ProjectPatch, Status, TaskFilter, TaskPatch,
+    TaskSort,
 };
 
 fn status(s: Status) -> TaskPatch {
@@ -556,4 +557,56 @@ async fn delegated_reviewers_can_approve() {
     ));
     let done = env.store.update_task(&lead, &t.key, status(Status::Done), None).await.unwrap();
     assert_eq!(done.status, Status::Done);
+}
+
+#[tokio::test]
+async fn list_tasks_sorts_and_pages() {
+    let env = Env::new().await;
+    let a = env.task_with(NewTask { title: "a".into(), priority: Some(1), ..Default::default() }).await;
+    env.advance(1);
+    let b = env.task_with(NewTask { title: "b".into(), priority: Some(3), ..Default::default() }).await;
+    env.advance(1);
+    let c = env.task_with(NewTask { title: "c".into(), priority: Some(2), ..Default::default() }).await;
+    env.advance(1);
+    env.store.update_task(&env.human, &a.key, status(Status::Done), None).await.unwrap();
+    let list = async |sort: &str, limit, offset| {
+        let filter = TaskFilter {
+            statuses: vec![Status::Open, Status::Done],
+            sort: sort.parse().unwrap(),
+            limit,
+            offset,
+            ..Default::default()
+        };
+        env.store.list_tasks(&env.human, filter).await.unwrap().into_iter().map(|t| t.key).collect::<Vec<_>>()
+    };
+    assert_eq!(list("priority", None, None).await, [a.key.clone(), c.key.clone(), b.key.clone()]);
+    assert_eq!(list("created_at", None, None).await, [a.key.clone(), b.key.clone(), c.key.clone()]);
+    assert_eq!(list("-created_at", None, None).await, [c.key.clone(), b.key.clone(), a.key.clone()]);
+    assert_eq!(list("-updated_at", None, None).await, [a.key.clone(), c.key.clone(), b.key.clone()]);
+    assert_eq!(list("updated_at", Some(2), None).await, [b.key.clone(), c.key.clone()]);
+    assert_eq!(list("updated_at", Some(2), Some(2)).await, std::slice::from_ref(&a.key));
+    assert!(matches!("updated".parse::<TaskSort>(), Err(Error::Invalid(_))));
+}
+
+#[tokio::test]
+async fn list_events_filters_kinds_before_limit() {
+    let env = Env::new().await;
+    let t = env.task("x").await;
+    let a = env.agent("a").await;
+    env.store.claim(&a, &t.key, None).await.unwrap();
+    for i in 0..5 {
+        let patch = TaskPatch { title: Some(format!("x{i}")), ..Default::default() };
+        env.store.update_task(&env.human, &t.key, patch, None).await.unwrap();
+    }
+    env.store.add_comment(&a, &t.key, comment(CommentKind::Note, "hi")).await.unwrap();
+    let filter = EventFilter {
+        kinds: vec!["claim.".into(), "comment.created".into()],
+        newest_first: true,
+        limit: Some(2),
+        ..Default::default()
+    };
+    let kinds: Vec<_> = env.store.list_events(&env.human, filter).await.unwrap().into_iter().map(|e| e.kind).collect();
+    assert_eq!(kinds.len(), 2);
+    assert_eq!(kinds[0], "comment.created");
+    assert!(kinds[1].starts_with("claim."), "{kinds:?}");
 }

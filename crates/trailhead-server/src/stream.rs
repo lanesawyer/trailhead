@@ -88,14 +88,7 @@ pub async fn events(
         ctx,
         after,
         task: q.task,
-        kinds: q
-            .kinds
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|k| !k.is_empty())
-            .map(String::from)
-            .collect(),
+        kinds: crate::routes::split_list(q.kinds.as_deref()),
         buffered: VecDeque::new(),
     };
     let stream = futures_util::stream::unfold(cursor, |mut c| async move {

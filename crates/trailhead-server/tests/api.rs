@@ -419,3 +419,21 @@ async fn idempotency_keys_belong_to_the_token() {
     assert!(b.headers.get("idempotent-replayed").is_none());
     assert_ne!(a.body["key"], b.body["key"]);
 }
+
+#[tokio::test]
+async fn task_list_sorts_and_pages_and_event_list_filters_kinds() {
+    let api = Api::new().await;
+    api.seed().await;
+    for title in ["a", "b", "c"] {
+        let r = api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": title}))).await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    }
+    let r = api.as_human("GET", "/v1/tasks?sort=-created_at&limit=2&offset=1&fields=key", None).await;
+    assert_eq!(r.body, json!([{"key": "AUTH-2"}, {"key": "AUTH-1"}]));
+    let r = api.as_human("GET", "/v1/tasks?sort=sideways", None).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+
+    let r = api.as_human("GET", "/v1/events?kinds=project.,nope&limit=1", None).await;
+    let kinds: Vec<&str> = r.body.as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["project.created"]);
+}

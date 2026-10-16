@@ -77,6 +77,11 @@ fn parse_list<T: std::str::FromStr<Err = trailhead_core::Error>>(s: Option<&str>
         .map_err(Into::into)
 }
 
+/// A comma-separated list of free-form strings, blanks dropped.
+pub(crate) fn split_list(s: Option<&str>) -> Vec<String> {
+    s.unwrap_or_default().split(',').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect()
+}
+
 /// `?fields=key,title` trims each object in a list to the named fields.
 fn select_fields<T: Serialize>(items: &[T], fields: Option<&str>) -> ApiResult<Value> {
     let v = serde_json::to_value(items).map_err(trailhead_core::Error::from)?;
@@ -258,7 +263,13 @@ struct TaskListQuery {
     due_before: Option<String>,
     /// `key:value` pairs, comma-separated.
     metadata: Option<String>,
+    /// `priority` (the default: priority, then due date, then oldest), `updated_at` or
+    /// `created_at`; prefix `-` for newest first, e.g. `-updated_at`.
+    sort: Option<String>,
+    /// Defaults to 100.
     limit: Option<i64>,
+    /// Skip this many tasks, to page with `limit`.
+    offset: Option<i64>,
     fields: Option<String>,
 }
 
@@ -287,7 +298,9 @@ async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<TaskListQuery>
         parent: q.parent,
         due_before: parse_opt_time(q.due_before.as_deref())?,
         metadata,
+        sort: q.sort.as_deref().map(str::parse).transpose()?.unwrap_or_default(),
         limit: q.limit,
+        offset: q.offset,
     };
     let tasks = s.store.list_tasks(&ctx, filter).await?;
     Ok(Json(select_fields(&tasks, q.fields.as_deref())?))
@@ -666,6 +679,8 @@ struct EventQuery {
     /// Leave out notifications (`task.due_soon`, `task.overdue`).
     #[serde(default)]
     changes_only: bool,
+    /// Comma-separated kind prefixes, e.g. `claim.,comment.created`. Applied before `limit`.
+    kinds: Option<String>,
 }
 
 #[utoipa::path(
@@ -683,6 +698,7 @@ async fn list_events(State(s): S, Auth(ctx): Auth, Query(q): Query<EventQuery>) 
         newest_first: q.newest_first,
         include_archived: false,
         changes_only: q.changes_only,
+        kinds: split_list(q.kinds.as_deref()),
     };
     Ok(Json(json!(s.store.list_events(&ctx, filter).await?)))
 }

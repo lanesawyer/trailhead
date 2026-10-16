@@ -28,7 +28,7 @@ pub use model::*;
 pub use projects::{NewProject, ProjectPatch};
 pub use reminders::{DEFAULT_REMINDER_WINDOW, DUE_SOON, OVERDUE};
 pub use store::{Clock, Ctx, Store};
-pub use tasks::{NewTask, TaskDetail, TaskFilter, TaskPatch};
+pub use tasks::{NewTask, TaskDetail, TaskFilter, TaskPatch, TaskSort};
 pub use tokens::{Principal, Token, TokenOptions};
 pub use undo::{Reverted, Skipped, UndoReport};
 pub use webhooks::{MAX_FAILURES as WEBHOOK_MAX_FAILURES, Webhook, WebhookDelivery, webhook_signature};

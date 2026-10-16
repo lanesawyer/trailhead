@@ -194,7 +194,48 @@ pub struct TaskFilter {
     pub due_before: Option<OffsetDateTime>,
     /// `(path, value)` pairs matched against `metadata` as text, e.g. `("team", "web")`.
     pub metadata: Vec<(String, String)>,
+    pub sort: TaskSort,
     pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Order for [`Store::list_tasks`]. Parses from `priority`, `updated_at`,
+/// `created_at`, with a leading `-` for newest first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TaskSort {
+    /// Priority, then due date (undated last), then oldest first.
+    #[default]
+    Priority,
+    UpdatedAt,
+    UpdatedAtDesc,
+    CreatedAt,
+    CreatedAtDesc,
+}
+
+impl TaskSort {
+    fn order_by(self) -> &'static str {
+        match self {
+            TaskSort::Priority => "priority, due_at IS NULL, due_at, created_at, id",
+            TaskSort::UpdatedAt => "updated_at, id",
+            TaskSort::UpdatedAtDesc => "updated_at DESC, id DESC",
+            TaskSort::CreatedAt => "created_at, id",
+            TaskSort::CreatedAtDesc => "created_at DESC, id DESC",
+        }
+    }
+}
+
+impl std::str::FromStr for TaskSort {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "priority" => Ok(TaskSort::Priority),
+            "updated_at" => Ok(TaskSort::UpdatedAt),
+            "-updated_at" => Ok(TaskSort::UpdatedAtDesc),
+            "created_at" => Ok(TaskSort::CreatedAt),
+            "-created_at" => Ok(TaskSort::CreatedAtDesc),
+            _ => Err(Error::Invalid(format!("unknown sort: {s}"))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -456,11 +497,9 @@ impl Store {
             let list = filter.statuses.iter().map(|s| format!("'{}'", s.as_str())).collect::<Vec<_>>().join(", ");
             sql.push_str(&format!(" AND status IN ({list})"));
         }
-        push(
-            &mut sql,
-            " ORDER BY priority, due_at IS NULL, due_at, created_at LIMIT ?",
-            filter.limit.unwrap_or(100).into(),
-        );
+        sql.push_str(&format!(" ORDER BY {}", filter.sort.order_by()));
+        push(&mut sql, " LIMIT ?", filter.limit.unwrap_or(100).into());
+        push(&mut sql, " OFFSET ?", filter.offset.unwrap_or(0).into());
         collect_tasks(conn.query(&sql, params).await?).await
     }
 
