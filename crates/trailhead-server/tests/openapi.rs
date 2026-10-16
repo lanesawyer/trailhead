@@ -120,3 +120,14 @@ async fn writes_document_idempotency_keys() {
     let get = &doc["paths"]["/v1/ready"]["get"];
     assert!(get["parameters"].as_array().is_none_or(|p| p.iter().all(|p| p["name"] != "Idempotency-Key")));
 }
+
+#[tokio::test]
+async fn task_list_schema_describes_included_claims() {
+    let doc = fetch_doc().await;
+    let schemas = &doc["components"]["schemas"];
+    let listed = serde_json::to_string(&schemas["ListedTask"]).unwrap();
+    assert!(listed.contains("#/components/schemas/Task"), "{listed}");
+    assert!(listed.contains("#/components/schemas/NamedClaim"), "{listed}");
+    let named = serde_json::to_string(&schemas["NamedClaim"]).unwrap();
+    assert!(named.contains("\"holder\"") && named.contains("#/components/schemas/Claim"), "{named}");
+}

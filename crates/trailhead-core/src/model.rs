@@ -181,7 +181,7 @@ pub struct Claim {
     pub on_behalf_of: Uuid,
     #[serde(with = "time::serde::rfc3339")]
     pub claimed_at: OffsetDateTime,
-    /// `None` for a claim that never expires: people's claims, unless they asked for a TTL.
+    /// `null` for a claim that never expires: people's claims, unless they asked for a TTL.
     #[serde(with = "time::serde::rfc3339::option")]
     pub expires_at: Option<OffsetDateTime>,
 }

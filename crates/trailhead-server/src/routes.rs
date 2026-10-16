@@ -277,7 +277,7 @@ struct TaskListQuery {
 
 #[utoipa::path(
     get, path = "/v1/tasks", tag = "tasks", params(TaskListQuery),
-    responses((status = 200, description = "Tasks; trimmed to the requested `fields` if set", body = Vec<Task>))
+    responses((status = 200, description = "Tasks; trimmed to the requested `fields` if set", body = Vec<crate::openapi::ListedTask>))
 )]
 async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<TaskListQuery>) -> ApiResult<Json<Value>> {
     let metadata = q

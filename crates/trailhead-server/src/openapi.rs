@@ -39,6 +39,16 @@ pub const ERROR_CODES: &[&str] = &[
     "internal",
 ];
 
+/// A task in `GET /v1/tasks`. `claim` is present only with `include=claim`.
+#[derive(Serialize, ToSchema)]
+#[allow(dead_code, reason = "schema only; the handler adds claim to the JSON")]
+pub struct ListedTask {
+    #[serde(flatten)]
+    task: trailhead_core::Task,
+    /// With `include=claim`: the live claim, or `null` if the task is unclaimed.
+    claim: Option<trailhead_core::NamedClaim>,
+}
+
 /// The error envelope every failed request returns.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
