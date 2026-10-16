@@ -39,7 +39,7 @@ pub const ERROR_CODES: &[&str] = &[
     "internal",
 ];
 
-/// A task in `GET /v1/tasks`. `claim` is present only with `include=claim`.
+/// A task in `GET /v1/tasks`. `claim`, `open_questions` and `last_handoff` are present only when named in `include`.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code, reason = "schema only; the handler adds claim to the JSON")]
 pub struct ListedTask {
@@ -47,6 +47,10 @@ pub struct ListedTask {
     task: trailhead_core::Task,
     /// With `include=claim`: the live claim, or `null` if the task is unclaimed.
     claim: Option<trailhead_core::NamedClaim>,
+    /// With `include=open_questions`: unresolved `question` comments, oldest first.
+    open_questions: Option<Vec<trailhead_core::Comment>>,
+    /// With `include=last_handoff`: the newest `handoff` comment, or `null`.
+    last_handoff: Option<trailhead_core::Comment>,
 }
 
 /// The error envelope every failed request returns.

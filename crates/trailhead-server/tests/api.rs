@@ -479,3 +479,38 @@ async fn search_hits_carry_where_they_matched() {
     let r = api.as_human("GET", "/v1/search?q=rotate&status=done", None).await;
     assert_eq!(r.body, json!([]));
 }
+
+#[tokio::test]
+async fn task_list_can_include_open_questions_and_last_handoff() {
+    let api = Api::new().await;
+    api.seed().await;
+    for title in ["asks", "quiet"] {
+        api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": title}))).await;
+    }
+    let post = async |kind: &str, body: &str| {
+        let r = api.as_human("POST", "/v1/tasks/AUTH-1/comments", Some(json!({"kind": kind, "body": body}))).await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+        r.body["id"].as_str().unwrap().to_string()
+    };
+    post("handoff", "first pass").await;
+    post("handoff", "second pass").await;
+    let answered = post("question", "which region?").await;
+    post("question", "which plan?").await;
+    let r = api.as_human("POST", &format!("/v1/comments/{answered}/resolve"), Some(json!({}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+
+    let r = api
+        .as_human(
+            "GET",
+            "/v1/tasks?status=open,needs_input&sort=created_at&fields=key&include=open_questions,last_handoff",
+            None,
+        )
+        .await;
+    let items = r.body.as_array().unwrap();
+    let questions: Vec<_> = items[0]["open_questions"].as_array().unwrap().iter().map(|c| c["body"].clone()).collect();
+    assert_eq!(questions, [json!("which plan?")]);
+    assert_eq!(items[0]["last_handoff"]["body"], "second pass");
+    assert_eq!(items[1]["open_questions"], json!([]));
+    assert!(items[1]["last_handoff"].is_null());
+    assert!(items[0].get("claim").is_none());
+}

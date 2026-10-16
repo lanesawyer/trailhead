@@ -271,7 +271,9 @@ struct TaskListQuery {
     /// Skip this many tasks, to page with `limit`.
     offset: Option<i64>,
     fields: Option<String>,
-    /// `claim` adds each task's live claim (`null` if unclaimed), with the holder's name as `holder`.
+    /// Comma-separated extras per task: `claim` (the live claim or `null`, with the holder's
+    /// name as `holder`), `open_questions` (unresolved `question` comments, oldest first) and
+    /// `last_handoff` (the newest `handoff` comment or `null`).
     include: Option<String>,
 }
 
@@ -304,20 +306,27 @@ async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<TaskListQuery>
         limit: q.limit,
         offset: q.offset,
     };
-    let mut with_claims = false;
-    for inc in split_list(q.include.as_deref()) {
-        match inc.as_str() {
-            "claim" => with_claims = true,
-            other => return Err(invalid(format!("unknown include: {other}"))),
-        }
+    let includes = split_list(q.include.as_deref());
+    if let Some(other) = includes.iter().find(|i| !["claim", "open_questions", "last_handoff"].contains(&i.as_str())) {
+        return Err(invalid(format!("unknown include: {other}")));
     }
+    let wants = |name: &str| includes.iter().any(|i| i == name);
     let tasks = s.store.list_tasks(&ctx, filter).await?;
     let mut out = select_fields(&tasks, q.fields.as_deref())?;
-    if with_claims {
-        let mut claims = s.store.live_claims(&ctx, &tasks.iter().map(|t| t.id).collect::<Vec<_>>()).await?;
-        if let Value::Array(items) = &mut out {
-            for (item, task) in items.iter_mut().zip(&tasks) {
-                item["claim"] = json!(claims.remove(&task.id));
+    let ids: Vec<_> = tasks.iter().map(|t| t.id).collect();
+    let mut claims = if wants("claim") { Some(s.store.live_claims(&ctx, &ids).await?) } else { None };
+    let mut questions = if wants("open_questions") { Some(s.store.open_questions(&ctx, &ids).await?) } else { None };
+    let mut handoffs = if wants("last_handoff") { Some(s.store.last_handoffs(&ctx, &ids).await?) } else { None };
+    if let Value::Array(items) = &mut out {
+        for (item, task) in items.iter_mut().zip(&tasks) {
+            if let Some(c) = &mut claims {
+                item["claim"] = json!(c.remove(&task.id));
+            }
+            if let Some(q) = &mut questions {
+                item["open_questions"] = json!(q.remove(&task.id).unwrap_or_default());
+            }
+            if let Some(h) = &mut handoffs {
+                item["last_handoff"] = json!(h.remove(&task.id));
             }
         }
     }

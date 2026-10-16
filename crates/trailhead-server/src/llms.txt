@@ -62,7 +62,7 @@ A project's `reviewers` (set by a human: `PATCH /v1/projects/KEY {"reviewers": [
 ## Tasks
 
 - `POST /v1/tasks` `{"project", "title", "description"?, "priority"?, "due_at"?, "due_tz"?, "parent"?, "metadata"?, "blocked_by"?, "blocks"?, "source"?, "external_id"?}`. `source` and `external_id` go together; repeating a pair returns the existing task instead of a duplicate.
-- `GET /v1/tasks?project=&status=a,b&parent=&due_before=&metadata=k:v,k2:v2&sort=&limit=&offset=` defaults to everything not done or cancelled. `sort` is `priority` (default: priority, then due date, then oldest), `updated_at` or `created_at`, with `-` for newest first; page with `limit` (default 100) and `offset`. `include=claim` adds each task's live `claim` (`null` if unclaimed) with the holder's name as `holder`.
+- `GET /v1/tasks?project=&status=a,b&parent=&due_before=&metadata=k:v,k2:v2&sort=&limit=&offset=` defaults to everything not done or cancelled. `sort` is `priority` (default: priority, then due date, then oldest), `updated_at` or `created_at`, with `-` for newest first; page with `limit` (default 100) and `offset`. `include=` takes any of `claim` (the live claim or `null`, with the holder's name as `holder`), `open_questions` (unresolved questions, oldest first) and `last_handoff` (the newest handoff or `null`), so an inbox of `status=needs_input,in_review` is one request.
 - `GET /v1/tasks/KEY-1` returns `{task, claim, blocked_by, blocks, comments}`.
 - `PATCH /v1/tasks/KEY-1` takes any of `title`, `description`, `status`, `priority`, `due_at`, `due_tz`, `parent`, `metadata` (a JSON merge patch: `null` removes a key). `null` clears `due_at`, `due_tz` and `parent`.
 - `DELETE /v1/tasks/KEY-1` soft-deletes; undo restores it.

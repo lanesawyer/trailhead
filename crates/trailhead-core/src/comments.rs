@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use libsql::{Connection, Row};
 use uuid::Uuid;
 
@@ -146,6 +148,44 @@ pub struct NewComment {
 }
 
 impl Store {
+    /// Unresolved questions on these tasks, oldest first, keyed by task id.
+    pub async fn open_questions(&self, ctx: &Ctx, task_ids: &[Uuid]) -> Result<HashMap<Uuid, Vec<Comment>>> {
+        let sql = format!(
+            "SELECT {COMMENT_COLS} FROM comments WHERE workspace_id = ?1 AND task_id IN (SELECT value FROM json_each(?2))
+               AND kind = 'question' AND resolved_at IS NULL AND deleted_at IS NULL
+             ORDER BY created_at, rowid"
+        );
+        let mut out: HashMap<Uuid, Vec<Comment>> = HashMap::new();
+        for c in self.comments_on(ctx, &sql, task_ids).await? {
+            out.entry(c.task_id).or_default().push(c);
+        }
+        Ok(out)
+    }
+
+    /// The newest handoff on each of these tasks, keyed by task id.
+    pub async fn last_handoffs(&self, ctx: &Ctx, task_ids: &[Uuid]) -> Result<HashMap<Uuid, Comment>> {
+        let sql = format!(
+            "SELECT {COMMENT_COLS} FROM comments WHERE workspace_id = ?1 AND task_id IN (SELECT value FROM json_each(?2))
+               AND kind = 'handoff' AND deleted_at IS NULL
+             ORDER BY created_at DESC, rowid DESC"
+        );
+        let mut out = HashMap::new();
+        for c in self.comments_on(ctx, &sql, task_ids).await? {
+            out.entry(c.task_id).or_insert(c);
+        }
+        Ok(out)
+    }
+
+    async fn comments_on(&self, ctx: &Ctx, sql: &str, task_ids: &[Uuid]) -> Result<Vec<Comment>> {
+        let ids = serde_json::to_string(&task_ids.iter().map(Uuid::to_string).collect::<Vec<_>>())?;
+        let mut rows = self.reader()?.query(sql, libsql::params![ctx.workspace_id.to_string(), ids]).await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(comment_from_row(&row)?);
+        }
+        Ok(out)
+    }
+
     /// Adds a comment. A `question` moves the task to `needs_input`, which takes it
     /// out of the ready queue until every question is resolved.
     pub async fn add_comment(&self, ctx: &Ctx, task: &str, new: NewComment) -> Result<Comment> {
