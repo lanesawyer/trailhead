@@ -3429,6 +3429,7 @@ dependencies = [
  "trailhead-core",
  "trailhead-server",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

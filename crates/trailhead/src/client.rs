@@ -339,6 +339,27 @@ fn server_copy(paths: &Paths, exe: &std::path::Path) -> Result<std::path::PathBu
     Ok(copy)
 }
 
+/// A Windows child inherits every inheritable handle, not just the ones it's
+/// given as stdio, so the server would hold this process's stdout and stderr
+/// open for its whole life and anything capturing this command's output (a
+/// script, a test) would wait for the server to exit. Our own std handles
+/// never need to be inherited: `Stdio::inherit` duplicates them for the child.
+#[cfg(windows)]
+fn keep_std_handles_from_children() {
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle has no preconditions, and SetHandleInformation only
+        // changes a flag on a handle this process owns (or fails harmlessly).
+        unsafe {
+            let h = GetStdHandle(id);
+            if !h.is_null() && h != INVALID_HANDLE_VALUE {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
 /// after this command exits.
 pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()> {
@@ -362,6 +383,8 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console, and Ctrl-C in this one doesn't reach it.
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0000_0008 | 0x0000_0200);
+    #[cfg(windows)]
+    keep_std_handles_from_children();
     cmd.spawn().context("couldn't start the local server")?;
     for _ in 0..100 {
         if health(http, base).await.is_some() {
