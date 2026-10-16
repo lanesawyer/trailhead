@@ -66,7 +66,7 @@ A project's `reviewers` (set by a human: `PATCH /v1/projects/KEY {"reviewers": [
 - `GET /v1/tasks/KEY-1` returns `{task, claim, blocked_by, blocks, comments}`.
 - `PATCH /v1/tasks/KEY-1` takes any of `title`, `description`, `status`, `priority`, `due_at`, `due_tz`, `parent`, `metadata` (a JSON merge patch: `null` removes a key). `null` clears `due_at`, `due_tz` and `parent`.
 - `DELETE /v1/tasks/KEY-1` soft-deletes; undo restores it.
-- `GET /v1/search?q=` searches titles, descriptions and comments.
+- `GET /v1/search?q=&project=&status=a,b&limit=` searches titles, descriptions and comments, open work first. Each hit has `match`: `{field, snippet, comment_id}`, where `field` is the first of `title`, `description` or `comment` that matched and `snippet` is plain text around the match.
 
 ## Concurrency
 

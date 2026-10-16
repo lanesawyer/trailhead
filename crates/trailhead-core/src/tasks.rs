@@ -238,6 +238,45 @@ impl std::str::FromStr for TaskSort {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SearchFilter {
+    pub query: String,
+    pub project: Option<String>,
+    /// Empty means every status.
+    pub statuses: Vec<Status>,
+    pub limit: Option<i64>,
+}
+
+/// A search result: the task and where the query matched it.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SearchHit {
+    #[serde(flatten)]
+    pub task: Task,
+    #[serde(rename = "match")]
+    pub matched: SearchMatch,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SearchMatch {
+    /// The first of title, description or a comment that matched.
+    pub field: MatchField,
+    /// A short excerpt around the match, `…` where text was cut.
+    pub snippet: String,
+    /// The newest matching comment, when `field` is `comment`.
+    pub comment_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MatchField {
+    Title,
+    Description,
+    Comment,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TaskDetail {
@@ -542,22 +581,108 @@ impl Store {
 
     /// Full-text search over titles, descriptions and comments.
     pub async fn search(&self, ctx: &Ctx, query: &str, limit: Option<i64>) -> Result<Vec<Task>> {
+        let filter = SearchFilter { query: query.into(), limit, ..Default::default() };
+        Ok(self.search_hits(ctx, filter).await?.into_iter().map(|h| h.task).collect())
+    }
+
+    /// Full-text search over titles, descriptions and comments, open work first,
+    /// then most recently updated. Each hit says where it matched.
+    pub async fn search_hits(&self, ctx: &Ctx, filter: SearchFilter) -> Result<Vec<SearchHit>> {
         let conn = self.reader()?;
-        let q = fts_query(query);
+        let q = fts_query(&filter.query);
         if q.is_empty() {
             return Ok(Vec::new());
         }
+        let project_id = match &filter.project {
+            Some(p) => Some(find_project(&conn, ctx, p).await?.id.to_string()),
+            None => None,
+        };
+        let statuses = if filter.statuses.is_empty() {
+            String::new()
+        } else {
+            let list = filter.statuses.iter().map(|s| format!("'{}'", s.as_str())).collect::<Vec<_>>().join(", ");
+            format!(" AND t.status IN ({list})")
+        };
         let sql = format!(
-            "SELECT {TASK_COLS} FROM tasks t WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND {} AND (
+            "SELECT {TASK_COLS} FROM tasks t WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND {}{statuses}
+               AND (?4 IS NULL OR t.project_id = ?4) AND (
                  t.rowid IN (SELECT rowid FROM tasks_fts WHERE tasks_fts MATCH ?2)
                  OR t.id IN (SELECT c.task_id FROM comments c WHERE c.deleted_at IS NULL
                              AND c.rowid IN (SELECT rowid FROM comments_fts WHERE comments_fts MATCH ?2)))
              ORDER BY t.status IN ('done', 'cancelled'), t.updated_at DESC LIMIT ?3",
             ctx.scope_sql("t.project_id")
         );
-        let rows = conn.query(&sql, libsql::params![ctx.workspace_id.to_string(), q, limit.unwrap_or(20)]).await?;
-        collect_tasks(rows).await
+        let rows = conn
+            .query(
+                &sql,
+                libsql::params![ctx.workspace_id.to_string(), q.clone(), filter.limit.unwrap_or(20), project_id],
+            )
+            .await?;
+        let tasks = collect_tasks(rows).await?;
+        let ids = serde_json::to_string(&tasks.iter().map(|t| t.id.to_string()).collect::<Vec<_>>())?;
+
+        // snippet() wraps matched terms in these markers, which tell us which column
+        // matched; they're stripped before the snippet goes out.
+        let mut matches: std::collections::HashMap<String, SearchMatch> = std::collections::HashMap::new();
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT t.id, snippet(tasks_fts, 0, '{MARK_ON}', '{MARK_OFF}', '…', 16),
+                            snippet(tasks_fts, 1, '{MARK_ON}', '{MARK_OFF}', '…', 16)
+                     FROM tasks_fts JOIN tasks t ON t.rowid = tasks_fts.rowid
+                     WHERE tasks_fts MATCH ?1 AND t.id IN (SELECT value FROM json_each(?2))"
+                ),
+                libsql::params![q.clone(), ids.clone()],
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let (id, title, description): (String, String, String) = (row.get(0)?, row.get(1)?, row.get(2)?);
+            let m = if title.contains(MARK_ON) {
+                SearchMatch { field: MatchField::Title, snippet: unmark(&title), comment_id: None }
+            } else {
+                SearchMatch { field: MatchField::Description, snippet: unmark(&description), comment_id: None }
+            };
+            matches.insert(id, m);
+        }
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT c.task_id, c.id, snippet(comments_fts, 0, '{MARK_ON}', '{MARK_OFF}', '…', 16)
+                     FROM comments_fts JOIN comments c ON c.rowid = comments_fts.rowid
+                     WHERE comments_fts MATCH ?1 AND c.deleted_at IS NULL
+                       AND c.task_id IN (SELECT value FROM json_each(?2))
+                     ORDER BY c.created_at DESC"
+                ),
+                libsql::params![q, ids],
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let task_id: String = row.get(0)?;
+            matches.entry(task_id).or_insert(SearchMatch {
+                field: MatchField::Comment,
+                snippet: unmark(&row.get::<String>(2)?),
+                comment_id: Some(get_uuid(&row, 1)?),
+            });
+        }
+        Ok(tasks
+            .into_iter()
+            .map(|task| {
+                let matched = matches.remove(&task.id.to_string()).unwrap_or_else(|| SearchMatch {
+                    field: MatchField::Title,
+                    snippet: task.title.clone(),
+                    comment_id: None,
+                });
+                SearchHit { task, matched }
+            })
+            .collect())
     }
+}
+
+const MARK_ON: char = '\u{2}';
+const MARK_OFF: char = '\u{3}';
+
+fn unmark(s: &str) -> String {
+    s.replace([MARK_ON, MARK_OFF], "")
 }
 
 /// Quotes each term so user input can't be parsed as FTS5 syntax. Terms are ANDed;

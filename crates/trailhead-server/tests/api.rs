@@ -465,3 +465,17 @@ async fn task_list_can_include_claims_with_holder_names() {
     let r = api.as_human("GET", "/v1/tasks?include=everything", None).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn search_hits_carry_where_they_matched() {
+    let api = Api::new().await;
+    api.seed().await;
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "Rotate keys"}))).await;
+    let r = api.as_human("GET", "/v1/search?q=rotate&project=AUTH&status=open&fields=key", None).await;
+    assert_eq!(
+        r.body,
+        json!([{"key": "AUTH-1", "match": {"field": "title", "snippet": "Rotate keys", "comment_id": null}}])
+    );
+    let r = api.as_human("GET", "/v1/search?q=rotate&status=done", None).await;
+    assert_eq!(r.body, json!([]));
+}

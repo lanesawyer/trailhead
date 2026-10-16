@@ -4,8 +4,8 @@ use common::Env;
 use serde_json::json;
 use time::Duration;
 use trailhead_core::{
-    CommentKind, Error, EventFilter, NewComment, NewProject, NewTask, ProjectPatch, Status, TaskFilter, TaskPatch,
-    TaskSort,
+    CommentKind, Error, EventFilter, MatchField, NewComment, NewProject, NewTask, ProjectPatch, SearchFilter, Status,
+    TaskFilter, TaskPatch, TaskSort,
 };
 
 fn status(s: Status) -> TaskPatch {
@@ -668,4 +668,50 @@ async fn list_events_filters_by_project_and_pages_back() {
         env.store.list_events(&env.human, EventFilter { project: Some("NOPE".into()), ..Default::default() }).await,
         Err(Error::NotFound(_))
     ));
+}
+
+#[tokio::test]
+async fn search_filters_and_says_where_it_matched() {
+    let env = Env::new().await;
+    env.store
+        .create_project(&env.human, NewProject { key: "WEB".into(), name: "Web".into(), ..Default::default() })
+        .await
+        .unwrap();
+    let titled = env.task("Rotate the signing keys").await;
+    let described = env
+        .task_with(NewTask {
+            title: "Housekeeping".into(),
+            description: "Before launch we must rotate every credential the old vendor saw.".into(),
+            ..Default::default()
+        })
+        .await;
+    let commented =
+        env.task_with(NewTask { project: "WEB".into(), title: "Login page".into(), ..Default::default() }).await;
+    let note = env
+        .store
+        .add_comment(&env.human, &commented.key, comment(CommentKind::Note, "remember to rotate the cookie secret"))
+        .await
+        .unwrap();
+    env.store.update_task(&env.human, &titled.key, status(Status::Done), None).await.unwrap();
+
+    let search = async |project: Option<&str>, statuses: Vec<Status>| {
+        let filter = SearchFilter { query: "rotate".into(), project: project.map(Into::into), statuses, limit: None };
+        env.store.search_hits(&env.human, filter).await.unwrap()
+    };
+    let hits = search(None, vec![]).await;
+    let by_key = |k: &str| hits.iter().find(|h| h.task.key == k).unwrap();
+    assert_eq!(hits.last().unwrap().task.key, titled.key, "finished work sorts last");
+    assert_eq!(by_key(&titled.key).matched.field, MatchField::Title);
+    assert_eq!(by_key(&described.key).matched.field, MatchField::Description);
+    assert!(by_key(&described.key).matched.snippet.contains("rotate every credential"));
+    let c = &by_key(&commented.key).matched;
+    assert_eq!(c.field, MatchField::Comment);
+    assert_eq!(c.comment_id, Some(note.id));
+    assert_eq!(c.snippet, "remember to rotate the cookie secret");
+
+    let web: Vec<_> = search(Some("WEB"), vec![]).await.into_iter().map(|h| h.task.key).collect();
+    assert_eq!(web, std::slice::from_ref(&commented.key));
+    let open: Vec<_> = search(None, vec![Status::Open]).await.into_iter().map(|h| h.task.key).collect();
+    assert_eq!(open.len(), 2);
+    assert!(!open.contains(&titled.key));
 }

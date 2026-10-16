@@ -11,8 +11,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
     Agent, Claim, ClaimResult, Comment, CommentKind, Dependency, Error, Event, EventFilter, HeldClaim, NewComment,
-    NewProject, NewTask, Principal, Project, ProjectPatch, ProjectStatus, Status, Task, TaskDetail, TaskFilter,
-    TaskPatch, Token, TokenOptions, UndoReport, Webhook, WebhookDelivery,
+    NewProject, NewTask, Principal, Project, ProjectPatch, ProjectStatus, SearchFilter, SearchHit, Status, Task,
+    TaskDetail, TaskFilter, TaskPatch, Token, TokenOptions, UndoReport, Webhook, WebhookDelivery,
 };
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -669,17 +669,29 @@ async fn ready(State(s): S, Auth(ctx): Auth, Query(q): Query<ReadyQuery>) -> Api
 #[into_params(parameter_in = Query)]
 struct SearchQuery {
     q: String,
+    project: Option<String>,
+    /// Comma-separated. Defaults to every status, open work first.
+    status: Option<String>,
     limit: Option<i64>,
     fields: Option<String>,
 }
 
 #[utoipa::path(
     get, path = "/v1/search", tag = "tasks", params(SearchQuery),
-    responses((status = 200, description = "Matching tasks; trimmed to `fields` if set", body = Vec<Task>))
+    responses((status = 200, description = "Matching tasks, each with `match` saying where it matched; tasks are trimmed to `fields` if set", body = Vec<SearchHit>))
 )]
 async fn search(State(s): S, Auth(ctx): Auth, Query(q): Query<SearchQuery>) -> ApiResult<Json<Value>> {
-    let tasks = s.store.search(&ctx, &q.q, q.limit).await?;
-    Ok(Json(select_fields(&tasks, q.fields.as_deref())?))
+    let filter =
+        SearchFilter { query: q.q, project: q.project, statuses: parse_list(q.status.as_deref())?, limit: q.limit };
+    let hits = s.store.search_hits(&ctx, filter).await?;
+    let tasks: Vec<_> = hits.iter().map(|h| &h.task).collect();
+    let mut out = select_fields(&tasks, q.fields.as_deref())?;
+    if let Value::Array(items) = &mut out {
+        for (item, hit) in items.iter_mut().zip(&hits) {
+            item["match"] = json!(hit.matched);
+        }
+    }
+    Ok(Json(out))
 }
 
 #[derive(Deserialize, IntoParams)]
