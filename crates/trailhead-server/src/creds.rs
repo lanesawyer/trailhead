@@ -103,7 +103,7 @@ mod tests {
         let a = CredStore { config_dir: "/tmp/a".into(), keyring: true };
         let b = CredStore { config_dir: "/tmp/b".into(), keyring: true };
         assert_ne!(a.service(), b.service());
-        assert_eq!(a.service(), "trailhead:/tmp/a");
+        assert_eq!(a.service(), format!("trailhead:{}", std::path::absolute("/tmp/a").unwrap().display()));
     }
 
     #[test]
