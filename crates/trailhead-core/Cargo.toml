@@ -3,6 +3,12 @@ name = "trailhead-core"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Domain core for Trailhead: schema, claims, ready queue, event log and undo"
 
 [dependencies]

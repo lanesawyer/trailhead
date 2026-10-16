@@ -4,6 +4,12 @@ description = "Trailhead's HTTP server: REST under /v1"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 trailhead-core = { workspace = true, features = ["openapi"] }

@@ -4,6 +4,12 @@ description = "Trailhead CLI and server binary"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 trailhead-core.workspace = true
