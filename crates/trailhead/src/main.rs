@@ -179,8 +179,10 @@ enum Cmd {
         #[arg(long)]
         to: Option<String>,
     },
-    /// Resolve a question, optionally answering it.
+    /// Resolve a question, optionally answering it. Takes the task key (when it
+    /// has one open question) or the question's comment id.
     Answer {
+        #[arg(value_name = "TASK_OR_COMMENT_ID")]
         comment_id: String,
         body: Option<String>,
     },
@@ -555,7 +557,31 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Handoff { task, body } => comment(&c, &task, "handoff", &body, None, json).await?,
         Cmd::Ask { task, body, to } => comment(&c, &task, "question", &body, to, json).await?,
         Cmd::Answer { comment_id, body } => {
-            let v = c.post(&format!("comments/{comment_id}/resolve"), json!({ "answer": body })).await?;
+            let id = match uuid::Uuid::parse_str(&comment_id) {
+                Ok(id) => id.to_string(),
+                Err(_) => {
+                    let detail = c.get(&format!("tasks/{comment_id}"), &[]).await?;
+                    let open: Vec<&Value> = detail["comments"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|q| q["kind"] == "question" && q["resolved_at"].is_null())
+                        .collect();
+                    match open.as_slice() {
+                        [q] => s(q, "id").to_string(),
+                        [] => bail!("{comment_id} has no open question"),
+                        many => bail!(
+                            "{comment_id} has {} open questions; answer one by id:\n{}",
+                            many.len(),
+                            many.iter()
+                                .map(|q| format!("  {}  {}", s(q, "id"), s(q, "body")))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        ),
+                    }
+                }
+            };
+            let v = c.post(&format!("comments/{id}/resolve"), json!({ "answer": body })).await?;
             show(v, &|_| "resolved".into());
         }
         Cmd::Block { blocker, blocked } => {
