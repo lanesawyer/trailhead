@@ -68,9 +68,14 @@ pub struct ServerInfo {
     pub started_at: time::OffsetDateTime,
 }
 
+/// Set by the CLI when it runs the server from a copy of its binary (on Windows,
+/// so the installed one can still be replaced): the installed binary's path,
+/// which the server reports as its `exe` so upgrades are still noticed.
+pub const SERVER_EXE_ENV: &str = "TRAILHEAD_SERVER_EXE";
+
 impl ServerInfo {
     pub fn current(db: Option<PathBuf>) -> Self {
-        let exe = std::env::current_exe().ok();
+        let exe = std::env::var_os(SERVER_EXE_ENV).map(PathBuf::from).or_else(|| std::env::current_exe().ok());
         ServerInfo {
             version: env!("CARGO_PKG_VERSION").into(),
             pid: std::process::id(),

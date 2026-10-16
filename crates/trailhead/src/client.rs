@@ -322,6 +322,23 @@ fn signal_stop(pid: u32) -> Result<bool> {
     Ok(status.success())
 }
 
+/// Windows can't replace a running executable, so a server running from the
+/// installed binary would make `cargo install` fail. Run it from a copy in the
+/// data directory instead, clearing out copies no server is using any more.
+#[cfg(windows)]
+fn server_copy(paths: &Paths, exe: &std::path::Path) -> Result<std::path::PathBuf> {
+    let dir = paths.data_dir.join("bin");
+    std::fs::create_dir_all(&dir)?;
+    for old in std::fs::read_dir(&dir)?.flatten() {
+        // A copy a running server still uses is locked; leave it for next time.
+        let _ = std::fs::remove_file(old.path());
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let copy = dir.join(format!("trailhead-server-{nanos}.exe"));
+    std::fs::copy(exe, &copy).context("couldn't copy the server binary")?;
+    Ok(copy)
+}
+
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
 /// after this command exits.
 pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()> {
@@ -329,8 +346,17 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     std::fs::create_dir_all(&paths.data_dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.server_log())?;
     let bind = format!("{}:{}", base.host_str().unwrap_or("127.0.0.1"), base.port_or_known_default().unwrap_or(7241));
-    let mut cmd = std::process::Command::new(std::env::current_exe()?);
-    cmd.args(["serve", "--bind", &bind]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
+    let exe = std::env::current_exe()?;
+    #[cfg(windows)]
+    let program = server_copy(&paths, &exe)?;
+    #[cfg(not(windows))]
+    let program = exe.clone();
+    let mut cmd = std::process::Command::new(program);
+    cmd.env(trailhead_server::SERVER_EXE_ENV, &exe)
+        .args(["serve", "--bind", &bind])
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console, and Ctrl-C in this one doesn't reach it.

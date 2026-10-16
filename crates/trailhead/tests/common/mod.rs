@@ -27,12 +27,7 @@ impl Instance {
         std::fs::copy(env!("CARGO_BIN_EXE_trailhead"), &staged).unwrap();
         // Windows keeps the source's mtime on copy, and an upgrade has to look newer.
         std::fs::File::options().write(true).open(&staged).unwrap().set_modified(SystemTime::now()).unwrap();
-        // Windows can't replace a running executable, but it can move one aside.
-        #[cfg(windows)]
-        if self.exe.exists() {
-            let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos();
-            std::fs::rename(&self.exe, self.dir.path().join(format!("trailhead.old-{nanos}.exe"))).unwrap();
-        }
+        // On Windows this only works because the server runs from a copy.
         std::fs::rename(&staged, &self.exe).unwrap();
     }
 
