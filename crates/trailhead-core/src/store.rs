@@ -25,15 +25,25 @@ pub struct Ctx {
     pub batch_id: Uuid,
     /// Projects this context may see and change, from its token. `None` means all.
     pub projects: Option<Vec<Uuid>>,
+    /// The authenticating token's requests per minute, so tokens it issues to
+    /// sub-agents can't exceed it. `None` means unlimited.
+    pub rate_limit: Option<i64>,
 }
 
 impl Ctx {
     pub fn user(workspace_id: Uuid, user_id: Uuid) -> Self {
-        Ctx { workspace_id, user_id, agent_id: None, batch_id: Uuid::now_v7(), projects: None }
+        Ctx { workspace_id, user_id, agent_id: None, batch_id: Uuid::now_v7(), projects: None, rate_limit: None }
     }
 
     pub fn agent(workspace_id: Uuid, user_id: Uuid, agent_id: Uuid) -> Self {
-        Ctx { workspace_id, user_id, agent_id: Some(agent_id), batch_id: Uuid::now_v7(), projects: None }
+        Ctx {
+            workspace_id,
+            user_id,
+            agent_id: Some(agent_id),
+            batch_id: Uuid::now_v7(),
+            projects: None,
+            rate_limit: None,
+        }
     }
 
     /// Same actor, fresh batch.

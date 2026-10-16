@@ -169,3 +169,21 @@ async fn idempotency_keys_make_mcp_retries_safe() {
     assert!(!err, "{out}");
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn one_connection_serves_several_registered_sub_agents() {
+    let s = start().await;
+    let client = connect(&s.url, &s.agent).await;
+    let (err, out) = call(&client, "ready", json!({"as_agent": "researcher"})).await;
+    assert!(err && out.starts_with("error[not_found]"), "unregistered names are refused: {out}");
+
+    let (err, out) = call(&client, "register_agent", json!({"name": "researcher"})).await;
+    assert!(!err && out.starts_with("registered claude/researcher"), "{out}");
+    let (err, out) = call(&client, "claim", json!({"task": "AUTH-1", "as_agent": "researcher"})).await;
+    assert!(!err, "{out}");
+    let (_, out) = call(&client, "my_claims", json!({"as_agent": "researcher"})).await;
+    assert!(out.starts_with("AUTH-1"), "{out}");
+    let (_, out) = call(&client, "my_claims", json!({})).await;
+    assert_eq!(out, "you hold no claims", "the parent doesn't hold its sub-agent's claim");
+    client.cancel().await.unwrap();
+}

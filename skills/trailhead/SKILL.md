@@ -21,6 +21,7 @@ You reach it through the `trailhead` MCP tools if they are connected, otherwise 
 - You are an agent acting for a person. Act as your own agent identity, never as the human: CLI `--as <agent>` (or `TRAILHEAD_AGENT`), or a `.trailhead.toml` with `agent = "<name>"` at or above the working directory. Never pass `--as-me` or use the human's token.
 - MCP tools already act as whichever agent the server connection was configured with.
 - If you have no agent identity, ask the human to run `trailhead agent add <name>`. Don't borrow another agent's.
+- If you start workers or share an MCP connection with other agents, give each its own sub-agent: `trailhead agent add <name>` run as yourself makes `<you>/<name>` (then `--as <you>/<name>`); over MCP, `register_agent` once, then `as_agent` on every call.
 - `.trailhead.toml` can also set `project = "KEY"`, the default `-p` for `ready`, `ls` and `add`.
 
 ## The loop

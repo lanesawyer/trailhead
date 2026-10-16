@@ -36,7 +36,7 @@ const BRIEF_PREFIX: &str = "trailhead://projects/";
 const INSTRUCTIONS: &str = "Trailhead is a shared task engine. Workflow: `ready` to see what's next, \
 read the project's brief resource, `claim` a task before working on it (the last handoff comes back \
 with the claim), `renew` on long work, `comment` with kind `decision` for choices and `question` for \
-anything only a human can answer, and finish with `update_task` status `done` and a `handoff`. File follow-ups with `create_task` instead of widening scope.";
+anything only a human can answer, and finish with `update_task` status `done` and a `handoff`. File follow-ups with `create_task` instead of widening scope. If several of your agents share this connection, give each its own identity: `register_agent` once per agent, then pass `as_agent` on every call.";
 
 pub fn service(state: Arc<AppState>) -> StreamableHttpService<TrailheadMcp, LocalSessionManager> {
     let config = StreamableHttpServerConfig::default().with_legacy_session_mode(false).with_json_response(true);
@@ -162,11 +162,25 @@ fn parse_time(s: &str) -> Result<OffsetDateTime, Error> {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct AsArgs {
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RegisterArgs {
+    /// The sub-agent's own name: letters, digits, '-' or '_'. It becomes `<you>/<name>`.
+    name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ReadyArgs {
     /// Project key, e.g. AUTH. Omit for every project.
     project: Option<String>,
     /// Defaults to 20.
     limit: Option<i64>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -178,12 +192,16 @@ pub struct ListArgs {
     /// Parent task key, to list subtasks.
     parent: Option<String>,
     limit: Option<i64>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskArg {
     /// Task key like AUTH-42, or its id.
     task: String,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
@@ -208,6 +226,9 @@ pub struct CreateArgs {
     /// result instead of doing it twice. Keys last 24 hours.
     #[serde(default, skip_serializing)]
     idempotency_key: Option<String>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    #[serde(default)]
+    as_agent: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -223,6 +244,8 @@ pub struct UpdateArgs {
     /// Posted as a `handoff` comment once the update succeeds: what changed, what's
     /// left, gotchas. Use it when finishing or stepping away.
     handoff: Option<String>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -230,6 +253,8 @@ pub struct ClaimArgs {
     task: String,
     /// Lease length in seconds. Defaults to the project's or workspace's TTL (30 minutes).
     ttl: Option<i64>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
@@ -245,6 +270,9 @@ pub struct CommentArgs {
     /// result instead of doing it twice. Keys last 24 hours.
     #[serde(default, skip_serializing)]
     idempotency_key: Option<String>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    #[serde(default)]
+    as_agent: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -253,18 +281,31 @@ pub struct ResolveArgs {
     comment_id: Uuid,
     /// Posted as a note addressed to whoever asked.
     answer: Option<String>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SearchArgs {
     query: String,
     limit: Option<i64>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
 }
 
 #[tool_router]
 impl TrailheadMcp {
     fn new(state: Arc<AppState>) -> Self {
         TrailheadMcp { state, tool_router: Self::tool_router() }
+    }
+
+    /// The caller's context, or one of its registered sub-agents' when `as_agent` is set.
+    async fn ctx_for(&self, parts: &Parts, as_agent: Option<&str>) -> trailhead_core::Result<Ctx> {
+        let ctx = ctx_of(parts).map_err(|_| Error::Unauthorized)?;
+        match as_agent.map(str::trim).filter(|n| !n.is_empty()) {
+            None => Ok(ctx),
+            Some(name) => self.state.store.sub_agent_ctx(&ctx, name).await,
+        }
     }
 
     async fn do_create_task(&self, ctx: &Ctx, a: CreateArgs) -> Result<CallToolResult, ErrorData> {
@@ -347,7 +388,7 @@ impl TrailheadMcp {
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<ReadyArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let tasks = attempt!(self.state.store.ready(&ctx, a.project.as_deref(), a.limit).await);
         text(task_list(&tasks, "nothing ready"))
     }
@@ -358,7 +399,7 @@ impl TrailheadMcp {
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<ListArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let statuses = attempt!(
             a.status
                 .as_deref()
@@ -374,13 +415,26 @@ impl TrailheadMcp {
         text(task_list(&tasks, "no tasks"))
     }
 
+    #[tool(
+        description = "Register a sub-agent named `<you>/<name>`, so work done as it (pass `as_agent` on any tool) is attributed to it. Each of your agents should have its own; names must be registered before use."
+    )]
+    async fn register_agent(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<RegisterArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = ctx_of(&parts)?;
+        let agent = attempt!(self.state.store.create_agent(&ctx, &a.name).await);
+        text(format!("registered {}; pass as_agent: {:?} to act as it", agent.name, a.name.trim()))
+    }
+
     #[tool(description = "A task with its claim, dependencies, description and comments.")]
     async fn show(
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<TaskArg>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         text(detail_text(&attempt!(self.state.store.task_detail(&ctx, &a.task).await)))
     }
 
@@ -390,7 +444,7 @@ impl TrailheadMcp {
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<CreateArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let key = a.idempotency_key.clone();
         let args = serde_json::to_vec(&a).unwrap_or_default();
         self.idempotent(&parts, &ctx, key, "create_task", &args, self.do_create_task(&ctx, a)).await
@@ -404,7 +458,7 @@ impl TrailheadMcp {
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<UpdateArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let status = attempt!(a.status.as_deref().map(str::parse::<Status>).transpose());
         let patch = TaskPatch {
             title: a.title,
@@ -427,7 +481,7 @@ impl TrailheadMcp {
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<ClaimArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let r = attempt!(self.state.store.claim(&ctx, &a.task, a.ttl).await);
         let mut out = format!(
             "{}\nclaimed until {}",
@@ -443,8 +497,12 @@ impl TrailheadMcp {
     #[tool(
         description = "Claims you currently hold and when they expire. Check this after a pause: a lapsed claim means someone else may own the task now."
     )]
-    async fn my_claims(&self, Extension(parts): Extension<Parts>) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+    async fn my_claims(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<AsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let held = attempt!(self.state.store.my_claims(&ctx).await);
         if held.is_empty() {
             return text("you hold no claims");
@@ -471,7 +529,7 @@ impl TrailheadMcp {
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<ClaimArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let c = attempt!(self.state.store.renew(&ctx, &a.task, a.ttl).await);
         text(format!("claimed until {}", c.expires_at.format(&Rfc3339).unwrap_or_default()))
     }
@@ -482,7 +540,7 @@ impl TrailheadMcp {
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<TaskArg>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         text(task_line(&attempt!(self.state.store.release(&ctx, &a.task).await)))
     }
 
@@ -492,7 +550,7 @@ impl TrailheadMcp {
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<CommentArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let key = a.idempotency_key.clone();
         let args = serde_json::to_vec(&a).unwrap_or_default();
         self.idempotent(&parts, &ctx, key, "comment", &args, self.do_comment(&ctx, a)).await
@@ -504,7 +562,7 @@ impl TrailheadMcp {
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<ResolveArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         attempt!(self.state.store.resolve_comment(&ctx, a.comment_id, a.answer).await);
         text("resolved")
     }
@@ -512,8 +570,12 @@ impl TrailheadMcp {
     #[tool(
         description = "Undo your own most recent change (everything from your last tool call that wrote something). Fails if someone changed the same thing since."
     )]
-    async fn undo_last(&self, Extension(parts): Extension<Parts>) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+    async fn undo_last(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<AsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let store = &self.state.store;
         let filter = EventFilter {
             actor_id: Some(ctx.actor_id()),
@@ -535,7 +597,7 @@ impl TrailheadMcp {
         Extension(parts): Extension<Parts>,
         Parameters(a): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = ctx_of(&parts)?;
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let tasks = attempt!(self.state.store.search(&ctx, &a.query, a.limit).await);
         text(task_list(&tasks, "no matches"))
     }

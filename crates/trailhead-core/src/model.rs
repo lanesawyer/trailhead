@@ -105,9 +105,16 @@ pub struct Agent {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub owner_user_id: Uuid,
+    /// Set for a sub-agent: the agent that created it. A sub-agent's name is
+    /// `<parent name>/<own name>`.
+    #[serde(default)]
+    pub parent_agent_id: Option<Uuid>,
     pub name: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Revoking an agent also revokes every sub-agent under it.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub revoked_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

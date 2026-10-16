@@ -309,7 +309,8 @@ enum ServerCmd {
 #[derive(Subcommand)]
 enum AgentCmd {
     Ls,
-    /// Create an agent and print its token (shown once).
+    /// Create an agent. Run as an agent, this creates a sub-agent named
+    /// `<agent>/<name>` that can never have more access than its parent.
     Add {
         name: String,
         /// Limit the token to these projects (comma-separated keys).
@@ -318,6 +319,10 @@ enum AgentCmd {
         /// Requests per minute the token may make.
         #[arg(long)]
         rate_limit: Option<i64>,
+    },
+    /// Revoke an agent and every sub-agent under it.
+    Revoke {
+        name: String,
     },
 }
 
@@ -682,13 +687,20 @@ async fn run(cli: Cli) -> Result<()> {
             if json {
                 print_json(&v);
             } else {
-                v.as_array().into_iter().flatten().for_each(|a| println!("{}  {}", s(a, "id"), s(a, "name")));
+                for a in v.as_array().into_iter().flatten() {
+                    let revoked = if a["revoked_at"].is_null() { "" } else { "  (revoked)" };
+                    println!("{}  {}{revoked}", s(a, "id"), s(a, "name"));
+                }
             }
         }
         Cmd::Agent(AgentCmd::Add { name, projects, rate_limit }) => {
             let body = json!({ "name": name, "projects": projects, "rate_limit_per_minute": rate_limit });
             let v = c.post("agents", body).await?;
-            let safe_name = name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+            // The server names sub-agents `<parent>/<name>`; save under the full name.
+            let name = s(&v["agent"], "name").to_string();
+            let safe_name = name.split('/').all(|seg| {
+                !seg.is_empty() && seg.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            });
             let saved = if c.local && safe_name {
                 let paths = trailhead_server::Paths::from_env().context("no home directory")?;
                 Some(paths.creds().save(Cred::Agent(&name), s(&v, "secret"))?)
@@ -709,6 +721,10 @@ async fn run(cli: Cli) -> Result<()> {
                     None => println!("token (shown once): {}", s(&v, "secret")),
                 }
             }
+        }
+        Cmd::Agent(AgentCmd::Revoke { name }) => {
+            let v = c.post(&format!("agents/{}/revoke", name.replace('/', "%2F")), json!({})).await?;
+            show(v, &|a| format!("revoked {} and its sub-agents", s(a, "name")));
         }
         Cmd::Token(TokenCmd::Ls) => {
             let v = c.get("tokens", &[]).await?;

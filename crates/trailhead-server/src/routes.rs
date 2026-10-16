@@ -49,6 +49,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/undo", post(undo))
         .route("/revert", post(revert))
         .route("/agents", get(list_agents).post(create_agent))
+        .route("/agents/{agent}/revoke", post(revoke_agent))
         .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/{id}", delete(revoke_token))
         .route("/webhooks", get(list_webhooks).post(create_webhook))
@@ -767,7 +768,6 @@ struct CreateAgent {
     )
 )]
 async fn create_agent(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateAgent>) -> ApiResult<Response> {
-    require_human(&ctx)?;
     let agent = s.store.create_agent(&ctx, &b.name).await?;
     let (token, secret) =
         s.store.create_token_with(&ctx, Principal::Agent(agent.id), &agent.name, b.limits.into()).await?;
@@ -793,7 +793,6 @@ struct CreateToken {
     )
 )]
 async fn create_token(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateToken>) -> ApiResult<Response> {
-    require_human(&ctx)?;
     let principal = match &b.agent {
         None => Principal::User(ctx.user_id),
         Some(a) => {
@@ -900,4 +899,19 @@ async fn webhook_deliveries(
     Query(q): Query<DeliveryQuery>,
 ) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.webhook_deliveries(&ctx, id, q.limit).await?)))
+}
+
+/// Revokes an agent and every sub-agent under it; their tokens stop working at
+/// once. The owning human or any agent above it may do this.
+#[utoipa::path(
+    post, path = "/v1/agents/{agent}/revoke", tag = "agents",
+    params(("agent" = String, Path, description = "Agent name (e.g. `openclaw/researcher`) or id")),
+    responses(
+        (status = 200, description = "The revoked agent", body = Agent),
+        (status = 403, description = "`forbidden`: not your agent or sub-agent", body = ErrorBody),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
+async fn revoke_agent(State(s): S, Auth(ctx): Auth, Path(agent): Path<String>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!(s.store.revoke_agent(&ctx, &agent).await?)))
 }

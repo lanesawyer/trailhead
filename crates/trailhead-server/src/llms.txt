@@ -8,7 +8,8 @@ Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, pro
 
 - Send `Authorization: Bearer th_...` on everything except `GET /v1/health`, `GET /v1/openapi.json` and `GET /llms.txt`. `GET /v1/me` says who you are.
 - A token belongs to a user (a human) or an agent. Every agent acts for exactly one user, and every write records both. Agents never use a human's token.
-- Agents can't issue or revoke tokens, create agents, revert, or approve review. Humans can edit, release or finish a task another actor holds; agents can't.
+- Agents can create sub-agents (`POST /v1/agents {"name"}` as an agent makes `<agent>/<name>`) and issue them tokens that never exceed their own projects or rate limit; `POST /v1/agents/{agent}/revoke` revokes an agent and everything under it. Over MCP, `register_agent` then `as_agent` on any tool lets one connection act as several registered sub-agents.
+- Agents can't revert, issue tokens for anyone but their sub-agents, or approve review (unless a project lists them as `reviewers`). Humans can edit, release or finish a task another actor holds; agents can't.
 - A token may be scoped to projects. Anything outside the scope reads as `not_found`; writes naming an out-of-scope project are `forbidden`. A blocker outside the scope shows as `(out of scope)`.
 - A token may have a per-minute rate limit. Over it: `429 rate_limited` with `Retry-After` seconds and `retry_after` in the body.
 

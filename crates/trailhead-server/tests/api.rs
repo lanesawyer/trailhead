@@ -101,8 +101,10 @@ async fn agent_lifecycle_over_http() {
 
     let agent = api.as_human("POST", "/v1/agents", Some(json!({"name": "claude"}))).await;
     let secret = agent.body["secret"].as_str().unwrap().to_string();
+    // An agent creates its own sub-agent, never needing a human's credentials.
     let r = api.call(Some(&secret), "POST", "/v1/agents", Some(json!({"name": "child"})), &[]).await;
-    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["agent"]["name"], "claude/child");
 
     let ready = api.call(Some(&secret), "GET", "/v1/ready?fields=key,title", None, &[]).await;
     assert_eq!(ready.body, json!([{"key": "AUTH-1", "title": "first"}]));

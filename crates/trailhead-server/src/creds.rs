@@ -43,7 +43,9 @@ impl CredStore {
     pub fn file(&self, cred: Cred) -> PathBuf {
         match cred {
             Cred::User => self.config_dir.join("credentials"),
-            Cred::Agent(name) => self.config_dir.join("agents").join(name),
+            // `parent/child` names flatten to `parent.child`: a parent's token is a
+            // file, so it can't also be a directory, and names never contain `.`.
+            Cred::Agent(name) => self.config_dir.join("agents").join(name.replace('/', ".")),
         }
     }
 

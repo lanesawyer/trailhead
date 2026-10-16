@@ -17,6 +17,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (7, "webhooks", include_str!("../migrations/0007_webhooks.sql")),
     (8, "unique_agent_names", include_str!("../migrations/0008_unique_agent_names.sql")),
     (9, "project_reviewers", include_str!("../migrations/0009_project_reviewers.sql")),
+    (10, "sub_agents", include_str!("../migrations/0010_sub_agents.sql")),
 ];
 
 pub(crate) async fn migrate(conn: &Connection) -> Result<()> {

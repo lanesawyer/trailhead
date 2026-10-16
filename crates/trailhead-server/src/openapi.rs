@@ -249,6 +249,7 @@ impl Modify for Common {
         routes::list_tokens,
         routes::my_claims,
         routes::create_token,
+        routes::revoke_agent,
         routes::create_webhook,
         routes::list_webhooks,
         routes::delete_webhook,

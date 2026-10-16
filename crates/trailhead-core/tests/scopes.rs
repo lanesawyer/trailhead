@@ -89,7 +89,10 @@ async fn writes_outside_scope_are_rejected() {
     forbidden(s.update_project(&bot, "WEB", ProjectPatch { name: Some("x".into()), ..Default::default() }, None).await);
     let p = NewProject { key: "NEW".into(), name: "New".into(), ..Default::default() };
     forbidden(s.create_project(&bot, p).await);
-    forbidden(s.create_agent(&bot, "child").await);
+    // A scoped agent may create sub-agents, but their tokens can't reach past its scope.
+    let kid = s.create_agent(&bot, "child").await.unwrap();
+    let wider = trailhead_core::TokenOptions { projects: Some(vec!["WEB".into()]), ..Default::default() };
+    forbidden(s.create_token_with(&bot, trailhead_core::Principal::Agent(kid.id), "k", wider).await);
 
     // Parents and dependencies can't reach out of scope either.
     let child = NewTask { project: "AUTH".into(), title: "c".into(), parent: Some(web.clone()), ..Default::default() };

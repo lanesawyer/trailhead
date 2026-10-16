@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::db::{get_opt_json, get_opt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
+use crate::identity::{is_descendant, lineage_revoked};
 use crate::projects::load_project;
 use crate::store::{Ctx, Store};
 
@@ -81,10 +82,7 @@ impl Store {
         name: &str,
         opts: TokenOptions,
     ) -> Result<(Token, String)> {
-        if !ctx.is_human() {
-            return Err(Error::Forbidden("agents can't issue tokens".into()));
-        }
-        if ctx.is_scoped() {
+        if ctx.is_human() && ctx.is_scoped() {
             return Err(Error::Forbidden("a token scoped to projects can't issue tokens".into()));
         }
         if let Some(n) = opts.rate_limit_per_minute
@@ -92,9 +90,26 @@ impl Store {
         {
             return Err(Error::Invalid("rate limit must be at least 1 request per minute".into()));
         }
+        // A token never gets more than the caller has: an agent's sub-agent
+        // inherits its rate limit and projects unless it asks for less.
+        let mut opts = opts;
+        if let Some(cap) = ctx.rate_limit {
+            match opts.rate_limit_per_minute {
+                Some(n) if n > cap => {
+                    return Err(Error::Forbidden(format!("rate limit can't exceed your own ({cap}/min)")));
+                }
+                None => opts.rate_limit_per_minute = Some(cap),
+                _ => {}
+            }
+        }
+        if let Some(scope) = &ctx.projects
+            && opts.projects.as_ref().is_none_or(|p| p.is_empty())
+        {
+            opts.projects = Some(scope.iter().map(Uuid::to_string).collect());
+        }
         let conn = self.reader()?;
         let (kind, pid) = match principal {
-            Principal::User(id) if id == ctx.user_id => ("user", id),
+            Principal::User(id) if id == ctx.user_id && ctx.is_human() => ("user", id),
             Principal::User(_) => return Err(Error::Forbidden("you can only issue tokens for yourself".into())),
             Principal::Agent(id) => {
                 let mut rows = conn
@@ -105,6 +120,14 @@ impl Store {
                     .await?;
                 if rows.next().await?.is_none() {
                     return Err(Error::NotFound(format!("agent {id}")));
+                }
+                if let Some(me) = ctx.agent_id
+                    && !is_descendant(&conn, me, id).await?
+                {
+                    return Err(Error::Forbidden("an agent can only issue tokens for its own sub-agents".into()));
+                }
+                if lineage_revoked(&conn, id).await? {
+                    return Err(Error::Forbidden("that agent has been revoked".into()));
                 }
                 ("agent", id)
             }
@@ -124,6 +147,11 @@ impl Store {
                         }
                         ids.sort();
                         ids.dedup();
+                        if let Some(scope) = &ctx.projects
+                            && !ids.iter().all(|i| scope.contains(i))
+                        {
+                            return Err(Error::Forbidden("a token can't reach projects you can't".into()));
+                        }
                         Some(serde_json::to_string(&ids)?)
                     }
                 };
@@ -180,25 +208,43 @@ impl Store {
             Principal::User(u) => Ctx::user(token.workspace_id, u),
             Principal::Agent(a) => self.agent_ctx(token.workspace_id, a).await?,
         };
-        let ctx = match &token.projects {
+        let mut ctx = match &token.projects {
             Some(p) => ctx.scoped_to(p.clone()),
             None => ctx,
         };
+        ctx.rate_limit = token.rate_limit_per_minute;
         Ok((ctx, token))
     }
 
     /// Tokens the caller can see: their own and their agents'.
     pub async fn list_tokens(&self, ctx: &Ctx) -> Result<Vec<Token>> {
         let conn = self.reader()?;
-        let mut rows = conn
-            .query(
-                &format!(
-                    "SELECT {TOKEN_COLS} FROM tokens WHERE workspace_id = ?1 AND (principal_id = ?2
-                     OR principal_id IN (SELECT id FROM agents WHERE owner_user_id = ?2)) ORDER BY created_at"
-                ),
-                [ctx.workspace_id.to_string(), ctx.user_id.to_string()],
-            )
-            .await?;
+        // Humans see their own and all their agents' tokens; an agent sees its own
+        // and its sub-agents'.
+        let mut rows = match ctx.agent_id {
+            None => {
+                conn.query(
+                    &format!(
+                        "SELECT {TOKEN_COLS} FROM tokens WHERE workspace_id = ?1 AND (principal_id = ?2
+                         OR principal_id IN (SELECT id FROM agents WHERE owner_user_id = ?2)) ORDER BY created_at"
+                    ),
+                    [ctx.workspace_id.to_string(), ctx.user_id.to_string()],
+                )
+                .await?
+            }
+            Some(me) => {
+                conn.query(
+                    &format!(
+                        "WITH RECURSIVE down(id) AS (
+                             SELECT ?2 UNION SELECT a.id FROM agents a JOIN down d ON a.parent_agent_id = d.id)
+                         SELECT {TOKEN_COLS} FROM tokens WHERE workspace_id = ?1
+                         AND principal_id IN (SELECT id FROM down) ORDER BY created_at"
+                    ),
+                    [ctx.workspace_id.to_string(), me.to_string()],
+                )
+                .await?
+            }
+        };
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
             out.push(token_from_row(&row)?);
