@@ -50,3 +50,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo package --workspace --locked
+      # rust-cache's cleanup trips over the unpacked crates and logs ENOENT errors.
+      - if: always()
+        run: rm -rf target/package

@@ -81,7 +81,6 @@ jobs:
         with:
           ref: ${{ needs.release.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       # Publishes trailhead-core, trailhead-server and trailhead in dependency order.
       - run: cargo publish --workspace --locked
         env:
