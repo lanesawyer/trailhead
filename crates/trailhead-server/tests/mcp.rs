@@ -71,6 +71,12 @@ async fn agent_works_a_task_over_mcp() {
     let client = connect(&s.url, &s.agent).await;
 
     let tools = client.list_all_tools().await.unwrap();
+    // Every tool says whether it's read-only, so clients can skip approval for safe calls.
+    for t in &tools {
+        let a = t.annotations.as_ref().unwrap_or_else(|| panic!("{} has no annotations", t.name));
+        let expect = matches!(t.name.as_ref(), "ready" | "list_tasks" | "show" | "search" | "my_claims");
+        assert_eq!(a.read_only_hint, Some(expect), "{}", t.name);
+    }
     let names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
     for expected in ["ready", "claim", "renew", "release", "show", "create_task", "update_task", "comment", "search"] {
         assert!(names.contains(&expected.to_string()), "missing tool {expected}: {names:?}");

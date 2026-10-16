@@ -381,7 +381,8 @@ impl TrailheadMcp {
     }
 
     #[tool(
-        description = "Open, unclaimed, unblocked tasks in priority order. One line per task: KEY status priority version title."
+        description = "Open, unclaimed, unblocked tasks in priority order. One line per task: KEY status priority version title.",
+        annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn ready(
         &self,
@@ -393,7 +394,10 @@ impl TrailheadMcp {
         text(task_list(&tasks, "nothing ready"))
     }
 
-    #[tool(description = "List tasks with filters. Defaults to everything not done or cancelled.")]
+    #[tool(
+        description = "List tasks with filters. Defaults to everything not done or cancelled.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn list_tasks(
         &self,
         Extension(parts): Extension<Parts>,
@@ -416,7 +420,8 @@ impl TrailheadMcp {
     }
 
     #[tool(
-        description = "Register a sub-agent named `<you>/<name>`, so work done as it (pass `as_agent` on any tool) is attributed to it. Each of your agents should have its own; names must be registered before use."
+        description = "Register a sub-agent named `<you>/<name>`, so work done as it (pass `as_agent` on any tool) is attributed to it. Each of your agents should have its own; names must be registered before use.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
     )]
     async fn register_agent(
         &self,
@@ -428,7 +433,10 @@ impl TrailheadMcp {
         text(format!("registered {}; pass as_agent: {:?} to act as it", agent.name, a.name.trim()))
     }
 
-    #[tool(description = "A task with its claim, dependencies, description and comments.")]
+    #[tool(
+        description = "A task with its claim, dependencies, description and comments.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn show(
         &self,
         Extension(parts): Extension<Parts>,
@@ -438,7 +446,10 @@ impl TrailheadMcp {
         text(detail_text(&attempt!(self.state.store.task_detail(&ctx, &a.task).await)))
     }
 
-    #[tool(description = "Create a task. Use blocks to make a subtask that blocks your own task.")]
+    #[tool(
+        description = "Create a task. Use blocks to make a subtask that blocks your own task.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
     async fn create_task(
         &self,
         Extension(parts): Extension<Parts>,
@@ -451,7 +462,8 @@ impl TrailheadMcp {
     }
 
     #[tool(
-        description = "Change a task's fields or status. Setting status done or in_review releases your claim. To finish, set status done with a handoff in one call."
+        description = "Change a task's fields or status. Setting status done or in_review releases your claim. To finish, set status done with a handoff in one call.",
+        annotations(read_only_hint = false, open_world_hint = false)
     )]
     async fn update_task(
         &self,
@@ -475,7 +487,10 @@ impl TrailheadMcp {
         text(task_line(&task))
     }
 
-    #[tool(description = "Take a lease on a task and start it. Returns the last handoff left on it.")]
+    #[tool(
+        description = "Take a lease on a task and start it. Returns the last handoff left on it.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
     async fn claim(
         &self,
         Extension(parts): Extension<Parts>,
@@ -495,7 +510,8 @@ impl TrailheadMcp {
     }
 
     #[tool(
-        description = "Claims you currently hold and when they expire. Check this after a pause: a lapsed claim means someone else may own the task now."
+        description = "Claims you currently hold and when they expire. Check this after a pause: a lapsed claim means someone else may own the task now.",
+        annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn my_claims(
         &self,
@@ -523,7 +539,10 @@ impl TrailheadMcp {
         )
     }
 
-    #[tool(description = "Extend your lease. Renew about every third of the TTL.")]
+    #[tool(
+        description = "Extend your lease. Renew about every third of the TTL.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
     async fn renew(
         &self,
         Extension(parts): Extension<Parts>,
@@ -534,7 +553,10 @@ impl TrailheadMcp {
         text(format!("claimed until {}", c.expires_at.format(&Rfc3339).unwrap_or_default()))
     }
 
-    #[tool(description = "Give a task back without finishing it. Leave a handoff comment first.")]
+    #[tool(
+        description = "Give a task back without finishing it. Leave a handoff comment first.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
     async fn release(
         &self,
         Extension(parts): Extension<Parts>,
@@ -544,7 +566,10 @@ impl TrailheadMcp {
         text(task_line(&attempt!(self.state.store.release(&ctx, &a.task).await)))
     }
 
-    #[tool(description = "Comment on a task. Kinds: handoff, progress, question, decision, note.")]
+    #[tool(
+        description = "Comment on a task. Kinds: handoff, progress, question, decision, note.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
     async fn comment(
         &self,
         Extension(parts): Extension<Parts>,
@@ -556,7 +581,10 @@ impl TrailheadMcp {
         self.idempotent(&parts, &ctx, key, "comment", &args, self.do_comment(&ctx, a)).await
     }
 
-    #[tool(description = "Resolve a question comment, optionally answering it.")]
+    #[tool(
+        description = "Resolve a question comment, optionally answering it.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
     async fn resolve_question(
         &self,
         Extension(parts): Extension<Parts>,
@@ -568,7 +596,8 @@ impl TrailheadMcp {
     }
 
     #[tool(
-        description = "Undo your own most recent change (everything from your last tool call that wrote something). Fails if someone changed the same thing since."
+        description = "Undo your own most recent change (everything from your last tool call that wrote something). Fails if someone changed the same thing since.",
+        annotations(read_only_hint = false, open_world_hint = false)
     )]
     async fn undo_last(
         &self,
@@ -591,7 +620,10 @@ impl TrailheadMcp {
         text(format!("reverted {} change(s)", report.reverted.len()))
     }
 
-    #[tool(description = "Full-text search over task titles, descriptions and comments.")]
+    #[tool(
+        description = "Full-text search over task titles, descriptions and comments.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn search(
         &self,
         Extension(parts): Extension<Parts>,
