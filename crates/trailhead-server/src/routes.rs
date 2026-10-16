@@ -686,7 +686,11 @@ async fn search(State(s): S, Auth(ctx): Auth, Query(q): Query<SearchQuery>) -> A
 #[into_params(parameter_in = Query)]
 struct EventQuery {
     after: Option<i64>,
+    /// Only events with a smaller id; with `newest_first`, pass the last id you got to page back.
+    before: Option<i64>,
     task: Option<String>,
+    /// Project key: events on its tasks and on the project itself.
+    project: Option<String>,
     actor: Option<Uuid>,
     batch: Option<Uuid>,
     #[param(format = DateTime)]
@@ -708,7 +712,9 @@ struct EventQuery {
 async fn list_events(State(s): S, Auth(ctx): Auth, Query(q): Query<EventQuery>) -> ApiResult<Json<Value>> {
     let filter = EventFilter {
         after_id: q.after,
+        before_id: q.before,
         task: q.task,
+        project: q.project,
         actor_id: q.actor,
         batch_id: q.batch,
         since: parse_opt_time(q.since.as_deref())?,

@@ -632,3 +632,40 @@ async fn list_events_filters_kinds_before_limit() {
     assert_eq!(kinds[0], "comment.created");
     assert!(kinds[1].starts_with("claim."), "{kinds:?}");
 }
+
+#[tokio::test]
+async fn list_events_filters_by_project_and_pages_back() {
+    let env = Env::new().await;
+    env.store
+        .create_project(&env.human, NewProject { key: "WEB".into(), name: "Web".into(), ..Default::default() })
+        .await
+        .unwrap();
+    let auth = env.task("auth").await;
+    let web = env.task_with(NewTask { project: "WEB".into(), title: "web".into(), ..Default::default() }).await;
+    env.store.add_comment(&env.human, &auth.key, comment(CommentKind::Note, "a")).await.unwrap();
+    env.store.add_comment(&env.human, &web.key, comment(CommentKind::Note, "w")).await.unwrap();
+    let list = async |project: &str, before, limit| {
+        let filter = EventFilter {
+            project: Some(project.into()),
+            before_id: before,
+            limit,
+            newest_first: true,
+            ..Default::default()
+        };
+        env.store.list_events(&env.human, filter).await.unwrap()
+    };
+    let web_events = list("web", None, None).await;
+    assert_eq!(
+        web_events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+        ["comment.created", "task.created", "project.created"]
+    );
+    assert!(web_events.iter().all(|e| e.task_key.as_deref().is_none_or(|k| k == web.key)));
+    let first = list("WEB", None, Some(1)).await;
+    let rest = list("WEB", Some(first[0].id), None).await;
+    assert_eq!(rest.len(), 2);
+    assert_eq!(rest[0].kind, "task.created");
+    assert!(matches!(
+        env.store.list_events(&env.human, EventFilter { project: Some("NOPE".into()), ..Default::default() }).await,
+        Err(Error::NotFound(_))
+    ));
+}

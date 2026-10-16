@@ -84,8 +84,8 @@ Every request is one batch; its id is in the `trailhead-batch` response header. 
 
 Every write appends an event: `{id, batch_id, actor_id, on_behalf_of, task_id, task_key, entity, entity_id, kind, before, after, undoes, at}`. Kinds: `task.created|updated|deleted`, `claim.acquired|renewed|released|expired`, `comment.created|resolved`, `dependency.added|removed`, `project.created|updated`, `<entity>.reverted`, and the reminders `task.due_soon` (within 24 hours) and `task.overdue`.
 
-- `GET /v1/events?after=ID&task=&actor=&batch=&since=&limit=&newest_first=true&changes_only=true&kinds=claim.,comment.created` (`changes_only` hides reminders; `kinds` keeps events whose kind starts with one of the prefixes, applied before `limit`). `GET /v1/tasks/KEY-1/history` is one task's log.
-- `GET /v1/events/stream?task=&kinds=task.,comment.created` is Server-Sent Events: `id` is the event id, `event` the kind, `data` the event JSON. On reconnect send `Last-Event-ID` (or `?after=`) to resume with nothing missed. With neither, the stream starts after the newest event.
+- `GET /v1/events?after=ID&before=ID&task=&project=KEY&actor=&batch=&since=&limit=&newest_first=true&changes_only=true&kinds=claim.,comment.created` (`changes_only` hides reminders; `kinds` keeps events whose kind starts with one of the prefixes, applied before `limit`; page back through history with `newest_first=true&before=<last id>`). `GET /v1/tasks/KEY-1/history` is one task's log.
+- `GET /v1/events/stream?task=&project=KEY&kinds=task.,comment.created` is Server-Sent Events: `id` is the event id, `event` the kind, `data` the event JSON. On reconnect send `Last-Event-ID` (or `?after=`) to resume with nothing missed. With neither, the stream starts after the newest event.
 
 ## Webhooks
 

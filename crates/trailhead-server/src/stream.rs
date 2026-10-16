@@ -26,6 +26,8 @@ pub struct StreamQuery {
     /// Without either, the stream starts at the newest event.
     after: Option<i64>,
     task: Option<String>,
+    /// Project key: events on its tasks and on the project itself.
+    project: Option<String>,
     /// Comma-separated kind prefixes, e.g. `task.,comment.created`.
     kinds: Option<String>,
 }
@@ -35,6 +37,7 @@ struct Cursor {
     ctx: Ctx,
     after: i64,
     task: Option<String>,
+    project: Option<String>,
     kinds: Vec<String>,
     changes: tokio::sync::watch::Receiver<u64>,
     shutdown: tokio::sync::watch::Receiver<bool>,
@@ -61,7 +64,7 @@ fn to_sse(e: &Event) -> SseEvent {
     responses(
         (status = 200, description = "Server-Sent Events. Each has `id` (the event id), `event` (the kind, e.g. `task.updated`) and `data` (the event as JSON).",
             content_type = "text/event-stream", body = Event),
-        (status = 404, description = "`not_found`: the `task` filter", body = crate::openapi::ErrorBody),
+        (status = 404, description = "`not_found`: the `task` or `project` filter", body = crate::openapi::ErrorBody),
     )
 )]
 pub async fn events(
@@ -75,11 +78,11 @@ pub async fn events(
         Some(id) => id,
         None => state.store.latest_event_id(&ctx).await?,
     };
-    if let Some(t) = &q.task {
-        state
-            .store
-            .list_events(&ctx, EventFilter { task: Some(t.clone()), limit: Some(0), ..Default::default() })
-            .await?;
+    if q.task.is_some() || q.project.is_some() {
+        // Fail now on an unknown task or project rather than inside the stream.
+        let check =
+            EventFilter { task: q.task.clone(), project: q.project.clone(), limit: Some(0), ..Default::default() };
+        state.store.list_events(&ctx, check).await?;
     }
     let cursor = Cursor {
         changes: state.store.changes(),
@@ -88,6 +91,7 @@ pub async fn events(
         ctx,
         after,
         task: q.task,
+        project: q.project,
         kinds: crate::routes::split_list(q.kinds.as_deref()),
         buffered: VecDeque::new(),
     };
@@ -100,8 +104,13 @@ pub async fn events(
                 return Some((Ok(to_sse(&e)), c));
             }
             c.changes.mark_unchanged();
-            let filter =
-                EventFilter { after_id: Some(c.after), task: c.task.clone(), limit: Some(PAGE), ..Default::default() };
+            let filter = EventFilter {
+                after_id: Some(c.after),
+                task: c.task.clone(),
+                project: c.project.clone(),
+                limit: Some(PAGE),
+                ..Default::default()
+            };
             match c.state.store.list_events(&c.ctx, filter).await {
                 Ok(page) if !page.is_empty() => {
                     c.after = page.last().map_or(c.after, |e| e.id);

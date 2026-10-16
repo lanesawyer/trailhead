@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::db::{fmt_ts, get_enum, get_opt_json, get_opt_uuid, get_ts, get_uuid};
 use crate::error::Result;
 use crate::model::Event;
+use crate::projects::find_project;
 use crate::store::{Ctx, Store};
 use crate::tasks::find_task;
 
@@ -68,7 +69,11 @@ pub struct EventFilter {
     /// Cursor: only events with a greater id. This is how SSE and webhook
     /// delivery resume after a restart.
     pub after_id: Option<i64>,
+    /// Only events with a smaller id, to page back through history with `newest_first`.
+    pub before_id: Option<i64>,
     pub task: Option<String>,
+    /// Events on this project's tasks and on the project itself.
+    pub project: Option<String>,
     pub actor_id: Option<Uuid>,
     pub batch_id: Option<Uuid>,
     pub since: Option<OffsetDateTime>,
@@ -99,6 +104,10 @@ impl Store {
             Some(t) => Some(find_task(&conn, ctx, t, true).await?.id.to_string()),
             None => None,
         };
+        let project_id = match &filter.project {
+            Some(p) => Some(find_project(&conn, ctx, p).await?.id.to_string()),
+            None => None,
+        };
         let rows = conn
             .query(
                 &format!(
@@ -108,6 +117,9 @@ impl Store {
                      AND (?6 IS NULL OR at >= ?6) AND {} AND (?8 = 0 OR {})
                      AND (?9 IS NULL OR EXISTS (
                          SELECT 1 FROM json_each(?9) k WHERE substr(events.kind, 1, length(k.value)) = k.value))
+                     AND (?10 IS NULL OR id < ?10)
+                     AND (?11 IS NULL OR task_id IN (SELECT id FROM tasks WHERE project_id = ?11)
+                          OR (entity = 'project' AND entity_id = ?11))
                      ORDER BY id {} LIMIT ?7",
                     if filter.include_archived {
                         "(SELECT * FROM events UNION ALL SELECT * FROM events_archive) AS events"
@@ -128,6 +140,8 @@ impl Store {
                     filter.limit.unwrap_or(100),
                     filter.changes_only,
                     (!filter.kinds.is_empty()).then(|| serde_json::to_string(&filter.kinds)).transpose()?,
+                    filter.before_id,
+                    project_id,
                 ],
             )
             .await?;
