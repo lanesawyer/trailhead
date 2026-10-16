@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use libsql::{Connection, Row};
 use serde::Serialize;
 use time::{Duration, OffsetDateTime};
@@ -201,6 +203,16 @@ pub struct HeldClaim {
     pub claim: Claim,
 }
 
+/// A live claim with its holder's name, for labelling task lists.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NamedClaim {
+    #[serde(flatten)]
+    pub claim: Claim,
+    /// The holder's user or agent name, e.g. `lane` or `claude/openapi`.
+    pub holder: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ClaimResult {
@@ -282,6 +294,29 @@ impl Store {
             Ok(ClaimResult { task, claim, handoff })
         })
         .await
+    }
+
+    /// The live claims on these tasks, keyed by task id. Tasks without one are absent.
+    pub async fn live_claims(&self, ctx: &Ctx, task_ids: &[Uuid]) -> Result<HashMap<Uuid, NamedClaim>> {
+        let conn = self.reader()?;
+        let ids = serde_json::to_string(&task_ids.iter().map(Uuid::to_string).collect::<Vec<_>>())?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {CLAIM_COLS}, COALESCE((SELECT name FROM agents WHERE id = holder_id),
+                         (SELECT name FROM users WHERE id = holder_id), holder_id)
+                     FROM claims WHERE workspace_id = ?1 AND (expires_at IS NULL OR expires_at > ?2)
+                       AND task_id IN (SELECT value FROM json_each(?3))"
+                ),
+                libsql::params![ctx.workspace_id.to_string(), fmt_ts(self.now()), ids],
+            )
+            .await?;
+        let mut out = HashMap::new();
+        while let Some(row) = rows.next().await? {
+            let claim = claim_from_row(&row)?;
+            out.insert(claim.task_id, NamedClaim { claim, holder: row.get(6)? });
+        }
+        Ok(out)
     }
 
     /// Live claims the caller holds, soonest to expire first, then those that

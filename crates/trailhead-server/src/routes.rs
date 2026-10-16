@@ -271,6 +271,8 @@ struct TaskListQuery {
     /// Skip this many tasks, to page with `limit`.
     offset: Option<i64>,
     fields: Option<String>,
+    /// `claim` adds each task's live claim (`null` if unclaimed), with the holder's name as `holder`.
+    include: Option<String>,
 }
 
 #[utoipa::path(
@@ -302,8 +304,24 @@ async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<TaskListQuery>
         limit: q.limit,
         offset: q.offset,
     };
+    let mut with_claims = false;
+    for inc in split_list(q.include.as_deref()) {
+        match inc.as_str() {
+            "claim" => with_claims = true,
+            other => return Err(invalid(format!("unknown include: {other}"))),
+        }
+    }
     let tasks = s.store.list_tasks(&ctx, filter).await?;
-    Ok(Json(select_fields(&tasks, q.fields.as_deref())?))
+    let mut out = select_fields(&tasks, q.fields.as_deref())?;
+    if with_claims {
+        let mut claims = s.store.live_claims(&ctx, &tasks.iter().map(|t| t.id).collect::<Vec<_>>()).await?;
+        if let Value::Array(items) = &mut out {
+            for (item, task) in items.iter_mut().zip(&tasks) {
+                item["claim"] = json!(claims.remove(&task.id));
+            }
+        }
+    }
+    Ok(Json(out))
 }
 
 #[derive(Deserialize, ToSchema)]

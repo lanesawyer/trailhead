@@ -19,7 +19,7 @@ mod tokens;
 mod undo;
 mod webhooks;
 
-pub use claims::{ClaimResult, HeldClaim};
+pub use claims::{ClaimResult, HeldClaim, NamedClaim};
 pub use comments::NewComment;
 pub use error::{Error, Result};
 pub use events::{EventFilter, UNDO_WINDOW};

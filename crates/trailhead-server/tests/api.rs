@@ -437,3 +437,31 @@ async fn task_list_sorts_and_pages_and_event_list_filters_kinds() {
     let kinds: Vec<&str> = r.body.as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert_eq!(kinds, ["project.created"]);
 }
+
+#[tokio::test]
+async fn task_list_can_include_claims_with_holder_names() {
+    let api = Api::new().await;
+    api.seed().await;
+    for title in ["agent's", "mine", "free"] {
+        api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": title}))).await;
+    }
+    let agent = api.as_human("POST", "/v1/agents", Some(json!({"name": "claude"}))).await;
+    let secret = agent.body["secret"].as_str().unwrap().to_string();
+    let r = api.call(Some(&secret), "POST", "/v1/tasks/AUTH-1/claim", None, &[]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    api.as_human("POST", "/v1/tasks/AUTH-2/claim", None).await;
+
+    let r = api.as_human("GET", "/v1/tasks?sort=created_at&fields=key&include=claim", None).await;
+    let items = r.body.as_array().unwrap();
+    assert_eq!(items[0]["claim"]["holder"], "claude");
+    assert!(items[0]["claim"]["expires_at"].is_string());
+    assert_eq!(items[1]["claim"]["holder"], "lane");
+    assert!(items[1]["claim"]["expires_at"].is_null());
+    assert!(items[2]["claim"].is_null());
+    assert_eq!(items[2]["key"], "AUTH-3");
+
+    let plain = api.as_human("GET", "/v1/tasks", None).await;
+    assert!(plain.body[0].get("claim").is_none());
+    let r = api.as_human("GET", "/v1/tasks?include=everything", None).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+}
