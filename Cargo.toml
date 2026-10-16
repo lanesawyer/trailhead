@@ -41,3 +41,4 @@ jiff = "0.2"
 utoipa = { version = "6", features = ["uuid", "time"] }
 keyring = "4"
 hmac = "0.13"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }

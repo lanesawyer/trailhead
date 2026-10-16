@@ -261,7 +261,7 @@ pub fn is_stale(info: &Health) -> bool {
     same_binary && matches!((modified_ms(&me), info.exe_modified_ms), (Some(now), Some(then)) if now > then)
 }
 
-/// Sends SIGTERM to the local server and waits for it to go away. Returns the pid
+/// Asks the local server to stop and waits for it to go away. Returns the pid
 /// it stopped, or `None` if nothing was running.
 pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32>> {
     let running = health(http, base).await;
@@ -289,8 +289,7 @@ pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32
             "a server is answering at {base} but didn't report its pid (it may predate `trailhead server`); stop it by hand"
         ),
     };
-    let status = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status()?;
-    if !status.success() {
+    if !signal_stop(pid)? {
         return Ok(None);
     }
     for _ in 0..100 {
@@ -299,7 +298,28 @@ pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Err(anyhow!("sent SIGTERM to the server (pid {pid}) but it's still answering"))
+    Err(anyhow!("asked the server (pid {pid}) to stop but it's still answering"))
+}
+
+/// Asks the process to shut down gracefully. Returns false if it wasn't running.
+#[cfg(unix)]
+fn signal_stop(pid: u32) -> Result<bool> {
+    Ok(std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status()?.success())
+}
+
+/// Sets the server's stop event, which drains in-flight requests like SIGTERM. A server
+/// without one (started by an older binary) is killed outright.
+#[cfg(windows)]
+fn signal_stop(pid: u32) -> Result<bool> {
+    if trailhead_server::stop_event::request(pid)? {
+        return Ok(true);
+    }
+    let status = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    Ok(status.success())
 }
 
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
@@ -313,6 +333,9 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     cmd.args(["serve", "--bind", &bind]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console, and Ctrl-C in this one doesn't reach it.
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0000_0008 | 0x0000_0200);
     cmd.spawn().context("couldn't start the local server")?;
     for _ in 0..100 {
         if health(http, base).await.is_some() {

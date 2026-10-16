@@ -10,6 +10,8 @@ mod mcp;
 mod openapi;
 mod ratelimit;
 mod routes;
+#[cfg(windows)]
+pub mod stop_event;
 mod stream;
 pub mod webhooks;
 
@@ -188,7 +190,7 @@ pub fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
     std::io::Write::write_all(&mut opts.open(path)?, format!("{secret}\n").as_bytes())
 }
 
-/// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first.
+/// Runs the local server until Ctrl-C, SIGTERM or (on Windows) `trailhead server stop`, finishing in-flight requests first.
 pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Error>> {
     let (store, ctx) = open_local(&cfg).await?;
     let state = Arc::new(AppState { info: ServerInfo::current(Some(cfg.db.clone())), ..AppState::new(store) });
@@ -284,6 +286,11 @@ async fn shutdown_signal() {
             _ = term.recv() => {}
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = stop_event::wait() => {}
+    }
+    #[cfg(not(any(unix, windows)))]
     tokio::signal::ctrl_c().await.ok();
 }
