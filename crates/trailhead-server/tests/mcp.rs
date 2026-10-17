@@ -6,7 +6,7 @@ use rmcp::service::RunningService;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
-use trailhead_core::{NewProject, NewTask, Principal};
+use trailhead_core::{NewProject, NewTask, Principal, TokenOptions};
 use trailhead_server::creds::{Cred, CredStore};
 use trailhead_server::{AppState, LocalConfig, open_local, router};
 
@@ -14,6 +14,8 @@ struct Server {
     url: String,
     human: String,
     agent: String,
+    /// An agent token limited to AUTH.
+    scoped: String,
     _dir: tempfile::TempDir,
 }
 
@@ -43,12 +45,15 @@ async fn start() -> Server {
     }
     let agent = store.create_agent(&ctx, "claude").await.unwrap();
     let (_, agent) = store.create_token(&ctx, Principal::Agent(agent.id), "claude").await.unwrap();
+    let bot = store.create_agent(&ctx, "scoped").await.unwrap();
+    let opts = TokenOptions { projects: Some(vec!["AUTH".into()]), ..Default::default() };
+    let (_, scoped) = store.create_token_with(&ctx, Principal::Agent(bot.id), "scoped", opts).await.unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
     let app = router(Arc::new(AppState::new(store)));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Server { url, human, agent, _dir: dir }
+    Server { url, human, agent, scoped, _dir: dir }
 }
 
 async fn connect(url: &str, token: &str) -> RunningService<rmcp::RoleClient, ClientConfig> {
@@ -74,7 +79,10 @@ async fn agent_works_a_task_over_mcp() {
     // Every tool says whether it's read-only, so clients can skip approval for safe calls.
     for t in &tools {
         let a = t.annotations.as_ref().unwrap_or_else(|| panic!("{} has no annotations", t.name));
-        let expect = matches!(t.name.as_ref(), "ready" | "list_tasks" | "show" | "search" | "my_claims");
+        let expect = matches!(
+            t.name.as_ref(),
+            "ready" | "list_tasks" | "show" | "search" | "my_claims" | "list_projects" | "show_project"
+        );
         assert_eq!(a.read_only_hint, Some(expect), "{}", t.name);
     }
     let names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
@@ -172,6 +180,64 @@ async fn idempotency_keys_make_mcp_retries_safe() {
     // The same key in a different tool is a different key.
     let (err, out) =
         call(&client, "comment", json!({"task": "AUTH-1", "body": "hi", "idempotency_key": "retry-1"})).await;
+    assert!(!err, "{out}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn agents_create_projects_and_write_briefs() {
+    let s = start().await;
+    let client = connect(&s.url, &s.agent).await;
+
+    let (err, out) = call(
+        &client,
+        "create_project",
+        json!({"key": "tb", "name": "Tutti Belli", "brief": "Choir app.", "require_review": true}),
+    )
+    .await;
+    assert!(!err, "{out}");
+    assert_eq!(out, "TB v1 Tutti Belli [review]");
+    let (err, out) = call(&client, "create_project", json!({"key": "TB", "name": "again"})).await;
+    assert!(err && out.starts_with("error[already_exists]"), "{out}");
+    let (err, out) = call(&client, "create_project", json!({"key": "1X", "name": "bad key"})).await;
+    assert!(err && out.starts_with("error[invalid]"), "{out}");
+
+    let (_, out) = call(&client, "list_projects", json!({})).await;
+    assert_eq!(out, "AUTH v1 Auth\nTB v1 Tutti Belli [review]");
+
+    let (err, out) = call(&client, "update_project", json!({"project": "TB", "brief": "Choir app. Ship small."})).await;
+    assert!(!err, "{out}");
+    let (err, out) = call(&client, "update_project", json!({"project": "TB", "name": "x", "version": 1})).await;
+    assert!(err && out.starts_with("error[version_conflict]"), "{out}");
+    let (_, out) = call(&client, "show_project", json!({"project": "tb"})).await;
+    assert_eq!(out, "TB v2 Tutti Belli [review]\n\nChoir app. Ship small.");
+
+    let (err, out) = call(&client, "undo_last", json!({})).await;
+    assert!(!err && out == "reverted 1 change(s)", "{out}");
+    let (_, out) = call(&client, "show_project", json!({"project": "TB"})).await;
+    assert!(out.ends_with("\n\nChoir app."), "{out}");
+
+    let (err, out) = call(&client, "create_task", json!({"project": "TB", "title": "first"})).await;
+    assert!(!err && out.starts_with("TB-1 open"), "{out}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn project_scoped_tokens_cant_create_or_edit_other_projects() {
+    let s = start().await;
+    let human = connect(&s.url, &s.human).await;
+    let (err, out) = call(&human, "create_project", json!({"key": "WEB", "name": "Web"})).await;
+    assert!(!err, "{out}");
+    human.cancel().await.unwrap();
+
+    let client = connect(&s.url, &s.scoped).await;
+    let (err, out) = call(&client, "create_project", json!({"key": "NEW", "name": "New"})).await;
+    assert!(err && out.starts_with("error[forbidden]"), "{out}");
+    let (err, out) = call(&client, "update_project", json!({"project": "WEB", "brief": "mine now"})).await;
+    assert!(err && out.starts_with("error[forbidden]"), "{out}");
+    let (_, out) = call(&client, "list_projects", json!({})).await;
+    assert_eq!(out, "AUTH v1 Auth");
+    let (err, out) = call(&client, "update_project", json!({"project": "AUTH", "brief": "Ship login fast."})).await;
     assert!(!err, "{out}");
     client.cancel().await.unwrap();
 }

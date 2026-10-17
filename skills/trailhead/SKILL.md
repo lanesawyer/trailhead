@@ -29,7 +29,7 @@ You reach it through the `trailhead` MCP tools if they are connected, otherwise 
 | Step | CLI | MCP |
 | --- | --- | --- |
 | See what's next | `trailhead --as A ready -p KEY` | `ready` |
-| Read the project brief | `trailhead project show KEY` | resource `trailhead://projects/KEY/brief` |
+| Read the project brief | `trailhead project show KEY` | `show_project` (or resource `trailhead://projects/KEY/brief`) |
 | Read a task | `trailhead show KEY-3` | `show` |
 | Claim it | `trailhead --as A claim KEY-3 [--ttl SECS]` | `claim` |
 | Renew the lease | `trailhead --as A renew KEY-3` | `renew` |
@@ -42,6 +42,9 @@ You reach it through the `trailhead` MCP tools if they are connected, otherwise 
 | Step away | `trailhead --as A handoff KEY-3 "..."` then `release KEY-3` | `comment` kind `handoff`, then `release` |
 | File a follow-up | `trailhead --as A add "..." -p KEY -P 3` | `create_task` |
 | Find a task | `trailhead search words` | `search` |
+| List projects | `trailhead project ls` | `list_projects` |
+| Start a project | `trailhead --as A project add KEY "Name" --brief "..."` | `create_project` with a `brief` |
+| Edit a brief | `trailhead --as A project edit KEY --brief-file brief.md` | `update_project` |
 | Undo my last change | `trailhead --as A undo` | `undo_last` |
 | Follow activity | `trailhead --as A watch [KEY-3]` | (REST `GET /v1/events/stream`) |
 

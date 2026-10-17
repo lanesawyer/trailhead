@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
-    Claim, Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewTask, Status, StoredResponse, Task,
-    TaskDetail, TaskFilter, TaskPatch, idempotency_fingerprint,
+    Claim, Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewProject, NewTask, Project, ProjectPatch,
+    ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch, idempotency_fingerprint,
 };
 use uuid::Uuid;
 
@@ -34,9 +34,9 @@ use crate::error::ApiError;
 const BRIEF_PREFIX: &str = "trailhead://projects/";
 
 const INSTRUCTIONS: &str = "Trailhead is a shared task engine. Workflow: `ready` to see what's next, \
-read the project's brief resource, `claim` a task before working on it (the last handoff comes back \
+read the project's brief (`show_project`), `claim` a task before working on it (the last handoff comes back \
 with the claim), `renew` on long work, `comment` with kind `decision` for choices and `question` for \
-anything only a human can answer, and finish with `update_task` status `done` and a `handoff`. File follow-ups with `create_task` instead of widening scope. If several of your agents share this connection, give each its own identity: `register_agent` once per agent, then pass `as_agent` on every call.";
+anything only a human can answer, and finish with `update_task` status `done` and a `handoff`. File follow-ups with `create_task` instead of widening scope. When you `create_project`, give it a brief. If several of your agents share this connection, give each its own identity: `register_agent` once per agent, then pass `as_agent` on every call.";
 
 pub fn service(state: Arc<AppState>) -> StreamableHttpService<TrailheadMcp, LocalSessionManager> {
     let config = StreamableHttpServerConfig::default().with_legacy_session_mode(false).with_json_response(true);
@@ -121,6 +121,22 @@ fn task_line(t: &Task) -> String {
 
 fn task_list(tasks: &[Task], empty: &str) -> String {
     if tasks.is_empty() { empty.to_string() } else { tasks.iter().map(task_line).collect::<Vec<_>>().join("\n") }
+}
+
+fn project_line(p: &Project) -> String {
+    let mut line = format!("{} v{} {}", p.key, p.version, p.name);
+    if p.status == ProjectStatus::Archived {
+        line.push_str(" (archived)");
+    }
+    if p.require_review {
+        line.push_str(" [review]");
+    }
+    line
+}
+
+fn project_text(p: &Project) -> String {
+    let brief = if p.brief.is_empty() { "(no brief yet)" } else { &p.brief };
+    format!("{}\n\n{brief}", project_line(p))
 }
 
 fn comment_line(c: &Comment) -> String {
@@ -289,6 +305,50 @@ pub struct ResolveArgs {
     comment_id: Uuid,
     /// Posted as a note addressed to whoever asked.
     answer: Option<String>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ListProjectsArgs {
+    /// Include archived projects.
+    #[serde(default)]
+    archived: bool,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProjectArg {
+    /// Project key, e.g. AUTH.
+    project: String,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct CreateProjectArgs {
+    /// 2-10 uppercase letters or digits, starting with a letter. Task keys become KEY-1, KEY-2, ...
+    key: String,
+    name: String,
+    /// Goals, conventions and definition of done, for agents to read before claiming work.
+    brief: Option<String>,
+    /// Agents must send finished work to `in_review` for a human to approve.
+    #[serde(default)]
+    require_review: bool,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct UpdateProjectArgs {
+    /// Project key, e.g. AUTH.
+    project: String,
+    name: Option<String>,
+    /// Replaces the whole brief.
+    brief: Option<String>,
+    /// The version you last saw; the update fails if the project changed since.
+    version: Option<i64>,
     /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
     as_agent: Option<String>,
 }
@@ -628,6 +688,70 @@ impl TrailheadMcp {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let tasks = attempt!(self.state.store.search(&ctx, &a.query, a.limit).await);
         text(task_list(&tasks, "no matches"))
+    }
+
+    #[tool(
+        description = "Projects you can see. One line per project: KEY version name, with (archived) and [review] when they apply.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_projects(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<ListProjectsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
+        let projects = attempt!(self.state.store.list_projects(&ctx, a.archived).await);
+        if projects.is_empty() {
+            return text("no projects");
+        }
+        text(projects.iter().map(project_line).collect::<Vec<_>>().join("\n"))
+    }
+
+    #[tool(
+        description = "A project and its brief: goals, conventions and definition of done. Read it before claiming work in the project.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn show_project(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<ProjectArg>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
+        text(project_text(&attempt!(self.state.store.get_project(&ctx, &a.project).await)))
+    }
+
+    #[tool(
+        description = "Create a project. Write a brief so other agents know the goals, conventions and definition of done. Tokens limited to certain projects can't create projects.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
+    async fn create_project(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<CreateProjectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
+        let new = NewProject {
+            key: a.key,
+            name: a.name,
+            brief: a.brief.unwrap_or_default(),
+            require_review: a.require_review,
+            ..Default::default()
+        };
+        text(project_line(&attempt!(self.state.store.create_project(&ctx, new).await)))
+    }
+
+    #[tool(
+        description = "Rename a project or replace its brief. Review settings and archiving are left to humans.",
+        annotations(read_only_hint = false, open_world_hint = false)
+    )]
+    async fn update_project(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<UpdateProjectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
+        let patch = ProjectPatch { name: a.name, brief: a.brief, ..Default::default() };
+        text(project_line(&attempt!(self.state.store.update_project(&ctx, &a.project, patch, a.version).await)))
     }
 }
 

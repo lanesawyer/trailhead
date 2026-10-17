@@ -21,7 +21,7 @@ openclaw mcp set trailhead '{"command":"trailhead","args":["--as","openclaw","mc
 
 Each OpenClaw agent should work under its own name, not as one shared `openclaw`. Since they all share this MCP server, each agent calls `register_agent` once with its own name (creating `openclaw/<name>`) and then passes `as_agent: "<name>"` on every tool call. Trailhead attributes the work to it, and unregistered names are refused. The MCP server's instructions tell agents this, so the agents can set it up themselves.
 
-That gives OpenClaw agents `ready`, `claim`, `renew`, `release`, `show`, `create_task`, `update_task` (finish with `status: "done"` and a `handoff`), `comment`, `resolve_question`, `search`, `my_claims`, `undo_last` and `register_agent`, plus each project's brief as a `trailhead://projects/<KEY>/brief` resource.
+That gives OpenClaw agents `ready`, `claim`, `renew`, `release`, `show`, `create_task`, `update_task` (finish with `status: "done"` and a `handoff`), `comment`, `resolve_question`, `search`, `my_claims`, `undo_last`, `register_agent`, `list_projects`, `show_project`, `create_project` and `update_project`, plus each project's brief as a `trailhead://projects/<KEY>/brief` resource.
 
 Over HTTP instead (for example when OpenClaw runs elsewhere), point it at `/mcp` with `transport: "streamable-http"` and an `Authorization: Bearer <token>` header. Keep the token in an environment variable (OpenClaw expands `${VAR}` in headers) rather than in committed config.
 

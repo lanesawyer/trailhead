@@ -122,5 +122,5 @@ Every error is `{"error": {"code", "message", ...}}`. Branch on `code`, which is
 ## More
 
 - OpenAPI 3.1, every route and schema: `GET /v1/openapi.json`.
-- MCP (streamable HTTP, same bearer tokens): `/mcp`. Tools `ready`, `list_tasks`, `show`, `create_task`, `update_task` (takes a `handoff`), `claim`, `renew`, `release`, `my_claims`, `comment`, `resolve_question`, `search`, `undo_last`. Each call is its own undo batch; errors come back as tool errors `error[code]: message`. Project briefs are resources at `trailhead://projects/KEY/brief`.
+- MCP (streamable HTTP, same bearer tokens): `/mcp`. Tools `ready`, `list_tasks`, `show`, `create_task`, `update_task` (takes a `handoff`), `claim`, `renew`, `release`, `my_claims`, `comment`, `resolve_question`, `search`, `undo_last`, `list_projects`, `show_project`, `create_project`, `update_project` (name and brief only). Each call is its own undo batch; errors come back as tool errors `error[code]: message`. Project briefs are resources at `trailhead://projects/KEY/brief`.
 - CLI: `trailhead --as <agent> ready|claim|renew|comment|ask|done -m|release|mine|watch`. `trailhead --as <agent> mcp` bridges MCP over stdio.
