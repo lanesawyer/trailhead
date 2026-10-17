@@ -542,6 +542,8 @@ async fn due_tz_must_be_a_real_zone() {
         ..Default::default()
     };
     assert!(matches!(env.store.create_task(&env.human, bad).await, Err(Error::Invalid(_))));
+    // Slim container images have no /usr/share/zoneinfo; jiff falls back to its bundled copy.
+    assert!(jiff::tz::TimeZoneDatabase::bundled().get("America/Los_Angeles").is_ok());
 }
 
 #[tokio::test]

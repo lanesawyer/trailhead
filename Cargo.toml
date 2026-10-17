@@ -37,7 +37,7 @@ trailhead-server = { path = "crates/trailhead-server", version = "0.1.0" }
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 http = "1"
 futures-util = { version = "0.3", default-features = false }
-jiff = "0.2"
+jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 utoipa = { version = "6", features = ["uuid", "time"] }
 keyring = "4"
 hmac = "0.13"
