@@ -82,6 +82,25 @@ impl Client {
         Ok(Client { http, base, token, local })
     }
 
+    /// Sends `req`. If the local server has gone away since `connect` (stopped, or
+    /// killed along with whatever started it), starts it again and retries once, so
+    /// a long-lived `trailhead mcp` bridge outlives the server it started with.
+    async fn send(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let retry = req.try_clone();
+        let err = match req.send().await {
+            Ok(res) => return Ok(res),
+            Err(e) => e,
+        };
+        match retry {
+            Some(retry) if self.local && err.is_connect() => {
+                eprintln!("note: the local server isn't running; starting it");
+                start_local_server(&self.http, &self.base).await?;
+                retry.send().await.context("request to Trailhead failed")
+            }
+            _ => Err(err).context("request to Trailhead failed"),
+        }
+    }
+
     pub async fn request(
         &self,
         method: Method,
@@ -94,7 +113,7 @@ impl Client {
         if let Some(b) = body {
             req = req.json(&b);
         }
-        let res = req.send().await.context("request to Trailhead failed")?;
+        let res = self.send(req).await?;
         let status = res.status();
         if status == StatusCode::NO_CONTENT {
             return Ok(Value::Null);
@@ -176,7 +195,7 @@ impl Client {
         if let Some(v) = protocol_version {
             req = req.header("mcp-protocol-version", v);
         }
-        let res = req.send().await.context("request to Trailhead failed")?;
+        let res = self.send(req).await?;
         let status = res.status();
         let is_sse = res
             .headers()
@@ -360,6 +379,18 @@ fn keep_std_handles_from_children() {
     }
 }
 
+/// This binary's path. On Linux a process whose file was replaced by a reinstall
+/// sees `<path> (deleted)`; the new binary at the original path is the one to run.
+fn current_exe() -> Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    if !exe.exists()
+        && let Some(path) = exe.to_str().and_then(|s| s.strip_suffix(" (deleted)"))
+    {
+        return Ok(path.into());
+    }
+    Ok(exe)
+}
+
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
 /// after this command exits.
 pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()> {
@@ -367,7 +398,7 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     std::fs::create_dir_all(&paths.data_dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.server_log())?;
     let bind = format!("{}:{}", base.host_str().unwrap_or("127.0.0.1"), base.port_or_known_default().unwrap_or(7241));
-    let exe = std::env::current_exe()?;
+    let exe = current_exe()?;
     #[cfg(windows)]
     let program = server_copy(&paths, &exe)?;
     #[cfg(not(windows))]
