@@ -1,0 +1,280 @@
+//! Tasks: listing, reading, writing, the ready queue and search.
+
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use trailhead_core::{NewTask, SearchFilter, SearchHit, Status, Task, TaskDetail, TaskFilter, TaskPatch};
+use utoipa::{IntoParams, ToSchema};
+
+use crate::auth::Auth;
+use crate::error::{ApiResult, Json, Path, Query, invalid};
+use crate::openapi::{ErrorBody, IfMatch, TaskParam};
+use crate::params::{parse_list, parse_opt_time, split_list};
+
+use super::{S, if_match, nullable, select_fields, with_etag};
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(crate) struct TaskListQuery {
+    project: Option<String>,
+    /// Comma-separated. Defaults to everything not done or cancelled.
+    status: Option<String>,
+    parent: Option<String>,
+    #[param(format = DateTime)]
+    due_before: Option<String>,
+    /// `key:value` pairs, comma-separated.
+    metadata: Option<String>,
+    /// `priority` (the default: priority, then due date, then oldest), `updated_at` or
+    /// `created_at`; prefix `-` for newest first, e.g. `-updated_at`.
+    sort: Option<String>,
+    /// Defaults to 100.
+    limit: Option<i64>,
+    /// Skip this many tasks, to page with `limit`.
+    offset: Option<i64>,
+    fields: Option<String>,
+    /// Comma-separated extras per task: `claim` (the live claim or `null`, with the holder's
+    /// name as `holder`), `open_questions` (unresolved `question` comments, oldest first) and
+    /// `last_handoff` (the newest `handoff` comment or `null`).
+    include: Option<String>,
+}
+
+#[utoipa::path(
+    get, path = "/v1/tasks", tag = "tasks", params(TaskListQuery),
+    responses((status = 200, description = "Tasks; trimmed to the requested `fields` if set", body = Vec<crate::openapi::ListedTask>))
+)]
+pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<TaskListQuery>) -> ApiResult<Json<Value>> {
+    let metadata = q
+        .metadata
+        .as_deref()
+        .map(|m| {
+            m.split(',')
+                .map(|pair| {
+                    pair.split_once(':')
+                        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                        .ok_or_else(|| invalid("metadata filter must be key:value"))
+                })
+                .collect::<ApiResult<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let filter = TaskFilter {
+        project: q.project,
+        statuses: parse_list(q.status.as_deref())?,
+        parent: q.parent,
+        due_before: parse_opt_time(q.due_before.as_deref())?,
+        metadata,
+        sort: q.sort.as_deref().map(str::parse).transpose()?.unwrap_or_default(),
+        limit: q.limit,
+        offset: q.offset,
+    };
+    let includes = split_list(q.include.as_deref());
+    if let Some(other) = includes.iter().find(|i| !["claim", "open_questions", "last_handoff"].contains(&i.as_str())) {
+        return Err(invalid(format!("unknown include: {other}")));
+    }
+    let wants = |name: &str| includes.iter().any(|i| i == name);
+    let tasks = s.store.list_tasks(&ctx, filter).await?;
+    let mut out = select_fields(&tasks, q.fields.as_deref())?;
+    let ids: Vec<_> = tasks.iter().map(|t| t.id).collect();
+    let mut claims = if wants("claim") { Some(s.store.live_claims(&ctx, &ids).await?) } else { None };
+    let mut questions = if wants("open_questions") { Some(s.store.open_questions(&ctx, &ids).await?) } else { None };
+    let mut handoffs = if wants("last_handoff") { Some(s.store.last_handoffs(&ctx, &ids).await?) } else { None };
+    if let Value::Array(items) = &mut out {
+        for (item, task) in items.iter_mut().zip(&tasks) {
+            if let Some(c) = &mut claims {
+                item["claim"] = json!(c.remove(&task.id));
+            }
+            if let Some(q) = &mut questions {
+                item["open_questions"] = json!(q.remove(&task.id).unwrap_or_default());
+            }
+            if let Some(h) = &mut handoffs {
+                item["last_handoff"] = json!(h.remove(&task.id));
+            }
+        }
+    }
+    Ok(Json(out))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct CreateTask {
+    project: String,
+    title: String,
+    #[serde(default)]
+    description: String,
+    priority: Option<i64>,
+    #[schema(format = DateTime)]
+    due_at: Option<String>,
+    due_tz: Option<String>,
+    parent: Option<String>,
+    metadata: Option<Value>,
+    source: Option<String>,
+    external_id: Option<String>,
+    /// Tasks that must finish before this one.
+    #[serde(default)]
+    blocked_by: Vec<String>,
+    /// Tasks this one blocks.
+    #[serde(default)]
+    blocks: Vec<String>,
+}
+
+#[utoipa::path(
+    post, path = "/v1/tasks", tag = "tasks", request_body = CreateTask,
+    responses(
+        (status = 201, description = "Created", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 404, description = "`not_found`: project, parent or dependency", body = ErrorBody),
+        (status = 409, description = "`dependency_cycle` from `blocked_by`/`blocks`. Repeating a `source` + `external_id` returns the existing task instead of an error.", body = ErrorBody),
+    )
+)]
+pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateTask>) -> ApiResult<Response> {
+    let new = NewTask {
+        project: b.project,
+        title: b.title,
+        description: b.description,
+        priority: b.priority,
+        due_at: parse_opt_time(b.due_at.as_deref())?,
+        due_tz: b.due_tz,
+        parent: b.parent,
+        metadata: b.metadata,
+        source: b.source,
+        external_id: b.external_id,
+    };
+    let task = s.store.create_task(&ctx, new).await?;
+    for blocker in &b.blocked_by {
+        s.store.add_dependency(&ctx, blocker, &task.key).await?;
+    }
+    for blocked in &b.blocks {
+        s.store.add_dependency(&ctx, &task.key, blocked).await?;
+    }
+    let mut res = with_etag(task.version, &task);
+    *res.status_mut() = StatusCode::CREATED;
+    Ok(res)
+}
+
+#[utoipa::path(
+    get, path = "/v1/tasks/{task}", tag = "tasks", params(TaskParam),
+    responses(
+        (status = 200, description = "The task with its claim, dependencies and comments", body = TaskDetail, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
+pub(crate) async fn get_task(State(s): S, Auth(ctx): Auth, Path(t): Path<String>) -> ApiResult<Response> {
+    let detail = s.store.task_detail(&ctx, &t).await?;
+    Ok(with_etag(detail.task.version, detail))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct UpdateTask {
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<Status>,
+    priority: Option<i64>,
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(format = DateTime)]
+    due_at: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    due_tz: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    parent: Option<Option<String>>,
+    metadata: Option<Value>,
+    /// Also accepted in the body for clients that can't set headers.
+    version: Option<i64>,
+}
+
+#[utoipa::path(
+    patch, path = "/v1/tasks/{task}", tag = "tasks", params(TaskParam, IfMatch),
+    request_body = UpdateTask,
+    responses(
+        (status = 200, description = "Updated", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 403, description = "`review_required` or `forbidden`", body = ErrorBody),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+        (status = 409, description = "`invalid_transition`, `claim_held` or `not_claim_holder`", body = ErrorBody),
+        (status = 412, description = "`version_conflict`", body = ErrorBody),
+    )
+)]
+pub(crate) async fn update_task(
+    State(s): S,
+    Auth(ctx): Auth,
+    Path(t): Path<String>,
+    headers: HeaderMap,
+    Json(b): Json<UpdateTask>,
+) -> ApiResult<Response> {
+    let patch = TaskPatch {
+        title: b.title,
+        description: b.description,
+        status: b.status,
+        priority: b.priority,
+        due_at: b.due_at.map(|d| parse_opt_time(d.as_deref())).transpose()?,
+        due_tz: b.due_tz,
+        parent: b.parent,
+        metadata: b.metadata,
+    };
+    let version = if_match(&headers)?.or(b.version);
+    let task = s.store.update_task(&ctx, &t, patch, version).await?;
+    Ok(with_etag(task.version, task))
+}
+
+#[utoipa::path(
+    delete, path = "/v1/tasks/{task}", tag = "tasks", params(TaskParam, IfMatch),
+    responses(
+        (status = 200, description = "Soft-deleted; undo restores it", body = Task),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+        (status = 409, description = "`claim_held` or `not_claim_holder`", body = ErrorBody),
+        (status = 412, description = "`version_conflict`", body = ErrorBody),
+    )
+)]
+pub(crate) async fn delete_task(
+    State(s): S,
+    Auth(ctx): Auth,
+    Path(t): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let task = s.store.delete_task(&ctx, &t, if_match(&headers)?).await?;
+    Ok(Json(task).into_response())
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(crate) struct ReadyQuery {
+    project: Option<String>,
+    limit: Option<i64>,
+    fields: Option<String>,
+}
+
+#[utoipa::path(
+    get, path = "/v1/ready", tag = "tasks", params(ReadyQuery),
+    responses((status = 200, description = "Open, unclaimed, unblocked tasks by priority then due date; trimmed to `fields` if set", body = Vec<Task>))
+)]
+pub(crate) async fn ready(State(s): S, Auth(ctx): Auth, Query(q): Query<ReadyQuery>) -> ApiResult<Json<Value>> {
+    let tasks = s.store.ready(&ctx, q.project.as_deref(), q.limit).await?;
+    Ok(Json(select_fields(&tasks, q.fields.as_deref())?))
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(crate) struct SearchQuery {
+    q: String,
+    project: Option<String>,
+    /// Comma-separated. Defaults to every status, open work first.
+    status: Option<String>,
+    limit: Option<i64>,
+    fields: Option<String>,
+}
+
+#[utoipa::path(
+    get, path = "/v1/search", tag = "tasks", params(SearchQuery),
+    responses((status = 200, description = "Matching tasks, each with `match` saying where it matched; tasks are trimmed to `fields` if set", body = Vec<SearchHit>))
+)]
+pub(crate) async fn search(State(s): S, Auth(ctx): Auth, Query(q): Query<SearchQuery>) -> ApiResult<Json<Value>> {
+    let filter =
+        SearchFilter { query: q.q, project: q.project, statuses: parse_list(q.status.as_deref())?, limit: q.limit };
+    let hits = s.store.search_hits(&ctx, filter).await?;
+    let tasks: Vec<_> = hits.iter().map(|h| &h.task).collect();
+    let mut out = select_fields(&tasks, q.fields.as_deref())?;
+    if let Value::Array(items) = &mut out {
+        for (item, hit) in items.iter_mut().zip(&hits) {
+            item["match"] = json!(hit.matched);
+        }
+    }
+    Ok(Json(out))
+}
