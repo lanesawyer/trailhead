@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -5,8 +7,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
-use trailhead_server::creds::CredStore;
-use trailhead_server::{AppState, LocalConfig, open_local, router};
+use trailhead_server::{AppState, open_local, router};
 
 /// Every (method, path) registered in `routes::v1()`. Add new routes here.
 const ROUTES: &[(&str, &str)] = &[
@@ -54,13 +55,7 @@ const ROUTES: &[(&str, &str)] = &[
 
 async fn fetch_doc() -> Value {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = LocalConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        db: dir.path().join("t.db"),
-        creds: CredStore { config_dir: dir.path().into(), keyring: false },
-        user_name: "lane".into(),
-        pid_file: None,
-    };
+    let cfg = common::local_config(dir.path());
     let (store, _) = open_local(&cfg).await.unwrap();
     let app = router(Arc::new(AppState::new(store)));
     let req = Request::builder().uri("/v1/openapi.json").body(Body::empty()).unwrap();

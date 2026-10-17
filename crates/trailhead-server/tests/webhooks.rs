@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -7,8 +9,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use trailhead_core::{CommentKind, Error, NewComment, NewProject, NewTask, webhook_signature};
-use trailhead_server::creds::CredStore;
-use trailhead_server::{AppState, LocalConfig, open_local, webhooks};
+use trailhead_server::{AppState, open_local, webhooks};
 
 #[derive(Default)]
 struct Receiver {
@@ -37,13 +38,7 @@ fn header<'a>(h: &'a HeaderMap, name: &str) -> &'a str {
 #[tokio::test]
 async fn delivers_signed_filtered_events_and_backs_off() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = LocalConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        db: dir.path().join("t.db"),
-        creds: CredStore { config_dir: dir.path().into(), keyring: false },
-        user_name: "lane".into(),
-        pid_file: None,
-    };
+    let cfg = common::local_config(dir.path());
     let (store, ctx) = open_local(&cfg).await.unwrap();
     store
         .create_project(&ctx, NewProject { key: "AUTH".into(), name: "Auth".into(), ..Default::default() })
@@ -115,13 +110,7 @@ async fn delivers_signed_filtered_events_and_backs_off() {
 #[tokio::test]
 async fn public_only_refuses_private_targets() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = LocalConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        db: dir.path().join("t.db"),
-        creds: CredStore { config_dir: dir.path().into(), keyring: false },
-        user_name: "lane".into(),
-        pid_file: None,
-    };
+    let cfg = common::local_config(dir.path());
     let (store, ctx) = open_local(&cfg).await.unwrap();
     store
         .create_project(&ctx, NewProject { key: "AUTH".into(), name: "Auth".into(), ..Default::default() })

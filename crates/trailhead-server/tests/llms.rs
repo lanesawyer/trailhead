@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use axum::Router;
@@ -5,8 +7,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
-use trailhead_server::creds::CredStore;
-use trailhead_server::{AppState, LocalConfig, open_local, router};
+use trailhead_server::{AppState, open_local, router};
 
 async fn get(app: &Router, path: &str) -> (StatusCode, String, String) {
     let res = app.clone().oneshot(Request::builder().uri(path).body(Body::empty()).unwrap()).await.unwrap();
@@ -19,13 +20,7 @@ async fn get(app: &Router, path: &str) -> (StatusCode, String, String) {
 #[tokio::test]
 async fn llms_txt_is_public_and_lists_every_error_code() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = LocalConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        db: dir.path().join("t.db"),
-        creds: CredStore { config_dir: dir.path().into(), keyring: false },
-        user_name: "lane".into(),
-        pid_file: None,
-    };
+    let cfg = common::local_config(dir.path());
     let (store, _) = open_local(&cfg).await.unwrap();
     let app = router(Arc::new(AppState::new(store)));
 

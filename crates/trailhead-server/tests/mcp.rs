@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use rmcp::ServiceExt;
@@ -7,8 +9,8 @@ use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
 use trailhead_core::{NewProject, NewTask, Principal, TokenOptions};
-use trailhead_server::creds::{Cred, CredStore};
-use trailhead_server::{AppState, LocalConfig, open_local, router};
+use trailhead_server::creds::Cred;
+use trailhead_server::{AppState, open_local, router};
 
 struct Server {
     url: String,
@@ -21,13 +23,7 @@ struct Server {
 
 async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = LocalConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        db: dir.path().join("t.db"),
-        creds: CredStore { config_dir: dir.path().into(), keyring: false },
-        user_name: "lane".into(),
-        pid_file: None,
-    };
+    let cfg = common::local_config(dir.path());
     let (store, ctx) = open_local(&cfg).await.unwrap();
     let human = std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap().trim().to_string();
     store

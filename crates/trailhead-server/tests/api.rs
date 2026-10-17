@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use axum::Router;
@@ -6,8 +8,8 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use trailhead_server::creds::{Cred, CredStore};
-use trailhead_server::{AppState, BATCH_HEADER, LocalConfig, open_local, router};
+use trailhead_server::creds::Cred;
+use trailhead_server::{AppState, BATCH_HEADER, open_local, router};
 
 struct Api {
     app: Router,
@@ -24,13 +26,7 @@ struct Res {
 impl Api {
     async fn new() -> Api {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = LocalConfig {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            db: dir.path().join("t.db"),
-            creds: CredStore { config_dir: dir.path().into(), keyring: false },
-            user_name: "lane".into(),
-            pid_file: None,
-        };
+        let cfg = common::local_config(dir.path());
         let (store, _) = open_local(&cfg).await.unwrap();
         let human = std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap().trim().to_string();
         Api { app: router(Arc::new(AppState::new(store))), human, _dir: dir }
@@ -185,13 +181,7 @@ async fn nullable_fields_clear_on_null() {
 #[tokio::test]
 async fn reopening_keeps_the_same_cli_token() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = LocalConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        db: dir.path().join("t.db"),
-        creds: CredStore { config_dir: dir.path().into(), keyring: false },
-        user_name: "lane".into(),
-        pid_file: None,
-    };
+    let cfg = common::local_config(dir.path());
     drop(open_local(&cfg).await.unwrap());
     let first = std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap();
     drop(open_local(&cfg).await.unwrap());
