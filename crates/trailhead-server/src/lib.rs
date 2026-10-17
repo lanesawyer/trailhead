@@ -37,6 +37,9 @@ pub struct AppState {
     /// streams end instead of holding graceful shutdown open forever.
     pub shutdown: tokio::sync::watch::Sender<bool>,
     pub limits: ratelimit::RateLimiter,
+    /// Public-only unless this is the local server, where receivers on the same
+    /// machine or network are the point.
+    pub webhook_targets: webhooks::Targets,
 }
 
 impl AppState {
@@ -46,6 +49,7 @@ impl AppState {
             info: ServerInfo::current(None),
             shutdown: tokio::sync::watch::Sender::new(false),
             limits: Default::default(),
+            webhook_targets: webhooks::Targets::PublicOnly,
         }
     }
 }
@@ -198,7 +202,11 @@ pub fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
 /// Runs the local server until Ctrl-C, SIGTERM or (on Windows) `trailhead server stop`, finishing in-flight requests first.
 pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Error>> {
     let (store, ctx) = open_local(&cfg).await?;
-    let state = Arc::new(AppState { info: ServerInfo::current(Some(cfg.db.clone())), ..AppState::new(store) });
+    let state = Arc::new(AppState {
+        info: ServerInfo::current(Some(cfg.db.clone())),
+        webhook_targets: webhooks::Targets::Any,
+        ..AppState::new(store)
+    });
     let reaper = state.clone();
     let reminder_ctx = ctx.clone();
     tokio::spawn(async move {

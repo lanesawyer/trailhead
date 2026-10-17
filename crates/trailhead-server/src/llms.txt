@@ -91,7 +91,7 @@ Every write appends an event: `{id, batch_id, actor_id, on_behalf_of, task_id, t
 
 ## Webhooks
 
-Humans with unscoped tokens can register `POST /v1/webhooks {"url", "event_kinds": ["task.", ...]}` (empty kinds means every event); the response carries a `whsec_` signing secret, shown once. Each event is POSTed as its JSON with headers `trailhead-event-id`, `trailhead-event-kind`, `trailhead-webhook-id` and `trailhead-signature: t=<unix>,v1=<hex HMAC-SHA256 of "<t>.<body>">` keyed by the secret; verify it and reject old timestamps. Delivery is ordered and at-least-once (dedupe on the event id). A non-2xx response stops the queue and retries with exponential backoff up to an hour; 20 failures in a row disable the webhook. `GET /v1/webhooks`, `DELETE /v1/webhooks/{id}`, and `GET /v1/webhooks/{id}/deliveries` for the attempt log.
+Humans with unscoped tokens can register `POST /v1/webhooks {"url", "event_kinds": ["task.", ...]}` (empty kinds means every event); the response carries a `whsec_` signing secret, shown once. Each event is POSTed as its JSON with headers `trailhead-event-id`, `trailhead-event-kind`, `trailhead-webhook-id` and `trailhead-signature: t=<unix>,v1=<hex HMAC-SHA256 of "<t>.<body>">` keyed by the secret; verify it and reject old timestamps. Delivery is ordered and at-least-once (dedupe on the event id). A non-2xx response stops the queue and retries with exponential backoff up to an hour; 20 failures in a row disable the webhook. `GET /v1/webhooks`, `DELETE /v1/webhooks/{id}`, and `GET /v1/webhooks/{id}/deliveries` for the attempt log. Except on the local server, targets must resolve to public addresses and redirects aren't followed; a private target fails like any other delivery and shows in the attempt log.
 
 ## Compact output
 

@@ -1,9 +1,11 @@
 //! Delivers events to registered webhooks. State (cursors, backoff, the
 //! delivery log) lives in core; this is the HTTP side.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use trailhead_core::{Event, Webhook, webhook_signature};
 
 use crate::AppState;
@@ -13,8 +15,85 @@ const POLL: Duration = Duration::from_secs(2);
 const BATCH: i64 = 50;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Where webhooks may post. A hosted server must not let a workspace point a
+/// webhook at its own network (cloud metadata, internal services).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Targets {
+    Any,
+    PublicOnly,
+}
+
+/// The HTTP client for deliveries. With `PublicOnly`, names resolve only to public
+/// addresses (checked at connect time, so DNS rebinding can't slip past), redirects
+/// aren't followed and proxies from the environment are ignored.
+pub fn client(targets: Targets) -> reqwest::Client {
+    let builder = reqwest::Client::builder().timeout(TIMEOUT);
+    let builder = match targets {
+        Targets::Any => builder,
+        Targets::PublicOnly => {
+            builder.dns_resolver(PublicResolver).redirect(reqwest::redirect::Policy::none()).no_proxy()
+        }
+    };
+    builder.build().expect("HTTP client")
+}
+
+struct PublicResolver;
+
+impl Resolve for PublicResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.filter(|a| is_public(a.ip())).collect();
+            if addrs.is_empty() {
+                return Err(format!("{host} doesn't resolve to a public address").into());
+            }
+            Ok(Box::new(addrs.into_iter()) as Addrs)
+        })
+    }
+}
+
+/// False for loopback, private, link-local (cloud metadata), shared, reserved and
+/// other non-global ranges.
+pub fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_public_v4(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_public_v4(v4),
+            None => is_public_v6(v6),
+        },
+    }
+}
+
+fn is_public_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_multicast()
+        || a == 0
+        || (a == 100 && (64..128).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 198 && (b == 18 || b == 19))
+        || a >= 240)
+}
+
+fn is_public_v6(ip: Ipv6Addr) -> bool {
+    let s = ip.segments();
+    !(ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_multicast()
+        || (s[0] & 0xfe00) == 0xfc00
+        || (s[0] & 0xffc0) == 0xfe80
+        || (s[0] == 0x2001 && s[1] == 0x0db8)
+        || (s[0] == 0x0064 && s[1] == 0xff9b))
+}
+
 pub fn spawn(state: Arc<AppState>) {
-    let http = reqwest::Client::builder().timeout(TIMEOUT).build().expect("HTTP client");
+    let http = client(state.webhook_targets);
     let mut changes = state.store.changes();
     tokio::spawn(async move {
         loop {
@@ -64,7 +143,7 @@ async fn deliver(
             if let Some(id) = skipped.take() {
                 store.webhook_advance(&hook, id, None).await?;
             }
-            match post(http, &hook, secret, e).await {
+            match post(http, state.webhook_targets, &hook, secret, e).await {
                 Ok(status) => {
                     store.webhook_advance(&hook, e.id, Some(status)).await?;
                     hook.failure_count = 0;
@@ -83,7 +162,23 @@ async fn deliver(
     }
 }
 
-async fn post(http: &reqwest::Client, hook: &Webhook, secret: &str, e: &Event) -> Result<u16, (Option<u16>, String)> {
+async fn post(
+    http: &reqwest::Client,
+    targets: Targets,
+    hook: &Webhook,
+    secret: &str,
+    e: &Event,
+) -> Result<u16, (Option<u16>, String)> {
+    // IP literals never reach the resolver, so check them here.
+    if targets == Targets::PublicOnly {
+        let url = reqwest::Url::parse(&hook.url).map_err(|err| (None, err.to_string()))?;
+        let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+        if let Ok(ip) = host.parse::<IpAddr>()
+            && !is_public(ip)
+        {
+            return Err((None, format!("{ip} is not a public address")));
+        }
+    }
     let body = serde_json::to_vec(e).map_err(|err| (None, err.to_string()))?;
     let signature = webhook_signature(secret, time::OffsetDateTime::now_utc().unix_timestamp(), &body);
     let res = http
@@ -97,7 +192,19 @@ async fn post(http: &reqwest::Client, hook: &Webhook, secret: &str, e: &Event) -
         .body(body)
         .send()
         .await
-        .map_err(|err| (None, err.to_string()))?;
+        .map_err(|err| (None, with_causes(&err)))?;
     let status = res.status().as_u16();
     if res.status().is_success() { Ok(status) } else { Err((Some(status), format!("HTTP {status}"))) }
+}
+
+/// reqwest's own message is just "error sending request"; the reason is in its sources.
+fn with_causes(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut cause = err.source();
+    while let Some(c) = cause {
+        out.push_str(": ");
+        out.push_str(&c.to_string());
+        cause = c.source();
+    }
+    out
 }
