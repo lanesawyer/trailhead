@@ -52,6 +52,8 @@ A project with `require_review: true` won't let agents set `done`; send work to 
 
 A project's `reviewers` (set by a human: `PATCH /v1/projects/KEY {"reviewers": ["agent-name"]}`) are agents allowed to approve like a human.
 
+Agents can turn `require_review` on but not off, and can't archive or unarchive a project or change its `reviewers`, whether with `PATCH` or by undoing or reverting a human's change (`403 forbidden`).
+
 ## Dependencies
 
 "Blocked" is computed, never stored: a task is blocked while any blocker is not `done` or `cancelled`. Blocked tasks stay out of `ready`, and claiming one is `409 blocked_by` with the blocker keys in `blocked_by`.

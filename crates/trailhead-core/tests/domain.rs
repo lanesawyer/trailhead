@@ -4,8 +4,8 @@ use common::Env;
 use serde_json::json;
 use time::Duration;
 use trailhead_core::{
-    CommentKind, Error, EventFilter, MatchField, NewComment, NewProject, NewTask, ProjectPatch, SearchFilter, Status,
-    TaskFilter, TaskPatch, TaskSort,
+    CommentKind, Error, EventFilter, MatchField, NewComment, NewProject, NewTask, ProjectPatch, ProjectStatus,
+    SearchFilter, Status, TaskFilter, TaskPatch, TaskSort,
 };
 
 fn status(s: Status) -> TaskPatch {
@@ -193,6 +193,43 @@ async fn review_requires_a_human() {
     assert!(matches!(env.store.update_task(&a, &t.key, status(Status::Done), None).await, Err(Error::ReviewRequired)));
     let done = env.store.update_task(&env.human, &t.key, status(Status::Done), None).await.unwrap();
     assert_eq!(done.status, Status::Done);
+}
+
+#[tokio::test]
+async fn only_humans_can_loosen_review_or_archive() {
+    let env = Env::new().await;
+    let a = env.agent("a").await;
+    let patch = |p: ProjectPatch| async { env.store.update_project(&a.next_batch(), "AUTH", p, None).await };
+
+    // Tightening is fine, and so is restating the current setting.
+    patch(ProjectPatch { require_review: Some(true), ..Default::default() }).await.unwrap();
+    patch(ProjectPatch { require_review: Some(true), name: Some("Auth".into()), ..Default::default() }).await.unwrap();
+    assert!(matches!(
+        patch(ProjectPatch { require_review: Some(false), ..Default::default() }).await,
+        Err(Error::Forbidden(_))
+    ));
+    assert!(matches!(
+        patch(ProjectPatch { status: Some(ProjectStatus::Archived), ..Default::default() }).await,
+        Err(Error::Forbidden(_))
+    ));
+    let project = env.store.get_project(&env.human, "AUTH").await.unwrap();
+    assert!(project.require_review);
+    assert_eq!(project.status, ProjectStatus::Active);
+
+    // Nor by undoing a human's change: here, undoing the human turning review back on.
+    env.store
+        .update_project(&env.human, "AUTH", ProjectPatch { require_review: Some(false), ..Default::default() }, None)
+        .await
+        .unwrap();
+    let on = env.human.next_batch();
+    env.store
+        .update_project(&on, "AUTH", ProjectPatch { require_review: Some(true), ..Default::default() }, None)
+        .await
+        .unwrap();
+    assert!(matches!(env.store.undo_batch(&a.next_batch(), on.batch_id).await, Err(Error::Forbidden(_))));
+    assert!(env.store.get_project(&env.human, "AUTH").await.unwrap().require_review);
+    env.store.undo_batch(&env.human.next_batch(), on.batch_id).await.unwrap();
+    assert!(!env.store.get_project(&env.human, "AUTH").await.unwrap().require_review);
 }
 
 #[tokio::test]

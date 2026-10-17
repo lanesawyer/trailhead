@@ -11,7 +11,7 @@ use crate::deps::{insert_dependency, load_dependency, remove_dependency_row};
 use crate::error::{Error, Result};
 use crate::events::{EVENT_COLS, UNDO_WINDOW, collect_events, scope_sql};
 use crate::model::{Claim, Comment, Dependency, Entity, Event, Project, Task};
-use crate::projects::{load_project, save_project};
+use crate::projects::{check_review_settings, load_project, save_project};
 use crate::reminders::{NOT_NOTIFICATION_SQL, is_notification};
 use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::{load_task, save_task};
@@ -83,6 +83,7 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
             if same_project(&cur, &want) {
                 return Ok(None);
             }
+            check_review_settings(&tx.ctx, &cur, &want)?;
             let saved = save_project(tx, &cur, want).await?;
             (None, Some(serde_json::to_value(&cur)?), Some(serde_json::to_value(&saved)?))
         }
