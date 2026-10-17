@@ -1,11 +1,11 @@
 use libsql::Connection;
 use uuid::Uuid;
 
-use crate::db::fmt_ts;
+use crate::db::{collect, fmt_ts};
 use crate::error::{Error, Result};
 use crate::model::{Dependency, Entity, Task};
 use crate::store::{Ctx, Store, Tx};
-use crate::tasks::{TASK_COLS, collect_tasks, find_task};
+use crate::tasks::{TASK_COLS, find_task, task_from_row};
 
 pub(crate) fn dep_entity_id(blocker: Uuid, blocked: Uuid) -> String {
     format!("{blocker}:{blocked}")
@@ -23,7 +23,7 @@ pub(crate) async fn unfinished_blockers(conn: &Connection, task_id: Uuid) -> Res
             [task_id.to_string()],
         )
         .await?;
-    collect_tasks(rows).await
+    collect(rows, task_from_row).await
 }
 
 /// Placeholder for a related task outside the caller's scope, so a scoped agent

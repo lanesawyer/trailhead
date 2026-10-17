@@ -9,9 +9,9 @@ use sha2::Sha256;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::db::{fmt_ts, get_opt_ts, get_ts, get_uuid};
+use crate::db::{collect, fmt_ts, get_opt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
-use crate::events::{EVENT_COLS, collect_events};
+use crate::events::{EVENT_COLS, event_from_row};
 use crate::model::Event;
 use crate::store::{Ctx, Store};
 
@@ -144,17 +144,13 @@ impl Store {
     pub async fn list_webhooks(&self, ctx: &Ctx) -> Result<Vec<Webhook>> {
         require_admin(ctx)?;
         let conn = self.reader()?;
-        let mut rows = conn
+        let rows = conn
             .query(
                 &format!("SELECT {WEBHOOK_COLS} FROM webhooks WHERE workspace_id = ?1 ORDER BY created_at"),
                 [ctx.workspace_id.to_string()],
             )
             .await?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            out.push(webhook_from_row(&row)?.0);
-        }
-        Ok(out)
+        collect(rows, |row| Ok(webhook_from_row(row)?.0)).await
     }
 
     pub async fn delete_webhook(&self, ctx: &Ctx, id: Uuid) -> Result<()> {
@@ -174,7 +170,7 @@ impl Store {
     pub async fn webhook_deliveries(&self, ctx: &Ctx, id: Uuid, limit: Option<i64>) -> Result<Vec<WebhookDelivery>> {
         require_admin(ctx)?;
         let conn = self.reader()?;
-        let mut rows = conn
+        let rows = conn
             .query(
                 "SELECT d.id, d.webhook_id, d.event_id, d.status_code, d.error, d.at FROM webhook_deliveries d
                  JOIN webhooks w ON w.id = d.webhook_id
@@ -182,25 +178,24 @@ impl Store {
                 libsql::params![id.to_string(), ctx.workspace_id.to_string(), limit.unwrap_or(50)],
             )
             .await?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            out.push(WebhookDelivery {
+        collect(rows, |row| {
+            Ok(WebhookDelivery {
                 id: row.get(0)?,
-                webhook_id: get_uuid(&row, 1)?,
+                webhook_id: get_uuid(row, 1)?,
                 event_id: row.get(2)?,
                 status_code: row.get(3)?,
                 error: row.get(4)?,
-                at: get_ts(&row, 5)?,
-            });
-        }
-        Ok(out)
+                at: get_ts(row, 5)?,
+            })
+        })
+        .await
     }
 
     /// Enabled webhooks whose backoff has passed, with their secrets, across every
     /// workspace. For the delivery loop.
     pub async fn webhooks_due(&self) -> Result<Vec<(Webhook, String)>> {
         let conn = self.reader()?;
-        let mut rows = conn
+        let rows = conn
             .query(
                 &format!(
                     "SELECT {WEBHOOK_COLS} FROM webhooks WHERE disabled_at IS NULL
@@ -209,11 +204,7 @@ impl Store {
                 [fmt_ts(self.now())],
             )
             .await?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            out.push(webhook_from_row(&row)?);
-        }
-        Ok(out)
+        collect(rows, webhook_from_row).await
     }
 
     /// The next events after a webhook's cursor, matching or not, oldest first.
@@ -225,7 +216,7 @@ impl Store {
                 libsql::params![hook.workspace_id.to_string(), hook.cursor, limit],
             )
             .await?;
-        collect_events(rows).await
+        collect(rows, event_from_row).await
     }
 
     /// Moves the cursor past `event_id` after a successful delivery (`status`

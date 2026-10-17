@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::db::{get_opt_json, get_opt_ts, get_ts, get_uuid};
+use crate::db::{collect, first, get_opt_json, get_opt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::identity::{is_descendant, lineage_revoked};
 use crate::projects::load_project;
@@ -232,7 +232,7 @@ impl Store {
         let conn = self.reader()?;
         // Humans see their own and all their agents' tokens; an agent sees its own
         // and its sub-agents'.
-        let mut rows = match ctx.agent_id {
+        let rows = match ctx.agent_id {
             None => {
                 conn.query(
                     &format!(
@@ -256,11 +256,7 @@ impl Store {
                 .await?
             }
         };
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            out.push(token_from_row(&row)?);
-        }
-        Ok(out)
+        collect(rows, token_from_row).await
     }
 
     /// Takes effect on the next request.
@@ -269,7 +265,7 @@ impl Store {
             return Err(Error::Forbidden("agents can't revoke tokens".into()));
         }
         self.write(ctx, async |tx| {
-            let mut rows = tx
+            let rows = tx
                 .conn
                 .query(
                     &format!(
@@ -280,10 +276,7 @@ impl Store {
                     [tx.now_str(), id.to_string(), tx.ws(), ctx.user_id.to_string()],
                 )
                 .await?;
-            match rows.next().await? {
-                Some(row) => token_from_row(&row),
-                None => Err(Error::NotFound(format!("token {id}"))),
-            }
+            first(rows, token_from_row).await?.ok_or_else(|| Error::NotFound(format!("token {id}")))
         })
         .await
     }

@@ -2,7 +2,7 @@ use libsql::Row;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::db::{fmt_ts, get_enum, get_opt_json, get_opt_uuid, get_ts, get_uuid};
+use crate::db::{collect, fmt_ts, get_enum, get_opt_json, get_opt_uuid, get_ts, get_uuid};
 use crate::error::Result;
 use crate::model::Event;
 use crate::projects::find_project;
@@ -41,14 +41,6 @@ pub(crate) fn event_from_row(row: &Row) -> Result<Event> {
         at: get_ts(row, 12)?,
         task_key: row.get(13)?,
     })
-}
-
-pub(crate) async fn collect_events(mut rows: libsql::Rows) -> Result<Vec<Event>> {
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await? {
-        out.push(event_from_row(&row)?);
-    }
-    Ok(out)
 }
 
 /// Events a scoped context may see: those on its projects' tasks, and on the
@@ -145,7 +137,7 @@ impl Store {
                 ],
             )
             .await?;
-        collect_events(rows).await
+        collect(rows, event_from_row).await
     }
 
     /// Moves events older than [`UNDO_WINDOW`] to `events_archive`, in every

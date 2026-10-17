@@ -7,9 +7,10 @@ use uuid::Uuid;
 
 use crate::claims::{any_claim, put_claim};
 use crate::comments::{load_comment, save_comment};
+use crate::db::collect;
 use crate::deps::{insert_dependency, load_dependency, remove_dependency_row};
 use crate::error::{Error, Result};
-use crate::events::{EVENT_COLS, UNDO_WINDOW, collect_events, scope_sql};
+use crate::events::{EVENT_COLS, UNDO_WINDOW, event_from_row, scope_sql};
 use crate::model::{Claim, Comment, Dependency, Entity, Event, Project, Task};
 use crate::projects::{check_review_settings, load_project, save_project};
 use crate::reminders::{NOT_NOTIFICATION_SQL, is_notification};
@@ -256,7 +257,7 @@ async fn check_window(
 async fn query_events(tx: &Tx, where_clause: &str, params: Vec<libsql::Value>) -> Result<Vec<Event>> {
     let rows =
         tx.conn.query(&format!("SELECT {EVENT_COLS} FROM events WHERE {where_clause} ORDER BY id"), params).await?;
-    collect_events(rows).await
+    collect(rows, event_from_row).await
 }
 
 impl Store {

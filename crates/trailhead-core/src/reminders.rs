@@ -2,9 +2,9 @@ use libsql::Connection;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::db::{fmt_ts, get_uuid};
+use crate::db::{collect, fmt_ts, get_uuid};
 use crate::error::{Error, Result};
-use crate::events::{EVENT_COLS, collect_events};
+use crate::events::{EVENT_COLS, event_from_row};
 use crate::model::{Entity, Event, Task};
 use crate::store::{Ctx, EventIn, Store};
 use crate::tasks::{TASK_COLS, task_from_row};
@@ -27,7 +27,7 @@ pub(crate) const NOT_NOTIFICATION_SQL: &str = "kind NOT IN ('task.due_soon', 'ta
 /// with the reminder kind. Only `task.overdue` fires once the due date has passed,
 /// so a task first seen late doesn't get both.
 async fn pending(conn: &Connection, ws: Uuid, now: OffsetDateTime, window: Duration) -> Result<Vec<(Task, String)>> {
-    let mut rows = conn
+    let rows = conn
         .query(
             &format!(
                 "SELECT {TASK_COLS}, kind FROM (
@@ -45,11 +45,7 @@ async fn pending(conn: &Connection, ws: Uuid, now: OffsetDateTime, window: Durat
             libsql::params![ws.to_string(), fmt_ts(now), fmt_ts(now + window)],
         )
         .await?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await? {
-        out.push((task_from_row(&row)?, row.get::<String>(19)?));
-    }
-    Ok(out)
+    collect(rows, |row| Ok((task_from_row(row)?, row.get::<String>(19)?))).await
 }
 
 /// The workspace's first user, who reminders are attributed to.
@@ -111,7 +107,7 @@ impl Store {
                     libsql::params![ctx.batch_id.to_string(), ids[0]],
                 )
                 .await?;
-            collect_events(rows).await
+            collect(rows, event_from_row).await
         })
         .await
     }

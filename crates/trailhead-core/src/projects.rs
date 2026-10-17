@@ -2,7 +2,7 @@ use libsql::{Connection, Row};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::db::{fmt_ts, get_enum, get_json, get_opt_ts, get_ts, get_uuid, opt_ts_value};
+use crate::db::{collect, first, fmt_ts, get_enum, get_json, get_opt_ts, get_ts, get_uuid, opt_ts_value};
 use crate::error::{Error, Result};
 use crate::metadata::merge_patch;
 use crate::model::{Entity, Project, ProjectStatus};
@@ -78,11 +78,8 @@ pub(crate) async fn load_project(conn: &Connection, ws: Uuid, r: &str, include_d
         "SELECT {PROJECT_COLS} FROM projects WHERE workspace_id = ?1 AND (id = ?2 OR key = upper(?2)) {}",
         if include_deleted { "" } else { "AND deleted_at IS NULL" }
     );
-    let mut rows = conn.query(&sql, [ws.to_string(), r.trim().to_string()]).await?;
-    match rows.next().await? {
-        Some(row) => project_from_row(&row),
-        None => Err(Error::NotFound(format!("project {r}"))),
-    }
+    let rows = conn.query(&sql, [ws.to_string(), r.trim().to_string()]).await?;
+    first(rows, project_from_row).await?.ok_or_else(|| Error::NotFound(format!("project {r}")))
 }
 
 /// [`load_project`] for reads of a project the caller named: one outside the
@@ -281,11 +278,7 @@ impl Store {
             ctx.scope_sql("id"),
             if include_archived { "" } else { "AND status = 'active'" }
         );
-        let mut rows = conn.query(&sql, [ctx.workspace_id.to_string()]).await?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            out.push(project_from_row(&row)?);
-        }
-        Ok(out)
+        let rows = conn.query(&sql, [ctx.workspace_id.to_string()]).await?;
+        collect(rows, project_from_row).await
     }
 }

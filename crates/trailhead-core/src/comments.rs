@@ -4,7 +4,10 @@ use libsql::{Connection, Row};
 use uuid::Uuid;
 
 use crate::claims::live_claim;
-use crate::db::{fmt_ts, get_enum, get_opt_ts, get_opt_uuid, get_ts, get_uuid, opt_ts_value, opt_uuid_value};
+use crate::db::{
+    collect, first, fmt_ts, get_enum, get_opt_ts, get_opt_uuid, get_ts, get_uuid, json_ids, opt_ts_value,
+    opt_uuid_value,
+};
 use crate::error::{Error, Result};
 use crate::model::{Comment, CommentKind, Entity, Status};
 use crate::store::{Ctx, Store, Tx};
@@ -30,7 +33,7 @@ fn comment_from_row(row: &Row) -> Result<Comment> {
 }
 
 pub(crate) async fn list_comments_for(conn: &Connection, task_id: Uuid) -> Result<Vec<Comment>> {
-    let mut rows = conn
+    let rows = conn
         .query(
             &format!(
                 "SELECT {COMMENT_COLS} FROM comments WHERE task_id = ?1 AND deleted_at IS NULL ORDER BY created_at, rowid"
@@ -38,15 +41,11 @@ pub(crate) async fn list_comments_for(conn: &Connection, task_id: Uuid) -> Resul
             [task_id.to_string()],
         )
         .await?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await? {
-        out.push(comment_from_row(&row)?);
-    }
-    Ok(out)
+    collect(rows, comment_from_row).await
 }
 
 pub(crate) async fn latest_handoff(conn: &Connection, task_id: Uuid) -> Result<Option<Comment>> {
-    let mut rows = conn
+    let rows = conn
         .query(
             &format!(
                 "SELECT {COMMENT_COLS} FROM comments WHERE task_id = ?1 AND kind = 'handoff' AND deleted_at IS NULL
@@ -55,24 +54,21 @@ pub(crate) async fn latest_handoff(conn: &Connection, task_id: Uuid) -> Result<O
             [task_id.to_string()],
         )
         .await?;
-    rows.next().await?.map(|r| comment_from_row(&r)).transpose()
+    first(rows, comment_from_row).await
 }
 
 pub(crate) async fn load_comment(conn: &Connection, ws: Uuid, id: Uuid) -> Result<Comment> {
-    let mut rows = conn
+    let rows = conn
         .query(
             &format!("SELECT {COMMENT_COLS} FROM comments WHERE id = ?1 AND workspace_id = ?2"),
             [id.to_string(), ws.to_string()],
         )
         .await?;
-    match rows.next().await? {
-        Some(row) => comment_from_row(&row),
-        None => Err(Error::NotFound(format!("comment {id}"))),
-    }
+    first(rows, comment_from_row).await?.ok_or_else(|| Error::NotFound(format!("comment {id}")))
 }
 
 pub(crate) async fn save_comment(tx: &Tx, c: &Comment) -> Result<Comment> {
-    let mut rows = tx
+    let rows = tx
         .conn
         .query(
             &format!(
@@ -89,10 +85,7 @@ pub(crate) async fn save_comment(tx: &Tx, c: &Comment) -> Result<Comment> {
             ],
         )
         .await?;
-    match rows.next().await? {
-        Some(row) => comment_from_row(&row),
-        None => Err(Error::NotFound(format!("comment {}", c.id))),
-    }
+    first(rows, comment_from_row).await?.ok_or_else(|| Error::NotFound(format!("comment {}", c.id)))
 }
 
 async fn principal_exists(conn: &Connection, ws: Uuid, id: Uuid) -> Result<bool> {
@@ -177,13 +170,9 @@ impl Store {
     }
 
     async fn comments_on(&self, ctx: &Ctx, sql: &str, task_ids: &[Uuid]) -> Result<Vec<Comment>> {
-        let ids = serde_json::to_string(&task_ids.iter().map(Uuid::to_string).collect::<Vec<_>>())?;
-        let mut rows = self.reader()?.query(sql, libsql::params![ctx.workspace_id.to_string(), ids]).await?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            out.push(comment_from_row(&row)?);
-        }
-        Ok(out)
+        let rows =
+            self.reader()?.query(sql, libsql::params![ctx.workspace_id.to_string(), json_ids(task_ids)?]).await?;
+        collect(rows, comment_from_row).await
     }
 
     /// Adds a comment. A `question` moves the task to `needs_input`, which takes it

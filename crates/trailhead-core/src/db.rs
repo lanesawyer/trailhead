@@ -1,4 +1,4 @@
-use libsql::{Connection, Row};
+use libsql::{Connection, Row, Rows};
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -42,6 +42,25 @@ pub(crate) async fn migrate(conn: &Connection) -> Result<()> {
         tx.commit().await?;
     }
     Ok(())
+}
+
+/// Reads every row with `f`.
+pub(crate) async fn collect<T>(mut rows: Rows, f: impl Fn(&Row) -> Result<T>) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        out.push(f(&row)?);
+    }
+    Ok(out)
+}
+
+/// Reads the first row with `f`, if there is one.
+pub(crate) async fn first<T>(mut rows: Rows, f: impl FnOnce(&Row) -> Result<T>) -> Result<Option<T>> {
+    rows.next().await?.map(|row| f(&row)).transpose()
+}
+
+/// Ids as a JSON array, for `IN (SELECT value FROM json_each(?))`.
+pub(crate) fn json_ids(ids: &[Uuid]) -> Result<String> {
+    Ok(serde_json::to_string(&ids.iter().map(Uuid::to_string).collect::<Vec<_>>())?)
 }
 
 /// Fixed-width UTC so timestamps compare correctly as text.

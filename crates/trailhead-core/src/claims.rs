@@ -6,7 +6,7 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::comments::latest_handoff;
-use crate::db::{fmt_ts, get_opt_ts, get_ts, get_uuid, opt_ts_value};
+use crate::db::{collect, first, fmt_ts, get_enum, get_opt_ts, get_ts, get_uuid, json_ids, opt_ts_value};
 use crate::deps::{unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
 use crate::identity::load_workspace;
@@ -30,9 +30,9 @@ fn claim_from_row(row: &Row) -> Result<Claim> {
 
 /// The claim row, expired or not.
 pub(crate) async fn any_claim(conn: &Connection, task_id: Uuid) -> Result<Option<Claim>> {
-    let mut rows =
+    let rows =
         conn.query(&format!("SELECT {CLAIM_COLS} FROM claims WHERE task_id = ?1"), [task_id.to_string()]).await?;
-    rows.next().await?.map(|r| claim_from_row(&r)).transpose()
+    first(rows, claim_from_row).await
 }
 
 /// A `claim_held` error naming the holder, so people and agents can tell who to ask.
@@ -95,7 +95,7 @@ pub(crate) async fn put_claim(tx: &Tx, claim: &Claim) -> Result<()> {
 /// Deletes expired claims and puts their in-progress tasks back to open. The
 /// events are attributed to the lapsed holder.
 pub(crate) async fn reap_expired(tx: &Tx, task_id: Option<Uuid>) -> Result<usize> {
-    let mut rows = tx
+    let rows = tx
         .conn
         .query(
             &format!(
@@ -104,10 +104,7 @@ pub(crate) async fn reap_expired(tx: &Tx, task_id: Option<Uuid>) -> Result<usize
             libsql::params![tx.ws(), tx.now_str(), task_id.map(|t| t.to_string())],
         )
         .await?;
-    let mut expired = Vec::new();
-    while let Some(row) = rows.next().await? {
-        expired.push(claim_from_row(&row)?);
-    }
+    let expired = collect(rows, claim_from_row).await?;
     for claim in &expired {
         drop_claim(tx, claim, "claim.expired").await?;
         let task = load_task(&tx.conn, claim.workspace_id, &claim.task_id.to_string(), true).await?;
@@ -299,8 +296,7 @@ impl Store {
     /// The live claims on these tasks, keyed by task id. Tasks without one are absent.
     pub async fn live_claims(&self, ctx: &Ctx, task_ids: &[Uuid]) -> Result<HashMap<Uuid, NamedClaim>> {
         let conn = self.reader()?;
-        let ids = serde_json::to_string(&task_ids.iter().map(Uuid::to_string).collect::<Vec<_>>())?;
-        let mut rows = conn
+        let rows = conn
             .query(
                 &format!(
                     "SELECT {CLAIM_COLS}, COALESCE((SELECT name FROM agents WHERE id = holder_id),
@@ -308,25 +304,22 @@ impl Store {
                      FROM claims WHERE workspace_id = ?1 AND (expires_at IS NULL OR expires_at > ?2)
                        AND task_id IN (SELECT value FROM json_each(?3))"
                 ),
-                libsql::params![ctx.workspace_id.to_string(), fmt_ts(self.now()), ids],
+                libsql::params![ctx.workspace_id.to_string(), fmt_ts(self.now()), json_ids(task_ids)?],
             )
             .await?;
-        let mut out = HashMap::new();
-        while let Some(row) = rows.next().await? {
-            let claim = claim_from_row(&row)?;
-            out.insert(claim.task_id, NamedClaim { claim, holder: row.get(6)? });
-        }
-        Ok(out)
+        let named = collect(rows, |row| Ok(NamedClaim { claim: claim_from_row(row)?, holder: row.get(6)? })).await?;
+        Ok(named.into_iter().map(|n| (n.claim.task_id, n)).collect())
     }
 
     /// Live claims the caller holds, soonest to expire first, then those that
     /// never expire, oldest first.
     pub async fn my_claims(&self, ctx: &Ctx) -> Result<Vec<HeldClaim>> {
         let conn = self.reader()?;
-        let mut rows = conn
+        let rows = conn
             .query(
                 &format!(
-                    "SELECT t.key, t.title, t.status, {} FROM claims c JOIN tasks t ON t.id = c.task_id
+                    // Claim columns first, so claim_from_row reads them as usual.
+                    "SELECT {}, t.key, t.title, t.status FROM claims c JOIN tasks t ON t.id = c.task_id
                      WHERE c.workspace_id = ?1 AND c.holder_id = ?2 AND (c.expires_at IS NULL OR c.expires_at > ?3)
                        AND t.deleted_at IS NULL
                      ORDER BY c.expires_at IS NULL, c.expires_at, c.claimed_at",
@@ -335,19 +328,15 @@ impl Store {
                 [ctx.workspace_id.to_string(), ctx.actor_id().to_string(), fmt_ts(self.now())],
             )
             .await?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let claim = Claim {
-                task_id: get_uuid(&row, 3)?,
-                workspace_id: get_uuid(&row, 4)?,
-                holder_id: get_uuid(&row, 5)?,
-                on_behalf_of: get_uuid(&row, 6)?,
-                claimed_at: get_ts(&row, 7)?,
-                expires_at: get_opt_ts(&row, 8)?,
-            };
-            out.push(HeldClaim { key: row.get(0)?, title: row.get(1)?, status: crate::db::get_enum(&row, 2)?, claim });
-        }
-        Ok(out)
+        collect(rows, |row| {
+            Ok(HeldClaim {
+                claim: claim_from_row(row)?,
+                key: row.get(6)?,
+                title: row.get(7)?,
+                status: get_enum(row, 8)?,
+            })
+        })
+        .await
     }
 
     /// Heartbeat. Renew roughly every third of the TTL. Renewing a claim that

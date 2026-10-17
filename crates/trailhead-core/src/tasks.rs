@@ -6,7 +6,10 @@ use uuid::Uuid;
 
 use crate::claims::{drop_claim, live_claim, reap_expired};
 use crate::comments::list_comments_for;
-use crate::db::{fmt_ts, get_enum, get_json, get_opt_ts, get_opt_uuid, get_ts, get_uuid, opt_ts_value, opt_uuid_value};
+use crate::db::{
+    collect, first, fmt_ts, get_enum, get_json, get_opt_ts, get_opt_uuid, get_ts, get_uuid, json_ids, opt_ts_value,
+    opt_uuid_value,
+};
 use crate::deps::{unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
 use crate::metadata::{merge_patch, validate_path};
@@ -44,25 +47,14 @@ pub(crate) fn task_from_row(row: &Row) -> Result<Task> {
     })
 }
 
-pub(crate) async fn collect_tasks(mut rows: libsql::Rows) -> Result<Vec<Task>> {
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await? {
-        out.push(task_from_row(&row)?);
-    }
-    Ok(out)
-}
-
 /// Resolves a task by UUID or key (`AUTH-42`).
 pub(crate) async fn load_task(conn: &Connection, ws: Uuid, r: &str, include_deleted: bool) -> Result<Task> {
     let sql = format!(
         "SELECT {TASK_COLS} FROM tasks WHERE workspace_id = ?1 AND (id = ?2 OR key = upper(?2)) {}",
         if include_deleted { "" } else { "AND deleted_at IS NULL" }
     );
-    let mut rows = conn.query(&sql, [ws.to_string(), r.trim().to_string()]).await?;
-    match rows.next().await? {
-        Some(row) => task_from_row(&row),
-        None => Err(Error::NotFound(format!("task {r}"))),
-    }
+    let rows = conn.query(&sql, [ws.to_string(), r.trim().to_string()]).await?;
+    first(rows, task_from_row).await?.ok_or_else(|| Error::NotFound(format!("task {r}")))
 }
 
 /// [`load_task`] for a task the caller named: one outside the context's project
@@ -501,7 +493,7 @@ impl Store {
                 [task.id.to_string()],
             )
             .await?;
-        let blocks = collect_tasks(rows).await?.iter().map(|t| visible_key(ctx, t)).collect();
+        let blocks = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
         let comments = list_comments_for(&conn, task.id).await?;
         Ok(TaskDetail { task, claim, blocked_by, blocks, comments })
     }
@@ -533,13 +525,12 @@ impl Store {
         if filter.statuses.is_empty() {
             sql.push_str(" AND status NOT IN ('done', 'cancelled')");
         } else {
-            let list = filter.statuses.iter().map(|s| format!("'{}'", s.as_str())).collect::<Vec<_>>().join(", ");
-            sql.push_str(&format!(" AND status IN ({list})"));
+            sql.push_str(&format!(" AND status IN ({})", sql_list(&filter.statuses)));
         }
         sql.push_str(&format!(" ORDER BY {}", filter.sort.order_by()));
         push(&mut sql, " LIMIT ?", filter.limit.unwrap_or(100).into());
         push(&mut sql, " OFFSET ?", filter.offset.unwrap_or(0).into());
-        collect_tasks(conn.query(&sql, params).await?).await
+        collect(conn.query(&sql, params).await?, task_from_row).await
     }
 
     /// Open, unclaimed tasks with no unfinished blockers, by priority then due date.
@@ -576,7 +567,7 @@ impl Store {
                 ],
             )
             .await?;
-        collect_tasks(rows).await
+        collect(rows, task_from_row).await
     }
 
     /// Full-text search over titles, descriptions and comments.
@@ -600,8 +591,7 @@ impl Store {
         let statuses = if filter.statuses.is_empty() {
             String::new()
         } else {
-            let list = filter.statuses.iter().map(|s| format!("'{}'", s.as_str())).collect::<Vec<_>>().join(", ");
-            format!(" AND t.status IN ({list})")
+            format!(" AND t.status IN ({})", sql_list(&filter.statuses))
         };
         let sql = format!(
             "SELECT {TASK_COLS} FROM tasks t WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND {}{statuses}
@@ -625,8 +615,8 @@ impl Store {
                 ],
             )
             .await?;
-        let tasks = collect_tasks(rows).await?;
-        let ids = serde_json::to_string(&tasks.iter().map(|t| t.id.to_string()).collect::<Vec<_>>())?;
+        let tasks = collect(rows, task_from_row).await?;
+        let ids = json_ids(&tasks.iter().map(|t| t.id).collect::<Vec<_>>())?;
 
         // snippet() wraps matched terms in these markers, which tell us which column
         // matched; they're stripped before the snippet goes out.
@@ -683,6 +673,11 @@ impl Store {
             })
             .collect())
     }
+}
+
+/// Statuses as a SQL list. They're fixed identifiers, so inlining them is safe.
+fn sql_list(statuses: &[Status]) -> String {
+    statuses.iter().map(|s| format!("'{}'", s.as_str())).collect::<Vec<_>>().join(", ")
 }
 
 const MARK_ON: char = '\u{2}';

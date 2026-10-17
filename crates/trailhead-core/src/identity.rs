@@ -1,7 +1,7 @@
 use libsql::{Connection, Row};
 use uuid::Uuid;
 
-use crate::db::{fmt_ts, get_ts, get_uuid};
+use crate::db::{collect, first, fmt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::model::{Agent, User, Workspace};
 use crate::store::{Ctx, Store};
@@ -41,16 +41,13 @@ fn agent_from_row(row: &Row) -> Result<Agent> {
 
 /// An agent by id or full name (`claude` or `claude/openapi`).
 pub(crate) async fn find_agent(conn: &Connection, ws: Uuid, r: &str) -> Result<Agent> {
-    let mut rows = conn
+    let rows = conn
         .query(
             &format!("SELECT {AGENT_COLS} FROM agents WHERE workspace_id = ?1 AND (id = ?2 OR name = ?2)"),
             [ws.to_string(), r.trim().to_string()],
         )
         .await?;
-    match rows.next().await? {
-        Some(row) => agent_from_row(&row),
-        None => Err(Error::NotFound(format!("agent {r}"))),
-    }
+    first(rows, agent_from_row).await?.ok_or_else(|| Error::NotFound(format!("agent {r}")))
 }
 
 /// Whether `agent` sits somewhere under `ancestor` (not counting itself).
@@ -92,24 +89,17 @@ fn validate_agent_name(name: &str) -> Result<()> {
 }
 
 pub(crate) async fn load_workspace(conn: &Connection, id: Uuid) -> Result<Workspace> {
-    let mut rows = conn
+    let rows = conn
         .query("SELECT id, name, default_claim_ttl, created_at FROM workspaces WHERE id = ?1", [id.to_string()])
         .await?;
-    match rows.next().await? {
-        Some(row) => workspace_from_row(&row),
-        None => Err(Error::NotFound(format!("workspace {id}"))),
-    }
+    first(rows, workspace_from_row).await?.ok_or_else(|| Error::NotFound(format!("workspace {id}")))
 }
 
 pub(crate) async fn agents_in(conn: &Connection, ws: Uuid) -> Result<Vec<Agent>> {
-    let mut rows = conn
+    let rows = conn
         .query(&format!("SELECT {AGENT_COLS} FROM agents WHERE workspace_id = ?1 ORDER BY name"), [ws.to_string()])
         .await?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await? {
-        out.push(agent_from_row(&row)?);
-    }
-    Ok(out)
+    collect(rows, agent_from_row).await
 }
 
 impl Store {
@@ -166,16 +156,13 @@ impl Store {
 
     pub async fn get_user(&self, ctx: &Ctx, id: Uuid) -> Result<User> {
         let conn = self.reader()?;
-        let mut rows = conn
+        let rows = conn
             .query(
                 "SELECT id, workspace_id, name, email, created_at FROM users WHERE id = ?1 AND workspace_id = ?2",
                 [id.to_string(), ctx.workspace_id.to_string()],
             )
             .await?;
-        match rows.next().await? {
-            Some(row) => user_from_row(&row),
-            None => Err(Error::NotFound(format!("user {id}"))),
-        }
+        first(rows, user_from_row).await?.ok_or_else(|| Error::NotFound(format!("user {id}")))
     }
 
     /// Creates an agent owned by the context's user.
