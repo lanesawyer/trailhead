@@ -8,6 +8,7 @@ mod idempotency;
 mod llms;
 mod mcp;
 mod openapi;
+mod params;
 mod ratelimit;
 mod routes;
 #[cfg(windows)]

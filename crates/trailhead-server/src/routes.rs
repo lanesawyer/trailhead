@@ -7,8 +7,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
     Agent, Claim, ClaimResult, Comment, CommentKind, Dependency, Error, Event, EventFilter, HeldClaim, NewComment,
     NewProject, NewTask, Principal, Project, ProjectPatch, ProjectStatus, SearchFilter, SearchHit, Status, Task,
@@ -20,7 +18,10 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::auth::{Auth, require_human};
 use crate::error::{ApiError, ApiResult, Json, Path, Query, invalid};
-use crate::openapi::{CreatedAgent, CreatedToken, CreatedWebhook, ErrorBody, Health, Me};
+use crate::openapi::{
+    CreatedAgent, CreatedToken, CreatedWebhook, ErrorBody, Health, IfMatch, Me, ProjectParam, TaskParam,
+};
+use crate::params::{parse_list, parse_opt_time, parse_time, split_list};
 
 type S = State<Arc<AppState>>;
 
@@ -62,38 +63,18 @@ fn nullable<'de, T: Deserialize<'de>, D: Deserializer<'de>>(d: D) -> Result<Opti
     Option::<T>::deserialize(d).map(Some)
 }
 
-fn parse_time(s: &str) -> ApiResult<OffsetDateTime> {
-    OffsetDateTime::parse(s, &Rfc3339).map_err(|_| invalid(format!("{s:?} is not an RFC 3339 timestamp")))
-}
-
-fn parse_opt_time(s: Option<&str>) -> ApiResult<Option<OffsetDateTime>> {
-    s.map(parse_time).transpose()
-}
-
-fn parse_list<T: std::str::FromStr<Err = trailhead_core::Error>>(s: Option<&str>) -> ApiResult<Vec<T>> {
-    s.map(|s| s.split(',').filter(|p| !p.is_empty()).map(|p| p.trim().parse()).collect::<Result<Vec<_>, _>>())
-        .transpose()
-        .map(Option::unwrap_or_default)
-        .map_err(Into::into)
-}
-
-/// A comma-separated list of free-form strings, blanks dropped.
-pub(crate) fn split_list(s: Option<&str>) -> Vec<String> {
-    s.unwrap_or_default().split(',').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect()
-}
-
 /// `?fields=key,title` trims each object in a list to the named fields.
 fn select_fields<T: Serialize>(items: &[T], fields: Option<&str>) -> ApiResult<Value> {
     let v = serde_json::to_value(items).map_err(trailhead_core::Error::from)?;
     let Some(fields) = fields else { return Ok(v) };
-    let keep: Vec<&str> = fields.split(',').map(str::trim).filter(|f| !f.is_empty()).collect();
+    let keep = split_list(Some(fields));
     let Value::Array(items) = v else { return Ok(v) };
     Ok(Value::Array(
         items
             .into_iter()
             .map(|item| match item {
                 Value::Object(mut m) => {
-                    Value::Object(keep.iter().filter_map(|k| m.remove(*k).map(|v| (k.to_string(), v))).collect())
+                    Value::Object(keep.iter().filter_map(|k| m.remove(k).map(|v| (k.clone(), v))).collect())
                 }
                 other => other,
             })
@@ -198,7 +179,7 @@ async fn create_project(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateProjec
 }
 
 #[utoipa::path(
-    get, path = "/v1/projects/{project}", tag = "projects", params(("project" = String, Path, description = "Project key, e.g. `AUTH`, or id")),
+    get, path = "/v1/projects/{project}", tag = "projects", params(ProjectParam),
     responses(
         (status = 200, description = "The project", body = Project, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
         (status = 404, description = "`not_found`", body = ErrorBody),
@@ -224,7 +205,7 @@ struct UpdateProject {
 }
 
 #[utoipa::path(
-    patch, path = "/v1/projects/{project}", tag = "projects", params(("project" = String, Path, description = "Project key, e.g. `AUTH`, or id"), ("If-Match" = Option<String>, Header, description = "Expected version, e.g. `\"3\"`. A stale version gets 412 `version_conflict`.")),
+    patch, path = "/v1/projects/{project}", tag = "projects", params(ProjectParam, IfMatch),
     request_body = UpdateProject,
     responses(
         (status = 200, description = "Updated", body = Project, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
@@ -383,13 +364,13 @@ async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateTask>) ->
     for blocked in &b.blocks {
         s.store.add_dependency(&ctx, &task.key, blocked).await?;
     }
-    let mut res = created(&task);
-    res.headers_mut().insert(header::ETAG, HeaderValue::from_str(&format!("\"{}\"", task.version)).expect("ascii"));
+    let mut res = with_etag(task.version, &task);
+    *res.status_mut() = StatusCode::CREATED;
     Ok(res)
 }
 
 #[utoipa::path(
-    get, path = "/v1/tasks/{task}", tag = "tasks", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    get, path = "/v1/tasks/{task}", tag = "tasks", params(TaskParam),
     responses(
         (status = 200, description = "The task with its claim, dependencies and comments", body = TaskDetail, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
         (status = 404, description = "`not_found`", body = ErrorBody),
@@ -419,7 +400,7 @@ struct UpdateTask {
 }
 
 #[utoipa::path(
-    patch, path = "/v1/tasks/{task}", tag = "tasks", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id"), ("If-Match" = Option<String>, Header, description = "Expected version, e.g. `\"3\"`. A stale version gets 412 `version_conflict`.")),
+    patch, path = "/v1/tasks/{task}", tag = "tasks", params(TaskParam, IfMatch),
     request_body = UpdateTask,
     responses(
         (status = 200, description = "Updated", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
@@ -452,7 +433,7 @@ async fn update_task(
 }
 
 #[utoipa::path(
-    delete, path = "/v1/tasks/{task}", tag = "tasks", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id"), ("If-Match" = Option<String>, Header, description = "Expected version, e.g. `\"3\"`. A stale version gets 412 `version_conflict`.")),
+    delete, path = "/v1/tasks/{task}", tag = "tasks", params(TaskParam, IfMatch),
     responses(
         (status = 200, description = "Soft-deleted; undo restores it", body = Task),
         (status = 404, description = "`not_found`", body = ErrorBody),
@@ -471,7 +452,7 @@ struct ClaimBody {
 }
 
 #[utoipa::path(
-    post, path = "/v1/tasks/{task}/claim", tag = "claims", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    post, path = "/v1/tasks/{task}/claim", tag = "claims", params(TaskParam),
     request_body(content = Option<ClaimBody>, description = "Optional; an empty body uses the default TTL"),
     responses(
         (status = 200, description = "Claimed, with the last handoff", body = ClaimResult, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
@@ -485,7 +466,7 @@ async fn claim(State(s): S, Auth(ctx): Auth, Path(t): Path<String>, b: axum::bod
 }
 
 #[utoipa::path(
-    post, path = "/v1/tasks/{task}/renew", tag = "claims", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    post, path = "/v1/tasks/{task}/renew", tag = "claims", params(TaskParam),
     request_body(content = Option<ClaimBody>, description = "Optional; an empty body uses the default TTL"),
     responses(
         (status = 200, description = "The extended claim", body = Claim),
@@ -498,7 +479,7 @@ async fn renew(State(s): S, Auth(ctx): Auth, Path(t): Path<String>, b: axum::bod
 }
 
 #[utoipa::path(
-    post, path = "/v1/tasks/{task}/release", tag = "claims", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    post, path = "/v1/tasks/{task}/release", tag = "claims", params(TaskParam),
     responses(
         (status = 200, description = "Released; the task is open again", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
         (status = 404, description = "`not_found`", body = ErrorBody),
@@ -511,7 +492,7 @@ async fn release(State(s): S, Auth(ctx): Auth, Path(t): Path<String>) -> ApiResu
 }
 
 #[utoipa::path(
-    get, path = "/v1/tasks/{task}/comments", tag = "comments", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    get, path = "/v1/tasks/{task}/comments", tag = "comments", params(TaskParam),
     responses(
         (status = 200, description = "Comments, oldest first", body = Vec<Comment>),
         (status = 404, description = "`not_found`", body = ErrorBody),
@@ -534,7 +515,7 @@ fn note() -> CommentKind {
 }
 
 #[utoipa::path(
-    post, path = "/v1/tasks/{task}/comments", tag = "comments", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")), request_body = AddComment,
+    post, path = "/v1/tasks/{task}/comments", tag = "comments", params(TaskParam), request_body = AddComment,
     responses(
         (status = 201, description = "Created", body = Comment),
         (status = 404, description = "`not_found`", body = ErrorBody),
@@ -575,7 +556,7 @@ async fn resolve_comment(
 }
 
 #[utoipa::path(
-    get, path = "/v1/tasks/{task}/blockers", tag = "dependencies", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")),
+    get, path = "/v1/tasks/{task}/blockers", tag = "dependencies", params(TaskParam),
     responses(
         (status = 200, description = "Tasks blocking this one", body = Vec<Task>),
         (status = 404, description = "`not_found`", body = ErrorBody),
@@ -591,7 +572,7 @@ struct AddBlocker {
 }
 
 #[utoipa::path(
-    post, path = "/v1/tasks/{task}/blockers", tag = "dependencies", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id")), request_body = AddBlocker,
+    post, path = "/v1/tasks/{task}/blockers", tag = "dependencies", params(TaskParam), request_body = AddBlocker,
     responses(
         (status = 201, description = "Created", body = Dependency),
         (status = 404, description = "`not_found`", body = ErrorBody),
@@ -609,7 +590,7 @@ async fn add_blocker(
 
 #[utoipa::path(
     delete, path = "/v1/tasks/{task}/blockers/{blocker}", tag = "dependencies",
-    params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id"), ("blocker" = String, Path, description = "Blocking task key or id")),
+    params(TaskParam, ("blocker" = String, Path, description = "Blocking task key or id")),
     responses(
         (status = 204, description = "Removed"),
         (status = 404, description = "`not_found`", body = ErrorBody),
@@ -635,7 +616,7 @@ struct HistoryQuery {
 }
 
 #[utoipa::path(
-    get, path = "/v1/tasks/{task}/history", tag = "events", params(("task" = String, Path, description = "Task key, e.g. `AUTH-42`, or id"), HistoryQuery),
+    get, path = "/v1/tasks/{task}/history", tag = "events", params(TaskParam, HistoryQuery),
     responses(
         (status = 200, description = "The task's events", body = Vec<Event>),
         (status = 404, description = "`not_found`", body = ErrorBody),

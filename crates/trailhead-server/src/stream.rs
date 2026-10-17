@@ -92,7 +92,7 @@ pub async fn events(
         after,
         task: q.task,
         project: q.project,
-        kinds: crate::routes::split_list(q.kinds.as_deref()),
+        kinds: crate::params::split_list(q.kinds.as_deref()),
         buffered: VecDeque::new(),
     };
     let stream = futures_util::stream::unfold(cursor, |mut c| async move {

@@ -11,7 +11,7 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::openapi::{
     ContentBuilder, HeaderBuilder, KnownFormat, ObjectBuilder, Ref, RefOr, ResponseBuilder, SchemaFormat, Type,
 };
-use utoipa::{Modify, OpenApi, ToSchema};
+use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use uuid::Uuid;
 
 use crate::routes;
@@ -52,6 +52,31 @@ pub struct ListedTask {
     /// With `include=last_handoff`: the newest `handoff` comment, or `null`.
     last_handoff: Option<trailhead_core::Comment>,
 }
+
+/// Path and header parameters many routes share, declared once for the docs.
+#[derive(IntoParams)]
+#[into_params(parameter_in = Path)]
+#[allow(dead_code, reason = "schema only; handlers take Path<String>")]
+pub struct TaskParam {
+    /// Task key, e.g. `AUTH-42`, or id
+    task: String,
+}
+
+#[derive(IntoParams)]
+#[into_params(parameter_in = Path)]
+#[allow(dead_code, reason = "schema only; handlers take Path<String>")]
+pub struct ProjectParam {
+    /// Project key, e.g. `AUTH`, or id
+    project: String,
+}
+
+#[derive(IntoParams)]
+#[into_params(parameter_in = Header, names("If-Match"))]
+#[allow(dead_code, reason = "schema only; handlers read the header with if_match")]
+pub struct IfMatch(
+    /// Expected version, e.g. `"3"`. A stale version gets 412 `version_conflict`.
+    Option<String>,
+);
 
 /// The error envelope every failed request returns.
 #[derive(Serialize, ToSchema)]

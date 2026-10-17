@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::ApiError;
+use crate::params::{parse_list, parse_time};
 
 const BRIEF_PREFIX: &str = "trailhead://projects/";
 
@@ -46,23 +47,10 @@ pub fn service(state: Arc<AppState>) -> StreamableHttpService<TrailheadMcp, Loca
 /// Authenticates `/mcp` requests with the same bearer tokens as REST. The context
 /// rides along in the request extensions, which rmcp hands to each tool.
 pub async fn auth(State(state): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
-    let secret = req
-        .headers()
-        .get(http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string());
-    let ctx = match secret {
-        Some(s) => state.store.authenticate_token(&s).await.and_then(|(ctx, token)| {
-            state.limits.check(&token)?;
-            Ok((ctx, token.id))
-        }),
-        None => Err(Error::Unauthorized),
-    };
-    match ctx {
+    match crate::auth::authenticate(&state, req.headers()).await {
         Ok((ctx, token)) => {
             req.extensions_mut().insert(ctx);
-            req.extensions_mut().insert(TokenId(token));
+            req.extensions_mut().insert(TokenId(token.id));
             next.run(req).await
         }
         Err(e) => ApiError(e).into_response(),
@@ -179,10 +167,6 @@ fn detail_text(d: &TaskDetail) -> String {
         out.extend(d.comments.iter().map(comment_line));
     }
     out.join("\n")
-}
-
-fn parse_time(s: &str) -> Result<OffsetDateTime, Error> {
-    OffsetDateTime::parse(s, &Rfc3339).map_err(|_| Error::Invalid(format!("{s:?} is not an RFC 3339 timestamp")))
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -472,15 +456,7 @@ impl TrailheadMcp {
         Parameters(a): Parameters<ListArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
-        let statuses = attempt!(
-            a.status
-                .as_deref()
-                .unwrap_or("")
-                .split(',')
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| s.trim().parse())
-                .collect::<Result<Vec<Status>, _>>()
-        );
+        let statuses = attempt!(parse_list(a.status.as_deref()));
         let filter =
             TaskFilter { project: a.project, statuses, parent: a.parent, limit: a.limit, ..Default::default() };
         let tasks = attempt!(self.state.store.list_tasks(&ctx, filter).await);
