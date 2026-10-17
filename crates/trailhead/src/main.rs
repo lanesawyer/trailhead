@@ -1,3 +1,4 @@
+mod cli;
 mod client;
 mod output;
 mod repo;
@@ -6,366 +7,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use cli::{AgentCmd, Cli, Cmd, ProjectCmd, ServerCmd, TokenCmd, WebhookCmd};
 use client::{ApiError, Client, Identity};
 use output::{comment_line, event_line, project_line, s, short_time, task_line, task_list};
 use trailhead_server::creds::{Cred, Saved};
-
-/// Trailhead: a headless task engine for humans and agents.
-#[derive(Parser)]
-#[command(version, about, after_help = IDENTITY_HELP)]
-struct Cli {
-    /// Print full JSON instead of terse lines.
-    #[arg(long, global = true)]
-    json: bool,
-    #[arg(long, global = true, env = "TRAILHEAD_URL", default_value = "http://127.0.0.1:7241")]
-    url: String,
-    #[arg(long, global = true, env = "TRAILHEAD_TOKEN", hide_env_values = true)]
-    token: Option<String>,
-    /// Act as a local agent, using its saved token [env: TRAILHEAD_AGENT].
-    #[arg(long = "as", global = true, value_name = "AGENT")]
-    agent: Option<String>,
-    /// Act as yourself, ignoring TRAILHEAD_AGENT and the agent in .trailhead.toml.
-    #[arg(long, global = true, conflicts_with = "agent")]
-    as_me: bool,
-    #[command(subcommand)]
-    cmd: Cmd,
-}
-
-const IDENTITY_HELP: &str = "\
-Identity, first match wins:
-  1. --token / TRAILHEAD_TOKEN
-  2. --as <agent> / TRAILHEAD_AGENT
-  3. agent = \"...\" in the nearest .trailhead.toml at or above the working directory
-  4. your own saved credential
---as-me skips 2 and 3. A .trailhead.toml may also set project = \"KEY\" as the default -p.
-
-Saved tokens live in the OS keyring when one is available, else in 0600 files in the
-config directory. TRAILHEAD_NO_KEYRING=1 skips the keyring.";
-
-#[derive(Subcommand)]
-enum Cmd {
-    /// Open, unclaimed, unblocked tasks in priority order.
-    Ready {
-        #[arg(short, long, env = "TRAILHEAD_PROJECT")]
-        project: Option<String>,
-        #[arg(short = 'n', long)]
-        limit: Option<i64>,
-    },
-    /// List tasks. Defaults to everything not done or cancelled.
-    Ls {
-        #[arg(short, long, env = "TRAILHEAD_PROJECT")]
-        project: Option<String>,
-        /// Comma-separated statuses.
-        #[arg(short, long)]
-        status: Option<String>,
-        #[arg(long)]
-        parent: Option<String>,
-        /// Include done and cancelled.
-        #[arg(short, long)]
-        all: bool,
-        #[arg(short = 'n', long)]
-        limit: Option<i64>,
-    },
-    /// Show a task with its claim, dependencies and comments.
-    Show {
-        task: String,
-    },
-    /// Create a task.
-    Add {
-        title: String,
-        #[arg(short, long, env = "TRAILHEAD_PROJECT")]
-        project: Option<String>,
-        #[arg(short, long)]
-        description: Option<String>,
-        /// 1 (urgent) to 4 (low).
-        #[arg(short = 'P', long)]
-        priority: Option<i64>,
-        #[arg(long)]
-        parent: Option<String>,
-        /// YYYY-MM-DD or an RFC 3339 timestamp.
-        #[arg(long)]
-        due: Option<String>,
-        /// Tasks that must finish first.
-        #[arg(long, value_delimiter = ',')]
-        after: Vec<String>,
-        /// Tasks this one blocks.
-        #[arg(long, value_delimiter = ',')]
-        blocks: Vec<String>,
-    },
-    /// Change a task's fields.
-    Edit {
-        task: String,
-        #[arg(long)]
-        title: Option<String>,
-        #[arg(short, long)]
-        description: Option<String>,
-        #[arg(short = 'P', long)]
-        priority: Option<i64>,
-        /// YYYY-MM-DD, RFC 3339, or "none".
-        #[arg(long)]
-        due: Option<String>,
-        #[arg(short, long)]
-        status: Option<String>,
-        /// Fail if the task changed since this version.
-        #[arg(long)]
-        version: Option<i64>,
-    },
-    /// Take a lease on a task and start it. Prints the last handoff.
-    Claim {
-        task: String,
-        /// Lease length in seconds.
-        #[arg(long)]
-        ttl: Option<i64>,
-    },
-    /// Claims you hold and when they expire.
-    Mine,
-    /// Extend your lease.
-    Renew {
-        task: String,
-        #[arg(long)]
-        ttl: Option<i64>,
-    },
-    /// Give a task back.
-    Release {
-        task: String,
-    },
-    /// Mark done, optionally leaving a handoff first.
-    Done {
-        task: String,
-        #[arg(short, long)]
-        message: Option<String>,
-    },
-    /// Send for human review.
-    Review {
-        task: String,
-        #[arg(short, long)]
-        message: Option<String>,
-    },
-    Cancel {
-        task: String,
-    },
-    Reopen {
-        task: String,
-    },
-    /// Delete a task (undoable).
-    Rm {
-        task: String,
-    },
-    /// Comment on a task.
-    Comment {
-        task: String,
-        body: String,
-        /// handoff, progress, question, decision or note.
-        #[arg(short, long, default_value = "note")]
-        kind: String,
-        /// User or agent id to address.
-        #[arg(long)]
-        to: Option<String>,
-    },
-    /// Leave a handoff: what's done, what's left, gotchas.
-    Handoff {
-        task: String,
-        body: String,
-    },
-    /// Ask a question; parks the task until answered.
-    Ask {
-        task: String,
-        body: String,
-        #[arg(long)]
-        to: Option<String>,
-    },
-    /// Resolve a question, optionally answering it. Takes the task key (when it
-    /// has one open question) or the question's comment id.
-    Answer {
-        #[arg(value_name = "TASK_OR_COMMENT_ID")]
-        comment_id: String,
-        body: Option<String>,
-    },
-    /// BLOCKER must finish before BLOCKED.
-    Block {
-        blocker: String,
-        blocked: String,
-    },
-    Unblock {
-        blocker: String,
-        blocked: String,
-    },
-    /// Full-text search over tasks and comments.
-    Search {
-        query: Vec<String>,
-        #[arg(short = 'n', long)]
-        limit: Option<i64>,
-    },
-    /// The event log, newest first.
-    Log {
-        task: Option<String>,
-        #[arg(short = 'n', long, default_value_t = 20)]
-        limit: i64,
-    },
-    /// Follow events live as they happen.
-    Watch {
-        /// Only this task's events.
-        task: Option<String>,
-        /// Comma-separated kind prefixes, e.g. `task.,comment.`.
-        #[arg(short, long)]
-        kinds: Option<String>,
-        /// Replay from after this event id instead of starting now.
-        #[arg(long)]
-        after: Option<i64>,
-    },
-    /// Undo an event or batch. With no arguments, undoes your last batch.
-    Undo {
-        event_id: Option<i64>,
-        #[arg(long)]
-        batch: Option<String>,
-    },
-    /// Revert everything an agent did since a time.
-    Revert {
-        actor_id: String,
-        /// RFC 3339 timestamp or YYYY-MM-DD.
-        #[arg(long)]
-        since: String,
-    },
-    #[command(subcommand)]
-    Project(ProjectCmd),
-    #[command(subcommand)]
-    Agent(AgentCmd),
-    #[command(subcommand)]
-    Token(TokenCmd),
-    /// Outbound webhooks (humans only; in an agent repo, add --as-me).
-    #[command(subcommand)]
-    Webhook(WebhookCmd),
-    Whoami,
-    /// Speak MCP over stdin/stdout, forwarding to the server's /mcp endpoint.
-    /// For MCP clients that launch a command, e.g. `trailhead --as claude mcp`.
-    Mcp,
-    /// Manage the local background server.
-    #[command(subcommand)]
-    Server(ServerCmd),
-    /// Run the server in the foreground.
-    Serve {
-        #[arg(long, env = "TRAILHEAD_BIND", default_value = trailhead_server::DEFAULT_BIND)]
-        bind: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum ProjectCmd {
-    Ls {
-        #[arg(short, long)]
-        all: bool,
-    },
-    Add {
-        key: String,
-        name: String,
-        #[arg(long)]
-        brief: Option<String>,
-        #[arg(long)]
-        brief_file: Option<PathBuf>,
-        /// Agents must send work for review.
-        #[arg(long)]
-        review: bool,
-    },
-    Show {
-        project: String,
-    },
-    Edit {
-        project: String,
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long)]
-        brief: Option<String>,
-        #[arg(long)]
-        brief_file: Option<PathBuf>,
-        #[arg(long)]
-        review: Option<bool>,
-        /// Comma-separated agents that may approve review work here; "" clears it.
-        #[arg(long, value_delimiter = ',')]
-        reviewers: Option<Vec<String>>,
-        #[arg(long)]
-        archive: bool,
-        #[arg(long)]
-        unarchive: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum ServerCmd {
-    /// Is it running, on which binary, and since when.
-    Status,
-    /// Start it in the background if it isn't running.
-    Start,
-    /// Stop it gracefully.
-    Stop,
-    /// Stop it and start it again, e.g. after a rebuild.
-    Restart,
-}
-
-#[derive(Subcommand)]
-enum AgentCmd {
-    Ls,
-    /// Create an agent. Run as an agent, this creates a sub-agent named
-    /// `<agent>/<name>` that can never have more access than its parent.
-    Add {
-        name: String,
-        /// Limit the token to these projects (comma-separated keys).
-        #[arg(long, value_delimiter = ',')]
-        projects: Vec<String>,
-        /// Requests per minute the token may make.
-        #[arg(long)]
-        rate_limit: Option<i64>,
-    },
-    /// Revoke an agent and every sub-agent under it.
-    Revoke {
-        name: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum WebhookCmd {
-    Ls,
-    /// Send events to URL, signed with a secret shown once.
-    Add {
-        /// Where to POST events. (Not `url`: that's the global server flag.)
-        #[arg(value_name = "URL")]
-        target: String,
-        /// Comma-separated event kind prefixes, e.g. `task.,comment.created`. Default: everything.
-        #[arg(short, long, value_delimiter = ',')]
-        kinds: Vec<String>,
-    },
-    Rm {
-        id: String,
-    },
-    /// Recent delivery attempts.
-    Log {
-        id: String,
-        #[arg(short = 'n', long, default_value_t = 20)]
-        limit: i64,
-    },
-}
-
-#[derive(Subcommand)]
-enum TokenCmd {
-    Ls,
-    Revoke {
-        id: String,
-    },
-    /// Change a token's limits without reissuing it.
-    Edit {
-        id: String,
-        /// Comma-separated project keys; "all" opens it to every project.
-        #[arg(long, value_delimiter = ',')]
-        projects: Option<Vec<String>>,
-        /// Requests per minute, or "none" to remove the limit.
-        #[arg(long)]
-        rate_limit: Option<String>,
-    },
-}
 
 /// RFC 3339 passes through; a bare date means the end of that day in the local
 /// zone, using that day's offset (DST included).
@@ -404,6 +54,11 @@ async fn names(c: &Client) -> Result<HashMap<String, String>> {
         map.insert(s(a, "id").to_string(), s(a, "name").to_string());
     }
     Ok(map)
+}
+
+/// Query parameters, leaving out the ones not given.
+fn params<const N: usize>(pairs: [(&'static str, Option<String>); N]) -> Vec<(&'static str, String)> {
+    pairs.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
 }
 
 fn print_json(v: &Value) {
@@ -468,13 +123,7 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Serve { .. } | Cmd::Server(_) => unreachable!(),
         Cmd::Ready { project, limit } => {
-            let mut q = vec![];
-            if let Some(p) = project.or(default_project) {
-                q.push(("project", p));
-            }
-            if let Some(n) = limit {
-                q.push(("limit", n.to_string()));
-            }
+            let q = params([("project", project.or(default_project)), ("limit", limit.map(|n| n.to_string()))]);
             let v = c.get("ready", &q).await?;
             if json {
                 print_json(&v)
@@ -488,21 +137,13 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Ls { project, status, parent, all, limit } => {
-            let mut q = vec![];
-            if let Some(p) = project.or(default_project) {
-                q.push(("project", p));
-            }
-            match (status, all) {
-                (Some(st), _) => q.push(("status", st)),
-                (None, true) => q.push(("status", "open,in_progress,needs_input,in_review,done,cancelled".into())),
-                _ => {}
-            }
-            if let Some(p) = parent {
-                q.push(("parent", p));
-            }
-            if let Some(n) = limit {
-                q.push(("limit", n.to_string()));
-            }
+            let status = status.or(all.then(|| "open,in_progress,needs_input,in_review,done,cancelled".into()));
+            let q = params([
+                ("project", project.or(default_project)),
+                ("status", status),
+                ("parent", parent),
+                ("limit", limit.map(|n| n.to_string())),
+            ]);
             let v = c.get("tasks", &q).await?;
             if json { print_json(&v) } else { task_list(&v, "no tasks") }
         }
@@ -646,18 +287,12 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Search { query, limit } => {
-            let mut q = vec![("q", query.join(" "))];
-            if let Some(n) = limit {
-                q.push(("limit", n.to_string()));
-            }
+            let q = params([("q", Some(query.join(" "))), ("limit", limit.map(|n| n.to_string()))]);
             let v = c.get("search", &q).await?;
             if json { print_json(&v) } else { task_list(&v, "no matches") }
         }
         Cmd::Log { task, limit } => {
-            let mut q = vec![("newest_first", "true".to_string()), ("limit", limit.to_string())];
-            if let Some(t) = task {
-                q.push(("task", t));
-            }
+            let q = params([("newest_first", Some("true".into())), ("limit", Some(limit.to_string())), ("task", task)]);
             let v = c.get("events", &q).await?;
             if json {
                 print_json(&v);
@@ -666,16 +301,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Watch { task, kinds, after } => {
-            let mut q = vec![];
-            if let Some(t) = task {
-                q.push(("task", t));
-            }
-            if let Some(k) = kinds {
-                q.push(("kinds", k));
-            }
-            if let Some(a) = after {
-                q.push(("after", a.to_string()));
-            }
+            let q = params([("task", task), ("kinds", kinds), ("after", after.map(|a| a.to_string()))]);
             c.watch(&q, |e| {
                 if json {
                     println!("{e}");
