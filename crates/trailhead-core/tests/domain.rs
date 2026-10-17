@@ -547,6 +547,75 @@ async fn due_tz_must_be_a_real_zone() {
 }
 
 #[tokio::test]
+async fn scheduling_is_separate_from_the_due_date() {
+    let env = Env::new().await;
+    let day = |d: u8| Some(time::Date::from_calendar_date(2026, time::Month::October, d).unwrap());
+    let due = Some(env.now() + Duration::days(7));
+    let earlier = env.task_with(NewTask { title: "earlier".into(), scheduled_on: day(16), ..Default::default() }).await;
+    let today = env
+        .task_with(NewTask { title: "today".into(), scheduled_on: day(17), due_at: due, ..Default::default() })
+        .await;
+    env.task_with(NewTask { title: "later".into(), scheduled_on: day(18), ..Default::default() }).await;
+    env.task("unscheduled").await;
+    assert_eq!(today.scheduled_on, day(17));
+    assert!(today.due_at.is_some());
+
+    let through = |d| TaskFilter { scheduled_through: d, ..Default::default() };
+    let keys = |ts: Vec<trailhead_core::Task>| {
+        let mut keys = ts.into_iter().map(|t| t.key).collect::<Vec<_>>();
+        keys.sort();
+        keys
+    };
+    let plan = env.store.list_tasks(&env.human, through(day(17))).await.unwrap();
+    assert_eq!(keys(plan), vec![earlier.key.clone(), today.key.clone()]);
+
+    let ctx = env.human.next_batch();
+    let patch = TaskPatch { scheduled_on: Some(day(18)), ..Default::default() };
+    let moved = env.store.update_task(&ctx, &earlier.key, patch, None).await.unwrap();
+    assert_eq!(moved.scheduled_on, day(18));
+    assert_eq!(keys(env.store.list_tasks(&env.human, through(day(17))).await.unwrap()), vec![today.key.clone()]);
+
+    env.store.undo_batch(&env.human.next_batch(), ctx.batch_id).await.unwrap();
+    assert_eq!(env.store.get_task(&env.human, &earlier.key).await.unwrap().scheduled_on, day(16));
+
+    let clear = TaskPatch { scheduled_on: Some(None), ..Default::default() };
+    let cleared = env.store.update_task(&env.human, &today.key, clear, None).await.unwrap();
+    assert_eq!(cleared.scheduled_on, None);
+    assert_eq!(cleared.due_at, today.due_at);
+}
+
+#[test]
+fn snapshots_from_before_scheduling_still_load() {
+    let mut v = serde_json::to_value(trailhead_core::Task {
+        id: uuid::Uuid::nil(),
+        workspace_id: uuid::Uuid::nil(),
+        project_id: uuid::Uuid::nil(),
+        key: "AUTH-1".into(),
+        title: "t".into(),
+        description: String::new(),
+        status: Status::Open,
+        priority: 3,
+        due_at: None,
+        due_tz: None,
+        scheduled_on: Some(time::macros::date!(2026 - 10 - 17)),
+        parent_id: None,
+        metadata: json!({}),
+        version: 1,
+        source: None,
+        external_id: None,
+        created_by: uuid::Uuid::nil(),
+        created_at: time::OffsetDateTime::UNIX_EPOCH,
+        updated_at: time::OffsetDateTime::UNIX_EPOCH,
+        deleted_at: None,
+    })
+    .unwrap();
+    assert_eq!(v["scheduled_on"], "2026-10-17");
+    v.as_object_mut().unwrap().remove("scheduled_on");
+    let old: trailhead_core::Task = serde_json::from_value(v).unwrap();
+    assert_eq!(old.scheduled_on, None);
+}
+
+#[tokio::test]
 async fn lost_claims_are_reported_on_renew() {
     let env = Env::new().await;
     let t = env.task("lease").await;

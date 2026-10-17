@@ -1,14 +1,14 @@
 use libsql::{Connection, Row};
 use serde::Serialize;
 use serde_json::Value;
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::claims::{drop_claim, live_claim, reap_expired};
 use crate::comments::list_comments_for;
 use crate::db::{
-    collect, first, fmt_ts, get_enum, get_json, get_opt_ts, get_opt_uuid, get_ts, get_uuid, json_ids, opt_ts_value,
-    opt_uuid_value,
+    collect, first, fmt_ts, get_enum, get_json, get_opt_date, get_opt_ts, get_opt_uuid, get_ts, get_uuid, json_ids,
+    opt_date_value, opt_ts_value, opt_uuid_value,
 };
 use crate::deps::{unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
@@ -17,7 +17,7 @@ use crate::model::{Claim, Comment, Entity, Status, Task};
 use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 
-pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at";
+pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on";
 
 fn prefixed_cols(prefix: &str) -> String {
     TASK_COLS.split(", ").map(|c| format!("{prefix}.{c}")).collect::<Vec<_>>().join(", ")
@@ -44,6 +44,7 @@ pub(crate) fn task_from_row(row: &Row) -> Result<Task> {
         created_at: get_ts(row, 16)?,
         updated_at: get_ts(row, 17)?,
         deleted_at: get_opt_ts(row, 18)?,
+        scheduled_on: get_opt_date(row, 19)?,
     })
 }
 
@@ -71,8 +72,8 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, after: Task) -> Result<Tas
         .query(
             &format!(
                 "UPDATE tasks SET title = ?1, description = ?2, status = ?3, priority = ?4, due_at = ?5, due_tz = ?6,
-                 parent_id = ?7, metadata = ?8, deleted_at = ?9, version = version + 1, updated_at = ?10
-                 WHERE id = ?11 AND version = ?12 RETURNING {TASK_COLS}"
+                 parent_id = ?7, metadata = ?8, deleted_at = ?9, version = version + 1, updated_at = ?10,
+                 scheduled_on = ?13 WHERE id = ?11 AND version = ?12 RETURNING {TASK_COLS}"
             ),
             libsql::params![
                 after.title,
@@ -87,6 +88,7 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, after: Task) -> Result<Tas
                 tx.now_str(),
                 before.id.to_string(),
                 before.version,
+                opt_date_value(after.scheduled_on),
             ],
         )
         .await?;
@@ -157,6 +159,7 @@ pub struct NewTask {
     pub priority: Option<i64>,
     pub due_at: Option<OffsetDateTime>,
     pub due_tz: Option<String>,
+    pub scheduled_on: Option<Date>,
     /// Parent task key or id.
     pub parent: Option<String>,
     pub metadata: Option<Value>,
@@ -172,6 +175,7 @@ pub struct TaskPatch {
     pub priority: Option<i64>,
     pub due_at: Option<Option<OffsetDateTime>>,
     pub due_tz: Option<Option<String>>,
+    pub scheduled_on: Option<Option<Date>>,
     pub parent: Option<Option<String>>,
     /// RFC 7386 merge patch: `null` removes a key.
     pub metadata: Option<Value>,
@@ -184,6 +188,8 @@ pub struct TaskFilter {
     pub statuses: Vec<Status>,
     pub parent: Option<String>,
     pub due_before: Option<OffsetDateTime>,
+    /// Tasks scheduled on or before this day, so overdue plans still show up "today".
+    pub scheduled_through: Option<Date>,
     /// `(path, value)` pairs matched against `metadata` as text, e.g. `("team", "web")`.
     pub metadata: Vec<(String, String)>,
     pub sort: TaskSort,
@@ -331,8 +337,8 @@ impl Store {
                 .query(
                     &format!(
                         "INSERT INTO tasks (id, workspace_id, project_id, key, title, description, priority, due_at, due_tz,
-                         parent_id, metadata, source, external_id, created_by, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15) RETURNING {TASK_COLS}"
+                         parent_id, metadata, source, external_id, created_by, created_at, updated_at, scheduled_on)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?16) RETURNING {TASK_COLS}"
                     ),
                     libsql::params![
                         id.to_string(),
@@ -350,6 +356,7 @@ impl Store {
                         new.external_id.clone(),
                         ctx.actor_id().to_string(),
                         tx.now_str(),
+                        opt_date_value(new.scheduled_on),
                     ],
                 )
                 .await?;
@@ -400,6 +407,9 @@ impl Store {
                 after.due_tz = tz;
             }
             validate_due(after.due_at, &after.due_tz)?;
+            if let Some(d) = patch.scheduled_on {
+                after.scheduled_on = d;
+            }
             if let Some(parent) = &patch.parent {
                 after.parent_id = match parent {
                     Some(p) => {
@@ -516,6 +526,9 @@ impl Store {
         }
         if let Some(d) = filter.due_before {
             push(&mut sql, " AND due_at IS NOT NULL AND due_at < ?", fmt_ts(d).into());
+        }
+        if let Some(d) = filter.scheduled_through {
+            push(&mut sql, " AND scheduled_on IS NOT NULL AND scheduled_on <= ?", d.to_string().into());
         }
         for (path, value) in &filter.metadata {
             validate_path(path)?;

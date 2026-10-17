@@ -1,7 +1,8 @@
 //! Parsing for query parameters and tool arguments, shared by REST and MCP.
 
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
+use time::{Date, OffsetDateTime};
 use trailhead_core::{Error, Result};
 
 pub fn parse_time(s: &str) -> Result<OffsetDateTime> {
@@ -10,6 +11,15 @@ pub fn parse_time(s: &str) -> Result<OffsetDateTime> {
 
 pub fn parse_opt_time(s: Option<&str>) -> Result<Option<OffsetDateTime>> {
     s.map(parse_time).transpose()
+}
+
+pub fn parse_date(s: &str) -> Result<Date> {
+    Date::parse(s, &format_description!("[year]-[month]-[day]"))
+        .map_err(|_| Error::Invalid(format!("{s:?} is not a date like 2026-10-17")))
+}
+
+pub fn parse_opt_date(s: Option<&str>) -> Result<Option<Date>> {
+    s.map(parse_date).transpose()
 }
 
 /// A comma-separated list of free-form strings, blanks dropped.

@@ -32,6 +32,20 @@ fn parse_when_in(s: &str, tz: &jiff::tz::TimeZone) -> Result<String> {
     Ok(end_of_day.timestamp().to_string())
 }
 
+/// A day to schedule work on: `YYYY-MM-DD`, `today` or `tomorrow`, in the local zone.
+fn parse_day(s: &str) -> Result<String> {
+    parse_day_from(s, jiff::Zoned::now().with_time_zone(output::local_tz().clone()).date())
+}
+
+fn parse_day_from(s: &str, today: jiff::civil::Date) -> Result<String> {
+    let day = match s {
+        "today" => today,
+        "tomorrow" => today.tomorrow()?,
+        _ => s.parse().with_context(|| format!("{s:?} isn't YYYY-MM-DD, today or tomorrow"))?,
+    };
+    Ok(day.to_string())
+}
+
 /// The local IANA zone name, e.g. `America/Los_Angeles`, if the system has one.
 fn local_time_zone() -> Option<String> {
     output::local_tz().iana_name().map(String::from)
@@ -136,12 +150,13 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Ls { project, status, parent, all, limit } => {
+        Cmd::Ls { project, status, parent, all, today, limit } => {
             let status = status.or(all.then(|| "open,in_progress,needs_input,in_review,done,cancelled".into()));
             let q = params([
                 ("project", project.or(default_project)),
                 ("status", status),
                 ("parent", parent),
+                ("scheduled_through", today.then(|| parse_day("today")).transpose()?),
                 ("limit", limit.map(|n| n.to_string())),
             ]);
             let v = c.get("tasks", &q).await?;
@@ -155,7 +170,7 @@ async fn run(cli: Cli) -> Result<()> {
                 print_detail(&c, &v).await?;
             }
         }
-        Cmd::Add { title, project, description, priority, parent, due, after, blocks } => {
+        Cmd::Add { title, project, description, priority, parent, due, on, after, blocks } => {
             let project =
                 project.or(default_project).context("--project is required (or set project in .trailhead.toml)")?;
             let body = json!({
@@ -166,12 +181,13 @@ async fn run(cli: Cli) -> Result<()> {
                 "parent": parent,
                 "due_at": due.as_deref().map(parse_when).transpose()?,
                 "due_tz": due.as_ref().and_then(|_| local_time_zone()),
+                "scheduled_on": on.as_deref().map(parse_day).transpose()?,
                 "blocked_by": after,
                 "blocks": blocks,
             });
             show(c.post("tasks", body).await?, &task_line);
         }
-        Cmd::Edit { task, title, description, priority, due, status, version } => {
+        Cmd::Edit { task, title, description, priority, due, on, status, version } => {
             let mut body = json!({});
             if let Some(t) = title {
                 body["title"] = json!(t);
@@ -189,6 +205,9 @@ async fn run(cli: Cli) -> Result<()> {
                     body["due_at"] = json!(parse_when(&d)?);
                     body["due_tz"] = json!(local_time_zone());
                 }
+            }
+            if let Some(d) = on {
+                body["scheduled_on"] = if d == "none" { Value::Null } else { json!(parse_day(&d)?) };
             }
             if let Some(st) = status {
                 body["status"] = json!(st);
@@ -541,6 +560,9 @@ async fn print_detail(c: &Client, v: &Value) -> Result<()> {
     let t = &v["task"];
     println!("{}  {}", s(t, "key"), s(t, "title"));
     let mut meta = vec![s(t, "status").to_string(), format!("p{}", t["priority"]), format!("v{}", t["version"])];
+    if let Some(day) = t["scheduled_on"].as_str() {
+        meta.push(format!("scheduled {day}"));
+    }
     if let Some(due) = t["due_at"].as_str() {
         meta.push(format!("due {}", short_time(due)));
     }
@@ -754,7 +776,7 @@ async fn serve(bind: &str) -> Result<()> {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Cmd, WebhookCmd, parse_when_in};
+    use super::{Cli, Cmd, WebhookCmd, parse_day_from, parse_when_in};
 
     #[test]
     fn webhook_url_does_not_clobber_the_server_url() {
@@ -772,5 +794,14 @@ mod tests {
         assert_eq!(parse_when_in("2026-11-01", &la).unwrap(), "2026-11-02T07:59:59Z");
         assert_eq!(parse_when_in("2026-11-01T12:00:00Z", &la).unwrap(), "2026-11-01T12:00:00Z");
         assert!(parse_when_in("next tuesday", &la).is_err());
+    }
+
+    #[test]
+    fn scheduled_days_are_plain_dates() {
+        let today = jiff::civil::date(2026, 10, 31);
+        assert_eq!(parse_day_from("today", today).unwrap(), "2026-10-31");
+        assert_eq!(parse_day_from("tomorrow", today).unwrap(), "2026-11-01");
+        assert_eq!(parse_day_from("2026-12-01", today).unwrap(), "2026-12-01");
+        assert!(parse_day_from("2026-12-01T00:00:00Z", today).is_err());
     }
 }

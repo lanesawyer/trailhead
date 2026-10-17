@@ -1,8 +1,8 @@
 use libsql::{Connection, Row, Rows};
 use serde_json::Value;
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
+use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -19,6 +19,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (9, "project_reviewers", include_str!("../migrations/0009_project_reviewers.sql")),
     (10, "sub_agents", include_str!("../migrations/0010_sub_agents.sql")),
     (11, "claims_without_expiry", include_str!("../migrations/0011_claims_without_expiry.sql")),
+    (12, "scheduled_on", include_str!("../migrations/0012_scheduled_on.sql")),
 ];
 
 pub(crate) async fn migrate(conn: &Connection) -> Result<()> {
@@ -71,6 +72,20 @@ pub(crate) fn fmt_ts(t: OffsetDateTime) -> String {
 
 pub(crate) fn opt_ts_value(t: Option<OffsetDateTime>) -> libsql::Value {
     t.map(fmt_ts).into()
+}
+
+pub(crate) fn opt_date_value(d: Option<Date>) -> libsql::Value {
+    d.map(|d| d.to_string()).into()
+}
+
+pub(crate) fn get_opt_date(row: &Row, i: i32) -> Result<Option<Date>> {
+    let s: Option<String> = row.get(i)?;
+    s.as_deref()
+        .map(|s| {
+            Date::parse(s, &format_description!("[year]-[month]-[day]"))
+                .map_err(|e| Error::Corrupt(format!("date {s}: {e}")))
+        })
+        .transpose()
 }
 
 pub(crate) fn opt_uuid_value(u: Option<Uuid>) -> libsql::Value {

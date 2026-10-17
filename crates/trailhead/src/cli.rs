@@ -57,6 +57,9 @@ pub(crate) enum Cmd {
         /// Include done and cancelled.
         #[arg(short, long)]
         all: bool,
+        /// Only tasks scheduled for today or earlier: today's plan.
+        #[arg(long)]
+        today: bool,
         #[arg(short = 'n', long)]
         limit: Option<i64>,
     },
@@ -76,9 +79,12 @@ pub(crate) enum Cmd {
         priority: Option<i64>,
         #[arg(long)]
         parent: Option<String>,
-        /// YYYY-MM-DD or an RFC 3339 timestamp.
+        /// The deadline: YYYY-MM-DD or an RFC 3339 timestamp.
         #[arg(long)]
         due: Option<String>,
+        /// The day to work on it: YYYY-MM-DD, today or tomorrow.
+        #[arg(long)]
+        on: Option<String>,
         /// Tasks that must finish first.
         #[arg(long, value_delimiter = ',')]
         after: Vec<String>,
@@ -98,6 +104,9 @@ pub(crate) enum Cmd {
         /// YYYY-MM-DD, RFC 3339, or "none".
         #[arg(long)]
         due: Option<String>,
+        /// The day to work on it: YYYY-MM-DD, today, tomorrow, or "none".
+        #[arg(long)]
+        on: Option<String>,
         #[arg(short, long)]
         status: Option<String>,
         /// Fail if the task changed since this version.

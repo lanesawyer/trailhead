@@ -2,7 +2,7 @@
 
 > Trailhead is a headless task engine that humans and AI agents share. It stores projects and tasks and enforces the rules around them: claims with expiring leases, a ready queue, typed comments for handoffs and questions, dependencies, review, and an event log where every write can be undone. There is no app; every interface is a client of the REST API under `/v1`, the MCP server at `/mcp`, or the `trailhead` CLI.
 
-Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, projects by key (`AUTH`) or UUID. Timestamps are UTC RFC 3339; a due date is `due_at` plus an optional IANA zone in `due_tz`. Priority is 1 (urgent) to 4 (low), default 3. A local server listens on `http://127.0.0.1:7241`.
+Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, projects by key (`AUTH`) or UUID. Timestamps are UTC RFC 3339; a due date is `due_at` plus an optional IANA zone in `due_tz`. `scheduled_on` is a separate plain date (`2026-10-17`) for the day the task is planned to be worked. Priority is 1 (urgent) to 4 (low), default 3. A local server listens on `http://127.0.0.1:7241`.
 
 ## Auth
 
@@ -64,10 +64,10 @@ Agents can turn `require_review` on but not off, and can't archive or unarchive 
 
 ## Tasks
 
-- `POST /v1/tasks` `{"project", "title", "description"?, "priority"?, "due_at"?, "due_tz"?, "parent"?, "metadata"?, "blocked_by"?, "blocks"?, "source"?, "external_id"?}`. `source` and `external_id` go together; repeating a pair returns the existing task instead of a duplicate.
-- `GET /v1/tasks?project=&status=a,b&parent=&due_before=&metadata=k:v,k2:v2&sort=&limit=&offset=` defaults to everything not done or cancelled. `sort` is `priority` (default: priority, then due date, then oldest), `updated_at` or `created_at`, with `-` for newest first; page with `limit` (default 100) and `offset`. `include=` takes any of `claim` (the live claim or `null`, with the holder's name as `holder`), `open_questions` (unresolved questions, oldest first) and `last_handoff` (the newest handoff or `null`), so an inbox of `status=needs_input,in_review` is one request.
+- `POST /v1/tasks` `{"project", "title", "description"?, "priority"?, "due_at"?, "due_tz"?, "scheduled_on"?, "parent"?, "metadata"?, "blocked_by"?, "blocks"?, "source"?, "external_id"?}`. `source` and `external_id` go together; repeating a pair returns the existing task instead of a duplicate.
+- `GET /v1/tasks?project=&status=a,b&parent=&due_before=&scheduled_through=&metadata=k:v,k2:v2&sort=&limit=&offset=` defaults to everything not done or cancelled. `scheduled_through=YYYY-MM-DD` keeps tasks scheduled on or before that day: today's date gives today's plan plus anything planned earlier and not finished. `sort` is `priority` (default: priority, then due date, then oldest), `updated_at` or `created_at`, with `-` for newest first; page with `limit` (default 100) and `offset`. `include=` takes any of `claim` (the live claim or `null`, with the holder's name as `holder`), `open_questions` (unresolved questions, oldest first) and `last_handoff` (the newest handoff or `null`), so an inbox of `status=needs_input,in_review` is one request.
 - `GET /v1/tasks/KEY-1` returns `{task, claim, blocked_by, blocks, comments}`.
-- `PATCH /v1/tasks/KEY-1` takes any of `title`, `description`, `status`, `priority`, `due_at`, `due_tz`, `parent`, `metadata` (a JSON merge patch: `null` removes a key). `null` clears `due_at`, `due_tz` and `parent`.
+- `PATCH /v1/tasks/KEY-1` takes any of `title`, `description`, `status`, `priority`, `due_at`, `due_tz`, `scheduled_on`, `parent`, `metadata` (a JSON merge patch: `null` removes a key). `null` clears `due_at`, `due_tz`, `scheduled_on` and `parent`.
 - `DELETE /v1/tasks/KEY-1` soft-deletes; undo restores it.
 - `GET /v1/search?q=&project=&status=a,b&limit=` searches titles, descriptions and comments, open work first. Each hit has `match`: `{field, snippet, comment_id}`, where `field` is the first of `title`, `description` or `comment` that matched and `snippet` is plain text around the match.
 

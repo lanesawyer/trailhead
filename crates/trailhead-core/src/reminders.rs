@@ -45,7 +45,7 @@ async fn pending(conn: &Connection, ws: Uuid, now: OffsetDateTime, window: Durat
             libsql::params![ws.to_string(), fmt_ts(now), fmt_ts(now + window)],
         )
         .await?;
-    collect(rows, |row| Ok((task_from_row(row)?, row.get::<String>(19)?))).await
+    collect(rows, |row| Ok((task_from_row(row)?, row.get::<String>(20)?))).await
 }
 
 /// The workspace's first user, who reminders are attributed to.

@@ -179,6 +179,28 @@ async fn nullable_fields_clear_on_null() {
 }
 
 #[tokio::test]
+async fn scheduled_days_filter_todays_plan() {
+    let api = Api::new().await;
+    api.seed().await;
+    let body =
+        json!({"project": "AUTH", "title": "plan", "scheduled_on": "2026-10-17", "due_at": "2026-11-01T12:00:00Z"});
+    let r = api.as_human("POST", "/v1/tasks", Some(body)).await;
+    assert_eq!(r.body["scheduled_on"], "2026-10-17");
+    assert_eq!(r.body["due_at"], "2026-11-01T12:00:00Z");
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "later", "scheduled_on": "2026-10-18"})))
+        .await;
+    let r = api.as_human("GET", "/v1/tasks?scheduled_through=2026-10-17&fields=key", None).await;
+    assert_eq!(r.body, json!([{"key": "AUTH-1"}]));
+    let r = api.as_human("GET", "/v1/tasks?scheduled_through=tomorrow", None).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let r = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"scheduled_on": "10/18/2026"}))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let r = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"scheduled_on": null}))).await;
+    assert!(r.body["scheduled_on"].is_null());
+    assert_eq!(r.body["due_at"], "2026-11-01T12:00:00Z");
+}
+
+#[tokio::test]
 async fn reopening_keeps_the_same_cli_token() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = common::local_config(dir.path());

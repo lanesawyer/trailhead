@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
+
+time::serde::format_description!(pub iso_date, Date, "[year]-[month]-[day]");
 use uuid::Uuid;
 
 use crate::error::Error;
@@ -158,6 +160,10 @@ pub struct Task {
     #[serde(with = "time::serde::rfc3339::option")]
     pub due_at: Option<OffsetDateTime>,
     pub due_tz: Option<String>,
+    /// The day the task is planned to be worked (`YYYY-MM-DD`), separate from its due date.
+    #[serde(default, with = "iso_date::option")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Date))]
+    pub scheduled_on: Option<Date>,
     pub parent_id: Option<Uuid>,
     pub metadata: Value,
     pub version: i64,

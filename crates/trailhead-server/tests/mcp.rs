@@ -181,6 +181,23 @@ async fn idempotency_keys_make_mcp_retries_safe() {
 }
 
 #[tokio::test]
+async fn agents_schedule_tasks_over_mcp() {
+    let s = start().await;
+    let client = connect(&s.url, &s.agent).await;
+    let args =
+        json!({"project": "AUTH", "title": "plan", "scheduled_on": "2026-10-17", "due_at": "2026-11-01T12:00:00Z"});
+    let (err, out) = call(&client, "create_task", args).await;
+    assert!(!err && out.contains("(scheduled 2026-10-17) (due 2026-11-01)"), "{out}");
+    let (_, out) = call(&client, "list_tasks", json!({"scheduled_through": "2026-10-16"})).await;
+    assert_eq!(out, "no tasks");
+    let (_, out) = call(&client, "list_tasks", json!({"scheduled_through": "2026-10-17"})).await;
+    assert!(out.starts_with("AUTH-3 ") && out.lines().count() == 1, "{out}");
+    let (err, out) = call(&client, "update_task", json!({"task": "AUTH-3", "scheduled_on": ""})).await;
+    assert!(!err && !out.contains("scheduled"), "{out}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn agents_create_projects_and_write_briefs() {
     let s = start().await;
     let client = connect(&s.url, &s.agent).await;

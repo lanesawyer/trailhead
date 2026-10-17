@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::params::{parse_list, parse_time};
+use crate::params::{parse_date, parse_list, parse_opt_date, parse_time};
 
 const BRIEF_PREFIX: &str = "trailhead://projects/";
 
@@ -101,6 +101,9 @@ fn date(t: OffsetDateTime) -> String {
 
 fn task_line(t: &Task) -> String {
     let mut line = format!("{} {} p{} v{} {}", t.key, t.status, t.priority, t.version, t.title);
+    if let Some(day) = t.scheduled_on {
+        line.push_str(&format!(" (scheduled {day})"));
+    }
     if let Some(due) = t.due_at {
         line.push_str(&format!(" (due {})", date(due)));
     }
@@ -199,6 +202,8 @@ pub struct ListArgs {
     status: Option<String>,
     /// Parent task key, to list subtasks.
     parent: Option<String>,
+    /// YYYY-MM-DD. Only tasks scheduled on or before this day; pass today's date for today's plan.
+    scheduled_through: Option<String>,
     limit: Option<i64>,
     /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
     as_agent: Option<String>,
@@ -228,8 +233,10 @@ pub struct CreateArgs {
     /// Task keys this one blocks. To get help on your own task, create a subtask that blocks it.
     #[serde(default)]
     blocks: Vec<String>,
-    /// RFC 3339 timestamp.
+    /// RFC 3339 timestamp: the deadline.
     due_at: Option<String>,
+    /// YYYY-MM-DD: the day to work on it, separate from the deadline.
+    scheduled_on: Option<String>,
     /// Optional. Retrying with the same key and arguments returns the first call's
     /// result instead of doing it twice. Keys last 24 hours.
     #[serde(default, skip_serializing)]
@@ -247,6 +254,8 @@ pub struct UpdateArgs {
     /// open, in_progress, needs_input, in_review, done or cancelled.
     status: Option<String>,
     priority: Option<i64>,
+    /// YYYY-MM-DD: the day to work on it. An empty string unschedules it.
+    scheduled_on: Option<String>,
     /// The version you last saw; the update fails if the task changed since.
     version: Option<i64>,
     /// Posted as a `handoff` comment once the update succeeds: what changed, what's
@@ -362,12 +371,14 @@ impl TrailheadMcp {
 
     async fn do_create_task(&self, ctx: &Ctx, a: CreateArgs) -> Result<CallToolResult, ErrorData> {
         let due_at = attempt!(a.due_at.as_deref().map(parse_time).transpose());
+        let scheduled_on = attempt!(parse_opt_date(a.scheduled_on.as_deref()));
         let new = NewTask {
             project: a.project,
             title: a.title,
             description: a.description.unwrap_or_default(),
             priority: a.priority,
             due_at,
+            scheduled_on,
             parent: a.parent,
             ..Default::default()
         };
@@ -457,8 +468,15 @@ impl TrailheadMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let statuses = attempt!(parse_list(a.status.as_deref()));
-        let filter =
-            TaskFilter { project: a.project, statuses, parent: a.parent, limit: a.limit, ..Default::default() };
+        let scheduled_through = attempt!(parse_opt_date(a.scheduled_through.as_deref()));
+        let filter = TaskFilter {
+            project: a.project,
+            statuses,
+            parent: a.parent,
+            scheduled_through,
+            limit: a.limit,
+            ..Default::default()
+        };
         let tasks = attempt!(self.state.store.list_tasks(&ctx, filter).await);
         text(task_list(&tasks, "no tasks"))
     }
@@ -516,11 +534,19 @@ impl TrailheadMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let status = attempt!(a.status.as_deref().map(str::parse::<Status>).transpose());
+        let scheduled_on = attempt!(
+            a.scheduled_on
+                .as_deref()
+                .map(str::trim)
+                .map(|d| (!d.is_empty()).then(|| parse_date(d)).transpose())
+                .transpose()
+        );
         let patch = TaskPatch {
             title: a.title,
             description: a.description,
             status,
             priority: a.priority,
+            scheduled_on,
             ..Default::default()
         };
         let task = attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await);

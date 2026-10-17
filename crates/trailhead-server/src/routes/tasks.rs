@@ -11,7 +11,7 @@ use utoipa::{IntoParams, ToSchema};
 use crate::auth::Auth;
 use crate::error::{ApiResult, Json, Path, Query, invalid};
 use crate::openapi::{ErrorBody, IfMatch, TaskParam};
-use crate::params::{parse_list, parse_opt_time, split_list};
+use crate::params::{parse_list, parse_opt_date, parse_opt_time, split_list};
 
 use super::{S, if_match, nullable, select_fields, with_etag};
 
@@ -24,6 +24,10 @@ pub(crate) struct TaskListQuery {
     parent: Option<String>,
     #[param(format = DateTime)]
     due_before: Option<String>,
+    /// Tasks scheduled on or before this day (`YYYY-MM-DD`): pass today for today's plan,
+    /// including anything planned earlier that's still unfinished.
+    #[param(format = Date)]
+    scheduled_through: Option<String>,
     /// `key:value` pairs, comma-separated.
     metadata: Option<String>,
     /// `priority` (the default: priority, then due date, then oldest), `updated_at` or
@@ -64,6 +68,7 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
         statuses: parse_list(q.status.as_deref())?,
         parent: q.parent,
         due_before: parse_opt_time(q.due_before.as_deref())?,
+        scheduled_through: parse_opt_date(q.scheduled_through.as_deref())?,
         metadata,
         sort: q.sort.as_deref().map(str::parse).transpose()?.unwrap_or_default(),
         limit: q.limit,
@@ -106,6 +111,9 @@ pub(crate) struct CreateTask {
     #[schema(format = DateTime)]
     due_at: Option<String>,
     due_tz: Option<String>,
+    /// The day to work the task (`YYYY-MM-DD`), separate from its due date.
+    #[schema(format = Date)]
+    scheduled_on: Option<String>,
     parent: Option<String>,
     metadata: Option<Value>,
     source: Option<String>,
@@ -134,6 +142,7 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
         priority: b.priority,
         due_at: parse_opt_time(b.due_at.as_deref())?,
         due_tz: b.due_tz,
+        scheduled_on: parse_opt_date(b.scheduled_on.as_deref())?,
         parent: b.parent,
         metadata: b.metadata,
         source: b.source,
@@ -175,6 +184,9 @@ pub(crate) struct UpdateTask {
     #[serde(default, deserialize_with = "nullable")]
     due_tz: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
+    #[schema(format = Date)]
+    scheduled_on: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
     parent: Option<Option<String>>,
     metadata: Option<Value>,
     /// Also accepted in the body for clients that can't set headers.
@@ -206,6 +218,7 @@ pub(crate) async fn update_task(
         priority: b.priority,
         due_at: b.due_at.map(|d| parse_opt_time(d.as_deref())).transpose()?,
         due_tz: b.due_tz,
+        scheduled_on: b.scheduled_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
         parent: b.parent,
         metadata: b.metadata,
     };
