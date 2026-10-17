@@ -101,6 +101,25 @@ pub(crate) fn check_project_write(ctx: &Ctx, project: &Project) -> Result<()> {
     }
 }
 
+/// Who approves work is a human's call: agents can turn review on but not off,
+/// and can't archive or unarchive projects or change their reviewers, whether
+/// by an update or by undoing someone else's.
+pub(crate) fn check_review_settings(ctx: &Ctx, before: &Project, after: &Project) -> Result<()> {
+    if ctx.is_human() {
+        return Ok(());
+    }
+    if before.require_review && !after.require_review {
+        return Err(Error::Forbidden("only a human can turn off review".into()));
+    }
+    if before.status != after.status {
+        return Err(Error::Forbidden("only a human can archive or unarchive a project".into()));
+    }
+    if before.reviewers != after.reviewers {
+        return Err(Error::Forbidden("only a human can choose who approves review work".into()));
+    }
+    Ok(())
+}
+
 /// Compare-and-swap on `version`. Used by updates and undo alike.
 pub(crate) async fn save_project(tx: &Tx, before: &Project, after: Project) -> Result<Project> {
     let mut rows = tx
@@ -241,6 +260,7 @@ impl Store {
             if let Some(m) = &patch.metadata {
                 after.metadata = merge_patch(&before.metadata, m)?;
             }
+            check_review_settings(ctx, &before, &after)?;
             let after = save_project(tx, &before, after).await?;
             tx.emit_change(Entity::Project, after.id.to_string(), None, "project.updated", Some(&before), Some(&after))
                 .await?;
