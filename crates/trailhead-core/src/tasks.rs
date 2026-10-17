@@ -606,16 +606,23 @@ impl Store {
         let sql = format!(
             "SELECT {TASK_COLS} FROM tasks t WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND {}{statuses}
                AND (?4 IS NULL OR t.project_id = ?4) AND (
-                 t.rowid IN (SELECT rowid FROM tasks_fts WHERE tasks_fts MATCH ?2)
+                 t.key = upper(?5)
+                 OR t.rowid IN (SELECT rowid FROM tasks_fts WHERE tasks_fts MATCH ?2)
                  OR t.id IN (SELECT c.task_id FROM comments c WHERE c.deleted_at IS NULL
                              AND c.rowid IN (SELECT rowid FROM comments_fts WHERE comments_fts MATCH ?2)))
-             ORDER BY t.status IN ('done', 'cancelled'), t.updated_at DESC LIMIT ?3",
+             ORDER BY t.key = upper(?5) DESC, t.status IN ('done', 'cancelled'), t.updated_at DESC LIMIT ?3",
             ctx.scope_sql("t.project_id")
         );
         let rows = conn
             .query(
                 &sql,
-                libsql::params![ctx.workspace_id.to_string(), q.clone(), filter.limit.unwrap_or(20), project_id],
+                libsql::params![
+                    ctx.workspace_id.to_string(),
+                    q.clone(),
+                    filter.limit.unwrap_or(20),
+                    project_id,
+                    filter.query.trim()
+                ],
             )
             .await?;
         let tasks = collect_tasks(rows).await?;

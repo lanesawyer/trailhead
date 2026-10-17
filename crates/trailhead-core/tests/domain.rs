@@ -754,3 +754,21 @@ async fn search_filters_and_says_where_it_matched() {
     assert_eq!(open.len(), 2);
     assert!(!open.contains(&titled.key));
 }
+
+#[tokio::test]
+async fn search_by_key_puts_that_task_first() {
+    let env = Env::new().await;
+    let target = env.task("Rate limits per process").await;
+    let mentions = env.task("Shared limiter").await;
+    env.store
+        .add_comment(&env.human, &mentions.key, comment(CommentKind::Note, &format!("split out of {}", target.key)))
+        .await
+        .unwrap();
+
+    let hits = env.store.search(&env.human, &target.key.to_lowercase(), None).await.unwrap();
+    let keys: Vec<_> = hits.iter().map(|t| t.key.clone()).collect();
+    assert_eq!(keys, [target.key.clone(), mentions.key.clone()]);
+
+    let filter = SearchFilter { query: target.key.clone(), statuses: vec![Status::Done], ..Default::default() };
+    assert!(env.store.search_hits(&env.human, filter).await.unwrap().is_empty(), "filters still apply");
+}
