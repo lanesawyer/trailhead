@@ -3,7 +3,7 @@ mod common;
 use common::Env;
 use trailhead_core::{
     CommentKind, Ctx, Error, EventFilter, NewComment, NewProject, NewTask, Principal, ProjectPatch, TaskFilter,
-    TaskPatch, TokenOptions,
+    TaskPatch, TokenOptions, TokenPatch,
 };
 
 struct Scoped {
@@ -162,4 +162,53 @@ async fn token_options_are_validated() {
     let ctx = s.authenticate(&secret).await.unwrap();
     assert!(ctx.is_human() && ctx.is_scoped());
     forbidden(s.create_token(&ctx, me, "y").await);
+}
+
+#[tokio::test]
+async fn tokens_can_be_rescoped_without_reissuing() {
+    let Scoped { env, bot, .. } = setup().await;
+    let s = &env.store;
+    let token = s.list_tokens(&env.human).await.unwrap().into_iter().find(|t| t.name == "bot").unwrap();
+
+    let widen = TokenPatch { projects: Some(Some(vec!["WEB".into(), "AUTH".into()])), ..Default::default() };
+    // Only the human who owns it can change it, never the agent holding it.
+    forbidden(s.update_token(&bot, token.id, widen.clone()).await);
+    let t = s.update_token(&env.human, token.id, widen).await.unwrap();
+    assert_eq!(t.projects.as_ref().map(Vec::len), Some(2));
+    assert_eq!(t.rate_limit_per_minute, Some(30), "omitted fields stay");
+
+    let lift = TokenPatch { projects: Some(None), rate_limit_per_minute: Some(None) };
+    let t = s.update_token(&env.human, token.id, lift).await.unwrap();
+    assert_eq!((t.projects, t.rate_limit_per_minute), (None, None));
+    let t = s.update_token(&env.human, token.id, TokenPatch { projects: Some(Some(vec![])), ..Default::default() });
+    assert_eq!(t.await.unwrap().projects, None, "an empty list means every project too");
+
+    let zero = TokenPatch { rate_limit_per_minute: Some(Some(0)), ..Default::default() };
+    assert!(matches!(s.update_token(&env.human, token.id, zero).await, Err(Error::Invalid(_))));
+    let nope = TokenPatch { projects: Some(Some(vec!["NOPE".into()])), ..Default::default() };
+    hidden(s.update_token(&env.human, token.id, nope).await);
+
+    // A scoped human token can't change tokens, and revoked tokens stay revoked.
+    let me = Principal::User(env.human.user_id);
+    let opts = TokenOptions { projects: Some(vec!["AUTH".into()]), ..Default::default() };
+    let (_, secret) = s.create_token_with(&env.human, me, "narrow", opts).await.unwrap();
+    let narrow = s.authenticate(&secret).await.unwrap();
+    forbidden(s.update_token(&narrow, token.id, TokenPatch::default()).await);
+    s.revoke_token(&env.human, token.id).await.unwrap();
+    hidden(s.update_token(&env.human, token.id, TokenPatch::default()).await);
+}
+
+#[tokio::test]
+async fn a_changed_scope_applies_on_the_next_request() {
+    let env = Env::new().await;
+    let s = &env.store;
+    let me = Principal::User(env.human.user_id);
+    let opts = TokenOptions { projects: Some(vec!["AUTH".into()]), rate_limit_per_minute: Some(10) };
+    let (token, secret) = s.create_token_with(&env.human, me, "x", opts).await.unwrap();
+    assert!(s.authenticate(&secret).await.unwrap().is_scoped());
+    let lift = TokenPatch { projects: Some(None), rate_limit_per_minute: Some(Some(100)) };
+    s.update_token(&env.human, token.id, lift).await.unwrap();
+    let (ctx, t) = s.authenticate_token(&secret).await.unwrap();
+    assert!(!ctx.is_scoped());
+    assert_eq!(t.rate_limit_per_minute, Some(100));
 }

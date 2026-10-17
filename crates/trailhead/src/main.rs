@@ -352,7 +352,19 @@ enum WebhookCmd {
 #[derive(Subcommand)]
 enum TokenCmd {
     Ls,
-    Revoke { id: String },
+    Revoke {
+        id: String,
+    },
+    /// Change a token's limits without reissuing it.
+    Edit {
+        id: String,
+        /// Comma-separated project keys; "all" opens it to every project.
+        #[arg(long, value_delimiter = ',')]
+        projects: Option<Vec<String>>,
+        /// Requests per minute, or "none" to remove the limit.
+        #[arg(long)]
+        rate_limit: Option<String>,
+    },
 }
 
 /// RFC 3339 passes through; a bare date means the end of that day in the local
@@ -794,6 +806,23 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Token(TokenCmd::Revoke { id }) => show(c.delete(&format!("tokens/{id}")).await?, &|_| "revoked".into()),
+        Cmd::Token(TokenCmd::Edit { id, projects, rate_limit }) => {
+            let mut body = json!({});
+            if let Some(p) = projects {
+                let all = p.iter().all(|k| k.trim().is_empty() || k.eq_ignore_ascii_case("all"));
+                body["projects"] = if all { Value::Null } else { json!(p) };
+            }
+            if let Some(r) = rate_limit {
+                body["rate_limit_per_minute"] = match r.as_str() {
+                    "none" => Value::Null,
+                    n => json!(n.parse::<i64>().with_context(|| format!("{n:?} isn't a number or \"none\""))?),
+                };
+            }
+            if body.as_object().is_some_and(|b| b.is_empty()) {
+                bail!("nothing to change: pass --projects and/or --rate-limit");
+            }
+            show(c.patch(&format!("tokens/{id}"), body).await?, &|_| "updated".into());
+        }
         Cmd::Webhook(WebhookCmd::Ls) => {
             let v = c.get("webhooks", &[]).await?;
             if json {

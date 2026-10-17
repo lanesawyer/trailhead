@@ -49,6 +49,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("delete", "/v1/webhooks/{id}"),
     ("get", "/v1/webhooks/{id}/deliveries"),
     ("delete", "/v1/tokens/{id}"),
+    ("patch", "/v1/tokens/{id}"),
 ];
 
 async fn fetch_doc() -> Value {

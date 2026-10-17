@@ -12,7 +12,7 @@ use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
     Agent, Claim, ClaimResult, Comment, CommentKind, Dependency, Error, Event, EventFilter, HeldClaim, NewComment,
     NewProject, NewTask, Principal, Project, ProjectPatch, ProjectStatus, SearchFilter, SearchHit, Status, Task,
-    TaskDetail, TaskFilter, TaskPatch, Token, TokenOptions, UndoReport, Webhook, WebhookDelivery,
+    TaskDetail, TaskFilter, TaskPatch, Token, TokenOptions, TokenPatch, UndoReport, Webhook, WebhookDelivery,
 };
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -51,7 +51,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/agents", get(list_agents).post(create_agent))
         .route("/agents/{agent}/revoke", post(revoke_agent))
         .route("/tokens", get(list_tokens).post(create_token))
-        .route("/tokens/{id}", delete(revoke_token))
+        .route("/tokens/{id}", delete(revoke_token).patch(update_token))
         .route("/webhooks", get(list_webhooks).post(create_webhook))
         .route("/webhooks/{id}", delete(delete_webhook))
         .route("/webhooks/{id}/deliveries", get(webhook_deliveries))
@@ -894,6 +894,39 @@ async fn list_tokens(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
 )]
 async fn revoke_token(State(s): S, Auth(ctx): Auth, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(s.store.revoke_token(&ctx, id).await?)))
+}
+
+#[derive(Deserialize, ToSchema)]
+struct UpdateToken {
+    /// Project keys or ids. `null` or `[]` opens the token to every project.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<Vec<String>>)]
+    projects: Option<Option<Vec<String>>>,
+    /// Requests per minute. `null` removes the limit.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<i64>)]
+    rate_limit_per_minute: Option<Option<i64>>,
+}
+
+/// Changes a token's project scope or rate limit without reissuing its secret.
+/// Omitted fields stay as they are. Humans only, for their own tokens and their agents'.
+#[utoipa::path(
+    patch, path = "/v1/tokens/{id}", tag = "tokens", params(("id" = Uuid, Path, description = "Token id")),
+    request_body = UpdateToken,
+    responses(
+        (status = 200, description = "The updated token", body = Token),
+        (status = 403, description = "forbidden: agents and scoped tokens can't change tokens", body = ErrorBody),
+        (status = 404, description = "`not_found`: no such live token of yours", body = ErrorBody),
+    )
+)]
+async fn update_token(
+    State(s): S,
+    Auth(ctx): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<UpdateToken>,
+) -> ApiResult<Json<Value>> {
+    let patch = TokenPatch { projects: b.projects, rate_limit_per_minute: b.rate_limit_per_minute };
+    Ok(Json(json!(s.store.update_token(&ctx, id, patch).await?)))
 }
 
 #[derive(Deserialize, ToSchema)]

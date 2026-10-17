@@ -269,6 +269,7 @@ impl Modify for Common {
         routes::delete_webhook,
         routes::webhook_deliveries,
         routes::revoke_token,
+        routes::update_token,
     ),
     components(schemas(ErrorBody, ErrorDetail))
 )]

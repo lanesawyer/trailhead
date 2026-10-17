@@ -31,6 +31,6 @@ pub use store::{Clock, Ctx, Store};
 pub use tasks::{
     MatchField, NewTask, SearchFilter, SearchHit, SearchMatch, TaskDetail, TaskFilter, TaskPatch, TaskSort,
 };
-pub use tokens::{Principal, Token, TokenOptions};
+pub use tokens::{Principal, Token, TokenOptions, TokenPatch};
 pub use undo::{Reverted, Skipped, UndoReport};
 pub use webhooks::{MAX_FAILURES as WEBHOOK_MAX_FAILURES, Webhook, WebhookDelivery, webhook_signature};

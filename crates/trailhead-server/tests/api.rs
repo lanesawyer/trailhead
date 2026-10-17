@@ -394,6 +394,18 @@ async fn scoped_tokens_only_see_their_projects() {
 
     let r = api.as_human("POST", "/v1/tokens", Some(json!({"name": "x", "agent": "nobody"}))).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
+
+    // Rescope in place: the same secret now reaches WEB, and an omitted field stays put.
+    let path = format!("/v1/tokens/{}", ci["id"].as_str().unwrap());
+    let r = api.as_human("PATCH", &path, Some(json!({"rate_limit_per_minute": 60}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["projects"].as_array().unwrap().len(), 1);
+    let r = api.call(Some(&bot), "PATCH", &path, Some(json!({"projects": null})), &[]).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "the agent can't widen its own token");
+    let r = api.as_human("PATCH", &path, Some(json!({"projects": null}))).await;
+    assert!(r.body["projects"].is_null() && r.body["rate_limit_per_minute"] == 60, "{}", r.body);
+    let r = api.call(Some(&bot), "GET", "/v1/tasks/WEB-1", None, &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
 }
 
 #[tokio::test]

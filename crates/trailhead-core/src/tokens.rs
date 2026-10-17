@@ -8,7 +8,7 @@ use crate::db::{get_opt_json, get_opt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::identity::{is_descendant, lineage_revoked};
 use crate::projects::load_project;
-use crate::store::{Ctx, Store};
+use crate::store::{Ctx, Store, Tx};
 
 const TOKEN_PREFIX: &str = "th_";
 
@@ -35,6 +35,15 @@ pub struct Token {
     pub projects: Option<Vec<Uuid>>,
     /// `None` means unlimited.
     pub rate_limit_per_minute: Option<i64>,
+}
+
+/// Changes to an existing token's limits. `None` leaves a field alone; `Some(None)`
+/// lifts the limit (every project, or no rate limit).
+#[derive(Debug, Clone, Default)]
+pub struct TokenPatch {
+    /// Project keys or ids; empty means every project, like `Some(None)`.
+    pub projects: Option<Option<Vec<String>>>,
+    pub rate_limit_per_minute: Option<Option<i64>>,
 }
 
 /// Optional limits on a new token.
@@ -65,6 +74,24 @@ const TOKEN_COLS: &str =
 
 fn hash(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
+}
+
+/// Resolves project keys or ids to the JSON stored in `tokens.projects`; `None`
+/// or empty means every project. Never wider than the caller's own scope.
+async fn project_scope(tx: &Tx, ctx: &Ctx, refs: Option<&[String]>) -> Result<Option<String>> {
+    let Some(refs) = refs.filter(|r| !r.is_empty()) else { return Ok(None) };
+    let mut ids = Vec::new();
+    for r in refs {
+        ids.push(load_project(&tx.conn, ctx.workspace_id, r, false).await?.id);
+    }
+    ids.sort();
+    ids.dedup();
+    if let Some(scope) = &ctx.projects
+        && !ids.iter().all(|i| scope.contains(i))
+    {
+        return Err(Error::Forbidden("a token can't reach projects you can't".into()));
+    }
+    Ok(Some(serde_json::to_string(&ids)?))
 }
 
 impl Store {
@@ -138,23 +165,7 @@ impl Store {
         let id = Uuid::now_v7();
         let token = self
             .write(ctx, async |tx| {
-                let projects = match opts.projects.as_deref() {
-                    None | Some([]) => None,
-                    Some(refs) => {
-                        let mut ids = Vec::new();
-                        for r in refs {
-                            ids.push(load_project(&tx.conn, ctx.workspace_id, r, false).await?.id);
-                        }
-                        ids.sort();
-                        ids.dedup();
-                        if let Some(scope) = &ctx.projects
-                            && !ids.iter().all(|i| scope.contains(i))
-                        {
-                            return Err(Error::Forbidden("a token can't reach projects you can't".into()));
-                        }
-                        Some(serde_json::to_string(&ids)?)
-                    }
-                };
+                let projects = project_scope(tx, ctx, opts.projects.as_deref()).await?;
                 let mut rows = tx
                     .conn
                     .query(
@@ -273,6 +284,53 @@ impl Store {
                 Some(row) => token_from_row(&row),
                 None => Err(Error::NotFound(format!("token {id}"))),
             }
+        })
+        .await
+    }
+
+    /// Changes a token's project scope or rate limit in place, so a limit can be
+    /// tightened or lifted without reissuing the secret. Like revoking, only for
+    /// a person's own tokens and their agents'. Takes effect on the next request.
+    pub async fn update_token(&self, ctx: &Ctx, id: Uuid, patch: TokenPatch) -> Result<Token> {
+        if !ctx.is_human() {
+            return Err(Error::Forbidden("agents can't change tokens".into()));
+        }
+        if ctx.is_scoped() {
+            return Err(Error::Forbidden("a token scoped to projects can't change tokens".into()));
+        }
+        if let Some(Some(n)) = patch.rate_limit_per_minute
+            && n < 1
+        {
+            return Err(Error::Invalid("rate limit must be at least 1 request per minute".into()));
+        }
+        self.write(ctx, async |tx| {
+            let mut rows = tx
+                .conn
+                .query(
+                    &format!(
+                        "SELECT {TOKEN_COLS} FROM tokens WHERE id = ?1 AND workspace_id = ?2 AND revoked_at IS NULL
+                         AND (principal_id = ?3 OR principal_id IN (SELECT id FROM agents WHERE owner_user_id = ?3))"
+                    ),
+                    [id.to_string(), tx.ws(), ctx.user_id.to_string()],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else { return Err(Error::NotFound(format!("token {id}"))) };
+            let before = token_from_row(&row)?;
+            let projects = match &patch.projects {
+                None => before.projects.as_ref().map(serde_json::to_string).transpose()?,
+                Some(refs) => project_scope(tx, ctx, refs.as_deref()).await?,
+            };
+            let rate_limit = patch.rate_limit_per_minute.unwrap_or(before.rate_limit_per_minute);
+            let mut rows = tx
+                .conn
+                .query(
+                    &format!(
+                        "UPDATE tokens SET projects = ?1, rate_limit_per_minute = ?2 WHERE id = ?3 RETURNING {TOKEN_COLS}"
+                    ),
+                    libsql::params![projects, rate_limit, id.to_string()],
+                )
+                .await?;
+            token_from_row(&rows.next().await?.expect("RETURNING yields a row"))
         })
         .await
     }
