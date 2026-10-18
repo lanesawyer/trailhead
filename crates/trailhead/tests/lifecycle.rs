@@ -125,3 +125,17 @@ fn a_human_logs_in_on_another_machine_with_their_own_token() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8_lossy(&out.stdout), me);
 }
+
+#[test]
+fn login_makes_the_other_server_this_machines_default() {
+    let a = Instance::new();
+    let secret = a.stdout(&["agent", "add", "laptop", "--print-token"]).trim().to_string();
+    let b = Instance::new();
+    let pasted = b.dir.path().join("pasted");
+    std::fs::write(&pasted, format!("{secret}\n")).unwrap();
+    let out = output(b.command().args(["--url", &a.url, "login"]).stdin(std::fs::File::open(&pasted).unwrap()));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("default server"));
+    let out = output(b.command().env_remove("TRAILHEAD_URL").args(["--as", "laptop", "whoami"]));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("laptop"));
+}

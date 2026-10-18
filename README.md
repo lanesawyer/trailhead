@@ -25,10 +25,10 @@ Trailhead runs as one server, and agents on other machines reach it through a tu
 trailhead agent add laptop --print-token
 # on the other machine, with the tunnel at 127.0.0.1:7242
 trailhead --url http://127.0.0.1:7242 login     # paste the token
-trailhead --url http://127.0.0.1:7242 --as laptop ready
+trailhead --as laptop ready
 ```
 
-To use the other machine as yourself, mint the token with `trailhead token add laptop` instead and drop `--as`. Set `TRAILHEAD_URL` to skip `--url`. If the tunnel drops, the CLI says so instead of starting an empty server of its own.
+To use the other machine as yourself, mint the token with `trailhead token add laptop` instead and drop `--as`. `login` makes that server the machine's default (in `config.toml` in the config directory); `--url` and `TRAILHEAD_URL` still override it. If the tunnel drops, the CLI says so instead of starting an empty server of its own.
 
 ## Integrations
 

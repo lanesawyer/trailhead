@@ -21,7 +21,7 @@ pub struct Client {
     /// The server is on a loopback address: this machine's, or a tunnel to another.
     pub local: bool,
     /// The server is this machine's own, so the CLI may start it again if it goes away.
-    ours: bool,
+    pub ours: bool,
     /// Where this server's tokens are saved on this machine.
     pub creds: CredStore,
 }

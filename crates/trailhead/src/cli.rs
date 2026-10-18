@@ -11,8 +11,9 @@ pub(crate) struct Cli {
     /// Print full JSON instead of terse lines.
     #[arg(long, global = true)]
     pub(crate) json: bool,
-    #[arg(long, global = true, env = "TRAILHEAD_URL", default_value = "http://127.0.0.1:7241")]
-    pub(crate) url: String,
+    /// The server [default: `url` in <config dir>/config.toml, which `login` sets, else http://127.0.0.1:7241].
+    #[arg(long, global = true, env = "TRAILHEAD_URL")]
+    pub(crate) url: Option<String>,
     #[arg(long, global = true, env = "TRAILHEAD_TOKEN", hide_env_values = true)]
     pub(crate) token: Option<String>,
     /// Act as a local agent, using its saved token [env: TRAILHEAD_AGENT].

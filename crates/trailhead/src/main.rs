@@ -1,5 +1,6 @@
 mod cli;
 mod client;
+mod config;
 mod output;
 mod repo;
 
@@ -199,10 +200,17 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if let Cmd::Serve { bind } = &cli.cmd {
+        return serve(bind).await;
+    }
+    let paths = trailhead_server::Paths::from_env().context("no home directory")?;
+    let url = match cli.url.clone() {
+        Some(url) => url,
+        None => config::load(&paths)?.url.unwrap_or_else(|| config::DEFAULT_URL.into()),
+    };
     match &cli.cmd {
-        Cmd::Serve { bind } => return serve(bind).await,
-        Cmd::Server(cmd) => return server(&cli.url, cmd, cli.json).await,
-        Cmd::Login => return login(&cli.url, cli.json).await,
+        Cmd::Server(cmd) => return server(&url, cmd, cli.json).await,
+        Cmd::Login => return login(&paths, &url, cli.json).await,
         _ => {}
     }
     let repo = repo::find(&std::env::current_dir()?)?.unwrap_or_default();
@@ -214,7 +222,7 @@ async fn run(cli: Cli) -> Result<()> {
         (false, None, None, None) => None,
     };
     let default_project = repo.project.clone();
-    let c = Client::connect(&cli.url, cli.token.clone(), agent.as_ref()).await?;
+    let c = Client::connect(&url, cli.token.clone(), agent.as_ref()).await?;
     let json = cli.json;
     let show = |v: Value, line: &dyn Fn(&Value) -> String| {
         if json { print_json(&v) } else { println!("{}", line(&v)) }
@@ -793,7 +801,7 @@ async fn mcp_bridge(c: &Client) -> Result<()> {
 
 /// Reads a token from stdin, checks it against the server and saves it for the
 /// agent (or user) it belongs to, in that server's credential store.
-async fn login(url: &str, json: bool) -> Result<()> {
+async fn login(paths: &trailhead_server::Paths, url: &str, json: bool) -> Result<()> {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         eprint!("token: ");
     }
@@ -810,6 +818,13 @@ async fn login(url: &str, json: bool) -> Result<()> {
         Some(name) => c.creds.save(Cred::Agent(name), secret)?,
         None => c.creds.save(Cred::User, secret)?,
     };
+    // Logging in to another machine's server makes it this machine's default.
+    let mut cfg = config::load(paths)?;
+    let new_default = !c.ours && cfg.url.as_deref() != Some(url);
+    if new_default {
+        cfg.url = Some(url.to_string());
+        config::save(paths, &cfg)?;
+    }
     if json {
         print_json(&me);
         return Ok(());
@@ -819,10 +834,11 @@ async fn login(url: &str, json: bool) -> Result<()> {
         Saved::File(path) => path.display().to_string(),
     };
     match agent {
-        Some(name) => {
-            println!("logged in as agent {name}, token saved to {to}; use `trailhead --url {url} --as {name}`")
-        }
+        Some(name) => println!("logged in as agent {name}, token saved to {to}; use `trailhead --as {name}`"),
         None => println!("logged in as {}, token saved to {to}", s(&me["user"], "name")),
+    }
+    if new_default {
+        println!("{url} is now this machine's default server (in {})", config::path(paths).display());
     }
     Ok(())
 }
@@ -927,7 +943,7 @@ mod tests {
     fn webhook_url_does_not_clobber_the_server_url() {
         let cli = Cli::try_parse_from(["trailhead", "--url", "http://127.0.0.1:1", "webhook", "add", "http://hook/x"])
             .unwrap();
-        assert_eq!(cli.url, "http://127.0.0.1:1");
+        assert_eq!(cli.url.as_deref(), Some("http://127.0.0.1:1"));
         assert!(matches!(cli.cmd, Cmd::Webhook(WebhookCmd::Add { ref target, .. }) if target == "http://hook/x"));
     }
 
