@@ -18,7 +18,10 @@ pub struct Client {
     http: reqwest::Client,
     base: Url,
     token: String,
+    /// The server is on a loopback address: this machine's, or a tunnel to another.
     pub local: bool,
+    /// The server is this machine's own, so the CLI may start it again if it goes away.
+    ours: bool,
 }
 
 /// An API error with its stable code, so the CLI can print `error[claim_held]: ...`.
@@ -41,45 +44,39 @@ pub fn is_local(url: &Url) -> bool {
 }
 
 impl Client {
-    /// Connects to the server, starting a local one in the background if needed.
+    /// Connects to the server, starting this machine's one in the background if needed.
     pub async fn connect(url: &str, token: Option<String>, agent: Option<&Identity>) -> Result<Client> {
         let (http, base) = http_and_base(url)?;
-        match health(&http, &base).await {
-            Some(info) if is_local(&base) && is_stale(&info) => {
-                eprintln!("note: restarting the local server on the updated trailhead binary");
-                stop_local(&http, &base).await?;
-                start_local_server(&http, &base).await?;
-            }
-            Some(_) => {}
-            None if is_local(&base) => start_local_server(&http, &base).await?,
-            None => bail!("can't reach the Trailhead server at {url}"),
-        }
         let paths = Paths::from_env().context("no home directory")?;
-        let token = match (token, agent) {
-            (Some(t), _) => t,
-            (None, Some(id)) => match paths.creds().read(Cred::Agent(&id.name)) {
-                Some((secret, _)) => secret,
-                None => {
-                    let file = paths.creds().file(Cred::Agent(&id.name));
-                    let msg = format!("no saved token for agent {:?} in the keyring or at {}", id.name, file.display());
-                    match &id.from {
-                        Some(f) => {
-                            bail!("{msg}\n{} sets agent = {:?}; pass --as-me to act as yourself", f.display(), id.name)
-                        }
-                        None => bail!("{msg}"),
-                    }
+        let saved = saved_token(&paths, token.as_deref(), agent);
+        let ours = match health(&http, &base, saved.as_deref().ok()).await {
+            Some(info) if is_local(&base) => {
+                let ours = is_ours(&paths, &info);
+                remember_tunnel(&paths, &base, !ours)?;
+                if ours && is_stale(&info) {
+                    eprintln!("note: restarting the local server on the updated trailhead binary");
+                    stop_local(&http, &base).await?;
+                    start_local_server(&http, &base).await?;
                 }
-            },
-            (None, None) => match paths.creds().read(Cred::User) {
-                Some((secret, _)) => secret,
-                None => bail!(
-                    "no token: set TRAILHEAD_TOKEN, or run a local server to create {}",
-                    paths.creds().file(Cred::User).display()
-                ),
-            },
+                ours
+            }
+            Some(_) => false,
+            None if is_local(&base) && is_tunnel(&paths, &base) => bail!(
+                "can't reach the Trailhead server at {url}, last reached through a tunnel from another machine; \
+                 check the tunnel, or run `trailhead server start` to run a server on this machine instead"
+            ),
+            None if is_local(&base) => {
+                start_local_server(&http, &base).await?;
+                true
+            }
+            None => bail!("can't reach the Trailhead server at {url}"),
         };
-        let local = is_local(&base);
-        Ok(Client { http, base, token, local })
+        // Starting a fresh server is what creates the user's token.
+        let token = match saved {
+            Ok(t) => t,
+            Err(_) => saved_token(&paths, token.as_deref(), agent)?,
+        };
+        Ok(Client { http, base: base.clone(), token, local: is_local(&base), ours })
     }
 
     /// Sends `req`. If the local server has gone away since `connect` (stopped, or
@@ -92,7 +89,7 @@ impl Client {
             Err(e) => e,
         };
         match retry {
-            Some(retry) if self.local && err.is_connect() => {
+            Some(retry) if self.ours && err.is_connect() => {
                 eprintln!("note: the local server isn't running; starting it");
                 start_local_server(&self.http, &self.base).await?;
                 retry.send().await.context("request to Trailhead failed")
@@ -243,6 +240,81 @@ impl Client {
     }
 }
 
+/// The token for `--token`, the agent, or the user, in that order.
+fn saved_token(paths: &Paths, token: Option<&str>, agent: Option<&Identity>) -> Result<String> {
+    Ok(match (token, agent) {
+        (Some(t), _) => t.to_string(),
+        (None, Some(id)) => match paths.creds().read(Cred::Agent(&id.name)) {
+            Some((secret, _)) => secret,
+            None => {
+                let file = paths.creds().file(Cred::Agent(&id.name));
+                let msg = format!("no saved token for agent {:?} in the keyring or at {}", id.name, file.display());
+                match &id.from {
+                    Some(f) => {
+                        bail!("{msg}\n{} sets agent = {:?}; pass --as-me to act as yourself", f.display(), id.name)
+                    }
+                    None => bail!("{msg}"),
+                }
+            }
+        },
+        (None, None) => match paths.creds().read(Cred::User) {
+            Some((secret, _)) => secret,
+            None => bail!(
+                "no token: set TRAILHEAD_TOKEN, or run a local server to create {}",
+                paths.creds().file(Cred::User).display()
+            ),
+        },
+    })
+}
+
+/// The local user's saved token, for the lifecycle checks that need the server's pid and paths.
+pub fn user_token(paths: &Paths) -> Option<String> {
+    paths.creds().read(Cred::User).map(|(secret, _)| secret)
+}
+
+/// Whether `info` came from the server for this CLI's data directory, rather than
+/// another one answering on the same port, such as a tunnel to another machine.
+pub fn is_ours(paths: &Paths, info: &Health) -> bool {
+    match &info.instance {
+        Some(id) => paths.instance().as_ref() == Some(id),
+        // Servers from before instance ids told anyone their database instead.
+        None => info.db.as_ref() == Some(&our_db(paths)),
+    }
+}
+
+fn our_db(paths: &Paths) -> std::path::PathBuf {
+    std::env::var_os("TRAILHEAD_DB").map(std::path::PathBuf::from).unwrap_or_else(|| paths.db())
+}
+
+/// Loopback URLs that last answered with another machine's server. If one stops
+/// answering, the tunnel is down, and starting a server here would quietly send
+/// every write to an empty database.
+fn tunnels_file(paths: &Paths) -> std::path::PathBuf {
+    paths.data_dir.join("tunnels")
+}
+
+fn tunnels(paths: &Paths) -> Vec<String> {
+    std::fs::read_to_string(tunnels_file(paths)).unwrap_or_default().lines().map(str::to_string).collect()
+}
+
+fn is_tunnel(paths: &Paths, base: &Url) -> bool {
+    tunnels(paths).iter().any(|t| t == base.as_str())
+}
+
+fn remember_tunnel(paths: &Paths, base: &Url, tunnel: bool) -> Result<()> {
+    let mut list = tunnels(paths);
+    if list.iter().any(|t| t == base.as_str()) == tunnel {
+        return Ok(());
+    }
+    list.retain(|t| t != base.as_str());
+    if tunnel {
+        list.push(base.to_string());
+    }
+    std::fs::create_dir_all(&paths.data_dir)?;
+    std::fs::write(tunnels_file(paths), list.iter().map(|t| format!("{t}\n")).collect::<String>())?;
+    Ok(())
+}
+
 pub fn http_and_base(url: &str) -> Result<(reqwest::Client, Url)> {
     let base = Url::parse(url).with_context(|| format!("bad server URL {url}"))?.join("/v1/")?;
     let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
@@ -255,6 +327,7 @@ pub fn http_and_base(url: &str) -> Result<(reqwest::Client, Url)> {
 #[serde(default)]
 pub struct Health {
     pub version: Option<String>,
+    pub instance: Option<String>,
     pub pid: Option<u32>,
     pub exe: Option<std::path::PathBuf>,
     pub exe_modified_ms: Option<u64>,
@@ -262,9 +335,14 @@ pub struct Health {
     pub started_at: Option<String>,
 }
 
-pub async fn health(http: &reqwest::Client, base: &Url) -> Option<Health> {
+/// The server's pid and paths come back only with a `token`.
+pub async fn health(http: &reqwest::Client, base: &Url, token: Option<&str>) -> Option<Health> {
     let url = base.join("health").ok()?;
-    let res = http.get(url).timeout(Duration::from_secs(2)).send().await.ok()?;
+    let mut req = http.get(url).timeout(Duration::from_secs(2));
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let res = req.send().await.ok()?;
     if !res.status().is_success() {
         return None;
     }
@@ -283,11 +361,16 @@ pub fn is_stale(info: &Health) -> bool {
 /// Asks the local server to stop and waits for it to go away. Returns the pid
 /// it stopped, or `None` if nothing was running.
 pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32>> {
-    let running = health(http, base).await;
     let paths = Paths::from_env().context("no home directory")?;
+    let running = health(http, base, user_token(&paths).as_deref()).await;
     // Only stop a server that serves this CLI's database, so stopping one
     // instance can't take down another that happens to answer on the port.
-    let ours = std::env::var_os("TRAILHEAD_DB").map(std::path::PathBuf::from).unwrap_or_else(|| paths.db());
+    if let Some(info) = &running
+        && !is_ours(&paths, info)
+    {
+        bail!("the server at {base} belongs to another data directory or machine (a tunnel?); refusing to stop it");
+    }
+    let ours = our_db(&paths);
     if let Some(db) = running.as_ref().and_then(|h| h.db.as_ref())
         && db != &ours
     {
@@ -312,7 +395,7 @@ pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32
         return Ok(None);
     }
     for _ in 0..100 {
-        if health(http, base).await.is_none() {
+        if health(http, base, None).await.is_none() {
             return Ok(Some(pid));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -418,8 +501,8 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     keep_std_handles_from_children();
     cmd.spawn().context("couldn't start the local server")?;
     for _ in 0..100 {
-        if health(http, base).await.is_some() {
-            return Ok(());
+        if health(http, base, None).await.is_some() {
+            return remember_tunnel(&paths, base, false);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

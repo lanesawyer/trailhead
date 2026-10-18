@@ -43,3 +43,42 @@ fn stop_refuses_a_server_for_another_data_dir() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to stop it"));
     assert!(a.pid().is_some(), "a's server should still be running");
 }
+
+/// `b` stands in for another machine reaching `a`'s server through a tunnel on a
+/// loopback port.
+#[test]
+fn a_tunnelled_server_is_used_but_never_managed_or_replaced() {
+    let a = Instance::new();
+    let added: serde_json::Value = serde_json::from_str(&a.stdout(&["--json", "agent", "add", "laptop"])).unwrap();
+    let secret = added["secret"].as_str().unwrap();
+    let b = Instance::new();
+    let remote =
+        |args: &[&str]| b.command().args(["--url", &a.url]).args(args).env("TRAILHEAD_TOKEN", secret).output().unwrap();
+
+    let out = remote(&["whoami"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("laptop"));
+    let status = String::from_utf8(remote(&["server", "status"]).stdout).unwrap();
+    assert!(status.contains("a tunnel?"), "{status}");
+    let out = remote(&["server", "stop"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to stop it"));
+    let out = remote(&["server", "start"]);
+    assert!(!out.status.success());
+
+    // The tunnel goes down: b must not start an empty server of its own in its place.
+    a.stdout(&["server", "stop"]);
+    let out = remote(&["whoami"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("through a tunnel"));
+    assert_eq!(a.stdout(&["server", "status"]).trim(), "not running");
+    assert!(!b.dir.path().join("data/trailhead.db").exists());
+
+    // Unless asked to, which makes the port b's own from then on.
+    assert!(remote(&["server", "start"]).status.success());
+    let out = b.command().args(["--url", &a.url, "whoami"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(remote(&["server", "stop"]).status.success());
+    let out = b.command().args(["--url", &a.url, "whoami"]).output().unwrap();
+    assert!(out.status.success(), "b's own server should auto-start again");
+    assert!(b.command().args(["--url", &a.url, "server", "stop"]).output().unwrap().status.success());
+}

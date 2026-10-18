@@ -122,7 +122,11 @@ fn error_code() -> utoipa::openapi::Object {
 pub struct Health {
     ok: bool,
     version: String,
-    pid: u32,
+    /// Identifies the server's data directory, so a client can tell its own
+    /// machine's server from one reached through a tunnel.
+    instance: Option<String>,
+    /// This and the paths below are only sent to callers with a token.
+    pid: Option<u32>,
     /// The binary this server was started from.
     exe: Option<String>,
     /// That binary's modification time when the server started, in Unix milliseconds.

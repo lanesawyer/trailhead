@@ -791,8 +791,11 @@ async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()> {
     if !local && !matches!(cmd, ServerCmd::Status) {
         bail!("{url} isn't a local server; only `trailhead server status` works against it");
     }
+    let paths = trailhead_server::Paths::from_env().context("no home directory")?;
+    let token = client::user_token(&paths);
+    let health = || client::health(&http, &base, token.as_deref());
     match cmd {
-        ServerCmd::Status => match client::health(&http, &base).await {
+        ServerCmd::Status => match health().await {
             Some(info) if json => print_json(&serde_json::to_value(&info)?),
             Some(info) => {
                 let mut parts = vec!["running".to_string()];
@@ -818,14 +821,19 @@ async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()> {
                 if let Some(db) = &info.db {
                     println!("db {}", db.display());
                 }
-                if local && client::is_stale(&info) {
+                if local && !client::is_ours(&paths, &info) {
+                    println!("served from another data directory or machine (a tunnel?), not this CLI's");
+                } else if local && client::is_stale(&info) {
                     println!("the binary has been rebuilt since; the next command restarts the server");
                 }
             }
             None if json => print_json(&json!({ "ok": false })),
             None => println!("not running"),
         },
-        ServerCmd::Start => match client::health(&http, &base).await {
+        ServerCmd::Start => match health().await {
+            Some(info) if !client::is_ours(&paths, &info) => {
+                bail!("a server from another data directory or machine (a tunnel?) is answering at {url}")
+            }
             Some(_) => println!("already running"),
             None => {
                 client::start_local_server(&http, &base).await?;
@@ -839,7 +847,7 @@ async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()> {
         ServerCmd::Restart => {
             client::stop_local(&http, &base).await?;
             client::start_local_server(&http, &base).await?;
-            let pid = client::health(&http, &base).await.and_then(|i| i.pid).map(|p| p.to_string()).unwrap_or_default();
+            let pid = health().await.and_then(|i| i.pid).map(|p| p.to_string()).unwrap_or_default();
             println!("restarted (pid {pid})");
         }
     }
@@ -860,6 +868,7 @@ async fn serve(bind: &str) -> Result<()> {
         creds: paths.creds(),
         user_name: std::env::var("USER").unwrap_or_else(|_| "me".into()),
         pid_file: Some(paths.pid_file()),
+        instance: Some(paths.instance_or_create()?),
     };
     trailhead_server::serve_local(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
 }

@@ -115,9 +115,16 @@ fn created(body: impl Serialize) -> Response {
     get, path = "/v1/health", tag = "meta", security(()),
     responses((status = 200, description = "The server is up", body = Health))
 )]
-async fn health(State(s): S) -> Json<Value> {
+async fn health(State(s): S, headers: HeaderMap) -> Json<Value> {
     let mut v = json!(s.info);
     v["ok"] = json!(true);
+    // Paths name the local user, so over a tunnel only token holders see them.
+    let authed = headers.contains_key(header::AUTHORIZATION) && crate::auth::authenticate(&s, &headers).await.is_ok();
+    if !authed && let Some(o) = v.as_object_mut() {
+        for k in ["pid", "exe", "exe_modified_ms", "db"] {
+            o.remove(k);
+        }
+    }
     Json(v)
 }
 

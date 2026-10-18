@@ -59,10 +59,14 @@ impl AppState {
 const DRAIN: Duration = Duration::from_secs(10);
 
 /// What `/v1/health` reports, so the CLI can tell which binary a server runs
-/// and restart it after an upgrade.
+/// and restart it after an upgrade. Everyone sees the version, instance and start
+/// time; the pid and paths only go to callers with a token.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServerInfo {
     pub version: String,
+    /// The id in the data directory's `instance` file, so a CLI can tell its own
+    /// machine's server from one reached through a tunnel on the same port.
+    pub instance: Option<String>,
     pub pid: u32,
     /// The binary this server was started from.
     pub exe: Option<PathBuf>,
@@ -83,6 +87,7 @@ impl ServerInfo {
         let exe = std::env::var_os(SERVER_EXE_ENV).map(PathBuf::from).or_else(|| std::env::current_exe().ok());
         ServerInfo {
             version: env!("CARGO_PKG_VERSION").into(),
+            instance: None,
             pid: std::process::id(),
             exe_modified_ms: exe.as_deref().and_then(modified_ms),
             exe,
@@ -144,6 +149,27 @@ impl Paths {
         self.data_dir.join("server.pid")
     }
 
+    pub fn instance_file(&self) -> PathBuf {
+        self.data_dir.join("instance")
+    }
+
+    /// This data directory's instance id, if a server has ever run from it.
+    pub fn instance(&self) -> Option<String> {
+        let id = std::fs::read_to_string(self.instance_file()).ok()?;
+        Some(id.trim().to_string()).filter(|id| !id.is_empty())
+    }
+
+    /// Like [`Paths::instance`], creating the id on first use.
+    pub fn instance_or_create(&self) -> std::io::Result<String> {
+        if let Some(id) = self.instance() {
+            return Ok(id);
+        }
+        std::fs::create_dir_all(&self.data_dir)?;
+        let id = uuid::Uuid::now_v7().simple().to_string();
+        std::fs::write(self.instance_file(), format!("{id}\n"))?;
+        Ok(id)
+    }
+
     pub fn server_log(&self) -> PathBuf {
         self.data_dir.join("server.log")
     }
@@ -157,6 +183,8 @@ pub struct LocalConfig {
     pub user_name: String,
     /// Holds the running server's pid while it's up.
     pub pid_file: Option<PathBuf>,
+    /// Reported by `/v1/health`; see [`ServerInfo::instance`].
+    pub instance: Option<String>,
 }
 
 /// Opens the local database, makes sure the workspace, user and a CLI token exist,
@@ -204,7 +232,7 @@ pub fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
 pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Error>> {
     let (store, ctx) = open_local(&cfg).await?;
     let state = Arc::new(AppState {
-        info: ServerInfo::current(Some(cfg.db.clone())),
+        info: ServerInfo { instance: cfg.instance.clone(), ..ServerInfo::current(Some(cfg.db.clone())) },
         webhook_targets: webhooks::Targets::Any,
         ..AppState::new(store)
     });

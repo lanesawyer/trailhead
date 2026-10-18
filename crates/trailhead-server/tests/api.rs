@@ -76,7 +76,16 @@ async fn health_is_open_and_everything_else_needs_a_token() {
     let health = api.call(None, "GET", "/v1/health", None, &[]).await;
     assert_eq!(health.status, StatusCode::OK);
     assert_eq!(health.body["ok"], true);
+    assert!(health.body["version"].is_string());
+    // The pid and paths name the local user, so they need a token.
+    for k in ["pid", "exe", "exe_modified_ms", "db"] {
+        assert!(health.body.get(k).is_none(), "{k} leaked: {}", health.body);
+    }
+    let health = api.as_human("GET", "/v1/health", None).await;
     assert_eq!(health.body["pid"], std::process::id());
+    let health = api.call(Some("th_nope"), "GET", "/v1/health", None, &[]).await;
+    assert_eq!(health.status, StatusCode::OK);
+    assert!(health.body.get("pid").is_none());
     let r = api.call(None, "GET", "/v1/ready", None, &[]).await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
     assert_eq!(r.body["error"]["code"], "unauthorized");
