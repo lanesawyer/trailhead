@@ -20,7 +20,7 @@ The long-term ambition is to replace other task tools, not to sync with them.
 2. **Agents act for people.** Every agent belongs to a user. There are no independent agents, and every change traces back to a human.
 3. **Nothing an agent does is permanent.** Every write is logged and reversible, including bulk reverts.
 4. **Agents pay for every token.** Responses are compact by default, with full detail on request.
-5. **One deployment, one mode.** An instance is either local and personal, or hosted and shared. Nothing syncs between them.
+5. **One server, reachable anywhere.** An instance is one server and one SQLite file, the single authority for its data. It runs wherever is convenient (Lane's PC, a home box, a VPS) and agents on other machines reach it over a tunnel. Trailhead assumes it is online and connected; there are no replicas and nothing syncs between instances.
 6. **Trailhead is the source of truth.** Other tools can be notified or imported from, never synced with.
 
 ## License
@@ -43,12 +43,11 @@ One Rust workspace producing one binary, built around a core crate that every in
                     trailhead-core
    domain rules · claims/leases · ready queue · event log, undo, outbox
                  /                          \
-         libsql (local)               libsql (remote)
-     Local SQLite file               Turso Cloud
-     (one user, one workspace)       (teams, server on Fly.io)
+                            |
+                     SQLite file (WAL)
 ```
 
-A deployment uses one storage mode, chosen by config. The CLI is a REST client of the server in every mode. Run locally, it starts `trailhead serve` in the background if no server is running.
+Remote machines reach the server through a tunnel (iroh via `dumbpipe`, Tailscale, SSH), never by binding it to a public interface. The CLI is a REST client of the server wherever it runs. Pointed at its own machine's server, it starts `trailhead serve` in the background if none is running.
 
 | Crate | Role | Key dependencies |
 | --- | --- | --- |
@@ -58,13 +57,13 @@ A deployment uses one storage mode, chosen by config. The CLI is a REST client o
 
 | Interface | Best for |
 | --- | --- |
-| CLI | Lane, and agents with shell access, local or hosted |
+| CLI | Lane, and agents with shell access, on any machine |
 | MCP | Agents without a shell, such as chat clients and OpenClaw |
 | REST | Apps and widgets people build |
 
-**Storage.** Trailhead targets SQLite through a small storage trait in `trailhead-core`. The first implementation uses the `libsql` crate, which opens plain local SQLite files and, with its `remote` feature, Turso Cloud over HTTP. Local mode is a SQLite file in WAL mode with no Turso involvement. Hosted mode runs the server on Fly.io against Turso, in the same region.
+**Storage.** Trailhead targets SQLite through a small storage trait in `trailhead-core`, implemented with the `libsql` crate over a plain SQLite file in WAL mode. The server is one process, so the file is all the storage it needs wherever it runs. `libsql`'s `remote` feature (Turso Cloud) stays behind the storage seam but is deferred: it is only worth using if a deployment ever needs more than one server process.
 
-Turso is a vendor risk, so nothing may depend on it beyond the storage trait. Queries use standard SQLite SQL only. If Turso goes away, hosted mode falls back to a SQLite file on a Fly.io volume, or swaps the backend for `rusqlite` or `sqlx`. Turso's newer `turso` crate is skipped for the same reason.
+Queries use standard SQLite SQL only, so the backend can be swapped for `rusqlite` or `sqlx`. Turso's newer `turso` crate is skipped.
 
 **Atomic writes.** Every state change is one atomic statement, such as a claim as a single `UPDATE … WHERE unclaimed … RETURNING`.
 
@@ -155,8 +154,9 @@ Every task belongs to exactly one project, and projects don't nest.
 - **Event retention.** Events kept forever. Events older than 90 days move to `events_archive`. Undo and bulk revert cover the last 90 days.
 - **Config and data location.** OS-standard directories via the `directories` crate.
 - **CLI credentials.** Like `gh`: OS credential store via `keyring`, falling back to a `0600` file in the config directory. `TRAILHEAD_TOKEN` overrides both.
-- **Local server.** `127.0.0.1:7241` by default, configurable (T-R-A-I/L; no IANA assignment). Stays running once auto-started. `trailhead service install` for launchd/systemd later.
-- **Backups.** Not built in. Local is one SQLite file; Turso handles hosted.
+- **Server.** `127.0.0.1:7241` by default, configurable (T-R-A-I/L; no IANA assignment). Stays running once auto-started. `trailhead service install` for launchd/systemd later.
+- **Remote access.** Through a tunnel to the loopback port, so the server never listens publicly. iroh (`dumbpipe`) first: end-to-end encrypted QUIC with NAT traversal, and only peers holding the ticket can connect. Bearer tokens still decide who can do what. If the server's machine is asleep, remote agents wait; leases expire as usual, so nothing is lost.
+- **Backups.** Not built in. The data is one SQLite file; Litestream or a periodic copy covers it.
 - **Observability.** `tracing` structured logs carrying request and batch IDs.
 - **Testing.** Concurrency tests in the core suite and CI: agents racing to claim one task, concurrent edits hitting ETag conflicts, bulk reverts racing new writes.
 
@@ -165,7 +165,7 @@ Every task belongs to exactly one project, and projects don't nest.
 1. **Core, local.** Schema and migrations, domain logic, projects, typed comments, event log with undo and outbox, claims and the ready queue, with tests.
 2. **Server and CLI.** axum REST under `/v1`, OpenAPI via utoipa, SSE, MCP via rmcp, token auth, reminders. CLI as a REST client that auto-starts a local server.
 3. **Clients.** Lane's own app, an OpenClaw plugin, `llms.txt` and an agent skill, webhooks. TypeScript SDK from OpenAPI later.
-4. **Teams.** Fly.io + Turso, multiple workspaces, user accounts, per-agent tokens, permissions.
+4. **Teams.** Deferred until a second person needs it. Other humans join the same server with their own accounts; the data model already carries workspaces, users and per-human permissions. Multiple workspaces and multi-process hosting (Turso, shared rate limits) come only if needed.
 5. **Importers.** One-way, one-time imports from Todoist, Vikunja, GitHub Issues, Jira.
 
 ### Phase 1 first steps
@@ -215,12 +215,13 @@ Decisions made while building, including where the build refines or departs from
 - **Agent docs (Phase 3).** `GET /llms.txt` serves one page of markdown (llms.txt convention: H1, summary blockquote, sections) from `crates/trailhead-server/src/llms.txt`, at the root rather than under `/v1` so it needs no token and stays out of the OpenAPI document. It covers auth, the claim loop, statuses, review, dependencies, ETags, idempotency, undo, events and every error code with its HTTP status; tests fail if a code from `ERROR_CODES` is missing or listed with a status the server doesn't return. The workflow and etiquette for agents ship as a portable skill in `skills/trailhead/SKILL.md` (CLI and MCP side by side), separate from `llms.txt` because one teaches how to behave and the other how to build a client.
 - **OpenClaw (Phase 3).** No plugin for now. OpenClaw mounts MCP servers (`openclaw mcp set trailhead '{"command":"trailhead","args":["--as","openclaw","mcp"]}'`) and loads Agent Skills, so Trailhead's MCP server and `skills/trailhead` cover the integration; see `docs/integrations/openclaw.md`. OpenClaw's Workboard has no external-backend interface, and syncing would break the no-sync principle, so the two stay separate. A TypeScript tool plugin is worth building only for something MCP and webhooks can't do.
 - **Sub-agents (Phase 3).** Agents create their own sub-agents explicitly; they never borrow a human's credentials to do it. A sub-agent is named `<parent>/<name>`, acts for the same human, and is recorded on every write it makes. Tokens an agent issues go only to its own sub-agents and inherit the issuing token's projects and rate limit. A request for more is `forbidden`. Revoking an agent (`POST /v1/agents/{agent}/revoke`, by the owner or any agent above it) revokes everything under it at once. Over MCP, one connection can serve several agents: `register_agent` creates a sub-agent, and the `as_agent` argument on any tool acts as one that is already registered. Unregistered names are refused. This is how OpenClaw's agents, which share one MCP server, each get their own identity. Locally, sub-agent tokens are saved as `agents/<parent>.<name>`.
+- **One server, reachable anywhere (Phase 3).** Local and hosted modes merge into one: the same binary and SQLite file, run wherever is convenient, reached from other machines over a tunnel. A replicated operation log (each machine with its own copy, synced over iroh) was considered and rejected: claims need one authority, since two offline copies could each grant the same task, and the event log stores entity snapshots for undo rather than mergeable operations. Fly.io + Turso and shared rate limits (TRAIL-61) are deferred until something needs more than one server process. Multi-user stays in the data model, so code shouldn't assume Lane is the only human.
 
 ## Non-goals
 
 - An official Trailhead app, for now.
 - Two-way sync with any other tool.
-- Syncing a local instance with a hosted one.
+- Replicas, offline sync or merging between instances.
 - Browser clients calling the API directly.
 - Agents that act without an owning user.
 
