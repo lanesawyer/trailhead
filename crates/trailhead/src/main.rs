@@ -543,6 +543,11 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Cmd::Token(TokenCmd::Add { name, agent, projects, rate_limit }) => {
+            let body =
+                json!({ "name": name, "agent": agent, "projects": projects, "rate_limit_per_minute": rate_limit });
+            show(c.post("tokens", body).await?, &|v| s(v, "secret").to_string());
+        }
         Cmd::Token(TokenCmd::Revoke { id }) => show(c.delete(&format!("tokens/{id}")).await?, &|_| "revoked".into()),
         Cmd::Token(TokenCmd::Edit { id, projects, rate_limit }) => {
             let mut body = json!({});

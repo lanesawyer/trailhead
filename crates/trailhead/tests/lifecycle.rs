@@ -109,3 +109,19 @@ fn another_machine_logs_in_with_a_printed_token() {
     assert!(b.dir.path().join("config/servers").join(instance.trim()).join("agents/laptop").exists());
     assert!(!b.dir.path().join("config/agents/laptop").exists());
 }
+
+#[test]
+fn a_human_logs_in_on_another_machine_with_their_own_token() {
+    let a = Instance::new();
+    let secret = a.stdout(&["token", "add", "laptop"]).trim().to_string();
+    assert!(secret.starts_with("th_"), "{secret}");
+    let b = Instance::new();
+    let pasted = b.dir.path().join("pasted");
+    std::fs::write(&pasted, format!("{secret}\n")).unwrap();
+    let out = output(b.command().args(["--url", &a.url, "login"]).stdin(std::fs::File::open(&pasted).unwrap()));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let me = a.stdout(&["whoami"]);
+    let out = output(b.command().args(["--url", &a.url, "whoami"]));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), me);
+}

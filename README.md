@@ -28,7 +28,7 @@ trailhead --url http://127.0.0.1:7242 login     # paste the token
 trailhead --url http://127.0.0.1:7242 --as laptop ready
 ```
 
-Set `TRAILHEAD_URL` to skip `--url`. If the tunnel drops, the CLI says so instead of starting an empty server of its own.
+To use the other machine as yourself, mint the token with `trailhead token add laptop` instead and drop `--as`. Set `TRAILHEAD_URL` to skip `--url`. If the tunnel drops, the CLI says so instead of starting an empty server of its own.
 
 ## Integrations
 

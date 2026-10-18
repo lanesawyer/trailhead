@@ -358,6 +358,21 @@ pub(crate) enum WebhookCmd {
 #[derive(Subcommand)]
 pub(crate) enum TokenCmd {
     Ls,
+    /// Issue a token for yourself (or --agent) and print it once, e.g. for
+    /// `trailhead login` on another machine. Humans only.
+    Add {
+        /// What the token is for, e.g. the machine it goes to.
+        name: String,
+        /// Issue it for this agent of yours instead.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Limit the token to these projects (comma-separated keys).
+        #[arg(long, value_delimiter = ',')]
+        projects: Vec<String>,
+        /// Requests per minute the token may make.
+        #[arg(long)]
+        rate_limit: Option<i64>,
+    },
     Revoke {
         id: String,
     },
