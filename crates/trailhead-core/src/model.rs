@@ -164,6 +164,12 @@ pub struct Task {
     #[serde(default, with = "iso_date::option")]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Date))]
     pub scheduled_on: Option<Date>,
+    /// An optional time on `scheduled_on`, e.g. 1pm that day.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub scheduled_at: Option<OffsetDateTime>,
+    /// The IANA zone `scheduled_at` was planned in; it decides which day it falls on.
+    #[serde(default)]
+    pub scheduled_tz: Option<String>,
     pub parent_id: Option<Uuid>,
     pub metadata: Value,
     pub version: i64,

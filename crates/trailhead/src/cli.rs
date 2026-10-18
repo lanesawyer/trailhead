@@ -82,9 +82,10 @@ pub(crate) enum Cmd {
         /// The deadline: YYYY-MM-DD or an RFC 3339 timestamp.
         #[arg(long)]
         due: Option<String>,
-        /// The day to work on it: YYYY-MM-DD, today or tomorrow.
-        #[arg(long)]
-        on: Option<String>,
+        /// When to work on it: a day (YYYY-MM-DD, today, tomorrow), optionally with a
+        /// time (today 1pm, 2026-10-20 13:30), or a time alone for today.
+        #[arg(long, num_args = 1..=3)]
+        on: Option<Vec<String>>,
         /// Tasks that must finish first.
         #[arg(long, value_delimiter = ',')]
         after: Vec<String>,
@@ -104,9 +105,9 @@ pub(crate) enum Cmd {
         /// YYYY-MM-DD, RFC 3339, or "none".
         #[arg(long)]
         due: Option<String>,
-        /// The day to work on it: YYYY-MM-DD, today, tomorrow, or "none".
-        #[arg(long)]
-        on: Option<String>,
+        /// When to work on it, as for `add --on`, or "none".
+        #[arg(long, num_args = 1..=3)]
+        on: Option<Vec<String>>,
         #[arg(short, long)]
         status: Option<String>,
         /// Fail if the task changed since this version.

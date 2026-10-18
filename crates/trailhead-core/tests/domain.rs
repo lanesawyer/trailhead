@@ -584,6 +584,70 @@ async fn scheduling_is_separate_from_the_due_date() {
     assert_eq!(cleared.due_at, today.due_at);
 }
 
+#[tokio::test]
+async fn scheduled_times_set_the_day_in_their_zone() {
+    use time::macros::{date, datetime};
+    let env = Env::new().await;
+    let la = Some("America/Los_Angeles".to_string());
+    // 6pm in Los Angeles is already the 18th in UTC.
+    let evening = datetime!(2026-10-17 18:00 -7);
+    let new = |title: &str| NewTask { title: title.into(), ..Default::default() };
+    let t = env.task_with(NewTask { scheduled_at: Some(evening), scheduled_tz: la.clone(), ..new("evening") }).await;
+    assert_eq!(t.scheduled_on, Some(date!(2026 - 10 - 17)));
+    assert_eq!(t.scheduled_at, Some(evening));
+
+    // Without a zone, the timestamp's own offset decides the day, and it sticks.
+    let bare = env.task_with(NewTask { scheduled_at: Some(evening), ..new("bare") }).await;
+    assert_eq!(bare.scheduled_on, Some(date!(2026 - 10 - 17)));
+    let renamed = TaskPatch { title: Some("renamed".into()), ..Default::default() };
+    let bare = env.store.update_task(&env.human, &bare.key, renamed, None).await.unwrap();
+    assert_eq!(bare.scheduled_on, Some(date!(2026 - 10 - 17)));
+
+    let wrong_day = NewTask {
+        project: "AUTH".into(),
+        scheduled_on: Some(date!(2026 - 10 - 18)),
+        scheduled_at: Some(evening),
+        scheduled_tz: la.clone(),
+        ..new("wrong")
+    };
+    assert!(matches!(env.store.create_task(&env.human, wrong_day).await, Err(Error::Invalid(_))));
+    let zone_alone = NewTask { project: "AUTH".into(), scheduled_tz: la.clone(), ..new("zone") };
+    assert!(matches!(env.store.create_task(&env.human, zone_alone).await, Err(Error::Invalid(_))));
+
+    // Dropping the time keeps the day; a new day drops the time; moving the time moves the day.
+    let untimed = TaskPatch { scheduled_at: Some(None), ..Default::default() };
+    let t2 = env.store.update_task(&env.human, &t.key, untimed, None).await.unwrap();
+    assert_eq!(
+        (t2.scheduled_on, t2.scheduled_at, t2.scheduled_tz.as_deref()),
+        (Some(date!(2026 - 10 - 17)), None, None)
+    );
+    let timed = TaskPatch { scheduled_at: Some(Some(evening)), scheduled_tz: Some(la.clone()), ..Default::default() };
+    env.store.update_task(&env.human, &t.key, timed, None).await.unwrap();
+    let next_day = TaskPatch { scheduled_on: Some(Some(date!(2026 - 10 - 19))), ..Default::default() };
+    let t3 = env.store.update_task(&env.human, &t.key, next_day, None).await.unwrap();
+    assert_eq!((t3.scheduled_on, t3.scheduled_at), (Some(date!(2026 - 10 - 19)), None));
+    let morning = datetime!(2026-10-20 9:00 -7);
+    let moved = TaskPatch { scheduled_at: Some(Some(morning)), scheduled_tz: Some(la.clone()), ..Default::default() };
+    let t4 = env.store.update_task(&env.human, &t.key, moved, None).await.unwrap();
+    assert_eq!((t4.scheduled_on, t4.scheduled_at), (Some(date!(2026 - 10 - 20)), Some(morning)));
+}
+
+#[tokio::test]
+async fn scheduled_sort_puts_timed_tasks_in_order_within_a_day() {
+    use time::macros::{date, datetime};
+    let env = Env::new().await;
+    let new = |title: &str| NewTask { title: title.into(), ..Default::default() };
+    let day = Some(date!(2026 - 10 - 17));
+    env.task_with(NewTask { scheduled_on: day, priority: Some(1), ..new("untimed urgent") }).await;
+    env.task_with(NewTask { scheduled_at: Some(datetime!(2026-10-17 15:00 UTC)), ..new("3pm") }).await;
+    env.task_with(NewTask { scheduled_at: Some(datetime!(2026-10-17 9:00 UTC)), ..new("9am") }).await;
+    env.task_with(NewTask { scheduled_on: Some(date!(2026 - 10 - 16)), ..new("yesterday") }).await;
+    env.task_with(new("unscheduled")).await;
+    let filter = TaskFilter { sort: TaskSort::Scheduled, ..Default::default() };
+    let titles: Vec<_> = env.store.list_tasks(&env.human, filter).await.unwrap().into_iter().map(|t| t.title).collect();
+    assert_eq!(titles, ["yesterday", "9am", "3pm", "untimed urgent", "unscheduled"]);
+}
+
 #[test]
 fn snapshots_from_before_scheduling_still_load() {
     let mut v = serde_json::to_value(trailhead_core::Task {
@@ -598,6 +662,8 @@ fn snapshots_from_before_scheduling_still_load() {
         due_at: None,
         due_tz: None,
         scheduled_on: Some(time::macros::date!(2026 - 10 - 17)),
+        scheduled_at: None,
+        scheduled_tz: None,
         parent_id: None,
         metadata: json!({}),
         version: 1,
@@ -610,7 +676,9 @@ fn snapshots_from_before_scheduling_still_load() {
     })
     .unwrap();
     assert_eq!(v["scheduled_on"], "2026-10-17");
-    v.as_object_mut().unwrap().remove("scheduled_on");
+    for k in ["scheduled_on", "scheduled_at", "scheduled_tz"] {
+        v.as_object_mut().unwrap().remove(k);
+    }
     let old: trailhead_core::Task = serde_json::from_value(v).unwrap();
     assert_eq!(old.scheduled_on, None);
 }

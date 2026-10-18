@@ -192,6 +192,12 @@ async fn agents_schedule_tasks_over_mcp() {
     assert_eq!(out, "no tasks");
     let (_, out) = call(&client, "list_tasks", json!({"scheduled_through": "2026-10-17"})).await;
     assert!(out.starts_with("AUTH-3 ") && out.lines().count() == 1, "{out}");
+    let at =
+        json!({"task": "AUTH-3", "scheduled_at": "2026-10-17T13:00:00-07:00", "scheduled_tz": "America/Los_Angeles"});
+    let (err, out) = call(&client, "update_task", at).await;
+    assert!(!err && out.contains("(scheduled 2026-10-17 13:00 PDT)"), "{out}");
+    let (err, out) = call(&client, "update_task", json!({"task": "AUTH-3", "scheduled_at": ""})).await;
+    assert!(!err && out.contains("(scheduled 2026-10-17)"), "{out}");
     let (err, out) = call(&client, "update_task", json!({"task": "AUTH-3", "scheduled_on": ""})).await;
     assert!(!err && !out.contains("scheduled"), "{out}");
     client.cancel().await.unwrap();

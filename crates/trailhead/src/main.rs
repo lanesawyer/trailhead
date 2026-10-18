@@ -32,18 +32,71 @@ fn parse_when_in(s: &str, tz: &jiff::tz::TimeZone) -> Result<String> {
     Ok(end_of_day.timestamp().to_string())
 }
 
-/// A day to schedule work on: `YYYY-MM-DD`, `today` or `tomorrow`, in the local zone.
-fn parse_day(s: &str) -> Result<String> {
-    parse_day_from(s, jiff::Zoned::now().with_time_zone(output::local_tz().clone()).date())
+fn local_today() -> jiff::civil::Date {
+    jiff::Zoned::now().with_time_zone(output::local_tz().clone()).date()
 }
 
-fn parse_day_from(s: &str, today: jiff::civil::Date) -> Result<String> {
-    let day = match s {
-        "today" => today,
-        "tomorrow" => today.tomorrow()?,
-        _ => s.parse().with_context(|| format!("{s:?} isn't YYYY-MM-DD, today or tomorrow"))?,
+/// The schedule fields for `--on`: a day, a day and a time, or a time today.
+fn parse_schedule(words: &[String]) -> Result<Value> {
+    parse_schedule_in(&words.join(" "), local_today(), output::local_tz())
+}
+
+fn parse_schedule_in(s: &str, today: jiff::civil::Date, tz: &jiff::tz::TimeZone) -> Result<Value> {
+    let lower = s.to_lowercase();
+    let mut words: Vec<&str> = lower.split_whitespace().filter(|w| *w != "at").collect();
+    let day = match words.first().map(|w| parse_day(w, today)) {
+        Some(Ok(day)) => {
+            words.remove(0);
+            day
+        }
+        _ => today,
     };
-    Ok(day.to_string())
+    if words.is_empty() {
+        return Ok(json!({"scheduled_on": day.to_string()}));
+    }
+    let at = day.to_datetime(parse_clock(&words.concat())?).to_zoned(tz.clone())?;
+    Ok(json!({
+        "scheduled_on": at.date().to_string(),
+        "scheduled_at": at.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+        "scheduled_tz": tz.iana_name(),
+    }))
+}
+
+fn merge(body: &mut Value, fields: Value) {
+    if let (Some(body), Value::Object(fields)) = (body.as_object_mut(), fields) {
+        body.extend(fields);
+    }
+}
+
+fn parse_day(s: &str, today: jiff::civil::Date) -> Result<jiff::civil::Date> {
+    match s {
+        "today" => Ok(today),
+        "tomorrow" => Ok(today.tomorrow()?),
+        _ => s.parse().with_context(|| format!("{s:?} isn't YYYY-MM-DD, today or tomorrow")),
+    }
+}
+
+/// `1pm`, `1:30pm`, `13:00` or `noon`.
+fn parse_clock(s: &str) -> Result<jiff::civil::Time> {
+    let bad = || anyhow::anyhow!("{s:?} isn't a day or a time like 1pm, 1:30pm or 13:00");
+    if s == "noon" {
+        return Ok(jiff::civil::time(12, 0, 0, 0));
+    }
+    let (clock, pm) = match (s.strip_suffix("am"), s.strip_suffix("pm")) {
+        (Some(c), _) => (c, Some(false)),
+        (_, Some(c)) => (c, Some(true)),
+        _ => (s, None),
+    };
+    let (h, m) = clock.split_once(':').unwrap_or((clock, "0"));
+    let mut hour: i8 = h.parse().map_err(|_| bad())?;
+    let minute: i8 = m.parse().map_err(|_| bad())?;
+    if let Some(pm) = pm {
+        if !(1..=12).contains(&hour) {
+            return Err(bad());
+        }
+        hour = hour % 12 + if pm { 12 } else { 0 };
+    }
+    jiff::civil::Time::new(hour, minute, 0, 0).map_err(|_| bad())
 }
 
 /// The local IANA zone name, e.g. `America/Los_Angeles`, if the system has one.
@@ -156,7 +209,8 @@ async fn run(cli: Cli) -> Result<()> {
                 ("project", project.or(default_project)),
                 ("status", status),
                 ("parent", parent),
-                ("scheduled_through", today.then(|| parse_day("today")).transpose()?),
+                ("scheduled_through", today.then(|| local_today().to_string())),
+                ("sort", today.then(|| "scheduled".to_string())),
                 ("limit", limit.map(|n| n.to_string())),
             ]);
             let v = c.get("tasks", &q).await?;
@@ -173,7 +227,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Add { title, project, description, priority, parent, due, on, after, blocks } => {
             let project =
                 project.or(default_project).context("--project is required (or set project in .trailhead.toml)")?;
-            let body = json!({
+            let mut body = json!({
                 "project": project,
                 "title": title,
                 "description": description.unwrap_or_default(),
@@ -181,10 +235,12 @@ async fn run(cli: Cli) -> Result<()> {
                 "parent": parent,
                 "due_at": due.as_deref().map(parse_when).transpose()?,
                 "due_tz": due.as_ref().and_then(|_| local_time_zone()),
-                "scheduled_on": on.as_deref().map(parse_day).transpose()?,
                 "blocked_by": after,
                 "blocks": blocks,
             });
+            if let Some(on) = on {
+                merge(&mut body, parse_schedule(&on)?);
+            }
             show(c.post("tasks", body).await?, &task_line);
         }
         Cmd::Edit { task, title, description, priority, due, on, status, version } => {
@@ -207,7 +263,11 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
             if let Some(d) = on {
-                body["scheduled_on"] = if d == "none" { Value::Null } else { json!(parse_day(&d)?) };
+                if d == ["none"] {
+                    body["scheduled_on"] = Value::Null;
+                } else {
+                    merge(&mut body, parse_schedule(&d)?);
+                }
             }
             if let Some(st) = status {
                 body["status"] = json!(st);
@@ -560,8 +620,10 @@ async fn print_detail(c: &Client, v: &Value) -> Result<()> {
     let t = &v["task"];
     println!("{}  {}", s(t, "key"), s(t, "title"));
     let mut meta = vec![s(t, "status").to_string(), format!("p{}", t["priority"]), format!("v{}", t["version"])];
-    if let Some(day) = t["scheduled_on"].as_str() {
-        meta.push(format!("scheduled {day}"));
+    match (t["scheduled_at"].as_str(), t["scheduled_on"].as_str()) {
+        (Some(at), _) => meta.push(format!("scheduled {}", short_time(at))),
+        (None, Some(day)) => meta.push(format!("scheduled {day}")),
+        _ => {}
     }
     if let Some(due) = t["due_at"].as_str() {
         meta.push(format!("due {}", short_time(due)));
@@ -776,7 +838,9 @@ async fn serve(bind: &str) -> Result<()> {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Cmd, WebhookCmd, parse_day_from, parse_when_in};
+    use serde_json::json;
+
+    use super::{Cli, Cmd, WebhookCmd, parse_schedule_in, parse_when_in};
 
     #[test]
     fn webhook_url_does_not_clobber_the_server_url() {
@@ -797,11 +861,23 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_days_are_plain_dates() {
+    fn schedules_are_a_day_with_an_optional_local_time() {
+        let la = jiff::tz::TimeZone::get("America/Los_Angeles").unwrap();
         let today = jiff::civil::date(2026, 10, 31);
-        assert_eq!(parse_day_from("today", today).unwrap(), "2026-10-31");
-        assert_eq!(parse_day_from("tomorrow", today).unwrap(), "2026-11-01");
-        assert_eq!(parse_day_from("2026-12-01", today).unwrap(), "2026-12-01");
-        assert!(parse_day_from("2026-12-01T00:00:00Z", today).is_err());
+        let on = |s| parse_schedule_in(s, today, &la);
+        assert_eq!(on("today").unwrap(), json!({"scheduled_on": "2026-10-31"}));
+        assert_eq!(on("tomorrow").unwrap(), json!({"scheduled_on": "2026-11-01"}));
+        assert_eq!(on("2026-12-01").unwrap(), json!({"scheduled_on": "2026-12-01"}));
+        let at = |day: &str, at: &str| json!({"scheduled_on": day, "scheduled_at": at, "scheduled_tz": "America/Los_Angeles"});
+        assert_eq!(on("today at 1pm").unwrap(), at("2026-10-31", "2026-10-31T13:00:00-07:00"));
+        assert_eq!(on("1:30 PM").unwrap(), at("2026-10-31", "2026-10-31T13:30:00-07:00"));
+        // DST ends 2026-11-01 in the US, so tomorrow's offset differs.
+        assert_eq!(on("tomorrow 9am").unwrap(), at("2026-11-01", "2026-11-01T09:00:00-08:00"));
+        assert_eq!(on("2026-12-01 13:00").unwrap(), at("2026-12-01", "2026-12-01T13:00:00-08:00"));
+        assert_eq!(on("12am").unwrap(), at("2026-10-31", "2026-10-31T00:00:00-07:00"));
+        assert_eq!(on("noon").unwrap(), at("2026-10-31", "2026-10-31T12:00:00-07:00"));
+        assert!(on("13pm").is_err());
+        assert!(on("next tuesday").is_err());
+        assert!(on("2026-12-01T00:00:00Z").is_err());
     }
 }

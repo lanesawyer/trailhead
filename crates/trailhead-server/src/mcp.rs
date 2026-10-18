@@ -24,13 +24,13 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use trailhead_core::{
     Claim, Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewProject, NewTask, Project, ProjectPatch,
-    ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch, idempotency_fingerprint,
+    ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch, TaskSort, idempotency_fingerprint,
 };
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::params::{parse_date, parse_list, parse_opt_date, parse_time};
+use crate::params::{parse_date, parse_list, parse_opt_date, parse_opt_time, parse_time};
 
 const BRIEF_PREFIX: &str = "trailhead://projects/";
 
@@ -99,10 +99,21 @@ fn date(t: OffsetDateTime) -> String {
     t.format(&Rfc3339).map(|s| s[..10].to_string()).unwrap_or_default()
 }
 
+/// `2026-10-17 13:00 PDT` in the zone it was planned in, else at UTC.
+fn local_time(t: OffsetDateTime, tz: Option<&str>) -> String {
+    let zone = tz.and_then(|z| jiff::tz::TimeZone::get(z).ok()).unwrap_or(jiff::tz::TimeZone::UTC);
+    match jiff::Timestamp::from_second(t.unix_timestamp()) {
+        Ok(ts) => ts.to_zoned(zone).strftime("%Y-%m-%d %H:%M %Z").to_string(),
+        Err(_) => t.to_string(),
+    }
+}
+
 fn task_line(t: &Task) -> String {
     let mut line = format!("{} {} p{} v{} {}", t.key, t.status, t.priority, t.version, t.title);
-    if let Some(day) = t.scheduled_on {
-        line.push_str(&format!(" (scheduled {day})"));
+    match (t.scheduled_on, t.scheduled_at) {
+        (_, Some(at)) => line.push_str(&format!(" (scheduled {})", local_time(at, t.scheduled_tz.as_deref()))),
+        (Some(day), None) => line.push_str(&format!(" (scheduled {day})")),
+        (None, None) => {}
     }
     if let Some(due) = t.due_at {
         line.push_str(&format!(" (due {})", date(due)));
@@ -237,6 +248,11 @@ pub struct CreateArgs {
     due_at: Option<String>,
     /// YYYY-MM-DD: the day to work on it, separate from the deadline.
     scheduled_on: Option<String>,
+    /// RFC 3339 timestamp with the local offset, e.g. 2026-10-17T13:00:00-07:00: a time
+    /// to work on it. Sets the day too; scheduled_on can be left out.
+    scheduled_at: Option<String>,
+    /// IANA zone for scheduled_at, e.g. America/Los_Angeles.
+    scheduled_tz: Option<String>,
     /// Optional. Retrying with the same key and arguments returns the first call's
     /// result instead of doing it twice. Keys last 24 hours.
     #[serde(default, skip_serializing)]
@@ -254,8 +270,13 @@ pub struct UpdateArgs {
     /// open, in_progress, needs_input, in_review, done or cancelled.
     status: Option<String>,
     priority: Option<i64>,
-    /// YYYY-MM-DD: the day to work on it. An empty string unschedules it.
+    /// YYYY-MM-DD: the day to work on it, without a time. An empty string unschedules it.
     scheduled_on: Option<String>,
+    /// RFC 3339 timestamp with the local offset: a time to work on it, moving the day to
+    /// match. An empty string drops the time and keeps the day.
+    scheduled_at: Option<String>,
+    /// IANA zone for scheduled_at, e.g. America/Los_Angeles.
+    scheduled_tz: Option<String>,
     /// The version you last saw; the update fails if the task changed since.
     version: Option<i64>,
     /// Posted as a `handoff` comment once the update succeeds: what changed, what's
@@ -372,6 +393,7 @@ impl TrailheadMcp {
     async fn do_create_task(&self, ctx: &Ctx, a: CreateArgs) -> Result<CallToolResult, ErrorData> {
         let due_at = attempt!(a.due_at.as_deref().map(parse_time).transpose());
         let scheduled_on = attempt!(parse_opt_date(a.scheduled_on.as_deref()));
+        let scheduled_at = attempt!(parse_opt_time(a.scheduled_at.as_deref()));
         let new = NewTask {
             project: a.project,
             title: a.title,
@@ -379,6 +401,8 @@ impl TrailheadMcp {
             priority: a.priority,
             due_at,
             scheduled_on,
+            scheduled_at,
+            scheduled_tz: a.scheduled_tz,
             parent: a.parent,
             ..Default::default()
         };
@@ -473,6 +497,7 @@ impl TrailheadMcp {
             project: a.project,
             statuses,
             parent: a.parent,
+            sort: if scheduled_through.is_some() { TaskSort::Scheduled } else { TaskSort::Priority },
             scheduled_through,
             limit: a.limit,
             ..Default::default()
@@ -534,19 +559,19 @@ impl TrailheadMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let status = attempt!(a.status.as_deref().map(str::parse::<Status>).transpose());
-        let scheduled_on = attempt!(
-            a.scheduled_on
-                .as_deref()
-                .map(str::trim)
-                .map(|d| (!d.is_empty()).then(|| parse_date(d)).transpose())
-                .transpose()
-        );
+        let blank = |s: Option<&str>| s.map(str::trim).map(|s| (!s.is_empty()).then(|| s.to_string()));
+        let scheduled_on =
+            attempt!(blank(a.scheduled_on.as_deref()).map(|d| d.map(|d| parse_date(&d)).transpose()).transpose());
+        let scheduled_at =
+            attempt!(blank(a.scheduled_at.as_deref()).map(|t| t.map(|t| parse_time(&t)).transpose()).transpose());
         let patch = TaskPatch {
             title: a.title,
             description: a.description,
             status,
             priority: a.priority,
             scheduled_on,
+            scheduled_at,
+            scheduled_tz: a.scheduled_tz.map(Some),
             ..Default::default()
         };
         let task = attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await);

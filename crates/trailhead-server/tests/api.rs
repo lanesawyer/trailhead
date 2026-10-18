@@ -195,8 +195,15 @@ async fn scheduled_days_filter_todays_plan() {
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     let r = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"scheduled_on": "10/18/2026"}))).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let at = json!({"scheduled_at": "2026-10-17T13:00:00-07:00", "scheduled_tz": "America/Los_Angeles"});
+    let r = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(at)).await;
+    assert_eq!(r.body["scheduled_on"], "2026-10-17");
+    assert_eq!(r.body["scheduled_at"], "2026-10-17T20:00:00Z");
+    assert_eq!(r.body["scheduled_tz"], "America/Los_Angeles");
+    let r = api.as_human("GET", "/v1/tasks?sort=scheduled&fields=key", None).await;
+    assert_eq!(r.body, json!([{"key": "AUTH-1"}, {"key": "AUTH-2"}]));
     let r = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"scheduled_on": null}))).await;
-    assert!(r.body["scheduled_on"].is_null());
+    assert!(r.body["scheduled_on"].is_null() && r.body["scheduled_at"].is_null());
     assert_eq!(r.body["due_at"], "2026-11-01T12:00:00Z");
 }
 

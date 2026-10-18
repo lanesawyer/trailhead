@@ -53,6 +53,13 @@ pub fn lease(claim: &Value) -> String {
     }
 }
 
+fn local_minute(ts: &str) -> String {
+    match ts.parse::<jiff::Timestamp>() {
+        Ok(t) => t.to_zoned(local_tz().clone()).strftime("%Y-%m-%d %H:%M").to_string(),
+        Err(_) => ts.to_string(),
+    }
+}
+
 fn short_date(ts: &str) -> String {
     match ts.parse::<jiff::Timestamp>() {
         Ok(t) => t.to_zoned(local_tz().clone()).strftime("%Y-%m-%d").to_string(),
@@ -62,8 +69,10 @@ fn short_date(ts: &str) -> String {
 
 pub fn task_line(t: &Value) -> String {
     let mut line = format!("{:<10} {:<11} p{}  {}", s(t, "key"), s(t, "status"), t["priority"], s(t, "title"));
-    if let Some(day) = t["scheduled_on"].as_str() {
-        line.push_str(&format!("  (on {day})"));
+    match (t["scheduled_at"].as_str(), t["scheduled_on"].as_str()) {
+        (Some(at), _) => line.push_str(&format!("  (on {})", local_minute(at))),
+        (None, Some(day)) => line.push_str(&format!("  (on {day})")),
+        _ => {}
     }
     if let Some(due) = t["due_at"].as_str() {
         line.push_str(&format!("  (due {})", short_date(due)));

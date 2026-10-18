@@ -31,7 +31,8 @@ pub(crate) struct TaskListQuery {
     /// `key:value` pairs, comma-separated.
     metadata: Option<String>,
     /// `priority` (the default: priority, then due date, then oldest), `updated_at` or
-    /// `created_at`; prefix `-` for newest first, e.g. `-updated_at`.
+    /// `created_at`, with `-` for newest first, e.g. `-updated_at`; or `scheduled`: by
+    /// scheduled day, timed tasks in time order before untimed ones, unscheduled last.
     sort: Option<String>,
     /// Defaults to 100.
     limit: Option<i64>,
@@ -112,8 +113,14 @@ pub(crate) struct CreateTask {
     due_at: Option<String>,
     due_tz: Option<String>,
     /// The day to work the task (`YYYY-MM-DD`), separate from its due date.
+    /// Optional when `scheduled_at` is set.
     #[schema(format = Date)]
     scheduled_on: Option<String>,
+    /// A time on the scheduled day, e.g. 1pm.
+    #[schema(format = DateTime)]
+    scheduled_at: Option<String>,
+    /// IANA zone `scheduled_at` was planned in; decides its day. Without one, the UTC day.
+    scheduled_tz: Option<String>,
     parent: Option<String>,
     metadata: Option<Value>,
     source: Option<String>,
@@ -143,6 +150,8 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
         due_at: parse_opt_time(b.due_at.as_deref())?,
         due_tz: b.due_tz,
         scheduled_on: parse_opt_date(b.scheduled_on.as_deref())?,
+        scheduled_at: parse_opt_time(b.scheduled_at.as_deref())?,
+        scheduled_tz: b.scheduled_tz,
         parent: b.parent,
         metadata: b.metadata,
         source: b.source,
@@ -184,8 +193,15 @@ pub(crate) struct UpdateTask {
     #[serde(default, deserialize_with = "nullable")]
     due_tz: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
+    /// A new day without `scheduled_at` drops the time; `null` unschedules.
     #[schema(format = Date)]
     scheduled_on: Option<Option<String>>,
+    /// Moves the day to match; `null` keeps the day without a time.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(format = DateTime)]
+    scheduled_at: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    scheduled_tz: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
     parent: Option<Option<String>>,
     metadata: Option<Value>,
@@ -219,6 +235,8 @@ pub(crate) async fn update_task(
         due_at: b.due_at.map(|d| parse_opt_time(d.as_deref())).transpose()?,
         due_tz: b.due_tz,
         scheduled_on: b.scheduled_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
+        scheduled_at: b.scheduled_at.map(|t| parse_opt_time(t.as_deref())).transpose()?,
+        scheduled_tz: b.scheduled_tz,
         parent: b.parent,
         metadata: b.metadata,
     };

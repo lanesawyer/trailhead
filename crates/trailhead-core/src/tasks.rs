@@ -17,7 +17,7 @@ use crate::model::{Claim, Comment, Entity, Status, Task};
 use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 
-pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on";
+pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz";
 
 fn prefixed_cols(prefix: &str) -> String {
     TASK_COLS.split(", ").map(|c| format!("{prefix}.{c}")).collect::<Vec<_>>().join(", ")
@@ -45,6 +45,8 @@ pub(crate) fn task_from_row(row: &Row) -> Result<Task> {
         updated_at: get_ts(row, 17)?,
         deleted_at: get_opt_ts(row, 18)?,
         scheduled_on: get_opt_date(row, 19)?,
+        scheduled_at: get_opt_ts(row, 20)?,
+        scheduled_tz: row.get(21)?,
     })
 }
 
@@ -73,7 +75,7 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, after: Task) -> Result<Tas
             &format!(
                 "UPDATE tasks SET title = ?1, description = ?2, status = ?3, priority = ?4, due_at = ?5, due_tz = ?6,
                  parent_id = ?7, metadata = ?8, deleted_at = ?9, version = version + 1, updated_at = ?10,
-                 scheduled_on = ?13 WHERE id = ?11 AND version = ?12 RETURNING {TASK_COLS}"
+                 scheduled_on = ?13, scheduled_at = ?14, scheduled_tz = ?15 WHERE id = ?11 AND version = ?12 RETURNING {TASK_COLS}"
             ),
             libsql::params![
                 after.title,
@@ -89,6 +91,8 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, after: Task) -> Result<Tas
                 before.id.to_string(),
                 before.version,
                 opt_date_value(after.scheduled_on),
+                opt_ts_value(after.scheduled_at),
+                after.scheduled_tz,
             ],
         )
         .await?;
@@ -109,6 +113,39 @@ pub(crate) async fn update_status(tx: &Tx, before: &Task, status: Status, kind: 
 
 fn validate_priority(p: i64) -> Result<()> {
     if (1..=4).contains(&p) { Ok(()) } else { Err(Error::Invalid("priority must be 1 (urgent) to 4 (low)".into())) }
+}
+
+/// The day `at` falls on in `tz`, or at its own offset without a zone.
+fn day_of(at: OffsetDateTime, tz: Option<&str>) -> Result<Date> {
+    let Some(tz) = tz else { return Ok(at.date()) };
+    let zone = jiff::tz::TimeZone::get(tz)
+        .map_err(|_| Error::Invalid(format!("{tz:?} isn't a known IANA time zone, like America/Los_Angeles")))?;
+    let local = jiff::Timestamp::from_second(at.unix_timestamp()).expect("in range").to_zoned(zone).date();
+    Date::from_calendar_date(
+        local.year().into(),
+        (local.month() as u8).try_into().expect("valid month"),
+        local.day() as u8,
+    )
+    .map_err(|e| Error::Invalid(e.to_string()))
+}
+
+/// Fills in the day from a scheduled time and checks the three agree. Only call it
+/// when the time or zone was just given: stored times are UTC, so a time without a
+/// zone can't be placed on a day again later.
+fn settle_schedule(on: &mut Option<Date>, at: Option<OffsetDateTime>, tz: &Option<String>) -> Result<()> {
+    if tz.is_some() && at.is_none() {
+        return Err(Error::Invalid("scheduled_tz needs scheduled_at".into()));
+    }
+    if let Some(at) = at {
+        let day = day_of(at, tz.as_deref())?;
+        match on {
+            Some(d) if *d != day => {
+                return Err(Error::Invalid(format!("scheduled_at falls on {day}, not scheduled_on {d}")));
+            }
+            _ => *on = Some(day),
+        }
+    }
+    Ok(())
 }
 
 fn validate_due(due_at: Option<OffsetDateTime>, due_tz: &Option<String>) -> Result<()> {
@@ -159,7 +196,10 @@ pub struct NewTask {
     pub priority: Option<i64>,
     pub due_at: Option<OffsetDateTime>,
     pub due_tz: Option<String>,
+    /// The day to work on it. Optional when `scheduled_at` is set: it's that time's day.
     pub scheduled_on: Option<Date>,
+    pub scheduled_at: Option<OffsetDateTime>,
+    pub scheduled_tz: Option<String>,
     /// Parent task key or id.
     pub parent: Option<String>,
     pub metadata: Option<Value>,
@@ -175,7 +215,12 @@ pub struct TaskPatch {
     pub priority: Option<i64>,
     pub due_at: Option<Option<OffsetDateTime>>,
     pub due_tz: Option<Option<String>>,
+    /// A new day drops any scheduled time unless `scheduled_at` comes with it;
+    /// clearing it clears the time too.
     pub scheduled_on: Option<Option<Date>>,
+    /// Clearing the time keeps the day.
+    pub scheduled_at: Option<Option<OffsetDateTime>>,
+    pub scheduled_tz: Option<Option<String>>,
     pub parent: Option<Option<String>>,
     /// RFC 7386 merge patch: `null` removes a key.
     pub metadata: Option<Value>,
@@ -208,6 +253,9 @@ pub enum TaskSort {
     UpdatedAtDesc,
     CreatedAt,
     CreatedAtDesc,
+    /// Earliest scheduled day first; within a day, timed tasks in time order, then
+    /// the rest by priority. Unscheduled last.
+    Scheduled,
 }
 
 impl TaskSort {
@@ -218,6 +266,9 @@ impl TaskSort {
             TaskSort::UpdatedAtDesc => "updated_at DESC, id DESC",
             TaskSort::CreatedAt => "created_at, id",
             TaskSort::CreatedAtDesc => "created_at DESC, id DESC",
+            TaskSort::Scheduled => {
+                "scheduled_on IS NULL, scheduled_on, scheduled_at IS NULL, scheduled_at, priority, due_at IS NULL, due_at, created_at, id"
+            }
         }
     }
 }
@@ -231,6 +282,7 @@ impl std::str::FromStr for TaskSort {
             "-updated_at" => Ok(TaskSort::UpdatedAtDesc),
             "created_at" => Ok(TaskSort::CreatedAt),
             "-created_at" => Ok(TaskSort::CreatedAtDesc),
+            "scheduled" => Ok(TaskSort::Scheduled),
             _ => Err(Error::Invalid(format!("unknown sort: {s}"))),
         }
     }
@@ -296,6 +348,8 @@ impl Store {
         let priority = new.priority.unwrap_or(3);
         validate_priority(priority)?;
         validate_due(new.due_at, &new.due_tz)?;
+        let mut scheduled_on = new.scheduled_on;
+        settle_schedule(&mut scheduled_on, new.scheduled_at, &new.scheduled_tz)?;
         let metadata = new.metadata.unwrap_or_else(|| Value::Object(Default::default()));
         if !metadata.is_object() {
             return Err(Error::Invalid("metadata must be a JSON object".into()));
@@ -337,8 +391,8 @@ impl Store {
                 .query(
                     &format!(
                         "INSERT INTO tasks (id, workspace_id, project_id, key, title, description, priority, due_at, due_tz,
-                         parent_id, metadata, source, external_id, created_by, created_at, updated_at, scheduled_on)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?16) RETURNING {TASK_COLS}"
+                         parent_id, metadata, source, external_id, created_by, created_at, updated_at, scheduled_on, scheduled_at, scheduled_tz)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?16, ?17, ?18) RETURNING {TASK_COLS}"
                     ),
                     libsql::params![
                         id.to_string(),
@@ -356,7 +410,9 @@ impl Store {
                         new.external_id.clone(),
                         ctx.actor_id().to_string(),
                         tx.now_str(),
-                        opt_date_value(new.scheduled_on),
+                        opt_date_value(scheduled_on),
+                        opt_ts_value(new.scheduled_at),
+                        new.scheduled_tz.clone(),
                     ],
                 )
                 .await?;
@@ -409,6 +465,23 @@ impl Store {
             validate_due(after.due_at, &after.due_tz)?;
             if let Some(d) = patch.scheduled_on {
                 after.scheduled_on = d;
+                after.scheduled_at = None;
+                after.scheduled_tz = None;
+            }
+            if let Some(at) = patch.scheduled_at {
+                after.scheduled_at = at;
+                if at.is_none() {
+                    after.scheduled_tz = None;
+                } else if patch.scheduled_on.is_none() {
+                    after.scheduled_on = None;
+                }
+            }
+            let placed = patch.scheduled_at.is_some() || patch.scheduled_tz.is_some();
+            if let Some(tz) = patch.scheduled_tz {
+                after.scheduled_tz = tz;
+            }
+            if placed {
+                settle_schedule(&mut after.scheduled_on, after.scheduled_at, &after.scheduled_tz)?;
             }
             if let Some(parent) = &patch.parent {
                 after.parent_id = match parent {

@@ -3462,6 +3462,7 @@ dependencies = [
  "futures-util",
  "http 1.5.0",
  "http-body-util",
+ "jiff",
  "keyring",
  "reqwest",
  "rmcp",
