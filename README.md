@@ -16,6 +16,20 @@ cargo install trailhead --locked
 
 Or skip the build with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) (`cargo binstall trailhead`), or download a binary for Linux, macOS or Windows from the [releases page](https://github.com/lanesawyer/trailhead/releases).
 
+## Other machines
+
+Trailhead runs as one server, and agents on other machines reach it through a tunnel to its loopback port (iroh's [dumbpipe](https://www.dumbpipe.dev), Tailscale, `ssh -L`) rather than by exposing it publicly. Give each machine's agent its own token:
+
+```sh
+# on the server's machine
+trailhead agent add laptop --print-token
+# on the other machine, with the tunnel at 127.0.0.1:7242
+trailhead --url http://127.0.0.1:7242 login     # paste the token
+trailhead --url http://127.0.0.1:7242 --as laptop ready
+```
+
+Set `TRAILHEAD_URL` to skip `--url`. If the tunnel drops, the CLI says so instead of starting an empty server of its own.
+
 ## Integrations
 
 - [OpenClaw](docs/integrations/openclaw.md): mount Trailhead's MCP server and agent skill.

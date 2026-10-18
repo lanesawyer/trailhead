@@ -6,7 +6,7 @@ use reqwest::{Method, StatusCode, Url};
 use serde_json::Value;
 use trailhead_server::{Paths, modified_ms};
 
-use trailhead_server::creds::Cred;
+use trailhead_server::creds::{Cred, CredStore};
 
 /// The agent to act as, and the `.trailhead.toml` that chose it, if one did.
 pub struct Identity {
@@ -22,6 +22,8 @@ pub struct Client {
     pub local: bool,
     /// The server is this machine's own, so the CLI may start it again if it goes away.
     ours: bool,
+    /// Where this server's tokens are saved on this machine.
+    pub creds: CredStore,
 }
 
 /// An API error with its stable code, so the CLI can print `error[claim_held]: ...`.
@@ -48,35 +50,34 @@ impl Client {
     pub async fn connect(url: &str, token: Option<String>, agent: Option<&Identity>) -> Result<Client> {
         let (http, base) = http_and_base(url)?;
         let paths = Paths::from_env().context("no home directory")?;
-        let saved = saved_token(&paths, token.as_deref(), agent);
-        let ours = match health(&http, &base, saved.as_deref().ok()).await {
-            Some(info) if is_local(&base) => {
-                let ours = is_ours(&paths, &info);
-                remember_tunnel(&paths, &base, !ours)?;
-                if ours && is_stale(&info) {
-                    eprintln!("note: restarting the local server on the updated trailhead binary");
-                    stop_local(&http, &base).await?;
-                    start_local_server(&http, &base).await?;
+        let (ours, creds) = match health(&http, &base, None).await {
+            Some(info) => {
+                let ours = is_local(&base) && is_ours(&paths, &info);
+                if is_local(&base) {
+                    remember_tunnel(&paths, &base, !ours)?;
                 }
-                ours
+                (ours, creds_for(&paths, &info, ours)?)
             }
-            Some(_) => false,
             None if is_local(&base) && is_tunnel(&paths, &base) => bail!(
                 "can't reach the Trailhead server at {url}, last reached through a tunnel from another machine; \
                  check the tunnel, or run `trailhead server start` to run a server on this machine instead"
             ),
             None if is_local(&base) => {
                 start_local_server(&http, &base).await?;
-                true
+                (true, paths.creds())
             }
             None => bail!("can't reach the Trailhead server at {url}"),
         };
-        // Starting a fresh server is what creates the user's token.
-        let token = match saved {
-            Ok(t) => t,
-            Err(_) => saved_token(&paths, token.as_deref(), agent)?,
-        };
-        Ok(Client { http, base: base.clone(), token, local: is_local(&base), ours })
+        let token = saved_token(&creds, token.as_deref(), agent, (!ours).then_some(url))?;
+        if ours
+            && let Some(info) = health(&http, &base, Some(&token)).await
+            && is_stale(&info)
+        {
+            eprintln!("note: restarting the local server on the updated trailhead binary");
+            stop_local(&http, &base).await?;
+            start_local_server(&http, &base).await?;
+        }
+        Ok(Client { http, base: base.clone(), token, local: is_local(&base), ours, creds })
     }
 
     /// Sends `req`. If the local server has gone away since `connect` (stopped, or
@@ -240,15 +241,40 @@ impl Client {
     }
 }
 
-/// The token for `--token`, the agent, or the user, in that order.
-fn saved_token(paths: &Paths, token: Option<&str>, agent: Option<&Identity>) -> Result<String> {
+/// This machine's own server keeps its tokens at the top of the config directory;
+/// any other server's go in a directory named after its instance id.
+fn creds_for(paths: &Paths, info: &Health, ours: bool) -> Result<CredStore> {
+    match (&info.instance, ours) {
+        (Some(id), false) => {
+            paths.creds().for_server(id).ok_or_else(|| anyhow!("the server's instance id {id:?} isn't valid"))
+        }
+        _ => Ok(paths.creds()),
+    }
+}
+
+/// The token for `--token`, the agent, or the user, in that order. `remote` is the
+/// URL of a server that isn't this machine's, whose tokens come from `login`.
+fn saved_token(
+    creds: &CredStore,
+    token: Option<&str>,
+    agent: Option<&Identity>,
+    remote: Option<&str>,
+) -> Result<String> {
+    let login = match remote {
+        Some(url) => format!(
+            "\non the server's machine, run `trailhead agent add <name> --print-token`, then pipe or paste it into \
+             `trailhead --url {url} login` here and act with `--as <name>`"
+        ),
+        None => String::new(),
+    };
     Ok(match (token, agent) {
         (Some(t), _) => t.to_string(),
-        (None, Some(id)) => match paths.creds().read(Cred::Agent(&id.name)) {
+        (None, Some(id)) => match creds.read(Cred::Agent(&id.name)) {
             Some((secret, _)) => secret,
             None => {
-                let file = paths.creds().file(Cred::Agent(&id.name));
+                let file = creds.file(Cred::Agent(&id.name));
                 let msg = format!("no saved token for agent {:?} in the keyring or at {}", id.name, file.display());
+                let msg = msg + &login;
                 match &id.from {
                     Some(f) => {
                         bail!("{msg}\n{} sets agent = {:?}; pass --as-me to act as yourself", f.display(), id.name)
@@ -257,11 +283,12 @@ fn saved_token(paths: &Paths, token: Option<&str>, agent: Option<&Identity>) -> 
                 }
             }
         },
-        (None, None) => match paths.creds().read(Cred::User) {
+        (None, None) => match creds.read(Cred::User) {
             Some((secret, _)) => secret,
+            None if remote.is_some() => bail!("no saved token for this server{login}"),
             None => bail!(
                 "no token: set TRAILHEAD_TOKEN, or run a local server to create {}",
-                paths.creds().file(Cred::User).display()
+                creds.file(Cred::User).display()
             ),
         },
     })

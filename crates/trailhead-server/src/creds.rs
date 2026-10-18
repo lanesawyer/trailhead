@@ -40,6 +40,14 @@ impl CredStore {
         CredStore { config_dir, keyring: !disabled }
     }
 
+    /// Tokens for another machine's server, kept apart from this machine's own so
+    /// one CLI can hold credentials for several servers. `None` if the server's
+    /// instance id isn't a plain id, since it becomes a directory name.
+    pub fn for_server(&self, instance: &str) -> Option<CredStore> {
+        let plain = !instance.is_empty() && instance.len() <= 64 && instance.chars().all(|c| c.is_ascii_alphanumeric());
+        plain.then(|| CredStore { config_dir: self.config_dir.join("servers").join(instance), keyring: self.keyring })
+    }
+
     pub fn file(&self, cred: Cred) -> PathBuf {
         match cred {
             Cred::User => self.config_dir.join("credentials"),
@@ -113,6 +121,20 @@ mod tests {
         assert!(matches!(s.save(Cred::Agent("a"), "tok").unwrap(), Saved::File(_)));
         assert_eq!(s.read(Cred::Agent("a")).unwrap().0, "tok");
         assert!(s.read(Cred::User).is_none());
+    }
+
+    #[test]
+    fn each_server_gets_its_own_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = CredStore { config_dir: dir.path().into(), keyring: false };
+        let remote = s.for_server("01a1504c8d90").unwrap();
+        remote.save(Cred::User, "remote").unwrap();
+        assert!(s.read(Cred::User).is_none());
+        assert_eq!(remote.read(Cred::User).unwrap().0, "remote");
+        assert_ne!(remote.service(), s.service());
+        for bad in ["", "../x", "a/b", "a.b", &"a".repeat(65)] {
+            assert!(s.for_server(bad).is_none(), "{bad:?}");
+        }
     }
 
     /// Talks to the real OS keyring, under a service named after a temp dir, and

@@ -202,6 +202,7 @@ async fn run(cli: Cli) -> Result<()> {
     match &cli.cmd {
         Cmd::Serve { bind } => return serve(bind).await,
         Cmd::Server(cmd) => return server(&cli.url, cmd, cli.json).await,
+        Cmd::Login => return login(&cli.url, cli.json).await,
         _ => {}
     }
     let repo = repo::find(&std::env::current_dir()?)?.unwrap_or_default();
@@ -220,7 +221,7 @@ async fn run(cli: Cli) -> Result<()> {
     };
 
     match cli.cmd {
-        Cmd::Serve { .. } | Cmd::Server(_) => unreachable!(),
+        Cmd::Serve { .. } | Cmd::Server(_) | Cmd::Login => unreachable!(),
         Cmd::Ready { project, limit } => {
             let q = params([("project", project.or(default_project)), ("limit", limit.map(|n| n.to_string()))]);
             let v = c.get("ready", &q).await?;
@@ -473,20 +474,20 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Agent(AgentCmd::Add { name, projects, rate_limit }) => {
+        Cmd::Agent(AgentCmd::Add { name, projects, rate_limit, print_token }) => {
             let body = json!({ "name": name, "projects": projects, "rate_limit_per_minute": rate_limit });
             let v = c.post("agents", body).await?;
+            if print_token {
+                println!("{}", s(&v, "secret"));
+                return Ok(());
+            }
             // The server names sub-agents `<parent>/<name>`; save under the full name.
             let name = s(&v["agent"], "name").to_string();
             let safe_name = name.split('/').all(|seg| {
                 !seg.is_empty() && seg.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
             });
-            let saved = if c.local && safe_name {
-                let paths = trailhead_server::Paths::from_env().context("no home directory")?;
-                Some(paths.creds().save(Cred::Agent(&name), s(&v, "secret"))?)
-            } else {
-                None
-            };
+            let saved =
+                if c.local && safe_name { Some(c.creds.save(Cred::Agent(&name), s(&v, "secret"))?) } else { None };
             if json {
                 print_json(&v);
             } else {
@@ -781,6 +782,42 @@ async fn mcp_bridge(c: &Client) -> Result<()> {
             stdout.write_all(b"\n").await?;
         }
         stdout.flush().await?;
+    }
+    Ok(())
+}
+
+/// Reads a token from stdin, checks it against the server and saves it for the
+/// agent (or user) it belongs to, in that server's credential store.
+async fn login(url: &str, json: bool) -> Result<()> {
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprint!("token: ");
+    }
+    let mut secret = String::new();
+    std::io::stdin().read_line(&mut secret)?;
+    let secret = secret.trim();
+    if secret.is_empty() {
+        bail!("no token on stdin");
+    }
+    let c = Client::connect(url, Some(secret.to_string()), None).await?;
+    let me = c.get("me", &[]).await?;
+    let agent = me["agent"]["name"].as_str();
+    let saved = match agent {
+        Some(name) => c.creds.save(Cred::Agent(name), secret)?,
+        None => c.creds.save(Cred::User, secret)?,
+    };
+    if json {
+        print_json(&me);
+        return Ok(());
+    }
+    let to = match saved {
+        Saved::Keyring => "the OS keyring".to_string(),
+        Saved::File(path) => path.display().to_string(),
+    };
+    match agent {
+        Some(name) => {
+            println!("logged in as agent {name}, token saved to {to}; use `trailhead --url {url} --as {name}`")
+        }
+        None => println!("logged in as {}, token saved to {to}", s(&me["user"], "name")),
     }
     Ok(())
 }

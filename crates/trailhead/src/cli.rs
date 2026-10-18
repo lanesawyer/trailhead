@@ -241,6 +241,9 @@ pub(crate) enum Cmd {
     #[command(subcommand)]
     Webhook(WebhookCmd),
     Whoami,
+    /// Save a token for the server at --url, read from stdin. Get one on the server's
+    /// machine with `trailhead agent add <name> --print-token`.
+    Login,
     /// Speak MCP over stdin/stdout, forwarding to the server's /mcp endpoint.
     /// For MCP clients that launch a command, e.g. `trailhead --as claude mcp`.
     Mcp,
@@ -319,6 +322,9 @@ pub(crate) enum AgentCmd {
         /// Requests per minute the token may make.
         #[arg(long)]
         rate_limit: Option<i64>,
+        /// Print only the token instead of saving it, to hand to another machine's `trailhead login`.
+        #[arg(long)]
+        print_token: bool,
     },
     /// Revoke an agent and every sub-agent under it.
     Revoke {

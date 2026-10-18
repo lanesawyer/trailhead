@@ -2,7 +2,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::Instance;
+use common::{Instance, output};
 
 #[test]
 fn auto_start_stop_and_restart_on_new_binary() {
@@ -38,7 +38,7 @@ fn stop_refuses_a_server_for_another_data_dir() {
     let a = Instance::new();
     a.stdout(&["whoami"]);
     let b = Instance::new();
-    let out = b.command().args(["--url", &a.url, "server", "stop"]).output().unwrap();
+    let out = output(b.command().args(["--url", &a.url, "server", "stop"]));
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to stop it"));
     assert!(a.pid().is_some(), "a's server should still be running");
@@ -52,8 +52,7 @@ fn a_tunnelled_server_is_used_but_never_managed_or_replaced() {
     let added: serde_json::Value = serde_json::from_str(&a.stdout(&["--json", "agent", "add", "laptop"])).unwrap();
     let secret = added["secret"].as_str().unwrap();
     let b = Instance::new();
-    let remote =
-        |args: &[&str]| b.command().args(["--url", &a.url]).args(args).env("TRAILHEAD_TOKEN", secret).output().unwrap();
+    let remote = |args: &[&str]| output(b.command().args(["--url", &a.url]).args(args).env("TRAILHEAD_TOKEN", secret));
 
     let out = remote(&["whoami"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -75,10 +74,38 @@ fn a_tunnelled_server_is_used_but_never_managed_or_replaced() {
 
     // Unless asked to, which makes the port b's own from then on.
     assert!(remote(&["server", "start"]).status.success());
-    let out = b.command().args(["--url", &a.url, "whoami"]).output().unwrap();
+    let out = output(b.command().args(["--url", &a.url, "whoami"]));
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(remote(&["server", "stop"]).status.success());
-    let out = b.command().args(["--url", &a.url, "whoami"]).output().unwrap();
+    let out = output(b.command().args(["--url", &a.url, "whoami"]));
     assert!(out.status.success(), "b's own server should auto-start again");
-    assert!(b.command().args(["--url", &a.url, "server", "stop"]).output().unwrap().status.success());
+    assert!(output(b.command().args(["--url", &a.url, "server", "stop"])).status.success());
+}
+
+#[test]
+fn another_machine_logs_in_with_a_printed_token() {
+    let a = Instance::new();
+    let secret = a.stdout(&["agent", "add", "laptop", "--print-token"]).trim().to_string();
+    assert!(secret.starts_with("th_"), "{secret}");
+    assert!(!a.dir.path().join("config/agents/laptop").exists(), "--print-token doesn't save");
+
+    let b = Instance::new();
+    let remote = |args: &[&str]| output(b.command().args(["--url", &a.url]).args(args));
+    let out = remote(&["whoami"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("login"), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let pasted = b.dir.path().join("pasted");
+    std::fs::write(&pasted, format!("{secret}\n")).unwrap();
+    let out = output(b.command().args(["--url", &a.url, "login"]).stdin(std::fs::File::open(&pasted).unwrap()));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("logged in as agent laptop"));
+
+    let out = remote(&["--as", "laptop", "whoami"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("laptop"));
+    // Saved under a's instance, so b's own server and its tokens are untouched.
+    let instance = std::fs::read_to_string(a.dir.path().join("data/instance")).unwrap();
+    assert!(b.dir.path().join("config/servers").join(instance.trim()).join("agents/laptop").exists());
+    assert!(!b.dir.path().join("config/agents/laptop").exists());
 }

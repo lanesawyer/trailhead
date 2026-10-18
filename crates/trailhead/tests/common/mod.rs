@@ -48,17 +48,7 @@ impl Instance {
     }
 
     pub fn run(&self, args: &[&str]) -> Output {
-        // Tests copy the binary while other threads fork, and a fork can briefly
-        // hold the fresh copy open for writing, so exec fails with ETXTBSY.
-        for _ in 0..50 {
-            match self.command().args(args).output() {
-                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                    std::thread::sleep(std::time::Duration::from_millis(20))
-                }
-                r => return r.unwrap(),
-            }
-        }
-        panic!("{} stayed busy", self.exe.display())
+        output(self.command().args(args))
     }
 
     pub fn stdout(&self, args: &[&str]) -> String {
@@ -71,6 +61,20 @@ impl Instance {
         let v: serde_json::Value = serde_json::from_str(&self.stdout(&["--json", "server", "status"])).unwrap();
         v["pid"].as_u64().map(|p| p.to_string())
     }
+}
+
+/// Runs `cmd` to completion. Tests copy the binary while other threads fork, and a
+/// fork can briefly hold the fresh copy open for writing, so exec fails with ETXTBSY.
+pub fn output(cmd: &mut Command) -> Output {
+    for _ in 0..50 {
+        match cmd.output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            r => return r.unwrap(),
+        }
+    }
+    panic!("{:?} stayed busy", cmd.get_program())
 }
 
 impl Drop for Instance {
