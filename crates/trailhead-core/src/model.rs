@@ -157,8 +157,15 @@ pub struct Task {
     pub status: Status,
     /// 1 (urgent) to 4 (low).
     pub priority: i64,
+    /// The day the task is due (`YYYY-MM-DD`). Without `due_at`, it's due by the end of
+    /// that day in `due_tz`.
+    #[serde(default, with = "iso_date::option")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Date))]
+    pub due_on: Option<Date>,
+    /// An optional time on `due_on` it's due by, e.g. 5pm.
     #[serde(with = "time::serde::rfc3339::option")]
     pub due_at: Option<OffsetDateTime>,
+    /// The IANA zone the deadline was set in; it decides the day and when the day ends.
     pub due_tz: Option<String>,
     /// The day the task is planned to be worked (`YYYY-MM-DD`), separate from its due date.
     #[serde(default, with = "iso_date::option")]

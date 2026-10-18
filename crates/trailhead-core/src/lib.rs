@@ -18,6 +18,7 @@ mod tasks;
 mod tokens;
 mod undo;
 mod webhooks;
+mod when;
 
 pub use claims::{ClaimResult, HeldClaim, NamedClaim};
 pub use comments::NewComment;

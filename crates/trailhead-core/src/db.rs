@@ -21,6 +21,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (11, "claims_without_expiry", include_str!("../migrations/0011_claims_without_expiry.sql")),
     (12, "scheduled_on", include_str!("../migrations/0012_scheduled_on.sql")),
     (13, "scheduled_at", include_str!("../migrations/0013_scheduled_at.sql")),
+    (14, "due_days", include_str!("../migrations/0014_due_days.sql")),
 ];
 
 pub(crate) async fn migrate(conn: &Connection) -> Result<()> {
@@ -36,12 +37,36 @@ pub(crate) async fn migrate(conn: &Connection) -> Result<()> {
         }
         let tx = conn.transaction().await?;
         tx.execute_batch(sql).await?;
+        if version == 14 {
+            backfill_due_days(&tx).await?;
+        }
         tx.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
             libsql::params![version, name, fmt_ts(OffsetDateTime::now_utc())],
         )
         .await?;
         tx.commit().await?;
+    }
+    Ok(())
+}
+
+/// Splits each existing deadline into a day and a time. A deadline at exactly
+/// 23:59:59 local is what a date-only `--due` used to store, so it becomes day-only.
+/// `due_by` keeps the old instant either way, so reminders don't fire again.
+async fn backfill_due_days(conn: &Connection) -> Result<()> {
+    let rows = conn.query("SELECT id, due_at, due_tz FROM tasks WHERE due_at IS NOT NULL", ()).await?;
+    let deadlines = collect(rows, |row| {
+        let at = get_opt_ts(row, 1)?.expect("filtered on due_at");
+        Ok((row.get::<String>(0)?, at, row.get::<Option<String>>(2)?))
+    })
+    .await?;
+    for (id, at, tz) in deadlines {
+        let (day, day_only) = crate::when::split_legacy_deadline(at, tz.as_deref())?;
+        conn.execute(
+            "UPDATE tasks SET due_on = ?1, due_by = due_at, due_at = CASE WHEN ?2 THEN NULL ELSE due_at END WHERE id = ?3",
+            libsql::params![day.to_string(), day_only, id],
+        )
+        .await?;
     }
     Ok(())
 }

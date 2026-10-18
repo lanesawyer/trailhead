@@ -109,8 +109,13 @@ pub(crate) struct CreateTask {
     #[serde(default)]
     description: String,
     priority: Option<i64>,
+    /// The day it's due. Optional when `due_at` is set.
+    #[schema(format = Date)]
+    due_on: Option<String>,
+    /// A time it's due by. Without one, it's due by the end of `due_on` in `due_tz`.
     #[schema(format = DateTime)]
     due_at: Option<String>,
+    /// IANA zone the deadline was set in; decides its day and when that day ends. Without one, UTC.
     due_tz: Option<String>,
     /// The day to work the task (`YYYY-MM-DD`), separate from its due date.
     /// Optional when `scheduled_at` is set.
@@ -147,6 +152,7 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
         title: b.title,
         description: b.description,
         priority: b.priority,
+        due_on: parse_opt_date(b.due_on.as_deref())?,
         due_at: parse_opt_time(b.due_at.as_deref())?,
         due_tz: b.due_tz,
         scheduled_on: parse_opt_date(b.scheduled_on.as_deref())?,
@@ -187,6 +193,11 @@ pub(crate) struct UpdateTask {
     description: Option<String>,
     status: Option<Status>,
     priority: Option<i64>,
+    /// A new day without `due_at` drops the time; `null` removes the deadline.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(format = Date)]
+    due_on: Option<Option<String>>,
+    /// Moves the day to match; `null` keeps the day without a time.
     #[serde(default, deserialize_with = "nullable")]
     #[schema(format = DateTime)]
     due_at: Option<Option<String>>,
@@ -232,6 +243,7 @@ pub(crate) async fn update_task(
         description: b.description,
         status: b.status,
         priority: b.priority,
+        due_on: b.due_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
         due_at: b.due_at.map(|d| parse_opt_time(d.as_deref())).transpose()?,
         due_tz: b.due_tz,
         scheduled_on: b.scheduled_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,

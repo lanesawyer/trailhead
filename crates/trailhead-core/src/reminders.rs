@@ -2,14 +2,14 @@ use libsql::Connection;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::db::{collect, fmt_ts, get_uuid};
+use crate::db::{collect, fmt_ts, get_opt_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::events::{EVENT_COLS, event_from_row};
 use crate::model::{Entity, Event, Task};
 use crate::store::{Ctx, EventIn, Store};
 use crate::tasks::{TASK_COLS, task_from_row};
 
-/// How long before `due_at` a `task.due_soon` reminder fires.
+/// How long before a deadline a `task.due_soon` reminder fires.
 pub const DEFAULT_REMINDER_WINDOW: Duration = Duration::hours(24);
 
 pub const DUE_SOON: &str = "task.due_soon";
@@ -23,30 +23,39 @@ pub(crate) fn is_notification(kind: &str) -> bool {
 /// SQL condition on `events.kind` that excludes notifications.
 pub(crate) const NOT_NOTIFICATION_SQL: &str = "kind NOT IN ('task.due_soon', 'task.overdue')";
 
-/// Open tasks whose reminder is due and hasn't fired for their current `due_at`,
-/// with the reminder kind. Only `task.overdue` fires once the due date has passed,
+/// Open tasks whose reminder is due and hasn't fired for their current deadline,
+/// with that deadline and the reminder kind. Only `task.overdue` fires once the due date has passed,
 /// so a task first seen late doesn't get both.
-async fn pending(conn: &Connection, ws: Uuid, now: OffsetDateTime, window: Duration) -> Result<Vec<(Task, String)>> {
+async fn pending(
+    conn: &Connection,
+    ws: Uuid,
+    now: OffsetDateTime,
+    window: Duration,
+) -> Result<Vec<(Task, OffsetDateTime, String)>> {
     let rows = conn
         .query(
             &format!(
-                "SELECT {TASK_COLS}, kind FROM (
-                     SELECT t.*, CASE WHEN t.due_at <= ?2 THEN '{OVERDUE}' ELSE '{DUE_SOON}' END AS kind
+                "SELECT {TASK_COLS}, due_by, kind FROM (
+                     SELECT t.*, CASE WHEN t.due_by <= ?2 THEN '{OVERDUE}' ELSE '{DUE_SOON}' END AS kind
                      FROM tasks t
-                     WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND t.due_at IS NOT NULL
-                       AND t.due_at <= ?3 AND t.status NOT IN ('done', 'cancelled')
+                     WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND t.due_by IS NOT NULL
+                       AND t.due_by <= ?3 AND t.status NOT IN ('done', 'cancelled')
                        AND t.project_id IN (SELECT id FROM projects WHERE deleted_at IS NULL AND status = 'active')
                  ) c
                  WHERE NOT EXISTS (
-                     SELECT 1 FROM reminders_sent r WHERE r.task_id = c.id AND r.kind = c.kind AND r.due_at = c.due_at
+                     SELECT 1 FROM reminders_sent r WHERE r.task_id = c.id AND r.kind = c.kind AND r.due_at = c.due_by
                  )
-                 ORDER BY due_at, id"
+                 ORDER BY due_by, id"
             ),
             libsql::params![ws.to_string(), fmt_ts(now), fmt_ts(now + window)],
         )
         .await?;
-    let kind = TASK_COLS.split(", ").count() as i32;
-    collect(rows, |row| Ok((task_from_row(row)?, row.get::<String>(kind)?))).await
+    let due_by = TASK_COLS.split(", ").count() as i32;
+    collect(rows, |row| {
+        let at = get_opt_ts(row, due_by)?.expect("filtered on due_by");
+        Ok((task_from_row(row)?, at, row.get::<String>(due_by + 1)?))
+    })
+    .await
 }
 
 /// The workspace's first user, who reminders are attributed to.
@@ -76,7 +85,7 @@ impl Store {
             }
             let owner = owner(&tx.conn, ctx.workspace_id).await?;
             let mut ids = Vec::with_capacity(due.len());
-            for (task, kind) in &due {
+            for (task, due_by, kind) in &due {
                 let snapshot = serde_json::to_value(task)?;
                 let id = tx
                     .emit(EventIn {
@@ -90,13 +99,12 @@ impl Store {
                         actor: Some((owner, owner)),
                     })
                     .await?;
-                let due_at = task.due_at.expect("pending tasks have a due date");
                 tx.conn
                     .execute(
                         "INSERT INTO reminders_sent (task_id, kind, due_at, event_id, sent_at) VALUES (?1, ?2, ?3, ?4, ?5)
                          ON CONFLICT (task_id, kind) DO UPDATE SET due_at = excluded.due_at,
                              event_id = excluded.event_id, sent_at = excluded.sent_at",
-                        libsql::params![task.id.to_string(), kind.as_str(), fmt_ts(due_at), id, tx.now_str()],
+                        libsql::params![task.id.to_string(), kind.as_str(), fmt_ts(*due_by), id, tx.now_str()],
                     )
                     .await?;
                 ids.push(id);

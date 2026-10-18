@@ -53,6 +53,15 @@ pub fn lease(claim: &Value) -> String {
     }
 }
 
+/// `<field>_at` shown with `time`, else the `<field>_on` day.
+pub fn when(t: &Value, field: &str, time: fn(&str) -> String) -> Option<String> {
+    match (t[format!("{field}_at")].as_str(), t[format!("{field}_on")].as_str()) {
+        (Some(at), _) => Some(time(at)),
+        (None, Some(day)) => Some(day.to_string()),
+        _ => None,
+    }
+}
+
 fn local_minute(ts: &str) -> String {
     match ts.parse::<jiff::Timestamp>() {
         Ok(t) => t.to_zoned(local_tz().clone()).strftime("%Y-%m-%d %H:%M").to_string(),
@@ -60,22 +69,13 @@ fn local_minute(ts: &str) -> String {
     }
 }
 
-fn short_date(ts: &str) -> String {
-    match ts.parse::<jiff::Timestamp>() {
-        Ok(t) => t.to_zoned(local_tz().clone()).strftime("%Y-%m-%d").to_string(),
-        Err(_) => ts.to_string(),
-    }
-}
-
 pub fn task_line(t: &Value) -> String {
     let mut line = format!("{:<10} {:<11} p{}  {}", s(t, "key"), s(t, "status"), t["priority"], s(t, "title"));
-    match (t["scheduled_at"].as_str(), t["scheduled_on"].as_str()) {
-        (Some(at), _) => line.push_str(&format!("  (on {})", local_minute(at))),
-        (None, Some(day)) => line.push_str(&format!("  (on {day})")),
-        _ => {}
+    if let Some(w) = when(t, "scheduled", local_minute) {
+        line.push_str(&format!("  (on {w})"));
     }
-    if let Some(due) = t["due_at"].as_str() {
-        line.push_str(&format!("  (due {})", short_date(due)));
+    if let Some(w) = when(t, "due", local_minute) {
+        line.push_str(&format!("  (due {w})"));
     }
     line
 }

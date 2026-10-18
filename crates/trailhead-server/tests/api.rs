@@ -172,8 +172,19 @@ async fn nullable_fields_clear_on_null() {
     .await;
     let r = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"title": "still due"}))).await;
     assert_eq!(r.body["due_at"], "2026-11-01T12:00:00Z");
+    assert_eq!(r.body["due_on"], "2026-11-01");
     let r = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"due_at": null}))).await;
     assert!(r.body["due_at"].is_null());
+    assert_eq!(r.body["due_on"], "2026-11-01");
+    let r = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"due_on": null}))).await;
+    assert!(r.body["due_on"].is_null());
+    let day_only = json!({"due_on": "2026-11-01", "due_tz": "America/Los_Angeles"});
+    let r = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(day_only)).await;
+    assert_eq!((&r.body["due_on"], &r.body["due_at"]), (&json!("2026-11-01"), &Value::Null));
+    let r = api.as_human("GET", "/v1/tasks?due_before=2026-11-02T06:59:00Z&fields=key", None).await;
+    assert_eq!(r.body, json!([]));
+    let r = api.as_human("GET", "/v1/tasks?due_before=2026-11-02T08:00:00Z&fields=key", None).await;
+    assert_eq!(r.body, json!([{"key": "AUTH-1"}]));
     let r = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"status": "bogus"}))).await;
     assert!(r.status.is_client_error());
 }

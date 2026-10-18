@@ -20,8 +20,8 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::{Date, OffsetDateTime};
 use trailhead_core::{
     Claim, Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewProject, NewTask, Project, ProjectPatch,
     ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch, TaskSort, idempotency_fingerprint,
@@ -95,10 +95,6 @@ macro_rules! attempt {
     };
 }
 
-fn date(t: OffsetDateTime) -> String {
-    t.format(&Rfc3339).map(|s| s[..10].to_string()).unwrap_or_default()
-}
-
 /// `2026-10-17 13:00 PDT` in the zone it was planned in, else at UTC.
 fn local_time(t: OffsetDateTime, tz: Option<&str>) -> String {
     let zone = tz.and_then(|z| jiff::tz::TimeZone::get(z).ok()).unwrap_or(jiff::tz::TimeZone::UTC);
@@ -108,15 +104,30 @@ fn local_time(t: OffsetDateTime, tz: Option<&str>) -> String {
     }
 }
 
+/// A day, or a day and time: `2026-10-17` or `2026-10-17 13:00 PDT`.
+fn when(on: Option<Date>, at: Option<OffsetDateTime>, tz: Option<&str>) -> Option<String> {
+    match (at, on) {
+        (Some(at), _) => Some(local_time(at, tz)),
+        (None, Some(day)) => Some(day.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// An update argument where an empty string clears the field.
+fn clearable<T>(
+    s: Option<&str>,
+    parse: impl Fn(&str) -> trailhead_core::Result<T>,
+) -> trailhead_core::Result<Option<Option<T>>> {
+    s.map(str::trim).map(|s| (!s.is_empty()).then(|| parse(s)).transpose()).transpose()
+}
+
 fn task_line(t: &Task) -> String {
     let mut line = format!("{} {} p{} v{} {}", t.key, t.status, t.priority, t.version, t.title);
-    match (t.scheduled_on, t.scheduled_at) {
-        (_, Some(at)) => line.push_str(&format!(" (scheduled {})", local_time(at, t.scheduled_tz.as_deref()))),
-        (Some(day), None) => line.push_str(&format!(" (scheduled {day})")),
-        (None, None) => {}
+    if let Some(w) = when(t.scheduled_on, t.scheduled_at, t.scheduled_tz.as_deref()) {
+        line.push_str(&format!(" (scheduled {w})"));
     }
-    if let Some(due) = t.due_at {
-        line.push_str(&format!(" (due {})", date(due)));
+    if let Some(w) = when(t.due_on, t.due_at, t.due_tz.as_deref()) {
+        line.push_str(&format!(" (due {w})"));
     }
     line
 }
@@ -244,8 +255,13 @@ pub struct CreateArgs {
     /// Task keys this one blocks. To get help on your own task, create a subtask that blocks it.
     #[serde(default)]
     blocks: Vec<String>,
-    /// RFC 3339 timestamp: the deadline.
+    /// YYYY-MM-DD: the day it's due, by the end of that day.
+    due_on: Option<String>,
+    /// RFC 3339 timestamp with the local offset, e.g. 2026-10-24T17:00:00-07:00: a time it's
+    /// due by. Sets the day too; due_on can be left out.
     due_at: Option<String>,
+    /// IANA zone for the deadline, e.g. America/Los_Angeles. Decides when a due day ends.
+    due_tz: Option<String>,
     /// YYYY-MM-DD: the day to work on it, separate from the deadline.
     scheduled_on: Option<String>,
     /// RFC 3339 timestamp with the local offset, e.g. 2026-10-17T13:00:00-07:00: a time
@@ -270,6 +286,13 @@ pub struct UpdateArgs {
     /// open, in_progress, needs_input, in_review, done or cancelled.
     status: Option<String>,
     priority: Option<i64>,
+    /// YYYY-MM-DD: the day it's due, without a time. An empty string removes the deadline.
+    due_on: Option<String>,
+    /// RFC 3339 timestamp with the local offset: a time it's due by, moving the day to
+    /// match. An empty string drops the time and keeps the day.
+    due_at: Option<String>,
+    /// IANA zone for the deadline, e.g. America/Los_Angeles.
+    due_tz: Option<String>,
     /// YYYY-MM-DD: the day to work on it, without a time. An empty string unschedules it.
     scheduled_on: Option<String>,
     /// RFC 3339 timestamp with the local offset: a time to work on it, moving the day to
@@ -399,7 +422,9 @@ impl TrailheadMcp {
             title: a.title,
             description: a.description.unwrap_or_default(),
             priority: a.priority,
+            due_on: attempt!(parse_opt_date(a.due_on.as_deref())),
             due_at,
+            due_tz: a.due_tz,
             scheduled_on,
             scheduled_at,
             scheduled_tz: a.scheduled_tz,
@@ -559,18 +584,16 @@ impl TrailheadMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let status = attempt!(a.status.as_deref().map(str::parse::<Status>).transpose());
-        let blank = |s: Option<&str>| s.map(str::trim).map(|s| (!s.is_empty()).then(|| s.to_string()));
-        let scheduled_on =
-            attempt!(blank(a.scheduled_on.as_deref()).map(|d| d.map(|d| parse_date(&d)).transpose()).transpose());
-        let scheduled_at =
-            attempt!(blank(a.scheduled_at.as_deref()).map(|t| t.map(|t| parse_time(&t)).transpose()).transpose());
         let patch = TaskPatch {
             title: a.title,
             description: a.description,
             status,
             priority: a.priority,
-            scheduled_on,
-            scheduled_at,
+            due_on: attempt!(clearable(a.due_on.as_deref(), parse_date)),
+            due_at: attempt!(clearable(a.due_at.as_deref(), parse_time)),
+            due_tz: a.due_tz.map(Some),
+            scheduled_on: attempt!(clearable(a.scheduled_on.as_deref(), parse_date)),
+            scheduled_at: attempt!(clearable(a.scheduled_at.as_deref(), parse_time)),
             scheduled_tz: a.scheduled_tz.map(Some),
             ..Default::default()
         };

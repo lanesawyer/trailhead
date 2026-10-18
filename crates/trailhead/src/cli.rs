@@ -79,10 +79,11 @@ pub(crate) enum Cmd {
         priority: Option<i64>,
         #[arg(long)]
         parent: Option<String>,
-        /// The deadline: YYYY-MM-DD or an RFC 3339 timestamp.
-        #[arg(long)]
-        due: Option<String>,
-        /// When to work on it: a day (YYYY-MM-DD, today, tomorrow), optionally with a
+        /// The deadline: a day (YYYY-MM-DD, today, tomorrow, fri), optionally with a time
+        /// (fri 5pm), a time alone for today, or an RFC 3339 timestamp.
+        #[arg(long, num_args = 1..=3)]
+        due: Option<Vec<String>>,
+        /// When to work on it: a day (YYYY-MM-DD, today, tomorrow, fri), optionally with a
         /// time (today 1pm, 2026-10-20 13:30), or a time alone for today.
         #[arg(long, num_args = 1..=3)]
         on: Option<Vec<String>>,
@@ -102,9 +103,9 @@ pub(crate) enum Cmd {
         description: Option<String>,
         #[arg(short = 'P', long)]
         priority: Option<i64>,
-        /// YYYY-MM-DD, RFC 3339, or "none".
-        #[arg(long)]
-        due: Option<String>,
+        /// The deadline, as for `add --due`, or "none".
+        #[arg(long, num_args = 1..=3)]
+        due: Option<Vec<String>>,
         /// When to work on it, as for `add --on`, or "none".
         #[arg(long, num_args = 1..=3)]
         on: Option<Vec<String>>,

@@ -633,6 +633,42 @@ async fn scheduled_times_set_the_day_in_their_zone() {
 }
 
 #[tokio::test]
+async fn deadlines_are_a_day_with_an_optional_time() {
+    use time::macros::{date, datetime};
+    let env = Env::new().await;
+    let la = Some("America/Los_Angeles".to_string());
+    let new = |title: &str| NewTask { title: title.into(), ..Default::default() };
+    let friday = Some(date!(2026 - 10 - 23));
+    let day_only = env.task_with(NewTask { due_on: friday, due_tz: la.clone(), ..new("by friday") }).await;
+    assert_eq!((day_only.due_on, day_only.due_at), (friday, None));
+    let five = datetime!(2026-10-23 17:00 -7);
+    let timed = env.task_with(NewTask { due_at: Some(five), due_tz: la.clone(), ..new("friday 5pm") }).await;
+    assert_eq!((timed.due_on, timed.due_at), (friday, Some(five)));
+
+    // A day-only deadline lasts to the end of its day in its zone.
+    let keys = |f: TaskFilter| async {
+        env.store.list_tasks(&env.human, f).await.unwrap().into_iter().map(|t| t.key).collect::<Vec<_>>()
+    };
+    let before = |t| TaskFilter { due_before: Some(t), ..Default::default() };
+    assert_eq!(keys(before(datetime!(2026-10-23 18:00 -7))).await, vec![timed.key.clone()]);
+    assert_eq!(keys(before(datetime!(2026-10-24 0:00 -7))).await, vec![timed.key.clone(), day_only.key.clone()]);
+    assert_eq!(keys(TaskFilter::default()).await, vec![timed.key.clone(), day_only.key.clone()]);
+
+    let zone_alone = NewTask { project: "AUTH".into(), due_tz: la.clone(), ..new("zone") };
+    assert!(matches!(env.store.create_task(&env.human, zone_alone).await, Err(Error::Invalid(_))));
+
+    let untimed = TaskPatch { due_at: Some(None), ..Default::default() };
+    let t = env.store.update_task(&env.human, &timed.key, untimed, None).await.unwrap();
+    assert_eq!((t.due_on, t.due_at, t.due_tz.as_deref()), (friday, None, Some("America/Los_Angeles")));
+    let moved = TaskPatch { due_on: Some(Some(date!(2026 - 10 - 26))), ..Default::default() };
+    let t = env.store.update_task(&env.human, &timed.key, moved, None).await.unwrap();
+    assert_eq!((t.due_on, t.due_at), (Some(date!(2026 - 10 - 26)), None));
+    let cleared = TaskPatch { due_on: Some(None), ..Default::default() };
+    let t = env.store.update_task(&env.human, &timed.key, cleared, None).await.unwrap();
+    assert_eq!((t.due_on, t.due_at, t.due_tz), (None, None, None));
+}
+
+#[tokio::test]
 async fn scheduled_sort_puts_timed_tasks_in_order_within_a_day() {
     use time::macros::{date, datetime};
     let env = Env::new().await;
@@ -659,6 +695,7 @@ fn snapshots_from_before_scheduling_still_load() {
         description: String::new(),
         status: Status::Open,
         priority: 3,
+        due_on: None,
         due_at: None,
         due_tz: None,
         scheduled_on: Some(time::macros::date!(2026 - 10 - 17)),
@@ -676,7 +713,7 @@ fn snapshots_from_before_scheduling_still_load() {
     })
     .unwrap();
     assert_eq!(v["scheduled_on"], "2026-10-17");
-    for k in ["scheduled_on", "scheduled_at", "scheduled_tz"] {
+    for k in ["scheduled_on", "scheduled_at", "scheduled_tz", "due_on"] {
         v.as_object_mut().unwrap().remove(k);
     }
     let old: trailhead_core::Task = serde_json::from_value(v).unwrap();

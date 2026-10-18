@@ -36,12 +36,33 @@ fn local_today() -> jiff::civil::Date {
     jiff::Zoned::now().with_time_zone(output::local_tz().clone()).date()
 }
 
-/// The schedule fields for `--on`: a day, a day and a time, or a time today.
-fn parse_schedule(words: &[String]) -> Result<Value> {
-    parse_schedule_in(&words.join(" "), local_today(), output::local_tz())
+/// Fields for `--on` (`scheduled_*`) or `--due` (`due_*`): a day, a day and a time,
+/// a time today, or an RFC 3339 timestamp, in the local zone.
+fn parse_day_time(field: Field, words: &[String]) -> Result<Value> {
+    parse_day_time_in(field, &words.join(" "), local_today(), output::local_tz())
 }
 
-fn parse_schedule_in(s: &str, today: jiff::civil::Date, tz: &jiff::tz::TimeZone) -> Result<Value> {
+#[derive(Clone, Copy)]
+enum Field {
+    Scheduled,
+    Due,
+}
+
+fn parse_day_time_in(field: Field, s: &str, today: jiff::civil::Date, tz: &jiff::tz::TimeZone) -> Result<Value> {
+    let f = match field {
+        Field::Scheduled => "scheduled",
+        Field::Due => "due",
+    };
+    let at = |at: jiff::Zoned| {
+        json!({
+            format!("{f}_on"): at.date().to_string(),
+            format!("{f}_at"): at.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+            format!("{f}_tz"): tz.iana_name(),
+        })
+    };
+    if let Ok(ts) = s.trim().parse::<jiff::Timestamp>() {
+        return Ok(at(ts.to_zoned(tz.clone())));
+    }
     let lower = s.to_lowercase();
     let mut words: Vec<&str> = lower.split_whitespace().filter(|w| *w != "at").collect();
     let day = match words.first().map(|w| parse_day(w, today)) {
@@ -51,15 +72,15 @@ fn parse_schedule_in(s: &str, today: jiff::civil::Date, tz: &jiff::tz::TimeZone)
         }
         _ => today,
     };
-    if words.is_empty() {
-        return Ok(json!({"scheduled_on": day.to_string()}));
+    if !words.is_empty() {
+        return Ok(at(day.to_datetime(parse_clock(&words.concat())?).to_zoned(tz.clone())?));
     }
-    let at = day.to_datetime(parse_clock(&words.concat())?).to_zoned(tz.clone())?;
-    Ok(json!({
-        "scheduled_on": at.date().to_string(),
-        "scheduled_at": at.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string(),
-        "scheduled_tz": tz.iana_name(),
-    }))
+    let mut out = json!({ format!("{f}_on"): day.to_string() });
+    // A day-only deadline ends at midnight in a zone; a scheduled day has no instant.
+    if let (Field::Due, Some(name)) = (field, tz.iana_name()) {
+        out["due_tz"] = json!(name);
+    }
+    Ok(out)
 }
 
 fn merge(body: &mut Value, fields: Value) {
@@ -68,11 +89,27 @@ fn merge(body: &mut Value, fields: Value) {
     }
 }
 
+/// `YYYY-MM-DD`, `today`, `tomorrow`, or a weekday (`fri`, `friday`): the next one,
+/// counting today.
 fn parse_day(s: &str, today: jiff::civil::Date) -> Result<jiff::civil::Date> {
+    use jiff::civil::Weekday::*;
+    let weekday = match s {
+        "mon" | "monday" => Some(Monday),
+        "tue" | "tues" | "tuesday" => Some(Tuesday),
+        "wed" | "wednesday" => Some(Wednesday),
+        "thu" | "thur" | "thurs" | "thursday" => Some(Thursday),
+        "fri" | "friday" => Some(Friday),
+        "sat" | "saturday" => Some(Saturday),
+        "sun" | "sunday" => Some(Sunday),
+        _ => None,
+    };
+    if let Some(w) = weekday {
+        return Ok(today.checked_add(jiff::Span::new().days(today.weekday().until(w)))?);
+    }
     match s {
         "today" => Ok(today),
         "tomorrow" => Ok(today.tomorrow()?),
-        _ => s.parse().with_context(|| format!("{s:?} isn't YYYY-MM-DD, today or tomorrow")),
+        _ => s.parse().with_context(|| format!("{s:?} isn't YYYY-MM-DD, today, tomorrow or a weekday")),
     }
 }
 
@@ -97,11 +134,6 @@ fn parse_clock(s: &str) -> Result<jiff::civil::Time> {
         hour = hour % 12 + if pm { 12 } else { 0 };
     }
     jiff::civil::Time::new(hour, minute, 0, 0).map_err(|_| bad())
-}
-
-/// The local IANA zone name, e.g. `America/Los_Angeles`, if the system has one.
-fn local_time_zone() -> Option<String> {
-    output::local_tz().iana_name().map(String::from)
 }
 
 fn read_brief(brief: Option<String>, file: Option<PathBuf>) -> Result<Option<String>> {
@@ -233,13 +265,14 @@ async fn run(cli: Cli) -> Result<()> {
                 "description": description.unwrap_or_default(),
                 "priority": priority,
                 "parent": parent,
-                "due_at": due.as_deref().map(parse_when).transpose()?,
-                "due_tz": due.as_ref().and_then(|_| local_time_zone()),
                 "blocked_by": after,
                 "blocks": blocks,
             });
+            if let Some(due) = due {
+                merge(&mut body, parse_day_time(Field::Due, &due)?);
+            }
             if let Some(on) = on {
-                merge(&mut body, parse_schedule(&on)?);
+                merge(&mut body, parse_day_time(Field::Scheduled, &on)?);
             }
             show(c.post("tasks", body).await?, &task_line);
         }
@@ -255,18 +288,17 @@ async fn run(cli: Cli) -> Result<()> {
                 body["priority"] = json!(p);
             }
             if let Some(d) = due {
-                if d == "none" {
-                    body["due_at"] = Value::Null;
+                if d == ["none"] {
+                    body["due_on"] = Value::Null;
                 } else {
-                    body["due_at"] = json!(parse_when(&d)?);
-                    body["due_tz"] = json!(local_time_zone());
+                    merge(&mut body, parse_day_time(Field::Due, &d)?);
                 }
             }
             if let Some(d) = on {
                 if d == ["none"] {
                     body["scheduled_on"] = Value::Null;
                 } else {
-                    merge(&mut body, parse_schedule(&d)?);
+                    merge(&mut body, parse_day_time(Field::Scheduled, &d)?);
                 }
             }
             if let Some(st) = status {
@@ -620,13 +652,11 @@ async fn print_detail(c: &Client, v: &Value) -> Result<()> {
     let t = &v["task"];
     println!("{}  {}", s(t, "key"), s(t, "title"));
     let mut meta = vec![s(t, "status").to_string(), format!("p{}", t["priority"]), format!("v{}", t["version"])];
-    match (t["scheduled_at"].as_str(), t["scheduled_on"].as_str()) {
-        (Some(at), _) => meta.push(format!("scheduled {}", short_time(at))),
-        (None, Some(day)) => meta.push(format!("scheduled {day}")),
-        _ => {}
+    if let Some(w) = output::when(t, "scheduled", short_time) {
+        meta.push(format!("scheduled {w}"));
     }
-    if let Some(due) = t["due_at"].as_str() {
-        meta.push(format!("due {}", short_time(due)));
+    if let Some(w) = output::when(t, "due", short_time) {
+        meta.push(format!("due {w}"));
     }
     println!("{}", meta.join(" · "));
     if v["claim"].is_object() {
@@ -840,7 +870,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Cli, Cmd, WebhookCmd, parse_schedule_in, parse_when_in};
+    use super::{Cli, Cmd, Field, WebhookCmd, parse_day_time_in, parse_when_in};
 
     #[test]
     fn webhook_url_does_not_clobber_the_server_url() {
@@ -864,7 +894,7 @@ mod tests {
     fn schedules_are_a_day_with_an_optional_local_time() {
         let la = jiff::tz::TimeZone::get("America/Los_Angeles").unwrap();
         let today = jiff::civil::date(2026, 10, 31);
-        let on = |s| parse_schedule_in(s, today, &la);
+        let on = |s| parse_day_time_in(Field::Scheduled, s, today, &la);
         assert_eq!(on("today").unwrap(), json!({"scheduled_on": "2026-10-31"}));
         assert_eq!(on("tomorrow").unwrap(), json!({"scheduled_on": "2026-11-01"}));
         assert_eq!(on("2026-12-01").unwrap(), json!({"scheduled_on": "2026-12-01"}));
@@ -878,6 +908,25 @@ mod tests {
         assert_eq!(on("noon").unwrap(), at("2026-10-31", "2026-10-31T12:00:00-07:00"));
         assert!(on("13pm").is_err());
         assert!(on("next tuesday").is_err());
-        assert!(on("2026-12-01T00:00:00Z").is_err());
+    }
+
+    #[test]
+    fn deadlines_take_the_same_input_and_keep_a_zone_for_day_only() {
+        let la = jiff::tz::TimeZone::get("America/Los_Angeles").unwrap();
+        // A Saturday.
+        let today = jiff::civil::date(2026, 10, 31);
+        let due = |s| parse_day_time_in(Field::Due, s, today, &la).unwrap();
+        let day = |d: &str| json!({"due_on": d, "due_tz": "America/Los_Angeles"});
+        assert_eq!(due("fri"), day("2026-11-06"));
+        assert_eq!(due("saturday"), day("2026-10-31"));
+        assert_eq!(due("2026-12-01"), day("2026-12-01"));
+        assert_eq!(
+            due("friday 5pm"),
+            json!({"due_on": "2026-11-06", "due_at": "2026-11-06T17:00:00-08:00", "due_tz": "America/Los_Angeles"})
+        );
+        assert_eq!(
+            due("2026-11-01T12:00:00Z"),
+            json!({"due_on": "2026-11-01", "due_at": "2026-11-01T04:00:00-08:00", "due_tz": "America/Los_Angeles"})
+        );
     }
 }
