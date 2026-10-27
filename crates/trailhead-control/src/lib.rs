@@ -7,14 +7,19 @@ mod core_tracker;
 
 pub use core_tracker::{CoreTracker, METADATA_KEY};
 
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::sync::Notify;
+use tokio::task::{self, JoinSet};
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
     Compute, Daemon, Egress, Error, FactoryConfig, Labels, ModelProvider, PrRef, Profile, Result, Role, RunEvent,
-    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskSpec, Tracker, Usd, Verdict,
-    label, review_name, run_name,
+    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd,
+    Verdict, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -76,7 +81,87 @@ impl Factory {
         format!("factory/{}", task.key.0.to_ascii_lowercase())
     }
 
-    /// Starts runs for ready tasks, up to the repo's sandbox cap.
+    /// The control plane's main loop: reconcile, then keep up to the repo's cap of tasks running, checking for
+    /// ready work when `wake` fires (on tracker events) and every `poll`. On `shutdown` it stops starting runs
+    /// and abandons the ones in flight; the next boot's reconcile requeues them.
+    pub async fn run(
+        self: Arc<Self>,
+        wake: Arc<Notify>,
+        poll: Duration,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<()> {
+        let done = self.reconcile().await?;
+        tracing::info!(?done, "reconciled");
+        tokio::pin!(shutdown);
+        let mut running: JoinSet<Result<Outcome>> = JoinSet::new();
+        let mut keys: HashMap<task::Id, TaskKey> = HashMap::new();
+        let mut dirty = false;
+        loop {
+            if dirty {
+                dirty = false;
+                if let Err(e) = self.reconcile_except(&keys.values().cloned().collect()).await {
+                    tracing::warn!(error = %e, "reconcile failed");
+                }
+            }
+            if let Err(e) = self.start_ready(&mut running, &mut keys).await {
+                tracing::warn!(error = %e, "couldn't start ready tasks");
+            }
+            tokio::select! {
+                _ = &mut shutdown => break,
+                _ = wake.notified() => {}
+                _ = tokio::time::sleep(poll) => dirty = true,
+                Some(joined) = running.join_next_with_id() => match joined {
+                    Ok((id, Ok(outcome))) => {
+                        let key = keys.remove(&id);
+                        tracing::info!(task = ?key, ?outcome, "run finished");
+                    }
+                    Ok((id, Err(e))) => {
+                        let key = keys.remove(&id);
+                        tracing::warn!(task = ?key, error = %e, "run failed; reconciling");
+                        dirty = true;
+                    }
+                    Err(e) => {
+                        let key = keys.remove(&e.id());
+                        tracing::error!(task = ?key, error = %e, "run panicked; reconciling");
+                        dirty = true;
+                    }
+                },
+            }
+        }
+        running.shutdown().await;
+        Ok(())
+    }
+
+    async fn start_ready(
+        self: &Arc<Self>,
+        running: &mut JoinSet<Result<Outcome>>,
+        keys: &mut HashMap<task::Id, TaskKey>,
+    ) -> Result<()> {
+        let busy: HashSet<TaskKey> = keys.values().cloned().collect();
+        let mut workers = self.base_labels();
+        workers.insert(label::ROLE.into(), Role::Worker.as_str().into());
+        let others = self
+            .compute
+            .list(&workers)
+            .await?
+            .into_iter()
+            .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !busy.contains(&TaskKey(t.clone()))))
+            .count();
+        let room = self.config.repo.max_sandboxes.saturating_sub(keys.len() + others);
+        if room == 0 {
+            return Ok(());
+        }
+        let ready = self.tracker.ready(self.project(), room).await?;
+        for task in ready.into_iter().filter(|t| !busy.contains(&t.key)) {
+            let key = task.key.clone();
+            let factory = self.clone();
+            let handle = running.spawn(async move { factory.run_task(&task).await });
+            keys.insert(handle.id(), key);
+        }
+        Ok(())
+    }
+
+    /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
     pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
         let mut workers = self.base_labels();
         workers.insert(label::ROLE.into(), Role::Worker.as_str().into());
@@ -297,11 +382,20 @@ impl Factory {
     /// task accounts for, requeues tasks whose run was interrupted, and retries
     /// reviews that didn't finish.
     pub async fn reconcile(&self) -> Result<Reconciled> {
+        self.reconcile_except(&HashSet::new()).await
+    }
+
+    /// [`Factory::reconcile`], leaving alone the tasks this process is running right now.
+    pub async fn reconcile_except(&self, running: &HashSet<TaskKey>) -> Result<Reconciled> {
         let mut done = Reconciled::default();
         let live = self.compute.list(&self.base_labels()).await?;
-        let tasks = self.tracker.in_flight(self.project()).await?;
+        let tasks: Vec<Task> =
+            self.tracker.in_flight(self.project()).await?.into_iter().filter(|t| !running.contains(&t.key)).collect();
 
         for sandbox in &live {
+            if sandbox.labels.get(label::TASK).is_some_and(|t| running.contains(&TaskKey(t.clone()))) {
+                continue;
+            }
             let parked = tasks
                 .iter()
                 .any(|t| t.status == Status::NeedsInput && t.run.sandbox.as_deref() == Some(sandbox.name.as_str()));

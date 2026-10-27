@@ -45,15 +45,19 @@ struct Rig {
     daemon: Arc<LocalDaemon>,
 }
 
-/// One micro-dollar per token, so 1,000,000 tokens is $1.
 fn rig() -> Rig {
+    rig_with(CONFIG)
+}
+
+/// One micro-dollar per token, so 1,000,000 tokens is $1.
+fn rig_with(config: &str) -> Rig {
     let tracker = FakeTracker::new("factory");
     let compute = FakeCompute::new();
     let codehost = FakeCodeHost::new();
     let harness = Arc::new(ScriptedHarness::new());
     let daemon = Arc::new(LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone()));
     let factory = Factory {
-        config: FactoryConfig::parse(CONFIG).unwrap(),
+        config: FactoryConfig::parse(config).unwrap(),
         compute: Arc::new(compute.clone()),
         tracker: Arc::new(tracker.clone()),
         provider: Arc::new(FakeProvider::new(1)),
@@ -290,4 +294,74 @@ async fn a_silent_hung_agent_hits_the_wall_clock() {
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Parked { reason } if reason.contains("60 minutes")), "{:?}", ran[0].1);
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+fn two_at_a_time() -> Rig {
+    rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_sandboxes = 2"))
+}
+
+async fn until(what: &str, mut cond: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn run_loop_reconciles_then_works_the_queue_and_stops() {
+    let r = two_at_a_time();
+    live(&r.compute, "trail-99-a1", &TaskKey("TRAIL-99".into()), "worker").await;
+    let keys: Vec<TaskKey> = (1..=3).map(|i| r.tracker.add_task("TRAIL", &format!("task {i}"), "")).collect();
+    for _ in 0..3 {
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+    }
+
+    let factory = Arc::new(r.factory);
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let poll = std::time::Duration::from_millis(10);
+    let handle = tokio::spawn(factory.run(wake.clone(), poll, async {
+        let _ = stopped.await;
+    }));
+
+    let tracker = r.tracker.clone();
+    until("every task in review", || keys.iter().all(|k| tracker.task(k).status == Status::InReview)).await;
+    assert!(r.compute.sandboxes().is_empty(), "the orphan went at boot and runs cleaned up");
+
+    // New work is picked up on wake.
+    let late = r.tracker.add_task("TRAIL", "late", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "?".into() }));
+    wake.notify_one();
+    until("the late task to park", || tracker.task(&late).status == Status::NeedsInput).await;
+
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn run_loop_respects_the_sandbox_cap() {
+    let r = two_at_a_time();
+    for i in 1..=3 {
+        r.tracker.add_task("TRAIL", &format!("slow {i}"), "");
+        r.harness.push(Role::Worker, Script::new(changes()).hang());
+    }
+    let factory = Arc::new(r.factory);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle =
+        tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), std::time::Duration::from_millis(5), async {
+            let _ = stopped.await;
+        }));
+    let compute = r.compute.clone();
+    until("two sandboxes", || compute.sandboxes().len() == 2).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(r.compute.sandboxes().len(), 2, "never more than the cap");
+    assert_eq!(r.tracker.task(&TaskKey("TRAIL-3".into())).status, Status::Open);
+
+    // Shutdown abandons the runs; the next boot's reconcile requeues them.
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
 }
