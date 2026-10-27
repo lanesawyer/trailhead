@@ -15,7 +15,9 @@ use async_trait::async_trait;
 use reqwest::{Method, RequestBuilder, Response, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use trailhead_factory::{CheckpointId, Compute, Egress, Error, Labels, Result, Sandbox, SandboxId, SandboxSpec};
+use trailhead_factory::{
+    CheckpointId, Compute, Egress, Error, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec,
+};
 
 pub const API_URL: &str = "https://api.sprites.dev";
 
@@ -23,6 +25,9 @@ pub const API_URL: &str = "https://api.sprites.dev";
 pub const GATEWAY_DOMAIN: &str = "api.sprites.dev";
 
 const PAGE_SIZE: u32 = 500;
+
+/// How long `start` watches a new service's output for an early exit.
+const START_WATCH_SECS: u32 = 3;
 
 #[derive(Clone)]
 pub struct SpritesCompute {
@@ -159,6 +164,28 @@ impl Compute for SpritesCompute {
         self.stream(req).await.map(drop)
     }
 
+    /// Uploads the files, defines the program as a Sprites service (supervised, and restarted when the Sprite wakes),
+    /// and starts it. A program that exits within the first few seconds is an error carrying its output.
+    async fn start(&self, id: &SandboxId, program: &Program) -> Result<()> {
+        for file in &program.files {
+            let mut url = self.url(&[&id.0, "fs", "write"]);
+            url.query_pairs_mut()
+                .append_pair("path", &file.path)
+                .append_pair("mode", &format!("{:04o}", file.mode))
+                .append_pair("mkdir", "true");
+            let req = self.request(Method::PUT, url).header("content-type", "application/octet-stream");
+            ok(send(req.body(file.contents.clone())).await?).await?;
+        }
+        let service = json!({ "cmd": program.cmd, "args": program.args, "needs": [] });
+        let url = self.url(&[&id.0, "services", &program.name]);
+        ok(send(self.request(Method::PUT, url).json(&service)).await?).await?;
+
+        let mut url = self.url(&[&id.0, "services", &program.name, "start"]);
+        url.query_pairs_mut().append_pair("duration", &START_WATCH_SECS.to_string());
+        let body = ok(send(self.request(Method::POST, url)).await?).await?.text().await.map_err(http_err)?;
+        service_started(&program.name, &body)
+    }
+
     async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()> {
         let body = json!({ "rules": egress_rules(egress) });
         let req = self.request(Method::POST, self.url(&[&id.0, "policy", "network"])).json(&body);
@@ -182,6 +209,25 @@ impl Compute for SpritesCompute {
         }
         ok(res).await.map(drop)
     }
+}
+
+/// Reads a service start's NDJSON log: an `error` event or an `exit` fails it, with the output seen so far.
+fn service_started(name: &str, ndjson: &str) -> Result<()> {
+    let mut output = String::new();
+    for line in ndjson.lines().filter(|l| !l.trim().is_empty()) {
+        let event: Value = serde_json::from_str(line).map_err(|e| Error::Other(format!("{e}: {line}")))?;
+        let data = event["data"].as_str().unwrap_or_default();
+        match event["type"].as_str().unwrap_or_default() {
+            "stdout" | "stderr" => output.push_str(data),
+            "error" => return Err(Error::Other(format!("service {name}: {data}"))),
+            "exit" => {
+                let code = &event["exit_code"];
+                return Err(Error::Other(format!("service {name} exited ({code}): {}", output.trim())));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 pub fn encode_labels(labels: &Labels) -> Vec<String> {

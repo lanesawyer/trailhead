@@ -12,7 +12,9 @@ pub mod provider;
 pub mod tracker;
 
 pub use codehost::{CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, Repo};
-pub use compute::{CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Sandbox, SandboxId, SandboxSpec, label};
+pub use compute::{
+    CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
+};
 pub use config::{Budget, Checks, FactoryConfig, Gate, Profile, Role};
 pub use daemon::{CheckResult, Daemon, RunReport, RunRequest, RunResult};
 pub use harness::{EventSink, Feedback, Harness, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict, VerdictKind};

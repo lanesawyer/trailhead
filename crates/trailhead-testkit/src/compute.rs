@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use trailhead_factory::{CheckpointId, Compute, Egress, Error, Labels, Result, Sandbox, SandboxId, SandboxSpec};
+use trailhead_factory::{
+    CheckpointId, Compute, Egress, Error, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec,
+};
 
 #[derive(Debug, Clone)]
 struct Live {
@@ -10,6 +12,7 @@ struct Live {
     egress: Egress,
     checkpoints: Vec<(CheckpointId, String)>,
     restores: Vec<CheckpointId>,
+    programs: Vec<Program>,
 }
 
 #[derive(Clone, Default)]
@@ -47,6 +50,12 @@ impl FakeCompute {
         live.get(&SandboxId(name.into())).map(|l| l.restores.clone()).unwrap_or_default()
     }
 
+    /// Programs started in a sandbox, oldest first.
+    pub fn programs(&self, name: &str) -> Vec<Program> {
+        let live = self.live.lock().unwrap();
+        live.get(&SandboxId(name.into())).map(|l| l.programs.clone()).unwrap_or_default()
+    }
+
     fn with<T>(&self, id: &SandboxId, f: impl FnOnce(&mut Live) -> Result<T>) -> Result<T> {
         let mut live = self.live.lock().unwrap();
         let l = live.get_mut(id).ok_or_else(|| Error::NotFound(format!("sandbox {}", id.0)))?;
@@ -64,6 +73,7 @@ impl Compute for FakeCompute {
             egress: spec.egress.clone(),
             checkpoints: Vec::new(),
             restores: Vec::new(),
+            programs: Vec::new(),
         });
         Ok(entry.sandbox.clone())
     }
@@ -91,6 +101,14 @@ impl Compute for FakeCompute {
                 return Err(Error::NotFound(format!("checkpoint {}", cp.0)));
             }
             l.restores.push(cp.clone());
+            Ok(())
+        })
+    }
+
+    async fn start(&self, id: &SandboxId, program: &Program) -> Result<()> {
+        self.with(id, |l| {
+            l.programs.retain(|p| p.name != program.name);
+            l.programs.push(program.clone());
             Ok(())
         })
     }

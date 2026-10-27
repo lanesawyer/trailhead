@@ -4,14 +4,15 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 use trailhead_compute_sprites::SpritesCompute;
-use trailhead_factory::{CheckpointId, Compute, Egress, Error, Labels, SandboxId, SandboxSpec};
+use trailhead_factory::{CheckpointId, Compute, Egress, Error, Labels, Program, SandboxFile, SandboxId, SandboxSpec};
 
 const TOKEN: &str = "test-token";
 const PAGE: usize = 2;
@@ -22,6 +23,9 @@ struct Sprite {
     policy: Value,
     checkpoints: Vec<String>,
     restores: Vec<String>,
+    files: BTreeMap<String, (Vec<u8>, String)>,
+    services: BTreeMap<String, Value>,
+    started: Vec<String>,
 }
 
 #[derive(Default)]
@@ -142,6 +146,51 @@ async fn restore(State(api): State<Shared>, Path((name, cp)): Path<(String, Stri
     ])
 }
 
+async fn write_file(
+    State(api): State<Shared>,
+    Path(name): Path<String>,
+    Query(q): Query<BTreeMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    let mut api = api.lock().unwrap();
+    let Some(s) = api.sprites.get_mut(&name) else { return StatusCode::NOT_FOUND.into_response() };
+    s.files.insert(q["path"].clone(), (body.to_vec(), q["mode"].clone()));
+    Json(json!({ "path": q["path"], "size": body.len() })).into_response()
+}
+
+async fn put_service(
+    State(api): State<Shared>,
+    Path((name, svc)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut api = api.lock().unwrap();
+    let Some(s) = api.sprites.get_mut(&name) else { return StatusCode::NOT_FOUND.into_response() };
+    s.services.insert(svc.clone(), body.clone());
+    Json(json!({ "name": svc, "cmd": body["cmd"] })).into_response()
+}
+
+/// A service whose command is `false` exits straight away, like a daemon that can't start.
+async fn start_service(State(api): State<Shared>, Path((name, svc)): Path<(String, String)>) -> Response {
+    let mut api = api.lock().unwrap();
+    let Some(s) = api.sprites.get_mut(&name) else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(def) = s.services.get(&svc).cloned() else { return StatusCode::NOT_FOUND.into_response() };
+    s.started.push(svc);
+    let started = json!({ "type": "started", "timestamp": 1 });
+    if def["cmd"] == "false" {
+        ndjson(&[
+            started,
+            json!({ "type": "stderr", "data": "no secrets file\n", "timestamp": 2 }),
+            json!({ "type": "exit", "exit_code": 1, "timestamp": 3 }),
+        ])
+    } else {
+        ndjson(&[
+            started,
+            json!({ "type": "stdout", "data": "listening\n", "timestamp": 2 }),
+            json!({ "type": "complete", "timestamp": 3 }),
+        ])
+    }
+}
+
 async fn serve() -> (Shared, String) {
     let api: Shared = Arc::default();
     let app = Router::new()
@@ -150,6 +199,9 @@ async fn serve() -> (Shared, String) {
         .route("/v1/sprites/{name}/policy/network", post(policy))
         .route("/v1/sprites/{name}/checkpoint", post(checkpoint))
         .route("/v1/sprites/{name}/checkpoints/{cp}/restore", post(restore))
+        .route("/v1/sprites/{name}/fs/write", put(write_file))
+        .route("/v1/sprites/{name}/services/{svc}", put(put_service))
+        .route("/v1/sprites/{name}/services/{svc}/start", post(start_service))
         .with_state(api.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -258,4 +310,36 @@ async fn destroy_is_idempotent_and_errors_map() {
 
     let wrong = SpritesCompute::with_url(&url, "nope").unwrap();
     assert!(matches!(wrong.list(&Labels::new()).await, Err(Error::Forbidden(_))));
+}
+
+#[tokio::test]
+async fn start_uploads_files_and_starts_a_service() {
+    let (api, url) = serve().await;
+    let compute = SpritesCompute::with_url(&url, TOKEN).unwrap();
+    let id = compute.create(&spec("s", &[], &[])).await.unwrap().id;
+    let program = Program {
+        name: "trailhead-daemon".into(),
+        files: vec![
+            SandboxFile { path: "/home/sprite/.trailhead/daemon".into(), contents: b"\x7fELF".to_vec(), mode: 0o755 },
+            SandboxFile { path: "/home/sprite/.trailhead/secrets.json".into(), contents: b"{}".to_vec(), mode: 0o600 },
+        ],
+        cmd: "/home/sprite/.trailhead/daemon".into(),
+        args: vec!["--secrets".into(), "/home/sprite/.trailhead/secrets.json".into()],
+    };
+    compute.start(&id, &program).await.unwrap();
+    {
+        let api = api.lock().unwrap();
+        let s = &api.sprites["s"];
+        assert_eq!(s.files["/home/sprite/.trailhead/daemon"], (b"\x7fELF".to_vec(), "0755".to_string()));
+        assert_eq!(s.files["/home/sprite/.trailhead/secrets.json"].1, "0600");
+        assert_eq!(
+            s.services["trailhead-daemon"]["args"],
+            json!(["--secrets", "/home/sprite/.trailhead/secrets.json"])
+        );
+        assert_eq!(s.started, ["trailhead-daemon"]);
+    }
+
+    let broken = Program { name: "broken".into(), files: vec![], cmd: "false".into(), args: vec![] };
+    let err = compute.start(&id, &broken).await.unwrap_err().to_string();
+    assert!(err.contains("exited") && err.contains("no secrets file"), "{err}");
 }

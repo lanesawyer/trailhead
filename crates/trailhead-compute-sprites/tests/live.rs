@@ -3,7 +3,7 @@
 //! `SPRITES_TOKEN=... cargo test -p trailhead-compute-sprites --test live -- --ignored`
 
 use trailhead_compute_sprites::SpritesCompute;
-use trailhead_factory::{Compute, Egress, IROH_DOMAINS, Labels, SandboxSpec};
+use trailhead_factory::{Compute, Egress, IROH_DOMAINS, Labels, Program, SandboxFile, SandboxSpec};
 
 #[tokio::test]
 #[ignore = "needs SPRITES_TOKEN and creates a real Sprite"]
@@ -26,6 +26,21 @@ async fn lifecycle_against_sprites() {
         let compute = c;
         assert_eq!(sandbox.labels, labels, "labels as stored by Sprites");
         assert_eq!(compute.create(&spec).await.unwrap().id, sandbox.id);
+
+        let script = SandboxFile {
+            path: "/home/sprite/.trailhead/sleeper.sh".into(),
+            contents: b"#!/bin/sh\necho up\nexec sleep 600\n".to_vec(),
+            mode: 0o755,
+        };
+        let sleeper = Program {
+            name: "sleeper".into(),
+            files: vec![script],
+            cmd: "/home/sprite/.trailhead/sleeper.sh".into(),
+            args: vec![],
+        };
+        compute.start(&sandbox.id, &sleeper).await.unwrap();
+        let broken = Program { name: "broken".into(), files: vec![], cmd: "/bin/false".into(), args: vec![] };
+        assert!(compute.start(&sandbox.id, &broken).await.is_err(), "a program that exits at once fails start");
 
         let cp = compute.checkpoint(&sandbox.id, "live test").await.unwrap();
         compute.restore(&sandbox.id, &cp).await.unwrap();
