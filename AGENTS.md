@@ -4,6 +4,8 @@ Headless, agent-native task engine in Rust + SQLite. AGPL-3.0.
 
 Read `docs/PLAN.md` before making design decisions. It is the source of truth for architecture, data model, and phase order. If a change conflicts with the plan, flag it rather than silently diverging, and update the plan when a decision changes.
 
+The software factory being built into Trailhead is designed in `docs/factory/`. Start at `docs/factory/README.md`, which says which file covers what, and open only the one your work needs.
+
 Current phase: 3 (clients). Phase 1 core is in `crates/trailhead-core`; Phase 2's server, MCP and CLI are in `crates/trailhead-server` and `crates/trailhead`.
 
 ## Development
