@@ -36,6 +36,8 @@ trailhead add "Optional expiry on tokens, for short-lived sub-agent tokens" -p T
 
 ## 5. Tunnel access from sandboxes (TRAIL-78)
 
+Done differently in M4: sandboxes reach the server through the control plane's iroh API tunnel, not `dumbpipe`, so no engine change was needed ([state.md](state.md#trailhead-access)). The original plan follows.
+
 Mostly done: Trailhead is one server reachable over an iroh tunnel (`dumbpipe`), and `trailhead login` saves a printed token on another machine. What the factory still needs is the unattended version: a sandbox opens the tunnel and uses a token the control plane passes in at start, with no interactive login. Later, the server could embed iroh itself instead of relying on `dumbpipe`.
 
 ```sh

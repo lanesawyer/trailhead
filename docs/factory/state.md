@@ -27,11 +27,8 @@ Trailhead already has the service layer the factory needs: REST under `/v1`, MCP
 
 - **Identity.** The control plane acts as one agent and creates a sub-agent per sandbox, scoped to the repo's project, revoked when the task finishes.
 - **Orchestration.** The control plane follows Trailhead's events in-process (it's the same server when the factory is built in).
-- **Reaching the server.** Trailhead is one server and one SQLite file wherever it runs, reached from other machines through a tunnel to its loopback port, iroh via `dumbpipe` first (`docs/PLAN.md`, "Remote access"). Only ticket holders can connect; bearer tokens decide what they can do. A sandbox runs the tunnel client and talks to Trailhead on loopback, so its egress needs only the iroh relays it already has. Turso and hosted mode are deferred.
+- **Reaching the server.** Trailhead is one server and one SQLite file wherever it runs, reached from other machines through a tunnel to its loopback port (`docs/PLAN.md`, "Remote access"). People and outside agents use `dumbpipe`. Decided in M4 (2026-10-27), replacing a `dumbpipe` client and ticket in each sandbox: sandboxes use an iroh API tunnel instead. The control plane serves `trailhead/api/0` on its iroh endpoint and forwards each stream to the server's loopback port. It lets in only daemons it started, and the server still checks every bearer token. The daemon exposes the tunnel as a loopback port, and its REST `Tracker` talks to `/v1` through it. A sandbox holds no ticket and needs no egress beyond the iroh relays it already has. Its Trailhead access lives and dies with the control plane, which hosts the server anyway. Turso and hosted mode are deferred.
 - **Server asleep.** If the server's machine sleeps, sandboxes wait and leases expire as usual, so nothing is lost; budgets should treat that time as stalled, not spent.
 - **Token in the sandbox.** A Custom API connector would inject one token for every sandbox and lose per-sandbox identity, so each sandbox holds its own short-lived, project-scoped sub-agent token, passed in by the control plane at start. It's the one credential a sandbox holds directly.
 
-```toml
-[trailhead]
-ticket = "<dumbpipe ticket for the server>"
-```
+

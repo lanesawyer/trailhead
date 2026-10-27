@@ -71,6 +71,10 @@ Decided: registry egress only during install phases. The risk isn't secrets, sin
 - **Supply-chain checks.** An audit tool per ecosystem (for example `cargo-deny` or `osv-scanner`) runs with the other checks.
 - **Narrow connector scopes.** An author sandbox's GitHub connector reaches only its own repo.
 
+## Keeping a sandbox awake
+
+A Sprite pauses about 30 seconds after its last inbound activity (an exec, a request to its URL), and pausing drops every open connection. Services don't count as activity, and neither does the daemon's outbound iroh connection: in M4's live test, a run's connection dropped about a minute in. So while a prepare or run is in flight, the daemon holds the Sprite with the Tasks API on `/.sprite/api.sock`: a 5-minute expiry refreshed every minute, deleted when the work ends, so a crashed daemon frees the Sprite on its own. A paused Sprite isn't woken by an iroh dial, so resuming a parked sandbox needs a wake first (TRAIL-100).
+
 ## Iroh in a locked-down sandbox
 
 Iroh runs in every phase: Trailhead's `dumbpipe` tunnel is the sandbox's only channel to the control plane and Trailhead.
