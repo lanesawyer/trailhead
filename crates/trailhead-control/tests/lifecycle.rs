@@ -208,7 +208,7 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
     // TRAIL-1: crashed mid-run. Its sub-agent holds the claim and its sandbox is live.
     let crashed = r.tracker.add_task("TRAIL", "Crashed", "");
     let name = run_name(&crashed, 1);
-    tracker.create_sub_agent(&name, "TRAIL").await.unwrap();
+    tracker.create_sub_agent(&name, "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
     let sub = tracker.sub_agent(&name);
     sub.claim(&crashed).await.unwrap();
     sub.report(&crashed, update(1, &name)).await.unwrap();

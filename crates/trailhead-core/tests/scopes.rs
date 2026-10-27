@@ -21,7 +21,8 @@ async fn setup() -> Scoped {
         .await
         .unwrap();
     let agent = env.store.create_agent(&env.human, "bot").await.unwrap();
-    let opts = TokenOptions { projects: Some(vec!["auth".into()]), rate_limit_per_minute: Some(30) };
+    let opts =
+        TokenOptions { projects: Some(vec!["auth".into()]), rate_limit_per_minute: Some(30), ..Default::default() };
     let (token, secret) =
         env.store.create_token_with(&env.human, Principal::Agent(agent.id), "bot", opts).await.unwrap();
     assert_eq!(token.rate_limit_per_minute, Some(30));
@@ -203,7 +204,8 @@ async fn a_changed_scope_applies_on_the_next_request() {
     let env = Env::new().await;
     let s = &env.store;
     let me = Principal::User(env.human.user_id);
-    let opts = TokenOptions { projects: Some(vec!["AUTH".into()]), rate_limit_per_minute: Some(10) };
+    let opts =
+        TokenOptions { projects: Some(vec!["AUTH".into()]), rate_limit_per_minute: Some(10), ..Default::default() };
     let (token, secret) = s.create_token_with(&env.human, me, "x", opts).await.unwrap();
     assert!(s.authenticate(&secret).await.unwrap().is_scoped());
     let lift = TokenPatch { projects: Some(None), rate_limit_per_minute: Some(Some(100)) };

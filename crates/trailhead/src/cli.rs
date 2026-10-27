@@ -383,6 +383,9 @@ pub(crate) enum TokenCmd {
         /// Requests per minute the token may make.
         #[arg(long)]
         rate_limit: Option<i64>,
+        /// How long it works for, e.g. 30m, 12h, 7d. Default: until revoked.
+        #[arg(long, value_parser = parse_lifetime)]
+        expires: Option<i64>,
     },
     Revoke {
         id: String,
@@ -397,4 +400,37 @@ pub(crate) enum TokenCmd {
         #[arg(long)]
         rate_limit: Option<String>,
     },
+}
+
+/// A lifetime like `90s`, `30m`, `12h` or `7d`, in seconds.
+pub(crate) fn parse_lifetime(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (n, unit) = s.split_at(split);
+    let n: i64 = n.parse().map_err(|_| format!("expected a number then s, m, h or d, like 30m: {s:?}"))?;
+    let per = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        _ => return Err(format!("expected s, m, h or d after the number, like 30m: {s:?}")),
+    };
+    match n.checked_mul(per) {
+        Some(secs) if secs > 0 => Ok(secs),
+        _ => Err(format!("lifetime must be positive and sane: {s:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_lifetime;
+
+    #[test]
+    fn lifetimes() {
+        assert_eq!(parse_lifetime("30m"), Ok(1800));
+        assert_eq!(parse_lifetime("7d"), Ok(604_800));
+        assert!(parse_lifetime("0h").is_err());
+        assert!(parse_lifetime("5").is_err());
+        assert!(parse_lifetime("h").is_err());
+    }
 }

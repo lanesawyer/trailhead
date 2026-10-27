@@ -1,10 +1,10 @@
 use libsql::Row;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::db::{collect, first, get_opt_json, get_opt_ts, get_ts, get_uuid};
+use crate::db::{collect, first, fmt_ts, get_opt_json, get_opt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::identity::{is_descendant, lineage_revoked};
 use crate::projects::load_project;
@@ -35,6 +35,9 @@ pub struct Token {
     pub projects: Option<Vec<Uuid>>,
     /// `None` means unlimited.
     pub rate_limit_per_minute: Option<i64>,
+    /// When it stops working. `None` means never.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub expires_at: Option<OffsetDateTime>,
 }
 
 /// Changes to an existing token's limits. `None` leaves a field alone; `Some(None)`
@@ -52,6 +55,8 @@ pub struct TokenOptions {
     /// Project keys or ids. `None` or empty means every project.
     pub projects: Option<Vec<String>>,
     pub rate_limit_per_minute: Option<i64>,
+    /// How long until it stops working. `None` means never, unless the caller's own token expires.
+    pub expires_in: Option<Duration>,
 }
 
 fn token_from_row(row: &Row) -> Result<Token> {
@@ -66,11 +71,12 @@ fn token_from_row(row: &Row) -> Result<Token> {
         revoked_at: get_opt_ts(row, 6)?,
         projects: get_opt_json(row, 7)?.map(serde_json::from_value).transpose()?,
         rate_limit_per_minute: row.get(8)?,
+        expires_at: get_opt_ts(row, 9)?,
     })
 }
 
-const TOKEN_COLS: &str =
-    "id, workspace_id, principal_kind, principal_id, name, created_at, revoked_at, projects, rate_limit_per_minute";
+const TOKEN_COLS: &str = "id, workspace_id, principal_kind, principal_id, name, created_at, revoked_at, projects, \
+     rate_limit_per_minute, expires_at";
 
 fn hash(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
@@ -129,6 +135,17 @@ impl Store {
                 _ => {}
             }
         }
+        if opts.expires_in.is_some_and(|d| !d.is_positive()) {
+            return Err(Error::Invalid("a token must expire in the future".into()));
+        }
+        let mut expires_at = opts.expires_in.map(|d| self.now() + d);
+        if let Some(cap) = ctx.expires_at {
+            match expires_at {
+                Some(e) if e > cap => return Err(Error::Forbidden("a token can't outlive your own".into())),
+                None => expires_at = Some(cap),
+                _ => {}
+            }
+        }
         if let Some(scope) = &ctx.projects
             && opts.projects.as_ref().is_none_or(|p| p.is_empty())
         {
@@ -171,8 +188,8 @@ impl Store {
                     .query(
                         &format!(
                             "INSERT INTO tokens (id, workspace_id, principal_kind, principal_id, name, secret_hash, created_at,
-                             projects, rate_limit_per_minute)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING {TOKEN_COLS}"
+                             projects, rate_limit_per_minute, expires_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING {TOKEN_COLS}"
                         ),
                         libsql::params![
                             id.to_string(),
@@ -183,7 +200,8 @@ impl Store {
                             hash(&secret),
                             tx.now_str(),
                             projects,
-                            opts.rate_limit_per_minute
+                            opts.rate_limit_per_minute,
+                            expires_at.map(fmt_ts)
                         ],
                     )
                     .await?;
@@ -215,6 +233,9 @@ impl Store {
             return Err(Error::Unauthorized);
         };
         let token = token_from_row(&row)?;
+        if token.expires_at.is_some_and(|e| e <= self.now()) {
+            return Err(Error::Unauthorized);
+        }
         let ctx = match token.principal {
             Principal::User(u) => Ctx::user(token.workspace_id, u),
             Principal::Agent(a) => self.agent_ctx(token.workspace_id, a).await?,
@@ -224,6 +245,7 @@ impl Store {
             None => ctx,
         };
         ctx.rate_limit = token.rate_limit_per_minute;
+        ctx.expires_at = token.expires_at;
         Ok((ctx, token))
     }
 

@@ -28,11 +28,21 @@ pub struct Ctx {
     /// The authenticating token's requests per minute, so tokens it issues to
     /// sub-agents can't exceed it. `None` means unlimited.
     pub rate_limit: Option<i64>,
+    /// When the authenticating token expires, so tokens it issues can't outlive it.
+    pub expires_at: Option<OffsetDateTime>,
 }
 
 impl Ctx {
     pub fn user(workspace_id: Uuid, user_id: Uuid) -> Self {
-        Ctx { workspace_id, user_id, agent_id: None, batch_id: Uuid::now_v7(), projects: None, rate_limit: None }
+        Ctx {
+            workspace_id,
+            user_id,
+            agent_id: None,
+            batch_id: Uuid::now_v7(),
+            projects: None,
+            rate_limit: None,
+            expires_at: None,
+        }
     }
 
     pub fn agent(workspace_id: Uuid, user_id: Uuid, agent_id: Uuid) -> Self {
@@ -43,6 +53,7 @@ impl Ctx {
             batch_id: Uuid::now_v7(),
             projects: None,
             rate_limit: None,
+            expires_at: None,
         }
     }
 

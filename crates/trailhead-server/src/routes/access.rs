@@ -28,11 +28,17 @@ pub(crate) struct TokenLimits {
     /// Project keys or ids. Omitted or empty means every project.
     projects: Option<Vec<String>>,
     rate_limit_per_minute: Option<i64>,
+    /// Seconds until the token stops working. Omitted means never, unless your own token expires sooner.
+    expires_in_seconds: Option<i64>,
 }
 
 impl From<TokenLimits> for TokenOptions {
     fn from(l: TokenLimits) -> Self {
-        TokenOptions { projects: l.projects, rate_limit_per_minute: l.rate_limit_per_minute }
+        TokenOptions {
+            projects: l.projects,
+            rate_limit_per_minute: l.rate_limit_per_minute,
+            expires_in: l.expires_in_seconds.map(time::Duration::seconds),
+        }
     }
 }
 

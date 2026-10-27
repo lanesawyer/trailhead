@@ -546,8 +546,12 @@ async fn run(cli: Cli) -> Result<()> {
                         Some(n) => format!("{n}/min"),
                         None => "unlimited".into(),
                     };
+                    let expires = match t["expires_at"].as_str() {
+                        Some(at) => format!("  expires={}", short_time(at)),
+                        None => String::new(),
+                    };
                     println!(
-                        "{}  {} {}  {}  projects={scope}  rate={limit}{}",
+                        "{}  {} {}  {}  projects={scope}  rate={limit}{expires}{}",
                         s(t, "id"),
                         s(&t["principal"], "kind"),
                         s(&t["principal"], "id"),
@@ -557,9 +561,14 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Token(TokenCmd::Add { name, agent, projects, rate_limit }) => {
-            let body =
-                json!({ "name": name, "agent": agent, "projects": projects, "rate_limit_per_minute": rate_limit });
+        Cmd::Token(TokenCmd::Add { name, agent, projects, rate_limit, expires }) => {
+            let body = json!({
+                "name": name,
+                "agent": agent,
+                "projects": projects,
+                "rate_limit_per_minute": rate_limit,
+                "expires_in_seconds": expires,
+            });
             show(c.post("tokens", body).await?, &|v| s(v, "secret").to_string());
         }
         Cmd::Token(TokenCmd::Revoke { id }) => show(c.delete(&format!("tokens/{id}")).await?, &|_| "revoked".into()),

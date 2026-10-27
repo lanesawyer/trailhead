@@ -26,9 +26,9 @@ Today approval and finishing are one step. Document the convention that a projec
 trailhead add "Separate approval from finishing: document merger-reviewer convention or add approved status" -p TRAIL -P 3
 ```
 
-## 4. Token expiry (TRAIL-85)
+## 4. Token expiry (TRAIL-85, done)
 
-Tokens can be revoked but never expire. Add an optional expiry, so short-lived per-sandbox sub-agent tokens clean themselves up if revoking is missed.
+Done: tokens take an optional `expires_in_seconds` and never outlive the token that issued them. The control plane gives each sandbox token its profile's wall-clock budget plus 30 minutes.
 
 ```sh
 trailhead add "Optional expiry on tokens, for short-lived sub-agent tokens" -p TRAIL -P 2

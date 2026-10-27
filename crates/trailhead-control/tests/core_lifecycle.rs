@@ -171,7 +171,7 @@ async fn sandbox_tokens_are_scoped_and_die_with_the_sub_agent() {
             .unwrap()
             .key,
     );
-    let cred = r.tracker.create_sub_agent("trail-1-a1", "TRAIL").await.unwrap();
+    let cred = r.tracker.create_sub_agent("trail-1-a1", "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
     let sandbox = CoreTracker::authenticate(r.store.clone(), &cred).await.unwrap();
     assert!(sandbox.show(&other).await.is_err(), "scoped to TRAIL");
 
@@ -183,7 +183,7 @@ async fn sandbox_tokens_are_scoped_and_die_with_the_sub_agent() {
 async fn reconcile_requeues_an_interrupted_run() {
     let r = rig().await;
     let key = r.task("Crashed").await;
-    r.tracker.create_sub_agent("trail-1-a1", "TRAIL").await.unwrap();
+    r.tracker.create_sub_agent("trail-1-a1", "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
     let sub = r.tracker.sub_agent("trail-1-a1");
     sub.claim(&key).await.unwrap();
     sub.report(&key, RunUpdate { attempt: Some(1), sandbox: Some("trail-1-a1".into()), ..Default::default() })

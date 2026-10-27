@@ -11,6 +11,7 @@ Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, pro
 - Agents can create sub-agents (`POST /v1/agents {"name"}` as an agent makes `<agent>/<name>`) and issue them tokens that never exceed their own projects or rate limit; `POST /v1/agents/{agent}/revoke` revokes an agent and everything under it. Over MCP, `register_agent` then `as_agent` on any tool lets one connection act as several registered sub-agents.
 - Agents can't revert, issue tokens for anyone but their sub-agents, or approve review (unless a project lists them as `reviewers`). Humans can edit, release or finish a task another actor holds; agents can't.
 - A token may be scoped to projects. Anything outside the scope reads as `not_found`; writes naming an out-of-scope project are `forbidden`. A blocker outside the scope shows as `(out of scope)`.
+- A token may expire: `expires_in_seconds` when issuing it (`POST /v1/tokens`, `POST /v1/agents`). An expired token gets `401`. A token never outlives the one that issued it: without `expires_in_seconds` it inherits the issuer's expiry, and asking for longer is `forbidden`.
 - A token may have a per-minute rate limit. Over it: `429 rate_limited` with `Retry-After` seconds and `retry_after` in the body.
 - A human can change a token's scope or limit without reissuing it: `PATCH /v1/tokens/{id} {"projects": ["AUTH"], "rate_limit_per_minute": 60}`; omit a field to keep it, `null` to lift it.
 

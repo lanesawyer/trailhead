@@ -1,6 +1,7 @@
 //! [`Tracker`] in-process on a Trailhead [`Store`], for when the server is the control plane.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -201,7 +202,7 @@ impl Tracker for CoreTracker {
         self.set_status(task, trailhead_core::Status::Done).await
     }
 
-    async fn create_sub_agent(&self, name: &str, project: &str) -> Result<Credential> {
+    async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential> {
         let ctx = self.ctx().await?;
         let full = format!("{}/{name}", self.agent);
         let agent = match self.store.create_agent(&ctx, name).await {
@@ -212,7 +213,12 @@ impl Tracker for CoreTracker {
             }
             Err(e) => return Err(map_err(e)),
         };
-        let opts = TokenOptions { projects: Some(vec![project.to_string()]), rate_limit_per_minute: None };
+        let expires_in = time::Duration::try_from(ttl).map_err(|e| Error::Other(e.to_string()))?;
+        let opts = TokenOptions {
+            projects: Some(vec![project.to_string()]),
+            rate_limit_per_minute: None,
+            expires_in: Some(expires_in),
+        };
         let (_, secret) =
             self.store.create_token_with(&ctx, Principal::Agent(agent.id), name, opts).await.map_err(map_err)?;
         Ok(Credential { agent: agent.name, token: secret })

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{Credential, Error, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict, VerdictKind};
@@ -278,7 +279,7 @@ impl Tracker for FakeTracker {
         Ok(())
     }
 
-    async fn create_sub_agent(&self, name: &str, _project: &str) -> Result<Credential> {
+    async fn create_sub_agent(&self, name: &str, _project: &str, _ttl: Duration) -> Result<Credential> {
         self.check_live()?;
         let full = format!("{}/{name}", self.agent);
         let mut s = self.state.lock().unwrap();

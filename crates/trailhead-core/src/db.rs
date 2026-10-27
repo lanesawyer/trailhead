@@ -23,6 +23,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (13, "scheduled_at", include_str!("../migrations/0013_scheduled_at.sql")),
     (14, "due_days", include_str!("../migrations/0014_due_days.sql")),
     (15, "review_verdicts", include_str!("../migrations/0015_review_verdicts.sql")),
+    (16, "token_expiry", include_str!("../migrations/0016_token_expiry.sql")),
 ];
 
 pub(crate) async fn migrate(conn: &Connection) -> Result<()> {

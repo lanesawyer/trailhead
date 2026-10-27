@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -107,8 +108,9 @@ pub trait Tracker: Send + Sync {
     async fn ask(&self, task: &TaskKey, question: &str) -> Result<()>;
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()>;
 
-    /// Creates (or reuses) a project-scoped sub-agent and a fresh token for it.
-    async fn create_sub_agent(&self, name: &str, project: &str) -> Result<Credential>;
+    /// Creates (or reuses) a project-scoped sub-agent and a fresh token for it that expires after `ttl`,
+    /// in case revoking it is missed.
+    async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential>;
     /// Revokes a sub-agent and its tokens. Revoking one that's already gone is fine.
     async fn revoke_sub_agent(&self, name: &str) -> Result<()>;
 }

@@ -95,7 +95,7 @@ impl Factory {
         let attempt = task.run.attempt.unwrap_or(0) + 1;
         let name = run_name(&task.key, attempt);
         let profile = self.config.worker().clone();
-        let credential = self.tracker.create_sub_agent(&name, self.project()).await?;
+        let credential = self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await?;
         let sub = self.tracker.sub_agent(&name);
         // Claiming as the sub-agent before creating the sandbox keeps two control planes from racing for one task.
         sub.claim(&task.key).await?;
@@ -171,7 +171,7 @@ impl Factory {
         let name = review_name(&task.key, attempt, round);
         self.tracker.report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() }).await?;
         let profile = self.config.reviewer().clone();
-        let credential = self.tracker.create_sub_agent(&name, self.project()).await?;
+        let credential = self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await?;
         let sub = self.tracker.sub_agent(&name);
         let sandbox = self.create_sandbox(&name, task, Role::Reviewer).await?;
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
@@ -332,6 +332,11 @@ impl Factory {
         }
         Ok(done)
     }
+}
+
+/// A sandbox's token outlives its wall-clock budget by a margin, so a missed revoke cleans itself up.
+fn token_ttl(profile: &Profile) -> Duration {
+    Duration::from_secs((u64::from(profile.budget.minutes) + 30) * 60)
 }
 
 fn spec(task: &Task) -> TaskSpec {
