@@ -15,12 +15,18 @@ Proposal: contract + adapters, starting with one CLI-agent adapter.
 
 ## The contract
 
-Decided: strongly typed. Shared Rust types for every message between the control plane and the daemon, serialized over Iroh. Message set and wire format are still open.
+Decided: strongly typed. Shared Rust types for every message between the control plane and the daemon (`trailhead_factory::daemon`), serialized over Iroh. Built in M3 (`trailhead-daemon`).
 
-- **In:** task spec, repo ref, base checkpoint id, budget, allowed tools, step limit, Trailhead sub-agent token.
-- **Out:** a branch and PR opened through the code host, a run report, check results, usage totals.
-- **Stream:** structured events (step started, tool call, checkpoint taken, cost tick, needs input).
-- **Control:** pause, resume, cancel, checkpoint now.
+- **In:** `Prepare` (repo, base branch, `setup` check), then `Run` (task spec, repo and branch, model and endpoint, step limit, required checks with their commands, hosts that must be blocked, Trailhead sub-agent token).
+- **Out:** `Prepared`, or a `Report` (result, check results, usage totals), or `Failed` with a typed error.
+- **Stream:** `Event`s while a run goes (step started, tool call, usage per model call, needs input).
+- **Control:** `Cancel`. Pause and checkpoint-now stay with the control plane, which checkpoints through `Compute`.
+- **Wire.** ALPN `trailhead/daemon/0`. One bidirectional stream per request, framed as a 4-byte big-endian length plus JSON.
+- **Who dials.** The control plane dials the daemon. Each daemon's iroh key is HMAC-SHA256 of the control plane's master key and the sandbox name, so the control plane can reach any of its daemons, including after a restart, without storing addresses. The daemon gets its key and the control plane's endpoint id in a 0600 secrets file that it reads and deletes, and refuses every other peer.
+- **Getting in.** `Compute::start` uploads the daemon binary (24.5 MB release build) and the secrets file and runs it as a supervised Sprites service.
+- **Losing the control plane.** If the stream drops mid-run, the daemon cancels the run rather than work unobserved, and the control plane's reconcile requeues the task.
+
+The Claude Code harness (`trailhead-harness-claude-code`) runs `claude --print --output-format stream-json` in the checkout, with `ANTHROPIC_BASE_URL` set to the run's endpoint and a placeholder key. It ends with structured output against a per-role schema (`done`, `needs_input` or `failed` for workers; `approve` or `request_changes` for reviewers). The step limit is enforced by killing the CLI, and a worker's changes are everything that differs from where the run started.
 
 ## Agent profiles
 

@@ -3,8 +3,8 @@
 ## To decide
 
 - [x] Build the factory into Trailhead: decided 2026-10-26. Rewriting `docs/PLAN.md` vision, principles and phases is TRAIL-87.
-- [ ] Daemon ↔ control plane protocol over Iroh: message set and wire format.
-- [ ] Which CLI agent gets the first `Harness` adapter (Claude Code planned).
+- [x] Daemon ↔ control plane protocol over Iroh: built in M3 ([agents.md](agents.md#the-contract)).
+- [x] Which CLI agent gets the first `Harness` adapter: Claude Code (`trailhead-harness-claude-code`).
 - [ ] Starting budget numbers per profile, per task and per day; the stall window.
 - [ ] Observability backend: self-hosted or hosted.
 - [ ] When to move off n0 public relays, and what triggers it.
