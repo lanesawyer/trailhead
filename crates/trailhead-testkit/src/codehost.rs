@@ -1,0 +1,108 @@
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use trailhead_factory::{CodeHost, Commit, Error, MergeOutcome, NewPr, PrRef, Repo, Result};
+
+#[derive(Debug, Clone)]
+pub struct FakePr {
+    pub pr: PrRef,
+    pub spec: NewPr,
+    pub comments: Vec<String>,
+    pub merged: bool,
+}
+
+#[derive(Default)]
+struct State {
+    branches: BTreeMap<(String, String), Vec<Commit>>,
+    prs: Vec<FakePr>,
+    conflicts: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct FakeCodeHost {
+    state: Arc<Mutex<State>>,
+}
+
+impl FakeCodeHost {
+    pub fn new() -> FakeCodeHost {
+        FakeCodeHost::default()
+    }
+
+    pub fn commits(&self, repo: &Repo, branch: &str) -> Vec<Commit> {
+        let s = self.state.lock().unwrap();
+        s.branches.get(&(repo.slug(), branch.to_string())).cloned().unwrap_or_default()
+    }
+
+    pub fn prs(&self) -> Vec<FakePr> {
+        self.state.lock().unwrap().prs.clone()
+    }
+
+    /// Makes every later merge report a conflict.
+    pub fn set_conflicts(&self, on: bool) {
+        self.state.lock().unwrap().conflicts = on;
+    }
+
+    fn find<T>(&self, pr: &PrRef, f: impl FnOnce(&mut FakePr, &State) -> T) -> Result<T> {
+        let mut s = self.state.lock().unwrap();
+        let i = s.prs.iter().position(|p| p.pr == *pr).ok_or_else(|| Error::NotFound(format!("PR {}", pr.url)))?;
+        let mut p = s.prs[i].clone();
+        let out = f(&mut p, &s);
+        s.prs[i] = p;
+        Ok(out)
+    }
+}
+
+#[async_trait]
+impl CodeHost for FakeCodeHost {
+    async fn publish(&self, repo: &Repo, branch: &str, commits: &[Commit]) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        s.branches.entry((repo.slug(), branch.to_string())).or_default().extend_from_slice(commits);
+        Ok(())
+    }
+
+    async fn open_pr(&self, repo: &Repo, pr: NewPr) -> Result<PrRef> {
+        let mut s = self.state.lock().unwrap();
+        if !s.branches.contains_key(&(repo.slug(), pr.branch.clone())) {
+            return Err(Error::NotFound(format!("branch {}", pr.branch)));
+        }
+        let number = s.prs.len() as u64 + 1;
+        let r =
+            PrRef { repo: repo.clone(), number, url: format!("https://example.invalid/{}/pull/{number}", repo.slug()) };
+        s.prs.push(FakePr { pr: r.clone(), spec: pr, comments: Vec::new(), merged: false });
+        Ok(r)
+    }
+
+    async fn diff(&self, pr: &PrRef) -> Result<String> {
+        self.find(pr, |p, s| {
+            let commits = s.branches.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default();
+            let mut out = String::new();
+            for c in commits {
+                for change in c.changes {
+                    match change.contents {
+                        Some(body) => {
+                            out.push_str(&format!("+++ {}\n{}\n", change.path, String::from_utf8_lossy(&body)))
+                        }
+                        None => out.push_str(&format!("--- {} (deleted)\n", change.path)),
+                    }
+                }
+            }
+            out
+        })
+    }
+
+    async fn comment(&self, pr: &PrRef, body: &str) -> Result<()> {
+        self.find(pr, |p, _| p.comments.push(body.to_string()))
+    }
+
+    async fn merge(&self, pr: &PrRef) -> Result<MergeOutcome> {
+        let conflicts = self.state.lock().unwrap().conflicts;
+        self.find(pr, |p, _| {
+            if conflicts {
+                return MergeOutcome::Conflict;
+            }
+            p.merged = true;
+            MergeOutcome::Merged
+        })
+    }
+}

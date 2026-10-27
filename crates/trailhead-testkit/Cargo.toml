@@ -1,0 +1,17 @@
+[package]
+name = "trailhead-testkit"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+description = "In-memory fakes for the Trailhead factory's plugin seams"
+
+[dependencies]
+trailhead-factory.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

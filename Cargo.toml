@@ -32,8 +32,13 @@ directories = "6"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 anyhow = "1"
+async-trait = "0.1"
+toml = "1"
 trailhead-core = { path = "crates/trailhead-core", version = "0.1.0" }
 trailhead-server = { path = "crates/trailhead-server", version = "0.1.0" }
+trailhead-factory = { path = "crates/trailhead-factory" }
+trailhead-testkit = { path = "crates/trailhead-testkit" }
+trailhead-control = { path = "crates/trailhead-control" }
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 http = "1"
 futures-util = { version = "0.3", default-features = false }

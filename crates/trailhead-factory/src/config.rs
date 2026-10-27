@@ -1,0 +1,310 @@
+//! A repo's factory file: stack, standard checks, agent profiles and gate policy.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::{Error, ModelAlias, Repo, Result, Usd};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Planner,
+    Worker,
+    Reviewer,
+    Utility,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Planner => "planner",
+            Role::Worker => "worker",
+            Role::Reviewer => "reviewer",
+            Role::Utility => "utility",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FactoryConfig {
+    pub repo: RepoConfig,
+    #[serde(default)]
+    pub stack: Stack,
+    #[serde(default)]
+    pub checks: Checks,
+    pub profiles: BTreeMap<String, Profile>,
+    #[serde(default)]
+    pub gates: BTreeMap<String, Gate>,
+    #[serde(default)]
+    pub egress: EgressConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoConfig {
+    pub owner: String,
+    pub name: String,
+    #[serde(default = "default_base_branch")]
+    pub base_branch: String,
+    /// The Trailhead project whose tasks run against this repo.
+    pub project: String,
+    #[serde(default = "default_max_sandboxes")]
+    pub max_sandboxes: usize,
+    /// The profile tasks run on unless they name another.
+    #[serde(default = "default_worker")]
+    pub worker: String,
+    #[serde(default = "default_reviewer")]
+    pub reviewer: String,
+}
+
+fn default_base_branch() -> String {
+    "main".into()
+}
+fn default_max_sandboxes() -> usize {
+    1
+}
+fn default_worker() -> String {
+    "worker".into()
+}
+fn default_reviewer() -> String {
+    "reviewer".into()
+}
+
+impl RepoConfig {
+    pub fn repo(&self) -> Repo {
+        Repo { owner: self.owner.clone(), name: self.name.clone() }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stack {
+    #[serde(default)]
+    pub tools: BTreeMap<String, String>,
+}
+
+/// The fixed set of named checks. A repo leaves out what it doesn't have; exit code 0 passes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Checks {
+    pub setup: Option<String>,
+    pub fmt: Option<String>,
+    pub fmt_fix: Option<String>,
+    pub lint: Option<String>,
+    pub typecheck: Option<String>,
+    pub test: Option<String>,
+    pub build: Option<String>,
+}
+
+impl Checks {
+    /// The verification checks, in the order they run. `setup` and `fmt_fix` change the tree, so they're left out.
+    pub fn verifying(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("fmt", &self.fmt),
+            ("lint", &self.lint),
+            ("typecheck", &self.typecheck),
+            ("test", &self.test),
+            ("build", &self.build),
+        ]
+        .into_iter()
+        .filter_map(|(name, cmd)| cmd.as_deref().map(|c| (name, c)))
+        .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub role: Role,
+    pub adapter: String,
+    pub provider: String,
+    pub model: ModelAlias,
+    pub budget: Budget,
+    pub escalate_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Budget {
+    pub usd: f64,
+    pub minutes: u32,
+    pub steps: u32,
+}
+
+impl Budget {
+    pub fn usd(&self) -> Usd {
+        Usd::dollars(self.usd)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gate {
+    #[serde(default)]
+    pub require: Vec<String>,
+    #[serde(default)]
+    pub auto_merge: bool,
+    pub quorum: Option<Quorum>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Quorum {
+    pub reviewers: u32,
+    pub agree: u32,
+    #[serde(default)]
+    pub distinct_models: bool,
+}
+
+/// Domains each phase may reach, on top of the iroh relays and connector gateway every phase gets.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressConfig {
+    #[serde(default)]
+    pub always: Vec<String>,
+    #[serde(default)]
+    pub install: Vec<String>,
+}
+
+impl FactoryConfig {
+    pub fn parse(toml_src: &str) -> Result<FactoryConfig> {
+        let config: FactoryConfig = toml::from_str(toml_src).map_err(|e| Error::Config(e.to_string()))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (want, role) in [(&self.repo.worker, Role::Worker), (&self.repo.reviewer, Role::Reviewer)] {
+            match self.profiles.get(want) {
+                None => return Err(Error::Config(format!("no profile named {want}"))),
+                Some(p) if p.role != role => {
+                    return Err(Error::Config(format!(
+                        "profile {want} has role {}, not {}",
+                        p.role.as_str(),
+                        role.as_str()
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        for (name, profile) in &self.profiles {
+            if let Some(next) = &profile.escalate_to
+                && !self.profiles.contains_key(next)
+            {
+                return Err(Error::Config(format!("profile {name} escalates to unknown profile {next}")));
+            }
+        }
+        let known = ["checks", "agent_review", "human", "quorum"];
+        let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
+        for (tier, gate) in &self.gates {
+            for r in &gate.require {
+                if !known.contains(&r.as_str()) && !checks.contains(&r.as_str()) {
+                    return Err(Error::Config(format!("gate {tier} requires unknown {r}")));
+                }
+            }
+            if gate.require.iter().any(|r| r == "quorum") && gate.quorum.is_none() {
+                return Err(Error::Config(format!("gate {tier} requires a quorum but doesn't define one")));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn worker(&self) -> &Profile {
+        &self.profiles[&self.repo.worker]
+    }
+
+    pub fn reviewer(&self) -> &Profile {
+        &self.profiles[&self.repo.reviewer]
+    }
+
+    /// The default tier's gate, `t1` unless the repo defines no tiers.
+    pub fn default_gate(&self) -> Gate {
+        self.gates.get("t1").cloned().unwrap_or(Gate {
+            require: vec!["checks".into(), "agent_review".into()],
+            auto_merge: false,
+            quorum: None,
+        })
+    }
+
+    /// The checks a worker must pass before opening a PR under the default gate.
+    pub fn required_checks(&self) -> Vec<String> {
+        let gate = self.default_gate();
+        let all: Vec<String> = self.checks.verifying().into_iter().map(|(n, _)| n.to_string()).collect();
+        if gate.require.iter().any(|r| r == "checks") {
+            return all;
+        }
+        all.into_iter().filter(|c| gate.require.contains(c)).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"
+[repo]
+owner = "lanesawyer"
+name = "trailhead"
+project = "TRAIL"
+
+[stack]
+tools = { rust = "stable" }
+
+[checks]
+fmt = "cargo fmt --check"
+lint = "cargo clippy -- -D warnings"
+test = "cargo test"
+
+[profiles.worker]
+role = "worker"
+adapter = "claude-code"
+provider = "anthropic"
+model = "sonnet"
+budget = { usd = 5, minutes = 60, steps = 40 }
+escalate_to = "worker-opus"
+
+[profiles.worker-opus]
+role = "worker"
+adapter = "claude-code"
+provider = "anthropic"
+model = "opus"
+budget = { usd = 15, minutes = 90, steps = 60 }
+
+[profiles.reviewer]
+role = "reviewer"
+adapter = "claude-code"
+provider = "anthropic"
+model = "opus"
+budget = { usd = 2, minutes = 20, steps = 20 }
+
+[gates.t1]
+require = ["checks", "agent_review", "human"]
+"#;
+
+    #[test]
+    fn parses_the_documented_shape() {
+        let c = FactoryConfig::parse(SAMPLE).unwrap();
+        assert_eq!(c.repo.base_branch, "main");
+        assert_eq!(c.worker().model, ModelAlias::Sonnet);
+        assert_eq!(c.worker().budget.usd(), Usd::dollars(5.0));
+        assert_eq!(c.required_checks(), ["fmt", "lint", "test"]);
+    }
+
+    #[test]
+    fn rejects_unknown_checks_and_profiles() {
+        let bad = SAMPLE.replace("lint = ", "lnt = ");
+        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        let bad = SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"nope\"");
+        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        let bad = SAMPLE.replace("\"agent_review\", \"human\"", "\"agent_review\", \"vibes\"");
+        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn worker_profile_must_have_worker_role() {
+        let bad = SAMPLE.replace("[repo]\n", "[repo]\nworker = \"reviewer\"\n");
+        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+    }
+}
