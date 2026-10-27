@@ -1,0 +1,10 @@
+# Secrets for local development, resolved by `fnox exec` (https://fnox.jdx.dev).
+# Needs a Bitwarden Secrets Manager machine-account token in BWS_ACCESS_TOKEN
+# with read access to the Trailhead project.
+
+[providers.bws]
+type = "bitwarden-sm"
+project_id = "a96f8061-409e-4eaa-b76b-b4f0002a6733" # Trailhead
+
+[secrets]
+SPRITES_TOKEN = { provider = "bws", value = "SPRITES_TOKEN" }

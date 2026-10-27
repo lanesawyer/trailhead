@@ -1,2 +1,7 @@
 [tools]
+fnox = { version = "latest", workflow = "release.yml" }
 rust = "latest"
+
+[tasks.test-live-sprites]
+description = "Run the Sprites Compute test against the real API (creates and destroys one Sprite)"
+run = "fnox exec -- cargo test -p trailhead-compute-sprites --test live -- --ignored --nocapture"
