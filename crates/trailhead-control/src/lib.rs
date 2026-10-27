@@ -17,9 +17,9 @@ use tokio::task::{self, JoinSet};
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
-    Compute, Daemon, Egress, Error, FactoryConfig, Labels, ModelProvider, PrRef, Profile, Result, Role, RunEvent,
-    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd,
-    Verdict, label, review_name, run_name,
+    Compute, Daemon, Egress, Error, FactoryConfig, IROH_DOMAINS, Labels, ModelProvider, PrRef, Profile, Result, Role,
+    RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec,
+    Tracker, Usd, Verdict, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -74,7 +74,8 @@ impl Factory {
     }
 
     fn agent_egress(&self) -> Egress {
-        Egress { domains: self.config.egress.always.clone() }
+        let iroh = IROH_DOMAINS.iter().map(|d| d.to_string());
+        Egress { domains: iroh.chain(self.config.egress.always.iter().cloned()).collect() }
     }
 
     fn branch(task: &Task) -> String {
@@ -305,7 +306,7 @@ impl Factory {
         let mut labels = self.base_labels();
         labels.insert(label::TASK.into(), task.key.0.clone());
         labels.insert(label::ROLE.into(), role.as_str().into());
-        let spec = SandboxSpec { name: name.to_string(), labels, egress: self.agent_egress(), base: None };
+        let spec = SandboxSpec { name: name.to_string(), labels, egress: self.agent_egress() };
         self.compute.create(&spec).await
     }
 

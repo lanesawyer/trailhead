@@ -3442,6 +3442,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "trailhead-compute-sprites"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "trailhead-factory",
+]
+
+[[package]]
 name = "trailhead-control"
 version = "0.1.0"
 dependencies = [

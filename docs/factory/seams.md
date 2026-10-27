@@ -24,7 +24,7 @@ Draft signatures; the testkit fakes are the first test of whether they're right.
 ```rust
 #[async_trait]
 pub trait Compute {
-    async fn create(&self, spec: &SandboxSpec) -> Result<SandboxId>;   // name, labels, egress, base checkpoint
+    async fn create(&self, spec: &SandboxSpec) -> Result<SandboxId>;   // name, labels, egress (no base: checkpoints can't seed another sandbox)
     async fn list(&self, labels: &Labels) -> Result<Vec<Sandbox>>;
     async fn checkpoint(&self, id: &SandboxId, note: &str) -> Result<CheckpointId>;
     async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()>;

@@ -23,6 +23,10 @@ pub mod label {
     pub const ROLE: &str = "role";
 }
 
+/// Domains iroh needs under a deny-by-default policy: n0's relays (which CNAME
+/// to `iroh-svc.com`) and DNS discovery. Measured in M0 (`docs/factory/sandbox.md`).
+pub const IROH_DOMAINS: &[&str] = &["iroh.link", "*.iroh.link", "*.iroh-svc.com"];
+
 /// Domains a sandbox may reach. Everything else is denied.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Egress {
@@ -40,7 +44,6 @@ pub struct SandboxSpec {
     pub name: String,
     pub labels: Labels,
     pub egress: Egress,
-    pub base: Option<CheckpointId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

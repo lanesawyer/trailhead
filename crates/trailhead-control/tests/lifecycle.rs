@@ -198,7 +198,7 @@ async fn sandbox_cap_limits_concurrent_runs() {
     labels.insert(label::FACTORY.into(), "trailhead".into());
     labels.insert(label::REPO.into(), "lanesawyer/trailhead".into());
     labels.insert(label::ROLE.into(), "worker".into());
-    let spec = SandboxSpec { name: "busy".into(), labels, egress: Default::default(), base: None };
+    let spec = SandboxSpec { name: "busy".into(), labels, egress: Default::default() };
     r.compute.create(&spec).await.unwrap();
     assert!(r.factory.tick().await.unwrap().is_empty());
 }
@@ -268,7 +268,7 @@ async fn live(compute: &FakeCompute, name: &str, task: &TaskKey, role: &str) {
         (label::TASK.into(), task.0.clone()),
         (label::ROLE.into(), role.into()),
     ]);
-    compute.create(&SandboxSpec { name: name.into(), labels, egress: Default::default(), base: None }).await.unwrap();
+    compute.create(&SandboxSpec { name: name.into(), labels, egress: Default::default() }).await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
