@@ -565,3 +565,27 @@ async fn task_list_can_include_open_questions_and_last_handoff() {
     assert!(items[1]["last_handoff"].is_null());
     assert!(items[0].get("claim").is_none());
 }
+
+#[tokio::test]
+async fn review_comments_carry_a_typed_verdict() {
+    let api = Api::new().await;
+    api.seed().await;
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "rotate keys"}))).await;
+    let post = async |body: serde_json::Value| api.as_human("POST", "/v1/tasks/AUTH-1/comments", Some(body)).await;
+
+    let r = post(json!({"kind": "review", "body": "tests miss expiry", "verdict": "request_changes", "model": "opus"}))
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["verdict"], "request_changes");
+    assert_eq!(r.body["model"], "opus");
+
+    let r = post(json!({"kind": "review", "body": "no verdict"})).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    let r = post(json!({"kind": "note", "body": "sneaky", "verdict": "approve"})).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+
+    let r = api.as_human("GET", "/v1/tasks/AUTH-1/comments", None).await;
+    let comments = r.body.as_array().unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0]["kind"], "review");
+}

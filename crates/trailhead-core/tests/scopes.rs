@@ -78,7 +78,7 @@ async fn writes_outside_scope_are_rejected() {
     hidden(s.delete_task(&bot, &web, None).await);
     hidden(s.claim(&bot, &web, None).await);
     hidden(s.release(&bot, &web).await);
-    let note = NewComment { kind: CommentKind::Note, body: "hi".into(), addressed_to: None };
+    let note = NewComment::new(CommentKind::Note, "hi");
     hidden(s.add_comment(&bot, &web, note.clone()).await);
     let c = s.add_comment(&env.human, &web, note.clone()).await.unwrap();
     hidden(s.resolve_comment(&bot, c.id, None).await);

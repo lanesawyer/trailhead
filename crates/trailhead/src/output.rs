@@ -95,6 +95,12 @@ pub fn comment_line(c: &Value, names: &dyn Fn(&str) -> String) -> String {
     if c["kind"] == "question" {
         tags.push(if c["resolved_at"].is_null() { "open".into() } else { "resolved".into() });
     }
+    if let Some(v) = c["verdict"].as_str() {
+        tags.push(v.replace('_', " "));
+    }
+    if let Some(m) = c["model"].as_str() {
+        tags.push(m.to_string());
+    }
     format!(
         "[{}] {} {}: {}\n    id {}",
         tags.join(", "),

@@ -168,6 +168,16 @@ pub(crate) enum Cmd {
         #[arg(long)]
         to: Option<String>,
     },
+    /// Record a review verdict on a task: approve or request-changes. Doesn't move the task.
+    Verdict {
+        task: String,
+        #[arg(value_parser = ["approve", "request-changes"])]
+        verdict: String,
+        body: String,
+        /// The model that reviewed, if an agent.
+        #[arg(long)]
+        model: Option<String>,
+    },
     /// Leave a handoff: what's done, what's left, gotchas.
     Handoff {
         task: String,

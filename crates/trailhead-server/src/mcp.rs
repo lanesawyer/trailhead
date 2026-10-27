@@ -24,7 +24,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime};
 use trailhead_core::{
     Claim, Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewProject, NewTask, Project, ProjectPatch,
-    ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch, TaskSort, idempotency_fingerprint,
+    ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch, TaskSort, Verdict,
+    idempotency_fingerprint,
 };
 use uuid::Uuid;
 
@@ -322,8 +323,12 @@ pub struct ClaimArgs {
 pub struct CommentArgs {
     task: String,
     body: String,
-    /// handoff, progress, question, decision or note (default). A question parks the task until answered.
+    /// handoff, progress, question, decision, review or note (default). A question parks the task until answered.
     kind: Option<String>,
+    /// For a review, required: approve or request_changes.
+    verdict: Option<String>,
+    /// For a review, optional: the model that reviewed.
+    model: Option<String>,
     /// User or agent id the comment is for.
     #[schemars(with = "Option<String>")]
     addressed_to: Option<Uuid>,
@@ -444,7 +449,8 @@ impl TrailheadMcp {
 
     async fn do_comment(&self, ctx: &Ctx, a: CommentArgs) -> Result<CallToolResult, ErrorData> {
         let kind = attempt!(a.kind.as_deref().map(str::parse::<CommentKind>).transpose()).unwrap_or(CommentKind::Note);
-        let new = NewComment { kind, body: a.body, addressed_to: a.addressed_to };
+        let verdict = attempt!(a.verdict.as_deref().map(str::parse::<Verdict>).transpose());
+        let new = NewComment { kind, body: a.body, addressed_to: a.addressed_to, verdict, model: a.model };
         let c = attempt!(self.state.store.add_comment(ctx, &a.task, new).await);
         text(format!("{} {}", c.kind, c.id))
     }
@@ -599,7 +605,7 @@ impl TrailheadMcp {
         };
         let task = attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await);
         if let Some(body) = a.handoff.filter(|b| !b.trim().is_empty()) {
-            let new = NewComment { kind: CommentKind::Handoff, body, addressed_to: None };
+            let new = NewComment::new(CommentKind::Handoff, body);
             attempt!(self.state.store.add_comment(&ctx, &task.key, new).await);
         }
         text(task_line(&task))

@@ -368,6 +368,12 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Comment { task, body, kind, to } => comment(&c, &task, &kind, &body, to, json).await?,
         Cmd::Handoff { task, body } => comment(&c, &task, "handoff", &body, None, json).await?,
         Cmd::Ask { task, body, to } => comment(&c, &task, "question", &body, to, json).await?,
+        Cmd::Verdict { task, verdict, body, model } => {
+            let verdict = verdict.replace('-', "_");
+            let body = json!({ "kind": "review", "body": body, "verdict": verdict, "model": model });
+            let v = c.post(&format!("tasks/{task}/comments"), body).await?;
+            if json { print_json(&v) } else { println!("review {} {}", s(&v, "verdict"), s(&v, "id")) }
+        }
         Cmd::Answer { comment_id, body } => {
             let id = match uuid::Uuid::parse_str(&comment_id) {
                 Ok(id) => id.to_string(),

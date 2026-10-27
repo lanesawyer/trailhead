@@ -69,7 +69,7 @@ impl CoreTracker {
 
     async fn comment(&self, task: &TaskKey, kind: CommentKind, body: &str) -> Result<()> {
         let ctx = self.ctx().await?;
-        let new = NewComment { kind, body: body.to_string(), addressed_to: None };
+        let new = NewComment::new(kind, body.to_string());
         self.store.add_comment(&ctx, &task.0, new).await.map_err(map_err)?;
         Ok(())
     }
@@ -178,14 +178,18 @@ impl Tracker for CoreTracker {
         self.set_status(task, trailhead_core::Status::InReview).await
     }
 
-    /// A note until Trailhead has typed review verdicts (TRAIL-84).
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()> {
+        let ctx = self.ctx().await?;
         let kind = match verdict.kind {
-            VerdictKind::Approve => "approve",
-            VerdictKind::RequestChanges => "request changes",
+            VerdictKind::Approve => trailhead_core::Verdict::Approve,
+            VerdictKind::RequestChanges => trailhead_core::Verdict::RequestChanges,
         };
-        let model = verdict.model.as_ref().map(|m| format!(" ({})", m.0)).unwrap_or_default();
-        self.comment(task, CommentKind::Note, &format!("Review: {kind}{model}\n\n{}", verdict.body)).await
+        let new = NewComment {
+            model: verdict.model.as_ref().map(|m| m.0.clone()),
+            ..NewComment::review(kind, &verdict.body)
+        };
+        self.store.add_comment(&ctx, &task.0, new).await.map_err(map_err)?;
+        Ok(())
     }
 
     async fn ask(&self, task: &TaskKey, question: &str) -> Result<()> {

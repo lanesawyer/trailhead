@@ -9,12 +9,12 @@ use crate::db::{
     opt_uuid_value,
 };
 use crate::error::{Error, Result};
-use crate::model::{Comment, CommentKind, Entity, Status};
+use crate::model::{Comment, CommentKind, Entity, Status, Verdict};
 use crate::store::{Ctx, Store, Tx};
 use crate::tasks::{find_task, load_task, update_status};
 
-pub(crate) const COMMENT_COLS: &str =
-    "id, workspace_id, task_id, author_id, on_behalf_of, kind, addressed_to, body, resolved_at, created_at, deleted_at";
+pub(crate) const COMMENT_COLS: &str = "id, workspace_id, task_id, author_id, on_behalf_of, kind, addressed_to, body, \
+     resolved_at, created_at, deleted_at, verdict, model";
 
 fn comment_from_row(row: &Row) -> Result<Comment> {
     Ok(Comment {
@@ -29,6 +29,8 @@ fn comment_from_row(row: &Row) -> Result<Comment> {
         resolved_at: get_opt_ts(row, 8)?,
         created_at: get_ts(row, 9)?,
         deleted_at: get_opt_ts(row, 10)?,
+        verdict: row.get::<Option<String>>(11)?.map(|v| v.parse()).transpose()?,
+        model: row.get(12)?,
     })
 }
 
@@ -99,20 +101,15 @@ async fn principal_exists(conn: &Connection, ws: Uuid, id: Uuid) -> Result<bool>
     Ok(rows.next().await?.is_some())
 }
 
-async fn insert_comment(
-    tx: &Tx,
-    task_id: Uuid,
-    kind: CommentKind,
-    body: &str,
-    addressed_to: Option<Uuid>,
-) -> Result<Comment> {
+async fn insert_comment(tx: &Tx, task_id: Uuid, new: &NewComment, body: &str) -> Result<Comment> {
     let id = Uuid::now_v7();
     let mut rows = tx
         .conn
         .query(
             &format!(
-                "INSERT INTO comments (id, workspace_id, task_id, author_id, on_behalf_of, kind, addressed_to, body, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING {COMMENT_COLS}"
+                "INSERT INTO comments (id, workspace_id, task_id, author_id, on_behalf_of, kind, addressed_to, body, created_at,
+                                       verdict, model)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) RETURNING {COMMENT_COLS}"
             ),
             libsql::params![
                 id.to_string(),
@@ -120,10 +117,12 @@ async fn insert_comment(
                 task_id.to_string(),
                 tx.ctx.actor_id().to_string(),
                 tx.ctx.user_id.to_string(),
-                kind.as_str(),
-                opt_uuid_value(addressed_to),
+                new.kind.as_str(),
+                opt_uuid_value(new.addressed_to),
                 body,
                 fmt_ts(tx.now),
+                new.verdict.map(|v| v.as_str()),
+                new.model.clone(),
             ],
         )
         .await?;
@@ -138,6 +137,20 @@ pub struct NewComment {
     pub body: String,
     /// A user or agent id. Mostly for questions.
     pub addressed_to: Option<Uuid>,
+    /// Required on a `review`, refused on anything else.
+    pub verdict: Option<Verdict>,
+    /// The model behind a review, optional.
+    pub model: Option<String>,
+}
+
+impl NewComment {
+    pub fn new(kind: CommentKind, body: impl Into<String>) -> NewComment {
+        NewComment { kind, body: body.into(), addressed_to: None, verdict: None, model: None }
+    }
+
+    pub fn review(verdict: Verdict, body: impl Into<String>) -> NewComment {
+        NewComment { verdict: Some(verdict), ..NewComment::new(CommentKind::Review, body) }
+    }
 }
 
 impl Store {
@@ -182,6 +195,16 @@ impl Store {
         if body.is_empty() {
             return Err(Error::Invalid("comment body is empty".into()));
         }
+        match (new.kind, new.verdict) {
+            (CommentKind::Review, None) => return Err(Error::Invalid("a review needs a verdict".into())),
+            (k, Some(_)) if k != CommentKind::Review => {
+                return Err(Error::Invalid("only a review comment carries a verdict".into()));
+            }
+            _ => {}
+        }
+        if new.model.is_some() && new.kind != CommentKind::Review {
+            return Err(Error::Invalid("only a review comment names a model".into()));
+        }
         self.write(ctx, async |tx| {
             let task = find_task(&tx.conn, ctx, task, false).await?;
             if let Some(to) = new.addressed_to
@@ -189,7 +212,7 @@ impl Store {
             {
                 return Err(Error::NotFound(format!("user or agent {to}")));
             }
-            let comment = insert_comment(tx, task.id, new.kind, &body, new.addressed_to).await?;
+            let comment = insert_comment(tx, task.id, &new, &body).await?;
             if new.kind == CommentKind::Question && task.status != Status::NeedsInput {
                 if !task.status.can_transition_to(Status::NeedsInput) {
                     return Err(Error::InvalidTransition { from: task.status, to: Status::NeedsInput });
@@ -216,7 +239,8 @@ impl Store {
                 return Ok(before);
             }
             if let Some(a) = answer.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
-                insert_comment(tx, before.task_id, CommentKind::Note, a, Some(before.author_id)).await?;
+                let new = NewComment { addressed_to: Some(before.author_id), ..NewComment::new(CommentKind::Note, a) };
+                insert_comment(tx, before.task_id, &new, a).await?;
             }
             let after = save_comment(tx, &Comment { resolved_at: Some(tx.now), ..before.clone() }).await?;
             tx.emit_change(

@@ -31,6 +31,7 @@ Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, pro
 - `progress`: short status updates.
 - `question`: needs an answer, from a human or another agent (`addressed_to` takes a user or agent id). Moves the task to `needs_input`, out of the ready queue. `POST /v1/comments/{id}/resolve` with optional `{"answer"}` resolves it; the answer is posted as a `note` to the asker. When the last open question resolves, the task returns to `in_progress` if still claimed, else `open`.
 - `decision`: a choice and why, so later agents don't relitigate it.
+- `review`: a verdict on a change. Needs `verdict` (`approve` or `request_changes`) and may name the reviewing `model`. It records the verdict only; moving the task is a separate step.
 - `note`: anything else. The default.
 
 The `description` is the current spec and gets edited; comments are the append-only history.

@@ -121,7 +121,9 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
     assert_eq!(task.run.reviewed, Some(1));
 
     let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
-    assert!(comments.iter().any(|c| c.kind == CommentKind::Note && c.body.starts_with("Review: approve")));
+    let review = comments.iter().find(|c| c.kind == CommentKind::Review).expect("a typed review");
+    assert_eq!(review.verdict, Some(trailhead_core::Verdict::Approve));
+    assert_eq!(review.model.as_deref(), Some("fake-opus"));
     assert!(r.revoked("factory/trail-1-a1").await);
     assert!(r.revoked("factory/trail-1-a1-r1").await);
     assert!(r.compute.sandboxes().is_empty());

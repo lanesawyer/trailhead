@@ -5,7 +5,7 @@ use serde_json::json;
 use time::Duration;
 use trailhead_core::{
     CommentKind, Error, EventFilter, MatchField, NewComment, NewProject, NewTask, ProjectPatch, ProjectStatus,
-    SearchFilter, Status, TaskFilter, TaskPatch, TaskSort,
+    SearchFilter, Status, TaskFilter, TaskPatch, TaskSort, Verdict,
 };
 
 fn status(s: Status) -> TaskPatch {
@@ -13,7 +13,7 @@ fn status(s: Status) -> TaskPatch {
 }
 
 fn comment(kind: CommentKind, body: &str) -> NewComment {
-    NewComment { kind, body: body.into(), addressed_to: None }
+    NewComment::new(kind, body)
 }
 
 #[tokio::test]
@@ -262,6 +262,8 @@ async fn questions_park_the_task_until_answered() {
                 kind: CommentKind::Question,
                 body: "which provider?".into(),
                 addressed_to: Some(env.human.user_id),
+                verdict: None,
+                model: None,
             },
         )
         .await
@@ -945,4 +947,24 @@ async fn search_by_key_puts_that_task_first() {
 
     let filter = SearchFilter { query: target.key.clone(), statuses: vec![Status::Done], ..Default::default() };
     assert!(env.store.search_hits(&env.human, filter).await.unwrap().is_empty(), "filters still apply");
+}
+
+#[tokio::test]
+async fn reviews_need_a_verdict_and_only_reviews_have_one() {
+    let env = Env::new().await;
+    let t = env.task("rotate keys").await;
+    let s = &env.store;
+
+    let r = s.add_comment(&env.human, &t.key, NewComment::review(Verdict::Approve, "looks right")).await.unwrap();
+    assert_eq!((r.kind, r.verdict), (CommentKind::Review, Some(Verdict::Approve)));
+    let back = s.list_comments(&env.human, &t.key).await.unwrap();
+    assert_eq!(back, [r]);
+
+    let no_verdict = NewComment::new(CommentKind::Review, "hmm");
+    assert!(matches!(s.add_comment(&env.human, &t.key, no_verdict).await, Err(Error::Invalid(_))));
+    let stray = NewComment { verdict: Some(Verdict::Approve), ..NewComment::new(CommentKind::Note, "x") };
+    assert!(matches!(s.add_comment(&env.human, &t.key, stray).await, Err(Error::Invalid(_))));
+    let stray = NewComment { model: Some("opus".into()), ..NewComment::new(CommentKind::Note, "x") };
+    assert!(matches!(s.add_comment(&env.human, &t.key, stray).await, Err(Error::Invalid(_))));
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::Open, "a review doesn't move the task");
 }

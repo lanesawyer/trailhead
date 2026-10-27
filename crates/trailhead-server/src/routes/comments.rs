@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::response::Response;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use trailhead_core::{Comment, CommentKind, NewComment};
+use trailhead_core::{Comment, CommentKind, NewComment, Verdict};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -31,6 +31,10 @@ pub(crate) struct AddComment {
     kind: CommentKind,
     body: String,
     addressed_to: Option<Uuid>,
+    /// Required when `kind` is `review`: `approve` or `request_changes`.
+    verdict: Option<Verdict>,
+    /// The model behind a review, optional.
+    model: Option<String>,
 }
 
 fn note() -> CommentKind {
@@ -50,8 +54,14 @@ pub(crate) async fn add_comment(
     Path(t): Path<String>,
     Json(b): Json<AddComment>,
 ) -> ApiResult<Response> {
-    let c =
-        s.store.add_comment(&ctx, &t, NewComment { kind: b.kind, body: b.body, addressed_to: b.addressed_to }).await?;
+    let c = s
+        .store
+        .add_comment(
+            &ctx,
+            &t,
+            NewComment { kind: b.kind, body: b.body, addressed_to: b.addressed_to, verdict: b.verdict, model: b.model },
+        )
+        .await?;
     Ok(created(c))
 }
 

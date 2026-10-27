@@ -73,6 +73,12 @@ string_enum!(CommentKind {
     Question => "question",
     Decision => "decision",
     Note => "note",
+    Review => "review",
+});
+
+string_enum!(Verdict {
+    Approve => "approve",
+    RequestChanges => "request_changes",
 });
 
 string_enum!(ProjectStatus {
@@ -222,6 +228,12 @@ pub struct Comment {
     pub kind: CommentKind,
     pub addressed_to: Option<Uuid>,
     pub body: String,
+    /// Set on `review` comments only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<Verdict>,
+    /// The model behind an agent's review, when it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub resolved_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]

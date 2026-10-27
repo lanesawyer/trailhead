@@ -114,6 +114,7 @@ Every task belongs to exactly one project, and projects don't nest.
 - `progress`: short status updates while working.
 - `question`: needs an answer, addressed to a human or another agent. Marks the task `needs_input` and removes it from the ready queue until answered.
 - `decision`: a choice made and why, so later agents don't relitigate it.
+- `review`: a typed verdict (`approve` or `request_changes`, optionally the reviewing model), so review gates and quorums count records rather than prose. It doesn't move the task.
 - `note`: anything else. The default.
 
 **Agents helping agents.** For real work, an agent creates a subtask that blocks its own task; the original becomes ready again once the subtask is done. For a quick question, it uses a `question` comment addressed to the other agent.

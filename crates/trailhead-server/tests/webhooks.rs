@@ -56,14 +56,7 @@ async fn delivers_signed_filtered_events_and_backs_off() {
         .create_task(&ctx.next_batch(), NewTask { project: "AUTH".into(), title: "first".into(), ..Default::default() })
         .await
         .unwrap();
-    store
-        .add_comment(
-            &ctx.next_batch(),
-            &task.key,
-            NewComment { kind: CommentKind::Note, body: "skip me".into(), addressed_to: None },
-        )
-        .await
-        .unwrap();
+    store.add_comment(&ctx.next_batch(), &task.key, NewComment::new(CommentKind::Note, "skip me")).await.unwrap();
 
     let state = AppState { webhook_targets: webhooks::Targets::Any, ..AppState::new(store) };
     let http = webhooks::client(state.webhook_targets);
