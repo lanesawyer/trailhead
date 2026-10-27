@@ -69,6 +69,10 @@ impl Factory {
         &self.config.repo.project
     }
 
+    fn queue(&self) -> Option<TaskKey> {
+        self.config.repo.queue.clone().map(TaskKey)
+    }
+
     fn base_labels(&self) -> Labels {
         Labels::from([
             (label::FACTORY.into(), FACTORY_LABEL.into()),
@@ -170,7 +174,7 @@ impl Factory {
         if room == 0 {
             return Ok(());
         }
-        let ready = self.tracker.ready(self.project(), room).await?;
+        let ready = self.tracker.ready(self.project(), self.queue().as_ref(), room).await?;
         for task in ready.into_iter().filter(|t| !busy.contains(&t.key)) {
             let key = task.key.clone();
             let factory = self.clone();
@@ -190,7 +194,7 @@ impl Factory {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for task in self.tracker.ready(self.project(), room).await? {
+        for task in self.tracker.ready(self.project(), self.queue().as_ref(), room).await? {
             let outcome = self.run_task(&task).await?;
             out.push((task, outcome));
         }

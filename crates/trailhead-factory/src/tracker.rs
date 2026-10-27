@@ -94,7 +94,9 @@ pub trait Tracker: Send + Sync {
     /// A handle acting as one of this agent's sub-agents, by the part after the parent's name.
     fn sub_agent(&self, name: &str) -> Arc<dyn Tracker>;
 
-    async fn ready(&self, project: &str, limit: usize) -> Result<Vec<Task>>;
+    /// Ready tasks in `project`; with `queue`, only the queue task's subtasks, which is how work is handed to the
+    /// factory.
+    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>>;
     async fn show(&self, task: &TaskKey) -> Result<Task>;
     /// Open, in-progress, parked or in-review tasks that carry factory metadata.
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>>;

@@ -8,3 +8,5 @@ project_id = "a96f8061-409e-4eaa-b76b-b4f0002a6733" # Trailhead
 
 [secrets]
 SPRITES_TOKEN = { provider = "bws", value = "SPRITES_TOKEN" }
+# Subscription mode (docs/factory/sandbox.md): `claude setup-token`, for trailhead-factory.
+CLAUDE_CODE_OAUTH_TOKEN = { provider = "bws", value = "CLAUDE_CODE_OAUTH_TOKEN" }

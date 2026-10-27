@@ -116,10 +116,33 @@ impl Tracker for RestTracker {
         Arc::new(refused)
     }
 
-    async fn ready(&self, project: &str, limit: usize) -> Result<Vec<Task>> {
-        let req = self.request(Method::GET, "/ready").query(&[("project", project), ("limit", &limit.to_string())]);
-        let tasks = self.send(req).await?;
-        tasks.as_array().into_iter().flatten().map(|t| task(t, &Value::Null)).collect()
+    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>> {
+        let fetch = if queue.is_some() { 1000 } else { limit };
+        let req = self.request(Method::GET, "/ready").query(&[("project", project), ("limit", &fetch.to_string())]);
+        let ready = self.send(req).await?;
+        let queued: Option<std::collections::HashSet<String>> = match queue {
+            None => None,
+            Some(q) => {
+                let query = [("project", project), ("parent", q.0.as_str()), ("limit", "1000")];
+                let subtasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
+                Some(
+                    subtasks
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|t| t["key"].as_str().map(str::to_string))
+                        .collect(),
+                )
+            }
+        };
+        ready
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| queued.as_ref().is_none_or(|q| t["key"].as_str().is_some_and(|k| q.contains(k))))
+            .take(limit)
+            .map(|t| task(t, &Value::Null))
+            .collect()
     }
 
     async fn show(&self, key: &TaskKey) -> Result<Task> {

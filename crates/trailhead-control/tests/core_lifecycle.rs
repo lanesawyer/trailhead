@@ -202,3 +202,33 @@ async fn reconcile_requeues_an_interrupted_run() {
     r.factory.tick().await.unwrap();
     assert_eq!(r.show(&key).await.run.attempt, Some(2));
 }
+
+#[tokio::test]
+async fn with_a_queue_only_its_subtasks_run() {
+    let mut r = rig().await;
+    let urgent = NewTask {
+        project: "TRAIL".into(),
+        title: "An epic, not for the factory".into(),
+        priority: Some(1),
+        ..Default::default()
+    };
+    let epic = TaskKey(r.store.create_task(&r.human, urgent).await.unwrap().key);
+    let queue = r.task("Factory queue").await;
+    let sub = NewTask {
+        project: "TRAIL".into(),
+        title: "Add a greeting".into(),
+        parent: Some(queue.0.clone()),
+        ..Default::default()
+    };
+    let handed = TaskKey(r.store.create_task(&r.human, sub).await.unwrap().key);
+    r.factory.config.repo.queue = Some(queue.0.clone());
+
+    let ready = r.tracker.ready("TRAIL", Some(&queue), 10).await.unwrap();
+    assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&handed]);
+
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which greeting?".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.iter().map(|(t, _)| &t.key).collect::<Vec<_>>(), [&handed]);
+    assert_eq!(r.show(&epic).await.status, Status::Open, "the epic is left alone");
+    assert_eq!(r.show(&queue).await.status, Status::Open, "and so is the queue itself");
+}

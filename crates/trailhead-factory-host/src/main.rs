@@ -156,8 +156,15 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
         Cmd::Check(opts) => {
             let (factory, tunnel) = setup(&opts).await?;
             let project = &factory.config.repo.project;
-            match factory.tracker.ready(project, 10).await {
-                Ok(ready) => println!("tracker: acting as {AGENT}; {} ready task(s) in {project}", ready.len()),
+            let queue = factory.config.repo.queue.clone().map(trailhead_factory::TaskKey);
+            match factory.tracker.ready(project, queue.as_ref(), 10).await {
+                Ok(ready) => {
+                    let scope = queue.as_ref().map_or(project.clone(), |q| format!("{project}, under {}", q.0));
+                    println!("tracker: acting as {AGENT}; {} ready task(s) in {scope}", ready.len());
+                    for t in &ready {
+                        println!("  {} {}", t.key.0, t.title);
+                    }
+                }
                 Err(e) => println!("tracker: acting as {AGENT}; {e}"),
             }
             match factory.compute.list(&Default::default()).await {

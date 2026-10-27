@@ -122,9 +122,23 @@ impl Tracker for CoreTracker {
         Arc::new(sub)
     }
 
-    async fn ready(&self, project: &str, limit: usize) -> Result<Vec<Task>> {
+    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
-        let tasks = self.store.ready(&ctx, Some(project), Some(limit as i64)).await.map_err(map_err)?;
+        let tasks = match queue {
+            None => self.store.ready(&ctx, Some(project), Some(limit as i64)).await.map_err(map_err)?,
+            Some(queue) => {
+                let filter = TaskFilter {
+                    project: Some(project.to_string()),
+                    parent: Some(queue.0.clone()),
+                    limit: Some(1000),
+                    ..TaskFilter::default()
+                };
+                let queued: std::collections::HashSet<_> =
+                    self.store.list_tasks(&ctx, filter).await.map_err(map_err)?.into_iter().map(|t| t.id).collect();
+                let ready = self.store.ready(&ctx, Some(project), Some(1000)).await.map_err(map_err)?;
+                ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
+            }
+        };
         let mut out = Vec::with_capacity(tasks.len());
         for t in tasks {
             out.push(self.task(&ctx, t).await?);

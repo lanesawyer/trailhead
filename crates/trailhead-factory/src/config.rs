@@ -57,6 +57,9 @@ pub struct RepoConfig {
     pub worker: String,
     #[serde(default = "default_reviewer")]
     pub reviewer: String,
+    /// A task whose subtasks are the factory's work. Without one, every ready task in the project is.
+    #[serde(default)]
+    pub queue: Option<String>,
 }
 
 fn default_base_branch() -> String {

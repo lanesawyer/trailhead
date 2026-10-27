@@ -24,6 +24,7 @@ struct State {
     comments: HashMap<TaskKey, Vec<FakeComment>>,
     agents: HashMap<String, Agent>,
     next: HashMap<String, u32>,
+    parents: HashMap<TaskKey, TaskKey>,
 }
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
@@ -50,6 +51,14 @@ impl FakeTracker {
             }
             _ => Err(Error::Forbidden("bad token".into())),
         }
+    }
+
+    /// A subtask of `parent`, as handed to a factory with a queue.
+    pub fn add_subtask(&self, parent: &TaskKey, title: &str, description: &str) -> TaskKey {
+        let project = parent.0.rsplit_once('-').map(|(p, _)| p.to_string()).unwrap_or_default();
+        let key = self.add_task(&project, title, description);
+        self.state.lock().unwrap().parents.insert(key.clone(), parent.clone());
+        key
     }
 
     pub fn add_task(&self, project: &str, title: &str, description: &str) -> TaskKey {
@@ -168,12 +177,13 @@ impl Tracker for FakeTracker {
         Arc::new(FakeTracker { state: self.state.clone(), agent: format!("{}/{name}", self.agent) })
     }
 
-    async fn ready(&self, project: &str, limit: usize) -> Result<Vec<Task>> {
+    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>> {
         self.check_live()?;
         let s = self.state.lock().unwrap();
         Ok(s.tasks
             .values()
             .filter(|t| t.project == project && t.status == Status::Open && t.holder.is_none())
+            .filter(|t| queue.is_none_or(|q| s.parents.get(&t.key) == Some(q)))
             .take(limit)
             .cloned()
             .collect())
