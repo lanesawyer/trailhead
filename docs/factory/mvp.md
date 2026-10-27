@@ -11,7 +11,7 @@ Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with 
 - `CodeHost`: GitHub through the connector, publishing with the Git Data API.
 - Standard checks, one agent review posted as a PR comment, a human merges.
 - Per-task budget and wall-clock limit from daemon usage counts; parking through `ask`.
-- Stateless control plane on Lane's machine, with reconcile on boot.
+- Stateless control plane on Lane's machine, with reconcile on boot: `trailhead-factory run --config factory.toml` (or `mise run factory`), a process beside the local server that shares its database and forwards the API tunnel to it. Moving it into the server process is later work.
 - `tracing` logs only.
 
 ## Out of scope

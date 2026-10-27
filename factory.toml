@@ -10,6 +10,8 @@ max_sandboxes = 1
 tools = { rust = "stable" }
 
 [checks]
+# Runs while install egress is open; the agent's phase can't reach crates.io.
+setup = "cargo fetch --locked && cargo build --all-targets --locked"
 fmt = "cargo fmt --all --check"
 lint = "cargo clippy --all-targets -- -D warnings"
 test = "cargo test"
