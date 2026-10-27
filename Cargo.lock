@@ -5018,6 +5018,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "trailhead-factory-host"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hex",
+ "iroh",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trailhead-compute-sprites",
+ "trailhead-control",
+ "trailhead-core",
+ "trailhead-daemon",
+ "trailhead-factory",
+ "trailhead-provider-anthropic",
+ "trailhead-server",
+]
+
+[[package]]
 name = "trailhead-harness-claude-code"
 version = "0.1.0"
 dependencies = [

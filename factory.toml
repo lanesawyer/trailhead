@@ -1,0 +1,33 @@
+# The factory's settings for this repo (docs/factory/). `trailhead-factory run --config factory.toml`.
+
+[repo]
+owner = "lanesawyer"
+name = "trailhead"
+project = "TRAIL"
+max_sandboxes = 1
+
+[stack]
+tools = { rust = "stable" }
+
+[checks]
+fmt = "cargo fmt --all --check"
+lint = "cargo clippy --all-targets -- -D warnings"
+test = "cargo test"
+
+[egress]
+# crates.io and rustup while installing dependencies; nothing extra while the agent works.
+install = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang.org"]
+
+[profiles.worker]
+role = "worker"
+adapter = "claude-code"
+provider = "anthropic"
+model = "sonnet"
+budget = { usd = 5, minutes = 60, steps = 60 }
+
+[profiles.reviewer]
+role = "reviewer"
+adapter = "claude-code"
+provider = "anthropic"
+model = "opus"
+budget = { usd = 2, minutes = 20, steps = 30 }

@@ -12,3 +12,10 @@ run = [
   "cargo build --release -p trailhead-daemon --bin trailhead-daemon",
   "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon fnox exec -- cargo test -p trailhead-daemon --test live -- --ignored --nocapture",
 ]
+
+[tasks.factory]
+description = "Run the factory's control plane for this repo (needs a `factory` agent and SPRITES_TOKEN via fnox)"
+run = [
+  "cargo build --release -p trailhead-daemon --bin trailhead-daemon -p trailhead-factory-host",
+  "fnox exec -- {{config_root}}/target/release/trailhead-factory run --config {{config_root}}/factory.toml --daemon {{config_root}}/target/release/trailhead-daemon",
+]

@@ -4,11 +4,12 @@
 
 use std::path::PathBuf;
 
-/// A saved credential: the local user's, or a local agent's.
+/// A saved credential: the local user's, a local agent's, or another named secret (such as the factory's keys).
 #[derive(Clone, Copy, Debug)]
 pub enum Cred<'a> {
     User,
     Agent(&'a str),
+    Secret(&'a str),
 }
 
 impl Cred<'_> {
@@ -16,6 +17,7 @@ impl Cred<'_> {
         match self {
             Cred::User => "user".into(),
             Cred::Agent(name) => format!("agent:{name}"),
+            Cred::Secret(name) => format!("secret:{name}"),
         }
     }
 }
@@ -54,6 +56,7 @@ impl CredStore {
             // `parent/child` names flatten to `parent.child`: a parent's token is a
             // file, so it can't also be a directory, and names never contain `.`.
             Cred::Agent(name) => self.config_dir.join("agents").join(name.replace('/', ".")),
+            Cred::Secret(name) => self.config_dir.join("secrets").join(name),
         }
     }
 

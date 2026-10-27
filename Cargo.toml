@@ -44,6 +44,7 @@ trailhead-harness-claude-code = { path = "crates/trailhead-harness-claude-code" 
 trailhead-compute-sprites = { path = "crates/trailhead-compute-sprites" }
 trailhead-codehost-github = { path = "crates/trailhead-codehost-github" }
 trailhead-provider-anthropic = { path = "crates/trailhead-provider-anthropic" }
+trailhead-factory-host = { path = "crates/trailhead-factory-host" }
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 http = "1"
 futures-util = { version = "0.3", default-features = false }
