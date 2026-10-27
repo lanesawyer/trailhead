@@ -41,7 +41,8 @@ impl ClaudeCode {
     /// Subscription mode: Claude Code authenticates with this token (`claude setup-token`) against Anthropic's API
     /// directly, and the run's endpoint is ignored.
     pub fn with_oauth_token(mut self, token: String) -> ClaudeCode {
-        self.oauth_token = Some(token);
+        // Tokens never contain whitespace, but one copied from a wrapped terminal line can.
+        self.oauth_token = Some(token.split_whitespace().collect());
         self
     }
 

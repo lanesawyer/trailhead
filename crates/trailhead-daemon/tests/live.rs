@@ -49,6 +49,22 @@ fn worker_model() -> String {
     std::env::var("LIVE_MODEL_URL").unwrap_or_else(|_| DEAD_MODEL.into())
 }
 
+/// With `LIVE_SUBSCRIPTION` set, the worker runs Claude Code for real on `CLAUDE_CODE_OAUTH_TOKEN` (a few cents of
+/// Lane's subscription), with a task that only asks a question, so nothing reaches GitHub.
+fn subscription() -> Option<String> {
+    std::env::var("LIVE_SUBSCRIPTION").ok().and_then(|_| std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok())
+}
+
+fn worker_task() -> String {
+    if subscription().is_some() {
+        "This is a connectivity test. Don't read or change any files. Finish straight away with outcome \
+         needs_input and the question \"Is the factory connected?\"."
+            .into()
+    } else {
+        "Say hi.".into()
+    }
+}
+
 fn domains(extra: &[&str]) -> Egress {
     Egress { domains: IROH_DOMAINS.iter().chain(extra).map(|d| d.to_string()).collect() }
 }
@@ -77,7 +93,11 @@ async fn daemon_in_a_sprite() {
         control.clone(),
         master,
         compute.clone(),
-        Launch { log: std::env::var("LIVE_DAEMON_LOG").ok(), ..Launch::new(binary) },
+        Launch {
+            log: std::env::var("LIVE_DAEMON_LOG").ok(),
+            claude_oauth_token: subscription(),
+            ..Launch::new(binary)
+        },
     ));
     let _tunnel = Router::builder(control).accept(API_ALPN, ApiTunnel::new(server, remote.peers())).spawn();
 
@@ -95,7 +115,8 @@ async fn daemon_in_a_sprite() {
 
             // Agent-work egress: iroh only. The daemon stays reachable, but GitHub stops being, after a delay:
             // the policy call returns before enforcement catches up, so measure how long that takes.
-            compute.set_egress(&sandbox.id, &domains(&[])).await.unwrap();
+            let agent_hosts: &[&str] = if subscription().is_some() { &["api.anthropic.com"] } else { &[] };
+            compute.set_egress(&sandbox.id, &domains(agent_hosts)).await.unwrap();
             let t = Instant::now();
             let mut attempts = 0;
             let err = loop {
@@ -114,7 +135,7 @@ async fn daemon_in_a_sprite() {
             let cred = tracker.create_sub_agent("live-a1", "LIVE", Duration::from_secs(900)).await.unwrap();
             let req = RunRequest {
                 role: Role::Worker,
-                task: TaskSpec { key: key.clone(), title: "Live run".into(), description: "Say hi.".into() },
+                task: TaskSpec { key: key.clone(), title: "Live run".into(), description: worker_task() },
                 repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
                 base_branch: "main".into(),
                 branch: "factory/live-1".into(),
@@ -130,14 +151,28 @@ async fn daemon_in_a_sprite() {
             let t = Instant::now();
             let report = remote.run(&sandbox.id, req, events).await.expect("the run reports");
             eprintln!("run finished in {:.1}s: {:?}", t.elapsed().as_secs_f64(), report.result);
-            assert!(matches!(report.result, RunResult::Failed(_)), "{:?}", report.result);
+            if subscription().is_some() {
+                // A real model call on Lane's subscription, through the locked-down Sprite.
+                assert!(matches!(report.result, RunResult::NeedsInput(_)), "{:?}", report.result);
+                eprintln!("subscription run usage: {:?}", report.usage);
+            } else {
+                assert!(matches!(report.result, RunResult::Failed(_)), "{:?}", report.result);
+            }
 
             let filter = EventFilter { task: Some(key.0.clone()), ..Default::default() };
             let kinds: Vec<String> =
                 store.list_events(&human, filter).await.unwrap().into_iter().map(|e| e.kind).collect();
             eprintln!("task events: {kinds:?}");
             assert!(kinds.iter().any(|k| k == "claim.acquired"), "{kinds:?}");
-            assert!(kinds.iter().any(|k| k == "claim.released"), "{kinds:?}");
+            // A failed run releases the task; a question parks it with a question comment.
+            let after = if subscription().is_some() { "comment.created" } else { "claim.released" };
+            assert!(kinds.iter().any(|k| k == after), "{kinds:?}");
+
+            // Subscription mode ignores the dead model endpoint, so a reviewer there would really review the PR and
+            // post its verdict to GitHub. It stops here.
+            if subscription().is_some() {
+                return;
+            }
 
             // A reviewer run reads the PR's diff through the Sprite's GitHub connector before the agent starts, so
             // failing in Claude Code rather than in GitHub means the connector worked. Read-only: the closed M0 PR.

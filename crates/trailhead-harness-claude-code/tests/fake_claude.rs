@@ -234,7 +234,8 @@ async fn subscription_mode_uses_only_the_oauth_token() {
     let log = std::fs::read_to_string(&r.log).unwrap();
     assert!(log.contains(&format!("KEY={PLACEHOLDER_KEY}")) && log.contains("OAUTH=\n"), "connector mode: {log}");
 
-    let subscription = Rig { harness: ClaudeCode::new(r.harness_binary()).with_oauth_token("sub-token".into()), ..r };
+    let subscription =
+        Rig { harness: ClaudeCode::new(r.harness_binary()).with_oauth_token("sub-\ntoken\n".into()), ..r };
     play(&subscription, "question", ctx(&subscription, Role::Worker, 10)).await;
     let log = std::fs::read_to_string(&subscription.log).unwrap();
     assert!(log.contains("OAUTH=sub-token"), "{log}");
