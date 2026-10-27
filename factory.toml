@@ -5,6 +5,8 @@ owner = "lanesawyer"
 name = "trailhead"
 project = "TRAIL"
 max_sandboxes = 1
+# Only subtasks of this task are the factory's work.
+queue = "TRAIL-102"
 
 [stack]
 tools = { rust = "stable" }
