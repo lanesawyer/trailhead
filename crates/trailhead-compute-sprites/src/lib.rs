@@ -26,6 +26,9 @@ pub const GATEWAY_DOMAIN: &str = "api.sprites.dev";
 
 const PAGE_SIZE: u32 = 500;
 
+/// How long a wake keeps the Sprite up for its program to reconnect.
+const WAKE_HOLD: &str = r#"{"expire":"2m"}"#;
+
 /// How long `start` watches a new service's output for an early exit.
 const START_WATCH_SECS: u32 = 3;
 
@@ -207,6 +210,26 @@ impl Compute for SpritesCompute {
         url.query_pairs_mut().append_pair("duration", &START_WATCH_SECS.to_string());
         let body = ok(send(self.request(Method::POST, url)).await?).await?.text().await.map_err(http_err)?;
         service_started(&program.name, &body)
+    }
+
+    /// A paused Sprite wakes on inbound activity such as an exec, and an iroh dial doesn't count. An exec alone isn't
+    /// enough: a Sprite idle past its window pauses again as soon as the command ends. So the exec takes a short hold
+    /// (the Tasks API), long enough for the daemon to reconnect and take its own.
+    async fn wake(&self, id: &SandboxId) -> Result<()> {
+        let mut url = self.url(&[&id.0, "exec"]);
+        url.query_pairs_mut()
+            .append_pair("cmd", "curl")
+            .append_pair("cmd", "-sf")
+            .append_pair("cmd", "--unix-socket")
+            .append_pair("cmd", "/.sprite/api.sock")
+            .append_pair("cmd", "-X")
+            .append_pair("cmd", "PUT")
+            .append_pair("cmd", "-H")
+            .append_pair("cmd", "Content-Type: application/json")
+            .append_pair("cmd", "-d")
+            .append_pair("cmd", WAKE_HOLD)
+            .append_pair("cmd", "http://sprite/v1/tasks/trailhead-wake");
+        ok(send(self.request(Method::POST, url)).await?).await.map(drop)
     }
 
     async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()> {

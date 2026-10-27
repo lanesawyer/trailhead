@@ -12,7 +12,7 @@ use iroh::protocol::Router;
 use trailhead_codehost_github::{GitHub, Identity};
 use trailhead_daemon::awake::{SPRITE_API_SOCKET, SpriteHolds};
 use trailhead_daemon::net::{
-    ALPN, DaemonProtocol, keep_iroh_hosts_resolved, open_api_tunnel, parse_endpoint_id, parse_secret_key,
+    ALPN, DaemonProtocol, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
 };
 use trailhead_daemon::{Connect, GitWorkspace, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, Repo, Result, Tracker};
@@ -34,6 +34,9 @@ struct Args {
     author_name: String,
     #[arg(long, default_value = "factory@trailhead.invalid")]
     author_email: String,
+    /// A `tracing` filter; `RUST_LOG` wins if set.
+    #[arg(long, default_value = "info")]
+    log: String,
 }
 
 /// Where connectors are listed from inside a Sprite.
@@ -91,9 +94,10 @@ fn read_secrets(path: &PathBuf) -> std::result::Result<DaemonSecrets, String> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let args = Args::parse();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| args.log.as_str().into());
     tracing_subscriber::fmt().with_env_filter(filter).init();
-    match serve(Args::parse()).await {
+    match serve(args).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("trailhead-daemon: {e}");
@@ -125,7 +129,7 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
         renew_every: RENEW_EVERY,
     };
     tracing::info!(id = %endpoint.id(), %control_plane, "trailhead-daemon listening");
-    keep_iroh_hosts_resolved();
+    watch_network(endpoint.clone());
     let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone());
     if std::path::Path::new(SPRITE_API_SOCKET).exists() {
         protocol = protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET));

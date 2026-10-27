@@ -94,6 +94,9 @@ pub trait Compute: Send + Sync {
     async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()>;
     /// Writes the program's files and starts it, replacing a program of the same name.
     async fn start(&self, id: &SandboxId, program: &Program) -> Result<()>;
+    /// Resumes a sandbox that paused while idle, so its programs can be reached again. Waking a running sandbox is
+    /// a no-op.
+    async fn wake(&self, id: &SandboxId) -> Result<()>;
     async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()>;
     async fn set_labels(&self, id: &SandboxId, labels: &Labels) -> Result<()>;
     async fn destroy(&self, id: &SandboxId) -> Result<()>;

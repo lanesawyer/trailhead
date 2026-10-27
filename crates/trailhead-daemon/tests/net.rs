@@ -173,6 +173,7 @@ async fn cancel_reaches_the_daemon() {
     r.remote.cancel(&sandbox).await.unwrap();
     let out = tokio::time::timeout(Duration::from_secs(10), run).await.unwrap().unwrap();
     assert_eq!(out.unwrap_err(), Error::Cancelled);
+    assert_eq!(r.compute.wakes("slow"), 1, "woken once, before the first dial");
 }
 
 #[tokio::test]

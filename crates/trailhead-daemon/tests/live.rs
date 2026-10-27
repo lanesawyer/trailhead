@@ -73,7 +73,12 @@ async fn daemon_in_a_sprite() {
     let (server, tracker, store, human, key) = trailhead(dir.path()).await;
     let control = Endpoint::builder(presets::N0).bind().await.unwrap();
     let master = SecretKey::generate().to_bytes();
-    let remote = Arc::new(RemoteDaemon::new(control.clone(), master, compute.clone(), Launch::new(binary)));
+    let remote = Arc::new(RemoteDaemon::new(
+        control.clone(),
+        master,
+        compute.clone(),
+        Launch { log: std::env::var("LIVE_DAEMON_LOG").ok(), ..Launch::new(binary) },
+    ));
     let _tunnel = Router::builder(control).accept(API_ALPN, ApiTunnel::new(server, remote.peers())).spawn();
 
     let result = tokio::spawn({
@@ -158,9 +163,21 @@ async fn daemon_in_a_sprite() {
             };
             let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
             let t = Instant::now();
+            let again = review.clone();
             let report = remote.run(&sandbox.id, review, events).await.expect("the review reports");
             eprintln!("review finished in {:.1}s: {:?}", t.elapsed().as_secs_f64(), report.result);
             assert!(matches!(&report.result, RunResult::Failed(r) if r.starts_with("claude")), "{:?}", report.result);
+
+            // With LIVE_PAUSE set: leave the Sprite idle until it pauses, then review again. The control plane has
+            // to wake it, since an iroh dial alone doesn't.
+            if std::env::var("LIVE_PAUSE").is_ok() {
+                eprintln!("idling 150s so the Sprite pauses");
+                tokio::time::sleep(Duration::from_secs(150)).await;
+                let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+                let t = Instant::now();
+                let report = remote.run(&sandbox.id, again, events).await.expect("the review after a pause reports");
+                eprintln!("review after pause finished in {:.1}s: {:?}", t.elapsed().as_secs_f64(), report.result);
+            }
         }
     });
     let outcome = tokio::time::timeout(Duration::from_secs(300), result).await;

@@ -201,6 +201,41 @@ async fn start_service(State(api): State<Shared>, Path((name, svc)): Path<(Strin
     }
 }
 
+async fn exec(
+    State(api): State<Shared>,
+    Path(name): Path<String>,
+    axum::extract::RawQuery(q): axum::extract::RawQuery,
+) -> Response {
+    let mut api = api.lock().unwrap();
+    let Some(s) = api.sprites.get_mut(&name) else { return StatusCode::NOT_FOUND.into_response() };
+    let args: Vec<String> = url_args(&q.unwrap_or_default());
+    s.started.push(format!("exec {}", args.join(" ")));
+    "".into_response()
+}
+
+/// The repeated `cmd` query parameters, decoded.
+fn url_args(q: &str) -> Vec<String> {
+    q.split('&')
+        .filter_map(|kv| kv.strip_prefix("cmd="))
+        .map(|v| {
+            let v = v.replace('+', " ");
+            let mut out = Vec::new();
+            let b = v.as_bytes();
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] == b'%' && i + 2 < b.len() {
+                    out.push(u8::from_str_radix(&v[i + 1..i + 3], 16).unwrap());
+                    i += 3;
+                } else {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            }
+            String::from_utf8(out).unwrap()
+        })
+        .collect()
+}
+
 async fn serve() -> (Shared, String) {
     let api: Shared = Arc::default();
     let app = Router::new()
@@ -210,6 +245,7 @@ async fn serve() -> (Shared, String) {
         .route("/v1/sprites/{name}/checkpoint", post(checkpoint))
         .route("/v1/sprites/{name}/checkpoints/{cp}/restore", post(restore))
         .route("/v1/sprites/{name}/fs/write", put(write_file))
+        .route("/v1/sprites/{name}/exec", post(exec))
         .route("/v1/sprites/{name}/fs/rename", post(rename_file))
         .route("/v1/sprites/{name}/services/{svc}", put(put_service))
         .route("/v1/sprites/{name}/services/{svc}/start", post(start_service))
@@ -354,4 +390,19 @@ async fn start_uploads_files_and_starts_a_service() {
     let broken = Program { name: "broken".into(), files: vec![], cmd: "false".into(), args: vec![] };
     let err = compute.start(&id, &broken).await.unwrap_err().to_string();
     assert!(err.contains("exited") && err.contains("no secrets file"), "{err}");
+}
+
+#[tokio::test]
+async fn wake_takes_a_short_hold() {
+    let (api, url) = serve().await;
+    let compute = SpritesCompute::with_url(&url, TOKEN).unwrap();
+    let id = compute.create(&spec("w", &[], &[])).await.unwrap().id;
+    compute.wake(&id).await.unwrap();
+    let started = api.lock().unwrap().sprites["w"].started.clone();
+    assert_eq!(started.len(), 1);
+    assert!(
+        started[0].contains("--unix-socket /.sprite/api.sock") && started[0].contains(r#"{"expire":"2m"}"#),
+        "{started:?}"
+    );
+    assert!(started[0].ends_with("http://sprite/v1/tasks/trailhead-wake"), "{started:?}");
 }

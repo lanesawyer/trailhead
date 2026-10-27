@@ -13,6 +13,7 @@ struct Live {
     checkpoints: Vec<(CheckpointId, String)>,
     restores: Vec<CheckpointId>,
     programs: Vec<Program>,
+    wakes: usize,
 }
 
 #[derive(Clone, Default)]
@@ -56,6 +57,10 @@ impl FakeCompute {
         live.get(&SandboxId(name.into())).map(|l| l.programs.clone()).unwrap_or_default()
     }
 
+    pub fn wakes(&self, name: &str) -> usize {
+        self.live.lock().unwrap().get(&SandboxId(name.into())).map_or(0, |l| l.wakes)
+    }
+
     fn with<T>(&self, id: &SandboxId, f: impl FnOnce(&mut Live) -> Result<T>) -> Result<T> {
         let mut live = self.live.lock().unwrap();
         let l = live.get_mut(id).ok_or_else(|| Error::NotFound(format!("sandbox {}", id.0)))?;
@@ -74,6 +79,7 @@ impl Compute for FakeCompute {
             checkpoints: Vec::new(),
             restores: Vec::new(),
             programs: Vec::new(),
+            wakes: 0,
         });
         Ok(entry.sandbox.clone())
     }
@@ -109,6 +115,13 @@ impl Compute for FakeCompute {
         self.with(id, |l| {
             l.programs.retain(|p| p.name != program.name);
             l.programs.push(program.clone());
+            Ok(())
+        })
+    }
+
+    async fn wake(&self, id: &SandboxId) -> Result<()> {
+        self.with(id, |l| {
+            l.wakes += 1;
             Ok(())
         })
     }

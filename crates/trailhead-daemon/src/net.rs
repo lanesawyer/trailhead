@@ -43,6 +43,9 @@ const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// How long the control plane keeps dialing a daemon that was just started: it has to boot and publish its address.
 const CONNECT_PATIENCE: Duration = Duration::from_secs(90);
 
+/// How long it keeps dialing a running daemon, which may need to resume from a pause and rebuild its connections.
+const RECONNECT_PATIENCE: Duration = Duration::from_secs(60);
+
 /// A sandbox daemon's iroh key, derived from the control plane's master key and the sandbox name.
 pub fn sandbox_key(master: &[u8; 32], sandbox: &SandboxId) -> SecretKey {
     let mut mac = Hmac::<Sha256>::new_from_slice(master).expect("HMAC takes any key length");
@@ -134,12 +137,29 @@ pub async fn resolve_iroh_hosts() {
     }
 }
 
-/// Keeps iroh's hosts resolved through the system resolver, in case the Sprite's allowance lapses with the DNS TTL.
-pub fn keep_iroh_hosts_resolved() {
-    tokio::spawn(async {
+/// Keeps iroh connectable: its hosts are re-resolved every minute, in case the Sprite's allowance lapses with the
+/// DNS TTL, and right away after the Sprite resumes from a pause, which drops every connection. A resume shows as the
+/// wall clock jumping between ticks; then iroh is told the network changed so it rebuilds its relay connection.
+pub fn watch_network(endpoint: Endpoint) {
+    tokio::spawn(async move {
+        let tick = Duration::from_secs(5);
+        let mut last = std::time::SystemTime::now();
+        let mut since_resolve = Duration::MAX;
         loop {
-            resolve_iroh_hosts().await;
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            let now = std::time::SystemTime::now();
+            let gap = now.duration_since(last).unwrap_or_default();
+            let resumed = gap > tick * 3;
+            if resumed || since_resolve >= Duration::from_secs(60) {
+                resolve_iroh_hosts().await;
+                since_resolve = Duration::ZERO;
+            }
+            if resumed {
+                tracing::info!(paused_for = ?gap, "resumed from a pause; reconnecting");
+                endpoint.network_change().await;
+            }
+            last = now;
+            tokio::time::sleep(tick).await;
+            since_resolve = since_resolve.saturating_add(tick);
         }
     });
 }
@@ -346,11 +366,18 @@ pub struct Launch {
     pub binary: Arc<Vec<u8>>,
     pub dir: String,
     pub workdir: String,
+    /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`.
+    pub log: Option<String>,
 }
 
 impl Launch {
     pub fn new(binary: Vec<u8>) -> Launch {
-        Launch { binary: Arc::new(binary), dir: "/home/sprite/.trailhead".into(), workdir: "/home/sprite/work".into() }
+        Launch {
+            binary: Arc::new(binary),
+            dir: "/home/sprite/.trailhead".into(),
+            workdir: "/home/sprite/work".into(),
+            log: None,
+        }
     }
 }
 
@@ -407,7 +434,13 @@ impl RemoteDaemon {
                 },
             ],
             cmd: bin,
-            args: vec!["--secrets".into(), secrets_path, "--workdir".into(), self.launch.workdir.clone()],
+            args: {
+                let mut args = vec!["--secrets".into(), secrets_path, "--workdir".into(), self.launch.workdir.clone()];
+                if let Some(log) = &self.launch.log {
+                    args.extend(["--log".into(), log.clone()]);
+                }
+                args
+            },
         }
     }
 
@@ -415,6 +448,8 @@ impl RemoteDaemon {
         if let Some(conn) = self.conns.lock().unwrap().get(sandbox).filter(|c| c.close_reason().is_none()) {
             return Ok(conn.clone());
         }
+        // The sandbox may have paused since the last request, and a dial won't wake it.
+        self.compute.wake(sandbox).await?;
         let id = self.daemon_id(sandbox);
         self.peers.lock().unwrap().insert(id);
         let deadline = tokio::time::Instant::now() + patience;
@@ -461,7 +496,7 @@ impl Daemon for RemoteDaemon {
         // Registered before connecting, so a cancel that arrives while dialing is kept and sent once the run starts.
         let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
         self.cancels.lock().unwrap().insert(sandbox.clone(), cancel_tx);
-        let opened = self.open(sandbox, Duration::from_secs(15)).await;
+        let opened = self.open(sandbox, RECONNECT_PATIENCE).await;
         let (mut send, recv) = match opened {
             Ok(streams) => streams,
             Err(e) => {
