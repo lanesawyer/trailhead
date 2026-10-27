@@ -21,6 +21,14 @@ pub mod label {
     /// `worker` or `reviewer`. Connector access is granted by role, so removing
     /// it is the kill switch.
     pub const ROLE: &str = "role";
+    /// Marks a pooled worker sandbox, kept warm between tasks (`docs/factory/sandbox.md`).
+    pub const POOL: &str = "pool";
+    /// A pooled sandbox's state: [`IDLE`] or [`BUSY`].
+    pub const STATE: &str = "state";
+    pub const IDLE: &str = "idle";
+    pub const BUSY: &str = "busy";
+    /// The checkpoint a pooled sandbox is restored to before and after each task.
+    pub const WARM: &str = "warm";
 }
 
 /// Domains iroh needs under a deny-by-default policy: n0's relays (which CNAME

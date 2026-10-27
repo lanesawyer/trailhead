@@ -120,6 +120,8 @@ impl std::fmt::Debug for DaemonSecrets {
 pub trait Daemon: Send + Sync {
     /// Starts the sandbox's daemon if needed and readies its checkout.
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()>;
+    /// Drops any connection to the sandbox's daemon, after something (a restore) restarted it.
+    async fn forget(&self, _sandbox: &SandboxId) {}
     /// Runs one agent step in the sandbox, streaming events, until it finishes or is cancelled.
     async fn run(&self, sandbox: &SandboxId, req: RunRequest, events: EventSink) -> Result<RunReport>;
     /// Stops the running agent. A cancelled `run` returns `Error::Cancelled`.

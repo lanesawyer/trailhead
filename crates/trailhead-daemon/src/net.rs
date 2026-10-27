@@ -529,6 +529,12 @@ impl Daemon for RemoteDaemon {
         result
     }
 
+    async fn forget(&self, sandbox: &SandboxId) {
+        if let Some(conn) = self.conns.lock().unwrap().remove(sandbox) {
+            conn.close(0u32.into(), b"restarted");
+        }
+    }
+
     async fn cancel(&self, sandbox: &SandboxId) -> Result<()> {
         if let Some(tx) = self.cancels.lock().unwrap().get(sandbox) {
             let _ = tx.send(());

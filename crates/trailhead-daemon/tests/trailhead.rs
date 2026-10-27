@@ -176,7 +176,7 @@ fn changes() -> RunOutcome {
 #[tokio::test]
 async fn work_flows_from_trailhead_over_the_tunnel() {
     let mut r = Rig::new().await;
-    r.serve("trail-1-a1").await;
+    r.serve("trailhead-w1").await;
     r.serve("trail-1-a1-r1").await;
     let key = r.task("Add a greeting").await;
     r.harness.push(Role::Worker, Script::new(changes()).steps(2, 100_000));
@@ -206,7 +206,7 @@ async fn work_flows_from_trailhead_over_the_tunnel() {
 #[tokio::test]
 async fn parking_asks_through_the_tunnel() {
     let mut r = Rig::new().await;
-    r.serve("trail-1-a1").await;
+    r.serve("trailhead-w1").await;
     let key = r.task("Add a greeting").await;
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which greeting?".into() }));
 
@@ -221,7 +221,7 @@ async fn parking_asks_through_the_tunnel() {
 #[tokio::test]
 async fn the_tunnel_refuses_strangers_and_bad_tokens() {
     let mut r = Rig::new().await;
-    r.serve("trail-1-a1").await;
+    r.serve("trailhead-w1").await;
 
     // A peer the control plane never started can't open the tunnel.
     let lookup = Arc::new(MemoryLookup::new());

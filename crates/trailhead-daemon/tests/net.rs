@@ -113,7 +113,7 @@ fn changes() -> RunOutcome {
 #[tokio::test]
 async fn lifecycle_over_iroh() {
     let mut r = Rig::new().await;
-    r.serve("trail-1-a1").await;
+    r.serve("trailhead-w1").await;
     r.serve("trail-1-a1-r1").await;
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
     r.harness.push(Role::Worker, Script::new(changes()).steps(3, 100_000));

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use trailhead_control::{CoreTracker, Factory, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Store, TaskPatch};
 use trailhead_factory::{
-    Commit, FactoryConfig, FileChange, Role, RunOutcome, RunUpdate, Status, TaskKey, Tracker, Usd, VerdictKind,
+    Commit, FactoryConfig, FileChange, Role, RunOutcome, RunUpdate, Status, TaskKey, Tracker, Usd, VerdictKind, label,
 };
 use trailhead_testkit::{Connect, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon, Script, ScriptedHarness};
 
@@ -126,7 +126,9 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
     assert_eq!(review.model.as_deref(), Some("fake-opus"));
     assert!(r.revoked("factory/trail-1-a1").await);
     assert!(r.revoked("factory/trail-1-a1-r1").await);
-    assert!(r.compute.sandboxes().is_empty());
+    let left: Vec<_> =
+        r.compute.sandboxes().into_iter().map(|s| (s.name, s.labels.get(label::STATE).cloned())).collect();
+    assert_eq!(left, [("trailhead-w1".to_string(), Some(label::IDLE.to_string()))], "only the idle pooled worker");
     assert_eq!(r.codehost.prs().len(), 1);
 
     // An agent can't finish a reviewed task; Lane can.

@@ -39,8 +39,12 @@ pub struct Task {
 pub struct RunUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
+    /// The run's name, which its sub-agent shares (`trail-42-a1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
+    /// The pooled sandbox the run is on, when it isn't one named after the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -58,9 +62,10 @@ pub struct RunUpdate {
 
 impl RunUpdate {
     pub fn merge(&mut self, update: RunUpdate) {
-        let RunUpdate { attempt, sandbox, profile, pr, review_rounds, reviewed, spend } = update;
+        let RunUpdate { attempt, sandbox, host, profile, pr, review_rounds, reviewed, spend } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
+        self.host = host.or(self.host.take());
         self.profile = profile.or(self.profile.take());
         self.pr = pr.or(self.pr.take());
         self.review_rounds = review_rounds.or(self.review_rounds.take());

@@ -107,7 +107,12 @@ async fn spec_to_reviewed_pr_then_human_merge() {
     assert!(review.diff.unwrap().contains("src/greet.rs"), "reviewer sees the diff");
     assert_eq!(review.model.0, "fake-opus");
 
-    assert!(r.compute.sandboxes().is_empty(), "no sandboxes outlive the run");
+    assert_eq!(busy(&r.compute), Vec::<String>::new(), "no sandbox stays busy after the run");
+    let pooled = r.compute.get("trailhead-w1").expect("the worker's sandbox stays in the pool");
+    assert_eq!(pooled.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert!(!pooled.labels.contains_key(label::ROLE), "an idle sandbox has no connector access");
+    assert!(r.compute.egress("trailhead-w1").unwrap().domains.is_empty(), "and no egress");
+    assert!(r.compute.get("trail-1-a1-r1").is_none(), "reviewer sandboxes aren't pooled");
     assert!(r.tracker.is_revoked("factory/trail-1-a1"));
     assert!(r.tracker.is_revoked("factory/trail-1-a1-r1"));
     assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "review" && c.body.starts_with("approve")));
@@ -136,10 +141,10 @@ async fn budget_breach_parks_the_task_and_suspends_its_sandbox() {
     assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
     assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "question"));
 
-    let sandbox = r.compute.get("trail-1-a1").expect("sandbox kept for resuming");
+    let sandbox = r.compute.get("trailhead-w1").expect("sandbox kept for resuming");
     assert!(!sandbox.labels.contains_key(label::ROLE), "connector access cut");
-    assert!(r.compute.egress("trail-1-a1").unwrap().domains.is_empty());
-    assert_eq!(r.compute.checkpoints("trail-1-a1").last().unwrap(), &format!("parked: {reason}"));
+    assert!(r.compute.egress("trailhead-w1").unwrap().domains.is_empty());
+    assert_eq!(r.compute.checkpoints("trailhead-w1").last().unwrap(), &format!("parked: {reason}"));
     assert!(r.codehost.prs().is_empty());
 }
 
@@ -164,7 +169,7 @@ async fn failed_check_requeues_and_next_attempt_gets_a_fresh_sandbox() {
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Open);
     assert_eq!(task.holder, None);
-    assert!(r.compute.sandboxes().is_empty());
+    assert_eq!(busy(&r.compute), Vec::<String>::new());
     assert!(r.codehost.prs().is_empty());
     let notes: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "note").collect();
     assert_eq!(notes.len(), 1, "the failure is noted on the task");
@@ -193,7 +198,7 @@ async fn agent_question_parks_the_task() {
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Parked { reason } if reason == "Which crate?"));
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
-    assert!(r.compute.get("trail-1-a1").is_some());
+    assert_eq!(busy(&r.compute), ["trailhead-w1"], "kept for resuming");
 }
 
 #[tokio::test]
@@ -247,12 +252,13 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
         done,
         Reconciled {
             destroyed: vec!["trail-1-a1".into(), "trail-99-a1".into()],
+            released: vec![],
             requeued: vec![crashed.0.clone()],
             reviewed: vec![unreviewed.0.clone()],
         }
     );
     let names: Vec<String> = r.compute.sandboxes().into_iter().map(|s| s.name).collect();
-    assert_eq!(names, ["trail-3-a1"]);
+    assert_eq!(names, ["trailhead-w1"], "the pooled sandbox stays, holding the parked task");
     assert_eq!(r.tracker.task(&crashed).status, Status::Open);
     assert!(r.tracker.is_revoked("factory/trail-1-a1"));
     assert_eq!(r.tracker.task(&unreviewed).run.reviewed, Some(1));
@@ -263,6 +269,16 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
 
     // A second pass finds nothing to do.
     assert_eq!(factory.reconcile().await.unwrap(), Reconciled::default());
+}
+
+/// Sandboxes that aren't idle in the pool: busy, parked, or not pooled at all.
+fn busy(compute: &FakeCompute) -> Vec<String> {
+    compute
+        .sandboxes()
+        .into_iter()
+        .filter(|s| s.labels.get(label::STATE).map(String::as_str) != Some(label::IDLE))
+        .map(|s| s.name)
+        .collect()
 }
 
 fn update(attempt: u32, sandbox: &str) -> trailhead_factory::RunUpdate {
@@ -289,9 +305,9 @@ async fn a_daemon_that_ignores_cancel_is_cut_off_and_parked() {
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Parked { reason } if reason.contains("budget")), "{:?}", ran[0].1);
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
-    let sandbox = r.compute.get("trail-1-a1").unwrap();
+    let sandbox = r.compute.get("trailhead-w1").unwrap();
     assert!(!sandbox.labels.contains_key(label::ROLE));
-    assert!(r.compute.egress("trail-1-a1").unwrap().domains.is_empty());
+    assert!(r.compute.egress("trailhead-w1").unwrap().domains.is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -338,7 +354,7 @@ async fn run_loop_reconciles_then_works_the_queue_and_stops() {
 
     let tracker = r.tracker.clone();
     until("every task in review", || keys.iter().all(|k| tracker.task(k).status == Status::InReview)).await;
-    assert!(r.compute.sandboxes().is_empty(), "the orphan went at boot and runs cleaned up");
+    assert_eq!(busy(&r.compute), Vec::<String>::new(), "the orphan went at boot and runs cleaned up");
 
     // New work is picked up on wake.
     let late = r.tracker.add_task("TRAIL", "late", "");
@@ -384,13 +400,66 @@ async fn sandboxes_are_prepared_under_install_egress_then_narrowed() {
 
     let prepared = r.daemon.prepared();
     assert_eq!(prepared.len(), 1);
-    assert_eq!(prepared[0].0.0, "trail-1-a1");
+    assert_eq!(prepared[0].0.0, "trailhead-w1");
     assert_eq!(prepared[0].1.repo.slug(), "lanesawyer/trailhead");
     assert_eq!(prepared[0].1.base_branch, "main");
 
-    let egress = r.compute.egress("trail-1-a1").unwrap().domains;
+    let egress = r.compute.egress("trailhead-w1").unwrap().domains;
     assert!(egress.iter().any(|d| d == "*.iroh.link"), "{egress:?}");
     assert!(!egress.iter().any(|d| d == "github.com"), "clone egress is closed before the agent runs: {egress:?}");
     let blocked = r.daemon.requests().into_iter().next().unwrap().blocked_hosts;
     assert_eq!(blocked, ["github.com", "codeload.github.com"], "the daemon confirms the lockdown before starting");
+}
+
+#[tokio::test]
+async fn workers_reuse_a_warm_pooled_sandbox_restored_between_tasks() {
+    let r = rig_with(&CONFIG.replace("[checks]\n", "[checks]\nsetup = \"cargo build\"\n"));
+    let first = r.tracker.add_task("TRAIL", "First", "");
+    let second = r.tracker.add_task("TRAIL", "Second", "");
+    for _ in 0..2 {
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+    }
+    r.factory.tick().await.unwrap();
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&first).status, Status::InReview);
+    assert_eq!(r.tracker.task(&second).status, Status::InReview);
+
+    let names: Vec<_> = r.compute.sandboxes().into_iter().map(|s| s.name).collect();
+    assert_eq!(names, ["trailhead-w1"], "one warm sandbox served both tasks");
+    assert_eq!(r.tracker.task(&second).run.host.as_deref(), Some("trailhead-w1"));
+    assert_eq!(r.tracker.task(&second).run.sandbox.as_deref(), Some("trail-2-a1"), "each run keeps its own name");
+    // Released after the first task, restored again before the second, released after it.
+    assert_eq!(r.compute.restores("trailhead-w1").len(), 3);
+    assert_eq!(r.compute.checkpoints("trailhead-w1"), ["warm", "warm"], "each prepare refreshes the warm point");
+
+    let prepared = r.daemon.prepared();
+    let workers: Vec<_> = prepared.iter().filter(|(s, _)| s.0 == "trailhead-w1").collect();
+    let reviewers: Vec<_> = prepared.iter().filter(|(s, _)| s.0.ends_with("-r1")).collect();
+    assert_eq!(workers.len(), 2);
+    assert!(workers.iter().all(|(_, p)| p.setup.is_some()), "workers build");
+    assert_eq!(reviewers.len(), 2);
+    assert!(reviewers.iter().all(|(_, p)| p.setup.is_none()), "reviewers only read the diff");
+}
+
+#[tokio::test]
+async fn reconcile_returns_a_busy_pooled_sandbox_to_idle() {
+    let r = rig();
+    r.tracker.add_task("TRAIL", "First", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    // A control plane that died mid-task leaves its pooled sandbox busy.
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.insert(label::STATE.into(), label::BUSY.into());
+    labels.insert(label::TASK.into(), "TRAIL-9".into());
+    let id = trailhead_factory::SandboxId("trailhead-w1".into());
+    r.compute.set_labels(&id, &labels).await.unwrap();
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.released, ["trailhead-w1"]);
+    assert!(done.destroyed.is_empty(), "pooled sandboxes aren't destroyed");
+    let after = r.compute.get("trailhead-w1").unwrap();
+    assert_eq!(after.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert!(!after.labels.contains_key(label::TASK));
 }

@@ -36,7 +36,7 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 | Plugin seams | `Compute`, `Harness`, `ModelProvider`, `Tracker`, `CodeHost` | Traits in core; vendor crates compiled in by feature; in-memory fakes for tests |
 | Compute | Fly.io Sprites | Own thin wrapper over the Sprites HTTP API, not the unofficial `sprites` crate |
 | Environment | mise, hidden behind standard checks | Users give stack and commands for setup, fmt, lint, typecheck, test, build |
-| Bootstrap | Stock image per task | Checkpoints can't seed another Sprite; the Sprite clones the repo, then `mise install` and deps; object-storage build cache if needed |
+| Bootstrap | Lazy pool of warm Sprites | Each worker Sprite is restored to its own warm checkpoint before and after every task; the pool grows to `max_sandboxes`; reviewers get fresh Sprites |
 | Rollback | Checkpoints as transactions | Checkpoint before each agent step; restore on failure or rejection |
 | Communication | Iroh 1.0 | n0 public relays for now; relay configurable to self-host later |
 | Identity | Per-sandbox Trailhead sub-agent token | The tunnel ticket controls who can connect; the token decides what they can do |

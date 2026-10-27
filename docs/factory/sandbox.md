@@ -50,13 +50,16 @@ This lives in the per-repo factory file, with agent profiles ([agents.md](agents
 
 ## Bootstrap and checkpoints
 
-Decided 2026-10-26, replacing the per-repo warm checkpoint: each task Sprite bootstraps from the stock image. Revisit if bootstrap proves too slow.
+Decided 2026-10-27, replacing a fresh Sprite per task (decided 2026-10-26): workers run in a lazy per-repo pool of warm Sprites, each restored to its own checkpoint before every task. A cold build of Trailhead took about 6½ minutes in the first real run (TRAIL-103), too long to pay on every task.
 
-- **Why.** Tested in M0: a checkpoint can't seed a different Sprite. Checkpoint IDs are a per-Sprite sequence (`v1`, `v2`, …); restoring another Sprite's ID fails with "checkpoint not found", and the API (OpenAPI v0.1.12) has no fork, clone or create-from-checkpoint.
-- **Bootstrap.** The stock image (Ubuntu 26.04, glibc 2.43) already ships rustup/cargo, node, python, go, `gh`, git and Claude Code, but not mise. The daemon clones the repo and runs the `setup` check under install-phase egress. In the M3 live test, uploading and starting the daemon, connecting over the relay, cloning Trailhead and running setup took about 11 s. mise and dependency installs are still to come (TRAIL-93).
-- **Checkpoints stay local.** Per-step rollback restores the Sprite's own checkpoints. A checkpoint captures only the writable overlay, not processes. Checkpointing took about 70 ms and an in-place restore about 1.5 s, which restarts the container.
-- **If cold builds are too slow,** a per-repo build cache (`target/`, `~/.cargo`) goes in object storage, keyed by a hash of the lockfiles and `mise.toml`.
-- **Rejected:** one long-lived base Sprite per repo, since restoring it serves one task at a time.
+- **Why not seed from a shared checkpoint.** Tested in M0: a checkpoint can't seed a different Sprite. Checkpoint IDs are a per-Sprite sequence (`v1`, `v2`, …). Restoring a Sprite to its own checkpoint works and takes about 1.5 s.
+- **Lazy pool.** Worker Sprites are `<repo>-w<n>`, labelled `pool=worker` and `state=idle|busy`, plus `warm=<checkpoint>`. A task takes an idle one, or creates one when none is idle; the tick's room check keeps the pool within `max_sandboxes`. A new one pays the cold build once.
+- **Per task.** Mark busy (with `task` and `role` labels), open install egress, restore the warm checkpoint, prepare (fetch and reset onto the base branch, then the `setup` check, an incremental build), checkpoint the result as the new warm point, narrow egress, run.
+- **Isolation.** When the task ends, the Sprite is restored to its warm checkpoint, which wipes everything the task wrote, then marked idle with no `role` label (so no connector access) and no egress. Idle Sprites pause and cost only storage. Parked tasks keep their Sprite busy.
+- **Reconcile.** Pooled Sprites are never destroyed at boot; one an interrupted run left busy goes back to idle.
+- **Reviewers** get a fresh Sprite each and skip `setup`, since they only read the diff.
+- **Bootstrap.** The stock image (Ubuntu 26.04, glibc 2.43) ships rustup/cargo, node, python, go, `gh`, git and Claude Code, but not mise. Uploading and starting the daemon and cloning takes about 11 s.
+- **Later:** deleting Sprites idle for N days, and a shared build cache in object storage for big pools, behind the same `Compute` seam.
 
 ## Egress policy
 

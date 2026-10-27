@@ -17,9 +17,9 @@ use tokio::task::{self, JoinSet};
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
-    Compute, Daemon, Egress, Error, FactoryConfig, IROH_DOMAINS, Labels, ModelProvider, PrRef, Profile, Result, Role,
-    RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec,
-    Tracker, Usd, Verdict, label, review_name, run_name,
+    CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, IROH_DOMAINS, Labels, ModelProvider, PrRef, Profile,
+    Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey,
+    TaskSpec, Tracker, Usd, Verdict, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -60,6 +60,8 @@ enum Run {
 #[derive(Debug, Default, PartialEq)]
 pub struct Reconciled {
     pub destroyed: Vec<String>,
+    /// Pooled sandboxes an interrupted run left busy, returned to idle.
+    pub released: Vec<String>,
     pub requeued: Vec<String>,
     pub reviewed: Vec<String>,
 }
@@ -221,10 +223,9 @@ impl Factory {
             },
         )
         .await?;
-        tracing::info!(task = %task.key.0, sandbox = %name, "starting worker");
-
-        let sandbox = self.create_sandbox(&name, task, Role::Worker).await?;
-        self.compute.checkpoint(&sandbox.id, &format!("before attempt {attempt}")).await?;
+        let sandbox = self.acquire_worker(task).await?;
+        sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
+        tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
         let req = RunRequest {
             role: Role::Worker,
             task: spec(task),
@@ -250,7 +251,10 @@ impl Factory {
                 sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await?;
                 sub.ask(
                     &task.key,
-                    &format!("Budget breached: {reason}. The sandbox {name} is suspended; raise the budget or cancel."),
+                    &format!(
+                        "Budget breached: {reason}. The sandbox {} is suspended; raise the budget or cancel.",
+                        sandbox.name
+                    ),
                 )
                 .await?;
                 return Ok(Outcome::Parked { reason });
@@ -261,15 +265,15 @@ impl Factory {
 
         match report.result {
             RunResult::PrOpened(pr) => {
-                // MVP: no suspend during review; requested changes start a fresh sandbox from the PR branch.
-                self.compute.destroy(&sandbox.id).await?;
+                // MVP: no suspend during review; requested changes start a new run from the PR branch.
+                self.release_worker(&sandbox).await?;
                 self.tracker.revoke_sub_agent(&name).await?;
                 self.review(task, &pr, attempt).await
             }
             RunResult::NeedsInput(question) => Ok(Outcome::Parked { reason: question }),
             RunResult::Failed(reason) => {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
-                self.compute.destroy(&sandbox.id).await?;
+                self.release_worker(&sandbox).await?;
                 self.tracker.revoke_sub_agent(&name).await?;
                 Ok(Outcome::Failed { reason })
             }
@@ -333,9 +337,82 @@ impl Factory {
         // Install egress only while the checkout is prepared, then narrowed before any agent runs.
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = self.compute.create(&spec).await?;
-        self.daemon.prepare(&sandbox.id, self.config.prepare_request()).await?;
+        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role)).await?;
         self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
         Ok(sandbox)
+    }
+
+    fn pool_labels(&self) -> Labels {
+        let mut labels = self.base_labels();
+        labels.insert(label::POOL.into(), Role::Worker.as_str().into());
+        labels
+    }
+
+    fn pooled(&self, state: &str, warm: Option<&str>, task: Option<&Task>) -> Labels {
+        let mut labels = self.pool_labels();
+        labels.insert(label::STATE.into(), state.into());
+        if let Some(warm) = warm {
+            labels.insert(label::WARM.into(), warm.into());
+        }
+        if let Some(task) = task {
+            labels.insert(label::TASK.into(), task.key.0.clone());
+            labels.insert(label::ROLE.into(), Role::Worker.as_str().into());
+        }
+        labels
+    }
+
+    /// A worker sandbox for `task` from the repo's pool (`docs/factory/sandbox.md`): an idle one restored to its warm
+    /// checkpoint, or a new one when none is idle. The tick's room check keeps the pool within `max_sandboxes`.
+    /// The prepared checkout becomes the new warm checkpoint, so the next task starts from it.
+    async fn acquire_worker(&self, task: &Task) -> Result<Sandbox> {
+        let idle = self.compute.list(&self.pooled(label::IDLE, None, None)).await?;
+        let (sandbox, warm) = match idle.into_iter().next() {
+            Some(s) => {
+                let warm = s.labels.get(label::WARM).cloned();
+                (s, warm)
+            }
+            None => {
+                let name = self.next_pool_name().await?;
+                let spec = SandboxSpec {
+                    name,
+                    labels: self.pooled(label::BUSY, None, Some(task)),
+                    egress: self.install_egress(),
+                };
+                (self.compute.create(&spec).await?, None)
+            }
+        };
+        self.compute.set_labels(&sandbox.id, &self.pooled(label::BUSY, warm.as_deref(), Some(task))).await?;
+        self.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
+        if let Some(cp) = &warm {
+            self.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
+            self.daemon.forget(&sandbox.id).await;
+        }
+        self.daemon.prepare(&sandbox.id, self.config.prepare_request(Role::Worker)).await?;
+        let cp = self.compute.checkpoint(&sandbox.id, "warm").await?;
+        let labels = self.pooled(label::BUSY, Some(&cp.0), Some(task));
+        self.compute.set_labels(&sandbox.id, &labels).await?;
+        self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+        Ok(Sandbox { labels, ..sandbox })
+    }
+
+    /// Returns a worker sandbox to the pool: restored to its warm checkpoint, which wipes everything the task did,
+    /// with no egress. One that never got warm is destroyed instead.
+    async fn release_worker(&self, sandbox: &Sandbox) -> Result<()> {
+        self.compute.set_egress(&sandbox.id, &Egress::none()).await?;
+        let Some(warm) = sandbox.labels.get(label::WARM).cloned() else {
+            return self.compute.destroy(&sandbox.id).await;
+        };
+        self.compute.restore(&sandbox.id, &CheckpointId(warm.clone())).await?;
+        self.daemon.forget(&sandbox.id).await;
+        self.compute.set_labels(&sandbox.id, &self.pooled(label::IDLE, Some(&warm), None)).await
+    }
+
+    /// The first free `<repo>-w<n>` name.
+    async fn next_pool_name(&self) -> Result<String> {
+        let taken: HashSet<String> =
+            self.compute.list(&self.pool_labels()).await?.into_iter().map(|s| s.name).collect();
+        let repo = self.config.repo.name.to_ascii_lowercase();
+        Ok((1..).map(|n| format!("{repo}-w{n}")).find(|n| !taken.contains(n)).expect("a free name"))
     }
 
     /// The kill switch: without its role label a sandbox loses connector access, and without egress it reaches nothing.
@@ -425,10 +502,19 @@ impl Factory {
             if sandbox.labels.get(label::TASK).is_some_and(|t| running.contains(&TaskKey(t.clone()))) {
                 continue;
             }
-            let parked = tasks
-                .iter()
-                .any(|t| t.status == Status::NeedsInput && t.run.sandbox.as_deref() == Some(sandbox.name.as_str()));
+            let parked = tasks.iter().any(|t| {
+                t.status == Status::NeedsInput
+                    && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
+            });
             if parked {
+                continue;
+            }
+            if sandbox.labels.contains_key(label::POOL) {
+                // A pooled sandbox stays; one left busy by an interrupted run goes back to idle.
+                if sandbox.labels.get(label::STATE).map(String::as_str) != Some(label::IDLE) {
+                    self.release_worker(sandbox).await?;
+                    done.released.push(sandbox.name.clone());
+                }
                 continue;
             }
             self.compute.destroy(&sandbox.id).await?;

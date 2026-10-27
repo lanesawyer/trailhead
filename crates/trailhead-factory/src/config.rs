@@ -240,12 +240,13 @@ impl FactoryConfig {
         all.filter(|c| everything || gate.require.contains(&c.name)).collect()
     }
 
-    pub fn prepare_request(&self) -> PrepareRequest {
-        PrepareRequest {
-            repo: self.repo.repo(),
-            base_branch: self.repo.base_branch.clone(),
-            setup: self.checks.setup.as_ref().map(|c| Check { name: "setup".into(), command: c.clone() }),
-        }
+    /// Readies a checkout. Only workers build: a reviewer reads the diff, so it skips `setup`.
+    pub fn prepare_request(&self, role: Role) -> PrepareRequest {
+        let setup = match role {
+            Role::Worker => self.checks.setup.as_ref().map(|c| Check { name: "setup".into(), command: c.clone() }),
+            _ => None,
+        };
+        PrepareRequest { repo: self.repo.repo(), base_branch: self.repo.base_branch.clone(), setup }
     }
 }
 
