@@ -2,15 +2,17 @@
 
 ## Vision
 
-Trailhead is a fast, headless task engine that humans and agents share. It owns the task data and the rules around it. Every interface, including any UI, is a client.
+Trailhead is a software factory built on a task engine. It turns tasks into agent runs inside locked-down sandboxes, gates every change through agent or human review, and records the work in Trailhead itself. The factory's design lives in `docs/factory/`, starting at `docs/factory/README.md`; this plan covers the whole and the task engine in detail.
 
-It is not a todo app. People use it three ways:
+The task engine stays the foundation and stays usable on its own: a fast, headless engine that humans and agents share. It owns the task data and the rules around it, and every interface, including any UI, is a client. People use the engine three ways:
 
 - **Build on it.** Vibe code a personal todo app, or a task widget inside a bigger app, against its API.
 - **Talk to it through an agent.** The agent reads, claims and completes tasks, and tells the person what's next.
 - **Plug it into agent platforms.** OpenClaw first, other platforms after.
 
-There is no official Trailhead app at the start. Lane's own app is the first real client and the dogfood test.
+The factory is the fourth way, and the one the project now centers on: Trailhead drives the agents itself. A task with an approved spec becomes a sandboxed run, a pull request, a review and a merge, with the claims, questions, handoffs and spend recorded on the task.
+
+There is no official Trailhead app. The todo use case becomes a separate client (working names `trailhead-todo` or `trailhead-ticklist`); Lane's reader app is the first real client and the dogfood test.
 
 The long-term ambition is to replace other task tools, not to sync with them.
 
@@ -22,6 +24,10 @@ The long-term ambition is to replace other task tools, not to sync with them.
 4. **Agents pay for every token.** Responses are compact by default, with full detail on request.
 5. **One server, reachable anywhere.** An instance is one server and one SQLite file, the single authority for its data. It runs wherever is convenient (Lane's PC, a home box, a VPS) and agents on other machines reach it over a tunnel. Trailhead assumes it is online and connected; there are no replicas and nothing syncs between instances.
 6. **Trailhead is the source of truth.** Other tools can be notified or imported from, never synced with.
+7. **The factory coordinates; sandboxes act.** The server is the control plane: it orchestrates, enforces budgets and decides review gates, and holds no agent credentials. Sandboxes are untrusted and disposable, reach only declared egress, and call model providers and the code host through injected credentials.
+8. **Humans review by risk, not by habit.** Per-repo policy decides when a human is required; loosening it always needs one.
+9. **Pluggable where vendors differ.** Compute, agent harness, model provider, tracker and code host are traits with in-memory fakes, so the whole lifecycle runs in CI with no network or spend.
+10. **The engine works without the factory.** Factory crates sit behind a Cargo feature; `cargo install trailhead` without it is still the small task engine.
 
 ## License
 
@@ -54,6 +60,11 @@ Remote machines reach the server through a tunnel (iroh via `dumbpipe`, Tailscal
 | `trailhead-core` | Schema, domain logic, storage trait, event log | `libsql`, `serde` |
 | `trailhead-server` | REST, MCP, SSE, webhooks | `axum`, `tokio`, `utoipa`, `rmcp` |
 | `trailhead` (CLI) | REST client for people and shell-capable agents; auto-starts a local server | `clap`, `reqwest` |
+| `trailhead-factory` | Factory domain types, the five plugin traits, the daemon contract, the per-repo factory file | `async-trait`, `toml` |
+| `trailhead-control` | Control plane: run loop, budget metering, review dispatch, reconcile; in-process `Tracker` over `trailhead-core` | `tokio` |
+| `trailhead-testkit` | In-memory fakes for every seam and an in-process daemon | |
+
+Further factory crates (the in-sandbox daemon, Sprites compute, the Claude Code harness, Anthropic, GitHub) are listed in `docs/factory/seams.md`. Factory crates are `publish = false` until the factory ships behind its Cargo feature.
 
 | Interface | Best for |
 | --- | --- |
@@ -163,21 +174,32 @@ Every task belongs to exactly one project, and projects don't nest.
 
 ## Phases
 
-1. **Core, local.** Schema and migrations, domain logic, projects, typed comments, event log with undo and outbox, claims and the ready queue, with tests.
-2. **Server and CLI.** axum REST under `/v1`, OpenAPI via utoipa, SSE, MCP via rmcp, token auth, reminders. CLI as a REST client that auto-starts a local server.
-3. **Clients.** Lane's own app, an OpenClaw plugin, `llms.txt` and an agent skill, webhooks. TypeScript SDK from OpenAPI later.
-4. **Teams.** Deferred until a second person needs it. Other humans join the same server with their own accounts; the data model already carries workspaces, users and per-human permissions. Multiple workspaces and multi-process hosting (Turso, shared rate limits) come only if needed.
-5. **Importers.** One-way, one-time imports from Todoist, Vikunja, GitHub Issues, Jira.
+Task engine:
 
-### Phase 1 first steps
+1. **Core, local.** Done. Schema and migrations, domain logic, projects, typed comments, event log with undo and outbox, claims and the ready queue, with tests.
+2. **Server and CLI.** Done. axum REST under `/v1`, OpenAPI via utoipa, SSE, MCP via rmcp, token auth, reminders. CLI as a REST client that auto-starts a local server.
+3. **Clients.** In progress, now in service of the factory: remote access over a tunnel, sub-agents, webhooks, `llms.txt` and an agent skill. Lane's reader app and an OpenClaw plugin. TypeScript SDK from OpenAPI later.
 
-1. Spike: create a local libsql database, check FTS5, run the first migration.
-2. Schema: workspaces, users, agents, projects, tasks, comments, claims, events.
-3. Atomic claim and ready-queue query, concurrency test written first.
+Factory (`docs/factory/mvp.md`), tracked under TRAIL-75:
+
+4. **Factory MVP.** One real task goes from a Trailhead spec to a merged PR in one repo, with two human touches: approving the spec and merging. Milestones:
+   - M0: spikes on the unknowns (iroh in a locked-down Sprite, Claude Code through the Anthropic connector, a PR through the GitHub connector, checkpoint seeding).
+   - M1: factory types, the five traits, fakes, and the lifecycle in CI. Done, along with the in-process `Tracker`, the run loop, typed review verdicts and token expiry.
+   - M2: Sprites compute. M3: the in-sandbox daemon over iroh with the Claude Code harness. M4: sandboxes reaching Trailhead over the tunnel. M5: GitHub and the reviewer agent.
+5. **Factory after the MVP.** Suspend during review (resume affinity), risk tiers and quorums, a merger agent and auto-merge, a planner agent, profile escalation, the provider usage API and daily cap, previews, more repos, OTLP export.
+
+Deferred:
+
+6. **Teams.** Until a second person needs it. Other humans join the same server with their own accounts; the data model already carries workspaces, users and per-human permissions. Multiple workspaces and multi-process hosting (Turso, shared rate limits) come only if needed.
+7. **Importers.** One-way, one-time imports from Todoist, Vikunja, GitHub Issues, Jira; for the factory, Jira specs first.
 
 ## Decisions log
 
-Decisions made while building, including where the build refines or departs from the text above.
+Decisions made while building, including where the build refines or departs from the text above. Factory decisions live in `docs/factory/overview.md`; the ones that change the engine are also recorded here.
+
+- **The factory is built into Trailhead (2026-10-26).** The task engine becomes one part of a software factory; the server is the control plane when the `factory` feature is on, and the todo use case becomes a separate client. See `docs/factory/overview.md`.
+- **Typed review verdicts (factory).** A `review` comment kind carries `approve` or `request_changes` and optionally the reviewing model. It records a verdict without moving the task, so the factory's gates and quorums count records rather than prose. CLI: `trailhead verdict` (`trailhead review` already sends a task for review).
+- **Token expiry (factory).** Tokens take an optional expiry and never outlive the token that issued them, so the factory's per-sandbox sub-agent tokens clean themselves up if revoking is missed.
 
 - **Storage seam (Phase 1).** The seam is the `Store` API rather than a Rust trait: libsql types never leave `trailhead-core`, and only `Store::open_local`/`open_remote` know which backend is in use. Swapping backends means rewriting the crate's query layer, not its callers. Revisit if a second backend actually lands.
 - **Write serialization (Phase 1).** All writes go through one connection behind an async mutex, each in a `BEGIN IMMEDIATE` transaction. Reads use a pool of connections, one per in-flight read, because a connection shared by concurrent reads leaks one read's snapshot into another.
@@ -220,7 +242,7 @@ Decisions made while building, including where the build refines or departs from
 
 ## Non-goals
 
-- An official Trailhead app, for now.
+- An official Trailhead todo app inside this repo; it's a separate client.
 - Two-way sync with any other tool.
 - Replicas, offline sync or merging between instances.
 - Browser clients calling the API directly.

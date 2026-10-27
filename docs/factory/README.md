@@ -1,6 +1,6 @@
 # Trailhead factory
 
-Trailhead is growing from a task engine into a software factory: it turns tasks into agent runs inside locked-down sandboxes, gates every change through agent or human review, and records the work in Trailhead itself. These docs are the factory's design. `docs/PLAN.md` still describes the task engine and hasn't been updated for the factory yet.
+Trailhead is growing from a task engine into a software factory: it turns tasks into agent runs inside locked-down sandboxes, gates every change through agent or human review, and records the work in Trailhead itself. These docs are the factory's design. `docs/PLAN.md` covers the whole project and the task engine in detail, and points here for the factory.
 
 Read this index first, then open only the file the work in front of you needs.
 

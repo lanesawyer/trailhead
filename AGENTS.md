@@ -6,7 +6,7 @@ Read `docs/PLAN.md` before making design decisions. It is the source of truth fo
 
 The software factory being built into Trailhead is designed in `docs/factory/`. Start at `docs/factory/README.md`, which says which file covers what, and open only the one your work needs.
 
-Current phase: 3 (clients). Phase 1 core is in `crates/trailhead-core`; Phase 2's server, MCP and CLI are in `crates/trailhead-server` and `crates/trailhead`.
+Current phase: 4 (factory MVP, TRAIL-75). The task engine's core is in `crates/trailhead-core`; its server, MCP and CLI are in `crates/trailhead-server` and `crates/trailhead`. The factory's crates are `crates/trailhead-factory` (types and traits), `crates/trailhead-control` (control plane) and `crates/trailhead-testkit` (fakes).
 
 ## Development
 
