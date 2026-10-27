@@ -81,15 +81,11 @@ fn is_public_v4(ip: Ipv4Addr) -> bool {
         || a >= 240)
 }
 
+/// Only global unicast (2000::/3) can be public. Anything else, including reserved ranges such as the `0fdf::1`
+/// a Sprite maps `localhost` to, is not.
 fn is_public_v6(ip: Ipv6Addr) -> bool {
     let s = ip.segments();
-    !(ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_multicast()
-        || (s[0] & 0xfe00) == 0xfc00
-        || (s[0] & 0xffc0) == 0xfe80
-        || (s[0] == 0x2001 && s[1] == 0x0db8)
-        || (s[0] == 0x0064 && s[1] == 0xff9b))
+    (s[0] & 0xe000) == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8)
 }
 
 pub fn spawn(state: Arc<AppState>) {
