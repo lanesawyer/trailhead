@@ -86,3 +86,41 @@ async fn confirm_blocked_waits_for_hosts_to_stop_resolving() {
     let err = ws.confirm_blocked(&["localhost".into()]).await.unwrap_err();
     assert!(matches!(err, trailhead_factory::Error::Forbidden(ref m) if m.contains("localhost")), "{err:?}");
 }
+
+#[tokio::test]
+async fn sprite_holds_heartbeat_and_release() {
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use trailhead_daemon::awake::SpriteHolds;
+
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("api.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 4096];
+            let n = s.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let line = req.lines().next().unwrap().to_string();
+            let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            log.lock().unwrap().push(format!("{line} {body}").trim().to_string());
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        }
+    });
+
+    let holds = SpriteHolds::new(&socket);
+    let hold = holds.hold();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    drop(hold);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        [
+            r#"PUT /v1/tasks/trailhead-daemon-1 HTTP/1.1 {"expire":"5m"}"#,
+            "DELETE /v1/tasks/trailhead-daemon-1 HTTP/1.1",
+        ]
+    );
+}

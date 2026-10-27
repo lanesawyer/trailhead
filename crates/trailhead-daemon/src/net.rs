@@ -28,6 +28,7 @@ use trailhead_factory::{
 };
 
 use crate::Runner;
+use crate::awake::SpriteHolds;
 
 pub const ALPN: &[u8] = b"trailhead/daemon/0";
 
@@ -117,6 +118,7 @@ fn frames<T: DeserializeOwned + Send + 'static>(mut recv: RecvStream) -> mpsc::U
 pub struct DaemonProtocol {
     runner: Arc<Runner>,
     control_plane: EndpointId,
+    holds: Option<Arc<SpriteHolds>>,
 }
 
 impl std::fmt::Debug for DaemonProtocol {
@@ -127,11 +129,18 @@ impl std::fmt::Debug for DaemonProtocol {
 
 impl DaemonProtocol {
     pub fn new(runner: Arc<Runner>, control_plane: EndpointId) -> DaemonProtocol {
-        DaemonProtocol { runner, control_plane }
+        DaemonProtocol { runner, control_plane, holds: None }
+    }
+
+    /// Holds the Sprite awake while a request is in flight.
+    pub fn holding(mut self, holds: Arc<SpriteHolds>) -> DaemonProtocol {
+        self.holds = Some(holds);
+        self
     }
 
     async fn serve_stream(&self, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
         let Some(first) = read_frame::<ToDaemon>(&mut recv).await? else { return Ok(()) };
+        let _hold = self.holds.as_ref().map(|h| h.hold());
         let reply = match first {
             ToDaemon::Prepare(req) => match self.runner.prepare(&req).await {
                 Ok(()) => FromDaemon::Prepared,

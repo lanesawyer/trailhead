@@ -9,6 +9,7 @@ use clap::Parser;
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
+use trailhead_daemon::awake::{SPRITE_API_SOCKET, SpriteHolds};
 use trailhead_daemon::net::{ALPN, DaemonProtocol, open_api_tunnel, parse_endpoint_id, parse_secret_key};
 use trailhead_daemon::{Connect, GitWorkspace, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, Repo, Result, Tracker};
@@ -61,7 +62,8 @@ fn read_secrets(path: &PathBuf) -> std::result::Result<DaemonSecrets, String> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     match serve(Args::parse()).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
@@ -94,7 +96,11 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
         renew_every: RENEW_EVERY,
     };
     tracing::info!(id = %endpoint.id(), %control_plane, "trailhead-daemon listening");
-    let router = Router::builder(endpoint).accept(ALPN, DaemonProtocol::new(Arc::new(runner), control_plane)).spawn();
+    let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane);
+    if std::path::Path::new(SPRITE_API_SOCKET).exists() {
+        protocol = protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET));
+    }
+    let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
     tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
     router.shutdown().await.map_err(|e| e.to_string())
 }

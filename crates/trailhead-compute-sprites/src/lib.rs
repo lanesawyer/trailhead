@@ -58,6 +58,25 @@ impl SpritesCompute {
         self
     }
 
+    /// The recent output of a program started with `start`, for diagnosing a sandbox.
+    pub async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
+        let mut url = self.url(&[&id.0, "services", program, "logs"]);
+        url.query_pairs_mut().append_pair("lines", "200");
+        let body = ok(send(self.request(Method::GET, url)).await?).await?.text().await.map_err(http_err)?;
+        let mut out = String::new();
+        for line in body.lines().filter(|l| !l.trim().is_empty()) {
+            match serde_json::from_str::<Value>(line) {
+                Ok(ev) if ev["data"].is_string() => out.push_str(ev["data"].as_str().unwrap_or_default()),
+                Ok(ev) => out.push_str(&format!("[{}]\n", ev["type"].as_str().unwrap_or("?"))),
+                Err(_) => {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn url(&self, segments: &[&str]) -> Url {
         let mut url = self.base.clone();
         url.path_segments_mut().expect("base url").pop_if_empty().push("v1").push("sprites").extend(segments);

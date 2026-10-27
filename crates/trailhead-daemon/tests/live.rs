@@ -1,5 +1,5 @@
-//! The daemon in a real Sprite, reached over iroh through n0's relay under a deny-by-default policy. Creates and
-//! destroys one Sprite. Needs `SPRITES_TOKEN` and a release build of the daemon in `TRAILHEAD_DAEMON_BIN`:
+//! The daemon in a real Sprite, reached over iroh through n0's relay under a deny-by-default policy, reaching a
+//! Trailhead server here through the API tunnel. Creates and destroys one Sprite. Needs `SPRITES_TOKEN` and a release build of the daemon in `TRAILHEAD_DAEMON_BIN`:
 //!
 //! `mise run test-live-daemon`
 
@@ -7,13 +7,39 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iroh::endpoint::presets;
+use iroh::protocol::Router;
 use iroh::{Endpoint, SecretKey};
 use trailhead_compute_sprites::SpritesCompute;
-use trailhead_daemon::net::{ALPN, Launch, RemoteDaemon};
+use trailhead_control::CoreTracker;
+use trailhead_core::{Ctx, EventFilter, NewProject, NewTask, Store};
+use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
 use trailhead_factory::{
-    Check, Compute, Credential, Daemon, Egress, Endpoint as ModelEndpoint, IROH_DOMAINS, Labels, ModelId,
-    PrepareRequest, Repo, Role, RunRequest, SandboxSpec, TaskKey, TaskSpec,
+    Check, Compute, Daemon, Egress, Endpoint as ModelEndpoint, IROH_DOMAINS, Labels, ModelId, PrepareRequest, Repo,
+    Role, RunRequest, RunResult, SandboxSpec, TaskKey, TaskSpec, Tracker,
 };
+
+/// A Trailhead server on a local port with a `LIVE` project and task, and a tracker for the control plane.
+async fn trailhead(dir: &std::path::Path) -> (std::net::SocketAddr, CoreTracker, Arc<Store>, Ctx, TaskKey) {
+    let db = dir.join("t.db");
+    let db = db.to_str().unwrap();
+    let server_store = Store::open_local(db).await.unwrap();
+    let (ws, user) = server_store.bootstrap_local("Lane").await.unwrap();
+    let human = Ctx::user(ws.id, user.id);
+    server_store
+        .create_project(&human, NewProject { key: "LIVE".into(), name: "Live".into(), ..Default::default() })
+        .await
+        .unwrap();
+    let task = NewTask { project: "LIVE".into(), title: "Live run".into(), ..Default::default() };
+    let key = TaskKey(server_store.create_task(&human, task).await.unwrap().key);
+    let agent = server_store.create_agent(&human, "factory").await.unwrap();
+    let ctx = server_store.agent_ctx(ws.id, agent.id).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = trailhead_server::router(Arc::new(trailhead_server::AppState::new(server_store)));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let store = Arc::new(Store::open_local(db).await.unwrap());
+    (addr, CoreTracker::new(store.clone(), ctx, "factory"), store, human, key)
+}
 
 fn domains(extra: &[&str]) -> Egress {
     Egress { domains: IROH_DOMAINS.iter().chain(extra).map(|d| d.to_string()).collect() }
@@ -33,9 +59,12 @@ async fn daemon_in_a_sprite() {
     };
     let sandbox = compute.create(&spec).await.unwrap();
 
-    let control = Endpoint::builder(presets::N0).alpns(vec![ALPN.to_vec()]).bind().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (server, tracker, store, human, key) = trailhead(dir.path()).await;
+    let control = Endpoint::builder(presets::N0).bind().await.unwrap();
     let master = SecretKey::generate().to_bytes();
-    let remote = Arc::new(RemoteDaemon::new(control, master, compute.clone(), Launch::new(binary)));
+    let remote = Arc::new(RemoteDaemon::new(control.clone(), master, compute.clone(), Launch::new(binary)));
+    let _tunnel = Router::builder(control).accept(API_ALPN, ApiTunnel::new(server, remote.peers())).spawn();
 
     let result = tokio::spawn({
         let (remote, compute, sandbox) = (remote.clone(), compute.clone(), sandbox.clone());
@@ -65,27 +94,44 @@ async fn daemon_in_a_sprite() {
             eprintln!("GitHub blocked after {:.1}s ({attempts} prepares): {err}", t.elapsed().as_secs_f64());
             assert!(err.contains("git fetch"), "{err}");
 
-            // A run crosses the wire and comes back as the daemon's typed error until Trailhead access lands (M4).
+            // A worker run: the daemon claims the task in Trailhead through the API tunnel as its sub-agent, Claude
+            // Code can't reach a model (no Anthropic connector here), and the daemon releases the task again.
+            let cred = tracker.create_sub_agent("live-a1", "LIVE", Duration::from_secs(900)).await.unwrap();
             let req = RunRequest {
                 role: Role::Worker,
-                task: TaskSpec { key: TaskKey("LIVE-1".into()), title: "Live".into(), description: String::new() },
+                task: TaskSpec { key: key.clone(), title: "Live run".into(), description: "Say hi.".into() },
                 repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
                 base_branch: "main".into(),
                 branch: "factory/live-1".into(),
                 pr: None,
                 model: ModelId("claude-sonnet-4-5".into()),
-                endpoint: ModelEndpoint { base_url: "https://api.sprites.dev/v1/gateway/anthropic/none".into() },
+                endpoint: ModelEndpoint { base_url: "http://127.0.0.1:9".into() },
                 max_steps: 1,
                 required_checks: Vec::new(),
                 blocked_hosts: vec!["github.com".into()],
-                credential: Credential { agent: "live".into(), token: "none".into() },
+                credential: cred,
             };
             let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
-            let err = remote.run(&sandbox.id, req, events).await.expect_err("no tracker yet").to_string();
-            assert!(err.contains("M4"), "{err}");
+            let t = Instant::now();
+            let report = remote.run(&sandbox.id, req, events).await.expect("the run reports");
+            eprintln!("run finished in {:.1}s: {:?}", t.elapsed().as_secs_f64(), report.result);
+            assert!(matches!(report.result, RunResult::Failed(_)), "{:?}", report.result);
+
+            let filter = EventFilter { task: Some(key.0.clone()), ..Default::default() };
+            let kinds: Vec<String> =
+                store.list_events(&human, filter).await.unwrap().into_iter().map(|e| e.kind).collect();
+            eprintln!("task events: {kinds:?}");
+            assert!(kinds.iter().any(|k| k == "claim.acquired"), "{kinds:?}");
+            assert!(kinds.iter().any(|k| k == "claim.released"), "{kinds:?}");
         }
     });
     let outcome = tokio::time::timeout(Duration::from_secs(300), result).await;
+    if !matches!(outcome, Ok(Ok(()))) {
+        match compute.logs(&sandbox.id, "trailhead-daemon").await {
+            Ok(logs) => eprintln!("--- daemon logs ---\n{logs}--- end ---"),
+            Err(e) => eprintln!("couldn't read the daemon's logs: {e}"),
+        }
+    }
     compute.destroy(&sandbox.id).await.unwrap();
     outcome.expect("finished within 5 minutes").unwrap();
 }
