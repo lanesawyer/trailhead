@@ -61,7 +61,7 @@ impl SpritesCompute {
     /// The recent output of a program started with `start`, for diagnosing a sandbox.
     pub async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
         let mut url = self.url(&[&id.0, "services", program, "logs"]);
-        url.query_pairs_mut().append_pair("lines", "200");
+        url.query_pairs_mut().append_pair("lines", "3000");
         let body = ok(send(self.request(Method::GET, url)).await?).await?.text().await.map_err(http_err)?;
         let mut out = String::new();
         for line in body.lines().filter(|l| !l.trim().is_empty()) {

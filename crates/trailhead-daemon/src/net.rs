@@ -113,12 +113,44 @@ fn frames<T: DeserializeOwned + Send + 'static>(mut recv: RecvStream) -> mpsc::U
     rx
 }
 
+/// Hosts iroh reaches by name: n0's relays and its DNS discovery.
+const IROH_HOSTS: &[&str] = &[
+    iroh::defaults::prod::NA_EAST_RELAY_HOSTNAME,
+    iroh::defaults::prod::NA_WEST_RELAY_HOSTNAME,
+    iroh::defaults::prod::EU_RELAY_HOSTNAME,
+    iroh::defaults::prod::AP_RELAY_HOSTNAME,
+    "dns.iroh.link",
+];
+
+/// A Sprite lets a raw IP through only after its own DNS has resolved it from an allowed name, and a policy change
+/// resets that. iroh dials relays by IPs it resolved and cached earlier, so after a lockdown every relay reconnect
+/// was refused. Looking the names up again through the system resolver re-allows their IPs.
+pub async fn resolve_iroh_hosts() {
+    for host in IROH_HOSTS {
+        let host = host.trim_end_matches('.');
+        if let Err(e) = tokio::net::lookup_host((host, 443)).await {
+            tracing::warn!(%host, error = %e, "can't resolve an iroh host");
+        }
+    }
+}
+
+/// Keeps iroh's hosts resolved through the system resolver, in case the Sprite's allowance lapses with the DNS TTL.
+pub fn keep_iroh_hosts_resolved() {
+    tokio::spawn(async {
+        loop {
+            resolve_iroh_hosts().await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+}
+
 /// The daemon's side: accepts connections from the one control plane it was told about and serves its requests.
 #[derive(Clone)]
 pub struct DaemonProtocol {
     runner: Arc<Runner>,
     control_plane: EndpointId,
     holds: Option<Arc<SpriteHolds>>,
+    endpoint: Option<Endpoint>,
 }
 
 impl std::fmt::Debug for DaemonProtocol {
@@ -129,7 +161,13 @@ impl std::fmt::Debug for DaemonProtocol {
 
 impl DaemonProtocol {
     pub fn new(runner: Arc<Runner>, control_plane: EndpointId) -> DaemonProtocol {
-        DaemonProtocol { runner, control_plane, holds: None }
+        DaemonProtocol { runner, control_plane, holds: None, endpoint: None }
+    }
+
+    /// The daemon's own endpoint, to tell iroh when a lockdown has cut its connections.
+    pub fn on(mut self, endpoint: Endpoint) -> DaemonProtocol {
+        self.endpoint = Some(endpoint);
+        self
     }
 
     /// Holds the Sprite awake while a request is in flight.
@@ -156,7 +194,17 @@ impl DaemonProtocol {
         send.finish().map_err(io_err)
     }
 
-    async fn serve_run(&self, req: RunRequest, send: &mut SendStream, recv: RecvStream) -> Result<RunReport> {
+    async fn serve_run(&self, mut req: RunRequest, send: &mut SendStream, recv: RecvStream) -> Result<RunReport> {
+        // Narrowing a Sprite's egress resets which relay IPs it lets through, so once the lockdown is confirmed, the
+        // relay names are resolved again (see `resolve_iroh_hosts`) and iroh is told to reconnect.
+        if !req.blocked_hosts.is_empty() {
+            self.runner.workspace.confirm_blocked(&req.blocked_hosts).await?;
+            req.blocked_hosts.clear();
+            resolve_iroh_hosts().await;
+            if let Some(ep) = &self.endpoint {
+                ep.network_change().await;
+            }
+        }
         let cancel = Arc::new(Notify::new());
         let (events, mut rx) = mpsc::unbounded_channel();
         let runner = self.runner.clone();

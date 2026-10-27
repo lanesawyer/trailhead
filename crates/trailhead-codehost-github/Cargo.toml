@@ -1,0 +1,24 @@
+[package]
+name = "trailhead-codehost-github"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+description = "Trailhead factory CodeHost for GitHub's REST API, directly or through a Sprites connector"
+
+[dependencies]
+trailhead-factory.workspace = true
+async-trait.workspace = true
+base64 = "0.22"
+reqwest.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio.workspace = true
+base64 = "0.22"

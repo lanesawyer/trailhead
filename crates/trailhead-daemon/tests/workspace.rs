@@ -88,7 +88,7 @@ async fn confirm_blocked_waits_for_hosts_to_stop_resolving() {
 }
 
 #[tokio::test]
-async fn sprite_holds_heartbeat_and_release() {
+async fn sprite_holds_heartbeat_then_linger() {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use trailhead_daemon::awake::SpriteHolds;
@@ -120,7 +120,7 @@ async fn sprite_holds_heartbeat_and_release() {
         seen,
         [
             r#"PUT /v1/tasks/trailhead-daemon-1 HTTP/1.1 {"expire":"5m"}"#,
-            "DELETE /v1/tasks/trailhead-daemon-1 HTTP/1.1",
+            r#"PUT /v1/tasks/trailhead-daemon-1 HTTP/1.1 {"expire":"90s"}"#,
         ]
     );
 }

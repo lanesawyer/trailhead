@@ -14,8 +14,8 @@ use trailhead_control::CoreTracker;
 use trailhead_core::{Ctx, EventFilter, NewProject, NewTask, Store};
 use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
 use trailhead_factory::{
-    Check, Compute, Daemon, Egress, Endpoint as ModelEndpoint, IROH_DOMAINS, Labels, ModelId, PrepareRequest, Repo,
-    Role, RunRequest, RunResult, SandboxSpec, TaskKey, TaskSpec, Tracker,
+    Check, Compute, Daemon, Egress, Endpoint as ModelEndpoint, IROH_DOMAINS, Labels, ModelId, PrRef, PrepareRequest,
+    Repo, Role, RunRequest, RunResult, SandboxSpec, TaskKey, TaskSpec, Tracker,
 };
 
 /// A Trailhead server on a local port with a `LIVE` project and task, and a tracker for the control plane.
@@ -41,6 +41,14 @@ async fn trailhead(dir: &std::path::Path) -> (std::net::SocketAddr, CoreTracker,
     (addr, CoreTracker::new(store.clone(), ctx, "factory"), store, human, key)
 }
 
+/// A gateway path with no connector behind it, so Claude Code fails at once instead of retrying.
+const DEAD_MODEL: &str = "https://api.sprites.dev/v1/gateway/anthropic/none";
+
+/// Where the worker run sends model calls; `LIVE_MODEL_URL=http://127.0.0.1:9` makes Claude Code retry for minutes.
+fn worker_model() -> String {
+    std::env::var("LIVE_MODEL_URL").unwrap_or_else(|_| DEAD_MODEL.into())
+}
+
 fn domains(extra: &[&str]) -> Egress {
     Egress { domains: IROH_DOMAINS.iter().chain(extra).map(|d| d.to_string()).collect() }
 }
@@ -48,6 +56,8 @@ fn domains(extra: &[&str]) -> Egress {
 #[tokio::test]
 #[ignore = "needs SPRITES_TOKEN and TRAILHEAD_DAEMON_BIN, and creates a real Sprite"]
 async fn daemon_in_a_sprite() {
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info,iroh=info,trailhead_daemon=debug".into());
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_test_writer().try_init();
     let token = std::env::var("SPRITES_TOKEN").expect("SPRITES_TOKEN");
     let binary = std::fs::read(std::env::var("TRAILHEAD_DAEMON_BIN").expect("TRAILHEAD_DAEMON_BIN")).unwrap();
     let compute = Arc::new(SpritesCompute::new(token).unwrap().with_prefix("th-live-"));
@@ -105,7 +115,7 @@ async fn daemon_in_a_sprite() {
                 branch: "factory/live-1".into(),
                 pr: None,
                 model: ModelId("claude-sonnet-4-5".into()),
-                endpoint: ModelEndpoint { base_url: "http://127.0.0.1:9".into() },
+                endpoint: ModelEndpoint { base_url: worker_model() },
                 max_steps: 1,
                 required_checks: Vec::new(),
                 blocked_hosts: vec!["github.com".into()],
@@ -123,6 +133,34 @@ async fn daemon_in_a_sprite() {
             eprintln!("task events: {kinds:?}");
             assert!(kinds.iter().any(|k| k == "claim.acquired"), "{kinds:?}");
             assert!(kinds.iter().any(|k| k == "claim.released"), "{kinds:?}");
+
+            // A reviewer run reads the PR's diff through the Sprite's GitHub connector before the agent starts, so
+            // failing in Claude Code rather than in GitHub means the connector worked. Read-only: the closed M0 PR.
+            let cred = tracker.create_sub_agent("live-r1", "LIVE", Duration::from_secs(900)).await.unwrap();
+            let pr = PrRef {
+                repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
+                number: 3,
+                url: "https://github.com/lanesawyer/trailhead/pull/3".into(),
+            };
+            let review = RunRequest {
+                role: Role::Reviewer,
+                task: TaskSpec { key: key.clone(), title: "Live run".into(), description: "Say hi.".into() },
+                repo: pr.repo.clone(),
+                base_branch: "main".into(),
+                branch: "spike/m0-github-connector".into(),
+                pr: Some(pr),
+                model: ModelId("claude-opus-4-5".into()),
+                endpoint: ModelEndpoint { base_url: DEAD_MODEL.into() },
+                max_steps: 1,
+                required_checks: Vec::new(),
+                blocked_hosts: Vec::new(),
+                credential: cred,
+            };
+            let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let t = Instant::now();
+            let report = remote.run(&sandbox.id, review, events).await.expect("the review reports");
+            eprintln!("review finished in {:.1}s: {:?}", t.elapsed().as_secs_f64(), report.result);
+            assert!(matches!(&report.result, RunResult::Failed(r) if r.starts_with("claude")), "{:?}", report.result);
         }
     });
     let outcome = tokio::time::timeout(Duration::from_secs(300), result).await;

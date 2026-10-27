@@ -1,7 +1,9 @@
 //! Keeps a Sprite from pausing while the daemon works. A Sprite pauses about 30 seconds after its last inbound
 //! activity, and the daemon's outbound iroh connection doesn't count, so without a hold a run is cut off mid-way.
 //! Holds are tasks on the Sprite's management socket (`docs.sprites.dev/keeping-sprites-running`): a short expiry,
-//! refreshed on a heartbeat and deleted when the work ends, so a crashed daemon frees the Sprite on its own.
+//! refreshed on a heartbeat, so a crashed daemon frees the Sprite on its own. When the work ends the hold lingers
+//! briefly instead of being deleted: a Sprite idle longer than its window pauses the moment the hold goes, which
+//! would freeze it between a run and the next request (a worker run and then its review).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ pub const SPRITE_API_SOCKET: &str = "/.sprite/api.sock";
 
 const EXPIRE: &str = "5m";
 const HEARTBEAT: Duration = Duration::from_secs(60);
+const LINGER: &str = "90s";
 
 pub struct SpriteHolds {
     socket: PathBuf,
@@ -26,7 +29,7 @@ impl SpriteHolds {
         Arc::new(SpriteHolds { socket: socket.into(), next: AtomicU64::new(1) })
     }
 
-    /// Holds the Sprite active until the guard drops.
+    /// Holds the Sprite active until the guard drops, and for a little while after.
     pub fn hold(self: &Arc<Self>) -> Hold {
         let name = format!("trailhead-daemon-{}", self.next.fetch_add(1, Ordering::Relaxed));
         let this = self.clone();
@@ -34,8 +37,10 @@ impl SpriteHolds {
         let heartbeat = tokio::spawn(async move {
             loop {
                 let body = format!(r#"{{"expire":"{EXPIRE}"}}"#);
-                if let Err(e) = this.call("PUT", &format!("/v1/tasks/{task}"), Some(&body)).await {
-                    tracing::warn!(error = %e, "couldn't hold the Sprite awake");
+                match this.call("PUT", &format!("/v1/tasks/{task}"), Some(&body)).await {
+                    Ok(status) if (200..300).contains(&status) => tracing::debug!(%task, "holding the Sprite awake"),
+                    Ok(status) => tracing::warn!(%task, status, "the Sprite refused a hold"),
+                    Err(e) => tracing::warn!(%task, error = %e, "couldn't hold the Sprite awake"),
                 }
                 tokio::time::sleep(HEARTBEAT).await;
             }
@@ -70,8 +75,9 @@ impl Drop for Hold {
         self.heartbeat.abort();
         let (holds, path) = (self.holds.clone(), format!("/v1/tasks/{}", self.name));
         tokio::spawn(async move {
-            if let Err(e) = holds.call("DELETE", &path, None).await {
-                tracing::warn!(error = %e, "couldn't release the Sprite hold; it expires on its own");
+            let body = format!(r#"{{"expire":"{LINGER}"}}"#);
+            if let Err(e) = holds.call("PUT", &path, Some(&body)).await {
+                tracing::warn!(error = %e, "couldn't shorten the Sprite hold; it expires on its own");
             }
         });
     }

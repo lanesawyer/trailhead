@@ -4916,6 +4916,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "trailhead-codehost-github"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "trailhead-factory",
+]
+
+[[package]]
 name = "trailhead-compute-sprites"
 version = "0.1.0"
 dependencies = [
@@ -4981,6 +4995,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "trailhead-codehost-github",
  "trailhead-compute-sprites",
  "trailhead-control",
  "trailhead-core",

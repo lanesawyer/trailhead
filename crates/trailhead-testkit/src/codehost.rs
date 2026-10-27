@@ -55,7 +55,7 @@ impl FakeCodeHost {
 
 #[async_trait]
 impl CodeHost for FakeCodeHost {
-    async fn publish(&self, repo: &Repo, branch: &str, commits: &[Commit]) -> Result<()> {
+    async fn publish(&self, repo: &Repo, _base: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let mut s = self.state.lock().unwrap();
         s.branches.entry((repo.slug(), branch.to_string())).or_default().extend_from_slice(commits);
         Ok(())

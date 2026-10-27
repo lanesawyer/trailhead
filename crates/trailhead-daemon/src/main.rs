@@ -9,8 +9,11 @@ use clap::Parser;
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
+use trailhead_codehost_github::{GitHub, Identity};
 use trailhead_daemon::awake::{SPRITE_API_SOCKET, SpriteHolds};
-use trailhead_daemon::net::{ALPN, DaemonProtocol, open_api_tunnel, parse_endpoint_id, parse_secret_key};
+use trailhead_daemon::net::{
+    ALPN, DaemonProtocol, keep_iroh_hosts_resolved, open_api_tunnel, parse_endpoint_id, parse_secret_key,
+};
 use trailhead_daemon::{Connect, GitWorkspace, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, Repo, Result, Tracker};
 use trailhead_harness_claude_code::ClaudeCode;
@@ -26,31 +29,57 @@ struct Args {
     /// The Claude Code CLI.
     #[arg(long, default_value = "claude")]
     claude: PathBuf,
+    /// Who published commits are attributed to.
+    #[arg(long, default_value = "Trailhead Factory")]
+    author_name: String,
+    #[arg(long, default_value = "factory@trailhead.invalid")]
+    author_email: String,
 }
 
-/// Placeholder until the GitHub code host lands (M5); runs that reach it fail cleanly.
-struct NoCodeHost;
+/// Where connectors are listed from inside a Sprite.
+const GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
 
-fn not_yet(what: &str, milestone: &str) -> Error {
-    Error::Other(format!("{what} isn't available in the daemon until {milestone}"))
-}
+/// Stands in for a code host when the sandbox has no GitHub connector, so runs fail with the reason.
+struct NoCodeHost(String);
 
 #[async_trait]
 impl CodeHost for NoCodeHost {
-    async fn publish(&self, _: &Repo, _: &str, _: &[Commit]) -> Result<()> {
-        Err(not_yet("publishing", "M5"))
+    async fn publish(&self, _: &Repo, _: &str, _: &str, _: &[Commit]) -> Result<()> {
+        Err(Error::Forbidden(self.0.clone()))
     }
     async fn open_pr(&self, _: &Repo, _: NewPr) -> Result<PrRef> {
-        Err(not_yet("opening PRs", "M5"))
+        Err(Error::Forbidden(self.0.clone()))
     }
     async fn diff(&self, _: &PrRef) -> Result<String> {
-        Err(not_yet("reading PRs", "M5"))
+        Err(Error::Forbidden(self.0.clone()))
     }
     async fn comment(&self, _: &PrRef, _: &str) -> Result<()> {
-        Err(not_yet("commenting", "M5"))
+        Err(Error::Forbidden(self.0.clone()))
     }
     async fn merge(&self, _: &PrRef) -> Result<MergeOutcome> {
-        Err(not_yet("merging", "M5"))
+        Err(Error::Forbidden(self.0.clone()))
+    }
+}
+
+/// GitHub through the Sprite's GitHub connector, found in the gateway's list.
+async fn codehost(author: Identity) -> Arc<dyn CodeHost> {
+    let found = async {
+        let list: serde_json::Value = reqwest::get(GATEWAY_LIST).await?.error_for_status()?.json().await?;
+        let conns = list["connections"].as_array().cloned().unwrap_or_default();
+        Ok::<_, reqwest::Error>(
+            conns
+                .into_iter()
+                .find(|c| c["provider"] == "github")
+                .and_then(|c| c["gateway_base_url"].as_str().map(str::to_string)),
+        )
+    };
+    match found.await {
+        Ok(Some(url)) => {
+            tracing::info!(%url, "using the GitHub connector");
+            Arc::new(GitHub::gateway(url).with_author(author))
+        }
+        Ok(None) => Arc::new(NoCodeHost("no GitHub connector is granted to this sandbox".into())),
+        Err(e) => Arc::new(NoCodeHost(format!("couldn't list this sandbox's connectors: {e}"))),
     }
 }
 
@@ -90,13 +119,14 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     });
     let runner = Runner {
         harness: Arc::new(ClaudeCode::new(args.claude)),
-        codehost: Arc::new(NoCodeHost),
+        codehost: codehost(Identity { name: args.author_name, email: args.author_email }).await,
         workspace: Arc::new(GitWorkspace::new(args.workdir)),
         connect,
         renew_every: RENEW_EVERY,
     };
     tracing::info!(id = %endpoint.id(), %control_plane, "trailhead-daemon listening");
-    let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane);
+    keep_iroh_hosts_resolved();
+    let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone());
     if std::path::Path::new(SPRITE_API_SOCKET).exists() {
         protocol = protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET));
     }

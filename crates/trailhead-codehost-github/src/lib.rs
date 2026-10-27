@@ -1,0 +1,242 @@
+//! `CodeHost` for GitHub's REST API (`docs/factory/sandbox.md`). Commits are published with the Git Data API
+//! (blobs, a tree on top of the parent's, a commit, then the ref), because the Sprites connector forwards REST
+//! paths, not git's protocol. Inside a sandbox the base URL is the connector's gateway and no token is sent; the
+//! gateway adds it. Elsewhere it's `https://api.github.com` with a token.
+
+use std::time::Duration;
+
+use async_trait::async_trait;
+use base64::Engine;
+use reqwest::{Method, RequestBuilder, StatusCode};
+use serde_json::{Value, json};
+use trailhead_factory::{CodeHost, Commit, Error, MergeOutcome, NewPr, PrRef, Repo, Result};
+
+pub const API_URL: &str = "https://api.github.com";
+
+/// GitHub pages a PR's files 100 at a time, up to 3,000.
+const MAX_FILE_PAGES: u32 = 30;
+
+/// Who commits are attributed to. Without one, GitHub uses the credential's user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Clone)]
+pub struct GitHub {
+    http: reqwest::Client,
+    base: String,
+    token: Option<String>,
+    author: Option<Identity>,
+}
+
+impl GitHub {
+    /// Through a Sprites connector: the gateway authenticates, so no token.
+    pub fn gateway(base: impl Into<String>) -> GitHub {
+        GitHub::new(base, None)
+    }
+
+    pub fn new(base: impl Into<String>, token: Option<String>) -> GitHub {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .user_agent("trailhead-factory")
+            .build()
+            .expect("http client");
+        GitHub { http, base: base.into().trim_end_matches('/').to_string(), token, author: None }
+    }
+
+    pub fn with_author(mut self, author: Identity) -> GitHub {
+        self.author = Some(author);
+        self
+    }
+
+    fn request(&self, method: Method, path: &str) -> RequestBuilder {
+        let req = self
+            .http
+            .request(method, format!("{}{path}", self.base))
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", "2022-11-28");
+        match &self.token {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        }
+    }
+
+    async fn send(&self, req: RequestBuilder) -> Result<(StatusCode, Value)> {
+        let res = req.send().await.map_err(|e| Error::Other(format!("github: {e}")))?;
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
+        Ok((status, body))
+    }
+
+    /// Sends and requires success, mapping GitHub's errors onto the factory's.
+    async fn call(&self, req: RequestBuilder) -> Result<Value> {
+        let (status, body) = self.send(req).await?;
+        if status.is_success() {
+            return Ok(body);
+        }
+        let msg = format!("github {status}: {}", body["message"].as_str().unwrap_or(&body.to_string()));
+        Err(match status {
+            StatusCode::NOT_FOUND => Error::NotFound(msg),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Forbidden(msg),
+            StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY => Error::Conflict(msg),
+            _ => Error::Other(msg),
+        })
+    }
+
+    fn repo_path(repo: &Repo) -> String {
+        format!("/repos/{}/{}", repo.owner, repo.name)
+    }
+
+    /// The commit a branch points at, or `None` if there's no such branch.
+    async fn head(&self, repo: &Repo, branch: &str) -> Result<Option<String>> {
+        let path = format!("{}/git/ref/heads/{branch}", Self::repo_path(repo));
+        match self.call(self.request(Method::GET, &path)).await {
+            Ok(r) => Ok(r["object"]["sha"].as_str().map(str::to_string)),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Writes one commit on top of `parent` and returns its sha.
+    async fn write_commit(&self, repo: &Repo, parent: &str, commit: &Commit) -> Result<String> {
+        let r = Self::repo_path(repo);
+        let parent_commit = self.call(self.request(Method::GET, &format!("{r}/git/commits/{parent}"))).await?;
+        let base_tree =
+            parent_commit["tree"]["sha"].as_str().ok_or_else(|| Error::Other("parent without a tree".into()))?;
+        let mut entries = Vec::with_capacity(commit.changes.len());
+        for change in &commit.changes {
+            let sha = match &change.contents {
+                Some(bytes) => {
+                    let content = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    let blob = json!({ "content": content, "encoding": "base64" });
+                    let blob = self.call(self.request(Method::POST, &format!("{r}/git/blobs")).json(&blob)).await?;
+                    Value::String(blob["sha"].as_str().unwrap_or_default().to_string())
+                }
+                // A null sha deletes the path from the base tree.
+                None => Value::Null,
+            };
+            entries.push(json!({ "path": change.path, "mode": "100644", "type": "blob", "sha": sha }));
+        }
+        let tree = json!({ "base_tree": base_tree, "tree": entries });
+        let tree = self.call(self.request(Method::POST, &format!("{r}/git/trees")).json(&tree)).await?;
+        let mut body = json!({ "message": commit.message, "tree": tree["sha"], "parents": [parent] });
+        if let Some(a) = &self.author {
+            body["author"] = json!({ "name": a.name, "email": a.email });
+            body["committer"] = body["author"].clone();
+        }
+        let created = self.call(self.request(Method::POST, &format!("{r}/git/commits")).json(&body)).await?;
+        created["sha"].as_str().map(str::to_string).ok_or_else(|| Error::Other("commit without a sha".into()))
+    }
+
+    async fn find_pr(&self, repo: &Repo, branch: &str) -> Result<Option<PrRef>> {
+        let path = format!("{}/pulls", Self::repo_path(repo));
+        let head = format!("{}:{branch}", repo.owner);
+        let prs =
+            self.call(self.request(Method::GET, &path).query(&[("head", head.as_str()), ("state", "open")])).await?;
+        Ok(prs.as_array().and_then(|a| a.first()).map(|p| pr_ref(repo, p)))
+    }
+}
+
+/// One file of a PR as a unified diff section. GitHub omits `patch` for binary and very large files.
+fn file_diff(f: &Value) -> String {
+    let name = f["filename"].as_str().unwrap_or_default();
+    let old = f["previous_filename"].as_str().unwrap_or(name);
+    let status = f["status"].as_str().unwrap_or_default();
+    let from = if status == "added" { "/dev/null".to_string() } else { format!("a/{old}") };
+    let to = if status == "removed" { "/dev/null".to_string() } else { format!("b/{name}") };
+    let body = match f["patch"].as_str() {
+        Some(patch) => format!("{patch}\n"),
+        None if status == "removed" => "(deleted)\n".to_string(),
+        None => "(binary or too large to show)\n".to_string(),
+    };
+    format!("diff --git a/{old} b/{name}\n--- {from}\n+++ {to}\n{body}")
+}
+
+fn pr_ref(repo: &Repo, p: &Value) -> PrRef {
+    PrRef {
+        repo: repo.clone(),
+        number: p["number"].as_u64().unwrap_or_default(),
+        url: p["html_url"].as_str().unwrap_or_default().to_string(),
+    }
+}
+
+#[async_trait]
+impl CodeHost for GitHub {
+    async fn publish(&self, repo: &Repo, base: &str, branch: &str, commits: &[Commit]) -> Result<()> {
+        let existing = self.head(repo, branch).await?;
+        let mut sha = match &existing {
+            Some(sha) => sha.clone(),
+            None => self.head(repo, base).await?.ok_or_else(|| Error::NotFound(format!("base branch {base}")))?,
+        };
+        for commit in commits {
+            sha = self.write_commit(repo, &sha, commit).await?;
+        }
+        let r = Self::repo_path(repo);
+        match existing {
+            // Not forced: if someone else moved the branch meanwhile, this fails instead of dropping their work.
+            Some(_) => {
+                let req = self.request(Method::PATCH, &format!("{r}/git/refs/heads/{branch}"));
+                self.call(req.json(&json!({ "sha": sha, "force": false }))).await?;
+            }
+            None => {
+                let body = json!({ "ref": format!("refs/heads/{branch}"), "sha": sha });
+                self.call(self.request(Method::POST, &format!("{r}/git/refs")).json(&body)).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Opens the PR, or returns the open one for this branch, so a retry after a crash doesn't fail.
+    async fn open_pr(&self, repo: &Repo, pr: NewPr) -> Result<PrRef> {
+        let body = json!({ "title": pr.title, "head": pr.branch, "base": pr.base, "body": pr.body });
+        let req = self.request(Method::POST, &format!("{}/pulls", Self::repo_path(repo))).json(&body);
+        match self.call(req).await {
+            Ok(created) => Ok(pr_ref(repo, &created)),
+            Err(Error::Conflict(msg)) => match self.find_pr(repo, &pr.branch).await? {
+                Some(existing) => Ok(existing),
+                None => Err(Error::Conflict(msg)),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A unified diff assembled from the PR's files. GitHub's diff media type would be simpler, but the Sprites
+    /// gateway doesn't pass `Accept` through, so this sticks to JSON.
+    async fn diff(&self, pr: &PrRef) -> Result<String> {
+        let path = format!("{}/pulls/{}/files", Self::repo_path(&pr.repo), pr.number);
+        let mut out = String::new();
+        for page in 1..=MAX_FILE_PAGES {
+            let req = self.request(Method::GET, &path).query(&[("per_page", "100"), ("page", &page.to_string())]);
+            let files = self.call(req).await?;
+            let files = files.as_array().cloned().unwrap_or_default();
+            for f in &files {
+                out.push_str(&file_diff(f));
+            }
+            if files.len() < 100 {
+                return Ok(out);
+            }
+        }
+        out.push_str("(diff truncated: GitHub lists at most 3,000 files)\n");
+        Ok(out)
+    }
+
+    async fn comment(&self, pr: &PrRef, body: &str) -> Result<()> {
+        let path = format!("{}/issues/{}/comments", Self::repo_path(&pr.repo), pr.number);
+        self.call(self.request(Method::POST, &path).json(&json!({ "body": body }))).await.map(drop)
+    }
+
+    async fn merge(&self, pr: &PrRef) -> Result<MergeOutcome> {
+        let path = format!("{}/pulls/{}/merge", Self::repo_path(&pr.repo), pr.number);
+        let (status, body) =
+            self.send(self.request(Method::PUT, &path).json(&json!({ "merge_method": "squash" }))).await?;
+        match status {
+            s if s.is_success() => Ok(MergeOutcome::Merged),
+            // Not mergeable, or the head moved: the task goes back to running.
+            StatusCode::METHOD_NOT_ALLOWED | StatusCode::CONFLICT => Ok(MergeOutcome::Conflict),
+            s => Err(Error::Other(format!("github {s}: {}", body["message"].as_str().unwrap_or_default()))),
+        }
+    }
+}

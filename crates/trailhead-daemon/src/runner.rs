@@ -45,10 +45,13 @@ impl Runner {
 
     /// Runs one step until it finishes or `cancel` fires, which ends it with `Error::Cancelled`.
     pub async fn run(&self, req: RunRequest, events: EventSink, cancel: Arc<Notify>) -> Result<RunReport> {
+        let key = &req.task.key.0;
         self.workspace.confirm_blocked(&req.blocked_hosts).await?;
+        tracing::info!(task = %key, role = req.role.as_str(), "egress confirmed; starting");
         let tracker = (self.connect)(req.credential.clone()).await?;
         if req.role == Role::Worker {
             tracker.claim(&req.task.key).await?;
+            tracing::info!(task = %key, "claimed");
         }
         let diff = match &req.pr {
             Some(pr) if req.role == Role::Reviewer => Some(self.codehost.diff(pr).await?),
@@ -63,7 +66,9 @@ impl Runner {
             max_steps: req.max_steps,
             diff,
         };
+        tracing::info!(task = %key, "agent starting");
         let (outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), cancel, &events).await?;
+        tracing::info!(task = %key, "agent finished");
         let (result, checks) = self.finish(&req, tracker.as_ref(), outcome).await?;
         Ok(RunReport { result, checks, usage })
     }
@@ -130,7 +135,7 @@ impl Runner {
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), checks));
                 }
-                self.codehost.publish(&req.repo, &req.branch, &commits).await?;
+                self.codehost.publish(&req.repo, &req.base_branch, &req.branch, &commits).await?;
                 let pr = match &req.pr {
                     Some(pr) => pr.clone(),
                     None => {

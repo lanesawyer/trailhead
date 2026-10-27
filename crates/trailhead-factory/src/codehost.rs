@@ -53,8 +53,8 @@ pub enum MergeOutcome {
 
 #[async_trait]
 pub trait CodeHost: Send + Sync {
-    /// Publishes commits on top of `branch`, creating it from the default branch if needed.
-    async fn publish(&self, repo: &Repo, branch: &str, commits: &[Commit]) -> Result<()>;
+    /// Publishes commits on top of `branch`, creating it from `base` if it doesn't exist.
+    async fn publish(&self, repo: &Repo, base: &str, branch: &str, commits: &[Commit]) -> Result<()>;
     async fn open_pr(&self, repo: &Repo, pr: NewPr) -> Result<PrRef>;
     async fn diff(&self, pr: &PrRef) -> Result<String>;
     async fn comment(&self, pr: &PrRef, body: &str) -> Result<()>;
