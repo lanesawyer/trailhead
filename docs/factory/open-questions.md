@@ -18,7 +18,9 @@
 
 ## Hands-on tests (MVP M0)
 
-- [ ] Iroh in a Sprite under a locked-down egress policy: direct connection or relay only? Compare against no policy; if relay-only, measure latency and try a self-hosted relay in the same Fly region.
-- [ ] Claude Code in a Sprite against the Anthropic connector (base URL, placeholder key); does the 120-second gateway timeout cut off long streams?
-- [ ] Publish commits and open a PR through the GitHub connector with the Git Data API.
-- [ ] Can a checkpoint seed a different Sprite, or only restore its own?
+- [x] Iroh in a Sprite under a locked-down egress policy: relay only by default, about 5 ms over direct on n0's relay. Allowing and resolving a DNS name for the peer's IP restores direct ([sandbox.md](sandbox.md#iroh-in-a-locked-down-sandbox)). A self-hosted relay isn't needed yet.
+- [ ] Claude Code in a Sprite against the Anthropic connector (base URL, placeholder key); does the 120-second gateway timeout cut off long streams? Assumed to work for now; Lane will test it (TRAIL-97).
+- [x] Publish commits and open a PR through the GitHub connector with the Git Data API: works (lanesawyer/trailhead#3, since closed). A public repo clones in 0.4 s with `github.com` on the bootstrap allowlist ([sandbox.md](sandbox.md#credentials-through-sprites-connectors)).
+- [ ] Private repos (deferred, TRAIL-96; the MVP uses public repos): `git clone` and `git push` through a `custom_api` connector to `https://github.com` with a fine-grained token.
+- [x] Can a checkpoint seed a different Sprite? No, a checkpoint only restores its own Sprite. Replaced by bootstrapping each Sprite from the stock image ([sandbox.md](sandbox.md#bootstrap-and-checkpoints)).
+- [ ] Can Sprite labels be set at create time and changed afterwards through the API? The kill switch and the reconciler depend on it.

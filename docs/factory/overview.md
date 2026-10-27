@@ -23,7 +23,7 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 ## Components
 
 - **Trailhead server (control plane).** Task engine, orchestrator, reconciler, review router, budget meter. Talks to the Sprites API, the provider usage API, and daemons over Iroh. Holds no agent credentials.
-- **Sandbox (Sprite).** The daemon, an agent adapter wrapping a CLI agent or an own loop, and the repo with its mise environment restored from a warm checkpoint. Holds no raw keys.
+- **Sandbox (Sprite).** The daemon, an agent adapter wrapping a CLI agent or an own loop, and the repo with its mise environment, bootstrapped from the stock image. Holds no raw keys.
 - **Connector gateway (Fly.io).** Injects credentials for the model provider and GitHub on the sandbox's behalf.
 - **Egress.** Sandboxes reach the Iroh relay and the connector gateway, plus package registries during install phases only. See [sandbox.md](sandbox.md).
 
@@ -36,6 +36,7 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 | Plugin seams | `Compute`, `Harness`, `ModelProvider`, `Tracker`, `CodeHost` | Traits in core; vendor crates compiled in by feature; in-memory fakes for tests |
 | Compute | Fly.io Sprites | Own thin wrapper over the Sprites HTTP API, not the unofficial `sprites` crate |
 | Environment | mise, hidden behind standard checks | Users give stack and commands for setup, fmt, lint, typecheck, test, build |
+| Bootstrap | Stock image per task | Checkpoints can't seed another Sprite; the Sprite clones the repo, then `mise install` and deps; object-storage build cache if needed |
 | Rollback | Checkpoints as transactions | Checkpoint before each agent step; restore on failure or rejection |
 | Communication | Iroh 1.0 | n0 public relays for now; relay configurable to self-host later |
 | Identity | Per-sandbox Trailhead sub-agent token | The tunnel ticket controls who can connect; the token decides what they can do |

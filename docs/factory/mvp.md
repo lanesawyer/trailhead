@@ -5,7 +5,7 @@ Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with 
 ## In scope
 
 - One repo, one worker profile (Sonnet) and one reviewer profile.
-- `Compute`: Sprites through the factory's own thin API wrapper; warm checkpoint for that repo; per-step checkpoints; install-phase egress.
+- `Compute`: Sprites through the factory's own thin API wrapper; bootstrap from the stock image; per-step checkpoints; install-phase egress.
 - `Harness`: Claude Code through the Anthropic connector.
 - `Tracker`: Trailhead on Lane's machine, reached from sandboxes through its iroh tunnel.
 - `CodeHost`: GitHub through the connector, publishing with the Git Data API.
@@ -28,7 +28,7 @@ Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with 
 | --- | --- | --- |
 | M0 | Spikes: Iroh in a locked-down Sprite; Claude Code through the Anthropic connector; a PR through the GitHub connector; checkpoint seeding another Sprite | The four unknowns, before building on them |
 | M1 | `trailhead-factory` types, the five traits, `trailhead-testkit` fakes; the MVP lifecycle runs in CI on fakes | The trait shapes |
-| M2 | `trailhead-compute-sprites`: create, labels, egress, checkpoint, restore, destroy; warm checkpoint | Real compute |
+| M2 | `trailhead-compute-sprites`: create, labels, egress, checkpoint, restore, destroy; bootstrap | Real compute |
 | M3 | `trailhead-daemon` over Iroh with the Claude Code harness, checks, per-step checkpoints and budget | A run inside a sandbox |
 | M4 | Trailhead `Tracker` implementations, with sandboxes on the tunnel | Work flows from Trailhead |
 | M5 | `trailhead-codehost-github` and the reviewer agent | End to end to a PR |
