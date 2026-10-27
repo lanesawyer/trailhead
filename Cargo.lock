@@ -5031,6 +5031,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "trailhead-provider-anthropic"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "trailhead-factory",
+]
+
+[[package]]
 name = "trailhead-server"
 version = "0.1.0"
 dependencies = [

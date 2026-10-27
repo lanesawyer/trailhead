@@ -1,0 +1,15 @@
+[package]
+name = "trailhead-provider-anthropic"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+description = "Trailhead factory ModelProvider for Anthropic: model aliases, endpoint and prices"
+
+[dependencies]
+trailhead-factory.workspace = true
+tracing.workspace = true
