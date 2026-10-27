@@ -9,11 +9,18 @@ use trailhead_factory::{EventSink, Feedback, Harness, Result, Role, RunContext, 
 pub struct Script {
     pub steps: Vec<Usage>,
     pub outcome: RunOutcome,
+    /// Never finishes after its steps, like an agent stuck in a loop.
+    pub hang: bool,
 }
 
 impl Script {
     pub fn new(outcome: RunOutcome) -> Script {
-        Script { steps: Vec::new(), outcome }
+        Script { steps: Vec::new(), outcome, hang: false }
+    }
+
+    pub fn hang(mut self) -> Script {
+        self.hang = true;
+        self
     }
 
     /// Adds `n` steps of `tokens` output tokens each.
@@ -63,6 +70,9 @@ impl Harness for ScriptedHarness {
             let _ = events.send(RunEvent::Usage { model: ctx.model.clone(), usage });
             // Lets a canceller act between steps, as a real model call would.
             tokio::task::yield_now().await;
+        }
+        if script.hang {
+            std::future::pending::<()>().await;
         }
         Ok(script.outcome)
     }

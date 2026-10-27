@@ -266,3 +266,28 @@ async fn live(compute: &FakeCompute, name: &str, task: &TaskKey, role: &str) {
     ]);
     compute.create(&SandboxSpec { name: name.into(), labels, egress: Default::default(), base: None }).await.unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_daemon_that_ignores_cancel_is_cut_off_and_parked() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Wedged", "");
+    r.daemon.ignore_cancel();
+    r.harness.push(Role::Worker, Script::new(changes()).steps(3, 2_000_000).hang());
+
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Parked { reason } if reason.contains("budget")), "{:?}", ran[0].1);
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    let sandbox = r.compute.get("trail-1-a1").unwrap();
+    assert!(!sandbox.labels.contains_key(label::ROLE));
+    assert!(r.compute.egress("trail-1-a1").unwrap().domains.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_hung_agent_hits_the_wall_clock() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Stuck", "");
+    r.harness.push(Role::Worker, Script::new(changes()).hang());
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Parked { reason } if reason.contains("60 minutes")), "{:?}", ran[0].1);
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+}

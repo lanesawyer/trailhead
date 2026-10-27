@@ -17,6 +17,9 @@ use trailhead_factory::{
     label, review_name, run_name,
 };
 
+/// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
+pub const CANCEL_GRACE: Duration = Duration::from_secs(60);
+
 /// The `factory` label value on every sandbox this control plane starts.
 pub const FACTORY_LABEL: &str = "trailhead";
 
@@ -256,20 +259,26 @@ impl Factory {
                 None
             }
         };
+        // Armed on a breach: a daemon that doesn't stop by then is cut off without waiting for it.
+        let grace = tokio::time::sleep(Duration::MAX / 4);
+        tokio::pin!(grace);
         let result = loop {
-            tokio::select! {
+            let new_breach = tokio::select! {
                 biased;
-                Some(ev) = rx.recv() => {
-                    if breach.is_none() && let Some(reason) = on_event(ev, &mut spent) {
-                        self.daemon.cancel(&sandbox.id).await?;
-                        breach = Some(reason);
-                    }
-                }
+                Some(ev) = rx.recv() => if breach.is_none() { on_event(ev, &mut spent) } else { None },
                 r = &mut run => break r,
-                _ = &mut deadline, if breach.is_none() => {
-                    self.daemon.cancel(&sandbox.id).await?;
-                    breach = Some(format!("ran past {} minutes", profile.budget.minutes));
+                _ = &mut deadline, if breach.is_none() => Some(format!("ran past {} minutes", profile.budget.minutes)),
+                _ = &mut grace, if breach.is_some() => {
+                    tracing::warn!(sandbox = %sandbox.name, "daemon ignored cancel; cutting it off");
+                    break Err(Error::Cancelled);
                 }
+            };
+            if let Some(reason) = new_breach {
+                if let Err(e) = self.daemon.cancel(&sandbox.id).await {
+                    tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't cancel; relying on the kill switch");
+                }
+                grace.as_mut().reset(tokio::time::Instant::now() + CANCEL_GRACE);
+                breach = Some(reason);
             }
         };
         while let Ok(ev) = rx.try_recv() {

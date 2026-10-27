@@ -24,6 +24,7 @@ pub struct LocalDaemon {
     codehost: Arc<dyn CodeHost>,
     connect: Connect,
     failing_checks: Mutex<BTreeMap<String, String>>,
+    ignore_cancel: std::sync::atomic::AtomicBool,
     cancels: Mutex<HashMap<SandboxId, Arc<Notify>>>,
 }
 
@@ -38,12 +39,24 @@ impl LocalDaemon {
     }
 
     pub fn connecting(harness: Arc<dyn Harness>, codehost: Arc<dyn CodeHost>, connect: Connect) -> LocalDaemon {
-        LocalDaemon { harness, codehost, connect, failing_checks: Mutex::default(), cancels: Mutex::default() }
+        LocalDaemon {
+            harness,
+            codehost,
+            connect,
+            failing_checks: Mutex::default(),
+            ignore_cancel: Default::default(),
+            cancels: Mutex::default(),
+        }
     }
 
     /// Makes a named check fail with this output on every later run.
     pub fn fail_check(&self, name: &str, output: &str) {
         self.failing_checks.lock().unwrap().insert(name.to_string(), output.to_string());
+    }
+
+    /// Makes the daemon ignore cancels, like a wedged or hostile sandbox.
+    pub fn ignore_cancel(&self) {
+        self.ignore_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn pass_check(&self, name: &str) {
@@ -175,6 +188,9 @@ impl Daemon for LocalDaemon {
     }
 
     async fn cancel(&self, sandbox: &SandboxId) -> Result<()> {
+        if self.ignore_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
         self.cancel_handle(sandbox).notify_one();
         Ok(())
     }
