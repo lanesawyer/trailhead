@@ -1,8 +1,13 @@
 //! The daemon contract over iroh. The control plane dials each sandbox's daemon by an endpoint id it derives from
 //! the sandbox name, so it needs no address book and can reconnect after a restart. One bidirectional stream
 //! carries one request; frames are a 4-byte big-endian length and a JSON message.
+//!
+//! The other direction is the API tunnel: a daemon reaches Trailhead by dialing the control plane on
+//! [`API_ALPN`], which forwards each stream to the server's loopback port. Only daemons this control plane started
+//! get in, and the server still checks every request's bearer token.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,6 +19,8 @@ use iroh::{Endpoint, EndpointId, SecretKey};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::Sha256;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc};
 use trailhead_factory::{
     Compute, Daemon, DaemonSecrets, Error, EventSink, FromDaemon, PrepareRequest, Program, Result, RunReport,
@@ -23,6 +30,12 @@ use trailhead_factory::{
 use crate::Runner;
 
 pub const ALPN: &[u8] = b"trailhead/daemon/0";
+
+/// Daemon to control plane: a byte stream to the Trailhead server.
+pub const API_ALPN: &[u8] = b"trailhead/api/0";
+
+/// The daemons allowed through the API tunnel: the ones this control plane started or dialed.
+pub type Peers = Arc<Mutex<HashSet<EndpointId>>>;
 
 const MAX_FRAME: usize = 16 * 1024 * 1024;
 
@@ -188,6 +201,87 @@ impl ProtocolHandler for DaemonProtocol {
     }
 }
 
+/// Copies bytes both ways between an iroh stream and a TCP connection until both sides finish.
+async fn pipe(mut send: SendStream, mut recv: RecvStream, tcp: TcpStream) {
+    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+    let inbound = async {
+        let _ = tokio::io::copy(&mut recv, &mut tcp_write).await;
+        let _ = tcp_write.shutdown().await;
+    };
+    let outbound = async {
+        let _ = tokio::io::copy(&mut tcp_read, &mut send).await;
+        let _ = send.finish();
+    };
+    tokio::join!(inbound, outbound);
+}
+
+/// The control plane's end of the API tunnel.
+#[derive(Debug, Clone)]
+pub struct ApiTunnel {
+    server: SocketAddr,
+    peers: Peers,
+}
+
+impl ApiTunnel {
+    pub fn new(server: SocketAddr, peers: Peers) -> ApiTunnel {
+        ApiTunnel { server, peers }
+    }
+}
+
+impl ProtocolHandler for ApiTunnel {
+    async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
+        if !self.peers.lock().unwrap().contains(&conn.remote_id()) {
+            tracing::warn!(peer = %conn.remote_id(), "refusing an API tunnel from an unknown peer");
+            conn.close(1u32.into(), b"unknown peer");
+            return Ok(());
+        }
+        while let Ok((send, recv)) = conn.accept_bi().await {
+            let server = self.server;
+            tokio::spawn(async move {
+                match TcpStream::connect(server).await {
+                    Ok(tcp) => pipe(send, recv, tcp).await,
+                    Err(e) => tracing::warn!(%server, error = %e, "can't reach the Trailhead server"),
+                }
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The daemon's end of the API tunnel: a loopback port whose connections reach the Trailhead server, each as a
+/// stream on one long-lived connection to the control plane, redialed if it drops.
+pub async fn open_api_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Result<SocketAddr> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_err)?;
+    let addr = listener.local_addr().map_err(io_err)?;
+    let conn: Arc<tokio::sync::Mutex<Option<Connection>>> = Arc::default();
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let (endpoint, conn) = (endpoint.clone(), conn.clone());
+            tokio::spawn(async move {
+                let streams = async {
+                    let mut guard = conn.lock().await;
+                    let live = guard.as_ref().filter(|c| c.close_reason().is_none()).cloned();
+                    let c = match live {
+                        Some(c) => c,
+                        None => {
+                            let c = endpoint.connect(control_plane, API_ALPN).await.map_err(io_err)?;
+                            *guard = Some(c.clone());
+                            c
+                        }
+                    };
+                    drop(guard);
+                    c.open_bi().await.map_err(io_err)
+                };
+                match streams.await {
+                    Ok((send, recv)) => pipe(send, recv, tcp).await,
+                    Err(e) => tracing::warn!(error = %e, "API tunnel to the control plane failed"),
+                }
+            });
+        }
+    });
+    Ok(addr)
+}
+
 /// Where the daemon lives inside a sandbox and how it's started.
 #[derive(Debug, Clone)]
 pub struct Launch {
@@ -211,15 +305,29 @@ pub struct RemoteDaemon {
     launch: Launch,
     conns: Mutex<HashMap<SandboxId, Connection>>,
     cancels: Mutex<HashMap<SandboxId, mpsc::UnboundedSender<()>>>,
+    peers: Peers,
 }
 
 impl RemoteDaemon {
     pub fn new(endpoint: Endpoint, master: [u8; 32], compute: Arc<dyn Compute>, launch: Launch) -> RemoteDaemon {
-        RemoteDaemon { endpoint, master, compute, launch, conns: Mutex::default(), cancels: Mutex::default() }
+        RemoteDaemon {
+            endpoint,
+            master,
+            compute,
+            launch,
+            conns: Mutex::default(),
+            cancels: Mutex::default(),
+            peers: Peers::default(),
+        }
     }
 
     pub fn daemon_id(&self, sandbox: &SandboxId) -> EndpointId {
         sandbox_key(&self.master, sandbox).public()
+    }
+
+    /// The daemons let through the API tunnel; share it with [`ApiTunnel`].
+    pub fn peers(&self) -> Peers {
+        self.peers.clone()
     }
 
     /// The program that runs a sandbox's daemon, with its secrets file.
@@ -251,6 +359,7 @@ impl RemoteDaemon {
             return Ok(conn.clone());
         }
         let id = self.daemon_id(sandbox);
+        self.peers.lock().unwrap().insert(id);
         let deadline = tokio::time::Instant::now() + patience;
         let mut wait = Duration::from_millis(250);
         let conn = loop {

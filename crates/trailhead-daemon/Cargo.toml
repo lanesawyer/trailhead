@@ -13,7 +13,7 @@ description = "Trailhead factory daemon: runs agents in a sandbox and speaks the
 [features]
 default = ["net"]
 # The iroh transport. The testkit turns it off to reuse the runner in-process.
-net = ["dep:iroh", "dep:hmac", "dep:sha2", "dep:hex", "dep:clap", "dep:tracing-subscriber", "dep:trailhead-harness-claude-code"]
+net = ["dep:iroh", "dep:hmac", "dep:sha2", "dep:hex", "dep:clap", "dep:tracing-subscriber", "dep:trailhead-harness-claude-code", "dep:reqwest"]
 
 [dependencies]
 trailhead-factory.workspace = true
@@ -27,6 +27,7 @@ hmac = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 trailhead-harness-claude-code = { workspace = true, optional = true }
 
@@ -39,4 +40,7 @@ trailhead-testkit.workspace = true
 trailhead-control.workspace = true
 tempfile = "3"
 trailhead-compute-sprites.workspace = true
+trailhead-core.workspace = true
+trailhead-server.workspace = true
+axum.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

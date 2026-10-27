@@ -10,6 +10,11 @@ mod workspace;
 
 #[cfg(feature = "net")]
 pub mod net;
+#[cfg(feature = "net")]
+mod rest;
+
+#[cfg(feature = "net")]
+pub use rest::RestTracker;
 
 pub use runner::{Connect, RENEW_EVERY, Runner, Workspace};
 pub use workspace::GitWorkspace;

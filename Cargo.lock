@@ -4968,10 +4968,12 @@ name = "trailhead-daemon"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "clap",
  "hex",
  "hmac",
  "iroh",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -4981,8 +4983,10 @@ dependencies = [
  "tracing-subscriber",
  "trailhead-compute-sprites",
  "trailhead-control",
+ "trailhead-core",
  "trailhead-factory",
  "trailhead-harness-claude-code",
+ "trailhead-server",
  "trailhead-testkit",
 ]
 
