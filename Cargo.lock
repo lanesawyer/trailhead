@@ -4995,6 +4995,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "trailhead-harness-claude-code"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "trailhead-factory",
+]
+
+[[package]]
 name = "trailhead-server"
 version = "0.1.0"
 dependencies = [
