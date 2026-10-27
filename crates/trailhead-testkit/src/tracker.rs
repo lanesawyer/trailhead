@@ -276,6 +276,12 @@ impl Tracker for FakeTracker {
         Ok(())
     }
 
+    async fn note(&self, task: &TaskKey, body: &str) -> Result<()> {
+        self.check_live()?;
+        self.comment(task, "note", body);
+        Ok(())
+    }
+
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
         self.write(task, |t, me| {
             if t.status != Status::InReview {

@@ -28,6 +28,23 @@ pub trait Workspace: Send + Sync {
 /// How often a worker renews its claim while the agent runs. Leases default to 30 minutes.
 pub const RENEW_EVERY: Duration = Duration::from_secs(10 * 60);
 
+/// How much of a failed check's output goes on the task.
+const NOTE_TAIL: usize = 4000;
+
+/// Why an attempt's checks failed, for the task, so a person or the next attempt can see it.
+fn failure_note(checks: &[CheckResult]) -> String {
+    let mut note = String::from("The factory's checks failed, so nothing was published.\n");
+    for c in checks.iter().filter(|c| !c.passed) {
+        let out = c.output.trim_end();
+        let mut start = out.len().saturating_sub(NOTE_TAIL);
+        while !out.is_char_boundary(start) {
+            start += 1;
+        }
+        note.push_str(&format!("\n`{}` failed; the end of its output:\n```\n{}\n```\n", c.name, &out[start..]));
+    }
+    note
+}
+
 /// The daemon's duties for one run: claim, run the harness, run checks, publish and open the PR, or review it,
 /// and record the result in the tracker as the sandbox's sub-agent.
 pub struct Runner {
@@ -132,6 +149,7 @@ impl Runner {
                 let checks = self.checks(&req.required_checks).await;
                 if let Some(failed) = checks.iter().find(|c| !c.passed) {
                     let reason = format!("check {} failed", failed.name);
+                    tracker.note(key, &failure_note(&checks)).await?;
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), checks));
                 }

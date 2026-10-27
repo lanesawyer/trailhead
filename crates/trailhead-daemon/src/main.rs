@@ -20,7 +20,7 @@ use trailhead_harness_claude_code::ClaudeCode;
 
 #[derive(Parser)]
 struct Args {
-    /// A JSON `DaemonSecrets` file. It's deleted once read.
+    /// A JSON `DaemonSecrets` file (0600). It stays, because the Sprite restarts the daemon after a cold wake.
     #[arg(long)]
     secrets: PathBuf,
     /// Where the repo is checked out.
@@ -88,7 +88,6 @@ async fn codehost(author: Identity) -> Arc<dyn CodeHost> {
 
 fn read_secrets(path: &PathBuf) -> std::result::Result<DaemonSecrets, String> {
     let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    std::fs::remove_file(path).map_err(|e| format!("deleting {}: {e}", path.display()))?;
     serde_json::from_slice(&raw).map_err(|e| format!("{}: {e}", path.display()))
 }
 

@@ -75,7 +75,7 @@ impl std::fmt::Debug for SandboxFile {
 
 /// A long-running program in a sandbox, supervised by the sandbox host so it
 /// survives the call that started it. This is how the daemon gets in: its
-/// binary and a secrets file it reads and deletes are among `files`.
+/// binary and its `0600` secrets file are among `files`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Program {
     pub name: String,

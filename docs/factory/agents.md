@@ -22,7 +22,7 @@ Decided: strongly typed. Shared Rust types for every message between the control
 - **Stream:** `Event`s while a run goes (step started, tool call, usage per model call, needs input).
 - **Control:** `Cancel`. Pause and checkpoint-now stay with the control plane, which checkpoints through `Compute`.
 - **Wire.** ALPN `trailhead/daemon/0`. One bidirectional stream per request, framed as a 4-byte big-endian length plus JSON.
-- **Who dials.** The control plane dials the daemon. Each daemon's iroh key is HMAC-SHA256 of the control plane's master key and the sandbox name, so the control plane can reach any of its daemons, including after a restart, without storing addresses. The daemon gets its key and the control plane's endpoint id in a 0600 secrets file that it reads and deletes, and refuses every other peer.
+- **Who dials.** The control plane dials the daemon. Each daemon's iroh key is HMAC-SHA256 of the control plane's master key and the sandbox name, so the control plane can reach any of its daemons, including after a restart, without storing addresses. The daemon gets its key and the control plane's endpoint id in a 0600 secrets file, which stays so a supervised restart can read it again, and refuses every other peer.
 - **Getting in.** `Compute::start` uploads the daemon binary (24.5 MB release build) and the secrets file and runs it as a supervised Sprites service.
 - **Losing the control plane.** If the stream drops mid-run, the daemon cancels the run rather than work unobserved, and the control plane's reconcile requeues the task.
 

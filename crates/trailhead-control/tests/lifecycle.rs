@@ -166,6 +166,14 @@ async fn failed_check_requeues_and_next_attempt_gets_a_fresh_sandbox() {
     assert_eq!(task.holder, None);
     assert!(r.compute.sandboxes().is_empty());
     assert!(r.codehost.prs().is_empty());
+    let notes: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "note").collect();
+    assert_eq!(notes.len(), 1, "the failure is noted on the task");
+    assert!(
+        notes[0].body.contains("`lint` failed") && notes[0].body.contains("warning: unused variable"),
+        "{}",
+        notes[0].body
+    );
+    assert_eq!(notes[0].author, "factory/trail-1-a1");
 
     // Fixed; the next tick is attempt 2 in a new sandbox under a new sub-agent.
     r.daemon.pass_check("lint");

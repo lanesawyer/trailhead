@@ -211,6 +211,10 @@ impl Tracker for CoreTracker {
         self.comment(task, CommentKind::Question, question).await
     }
 
+    async fn note(&self, task: &TaskKey, body: &str) -> Result<()> {
+        self.comment(task, CommentKind::Note, body).await
+    }
+
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
         self.comment(task, CommentKind::Handoff, handoff).await?;
         self.set_status(task, trailhead_core::Status::Done).await

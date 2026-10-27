@@ -200,6 +200,10 @@ impl Tracker for RestTracker {
         self.comment(key, json!({ "kind": "question", "body": question })).await
     }
 
+    async fn note(&self, key: &TaskKey, body: &str) -> Result<()> {
+        self.comment(key, json!({ "kind": "note", "body": body })).await
+    }
+
     async fn finish(&self, key: &TaskKey, handoff: &str) -> Result<()> {
         self.comment(key, json!({ "kind": "handoff", "body": handoff })).await?;
         self.patch(key, json!({ "status": "done" })).await

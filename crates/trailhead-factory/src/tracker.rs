@@ -108,6 +108,8 @@ pub trait Tracker: Send + Sync {
     async fn request_review(&self, task: &TaskKey) -> Result<()>;
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()>;
     async fn ask(&self, task: &TaskKey, question: &str) -> Result<()>;
+    /// A note on the task, such as why an attempt failed, without changing it.
+    async fn note(&self, task: &TaskKey, body: &str) -> Result<()>;
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()>;
 
     /// Creates (or reuses) a project-scoped sub-agent and a fresh token for it that expires after `ttl`,

@@ -91,8 +91,9 @@ pub enum FromDaemon {
     Failed(Error),
 }
 
-/// What the control plane hands a daemon at start, as a file the daemon reads
-/// and deletes: its iroh key, and the one peer it accepts.
+/// What the control plane hands a daemon at start, as a `0600` file: its iroh
+/// key, and the one peer it accepts. The file stays, because a supervised
+/// restart (a Sprite's cold wake) reads it again.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DaemonSecrets {
     /// The daemon's iroh secret key, hex. Derived per sandbox by the control
