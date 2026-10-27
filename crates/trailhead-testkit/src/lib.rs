@@ -10,7 +10,7 @@ mod tracker;
 
 pub use codehost::{FakeCodeHost, FakePr};
 pub use compute::FakeCompute;
-pub use daemon::{Connect, LocalDaemon};
+pub use daemon::{Connect, FakeWorkspace, LocalDaemon};
 pub use harness::{Script, ScriptedHarness};
 pub use provider::FakeProvider;
 pub use tracker::{FakeComment, FakeTracker};

@@ -39,6 +39,7 @@ trailhead-server = { path = "crates/trailhead-server", version = "0.1.0" }
 trailhead-factory = { path = "crates/trailhead-factory" }
 trailhead-testkit = { path = "crates/trailhead-testkit" }
 trailhead-control = { path = "crates/trailhead-control" }
+trailhead-daemon = { path = "crates/trailhead-daemon", default-features = false }
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 http = "1"
 futures-util = { version = "0.3", default-features = false }

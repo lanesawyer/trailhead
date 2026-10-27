@@ -1,0 +1,34 @@
+[package]
+name = "trailhead-daemon"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+description = "Trailhead factory daemon: runs agents in a sandbox and speaks the daemon contract over iroh"
+
+[features]
+default = ["net"]
+# The iroh transport. The testkit turns it off to reuse the runner in-process.
+net = ["dep:iroh", "dep:hmac", "dep:sha2", "dep:hex"]
+
+[dependencies]
+trailhead-factory.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "process", "io-util"] }
+tracing.workspace = true
+iroh = { version = "1.4", optional = true }
+hmac = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+
+[dev-dependencies]
+trailhead-testkit.workspace = true
+trailhead-control.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

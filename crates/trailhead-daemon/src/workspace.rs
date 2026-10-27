@@ -1,0 +1,95 @@
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+
+use async_trait::async_trait;
+use tokio::process::Command;
+use trailhead_factory::{Check, CheckResult, Error, PrepareRequest, Result};
+
+use crate::Workspace;
+
+/// Keep the end of a check's output, where failures usually are.
+const OUTPUT_TAIL: usize = 16 * 1024;
+
+/// A git checkout of a public GitHub repo, cloned anonymously during prepare.
+pub struct GitWorkspace {
+    dir: PathBuf,
+    /// Where repos are cloned from; tests point it at a local directory.
+    remote_base: String,
+}
+
+impl GitWorkspace {
+    pub fn new(dir: impl Into<PathBuf>) -> GitWorkspace {
+        GitWorkspace::with_remote(dir, "https://github.com")
+    }
+
+    pub fn with_remote(dir: impl Into<PathBuf>, remote_base: impl Into<String>) -> GitWorkspace {
+        GitWorkspace { dir: dir.into(), remote_base: remote_base.into() }
+    }
+
+    async fn git(&self, cwd: &Path, args: &[&str]) -> Result<()> {
+        let out = Command::new("git").args(args).current_dir(cwd).stdin(Stdio::null()).output().await;
+        let out = out.map_err(|e| Error::Other(format!("git {}: {e}", args.join(" "))))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        Err(Error::Other(format!("git {} failed: {}", args.join(" "), stderr.trim())))
+    }
+}
+
+#[async_trait]
+impl Workspace for GitWorkspace {
+    fn dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
+
+    /// Clones the base branch, or resets an existing checkout to it. Ignored files such as build output stay, so a
+    /// sandbox reused for another round keeps its caches.
+    async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
+        let base = &req.base_branch;
+        if self.dir.join(".git").exists() {
+            self.git(&self.dir, &["fetch", "--quiet", "origin", base]).await?;
+            self.git(&self.dir, &["checkout", "--quiet", "-B", base, &format!("origin/{base}")]).await?;
+            self.git(&self.dir, &["clean", "--quiet", "-fd"]).await?;
+        } else {
+            let parent = self.dir.parent().unwrap_or(Path::new("/"));
+            tokio::fs::create_dir_all(parent).await.map_err(|e| Error::Other(format!("{}: {e}", parent.display())))?;
+            let url = format!("{}/{}/{}.git", self.remote_base.trim_end_matches('/'), req.repo.owner, req.repo.name);
+            let dir = self.dir.to_string_lossy();
+            self.git(parent, &["clone", "--quiet", "--branch", base, &url, &dir]).await?;
+        }
+        if let Some(setup) = &req.setup {
+            let result = self.check(setup).await;
+            if !result.passed {
+                return Err(Error::Other(format!("setup failed: {}", result.output.trim())));
+            }
+        }
+        Ok(())
+    }
+
+    async fn check(&self, check: &Check) -> CheckResult {
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!("exec 2>&1\n{}", check.command))
+            .current_dir(&self.dir)
+            .stdin(Stdio::null())
+            .output()
+            .await;
+        let (passed, output) = match out {
+            Ok(out) => (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()),
+            Err(e) => (false, format!("couldn't run `{}`: {e}", check.command)),
+        };
+        CheckResult { name: check.name.clone(), passed, output: tail(output) }
+    }
+}
+
+fn tail(mut s: String) -> String {
+    if s.len() > OUTPUT_TAIL {
+        let mut cut = s.len() - OUTPUT_TAIL;
+        while !s.is_char_boundary(cut) {
+            cut += 1;
+        }
+        s.replace_range(..cut, "…");
+    }
+    s
+}

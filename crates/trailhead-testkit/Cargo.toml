@@ -12,6 +12,7 @@ description = "In-memory fakes for the Trailhead factory's plugin seams"
 
 [dependencies]
 trailhead-factory.workspace = true
+trailhead-daemon.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
