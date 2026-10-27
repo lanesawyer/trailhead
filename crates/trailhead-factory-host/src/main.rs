@@ -31,6 +31,8 @@ use trailhead_server::creds::{Cred, CredStore};
 const AGENT: &str = "factory";
 /// Where the control plane's iroh key and daemon master key are kept.
 const KEYS: Cred<'static> = Cred::Secret("factory-keys");
+/// What subscription mode adds to agent egress.
+const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
 
 #[derive(Parser)]
 struct Cli {
@@ -57,6 +59,10 @@ struct Opts {
     /// How often to look for ready work.
     #[arg(long, default_value_t = 30)]
     poll_secs: u64,
+    /// Subscription mode: run Claude Code in sandboxes on this OAuth token (`claude setup-token`) instead of a model
+    /// connector. Each sandbox holds the token, and egress opens to api.anthropic.com. For Lane's own use.
+    #[arg(long, env = "CLAUDE_CODE_OAUTH_TOKEN", hide_env_values = true)]
+    claude_oauth_token: Option<String>,
     /// Create the `factory` agent if it's missing, as the local user. Otherwise Lane creates it with
     /// `trailhead --as-me agent add factory`, since agent identities are the human's to hand out.
     #[arg(long)]
@@ -107,7 +113,11 @@ async fn factory_ctx(store: &Store, create: bool) -> Result<Ctx, String> {
 
 async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router), String> {
     let config = std::fs::read_to_string(&opts.config).map_err(|e| format!("{}: {e}", opts.config.display()))?;
-    let config = FactoryConfig::parse(&config).map_err(|e| e.to_string())?;
+    let mut config = FactoryConfig::parse(&config).map_err(|e| e.to_string())?;
+    if opts.claude_oauth_token.is_some() {
+        tracing::warn!("subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
+        config.egress.always.push(ANTHROPIC_API_HOST.into());
+    }
     let binary = std::fs::read(&opts.daemon).map_err(|e| format!("daemon binary {}: {e}", opts.daemon.display()))?;
 
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
@@ -125,7 +135,8 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router), String> {
         .await
         .map_err(|e| format!("binding the iroh endpoint: {e}"))?;
     let compute = Arc::new(SpritesCompute::new(opts.sprites_token.clone()).map_err(|e| e.to_string())?);
-    let daemon = Arc::new(RemoteDaemon::new(endpoint.clone(), master, compute.clone(), Launch::new(binary)));
+    let launch = Launch { claude_oauth_token: opts.claude_oauth_token.clone(), ..Launch::new(binary) };
+    let daemon = Arc::new(RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch));
     let tunnel =
         Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, daemon.peers())).spawn();
     tracing::info!(endpoint = %endpoint.id(), project = %config.repo.project, repo = %config.repo.repo().slug(), "factory ready");

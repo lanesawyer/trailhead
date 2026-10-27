@@ -11,7 +11,7 @@ use trailhead_harness_claude_code::{ClaudeCode, PLACEHOLDER_KEY};
 
 /// Writes its arguments and environment to `$FAKE_LOG`, then plays the scenario in `$FAKE_SCENARIO`.
 const FAKE: &str = r#"#!/bin/sh
-{ printf '%s\n' "$@"; echo "BASE=$ANTHROPIC_BASE_URL"; echo "KEY=$ANTHROPIC_API_KEY"; } > "$FAKE_LOG"
+{ printf '%s\n' "$@"; echo "BASE=$ANTHROPIC_BASE_URL"; echo "KEY=$ANTHROPIC_API_KEY"; echo "OAUTH=$CLAUDE_CODE_OAUTH_TOKEN"; } > "$FAKE_LOG"
 asst() { echo "{\"type\":\"assistant\",\"message\":{\"id\":\"$1\",\"model\":\"claude-sonnet-x\",\"content\":[$2],\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":1}}}"; }
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 case "$FAKE_SCENARIO" in
@@ -51,7 +51,14 @@ struct Rig {
     _tmp: tempfile::TempDir,
     repo: PathBuf,
     log: PathBuf,
+    bin: PathBuf,
     harness: ClaudeCode,
+}
+
+impl Rig {
+    fn harness_binary(&self) -> PathBuf {
+        self.bin.clone()
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -78,7 +85,7 @@ fn rig() -> Rig {
     git(&repo, &["commit", "--quiet", "-m", "init"]);
 
     let log = tmp.path().join("log");
-    Rig { _tmp: tmp, repo, log, harness: ClaudeCode::new(fake) }
+    Rig { _tmp: tmp, repo, log, bin: fake.clone(), harness: ClaudeCode::new(fake) }
 }
 
 fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
@@ -118,6 +125,7 @@ async fn claude_code_sessions() {
     step_limit_kills_the_agent().await;
     cli_errors_fail_the_run().await;
     resume_carries_feedback().await;
+    subscription_mode_uses_only_the_oauth_token().await;
 }
 
 async fn worker_changes_are_collected() {
@@ -212,4 +220,28 @@ async fn resume_carries_feedback() {
     r.harness.resume(ctx(&r, Role::Worker, 10), feedback, tx).await.unwrap();
     let log = std::fs::read_to_string(&r.log).unwrap();
     assert!(log.contains("Use a doc comment."), "{log}");
+}
+
+async fn subscription_mode_uses_only_the_oauth_token() {
+    let r = rig();
+    // A key or token already in the environment must not reach the agent in either mode.
+    // SAFETY: as in `play`.
+    unsafe {
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-should-not-leak");
+        std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "env-token");
+    }
+    play(&r, "question", ctx(&r, Role::Worker, 10)).await;
+    let log = std::fs::read_to_string(&r.log).unwrap();
+    assert!(log.contains(&format!("KEY={PLACEHOLDER_KEY}")) && log.contains("OAUTH=\n"), "connector mode: {log}");
+
+    let subscription = Rig { harness: ClaudeCode::new(r.harness_binary()).with_oauth_token("sub-token".into()), ..r };
+    play(&subscription, "question", ctx(&subscription, Role::Worker, 10)).await;
+    let log = std::fs::read_to_string(&subscription.log).unwrap();
+    assert!(log.contains("OAUTH=sub-token"), "{log}");
+    assert!(log.contains("KEY=\n") && log.contains("BASE=\n"), "no key or gateway in subscription mode: {log}");
+    // SAFETY: as in `play`.
+    unsafe {
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+    }
 }

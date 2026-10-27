@@ -24,6 +24,7 @@ pub const PLACEHOLDER_KEY: &str = "sprites-connector";
 
 pub struct ClaudeCode {
     binary: PathBuf,
+    oauth_token: Option<String>,
 }
 
 impl Default for ClaudeCode {
@@ -34,12 +35,32 @@ impl Default for ClaudeCode {
 
 impl ClaudeCode {
     pub fn new(binary: impl Into<PathBuf>) -> ClaudeCode {
-        ClaudeCode { binary: binary.into() }
+        ClaudeCode { binary: binary.into(), oauth_token: None }
+    }
+
+    /// Subscription mode: Claude Code authenticates with this token (`claude setup-token`) against Anthropic's API
+    /// directly, and the run's endpoint is ignored.
+    pub fn with_oauth_token(mut self, token: String) -> ClaudeCode {
+        self.oauth_token = Some(token);
+        self
     }
 
     async fn session(&self, ctx: RunContext, prompt: String, events: EventSink) -> Result<RunOutcome> {
         let start = git_head(&ctx.workdir).await?;
-        let mut child = Command::new(&self.binary)
+        let mut cmd = Command::new(&self.binary);
+        match &self.oauth_token {
+            // An API key or base URL would take precedence over the token, so none may leak in from the environment.
+            Some(token) => cmd
+                .env("CLAUDE_CODE_OAUTH_TOKEN", token)
+                .env_remove("ANTHROPIC_API_KEY")
+                .env_remove("ANTHROPIC_AUTH_TOKEN")
+                .env_remove("ANTHROPIC_BASE_URL"),
+            None => cmd
+                .env("ANTHROPIC_BASE_URL", &ctx.endpoint.base_url)
+                .env("ANTHROPIC_API_KEY", PLACEHOLDER_KEY)
+                .env_remove("CLAUDE_CODE_OAUTH_TOKEN"),
+        };
+        let mut child = cmd
             .args(["--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"])
             .arg("--model")
             .arg(&ctx.model.0)
@@ -47,8 +68,6 @@ impl ClaudeCode {
             .arg(schema(ctx.role).to_string())
             .arg(&prompt)
             .current_dir(&ctx.workdir)
-            .env("ANTHROPIC_BASE_URL", &ctx.endpoint.base_url)
-            .env("ANTHROPIC_API_KEY", PLACEHOLDER_KEY)
             .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
             .env("DISABLE_AUTOUPDATER", "1")
             .stdin(Stdio::null())

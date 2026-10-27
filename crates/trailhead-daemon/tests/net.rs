@@ -186,3 +186,16 @@ async fn daemons_refuse_other_peers() {
     let reason = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await.unwrap();
     assert!(reason.to_string().contains("unknown peer"), "{reason}");
 }
+
+#[tokio::test]
+async fn subscription_token_goes_in_the_secrets_file_only() {
+    let control = endpoint(SecretKey::generate(), None).await;
+    let launch = Launch { claude_oauth_token: Some("sk-ant-oat-test".into()), ..Launch::new(b"daemon".to_vec()) };
+    let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
+    let program = remote.program(&SandboxId("s".into()));
+    let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
+    assert_eq!(secrets.claude_oauth_token.as_deref(), Some("sk-ant-oat-test"));
+    assert_eq!(program.files[1].mode, 0o600);
+    assert!(!format!("{secrets:?} {program:?}").contains("sk-ant-oat-test"), "never in debug output");
+    assert!(!program.args.iter().any(|a| a.contains("sk-ant")), "never on the command line");
+}

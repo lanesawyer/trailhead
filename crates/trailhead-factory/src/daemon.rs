@@ -100,11 +100,18 @@ pub struct DaemonSecrets {
     pub secret_key: String,
     /// The control plane's iroh endpoint id, hex.
     pub control_plane: String,
+    /// Subscription mode (`docs/factory/sandbox.md`): a Claude Code OAuth token from `claude setup-token`, used in
+    /// place of a model connector. The one exception to sandboxes holding no model credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_oauth_token: Option<String>,
 }
 
 impl std::fmt::Debug for DaemonSecrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DaemonSecrets").field("control_plane", &self.control_plane).finish_non_exhaustive()
+        f.debug_struct("DaemonSecrets")
+            .field("control_plane", &self.control_plane)
+            .field("subscription", &self.claude_oauth_token.is_some())
+            .finish_non_exhaustive()
     }
 }
 

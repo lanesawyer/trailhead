@@ -368,6 +368,8 @@ pub struct Launch {
     pub workdir: String,
     /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`.
     pub log: Option<String>,
+    /// Subscription mode: the Claude Code OAuth token handed to each daemon in its secrets file.
+    pub claude_oauth_token: Option<String>,
 }
 
 impl Launch {
@@ -377,6 +379,7 @@ impl Launch {
             dir: "/home/sprite/.trailhead".into(),
             workdir: "/home/sprite/work".into(),
             log: None,
+            claude_oauth_token: None,
         }
     }
 }
@@ -419,6 +422,7 @@ impl RemoteDaemon {
         let secrets = DaemonSecrets {
             secret_key: hex::encode(sandbox_key(&self.master, sandbox).to_bytes()),
             control_plane: self.endpoint.id().to_string(),
+            claude_oauth_token: self.launch.claude_oauth_token.clone(),
         };
         let dir = &self.launch.dir;
         let bin = format!("{dir}/trailhead-daemon");

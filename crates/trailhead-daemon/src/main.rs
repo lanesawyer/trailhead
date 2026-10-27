@@ -122,7 +122,10 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
         Box::pin(async move { Ok(Arc::new(RestTracker::new(format!("http://{api}"), cred)) as Arc<dyn Tracker>) })
     });
     let runner = Runner {
-        harness: Arc::new(ClaudeCode::new(args.claude)),
+        harness: Arc::new(match secrets.claude_oauth_token.clone() {
+            Some(token) => ClaudeCode::new(args.claude).with_oauth_token(token),
+            None => ClaudeCode::new(args.claude),
+        }),
         codehost: codehost(Identity { name: args.author_name, email: args.author_email }).await,
         workspace: Arc::new(GitWorkspace::new(args.workdir)),
         connect,
