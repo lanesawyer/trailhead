@@ -3,6 +3,10 @@
 //! own; everything it needs is in the tracker and the compute host
 //! (`docs/factory/state.md`).
 
+mod core_tracker;
+
+pub use core_tracker::{CoreTracker, METADATA_KEY};
+
 use std::sync::Arc;
 use std::time::Duration;
 

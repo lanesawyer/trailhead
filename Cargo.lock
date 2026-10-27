@@ -3445,9 +3445,11 @@ dependencies = [
 name = "trailhead-control"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "serde_json",
  "tokio",
  "tracing",
+ "trailhead-core",
  "trailhead-factory",
  "trailhead-testkit",
 ]
