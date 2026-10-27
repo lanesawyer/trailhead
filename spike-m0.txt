@@ -1,0 +1,1 @@
+TRAIL-76 M0 spike: commit published from a Sprite through the Sprites GitHub connector with the Git Data API. Safe to close.
