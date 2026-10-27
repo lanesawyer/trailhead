@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, ModelAlias, Repo, Result, Usd};
+use crate::{Check, Error, ModelAlias, PrepareRequest, Repo, Result, Usd};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -229,13 +229,20 @@ impl FactoryConfig {
     }
 
     /// The checks a worker must pass before opening a PR under the default gate.
-    pub fn required_checks(&self) -> Vec<String> {
+    pub fn required_checks(&self) -> Vec<Check> {
         let gate = self.default_gate();
-        let all: Vec<String> = self.checks.verifying().into_iter().map(|(n, _)| n.to_string()).collect();
-        if gate.require.iter().any(|r| r == "checks") {
-            return all;
+        let all =
+            self.checks.verifying().into_iter().map(|(n, c)| Check { name: n.to_string(), command: c.to_string() });
+        let everything = gate.require.iter().any(|r| r == "checks");
+        all.filter(|c| everything || gate.require.contains(&c.name)).collect()
+    }
+
+    pub fn prepare_request(&self) -> PrepareRequest {
+        PrepareRequest {
+            repo: self.repo.repo(),
+            base_branch: self.repo.base_branch.clone(),
+            setup: self.checks.setup.as_ref().map(|c| Check { name: "setup".into(), command: c.clone() }),
         }
-        all.into_iter().filter(|c| gate.require.contains(c)).collect()
     }
 }
 
@@ -289,7 +296,8 @@ require = ["checks", "agent_review", "human"]
         assert_eq!(c.repo.base_branch, "main");
         assert_eq!(c.worker().model, ModelAlias::Sonnet);
         assert_eq!(c.worker().budget.usd(), Usd::dollars(5.0));
-        assert_eq!(c.required_checks(), ["fmt", "lint", "test"]);
+        let names: Vec<_> = c.required_checks().into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["fmt", "lint", "test"]);
     }
 
     #[test]

@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use tokio::sync::{Notify, mpsc};
 use trailhead_factory::{
-    CheckResult, CodeHost, Credential, Daemon, Error, EventSink, Harness, NewPr, Result, Role, RunContext, RunEvent,
-    RunOutcome, RunReport, RunRequest, RunResult, SandboxId, Tracker, Usage, Verdict,
+    Check, CheckResult, CodeHost, Credential, Daemon, Error, EventSink, Harness, NewPr, PrepareRequest, Result, Role,
+    RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, SandboxId, Tracker, Usage, Verdict,
 };
 
 use crate::FakeTracker;
@@ -26,6 +26,7 @@ pub struct LocalDaemon {
     failing_checks: Mutex<BTreeMap<String, String>>,
     ignore_cancel: std::sync::atomic::AtomicBool,
     cancels: Mutex<HashMap<SandboxId, Arc<Notify>>>,
+    prepared: Mutex<Vec<(SandboxId, PrepareRequest)>>,
 }
 
 impl LocalDaemon {
@@ -46,6 +47,7 @@ impl LocalDaemon {
             failing_checks: Mutex::default(),
             ignore_cancel: Default::default(),
             cancels: Mutex::default(),
+            prepared: Mutex::default(),
         }
     }
 
@@ -59,6 +61,11 @@ impl LocalDaemon {
         self.ignore_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Sandboxes prepared so far, oldest first.
+    pub fn prepared(&self) -> Vec<(SandboxId, PrepareRequest)> {
+        self.prepared.lock().unwrap().clone()
+    }
+
     pub fn pass_check(&self, name: &str) {
         self.failing_checks.lock().unwrap().remove(name);
     }
@@ -67,13 +74,13 @@ impl LocalDaemon {
         self.cancels.lock().unwrap().entry(sandbox.clone()).or_default().clone()
     }
 
-    fn checks(&self, names: &[String]) -> Vec<CheckResult> {
+    fn checks(&self, checks: &[Check]) -> Vec<CheckResult> {
         let failing = self.failing_checks.lock().unwrap();
-        names
+        checks
             .iter()
-            .map(|name| match failing.get(name) {
-                Some(output) => CheckResult { name: name.clone(), passed: false, output: output.clone() },
-                None => CheckResult { name: name.clone(), passed: true, output: String::new() },
+            .map(|c| match failing.get(&c.name) {
+                Some(output) => CheckResult { name: c.name.clone(), passed: false, output: output.clone() },
+                None => CheckResult { name: c.name.clone(), passed: true, output: String::new() },
             })
             .collect()
     }
@@ -163,6 +170,11 @@ impl LocalDaemon {
 
 #[async_trait]
 impl Daemon for LocalDaemon {
+    async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
+        self.prepared.lock().unwrap().push((sandbox.clone(), req));
+        Ok(())
+    }
+
     async fn run(&self, sandbox: &SandboxId, req: RunRequest, events: EventSink) -> Result<RunReport> {
         let tracker = (self.connect)(req.credential.clone()).await?;
         let cancel = self.cancel_handle(sandbox);

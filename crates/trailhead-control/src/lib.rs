@@ -28,6 +28,9 @@ pub const CANCEL_GRACE: Duration = Duration::from_secs(60);
 /// The `factory` label value on every sandbox this control plane starts.
 pub const FACTORY_LABEL: &str = "trailhead";
 
+/// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
+const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
+
 pub struct Factory {
     pub config: FactoryConfig,
     pub compute: Arc<dyn Compute>,
@@ -76,6 +79,13 @@ impl Factory {
     fn agent_egress(&self) -> Egress {
         let iroh = IROH_DOMAINS.iter().map(|d| d.to_string());
         Egress { domains: iroh.chain(self.config.egress.always.iter().cloned()).collect() }
+    }
+
+    fn install_egress(&self) -> Egress {
+        let mut egress = self.agent_egress();
+        let extra = self.config.egress.install.iter().cloned().chain(CLONE_DOMAINS.iter().map(|d| d.to_string()));
+        egress.domains.extend(extra);
+        egress
     }
 
     fn branch(task: &Task) -> String {
@@ -306,8 +316,12 @@ impl Factory {
         let mut labels = self.base_labels();
         labels.insert(label::TASK.into(), task.key.0.clone());
         labels.insert(label::ROLE.into(), role.as_str().into());
-        let spec = SandboxSpec { name: name.to_string(), labels, egress: self.agent_egress() };
-        self.compute.create(&spec).await
+        // Install egress only while the checkout is prepared, then narrowed before any agent runs.
+        let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
+        let sandbox = self.compute.create(&spec).await?;
+        self.daemon.prepare(&sandbox.id, self.config.prepare_request()).await?;
+        self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+        Ok(sandbox)
     }
 
     /// The kill switch: without its role label a sandbox loses connector access, and without egress it reaches nothing.

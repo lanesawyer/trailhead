@@ -365,3 +365,22 @@ async fn run_loop_respects_the_sandbox_cap() {
     stop.send(()).unwrap();
     handle.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn sandboxes_are_prepared_under_install_egress_then_narrowed() {
+    let r = rig();
+    r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    // Park the worker so its sandbox survives to be inspected.
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which greeting?".into() }));
+    r.factory.tick().await.unwrap();
+
+    let prepared = r.daemon.prepared();
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(prepared[0].0.0, "trail-1-a1");
+    assert_eq!(prepared[0].1.repo.slug(), "lanesawyer/trailhead");
+    assert_eq!(prepared[0].1.base_branch, "main");
+
+    let egress = r.compute.egress("trail-1-a1").unwrap().domains;
+    assert!(egress.iter().any(|d| d == "*.iroh.link"), "{egress:?}");
+    assert!(!egress.iter().any(|d| d == "github.com"), "clone egress is closed before the agent runs: {egress:?}");
+}

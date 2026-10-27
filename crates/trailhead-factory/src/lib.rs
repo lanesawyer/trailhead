@@ -16,13 +16,15 @@ pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };
 pub use config::{Budget, Checks, FactoryConfig, Gate, Profile, Role};
-pub use daemon::{CheckResult, Daemon, RunReport, RunRequest, RunResult};
+pub use daemon::{
+    Check, CheckResult, Daemon, DaemonSecrets, FromDaemon, PrepareRequest, RunReport, RunRequest, RunResult, ToDaemon,
+};
 pub use harness::{EventSink, Feedback, Harness, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict, VerdictKind};
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use tracker::{Credential, RunUpdate, Status, Task, TaskKey, Tracker};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 pub enum Error {
     #[error("not found: {0}")]
     NotFound(String),
