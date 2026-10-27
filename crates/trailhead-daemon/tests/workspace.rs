@@ -77,3 +77,12 @@ async fn checks_report_exit_status_and_output() {
     assert!(!fail.passed);
     assert_eq!(fail.output, "out\nerr\n", "stderr is folded into the output");
 }
+
+#[tokio::test]
+async fn confirm_blocked_waits_for_hosts_to_stop_resolving() {
+    let root = tempfile::tempdir().unwrap();
+    let ws = GitWorkspace::new(root.path()).with_block_patience(std::time::Duration::from_millis(500));
+    ws.confirm_blocked(&["nothing-here.invalid".into()]).await.unwrap();
+    let err = ws.confirm_blocked(&["localhost".into()]).await.unwrap_err();
+    assert!(matches!(err, trailhead_factory::Error::Forbidden(ref m) if m.contains("localhost")), "{err:?}");
+}

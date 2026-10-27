@@ -168,13 +168,17 @@ impl Compute for SpritesCompute {
     /// and starts it. A program that exits within the first few seconds is an error carrying its output.
     async fn start(&self, id: &SandboxId, program: &Program) -> Result<()> {
         for file in &program.files {
+            // Written beside the target and renamed over it, so a running binary can be replaced.
+            let tmp = format!("{}.new", file.path);
             let mut url = self.url(&[&id.0, "fs", "write"]);
             url.query_pairs_mut()
-                .append_pair("path", &file.path)
+                .append_pair("path", &tmp)
                 .append_pair("mode", &format!("{:04o}", file.mode))
                 .append_pair("mkdir", "true");
             let req = self.request(Method::PUT, url).header("content-type", "application/octet-stream");
             ok(send(req.body(file.contents.clone())).await?).await?;
+            let rename = json!({ "source": tmp, "dest": file.path, "workingDir": "/", "asRoot": false });
+            ok(send(self.request(Method::POST, self.url(&[&id.0, "fs", "rename"])).json(&rename)).await?).await?;
         }
         let service = json!({ "cmd": program.cmd, "args": program.args, "needs": [] });
         let url = self.url(&[&id.0, "services", &program.name]);

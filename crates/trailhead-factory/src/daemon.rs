@@ -41,6 +41,9 @@ pub struct RunRequest {
     pub max_steps: u32,
     /// The checks that must pass before a worker opens a PR.
     pub required_checks: Vec<Check>,
+    /// Hosts that egress was just narrowed to exclude. Policy changes take effect a moment after the call that makes
+    /// them, so the daemon waits until these stop resolving before the agent starts.
+    pub blocked_hosts: Vec<String>,
     /// The sandbox's own Trailhead sub-agent.
     pub credential: Credential,
 }

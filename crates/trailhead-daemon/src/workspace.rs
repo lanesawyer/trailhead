@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -10,11 +11,15 @@ use crate::Workspace;
 /// Keep the end of a check's output, where failures usually are.
 const OUTPUT_TAIL: usize = 16 * 1024;
 
+/// How long to wait for narrowed egress to take effect. Sprites took under a second in M0's tests.
+const BLOCK_PATIENCE: Duration = Duration::from_secs(15);
+
 /// A git checkout of a public GitHub repo, cloned anonymously during prepare.
 pub struct GitWorkspace {
     dir: PathBuf,
     /// Where repos are cloned from; tests point it at a local directory.
     remote_base: String,
+    block_patience: Duration,
 }
 
 impl GitWorkspace {
@@ -23,7 +28,12 @@ impl GitWorkspace {
     }
 
     pub fn with_remote(dir: impl Into<PathBuf>, remote_base: impl Into<String>) -> GitWorkspace {
-        GitWorkspace { dir: dir.into(), remote_base: remote_base.into() }
+        GitWorkspace { dir: dir.into(), remote_base: remote_base.into(), block_patience: BLOCK_PATIENCE }
+    }
+
+    pub fn with_block_patience(mut self, patience: Duration) -> GitWorkspace {
+        self.block_patience = patience;
+        self
     }
 
     async fn git(&self, cwd: &Path, args: &[&str]) -> Result<()> {
@@ -62,6 +72,19 @@ impl Workspace for GitWorkspace {
             let result = self.check(setup).await;
             if !result.passed {
                 return Err(Error::Other(format!("setup failed: {}", result.output.trim())));
+            }
+        }
+        Ok(())
+    }
+
+    async fn confirm_blocked(&self, hosts: &[String]) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + self.block_patience;
+        for host in hosts {
+            while tokio::net::lookup_host((host.as_str(), 443)).await.is_ok() {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(Error::Forbidden(format!("egress still reaches {host}; not starting the agent")));
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
         Ok(())

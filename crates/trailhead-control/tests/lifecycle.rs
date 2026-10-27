@@ -383,4 +383,6 @@ async fn sandboxes_are_prepared_under_install_egress_then_narrowed() {
     let egress = r.compute.egress("trail-1-a1").unwrap().domains;
     assert!(egress.iter().any(|d| d == "*.iroh.link"), "{egress:?}");
     assert!(!egress.iter().any(|d| d == "github.com"), "clone egress is closed before the agent runs: {egress:?}");
+    let blocked = r.daemon.requests().into_iter().next().unwrap().blocked_hosts;
+    assert_eq!(blocked, ["github.com", "codeload.github.com"], "the daemon confirms the lockdown before starting");
 }

@@ -21,6 +21,8 @@ pub trait Workspace: Send + Sync {
     fn dir(&self) -> PathBuf;
     async fn prepare(&self, req: &PrepareRequest) -> Result<()>;
     async fn check(&self, check: &Check) -> CheckResult;
+    /// Returns once none of `hosts` resolve, or fails if they still do after a while.
+    async fn confirm_blocked(&self, hosts: &[String]) -> Result<()>;
 }
 
 /// How often a worker renews its claim while the agent runs. Leases default to 30 minutes.
@@ -43,6 +45,7 @@ impl Runner {
 
     /// Runs one step until it finishes or `cancel` fires, which ends it with `Error::Cancelled`.
     pub async fn run(&self, req: RunRequest, events: EventSink, cancel: Arc<Notify>) -> Result<RunReport> {
+        self.workspace.confirm_blocked(&req.blocked_hosts).await?;
         let tracker = (self.connect)(req.credential.clone()).await?;
         if req.role == Role::Worker {
             tracker.claim(&req.task.key).await?;

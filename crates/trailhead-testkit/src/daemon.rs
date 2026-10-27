@@ -33,6 +33,10 @@ impl Workspace for FakeWorkspace {
         Ok(())
     }
 
+    async fn confirm_blocked(&self, _hosts: &[String]) -> Result<()> {
+        Ok(())
+    }
+
     async fn check(&self, check: &Check) -> CheckResult {
         match self.failing.lock().unwrap().get(&check.name) {
             Some(output) => CheckResult { name: check.name.clone(), passed: false, output: output.clone() },
@@ -48,6 +52,7 @@ pub struct LocalDaemon {
     ignore_cancel: AtomicBool,
     cancels: Mutex<HashMap<SandboxId, Arc<Notify>>>,
     prepared: Mutex<Vec<(SandboxId, PrepareRequest)>>,
+    requests: Mutex<Vec<RunRequest>>,
 }
 
 impl LocalDaemon {
@@ -69,6 +74,7 @@ impl LocalDaemon {
             ignore_cancel: AtomicBool::new(false),
             cancels: Mutex::default(),
             prepared: Mutex::default(),
+            requests: Mutex::default(),
         }
     }
 
@@ -96,6 +102,11 @@ impl LocalDaemon {
         self.prepared.lock().unwrap().clone()
     }
 
+    /// Run requests received so far, oldest first.
+    pub fn requests(&self) -> Vec<RunRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
     fn cancel_handle(&self, sandbox: &SandboxId) -> Arc<Notify> {
         self.cancels.lock().unwrap().entry(sandbox.clone()).or_default().clone()
     }
@@ -110,6 +121,7 @@ impl Daemon for LocalDaemon {
     }
 
     async fn run(&self, sandbox: &SandboxId, req: RunRequest, events: EventSink) -> Result<RunReport> {
+        self.requests.lock().unwrap().push(req.clone());
         self.runner.run(req, events, self.cancel_handle(sandbox)).await
     }
 

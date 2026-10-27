@@ -276,8 +276,12 @@ impl RemoteDaemon {
 
 #[async_trait]
 impl Daemon for RemoteDaemon {
+    /// Starts the daemon unless this control plane already has a live connection to it.
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
-        self.compute.start(sandbox, &self.program(sandbox)).await?;
+        let connected = self.conns.lock().unwrap().get(sandbox).is_some_and(|c| c.close_reason().is_none());
+        if !connected {
+            self.compute.start(sandbox, &self.program(sandbox)).await?;
+        }
         let (mut send, mut recv) = self.open(sandbox, CONNECT_PATIENCE).await?;
         write_frame(&mut send, &ToDaemon::Prepare(req)).await?;
         match read_frame::<FromDaemon>(&mut recv).await? {

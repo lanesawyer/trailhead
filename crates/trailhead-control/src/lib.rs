@@ -81,6 +81,14 @@ impl Factory {
         Egress { domains: iroh.chain(self.config.egress.always.iter().cloned()).collect() }
     }
 
+    /// Install-phase hosts the agent phase drops, which the daemon confirms are unreachable before the agent starts.
+    /// Wildcards can't be looked up, so they're left out.
+    fn blocked_hosts(&self) -> Vec<String> {
+        let agent = self.agent_egress().domains;
+        let install = self.install_egress().domains;
+        install.into_iter().filter(|d| !d.contains('*') && !agent.contains(d)).collect()
+    }
+
     fn install_egress(&self) -> Egress {
         let mut egress = self.agent_egress();
         let extra = self.config.egress.install.iter().cloned().chain(CLONE_DOMAINS.iter().map(|d| d.to_string()));
@@ -224,6 +232,7 @@ impl Factory {
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
             required_checks: self.config.required_checks(),
+            blocked_hosts: self.blocked_hosts(),
             credential,
         };
         let prior = task.run.spend.unwrap_or_default();
@@ -285,6 +294,7 @@ impl Factory {
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
             required_checks: Vec::new(),
+            blocked_hosts: self.blocked_hosts(),
             credential,
         };
         let prior = self.tracker.show(&task.key).await?.run.spend.unwrap_or_default();

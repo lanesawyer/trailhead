@@ -5,3 +5,10 @@ rust = "latest"
 [tasks.test-live-sprites]
 description = "Run the Sprites Compute test against the real API (creates and destroys one Sprite)"
 run = "fnox exec -- cargo test -p trailhead-compute-sprites --test live -- --ignored --nocapture"
+
+[tasks.test-live-daemon]
+description = "Start the daemon in a real Sprite and drive it over iroh (creates and destroys one Sprite)"
+run = [
+  "cargo build --release -p trailhead-daemon --bin trailhead-daemon",
+  "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon fnox exec -- cargo test -p trailhead-daemon --test live -- --ignored --nocapture",
+]

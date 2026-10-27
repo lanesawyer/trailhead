@@ -158,6 +158,16 @@ async fn write_file(
     Json(json!({ "path": q["path"], "size": body.len() })).into_response()
 }
 
+async fn rename_file(State(api): State<Shared>, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
+    let mut api = api.lock().unwrap();
+    let Some(s) = api.sprites.get_mut(&name) else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(file) = s.files.remove(body["source"].as_str().unwrap()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    s.files.insert(body["dest"].as_str().unwrap().to_string(), file);
+    Json(json!({ "source": body["source"], "dest": body["dest"] })).into_response()
+}
+
 async fn put_service(
     State(api): State<Shared>,
     Path((name, svc)): Path<(String, String)>,
@@ -200,6 +210,7 @@ async fn serve() -> (Shared, String) {
         .route("/v1/sprites/{name}/checkpoint", post(checkpoint))
         .route("/v1/sprites/{name}/checkpoints/{cp}/restore", post(restore))
         .route("/v1/sprites/{name}/fs/write", put(write_file))
+        .route("/v1/sprites/{name}/fs/rename", post(rename_file))
         .route("/v1/sprites/{name}/services/{svc}", put(put_service))
         .route("/v1/sprites/{name}/services/{svc}/start", post(start_service))
         .with_state(api.clone());
@@ -332,6 +343,7 @@ async fn start_uploads_files_and_starts_a_service() {
         let s = &api.sprites["s"];
         assert_eq!(s.files["/home/sprite/.trailhead/daemon"], (b"\x7fELF".to_vec(), "0755".to_string()));
         assert_eq!(s.files["/home/sprite/.trailhead/secrets.json"].1, "0600");
+        assert_eq!(s.files.len(), 2, "no temp files left behind: {:?}", s.files.keys());
         assert_eq!(
             s.services["trailhead-daemon"]["args"],
             json!(["--secrets", "/home/sprite/.trailhead/secrets.json"])
