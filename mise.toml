@@ -6,7 +6,7 @@ docker_host = "unix://{{env.HOME}}/.lima/trailhead/sock/docker.sock"
 docker-cli = "latest"
 fnox = { version = "latest", workflow = "release.yml" }
 lima = "latest"
-mdbook = "latest"
+mdbook = "0.5.4"
 rust = "latest"
 
 [tasks.test-live-sprites]

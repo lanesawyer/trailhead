@@ -54,7 +54,6 @@ To use the other machine as yourself, mint the token with `trailhead token add l
 
 ## Integrations
 
-- [Docs site](https://lanesawyer.github.io/trailhead/): these docs as a book, built with mdBook (`mdbook serve` to preview; needs Pages set to "GitHub Actions" in the repo settings).
 - [OpenClaw](docs/integrations/openclaw.md): mount Trailhead's MCP server and agent skill.
 
 ## Development
@@ -68,6 +67,8 @@ cargo fmt --all
 `cargo test` covers the engine and the whole factory lifecycle on in-memory fakes. Tests that touch real services are `#[ignore]`d and run as mise tasks (`mise run test-live-sprites`, `mise run test-live-daemon`), with secrets from Bitwarden through fnox. Work on Trailhead is tracked in Trailhead, in the `TRAIL` project; [AGENTS.md](AGENTS.md) has the conventions for agents working here.
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` on every pull request and push to `main`, and checks that the published crates package (`cargo package -p trailhead-core -p trailhead-server -p trailhead`). The factory's crates aren't published yet.
+
+The docs in `docs/` are also a book, built with mdBook and published to the [docs site](https://lanesawyer.github.io/trailhead/) by `.github/workflows/docs.yml`, which builds them on pull requests that touch them and deploys from `main`. `mise run docs` builds them locally and `mdbook serve` previews them. A new page has to be listed in `docs/SUMMARY.md`; the build fails on a listed page that doesn't exist.
 
 ## Releasing
 
