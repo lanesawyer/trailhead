@@ -35,20 +35,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked -- -D warnings
 
-  # Lints and tests the Windows-only code paths (the server's stop event, detached spawn).
-  windows:
-    runs-on: windows-latest
-    # A hung test otherwise holds the runner for GitHub's 6-hour limit.
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
-
   test:
     runs-on: ubuntu-latest
     steps:

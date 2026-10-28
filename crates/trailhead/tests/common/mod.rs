@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::time::SystemTime;
 
 pub struct Instance {
     pub dir: tempfile::TempDir,
@@ -14,7 +13,7 @@ impl Instance {
     pub fn new() -> Instance {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join(format!("trailhead{}", std::env::consts::EXE_SUFFIX));
+        let exe = dir.path().join("trailhead");
         let th = Instance { dir, url: format!("http://127.0.0.1:{port}"), exe };
         th.install();
         th
@@ -23,11 +22,8 @@ impl Instance {
     /// Like `cargo install`: write a fresh copy and rename it over the old one, so a
     /// running server keeps its old inode while the path gets a newer mtime.
     pub fn install(&self) {
-        let staged = self.dir.path().join(format!("trailhead.new{}", std::env::consts::EXE_SUFFIX));
+        let staged = self.dir.path().join("trailhead.new");
         std::fs::copy(env!("CARGO_BIN_EXE_trailhead"), &staged).unwrap();
-        // Windows keeps the source's mtime on copy, and an upgrade has to look newer.
-        std::fs::File::options().write(true).open(&staged).unwrap().set_modified(SystemTime::now()).unwrap();
-        // On Windows this only works because the server runs from a copy.
         std::fs::rename(&staged, &self.exe).unwrap();
     }
 

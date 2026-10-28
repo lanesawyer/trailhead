@@ -84,7 +84,6 @@ jobs:
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-15-intel, target: x86_64-apple-darwin }
           - { os: macos-15, target: aarch64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -103,25 +102,15 @@ jobs:
           NAME: trailhead-${{ needs.release.outputs.tag }}-${{ matrix.target }}
         run: |
           mkdir -p "dist/$NAME"
-          if [ "$RUNNER_OS" = Windows ]; then
-            cp "target/${{ matrix.target }}/release/trailhead.exe" LICENSE README.md "dist/$NAME/"
-            cd dist
-            archive="$NAME.zip"
-            7z a -tzip "$archive" "$NAME" >/dev/null
-            sha256sum "$archive" > "$archive.sha256"
-          else
-            cp "target/${{ matrix.target }}/release/trailhead" LICENSE README.md "dist/$NAME/"
-            cd dist
-            archive="$NAME.tar.gz"
-            tar czf "$archive" "$NAME"
-            shasum -a 256 "$archive" > "$archive.sha256"
-          fi
+          cp "target/${{ matrix.target }}/release/trailhead" LICENSE README.md "dist/$NAME/"
+          cd dist
+          archive="$NAME.tar.gz"
+          tar czf "$archive" "$NAME"
+          shasum -a 256 "$archive" > "$archive.sha256"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
-          path: |
-            dist/*.tar.gz*
-            dist/*.zip*
+          path: dist/*.tar.gz*
           if-no-files-found: error
 
   crates-io:

@@ -57,9 +57,8 @@ fn bridge_restarts_a_server_that_went_away() {
     };
     assert_eq!(ask(1).as_deref(), Some("MCP-1 open p3 v1 first"));
 
-    // Reinstall under the running bridge (Windows can't replace a running .exe),
-    // then lose the server, as when whatever started it exits and takes it along.
-    #[cfg(not(windows))]
+    // Reinstall under the running bridge, then lose the server, as when whatever
+    // started it exits and takes it along.
     th.install();
     assert!(th.stdout(&["server", "stop"]).starts_with("stopped"));
     assert_eq!(ask(2).as_deref(), Some("MCP-1 open p3 v1 first"));
