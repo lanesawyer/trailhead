@@ -22,6 +22,11 @@ test = "cargo test"
 # crates.io and rustup while installing dependencies; nothing extra while the agent works.
 install = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang.org"]
 
+[usage]
+# Subscription usage windows, in percent: at or past these, no new runs start until the window resets, leaving
+# room for whatever else shares the plan (docs/factory/budgets.md).
+pause_at = { five_hour = 80, seven_day = 90 }
+
 [profiles.worker]
 role = "worker"
 adapter = "claude-code"

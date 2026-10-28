@@ -39,6 +39,17 @@ pub struct FactoryConfig {
     pub gates: BTreeMap<String, Gate>,
     #[serde(default)]
     pub egress: EgressConfig,
+    #[serde(default)]
+    pub usage: UsageConfig,
+}
+
+/// Subscription usage windows (`docs/factory/budgets.md`): at or past `pause_at[window]` percent, no new runs
+/// start until that window resets, leaving room for whatever else shares the subscription.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageConfig {
+    #[serde(default)]
+    pub pause_at: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,6 +264,12 @@ impl FactoryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_repos_own_factory_toml_parses() {
+        let config = FactoryConfig::parse(include_str!("../../../factory.toml")).unwrap();
+        assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
+    }
 
     const SAMPLE: &str = r#"
 [repo]

@@ -16,6 +16,7 @@ asst() { echo "{\"type\":\"assistant\",\"message\":{\"id\":\"$1\",\"model\":\"cl
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 case "$FAKE_SCENARIO" in
 worker)
+  echo '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour","resetsAt":1793182800,"unifiedWindows":{"five_hour":{"utilization":0.22,"resetsAt":1793182800},"seven_day":{"utilization":0.05,"resetsAt":1793372400}}}}'
   asst m1 '{"type":"text","text":"Looking."}'
   asst m1 '{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}'
   echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"README.md"}]}}'
@@ -164,6 +165,15 @@ async fn worker_changes_are_collected() {
 
     let steps = events.iter().filter(|e| matches!(e, RunEvent::StepStarted { .. })).count();
     assert_eq!(steps, 2, "two model responses, though m1 arrived as two messages");
+    let quota: Vec<_> = events.iter().filter(|e| matches!(e, RunEvent::Quota { .. })).cloned().collect();
+    assert_eq!(
+        quota,
+        [
+            RunEvent::Quota { window: "five_hour".into(), used_percent: 22, resets_at: 1793182800 },
+            RunEvent::Quota { window: "seven_day".into(), used_percent: 5, resets_at: 1793372400 },
+        ],
+        "both windows from Claude Code's rate_limit_event"
+    );
     let usage: u64 = events
         .iter()
         .filter_map(|e| match e {

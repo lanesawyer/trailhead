@@ -54,6 +54,10 @@ pub struct Factory {
     pub provider: Arc<dyn ModelProvider>,
     pub daemon: Arc<dyn Daemon>,
     troubled: Mutex<HashMap<String, Trouble>>,
+    /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
+    quota: Mutex<HashMap<String, (u32, i64)>>,
+    /// The reset a pause was last logged for, so a pause is logged once rather than on every poll.
+    pause_logged: Mutex<Option<i64>>,
 }
 
 /// A pooled sandbox that keeps failing to release. Kept in memory only, so a restart counts again from zero.
@@ -102,7 +106,16 @@ impl Factory {
         provider: Arc<dyn ModelProvider>,
         daemon: Arc<dyn Daemon>,
     ) -> Factory {
-        Factory { config, compute, tracker, provider, daemon, troubled: Mutex::default() }
+        Factory {
+            config,
+            compute,
+            tracker,
+            provider,
+            daemon,
+            troubled: Mutex::default(),
+            quota: Mutex::default(),
+            pause_logged: Mutex::default(),
+        }
     }
 
     fn project(&self) -> &str {
@@ -181,9 +194,11 @@ impl Factory {
             if let Err(e) = self.start_ready(&mut running, &mut keys).await {
                 tracing::warn!(error = %e, "couldn't start ready tasks");
             }
+            let resume = self.paused_until().map(|(_, _, resets_at)| until(resets_at));
             tokio::select! {
                 _ = &mut shutdown => break,
                 _ = wake.notified() => {}
+                _ = tokio::time::sleep(resume.unwrap_or_default()), if resume.is_some() => {}
                 _ = tokio::time::sleep(poll) => dirty = true,
                 Some(joined) = running.join_next_with_id() => match joined {
                     Ok((id, Ok(outcome))) => {
@@ -222,6 +237,9 @@ impl Factory {
         running: &mut JoinSet<Result<Outcome>>,
         keys: &mut HashMap<task::Id, TaskKey>,
     ) -> Result<()> {
+        if self.usage_paused() {
+            return Ok(());
+        }
         let busy: HashSet<TaskKey> = keys.values().cloned().collect();
         let others = self
             .occupied()
@@ -261,6 +279,9 @@ impl Factory {
 
     /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
     pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
+        if self.usage_paused() {
+            return Ok(Vec::new());
+        }
         let room = self.config.repo.max_sandboxes.saturating_sub(self.occupied().await?.len());
         if room == 0 {
             return Ok(Vec::new());
@@ -528,6 +549,10 @@ impl Factory {
                     tracing::info!(task = %key, tool = %name, detail = detail.as_deref().unwrap_or(""), "tool");
                 }
                 RunEvent::NeedsInput { question } => tracing::info!(task = %key, %question, "asked"),
+                RunEvent::Quota { window, used_percent, resets_at } => {
+                    tracing::info!(%window, used_percent, resets_in = ?until(resets_at), "subscription usage");
+                    self.quota.lock().unwrap().insert(window, (used_percent, resets_at));
+                }
                 _ => {}
             }
             if *spent > limit {
@@ -640,6 +665,42 @@ impl Factory {
 }
 
 impl Factory {
+    /// The fullest usage window at or past its `pause_at`, if any, as (window, percent used, resets at). A reading
+    /// whose window has since reset no longer counts.
+    fn paused_until(&self) -> Option<(String, u32, i64)> {
+        let now = unix_now();
+        let quota = self.quota.lock().unwrap();
+        self.config
+            .usage
+            .pause_at
+            .iter()
+            .filter_map(|(window, limit)| {
+                let (used, resets_at) = *quota.get(window)?;
+                (used >= *limit && resets_at > now).then(|| (window.clone(), used, resets_at))
+            })
+            .max_by_key(|(_, _, resets_at)| *resets_at)
+    }
+
+    /// Whether to hold off starting runs because a usage window is nearly full. Running ones carry on.
+    fn usage_paused(&self) -> bool {
+        let paused = self.paused_until();
+        let mut logged = self.pause_logged.lock().unwrap();
+        match &paused {
+            Some((window, used, resets_at)) if *logged != Some(*resets_at) => {
+                tracing::warn!(
+                    %window,
+                    used_percent = used,
+                    resumes_in = ?until(*resets_at),
+                    "subscription usage window nearly full; starting no new runs until it resets"
+                );
+                *logged = Some(*resets_at);
+            }
+            None if logged.take().is_some() => tracing::info!("usage window reset; starting runs again"),
+            _ => {}
+        }
+        paused.is_some()
+    }
+
     /// A pooled sandbox stays; one left busy by an interrupted run goes back to idle. One that keeps failing to
     /// release is given up on, so it can't hold the pool's only place while every retry fails (TRAIL-135).
     async fn reconcile_pooled(&self, sandbox: &Sandbox, done: &mut Reconciled) {
@@ -728,6 +789,15 @@ impl Factory {
         t.next_try = now + FIRST_BACKOFF.saturating_mul(1 << (t.failures - 1).min(8)).min(MAX_BACKOFF);
         !t.abandoned && (t.failures >= RELEASE_ATTEMPTS || now - t.since >= RELEASE_PATIENCE)
     }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// How long until a unix time, plus a second so a timer set for a reset fires after it.
+fn until(unix: i64) -> Duration {
+    Duration::from_secs(u64::try_from(unix - unix_now()).unwrap_or(0) + 1)
 }
 
 /// A sandbox's token outlives its wall-clock budget by a margin, so a missed revoke cleans itself up.

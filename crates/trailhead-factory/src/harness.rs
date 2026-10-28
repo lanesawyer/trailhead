@@ -88,6 +88,14 @@ pub enum RunEvent {
     NeedsInput {
         question: String,
     },
+    /// How full one of the subscription's usage windows is (Claude's `five_hour` or `seven_day`), as the harness
+    /// last heard. The control plane stops starting runs past a threshold until the window resets.
+    Quota {
+        window: String,
+        used_percent: u32,
+        /// Unix seconds.
+        resets_at: i64,
+    },
 }
 
 pub type EventSink = mpsc::UnboundedSender<RunEvent>;

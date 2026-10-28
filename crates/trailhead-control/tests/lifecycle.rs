@@ -632,6 +632,81 @@ async fn a_sandbox_that_recovers_is_released_as_usual() {
     assert!(done.abandoned.is_empty());
 }
 
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// The test config, pausing at 80% of the five-hour window.
+fn pausing_rig() -> Rig {
+    rig_with(&format!("{CONFIG}\n[usage]\npause_at = {{ five_hour = 80 }}\n"))
+}
+
+/// Runs one task whose agent reports the five-hour window `used` percent full, resetting in `resets_in` seconds.
+async fn report_usage(r: &Rig, used: u32, resets_in: i64) {
+    r.tracker.add_task("TRAIL", "First", "");
+    let script = Script::new(changes()).quota("five_hour", used, unix_now() + resets_in).quota("seven_day", 99, 0);
+    r.harness.push(Role::Worker, script);
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert_eq!(r.factory.tick().await.unwrap().len(), 1, "a run already under way finishes");
+}
+
+#[tokio::test]
+async fn a_nearly_full_usage_window_pauses_new_runs() {
+    let r = pausing_rig();
+    report_usage(&r, 85, 3600).await;
+    r.tracker.add_task("TRAIL", "Second", "");
+    assert!(r.factory.tick().await.unwrap().is_empty(), "paused until the window resets");
+}
+
+#[tokio::test]
+async fn runs_start_again_once_the_window_resets() {
+    let r = pausing_rig();
+    report_usage(&r, 95, 1).await;
+    r.tracker.add_task("TRAIL", "Second", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    assert_eq!(r.factory.tick().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_run_loop_wakes_itself_when_the_window_resets() {
+    let r = pausing_rig();
+    report_usage(&r, 90, 1).await;
+    let key = r.tracker.add_task("TRAIL", "Second", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let factory = Arc::new(r.factory);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    // A poll far longer than the test: only the reset timer can start the second task in time.
+    let poll = std::time::Duration::from_secs(600);
+    let handle = tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), poll, async {
+        let _ = stopped.await;
+    }));
+    let tracker = r.tracker.clone();
+    for _ in 0..100 {
+        if tracker.task(&key).status == Status::InReview {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(tracker.task(&key).status, Status::InReview, "started once the window reset");
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn usage_under_the_threshold_or_without_one_doesnt_pause() {
+    // 70% is under the five-hour threshold, and the seven-day window at 99% has none configured.
+    let r = pausing_rig();
+    report_usage(&r, 70, 3600).await;
+    r.tracker.add_task("TRAIL", "Second", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert_eq!(r.factory.tick().await.unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn a_refused_publish_parks_the_task_instead_of_redoing_the_work() {
     let r = rig();

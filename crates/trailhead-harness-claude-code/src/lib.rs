@@ -320,10 +320,28 @@ impl Stream {
                 }
             }
             Some("result") => self.result = Some(msg.clone()),
+            Some("rate_limit_event") => out.extend(quota(&msg["rate_limit_info"])),
             _ => {}
         }
         out
     }
+}
+
+/// A subscription's usage windows from Claude Code's `rate_limit_event`. Observed, not documented: anything
+/// missing or renamed yields no reading, and the factory carries on as if it had none.
+fn quota(info: &Value) -> Vec<RunEvent> {
+    let Some(windows) = info["unifiedWindows"].as_object() else { return Vec::new() };
+    windows
+        .iter()
+        .filter_map(|(window, w)| {
+            let used = w["utilization"].as_f64()?;
+            Some(RunEvent::Quota {
+                window: window.clone(),
+                used_percent: (used * 100.0).round().clamp(0.0, 1000.0) as u32,
+                resets_at: w["resetsAt"].as_i64()?,
+            })
+        })
+        .collect()
 }
 
 /// What a tool call is about, in one short line: a Bash command, a file path or a search pattern.

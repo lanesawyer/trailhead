@@ -47,6 +47,7 @@ run finished task=TRAIL-105 outcome=…
 | Checks failed | A note on the task with the end of the failing check's output; the task is open again and retried | Usually nothing. If it keeps failing, Ctrl-C and read the note (attempt cap: TRAIL-107) |
 | Question | Task `needs_input` with a question comment; its Sprite stays busy | Answer it, set the task open, restart the factory (TRAIL-108 removes the restart) |
 | Budget or time breach | As a question, saying which limit it hit | Raise the budget in `factory.toml` or cancel the task |
+| Usage window nearly full | `subscription usage window nearly full; starting no new runs until it resets`, with how long until the reset | Nothing; runs start again at the reset. Change `[usage] pause_at` in `factory.toml` to leave more or less room |
 | Dropped model call | `claude's API call failed; resuming the session` in the log | Nothing; it resumes up to three times |
 
 ## Sandboxes and cost

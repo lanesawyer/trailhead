@@ -19,8 +19,19 @@ The control plane enforces budgets. Token and dollar counts come from the daemon
 | Per task | `usage` on each Messages response, counted by the daemon | Immediate | Task and step budgets |
 | Global | Provider usage API, polled at most once a minute | About 5 minutes behind | Daily cap; reconciling daemon counts |
 | Backstop | Spend limit on a dedicated factory workspace at the provider | Enforced by the provider | Hard ceiling if the factory's accounting fails |
+| Subscription | The harness's usage-window readings (Claude Code's `rate_limit_event`) | Once per agent session | Pausing new runs before a shared subscription runs out |
 
 - **Anthropic.** The [Usage and Cost API](https://platform.claude.com/docs/en/build-with-claude/usage-cost-api) reports usage in 1-minute buckets, filterable by API key and workspace, typically within 5 minutes. The cost endpoint is daily only and omits Priority Tier, so minute-level dollars come from pricing usage tokens. It needs an Admin API key (or an OAuth token with `org:admin`), which can also manage the organization: the one powerful credential the control plane holds. The connector forwards only the Messages API, so this call goes from the control plane directly. Store the key in the OS keyring.
 - **Dedicated workspace and key.** The connector's key belongs to a factory-only workspace, so usage numbers are the factory's alone and that workspace's spend limit is the backstop. Confirm per-workspace spend limits in the Console.
 - **Lag means overshoot.** Five minutes of every running sandbox's spend can land after the daily cap is hit, which is why per-task budgets come from the daemon in real time.
 - **Provider-agnostic.** `ModelProvider::spend` ([seams.md](seams.md)) wraps each provider's usage API.
+
+## Subscription usage windows
+
+Decided 2026-10-28 (TRAIL-160). In subscription mode, the factory shares Lane's Claude plan with everything else on it (OpenClaw), so it mustn't use a window up. Claude Code starts every `stream-json` session with a `rate_limit_event` that reports each window's utilization and reset time (`five_hour`, `seven_day`). This was observed, not documented, so a missing or changed event means no reading and no pause.
+
+- The harness reports each window as `RunEvent::Quota { window, used_percent, resets_at }`, and the control plane keeps the latest reading in memory.
+- `[usage] pause_at` in `factory.toml` sets a threshold per window, in percent. At or past it, no new runs start; runs already going finish. The control plane logs the pause once, then sets a timer for the reset and starts runs again when it fires.
+- Readings arrive only while something runs, and only once per session, so a long run's reading goes stale. Leave margin in the threshold.
+- A run that hits the limit mid-way fails and is requeued, and the pause holds it until the reset. It still uses up an attempt (TRAIL-159).
+- Any harness can report the same event; Codex CLI reports similar windows.

@@ -14,15 +14,23 @@ pub struct Script {
     pub hang: bool,
     /// Waits for this after its steps before finishing.
     pub gate: Option<Arc<Notify>>,
+    /// Usage window readings reported before the first step, as Claude Code does at session start.
+    pub quota: Vec<(String, u32, i64)>,
 }
 
 impl Script {
     pub fn new(outcome: RunOutcome) -> Script {
-        Script { steps: Vec::new(), outcome, hang: false, gate: None }
+        Script { steps: Vec::new(), outcome, hang: false, gate: None, quota: Vec::new() }
     }
 
     pub fn hang(mut self) -> Script {
         self.hang = true;
+        self
+    }
+
+    /// Reports `window` as `used_percent` full, resetting at `resets_at` (unix seconds).
+    pub fn quota(mut self, window: &str, used_percent: u32, resets_at: i64) -> Script {
+        self.quota.push((window.to_string(), used_percent, resets_at));
         self
     }
 
@@ -73,6 +81,9 @@ impl Harness for ScriptedHarness {
                 None => return Ok(RunOutcome::Failed { reason: format!("no script for {}", ctx.role.as_str()) }),
             }
         };
+        for (window, used_percent, resets_at) in script.quota {
+            let _ = events.send(RunEvent::Quota { window, used_percent, resets_at });
+        }
         for (i, usage) in script.steps.into_iter().enumerate() {
             let _ = events.send(RunEvent::StepStarted { step: i as u32 + 1 });
             let _ = events.send(RunEvent::Usage { model: ctx.model.clone(), usage });
