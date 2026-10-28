@@ -210,15 +210,11 @@ impl Factory {
         keys: &mut HashMap<task::Id, TaskKey>,
     ) -> Result<()> {
         let busy: HashSet<TaskKey> = keys.values().cloned().collect();
-        let mut workers = self.base_labels();
-        workers.insert(label::ROLE.into(), Role::Worker.as_str().into());
         let others = self
-            .compute
-            .list(&workers)
+            .occupied()
             .await?
             .into_iter()
             .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !busy.contains(&TaskKey(t.clone()))))
-            .filter(|s| !self.abandoned(&s.name))
             .count();
         let room = self.config.repo.max_sandboxes.saturating_sub(keys.len() + others);
         if room == 0 {
@@ -234,12 +230,25 @@ impl Factory {
         Ok(())
     }
 
-    /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
-    pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
+    /// The worker sandboxes that take a place in the cap: any with a worker role, and busy pooled ones, which
+    /// include a parked task's whose kill switch took its role away. Abandoned ones don't count (TRAIL-135).
+    async fn occupied(&self) -> Result<Vec<Sandbox>> {
         let mut workers = self.base_labels();
         workers.insert(label::ROLE.into(), Role::Worker.as_str().into());
-        let live = self.compute.list(&workers).await?.into_iter().filter(|s| !self.abandoned(&s.name)).count();
-        let room = self.config.repo.max_sandboxes.saturating_sub(live);
+        let mut busy = self.pool_labels();
+        busy.insert(label::STATE.into(), label::BUSY.into());
+        let mut out: Vec<Sandbox> = Vec::new();
+        for s in self.compute.list(&workers).await?.into_iter().chain(self.compute.list(&busy).await?) {
+            if !self.abandoned(&s.name) && !out.iter().any(|o| o.name == s.name) {
+                out.push(s);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
+    pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
+        let room = self.config.repo.max_sandboxes.saturating_sub(self.occupied().await?.len());
         if room == 0 {
             return Ok(Vec::new());
         }

@@ -160,6 +160,18 @@ async fn budget_breach_parks_the_task_and_suspends_its_sandbox() {
 }
 
 #[tokio::test]
+async fn a_parked_sandbox_keeps_its_place_in_the_cap() {
+    let r = rig();
+    r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.factory.tick().await.unwrap();
+    // The kill switch took the role label away, but the parked task still holds the pool's one place.
+    r.tracker.add_task("TRAIL", "Next", "");
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    assert_eq!(r.compute.sandboxes().len(), 1, "no second sandbox");
+}
+
+#[tokio::test]
 async fn too_many_steps_is_a_breach() {
     let r = rig();
     r.tracker.add_task("TRAIL", "Chatty", "");
