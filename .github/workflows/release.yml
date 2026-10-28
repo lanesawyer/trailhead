@@ -82,11 +82,7 @@ jobs:
           # The oldest Ubuntu runners, so the binaries run on glibc 2.35 and newer.
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-15-intel, target: x86_64-apple-darwin }
-          - { os: macos-15, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
-    env:
-      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -97,7 +93,6 @@ jobs:
       - run: cargo build --release --locked -p trailhead --target ${{ matrix.target }}
       # cargo-binstall finds these through [package.metadata.binstall] in crates/trailhead/Cargo.toml.
       - name: Package
-        shell: bash
         env:
           NAME: trailhead-${{ needs.release.outputs.tag }}-${{ matrix.target }}
         run: |
@@ -106,7 +101,7 @@ jobs:
           cd dist
           archive="$NAME.tar.gz"
           tar czf "$archive" "$NAME"
-          shasum -a 256 "$archive" > "$archive.sha256"
+          sha256sum "$archive" > "$archive.sha256"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
