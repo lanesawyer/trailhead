@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 /// Trailhead: a headless task engine for humans and agents.
 #[derive(Parser)]
@@ -69,53 +69,9 @@ pub(crate) enum Cmd {
         task: String,
     },
     /// Create a task.
-    Add {
-        title: String,
-        #[arg(short, long, env = "TRAILHEAD_PROJECT")]
-        project: Option<String>,
-        #[arg(short, long)]
-        description: Option<String>,
-        /// 1 (urgent) to 4 (low).
-        #[arg(short = 'P', long)]
-        priority: Option<i64>,
-        #[arg(long)]
-        parent: Option<String>,
-        /// The deadline: a day (YYYY-MM-DD, today, tomorrow, fri), optionally with a time
-        /// (fri 5pm), a time alone for today, or an RFC 3339 timestamp.
-        #[arg(long, num_args = 1..=3)]
-        due: Option<Vec<String>>,
-        /// When to work on it: a day (YYYY-MM-DD, today, tomorrow, fri), optionally with a
-        /// time (today 1pm, 2026-10-20 13:30), or a time alone for today.
-        #[arg(long, num_args = 1..=3)]
-        on: Option<Vec<String>>,
-        /// Tasks that must finish first.
-        #[arg(long, value_delimiter = ',')]
-        after: Vec<String>,
-        /// Tasks this one blocks.
-        #[arg(long, value_delimiter = ',')]
-        blocks: Vec<String>,
-    },
+    Add(AddArgs),
     /// Change a task's fields.
-    Edit {
-        task: String,
-        #[arg(long)]
-        title: Option<String>,
-        #[arg(short, long)]
-        description: Option<String>,
-        #[arg(short = 'P', long)]
-        priority: Option<i64>,
-        /// The deadline, as for `add --due`, or "none".
-        #[arg(long, num_args = 1..=3)]
-        due: Option<Vec<String>>,
-        /// When to work on it, as for `add --on`, or "none".
-        #[arg(long, num_args = 1..=3)]
-        on: Option<Vec<String>>,
-        #[arg(short, long)]
-        status: Option<String>,
-        /// Fail if the task changed since this version.
-        #[arg(long)]
-        version: Option<i64>,
-    },
+    Edit(EditArgs),
     /// Take a lease on a task and start it. Prints the last handoff.
     Claim {
         task: String,
@@ -266,6 +222,56 @@ pub(crate) enum Cmd {
         #[arg(long, env = "TRAILHEAD_BIND", default_value = trailhead_server::DEFAULT_BIND)]
         bind: String,
     },
+}
+
+#[derive(Args)]
+pub(crate) struct AddArgs {
+    pub(crate) title: String,
+    #[arg(short, long, env = "TRAILHEAD_PROJECT")]
+    pub(crate) project: Option<String>,
+    #[arg(short, long)]
+    pub(crate) description: Option<String>,
+    /// 1 (urgent) to 4 (low).
+    #[arg(short = 'P', long)]
+    pub(crate) priority: Option<i64>,
+    #[arg(long)]
+    pub(crate) parent: Option<String>,
+    /// The deadline: a day (YYYY-MM-DD, today, tomorrow, fri), optionally with a time
+    /// (fri 5pm), a time alone for today, or an RFC 3339 timestamp.
+    #[arg(long, num_args = 1..=3)]
+    pub(crate) due: Option<Vec<String>>,
+    /// When to work on it: a day (YYYY-MM-DD, today, tomorrow, fri), optionally with a
+    /// time (today 1pm, 2026-10-20 13:30), or a time alone for today.
+    #[arg(long, num_args = 1..=3)]
+    pub(crate) on: Option<Vec<String>>,
+    /// Tasks that must finish first.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) after: Vec<String>,
+    /// Tasks this one blocks.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) blocks: Vec<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct EditArgs {
+    pub(crate) task: String,
+    #[arg(long)]
+    pub(crate) title: Option<String>,
+    #[arg(short, long)]
+    pub(crate) description: Option<String>,
+    #[arg(short = 'P', long)]
+    pub(crate) priority: Option<i64>,
+    /// The deadline, as for `add --due`, or "none".
+    #[arg(long, num_args = 1..=3)]
+    pub(crate) due: Option<Vec<String>>,
+    /// When to work on it, as for `add --on`, or "none".
+    #[arg(long, num_args = 1..=3)]
+    pub(crate) on: Option<Vec<String>>,
+    #[arg(short, long)]
+    pub(crate) status: Option<String>,
+    /// Fail if the task changed since this version.
+    #[arg(long)]
+    pub(crate) version: Option<i64>,
 }
 
 #[derive(Subcommand)]
@@ -423,7 +429,17 @@ pub(crate) fn parse_lifetime(s: &str) -> Result<i64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_lifetime;
+    use clap::Parser;
+
+    use super::{Cli, Cmd, WebhookCmd, parse_lifetime};
+
+    #[test]
+    fn webhook_url_does_not_clobber_the_server_url() {
+        let cli = Cli::try_parse_from(["trailhead", "--url", "http://127.0.0.1:1", "webhook", "add", "http://hook/x"])
+            .unwrap();
+        assert_eq!(cli.url.as_deref(), Some("http://127.0.0.1:1"));
+        assert!(matches!(cli.cmd, Cmd::Webhook(WebhookCmd::Add { ref target, .. }) if target == "http://hook/x"));
+    }
 
     #[test]
     fn lifetimes() {
