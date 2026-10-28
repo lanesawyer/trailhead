@@ -22,7 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "process", "io-util", "signal", "net"] }
 tracing.workspace = true
-iroh = { version = "1.4", optional = true }
+iroh = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
@@ -39,7 +39,7 @@ required-features = ["net"]
 [dev-dependencies]
 trailhead-testkit.workspace = true
 trailhead-control.workspace = true
-tempfile = "3"
+tempfile.workspace = true
 trailhead-compute-sprites.workspace = true
 trailhead-core.workspace = true
 trailhead-server.workspace = true
