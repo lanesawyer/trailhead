@@ -53,8 +53,11 @@ pub enum MergeOutcome {
 
 #[async_trait]
 pub trait CodeHost: Send + Sync {
-    /// Publishes commits on top of `branch`, creating it from `base` if it doesn't exist.
-    async fn publish(&self, repo: &Repo, base: &str, branch: &str, commits: &[Commit]) -> Result<()>;
+    /// Publishes commits made on top of `start`, the commit sha the checkout was at when the work began. A new
+    /// `branch` is created there, never on the base branch's current head: commits carry whole files, so laying them
+    /// on a newer head would silently undo whatever landed since (TRAIL-161). An existing branch must still be at
+    /// `start`, otherwise this fails with `Conflict` rather than overwrite what's on it.
+    async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()>;
     async fn open_pr(&self, repo: &Repo, pr: NewPr) -> Result<PrRef>;
     async fn diff(&self, pr: &PrRef) -> Result<String>;
     async fn comment(&self, pr: &PrRef, body: &str) -> Result<()>;

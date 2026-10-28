@@ -23,6 +23,8 @@ pub trait Workspace: Send + Sync {
     async fn check(&self, check: &Check) -> CheckResult;
     /// Returns once none of `hosts` resolve, or fails if they still do after a while.
     async fn confirm_blocked(&self, hosts: &[String]) -> Result<()>;
+    /// The commit sha the checkout is at.
+    async fn head(&self) -> Result<String>;
 }
 
 /// How often a worker renews its claim while the agent runs. Leases default to 30 minutes.
@@ -100,9 +102,11 @@ impl Runner {
             diff,
         };
         tracing::info!(task = %key, "agent starting");
+        // Where the agent's work starts, which is what it's published on top of.
+        let start = self.workspace.head().await?;
         let (outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events).await?;
         tracing::info!(task = %key, "agent finished");
-        let (result, checks) = self.finish(&req, tracker.as_ref(), outcome, &cancel).await?;
+        let (result, checks) = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start).await?;
         Ok(RunReport { result, checks, usage })
     }
 
@@ -149,10 +153,11 @@ impl Runner {
         &self,
         req: &RunRequest,
         agent: &str,
+        start: &str,
         commits: Vec<trailhead_factory::Commit>,
         summary: String,
     ) -> Result<PrRef> {
-        self.codehost.publish(&req.repo, &req.base_branch, &req.branch, &commits).await?;
+        self.codehost.publish(&req.repo, start, &req.branch, &commits).await?;
         match &req.pr {
             Some(pr) => Ok(pr.clone()),
             None => {
@@ -181,6 +186,7 @@ impl Runner {
         tracker: &dyn Tracker,
         outcome: RunOutcome,
         cancel: &Notify,
+        start: &str,
     ) -> Result<(RunResult, Vec<CheckResult>)> {
         let key = &req.task.key;
         match outcome {
@@ -198,7 +204,7 @@ impl Runner {
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), checks));
                 }
-                let pr = match self.publish(req, tracker.agent(), commits, summary).await {
+                let pr = match self.publish(req, tracker.agent(), start, commits, summary).await {
                     Ok(pr) => pr,
                     // The agent's work is done and checked; retrying the whole run would only hit the same wall, so
                     // park the task with the reason instead, keeping the sandbox and its checkout.

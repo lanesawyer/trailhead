@@ -8,7 +8,9 @@ use trailhead_factory::{
     CodeHost, Commit, Compute, FactoryConfig, FileChange, MergeOutcome, Role, RunOutcome, SandboxSpec, Status, TaskKey,
     Tracker, Usd, VerdictKind, label, run_name,
 };
-use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
+use trailhead_testkit::{
+    FAKE_BASE, FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness,
+};
 
 const CONFIG: &str = r#"
 [repo]
@@ -102,6 +104,8 @@ async fn spec_to_reviewed_pr_then_human_merge() {
 
     let opened = &r.codehost.prs()[0];
     assert_eq!(opened.spec.branch, "factory/trail-1");
+    let start = r.codehost.start(&opened.pr.repo, "factory/trail-1");
+    assert_eq!(start.as_deref(), Some(FAKE_BASE), "published on the commit the checkout started from");
     assert_eq!(
         opened.comments,
         ["🔍 **Review by `factory/trail-1-a1-r1` (`fake-opus`) · Verdict: Approve**\n\nLooks right; tests cover it."]

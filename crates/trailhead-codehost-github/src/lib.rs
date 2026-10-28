@@ -174,12 +174,14 @@ fn pr_ref(repo: &Repo, p: &Value) -> PrRef {
 
 #[async_trait]
 impl CodeHost for GitHub {
-    async fn publish(&self, repo: &Repo, base: &str, branch: &str, commits: &[Commit]) -> Result<()> {
+    async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let existing = self.head(repo, branch).await?;
-        let mut sha = match &existing {
-            Some(sha) => sha.clone(),
-            None => self.head(repo, base).await?.ok_or_else(|| Error::NotFound(format!("base branch {base}")))?,
-        };
+        if let Some(head) = existing.as_deref().filter(|head| *head != start) {
+            return Err(Error::Conflict(format!(
+                "branch {branch} is at {head}, not at {start} where this work started; publishing would overwrite it"
+            )));
+        }
+        let mut sha = start.to_string();
         for commit in commits {
             sha = self.write_commit(repo, &sha, commit).await?;
         }

@@ -37,10 +37,14 @@ impl GitWorkspace {
     }
 
     async fn git(&self, cwd: &Path, args: &[&str]) -> Result<()> {
+        self.git_output(cwd, args).await.map(drop)
+    }
+
+    async fn git_output(&self, cwd: &Path, args: &[&str]) -> Result<String> {
         let out = Command::new("git").args(args).current_dir(cwd).stdin(Stdio::null()).output().await;
         let out = out.map_err(|e| Error::Other(format!("git {}: {e}", args.join(" "))))?;
         if out.status.success() {
-            return Ok(());
+            return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
         Err(Error::Other(format!("git {} failed: {}", args.join(" "), stderr.trim())))
@@ -75,6 +79,10 @@ impl Workspace for GitWorkspace {
             }
         }
         Ok(())
+    }
+
+    async fn head(&self) -> Result<String> {
+        self.git_output(&self.dir, &["rev-parse", "HEAD"]).await
     }
 
     async fn confirm_blocked(&self, hosts: &[String]) -> Result<()> {

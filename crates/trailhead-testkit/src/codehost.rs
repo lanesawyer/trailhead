@@ -15,6 +15,10 @@ pub struct FakePr {
 #[derive(Default)]
 struct State {
     branches: BTreeMap<(String, String), Vec<Commit>>,
+    /// Each branch's head: the commit it started from, then one made-up sha per publish.
+    heads: BTreeMap<(String, String), String>,
+    /// The commit each branch was first published on top of.
+    starts: BTreeMap<(String, String), String>,
     prs: Vec<FakePr>,
     conflicts: bool,
     refuse_publish: Option<String>,
@@ -33,6 +37,11 @@ impl FakeCodeHost {
     pub fn commits(&self, repo: &Repo, branch: &str) -> Vec<Commit> {
         let s = self.state.lock().unwrap();
         s.branches.get(&(repo.slug(), branch.to_string())).cloned().unwrap_or_default()
+    }
+
+    /// The commit a branch was first published on top of.
+    pub fn start(&self, repo: &Repo, branch: &str) -> Option<String> {
+        self.state.lock().unwrap().starts.get(&(repo.slug(), branch.to_string())).cloned()
     }
 
     pub fn prs(&self) -> Vec<FakePr> {
@@ -61,12 +70,19 @@ impl FakeCodeHost {
 
 #[async_trait]
 impl CodeHost for FakeCodeHost {
-    async fn publish(&self, repo: &Repo, _base: &str, branch: &str, commits: &[Commit]) -> Result<()> {
+    async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let mut s = self.state.lock().unwrap();
         if let Some(why) = &s.refuse_publish {
             return Err(Error::NotFound(why.clone()));
         }
-        s.branches.entry((repo.slug(), branch.to_string())).or_default().extend_from_slice(commits);
+        let key = (repo.slug(), branch.to_string());
+        if let Some(head) = s.heads.get(&key).filter(|head| *head != start) {
+            return Err(Error::Conflict(format!("branch {branch} is at {head}, not at {start}")));
+        }
+        s.starts.entry(key.clone()).or_insert_with(|| start.to_string());
+        let n = s.branches.get(&key).map_or(0, Vec::len) + commits.len();
+        s.heads.insert(key.clone(), format!("{branch}@{n}"));
+        s.branches.entry(key).or_default().extend_from_slice(commits);
         Ok(())
     }
 

@@ -15,6 +15,9 @@ pub use trailhead_daemon::Connect;
 
 use crate::FakeTracker;
 
+/// The commit every fake checkout is at.
+pub const FAKE_BASE: &str = "base0000";
+
 /// A checkout that doesn't exist: prepares are recorded and checks pass unless told to fail.
 #[derive(Default)]
 pub struct FakeWorkspace {
@@ -42,6 +45,10 @@ impl Workspace for FakeWorkspace {
 
     async fn confirm_blocked(&self, _hosts: &[String]) -> Result<()> {
         Ok(())
+    }
+
+    async fn head(&self) -> Result<String> {
+        Ok(FAKE_BASE.to_string())
     }
 
     async fn check(&self, check: &Check) -> CheckResult {

@@ -226,6 +226,11 @@ fn change(path: &str, contents: Option<&[u8]>) -> FileChange {
 }
 
 /// The files at a branch's head, with their contents.
+/// A branch's head commit.
+fn head(git: &Shared, branch: &str) -> String {
+    git.lock().unwrap().refs[branch].clone()
+}
+
 fn files(git: &Shared, branch: &str) -> BTreeMap<String, Vec<u8>> {
     let g = git.lock().unwrap();
     let tree = g.commits[&g.refs[branch]]["tree"]["sha"].as_str().unwrap().to_string();
@@ -246,12 +251,13 @@ async fn publish_builds_commits_on_a_new_branch_then_on_top_of_it() {
             change("logo.bin", Some(&[0, 159, 146, 150])),
         ],
     };
-    gh.publish(&repo(), "main", "factory/trail-1", std::slice::from_ref(&first)).await.unwrap();
+    let main = head(&git, "main");
+    gh.publish(&repo(), &main, "factory/trail-1", std::slice::from_ref(&first)).await.unwrap();
 
-    let head = files(&git, "factory/trail-1");
-    assert_eq!(head.keys().map(String::as_str).collect::<Vec<_>>(), ["README.md", "logo.bin", "src/greet.rs"]);
-    assert_eq!(head["README.md"], b"v2\n");
-    assert_eq!(head["logo.bin"], [0, 159, 146, 150], "binary files survive");
+    let published = files(&git, "factory/trail-1");
+    assert_eq!(published.keys().map(String::as_str).collect::<Vec<_>>(), ["README.md", "logo.bin", "src/greet.rs"]);
+    assert_eq!(published["README.md"], b"v2\n");
+    assert_eq!(published["logo.bin"], [0, 159, 146, 150], "binary files survive");
     {
         let g = git.lock().unwrap();
         let commit = &g.commits[&g.refs["factory/trail-1"]];
@@ -264,12 +270,39 @@ async fn publish_builds_commits_on_a_new_branch_then_on_top_of_it() {
         message: "TRAIL-1: test".into(),
         changes: vec![change("tests/greet.rs", Some(b"#[test] fn t() {}\n"))],
     };
-    gh.publish(&repo(), "main", "factory/trail-1", &[second]).await.unwrap();
-    let head = files(&git, "factory/trail-1");
-    assert!(head.contains_key("tests/greet.rs") && head.contains_key("src/greet.rs"), "stacked on the branch");
+    let branch = head(&git, "factory/trail-1");
+    gh.publish(&repo(), &branch, "factory/trail-1", std::slice::from_ref(&second)).await.unwrap();
+    let files_now = files(&git, "factory/trail-1");
+    assert!(
+        files_now.contains_key("tests/greet.rs") && files_now.contains_key("src/greet.rs"),
+        "stacked on the branch"
+    );
+
+    // Work that started from an older commit than the branch is at would overwrite it, so it's refused.
+    let moved = gh.publish(&repo(), &main, "factory/trail-1", &[second]).await.unwrap_err();
+    assert!(matches!(&moved, Error::Conflict(m) if m.contains("would overwrite")), "{moved:?}");
 
     let missing = gh.publish(&repo(), "nope", "factory/trail-2", &[first]).await.unwrap_err();
     assert!(matches!(missing, Error::NotFound(_)), "{missing:?}");
+}
+
+/// TRAIL-161: the checkout started at an older main, and main moved before publishing. The new branch is built on the
+/// commit the work started from, so GitHub sees an ordinary branch and nothing newer on main is overwritten.
+#[tokio::test]
+async fn a_new_branch_starts_where_the_work_did_not_at_mains_new_head() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let started = head(&git, "main");
+    let landed = Commit { message: "meanwhile on main".into(), changes: vec![change("README.md", Some(b"newer\n"))] };
+    gh.publish(&repo(), &started, "main", &[landed]).await.unwrap();
+    let main_now = head(&git, "main");
+    assert_ne!(main_now, started);
+
+    let work =
+        Commit { message: "TRAIL-1: greet".into(), changes: vec![change("src/greet.rs", Some(b"pub fn hi() {}\n"))] };
+    gh.publish(&repo(), &started, "factory/trail-1", &[work]).await.unwrap();
+    let g = git.lock().unwrap();
+    assert_eq!(g.commits[&g.refs["factory/trail-1"]]["parents"], json!([started]), "parented where the work started");
 }
 
 #[tokio::test]
@@ -277,7 +310,8 @@ async fn prs_open_once_and_take_reviews_and_merges() {
     let (git, url) = serve().await;
     let gh = GitHub::new(&url, Some("ghp_test".into()));
     let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a")), change("old.txt", None)] };
-    gh.publish(&repo(), "main", "factory/trail-1", &[commit]).await.unwrap();
+    let main = head(&git, "main");
+    gh.publish(&repo(), &main, "factory/trail-1", &[commit]).await.unwrap();
     let new = NewPr {
         branch: "factory/trail-1".into(),
         base: "main".into(),
@@ -309,7 +343,8 @@ async fn a_refused_workflow_change_names_the_call_and_the_scope() {
     let gh = GitHub::gateway(&url);
     let commit =
         Commit { message: "ci".into(), changes: vec![change(".github/workflows/ci.yml", Some(b"on: push\n"))] };
-    let err = gh.publish(&repo(), "main", "factory/trail-105", &[commit]).await.unwrap_err().to_string();
+    let main = head(&git, "main");
+    let err = gh.publish(&repo(), &main, "factory/trail-105", &[commit]).await.unwrap_err().to_string();
     assert!(err.contains("POST /repos/lanesawyer/trailhead/git/refs"), "{err}");
     assert!(err.contains("`workflow` scope"), "{err}");
 }
