@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,9 +22,9 @@ use serde::de::DeserializeOwned;
 use sha2::Sha256;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 use trailhead_factory::{
-    Compute, Daemon, DaemonSecrets, Error, EventSink, FromDaemon, PrepareRequest, Program, Result, RunReport,
+    Compute, Daemon, DaemonSecrets, Error, EventSink, FromDaemon, PrepareRequest, Program, Result, RunEvent, RunReport,
     RunRequest, SandboxFile, SandboxId, ToDaemon,
 };
 
@@ -45,6 +46,13 @@ const CONNECT_PATIENCE: Duration = Duration::from_secs(90);
 
 /// How long it keeps dialing a running daemon, which may need to resume from a pause and rebuild its connections.
 const RECONNECT_PATIENCE: Duration = Duration::from_secs(60);
+
+/// How many times one run may lose its connection and reattach before the control plane gives up on it.
+const MAX_REATTACH: u32 = 10;
+
+/// How long a daemon keeps a run going with no control plane following it before cancelling it. Covers QUIC noticing
+/// the drop on both sides plus the control plane's [`RECONNECT_PATIENCE`].
+pub const ATTACH_PATIENCE: Duration = Duration::from_secs(5 * 60);
 
 /// A sandbox daemon's iroh key, derived from the control plane's master key and the sandbox name.
 pub fn sandbox_key(master: &[u8; 32], sandbox: &SandboxId) -> SecretKey {
@@ -173,6 +181,21 @@ pub fn watch_network(endpoint: Endpoint) {
     });
 }
 
+/// A run on the daemon, which goes on whether or not a control plane is following it.
+struct LiveRun {
+    log: watch::Sender<RunLog>,
+    cancel: Arc<Notify>,
+    /// Counts the streams that have followed the run, so a detached stream's watchdog can tell if another came.
+    followers: AtomicU64,
+}
+
+/// Everything a run has produced, kept so a control plane that reattaches can pick up where it lost the stream.
+#[derive(Default)]
+struct RunLog {
+    events: Vec<RunEvent>,
+    result: Option<Result<RunReport>>,
+}
+
 /// The daemon's side: accepts connections from the one control plane it was told about and serves its requests.
 #[derive(Clone)]
 pub struct DaemonProtocol {
@@ -180,6 +203,8 @@ pub struct DaemonProtocol {
     control_plane: EndpointId,
     holds: Option<Arc<SpriteHolds>>,
     endpoint: Option<Endpoint>,
+    runs: Arc<Mutex<HashMap<String, Arc<LiveRun>>>>,
+    attach_patience: Duration,
 }
 
 impl std::fmt::Debug for DaemonProtocol {
@@ -190,7 +215,20 @@ impl std::fmt::Debug for DaemonProtocol {
 
 impl DaemonProtocol {
     pub fn new(runner: Arc<Runner>, control_plane: EndpointId) -> DaemonProtocol {
-        DaemonProtocol { runner, control_plane, holds: None, endpoint: None }
+        DaemonProtocol {
+            runner,
+            control_plane,
+            holds: None,
+            endpoint: None,
+            runs: Arc::default(),
+            attach_patience: ATTACH_PATIENCE,
+        }
+    }
+
+    /// How long a run may go unfollowed before it's cancelled; [`ATTACH_PATIENCE`] unless a test wants less.
+    pub fn attach_patience(mut self, patience: Duration) -> DaemonProtocol {
+        self.attach_patience = patience;
+        self
     }
 
     /// The daemon's own endpoint, to tell iroh when a lockdown has cut its connections.
@@ -208,22 +246,53 @@ impl DaemonProtocol {
     async fn serve_stream(&self, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
         let Some(first) = read_frame::<ToDaemon>(&mut recv).await? else { return Ok(()) };
         let _hold = self.holds.as_ref().map(|h| h.hold());
-        let reply = match first {
-            ToDaemon::Prepare(req) => match self.runner.prepare(&req).await {
-                Ok(()) => FromDaemon::Prepared,
-                Err(e) => FromDaemon::Failed(e),
+        let (live, seen) = match first {
+            ToDaemon::Prepare(req) => {
+                let reply = match self.runner.prepare(&req).await {
+                    Ok(()) => FromDaemon::Prepared,
+                    Err(e) => FromDaemon::Failed(e),
+                };
+                return reply_with(&mut send, &reply).await;
+            }
+            ToDaemon::Run(req) => match self.start(*req).await {
+                Ok(live) => (live, 0),
+                Err(e) => return reply_with(&mut send, &FromDaemon::Failed(e)).await,
             },
-            ToDaemon::Run(req) => match self.serve_run(*req, &mut send, recv).await {
-                Ok(report) => FromDaemon::Report(report),
-                Err(e) => FromDaemon::Failed(e),
+            ToDaemon::Attach { run, seen } => match self.find(&run) {
+                Some(live) => {
+                    tracing::info!(%run, seen, "control plane reattached");
+                    (live, seen)
+                }
+                None => {
+                    let e = Error::NotFound(format!("run {run} on this daemon"));
+                    return reply_with(&mut send, &FromDaemon::Failed(e)).await;
+                }
             },
-            ToDaemon::Cancel => FromDaemon::Failed(Error::Other("cancel without a run".into())),
+            ToDaemon::Cancel => {
+                return reply_with(&mut send, &FromDaemon::Failed(Error::Other("cancel without a run".into()))).await;
+            }
         };
-        write_frame(&mut send, &reply).await?;
-        send.finish().map_err(io_err)
+        let follower = live.followers.fetch_add(1, Ordering::SeqCst) + 1;
+        // The result stays in the run's log, so if this reply doesn't arrive, a reattach gets it again.
+        let followed = match self.follow(&live, seen, &mut send, recv).await {
+            Ok(result) => reply_with(&mut send, &result.map_or_else(FromDaemon::Failed, FromDaemon::Report)).await,
+            Err(e) => Err(e),
+        };
+        if followed.is_err() {
+            self.watch_detached(live, follower);
+        }
+        followed
     }
 
-    async fn serve_run(&self, mut req: RunRequest, send: &mut SendStream, recv: RecvStream) -> Result<RunReport> {
+    fn find(&self, run: &str) -> Option<Arc<LiveRun>> {
+        self.runs.lock().unwrap().get(run).cloned()
+    }
+
+    /// Starts a run on its own task, so it outlives the stream that asked for it.
+    async fn start(&self, mut req: RunRequest) -> Result<Arc<LiveRun>> {
+        if self.runs.lock().unwrap().contains_key(&req.run) {
+            return Err(Error::Conflict(format!("run {} already started; attach to it", req.run)));
+        }
         // Narrowing a Sprite's egress resets which relay IPs it lets through, so once the lockdown is confirmed, the
         // relay names are resolved again (see `resolve_iroh_hosts`) and iroh is told to reconnect.
         KEEP_RESOLVED.lock().unwrap().extend(req.allowed_hosts.iter().cloned());
@@ -235,35 +304,99 @@ impl DaemonProtocol {
                 ep.network_change().await;
             }
         }
-        let cancel = Arc::new(Notify::new());
+        let live = Arc::new(LiveRun {
+            log: watch::Sender::new(RunLog::default()),
+            cancel: Arc::default(),
+            followers: AtomicU64::new(0),
+        });
+        {
+            let mut runs = self.runs.lock().unwrap();
+            // A sandbox runs one step at a time, so once a new run starts, nobody will ask for a finished one.
+            runs.retain(|_, r| r.log.borrow().result.is_none());
+            runs.insert(req.run.clone(), live.clone());
+        }
         let (events, mut rx) = mpsc::unbounded_channel();
         let runner = self.runner.clone();
+        let hold = self.holds.as_ref().map(|h| h.hold());
         let mut run = tokio::spawn({
-            let cancel = cancel.clone();
+            let cancel = live.cancel.clone();
             async move { runner.run(req, events, cancel).await }
         });
-        let mut incoming = frames::<ToDaemon>(recv);
-        let mut control_open = true;
-        let report = loop {
-            tokio::select! {
-                Some(ev) = rx.recv() => write_frame(send, &FromDaemon::Event(ev)).await?,
-                msg = incoming.recv(), if control_open => match msg {
-                    Some(Ok(ToDaemon::Cancel)) => cancel.notify_one(),
-                    Some(Ok(other)) => tracing::warn!(?other, "unexpected message during a run"),
-                    // The control plane went away: stop rather than work unobserved; it requeues the task.
-                    Some(Err(_)) | None => {
-                        control_open = false;
-                        cancel.notify_one();
+        tokio::spawn({
+            let live = live.clone();
+            async move {
+                let _hold = hold;
+                let result = loop {
+                    tokio::select! {
+                        Some(ev) = rx.recv() => live.log.send_modify(|l| l.events.push(ev)),
+                        done = &mut run => break done.unwrap_or_else(|e| Err(Error::Other(format!("run panicked: {e}")))),
                     }
-                },
-                done = &mut run => break done.map_err(|e| Error::Other(format!("run panicked: {e}")))?,
+                };
+                live.log.send_modify(|l| {
+                    while let Ok(ev) = rx.try_recv() {
+                        l.events.push(ev);
+                    }
+                    l.result = Some(result);
+                });
             }
-        };
-        while let Ok(ev) = rx.try_recv() {
-            write_frame(send, &FromDaemon::Event(ev)).await?;
-        }
-        report
+        });
+        Ok(live)
     }
+
+    /// Streams a run's events after the first `seen`, passing on cancels, until it finishes. Fails if the control
+    /// plane goes away; the run carries on regardless.
+    async fn follow(
+        &self,
+        live: &LiveRun,
+        seen: u64,
+        send: &mut SendStream,
+        recv: RecvStream,
+    ) -> Result<Result<RunReport>> {
+        let mut seen = usize::try_from(seen).unwrap_or(usize::MAX);
+        let mut log = live.log.subscribe();
+        let mut incoming = frames::<ToDaemon>(recv);
+        loop {
+            let (new, result) = {
+                let l = log.borrow_and_update();
+                (l.events.get(seen..).unwrap_or_default().to_vec(), l.result.clone())
+            };
+            for ev in new {
+                write_frame(send, &FromDaemon::Event(ev)).await?;
+                seen += 1;
+            }
+            if let Some(result) = result {
+                return Ok(result);
+            }
+            tokio::select! {
+                _ = log.changed() => {}
+                msg = incoming.recv() => match msg {
+                    Some(Ok(ToDaemon::Cancel)) => live.cancel.notify_one(),
+                    Some(Ok(other)) => tracing::warn!(?other, "unexpected message during a run"),
+                    Some(Err(e)) => return Err(e),
+                    None => return Err(io_err("the control plane went away")),
+                },
+            }
+        }
+    }
+
+    /// After a stream following a run drops, cancels the run unless a control plane reattaches in time, so an
+    /// abandoned run doesn't go on working unobserved.
+    fn watch_detached(&self, live: Arc<LiveRun>, follower: u64) {
+        let patience = self.attach_patience;
+        tokio::spawn(async move {
+            tokio::time::sleep(patience).await;
+            let unfinished = live.log.borrow().result.is_none();
+            if unfinished && live.followers.load(Ordering::SeqCst) == follower {
+                tracing::warn!(?patience, "no control plane reattached to the run; cancelling it");
+                live.cancel.notify_one();
+            }
+        });
+    }
+}
+
+async fn reply_with(send: &mut SendStream, reply: &FromDaemon) -> Result<()> {
+    write_frame(send, reply).await?;
+    send.finish().map_err(io_err)
 }
 
 impl ProtocolHandler for DaemonProtocol {
@@ -487,6 +620,68 @@ impl RemoteDaemon {
         let conn = self.connection(sandbox, patience).await?;
         conn.open_bi().await.map_err(io_err)
     }
+    /// Starts a run and follows it to its report. A dropped connection doesn't end the run: the daemon keeps it
+    /// going, and this redials and reattaches, picking up the events after the last one it saw.
+    async fn follow(
+        &self,
+        sandbox: &SandboxId,
+        req: RunRequest,
+        events: &EventSink,
+        cancels: &mut mpsc::UnboundedReceiver<()>,
+    ) -> Result<RunReport> {
+        let run = req.run.clone();
+        let mut hello = ToDaemon::Run(Box::new(req));
+        let mut seen = 0u64;
+        let mut cancelled = false;
+        let mut reattached = 0;
+        loop {
+            let (mut send, recv) = self.open(sandbox, RECONNECT_PATIENCE).await?;
+            let mut sent = write_frame(&mut send, &hello).await;
+            if cancelled && sent.is_ok() {
+                sent = write_frame(&mut send, &ToDaemon::Cancel).await;
+            }
+            let lost = match sent {
+                Err(e) => e,
+                Ok(()) => {
+                    let mut incoming = frames::<FromDaemon>(recv);
+                    loop {
+                        tokio::select! {
+                            Some(()) = cancels.recv() => {
+                                cancelled = true;
+                                if let Err(e) = write_frame(&mut send, &ToDaemon::Cancel).await {
+                                    break e;
+                                }
+                            }
+                            msg = incoming.recv() => match msg {
+                                Some(Ok(FromDaemon::Event(ev))) => {
+                                    seen += 1;
+                                    let _ = events.send(ev);
+                                }
+                                Some(Ok(FromDaemon::Report(report))) => return Ok(report),
+                                Some(Ok(FromDaemon::Failed(e))) => return Err(e),
+                                Some(Ok(FromDaemon::Prepared)) => return Err(io_err("unexpected Prepared during a run")),
+                                Some(Err(e)) => break e,
+                                None => break io_err(format!("the daemon in {} went away", sandbox.0)),
+                            },
+                        }
+                    }
+                }
+            };
+            reattached += 1;
+            if reattached > MAX_REATTACH {
+                return Err(io_err(format!("lost run {run} in {} {MAX_REATTACH} times: {lost}", sandbox.0)));
+            }
+            tracing::warn!(sandbox = %sandbox.0, %run, seen, error = %lost, "lost the daemon mid-run; reattaching");
+            self.disconnect(sandbox);
+            hello = ToDaemon::Attach { run: run.clone(), seen };
+        }
+    }
+
+    fn disconnect(&self, sandbox: &SandboxId) {
+        if let Some(conn) = self.conns.lock().unwrap().remove(sandbox) {
+            conn.close(0u32.into(), b"reattaching");
+        }
+    }
 }
 
 #[async_trait]
@@ -510,31 +705,7 @@ impl Daemon for RemoteDaemon {
         // Registered before connecting, so a cancel that arrives while dialing is kept and sent once the run starts.
         let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
         self.cancels.lock().unwrap().insert(sandbox.clone(), cancel_tx);
-        let opened = self.open(sandbox, RECONNECT_PATIENCE).await;
-        let (mut send, recv) = match opened {
-            Ok(streams) => streams,
-            Err(e) => {
-                self.cancels.lock().unwrap().remove(sandbox);
-                return Err(e);
-            }
-        };
-        write_frame(&mut send, &ToDaemon::Run(Box::new(req))).await?;
-        let mut incoming = frames::<FromDaemon>(recv);
-        let result = loop {
-            tokio::select! {
-                Some(()) = cancel_rx.recv() => write_frame(&mut send, &ToDaemon::Cancel).await?,
-                msg = incoming.recv() => match msg {
-                    Some(Ok(FromDaemon::Event(ev))) => {
-                        let _ = events.send(ev);
-                    }
-                    Some(Ok(FromDaemon::Report(report))) => break Ok(report),
-                    Some(Ok(FromDaemon::Failed(e))) => break Err(e),
-                    Some(Ok(FromDaemon::Prepared)) => break Err(io_err("unexpected Prepared during a run")),
-                    Some(Err(e)) => break Err(e),
-                    None => break Err(io_err(format!("the daemon in {} went away", sandbox.0))),
-                },
-            }
-        };
+        let result = self.follow(sandbox, req, &events, &mut cancel_rx).await;
         self.cancels.lock().unwrap().remove(sandbox);
         result
     }

@@ -75,7 +75,8 @@ impl Runner {
         self.workspace.prepare(req).await
     }
 
-    /// Runs one step until it finishes or `cancel` fires, which ends it with `Error::Cancelled`.
+    /// Runs one step until it finishes or `cancel` fires, which ends it with `Error::Cancelled`. A cancel during the
+    /// checks stops them before anything is published; once publishing starts, the step runs to the end.
     pub async fn run(&self, req: RunRequest, events: EventSink, cancel: Arc<Notify>) -> Result<RunReport> {
         let key = &req.task.key.0;
         self.workspace.confirm_blocked(&req.blocked_hosts).await?;
@@ -99,9 +100,9 @@ impl Runner {
             diff,
         };
         tracing::info!(task = %key, "agent starting");
-        let (outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), cancel, &events).await?;
+        let (outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events).await?;
         tracing::info!(task = %key, "agent finished");
-        let (result, checks) = self.finish(&req, tracker.as_ref(), outcome).await?;
+        let (result, checks) = self.finish(&req, tracker.as_ref(), outcome, &cancel).await?;
         Ok(RunReport { result, checks, usage })
     }
 
@@ -111,7 +112,7 @@ impl Runner {
         req: &RunRequest,
         ctx: RunContext,
         tracker: &dyn Tracker,
-        cancel: Arc<Notify>,
+        cancel: &Notify,
         events: &EventSink,
     ) -> Result<(RunOutcome, Usage)> {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -179,11 +180,16 @@ impl Runner {
         req: &RunRequest,
         tracker: &dyn Tracker,
         outcome: RunOutcome,
+        cancel: &Notify,
     ) -> Result<(RunResult, Vec<CheckResult>)> {
         let key = &req.task.key;
         match outcome {
             RunOutcome::Changes { commits, summary } => {
-                let checks = self.checks(&req.required_checks).await;
+                let checks = tokio::select! {
+                    biased;
+                    _ = cancel.notified() => return Err(Error::Cancelled),
+                    checks = self.checks(&req.required_checks) => checks,
+                };
                 if let Some(failed) = checks.iter().find(|c| !c.passed) {
                     let reason = format!("check {} failed", failed.name);
                     tracker.note(key, &failure_note(&checks)).await?;

@@ -1,5 +1,6 @@
 //! The control plane and sandbox daemons over real iroh connections on localhost: the MVP lifecycle with
-//! `RemoteDaemon` in place of the in-process daemon, plus cancel and the peer check.
+//! `RemoteDaemon` in place of the in-process daemon, plus cancel, reattaching after a dropped connection and the
+//! peer check.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,11 +9,13 @@ use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, RelayMode, SecretKey};
+use tokio::sync::Notify;
 use trailhead_control::{Factory, Outcome};
-use trailhead_daemon::net::{ALPN, DaemonProtocol, Launch, RemoteDaemon, sandbox_key};
+use trailhead_daemon::net::{ALPN, DaemonProtocol, Launch, RemoteDaemon, read_frame, sandbox_key, write_frame};
 use trailhead_factory::{
-    Commit, Compute, Daemon, DaemonSecrets, Error, FactoryConfig, FileChange, Labels, Role, RunOutcome, SandboxId,
-    SandboxSpec, Status, Tracker, Usd, VerdictKind,
+    Commit, Compute, Credential, Daemon, DaemonSecrets, Error, FactoryConfig, FileChange, FromDaemon, Labels, Role,
+    RunEvent, RunOutcome, RunRequest, RunResult, SandboxId, SandboxSpec, Status, TaskKey, ToDaemon, Tracker, Usd,
+    VerdictKind,
 };
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
 
@@ -58,6 +61,7 @@ struct Rig {
     codehost: FakeCodeHost,
     harness: Arc<ScriptedHarness>,
     lookup: Arc<MemoryLookup>,
+    control: Endpoint,
     remote: Arc<RemoteDaemon>,
     local: Arc<LocalDaemon>,
     routers: Vec<Router>,
@@ -72,21 +76,35 @@ impl Rig {
         let local = Arc::new(LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone()));
         let lookup = Arc::new(MemoryLookup::new());
         let control = endpoint(SecretKey::generate(), Some(lookup.clone())).await;
-        let remote =
-            Arc::new(RemoteDaemon::new(control, MASTER, Arc::new(compute.clone()), Launch::new(b"daemon".to_vec())));
-        Rig { tracker, compute, codehost, harness, lookup, remote, local, routers: Vec::new() }
+        let remote = Arc::new(RemoteDaemon::new(
+            control.clone(),
+            MASTER,
+            Arc::new(compute.clone()),
+            Launch::new(b"daemon".to_vec()),
+        ));
+        Rig { tracker, compute, codehost, harness, lookup, control, remote, local, routers: Vec::new() }
     }
 
     /// Stands up the daemon a sandbox would run, from the secrets the control plane would hand it.
     async fn serve(&mut self, sandbox: &str) {
+        self.serve_with(sandbox, trailhead_daemon::net::ATTACH_PATIENCE).await;
+    }
+
+    async fn serve_with(&mut self, sandbox: &str, attach_patience: Duration) {
         let program = self.remote.program(&SandboxId(sandbox.into()));
         let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
         let key = trailhead_daemon::net::parse_secret_key(&secrets.secret_key).unwrap();
         let control_plane = trailhead_daemon::net::parse_endpoint_id(&secrets.control_plane).unwrap();
         let ep = endpoint(key, None).await;
         self.lookup.add_endpoint_info(ep.addr());
-        let protocol = DaemonProtocol::new(self.local.runner(), control_plane);
+        let protocol = DaemonProtocol::new(self.local.runner(), control_plane).attach_patience(attach_patience);
         self.routers.push(Router::builder(ep).accept(ALPN, protocol).spawn());
+    }
+
+    /// A sandbox the fake compute knows about, so the control plane can wake it before dialing.
+    async fn sandbox(&self, name: &str) -> SandboxId {
+        let spec = SandboxSpec { name: name.into(), labels: Labels::new(), egress: Default::default() };
+        self.compute.create(&spec).await.unwrap().id
     }
 
     fn factory(&self) -> Factory {
@@ -97,6 +115,25 @@ impl Rig {
             provider: Arc::new(FakeProvider::new(1)),
             daemon: self.remote.clone(),
         }
+    }
+}
+
+fn request(run: &str, key: TaskKey, credential: Credential) -> RunRequest {
+    RunRequest {
+        run: run.into(),
+        role: Role::Worker,
+        task: trailhead_factory::TaskSpec { key, title: "Slow".into(), description: String::new() },
+        repo: trailhead_factory::Repo { owner: "o".into(), name: "r".into() },
+        base_branch: "main".into(),
+        branch: format!("factory/{run}"),
+        pr: None,
+        model: trailhead_factory::ModelId("fake-sonnet".into()),
+        endpoint: trailhead_factory::Endpoint { base_url: "http://gateway.invalid".into() },
+        max_steps: 5,
+        required_checks: Vec::new(),
+        blocked_hosts: Vec::new(),
+        allowed_hosts: Vec::new(),
+        credential,
     }
 }
 
@@ -145,29 +182,11 @@ async fn lifecycle_over_iroh() {
 async fn cancel_reaches_the_daemon() {
     let mut r = Rig::new().await;
     r.serve("slow").await;
-    let sandbox = SandboxId("slow".into());
-    r.compute
-        .create(&SandboxSpec { name: "slow".into(), labels: Labels::new(), egress: Default::default() })
-        .await
-        .unwrap();
+    let sandbox = r.sandbox("slow").await;
     let key = r.tracker.add_task("TRAIL", "Slow", "");
     r.harness.push(Role::Worker, Script::new(changes()).hang());
     let cred = r.tracker.create_sub_agent("slow", "TRAIL", Duration::from_secs(600)).await.unwrap();
-    let req = trailhead_factory::RunRequest {
-        role: Role::Worker,
-        task: trailhead_factory::TaskSpec { key, title: "Slow".into(), description: String::new() },
-        repo: trailhead_factory::Repo { owner: "o".into(), name: "r".into() },
-        base_branch: "main".into(),
-        branch: "factory/slow".into(),
-        pr: None,
-        model: trailhead_factory::ModelId("fake-sonnet".into()),
-        endpoint: trailhead_factory::Endpoint { base_url: "http://gateway.invalid".into() },
-        max_steps: 5,
-        required_checks: Vec::new(),
-        blocked_hosts: Vec::new(),
-        allowed_hosts: Vec::new(),
-        credential: cred,
-    };
+    let req = request("slow", key, cred);
     let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
     let remote = r.remote.clone();
     let run = tokio::spawn({
@@ -179,6 +198,82 @@ async fn cancel_reaches_the_daemon() {
     let out = tokio::time::timeout(Duration::from_secs(10), run).await.unwrap().unwrap();
     assert_eq!(out.unwrap_err(), Error::Cancelled);
     assert_eq!(r.compute.wakes("slow"), 1, "woken once, before the first dial");
+}
+
+#[tokio::test]
+async fn a_run_survives_a_dropped_connection() {
+    let mut r = Rig::new().await;
+    r.serve("flaky").await;
+    let sandbox = r.sandbox("flaky").await;
+    let key = r.tracker.add_task("TRAIL", "Flaky", "");
+    let gate = Arc::new(Notify::new());
+    r.harness.push(Role::Worker, Script::new(changes()).steps(2, 100).wait_for(gate.clone()));
+    let cred = r.tracker.create_sub_agent("flaky-a1", "TRAIL", Duration::from_secs(600)).await.unwrap();
+    let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let remote = r.remote.clone();
+    let run = tokio::spawn({
+        let sandbox = sandbox.clone();
+        let req = request("flaky-a1", key.clone(), cred);
+        async move { remote.run(&sandbox, req, events).await }
+    });
+    let mut seen = Vec::new();
+    while seen.len() < 4 {
+        seen.push(tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap());
+    }
+
+    // The connection drops while the agent is still working.
+    r.remote.forget(&sandbox).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    gate.notify_one();
+
+    let report = tokio::time::timeout(Duration::from_secs(20), run).await.unwrap().unwrap().unwrap();
+    assert!(matches!(report.result, RunResult::PrOpened(_)), "{:?}", report.result);
+    while let Ok(ev) = rx.try_recv() {
+        seen.push(ev);
+    }
+    let steps = seen.iter().filter(|e| matches!(e, RunEvent::StepStarted { .. })).count();
+    assert_eq!((seen.len(), steps), (4, 2), "every event exactly once: {seen:?}");
+    assert_eq!(r.harness.contexts().len(), 1, "the run went on rather than starting again");
+    assert_eq!(r.compute.wakes("flaky"), 2, "redialed once after the drop");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+}
+
+#[tokio::test]
+async fn an_abandoned_run_is_cancelled() {
+    let mut r = Rig::new().await;
+    r.serve_with("lonely", Duration::from_millis(200)).await;
+    let key = r.tracker.add_task("TRAIL", "Lonely", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100).hang());
+    let cred = r.tracker.create_sub_agent("lonely-a1", "TRAIL", Duration::from_secs(600)).await.unwrap();
+    let daemon = sandbox_key(&MASTER, &SandboxId("lonely".into())).public();
+
+    let conn = r.control.connect(daemon, ALPN).await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    write_frame(&mut send, &ToDaemon::Run(Box::new(request("lonely-a1", key, cred)))).await.unwrap();
+    let first = read_frame::<FromDaemon>(&mut recv).await.unwrap();
+    assert!(matches!(first, Some(FromDaemon::Event(_))), "{first:?}");
+    conn.close(0u32.into(), b"gone");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    // Reattaching later finds the run cancelled, with its events replayed from the start.
+    let conn = r.control.connect(daemon, ALPN).await.unwrap();
+    let attach = |run: &str| ToDaemon::Attach { run: run.into(), seen: 0 };
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    write_frame(&mut send, &attach("lonely-a1")).await.unwrap();
+    let mut replayed = 0;
+    let last = loop {
+        match read_frame::<FromDaemon>(&mut recv).await.unwrap() {
+            Some(FromDaemon::Event(_)) => replayed += 1,
+            other => break other,
+        }
+    };
+    assert!(matches!(last, Some(FromDaemon::Failed(Error::Cancelled))), "{last:?}");
+    assert_eq!(replayed, 2);
+
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    write_frame(&mut send, &attach("nobody")).await.unwrap();
+    let reply = read_frame::<FromDaemon>(&mut recv).await.unwrap();
+    assert!(matches!(reply, Some(FromDaemon::Failed(Error::NotFound(_)))), "{reply:?}");
 }
 
 #[tokio::test]

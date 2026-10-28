@@ -96,6 +96,7 @@ impl Workspace for GitWorkspace {
             .arg(format!("exec 2>&1\n{}", check.command))
             .current_dir(&self.dir)
             .stdin(Stdio::null())
+            .kill_on_drop(true)
             .output()
             .await;
         let (passed, output) = match out {

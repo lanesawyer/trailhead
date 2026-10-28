@@ -29,6 +29,8 @@ pub struct PrepareRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRequest {
+    /// Names the run, so a control plane that loses its connection can reattach to it (`ToDaemon::Attach`).
+    pub run: String,
     pub role: Role,
     pub task: TaskSpec,
     pub repo: Repo,
@@ -78,11 +80,17 @@ pub struct RunReport {
 }
 
 /// Control plane to daemon. One iroh stream carries one request: `Prepare`, or
-/// `Run` followed by at most one `Cancel`.
+/// `Run` or `Attach` followed by `Cancel`s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToDaemon {
     Prepare(PrepareRequest),
     Run(Box<RunRequest>),
+    /// Resumes following a run after a dropped connection: the daemon sends the events after the first `seen`,
+    /// then the rest of the run as usual. A run the daemon doesn't know ends with `Failed(NotFound)`.
+    Attach {
+        run: String,
+        seen: u64,
+    },
     Cancel,
 }
 

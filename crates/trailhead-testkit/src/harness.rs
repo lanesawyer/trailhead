@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use tokio::sync::Notify;
 use trailhead_factory::{EventSink, Feedback, Harness, Result, Role, RunContext, RunEvent, RunOutcome, Usage};
 
 /// What a scripted agent does in one run: a model call per step, then an outcome.
@@ -11,15 +12,22 @@ pub struct Script {
     pub outcome: RunOutcome,
     /// Never finishes after its steps, like an agent stuck in a loop.
     pub hang: bool,
+    /// Waits for this after its steps before finishing.
+    pub gate: Option<Arc<Notify>>,
 }
 
 impl Script {
     pub fn new(outcome: RunOutcome) -> Script {
-        Script { steps: Vec::new(), outcome, hang: false }
+        Script { steps: Vec::new(), outcome, hang: false, gate: None }
     }
 
     pub fn hang(mut self) -> Script {
         self.hang = true;
+        self
+    }
+
+    pub fn wait_for(mut self, gate: Arc<Notify>) -> Script {
+        self.gate = Some(gate);
         self
     }
 
@@ -70,6 +78,9 @@ impl Harness for ScriptedHarness {
             let _ = events.send(RunEvent::Usage { model: ctx.model.clone(), usage });
             // Lets a canceller act between steps, as a real model call would.
             tokio::task::yield_now().await;
+        }
+        if let Some(gate) = &script.gate {
+            gate.notified().await;
         }
         if script.hang {
             std::future::pending::<()>().await;

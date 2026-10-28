@@ -241,6 +241,7 @@ impl Factory {
         sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
         let req = RunRequest {
+            run: name.clone(),
             role: Role::Worker,
             task: spec(task),
             repo: self.config.repo.repo(),
@@ -307,6 +308,7 @@ impl Factory {
         let sandbox = self.create_sandbox(&name, task, Role::Reviewer).await?;
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
         let req = RunRequest {
+            run: name.clone(),
             role: Role::Reviewer,
             task: spec(task),
             repo: self.config.repo.repo(),
