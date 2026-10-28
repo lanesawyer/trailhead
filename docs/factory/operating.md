@@ -52,7 +52,7 @@ run finished task=TRAIL-105 outcome=…
 ## Sandboxes and cost
 
 - Workers run in a lazy pool of warm Sprites (`trailhead-w1`, …, up to `max_sandboxes`). The first task pays a cold build of the repo (about 12 minutes for Trailhead today; TRAIL-120 should cut it). After that, each task restores the warm checkpoint and builds incrementally, in about a minute.
-- Between tasks, pooled Sprites are restored (wiping the last task), have no egress and no connector access, and pause about two minutes after their last task. A paused Sprite costs only storage. Stopping the factory doesn't delete the pool; destroy a Sprite in the Sprites dashboard if you want it gone.
+- Between tasks, pooled Sprites are restored (wiping the last task), have no egress and no connector access, and pause about two minutes after their last task. A paused Sprite costs only storage. Stopping the factory doesn't delete the pool; destroy a Sprite in the Sprites dashboard if you want it gone. A Sprite that keeps failing to release is given up on after five tries or ten minutes: an `ERROR` line in the log, the label `state=broken`, and a new Sprite for the next task. Destroy it in the dashboard if the factory can't.
 - Reviewers get a fresh Sprite each, skip the build, and are destroyed after.
 - Each run is capped by its profile's budget: dollars (API-equivalent in subscription mode), minutes and steps.
 

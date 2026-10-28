@@ -65,13 +65,13 @@ async fn rig() -> Rig {
         Box::pin(async move { Ok(Arc::new(CoreTracker::authenticate(s, &cred).await?) as Arc<dyn Tracker>) })
     });
     let daemon = Arc::new(LocalDaemon::connecting(harness.clone(), Arc::new(codehost.clone()), connect));
-    let factory = Factory {
-        config: FactoryConfig::parse(CONFIG).unwrap(),
-        compute: Arc::new(compute.clone()),
-        tracker: Arc::new(tracker.clone()),
-        provider: Arc::new(FakeProvider::new(1)),
+    let factory = Factory::new(
+        FactoryConfig::parse(CONFIG).unwrap(),
+        Arc::new(compute.clone()),
+        Arc::new(tracker.clone()),
+        Arc::new(FakeProvider::new(1)),
         daemon,
-    };
+    );
     Rig { store, human, factory, tracker, compute, codehost, harness }
 }
 

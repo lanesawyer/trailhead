@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -19,6 +19,7 @@ struct Live {
 #[derive(Clone, Default)]
 pub struct FakeCompute {
     live: Arc<Mutex<BTreeMap<SandboxId, Live>>>,
+    failing: Arc<Mutex<BTreeSet<(String, &'static str)>>>,
 }
 
 impl FakeCompute {
@@ -59,6 +60,23 @@ impl FakeCompute {
 
     pub fn wakes(&self, name: &str) -> usize {
         self.live.lock().unwrap().get(&SandboxId(name.into())).map_or(0, |l| l.wakes)
+    }
+
+    /// Makes one operation (`restore`, `set_egress`, `set_labels` or `destroy`) fail on a sandbox until
+    /// [`FakeCompute::heal`], like a Sprite whose storage has gone bad.
+    pub fn fail(&self, name: &str, op: &'static str) {
+        self.failing.lock().unwrap().insert((name.to_string(), op));
+    }
+
+    pub fn heal(&self, name: &str) {
+        self.failing.lock().unwrap().retain(|(n, _)| n != name);
+    }
+
+    fn check(&self, id: &SandboxId, op: &'static str) -> Result<()> {
+        if self.failing.lock().unwrap().contains(&(id.0.clone(), op)) {
+            return Err(Error::Other(format!("sprites api 503 Service Unavailable: Storage not ready ({op})")));
+        }
+        Ok(())
     }
 
     fn with<T>(&self, id: &SandboxId, f: impl FnOnce(&mut Live) -> Result<T>) -> Result<T> {
@@ -102,6 +120,7 @@ impl Compute for FakeCompute {
     }
 
     async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()> {
+        self.check(id, "restore")?;
         self.with(id, |l| {
             if !l.checkpoints.iter().any(|(c, _)| c == cp) {
                 return Err(Error::NotFound(format!("checkpoint {}", cp.0)));
@@ -127,6 +146,7 @@ impl Compute for FakeCompute {
     }
 
     async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()> {
+        self.check(id, "set_egress")?;
         self.with(id, |l| {
             l.egress = egress.clone();
             Ok(())
@@ -134,6 +154,7 @@ impl Compute for FakeCompute {
     }
 
     async fn set_labels(&self, id: &SandboxId, labels: &Labels) -> Result<()> {
+        self.check(id, "set_labels")?;
         self.with(id, |l| {
             l.sandbox.labels = labels.clone();
             Ok(())
@@ -141,6 +162,7 @@ impl Compute for FakeCompute {
     }
 
     async fn destroy(&self, id: &SandboxId) -> Result<()> {
+        self.check(id, "destroy")?;
         self.live.lock().unwrap().remove(id);
         Ok(())
     }

@@ -56,13 +56,13 @@ fn rig_with(config: &str) -> Rig {
     let codehost = FakeCodeHost::new();
     let harness = Arc::new(ScriptedHarness::new());
     let daemon = Arc::new(LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone()));
-    let factory = Factory {
-        config: FactoryConfig::parse(config).unwrap(),
-        compute: Arc::new(compute.clone()),
-        tracker: Arc::new(tracker.clone()),
-        provider: Arc::new(FakeProvider::new(1)),
-        daemon: daemon.clone(),
-    };
+    let factory = Factory::new(
+        FactoryConfig::parse(config).unwrap(),
+        Arc::new(compute.clone()),
+        Arc::new(tracker.clone()),
+        Arc::new(FakeProvider::new(1)),
+        daemon.clone(),
+    );
     Rig { factory, tracker, compute, codehost, harness, daemon }
 }
 
@@ -266,6 +266,7 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
             released: vec![],
             requeued: vec![crashed.0.clone()],
             reviewed: vec![unreviewed.0.clone()],
+            abandoned: vec![],
         }
     );
     let names: Vec<String> = r.compute.sandboxes().into_iter().map(|s| s.name).collect();
@@ -496,6 +497,95 @@ async fn a_pooled_sandbox_that_cant_be_restored_is_destroyed_without_stopping_re
     assert!(r.compute.get("trailhead-w1").is_none(), "never reused with leftovers; destroyed");
     assert_eq!(done.released, ["trailhead-w1"]);
     assert_eq!(done.destroyed, ["trail-99-a1"]);
+}
+
+/// Runs one task through the pool so `trailhead-w1` exists and is warm, then leaves it busy as a crash would, with
+/// its storage gone bad for `ops`.
+async fn wedged_pool(r: &Rig, ops: &[&'static str]) {
+    r.tracker.add_task("TRAIL", "First", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.insert(label::STATE.into(), label::BUSY.into());
+    labels.insert(label::TASK.into(), "TRAIL-9".into());
+    labels.insert(label::ROLE.into(), "worker".into());
+    r.compute.set_labels(&trailhead_factory::SandboxId("trailhead-w1".into()), &labels).await.unwrap();
+    for op in ops {
+        r.compute.fail("trailhead-w1", op);
+    }
+}
+
+/// Reconciles until it gives up on a sandbox, stepping past each backoff.
+async fn reconcile_until_abandoned(r: &Rig) {
+    for _ in 0..20 {
+        let done = r.factory.reconcile().await.unwrap();
+        if !done.abandoned.is_empty() {
+            assert_eq!(done.abandoned, ["trailhead-w1"]);
+            return;
+        }
+        assert!(done.released.is_empty());
+        tokio::time::advance(std::time::Duration::from_secs(5 * 60)).await;
+    }
+    panic!("never gave up on trailhead-w1");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pooled_sandbox_that_wont_release_is_abandoned_and_replaced() {
+    let r = rig();
+    wedged_pool(&r, &["set_egress", "destroy"]).await;
+    // Retries back off: an immediate second reconcile doesn't try again.
+    r.factory.reconcile().await.unwrap();
+    let again = r.factory.reconcile().await.unwrap();
+    assert!(again.abandoned.is_empty() && again.released.is_empty());
+
+    // Five tries or ten minutes, whichever comes first; with these waits, ten minutes.
+    reconcile_until_abandoned(&r).await;
+    let w1 = r.compute.get("trailhead-w1").expect("destroy failed, so it's still there");
+    assert_eq!(w1.labels.get(label::STATE).map(String::as_str), Some(label::BROKEN));
+    assert!(!w1.labels.contains_key(label::ROLE), "no role, so no connector access");
+
+    // The pool's one place is free again, so new work runs in a new sandbox.
+    let key = r.tracker.add_task("TRAIL", "Second", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(r.tracker.task(&key).run.host.as_deref(), Some("trailhead-w2"));
+
+    // Once the compute host lets it, the broken one is destroyed.
+    r.compute.heal("trailhead-w1");
+    tokio::time::advance(std::time::Duration::from_secs(5 * 60)).await;
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.destroyed, ["trailhead-w1"]);
+    assert!(r.compute.get("trailhead-w1").is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sandbox_that_cant_even_be_labelled_broken_is_still_left_out() {
+    let r = rig();
+    wedged_pool(&r, &["set_egress", "destroy", "set_labels"]).await;
+    reconcile_until_abandoned(&r).await;
+    let w1 = r.compute.get("trailhead-w1").unwrap();
+    assert_eq!(w1.labels.get(label::STATE).map(String::as_str), Some(label::BUSY), "labels couldn't change");
+
+    let key = r.tracker.add_task("TRAIL", "Second", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).run.host.as_deref(), Some("trailhead-w2"), "out of the cap in memory");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sandbox_that_recovers_is_released_as_usual() {
+    let r = rig();
+    wedged_pool(&r, &["set_egress"]).await;
+    assert!(r.factory.reconcile().await.unwrap().released.is_empty());
+    r.compute.heal("trailhead-w1");
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.released, ["trailhead-w1"]);
+    assert!(done.abandoned.is_empty());
 }
 
 #[tokio::test]

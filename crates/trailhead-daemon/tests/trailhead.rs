@@ -148,13 +148,13 @@ impl Rig {
     }
 
     fn factory(&self) -> Factory {
-        Factory {
-            config: FactoryConfig::parse(CONFIG).unwrap(),
-            compute: Arc::new(self.compute.clone()),
-            tracker: Arc::new(self.tracker.clone()),
-            provider: Arc::new(FakeProvider::new(1)),
-            daemon: self.remote.clone(),
-        }
+        Factory::new(
+            FactoryConfig::parse(CONFIG).unwrap(),
+            Arc::new(self.compute.clone()),
+            Arc::new(self.tracker.clone()),
+            Arc::new(FakeProvider::new(1)),
+            self.remote.clone(),
+        )
     }
 
     async fn task(&self, title: &str) -> TaskKey {

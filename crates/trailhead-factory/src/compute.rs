@@ -23,10 +23,13 @@ pub mod label {
     pub const ROLE: &str = "role";
     /// Marks a pooled worker sandbox, kept warm between tasks (`docs/factory/sandbox.md`).
     pub const POOL: &str = "pool";
-    /// A pooled sandbox's state: [`IDLE`] or [`BUSY`].
+    /// A pooled sandbox's state: [`IDLE`], [`BUSY`] or [`BROKEN`].
     pub const STATE: &str = "state";
     pub const IDLE: &str = "idle";
     pub const BUSY: &str = "busy";
+    /// Kept failing to release and couldn't be destroyed: out of the pool and the sandbox cap, destroyed when the
+    /// compute host lets it.
+    pub const BROKEN: &str = "broken";
     /// The checkpoint a pooled sandbox is restored to before and after each task.
     pub const WARM: &str = "warm";
 }

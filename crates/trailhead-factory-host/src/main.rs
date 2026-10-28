@@ -141,13 +141,8 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router), String> {
         Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, daemon.peers())).spawn();
     tracing::info!(endpoint = %endpoint.id(), project = %config.repo.project, repo = %config.repo.repo().slug(), "factory ready");
 
-    let factory = Factory {
-        config,
-        compute,
-        tracker: Arc::new(tracker),
-        provider: Arc::new(Anthropic::new(opts.model_endpoint.clone())),
-        daemon,
-    };
+    let factory =
+        Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon);
     Ok((Arc::new(factory), tunnel))
 }
 
