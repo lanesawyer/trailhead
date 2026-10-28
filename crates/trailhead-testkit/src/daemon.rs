@@ -116,9 +116,14 @@ impl LocalDaemon {
         self.workspace.failing.lock().unwrap().insert(name.to_string(), (output.to_string(), None));
     }
 
-    /// Makes a named check fail its next `times` runs, then pass.
+    /// Makes a named check fail its next `times` runs, then pass. Zero times means it passes.
     pub fn fail_check_times(&self, name: &str, output: &str, times: usize) {
-        self.workspace.failing.lock().unwrap().insert(name.to_string(), (output.to_string(), Some(times)));
+        let mut failing = self.workspace.failing.lock().unwrap();
+        if times == 0 {
+            failing.remove(name);
+        } else {
+            failing.insert(name.to_string(), (output.to_string(), Some(times)));
+        }
     }
 
     pub fn pass_check(&self, name: &str) {
