@@ -23,6 +23,8 @@ struct Sprite {
     policy: Value,
     checkpoints: Vec<String>,
     restores: Vec<String>,
+    /// Restores whose progress stream is cut off before it completes, as when the container restarts mid-stream.
+    cut_restores: usize,
     files: BTreeMap<String, (Vec<u8>, String)>,
     services: BTreeMap<String, Value>,
     started: Vec<String>,
@@ -140,6 +142,13 @@ async fn restore(State(api): State<Shared>, Path((name, cp)): Path<(String, Stri
         return ndjson(&[start, json!({ "type": "error", "error": err, "time": "2026-10-27T01:48:02Z" })]);
     }
     s.restores.push(cp.clone());
+    if s.cut_restores > 0 {
+        s.cut_restores -= 1;
+        let chunks: Vec<std::result::Result<String, std::io::Error>> =
+            vec![Ok(format!("{start}\n")), Err(std::io::Error::other("container restarted"))];
+        let body = axum::body::Body::from_stream(futures_util::stream::iter(chunks));
+        return ([("content-type", "application/x-ndjson")], body).into_response();
+    }
     ndjson(&[
         start,
         json!({ "type": "complete", "data": format!("Restore from {cp} complete"), "time": "2026-10-27T01:48:04Z" }),
@@ -405,4 +414,19 @@ async fn wake_takes_a_short_hold() {
         "{started:?}"
     );
     assert!(started[0].ends_with("http://sprite/v1/tasks/trailhead-wake"), "{started:?}");
+}
+
+#[tokio::test]
+async fn an_interrupted_restore_is_retried() {
+    let (api, url) = serve().await;
+    let compute = SpritesCompute::with_url(&url, TOKEN).unwrap();
+    let id = compute.create(&spec("r", &[], &[])).await.unwrap().id;
+    let cp = compute.checkpoint(&id, "warm").await.unwrap();
+    api.lock().unwrap().sprites.get_mut("r").unwrap().cut_restores = 1;
+
+    compute.restore(&id, &cp).await.unwrap();
+    assert_eq!(api.lock().unwrap().sprites["r"].restores, ["v2", "v2"], "cut off once, then restored again");
+
+    let unknown = compute.restore(&id, &CheckpointId("v9".into())).await;
+    assert!(matches!(unknown, Err(Error::NotFound(_))), "an error event isn't retried: {unknown:?}");
 }

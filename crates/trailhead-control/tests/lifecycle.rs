@@ -465,3 +465,24 @@ async fn reconcile_returns_a_busy_pooled_sandbox_to_idle() {
     assert_eq!(after.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
     assert!(!after.labels.contains_key(label::TASK));
 }
+
+#[tokio::test]
+async fn a_pooled_sandbox_that_cant_be_restored_is_destroyed_without_stopping_reconcile() {
+    let r = rig();
+    r.tracker.add_task("TRAIL", "First", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    // Left busy by a crash, pointing at a warm checkpoint that's gone.
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.insert(label::STATE.into(), label::BUSY.into());
+    labels.insert(label::WARM.into(), "gone".into());
+    r.compute.set_labels(&trailhead_factory::SandboxId("trailhead-w1".into()), &labels).await.unwrap();
+    // And an orphan, to show reconcile carries on past the failure.
+    live(&r.compute, "trail-99-a1", &TaskKey("TRAIL-99".into()), "worker").await;
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(r.compute.get("trailhead-w1").is_none(), "never reused with leftovers; destroyed");
+    assert_eq!(done.released, ["trailhead-w1"]);
+    assert_eq!(done.destroyed, ["trail-99-a1"]);
+}

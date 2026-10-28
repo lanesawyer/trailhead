@@ -404,13 +404,18 @@ impl Factory {
     }
 
     /// Returns a worker sandbox to the pool: restored to its warm checkpoint, which wipes everything the task did,
-    /// with no egress. One that never got warm is destroyed instead.
+    /// with no egress. One that never got warm, or can't be restored, is destroyed instead: a sandbox that may still
+    /// hold the last task's leftovers is never handed to another task.
     async fn release_worker(&self, sandbox: &Sandbox) -> Result<()> {
         self.compute.set_egress(&sandbox.id, &Egress::none()).await?;
         let Some(warm) = sandbox.labels.get(label::WARM).cloned() else {
             return self.compute.destroy(&sandbox.id).await;
         };
-        self.compute.restore(&sandbox.id, &CheckpointId(warm.clone())).await?;
+        if let Err(e) = self.compute.restore(&sandbox.id, &CheckpointId(warm.clone())).await {
+            tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't restore the warm checkpoint; destroying");
+            self.daemon.forget(&sandbox.id).await;
+            return self.compute.destroy(&sandbox.id).await;
+        }
         self.daemon.forget(&sandbox.id).await;
         self.compute.set_labels(&sandbox.id, &self.pooled(label::IDLE, Some(&warm), None)).await
     }
@@ -525,16 +530,23 @@ impl Factory {
             if parked {
                 continue;
             }
+            // One sandbox's failure is logged and skipped rather than stopping the control plane from starting.
             if sandbox.labels.contains_key(label::POOL) {
                 // A pooled sandbox stays; one left busy by an interrupted run goes back to idle.
                 if sandbox.labels.get(label::STATE).map(String::as_str) != Some(label::IDLE) {
-                    self.release_worker(sandbox).await?;
-                    done.released.push(sandbox.name.clone());
+                    match self.release_worker(sandbox).await {
+                        Ok(()) => done.released.push(sandbox.name.clone()),
+                        Err(e) => {
+                            tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't release a pooled sandbox")
+                        }
+                    }
                 }
                 continue;
             }
-            self.compute.destroy(&sandbox.id).await?;
-            done.destroyed.push(sandbox.name.clone());
+            match self.compute.destroy(&sandbox.id).await {
+                Ok(()) => done.destroyed.push(sandbox.name.clone()),
+                Err(e) => tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't destroy an orphaned sandbox"),
+            }
         }
 
         for task in &tasks {

@@ -181,9 +181,22 @@ impl Compute for SpritesCompute {
         }
     }
 
+    /// Restoring restarts the Sprite's container, which can cut off the progress stream mid-way. Restoring the same
+    /// checkpoint again is harmless, so transport errors are retried; an `error` event (such as an unknown checkpoint)
+    /// isn't.
     async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()> {
-        let req = self.request(Method::POST, self.url(&[&id.0, "checkpoints", &cp.0, "restore"]));
-        self.stream(req).await.map(drop)
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let req = self.request(Method::POST, self.url(&[&id.0, "checkpoints", &cp.0, "restore"]));
+            match self.stream(req).await {
+                Err(Error::Other(msg)) if msg.starts_with(TRANSPORT) && tries < RESTORE_TRIES => {
+                    tracing::warn!(sandbox = %id.0, checkpoint = %cp.0, error = %msg, tries, "restore interrupted; retrying");
+                    tokio::time::sleep(Duration::from_secs(2 * tries)).await;
+                }
+                other => return other.map(drop),
+            }
+        }
     }
 
     /// Uploads the files, defines the program as a Sprites service (supervised, and restarted when the Sprite wakes),
@@ -340,8 +353,13 @@ struct StreamEvent {
     error: Option<String>,
 }
 
+/// The prefix of errors from the connection itself, as opposed to the API's answer.
+const TRANSPORT: &str = "sprites api: ";
+
+const RESTORE_TRIES: u64 = 3;
+
 fn http_err(e: reqwest::Error) -> Error {
-    Error::Other(format!("sprites api: {e}"))
+    Error::Other(format!("{TRANSPORT}{e}"))
 }
 
 async fn send(req: RequestBuilder) -> Result<Response> {
