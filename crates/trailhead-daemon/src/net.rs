@@ -137,8 +137,13 @@ pub async fn resolve_iroh_hosts() {
     }
 }
 
-/// Keeps iroh connectable: its hosts are re-resolved every minute, in case the Sprite's allowance lapses with the
-/// DNS TTL, and right away after the Sprite resumes from a pause, which drops every connection. A resume shows as the
+/// Well inside QUIC's 30-second idle timeout, so a relay connection cut by an egress change comes back in time.
+pub const RESOLVE_EVERY: Duration = Duration::from_secs(10);
+
+/// Keeps iroh connectable: its hosts are re-resolved every [`RESOLVE_EVERY`], since any egress change resets which
+/// relay IPs the Sprite allows, and can land before a run request reaches the daemon (TRAIL-105's attempt 4 lost its
+/// connection that way). They're also re-resolved right away after the Sprite resumes from a pause, which drops every
+/// connection. A resume shows as the
 /// wall clock jumping between ticks; then iroh is told the network changed so it rebuilds its relay connection.
 pub fn watch_network(endpoint: Endpoint) {
     tokio::spawn(async move {
@@ -149,7 +154,7 @@ pub fn watch_network(endpoint: Endpoint) {
             let now = std::time::SystemTime::now();
             let gap = now.duration_since(last).unwrap_or_default();
             let resumed = gap > tick * 3;
-            if resumed || since_resolve >= Duration::from_secs(60) {
+            if resumed || since_resolve >= RESOLVE_EVERY {
                 resolve_iroh_hosts().await;
                 since_resolve = Duration::ZERO;
             }
