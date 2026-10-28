@@ -1,6 +1,6 @@
 # Task-engine changes for the factory
 
-Changes `trailhead-core` and `trailhead-server` need before the factory can use them fully. Checked against commit `bc3fa26`. Each is filed in `TRAIL`; the task key is in its heading. The MVP needs only #5 ([mvp.md](mvp.md)).
+Changes `trailhead-core` and `trailhead-server` need before the factory can use them fully. Statuses checked on 2026-10-28, after the MVP. Each is filed in `TRAIL`; the task key is in its heading. The MVP needs only #5 ([mvp.md](mvp.md)).
 
 ## 1. Resume affinity (TRAIL-83)
 
@@ -34,7 +34,7 @@ Done: tokens take an optional `expires_in_seconds` and never outlive the token t
 trailhead add "Optional expiry on tokens, for short-lived sub-agent tokens" -p TRAIL -P 2
 ```
 
-## 5. Tunnel access from sandboxes (TRAIL-78)
+## 5. Tunnel access from sandboxes (TRAIL-78, done)
 
 Done differently in M4: sandboxes reach the server through the control plane's iroh API tunnel, not `dumbpipe`, so no engine change was needed ([state.md](state.md#trailhead-access)). The original plan follows.
 

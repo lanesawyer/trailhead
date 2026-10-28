@@ -35,36 +35,41 @@ Everything is **AGPL-3.0**: the server, CLI, MCP server, SDKs and plugins. Clien
 
 ## Architecture
 
-One Rust workspace producing one binary, built around a core crate that every interface shares.
+One Rust workspace around a core crate that every interface shares. It builds three binaries: `trailhead` (the CLI, which also runs the server), `trailhead-factory` (the factory's control plane) and `trailhead-daemon` (uploaded into each sandbox).
 
 ```
- Your app        Agents        OpenClaw plugin     trailhead CLI
- (REST + SSE)    (MCP)         (REST)              (REST, auto-starts server)
+ Your app        Agents        OpenClaw         trailhead CLI
+ (REST + SSE)    (MCP)         (MCP + skill)    (REST, auto-starts server)
       \             |               |                 /
        +------------+---------------+----------------+
                             |
               trailhead-server (axum)
       REST /v1 · MCP (rmcp) · SSE events · outbound webhooks
-                            |
-                    trailhead-core
-   domain rules · claims/leases · ready queue · event log, undo, outbox
-                 /                          \
-                            |
-                     SQLite file (WAL)
+                            |                         \
+                    trailhead-core  <-----------  trailhead-factory (control plane)
+   domain rules · claims/leases · ready queue        |  run loop · pool · budgets · reconcile
+   event log, undo, outbox                           |  iroh: daemon protocol + API tunnel
+                            |                        v
+                     SQLite file (WAL)         Sprites, each running trailhead-daemon
+                                               (Claude Code, checks, publish to GitHub)
 ```
+
+The control plane shares the server's database through `trailhead-core` and forwards the daemons' API tunnel to the server's loopback port, so sandboxes reach Trailhead as their own sub-agents without the server being exposed. It runs as a separate process for now; moving it into the server is TRAIL-164.
 
 Remote machines reach the server through a tunnel (iroh via `dumbpipe`, Tailscale, SSH), never by binding it to a public interface. The CLI is a REST client of the server wherever it runs. Pointed at its own machine's server, it starts `trailhead serve` in the background if none is running.
 
 | Crate | Role | Key dependencies |
 | --- | --- | --- |
-| `trailhead-core` | Schema, domain logic, storage trait, event log | `libsql`, `serde` |
+| `trailhead-core` | Schema, domain logic, the `Store` API, event log | `libsql`, `serde` |
 | `trailhead-server` | REST, MCP, SSE, webhooks | `axum`, `tokio`, `utoipa`, `rmcp` |
 | `trailhead` (CLI) | REST client for people and shell-capable agents; auto-starts a local server | `clap`, `reqwest` |
 | `trailhead-factory` | Factory domain types, the five plugin traits, the daemon contract, the per-repo factory file | `async-trait`, `toml` |
-| `trailhead-control` | Control plane: run loop, budget metering, review dispatch, reconcile; in-process `Tracker` over `trailhead-core` | `tokio` |
+| `trailhead-control` | Control plane: run loop, sandbox pool, budget metering, review dispatch, reconcile; in-process `Tracker` over `trailhead-core` | `tokio` |
+| `trailhead-factory-host` | The `trailhead-factory` binary that assembles and runs the control plane | `iroh`, `clap` |
+| `trailhead-daemon` | The in-sandbox daemon and the iroh transport between it and the control plane | `iroh` |
 | `trailhead-testkit` | In-memory fakes for every seam and an in-process daemon | |
 
-Further factory crates (the in-sandbox daemon, Sprites compute, the Claude Code harness, Anthropic, GitHub) are listed in `docs/factory/seams.md`. Factory crates are `publish = false` until the factory ships behind its Cargo feature.
+The vendor implementations (Sprites compute, the Claude Code harness, Anthropic, GitHub) are listed in `docs/factory/seams.md`. Factory crates are `publish = false` while the factory is built from this repo; shipping it in the `trailhead` CLI is TRAIL-116.
 
 | Interface | Best for |
 | --- | --- |
@@ -72,7 +77,7 @@ Further factory crates (the in-sandbox daemon, Sprites compute, the Claude Code 
 | MCP | Agents without a shell, such as chat clients and OpenClaw |
 | REST | Apps and widgets people build |
 
-**Storage.** Trailhead targets SQLite through a small storage trait in `trailhead-core`, implemented with the `libsql` crate over a plain SQLite file in WAL mode. The server is one process, so the file is all the storage it needs wherever it runs. `libsql`'s `remote` feature (Turso Cloud) stays behind the storage seam but is deferred: it is only worth using if a deployment ever needs more than one server process.
+**Storage.** Trailhead targets SQLite through the `Store` API in `trailhead-core` (see the Storage seam decision), implemented with the `libsql` crate over a plain SQLite file in WAL mode. The server is one process, so the file is all the storage it needs wherever it runs. `libsql`'s `remote` feature (Turso Cloud) stays behind the storage seam but is deferred: it is only worth using if a deployment ever needs more than one server process.
 
 Queries use standard SQLite SQL only, so the backend can be swapped for `rusqlite` or `sqlx`. Turso's newer `turso` crate is skipped.
 
@@ -178,7 +183,7 @@ Task engine:
 
 1. **Core, local.** Done. Schema and migrations, domain logic, projects, typed comments, event log with undo and outbox, claims and the ready queue, with tests.
 2. **Server and CLI.** Done. axum REST under `/v1`, OpenAPI via utoipa, SSE, MCP via rmcp, token auth, reminders. CLI as a REST client that auto-starts a local server.
-3. **Clients.** In progress, now in service of the factory: remote access over a tunnel, sub-agents, webhooks, `llms.txt` and an agent skill. Lane's reader app and an OpenClaw plugin. TypeScript SDK from OpenAPI later.
+3. **Clients.** Mostly done, in service of the factory: remote access over a tunnel, sub-agents, webhooks, `llms.txt` and an agent skill, and OpenClaw through MCP and the skill rather than a plugin (see the OpenClaw decision). Still open: deciding on `trailhead tunnel` (TRAIL-71), Lane's reader app, and a TypeScript SDK from OpenAPI later.
 
 Factory (`docs/factory/mvp.md`), tracked under TRAIL-75:
 
@@ -198,7 +203,7 @@ Deferred:
 
 Decisions made while building, including where the build refines or departs from the text above. Factory decisions live in `docs/factory/overview.md`; the ones that change the engine are also recorded here.
 
-- **The factory is built into Trailhead (2026-10-26).** The task engine becomes one part of a software factory; the server is the control plane when the `factory` feature is on, and the todo use case becomes a separate client. See `docs/factory/overview.md`.
+- **The factory is built into Trailhead (2026-10-26).** The task engine becomes one part of a software factory; the server is the control plane when the `factory` feature is on (the target; for now it's a separate process, TRAIL-164 and TRAIL-116), and the todo use case becomes a separate client. See `docs/factory/overview.md`.
 - **Typed review verdicts (factory).** A `review` comment kind carries `approve` or `request_changes` and optionally the reviewing model. It records a verdict without moving the task, so the factory's gates and quorums count records rather than prose. CLI: `trailhead verdict` (`trailhead review` already sends a task for review).
 - **An official UI (2026-10-28).** This replaces "no official Trailhead app": the factory gets a first-party native client in Bevy, because watching agents move between sandboxes and tasks is the main thing a person does with it. It stays a client: it reads through the API and writes through commands, never touching `trailhead-core` or the database. It lives at `clients/trailhead-ui`, outside `default-members`, so `cargo build`, CI and sandboxes never compile Bevy. The todo client is still separate. See `docs/factory/ui.md`.
 - **One date-time crate (TRAIL-150).** Trailhead uses `jiff` alone; `time` is gone. Instants are `jiff::Timestamp`, days `jiff::civil::Date`, and the wire and database formats are unchanged (RFC 3339 with `Z`; fixed six-digit UTC text in SQLite). Task times given to `NewTask` and `TaskPatch` are `jiff::Zoned` from `trailhead_core::parse_at`, which keeps the offset they were written with, because a time without a zone falls on its own offset's day.

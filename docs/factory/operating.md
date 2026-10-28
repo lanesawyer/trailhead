@@ -13,14 +13,17 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 
 - `mise run factory` builds the daemon and the control plane in release mode and runs it in the foreground. Its output is the log.
 - `trailhead-factory check --config factory.toml` (under `fnox exec --`) reports what it can see without running anything: queued tasks, Sprites, its iroh endpoint.
-- Ctrl-C stops it. Runs in flight are abandoned, and the next start's reconcile requeues them and returns their pooled Sprites to idle. Restarting is always safe.
+- Ctrl-C stops it. Runs in flight are cancelled first (up to 15 seconds), and the next start's reconcile requeues their tasks and returns their pooled Sprites to idle. Restarting is always safe, though a cancelled run counts as an attempt (TRAIL-159).
+- The factory clones from GitHub, not your checkout: push `main` before queuing work that builds on local commits.
 - Run only one at a time. Two would share an iroh identity and undo each other's runs (TRAIL-113).
 
 ## Handing it work
 
 - The factory only takes ready subtasks of the queue task (`[repo] queue` in `factory.toml`, TRAIL-102), highest priority first, up to `max_sandboxes` at once. Putting a task under the queue is the approval: there's no separate "go".
-- Create work there: `trailhead --as-me add "title" -p TRAIL --parent TRAIL-102 -P 2 -d "spec"`. Moving an existing task in waits on TRAIL-110.
+- Create work there: `trailhead --as-me add "title" -p TRAIL --parent TRAIL-102 -P 2 -d "spec"`. To move an existing task in, `PATCH /v1/tasks/TRAIL-n` with `{"parent": "TRAIL-102"}` until `trailhead edit --parent` lands (TRAIL-110).
 - Write the spec as you would for a careful contractor: which files, acceptance criteria, what not to touch, how to check it. TRAIL-105 is a good example.
+- **The agent sees only the title and description.** Comments, including `decision` comments, don't reach it, so fold any decision into the description before queuing.
+- **Keep queued tasks from colliding.** Each run branches from `main` as it is when the run starts, and PRs wait for you to merge, so two queued tasks that edit the same files produce conflicting PRs. Chain them with `trailhead block TRAIL-a TRAIL-b`: the second waits until the first is done, which is when you merge it.
 - To take work back: `trailhead --as-me edit TRAIL-n -s cancelled`.
 
 ## Watching a run
@@ -43,7 +46,7 @@ run finished task=TRAIL-105 outcome=…
 
 | Outcome | What you see | What you do |
 | --- | --- | --- |
-| PR opened | Task `in_review`, a PR on GitHub with the reviewer's comment, a typed verdict on the task | Review and merge on GitHub, then `trailhead --as-me done TRAIL-n -m "merged"` |
+| PR opened | Task `in_review`, a PR on GitHub with the reviewer's comment, a typed verdict on the task | Check CI is green and the diff's size is believable, merge on GitHub, then `trailhead --as-me done TRAIL-n -m "merged"`, which also unblocks anything chained behind it |
 | Checks failed | A note on the task with the end of the failing check's output; the task is open again and retried | Usually nothing. The next attempt is told what failed; after `max_attempts` (`[repo]`, default 3) the task is parked with a question summarizing the failure |
 | Question | Task `needs_input` with a question comment; its Sprite stays busy | Answer it, set the task open, restart the factory (TRAIL-108 removes the restart) |
 | Budget or time breach | As a question, saying which limit it hit | Raise the budget in `factory.toml` or cancel the task |
@@ -60,6 +63,9 @@ run finished task=TRAIL-105 outcome=…
 ## Known rough edges
 
 - Answering a question needs a restart (TRAIL-108).
-- No `status` or `logs` commands (TRAIL-109); no way to move a task into the queue (TRAIL-110).
+- No `status` or `logs` commands (TRAIL-109); moving a task into the queue needs the REST call above (TRAIL-110).
+- New work is noticed on the next poll, not immediately (TRAIL-158).
+- Reviewers try to build and can't, wasting time (TRAIL-136).
+- A pooled Sprite has 8 GB and no swap; heavy builds have restarted one mid-run (TRAIL-140).
 - No notifications (TRAIL-111); runs in a terminal rather than as a service (TRAIL-112); no single-instance lock (TRAIL-113).
 - The GitHub connector has classic `repo` scope on all of Lane's repos and lets every Sprite use it (TRAIL-95).

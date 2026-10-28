@@ -6,7 +6,14 @@ Read `docs/PLAN.md` before making design decisions. It is the source of truth fo
 
 The software factory being built into Trailhead is designed in `docs/factory/`. Start at `docs/factory/README.md`, which says which file covers what, and open only the one your work needs.
 
-Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). First the rough edges live runs hit, starting with TRAIL-140. The task engine's core is in `crates/trailhead-core`; its server, MCP and CLI are in `crates/trailhead-server` and `crates/trailhead`. The factory's crates are `crates/trailhead-factory` (types and traits), `crates/trailhead-control` (control plane) and `crates/trailhead-testkit` (fakes).
+Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). First the rough edges live runs hit, starting with TRAIL-140. The task engine's core is in `crates/trailhead-core`; its server, MCP and CLI are in `crates/trailhead-server` and `crates/trailhead`. The factory's crates, none of them published yet:
+
+- `trailhead-factory`: types, the five traits (compute, harness, provider, tracker, code host), the daemon protocol and `factory.toml`.
+- `trailhead-control`: the control plane (run loop, budgets, reviews, reconcile, the sandbox pool).
+- `trailhead-factory-host`: the `trailhead-factory` binary that runs the control plane beside the server (`mise run factory`).
+- `trailhead-daemon`: the daemon in each sandbox, and the iroh transport between it and the control plane.
+- `trailhead-compute-sprites`, `trailhead-harness-claude-code`, `trailhead-provider-anthropic`, `trailhead-codehost-github`: the real implementations of the traits.
+- `trailhead-testkit`: in-memory fakes of all five, so the whole lifecycle runs in `cargo test`.
 
 ## Development
 

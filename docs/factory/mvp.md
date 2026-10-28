@@ -2,11 +2,13 @@
 
 Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with two human touches: approving the spec and merging.
 
+**Done 2026-10-28 (TRAIL-75).** TRAIL-103 went from spec to merged PR #5 with its spend recorded, and TRAIL-120 followed (PR #6). Stopping and restarting the control plane mid-run requeued cleanly, several times. A budget breach (TRAIL-141) parked its task and suspended its Sprite. The evidence is on TRAIL-75. What followed is phase 5 in `docs/PLAN.md`: making the factory run unattended.
+
 ## In scope
 
 - One repo, one worker profile (Sonnet) and one reviewer profile.
 - `Compute`: Sprites through the factory's own thin API wrapper; bootstrap from the stock image; per-step checkpoints; install-phase egress.
-- `Harness`: Claude Code through the Anthropic connector.
+- `Harness`: Claude Code through the Anthropic connector. In practice the MVP ran in subscription mode, on a Claude OAuth token ([sandbox.md](sandbox.md)).
 - `Tracker`: Trailhead on Lane's machine, reached from sandboxes through its iroh tunnel.
 - `CodeHost`: GitHub through the connector, publishing with the Git Data API.
 - Standard checks, one agent review posted as a PR comment, a human merges.
@@ -17,7 +19,7 @@ Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with 
 ## Out of scope
 
 - Suspend during review: requested changes start a fresh sandbox from the PR branch, so resume affinity isn't needed yet.
-- Tiers beyond one default, quorums, auto-merge, the merger agent, typed verdicts.
+- Tiers beyond one default, quorums, auto-merge, the merger agent. (Typed verdicts shipped anyway, as TRAIL-84.)
 - Planner agent and spec collaboration: Lane writes the task spec by hand.
 - Provider usage API, daily cap, workspace spend limit.
 - Multiple repos, profile escalation, previews, outcome tracking, onboarding agent, OTLP export.
@@ -33,7 +35,7 @@ Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with 
 | M4 | Trailhead `Tracker` implementations, with sandboxes on the tunnel | Work flows from Trailhead |
 | M5 | `trailhead-codehost-github` and the reviewer agent | End to end to a PR |
 
-Engine work the MVP needs: only unattended tunnel access ([engine-changes.md](engine-changes.md) #5); the tunnel itself exists. Revoke on finish covers sandbox tokens until expiry exists.
+Engine work the MVP needs: only unattended tunnel access ([engine-changes.md](engine-changes.md) #5); the tunnel itself exists. Sandbox tokens are revoked when a run finishes and also expire (TRAIL-85).
 
 ## Done when
 
@@ -42,4 +44,4 @@ Engine work the MVP needs: only unattended tunnel access ([engine-changes.md](en
 - A budget breach parks the task and suspends its sandbox.
 - The full lifecycle also passes in CI on fakes.
 
-Open: which repo first. Trailhead itself is the obvious candidate: Rust, CI already defined, and its work is already tracked in `TRAIL`.
+Decided: Trailhead itself was the first repo, with its factory work queued under TRAIL-102.
