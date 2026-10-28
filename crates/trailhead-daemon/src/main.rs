@@ -133,11 +133,13 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     };
     tracing::info!(id = %endpoint.id(), %control_plane, "trailhead-daemon listening");
     watch_network(endpoint.clone());
-    let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone());
+    let protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone());
     #[cfg(unix)]
-    if std::path::Path::new(SPRITE_API_SOCKET).exists() {
-        protocol = protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET));
-    }
+    let protocol = if std::path::Path::new(SPRITE_API_SOCKET).exists() {
+        protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET))
+    } else {
+        protocol
+    };
     let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
     tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
     router.shutdown().await.map_err(|e| e.to_string())
