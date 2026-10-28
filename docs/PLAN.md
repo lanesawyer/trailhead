@@ -182,11 +182,11 @@ Task engine:
 
 Factory (`docs/factory/mvp.md`), tracked under TRAIL-75:
 
-4. **Factory MVP.** One real task goes from a Trailhead spec to a merged PR in one repo, with two human touches: approving the spec and merging. Milestones:
+4. **Factory MVP.** Done (2026-10-28, TRAIL-75). One real task goes from a Trailhead spec to a merged PR in one repo, with two human touches: approving the spec and merging. Milestones:
    - M0: spikes on the unknowns (iroh in a locked-down Sprite, Claude Code through the Anthropic connector, a PR through the GitHub connector, checkpoint seeding).
    - M1: factory types, the five traits, fakes, and the lifecycle in CI. Done, along with the in-process `Tracker`, the run loop, typed review verdicts and token expiry.
    - M2: Sprites compute. M3: the in-sandbox daemon over iroh with the Claude Code harness. M4: sandboxes reaching Trailhead over the tunnel. M5: GitHub and the reviewer agent.
-5. **Factory after the MVP.** First the rough edges the MVP's live runs hit (attempt caps, resuming parked tasks, `factory status` and `logs`, sandboxes that won't release). Then suspend during review (resume affinity), risk tiers and quorums, a merger agent and auto-merge, a planner agent, profile escalation, the provider usage API and daily cap, previews, more repos, OTLP export.
+5. **Factory after the MVP.** First the rough edges the MVP's live runs hit (Sprites restarting under heavy builds, attempt caps, resuming parked tasks, `factory status` and `logs`, refusing a second control plane). Then suspend during review (resume affinity), risk tiers and quorums, a merger agent and auto-merge, a planner agent, profile escalation, the provider usage API and daily cap, previews, more repos, OTLP export.
 6. **Factory UI.** The Bevy app in `docs/factory/ui.md`, started once the factory runs unattended without regular fixes. It needs the factory status surface from phase 5 first.
 
 Deferred:
