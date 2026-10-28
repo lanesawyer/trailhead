@@ -125,11 +125,15 @@ const IROH_HOSTS: &[&str] = &[
     "dns.iroh.link",
 ];
 
+/// Other hosts runs need, such as the model API, kept resolved alongside iroh's (`RunRequest::allowed_hosts`).
+static KEEP_RESOLVED: Mutex<std::collections::BTreeSet<String>> = Mutex::new(std::collections::BTreeSet::new());
+
 /// A Sprite lets a raw IP through only after its own DNS has resolved it from an allowed name, and a policy change
 /// resets that. iroh dials relays by IPs it resolved and cached earlier, so after a lockdown every relay reconnect
 /// was refused. Looking the names up again through the system resolver re-allows their IPs.
 pub async fn resolve_iroh_hosts() {
-    for host in IROH_HOSTS {
+    let extra: Vec<String> = KEEP_RESOLVED.lock().unwrap().iter().cloned().collect();
+    for host in IROH_HOSTS.iter().map(|h| h.to_string()).chain(extra) {
         let host = host.trim_end_matches('.');
         if let Err(e) = tokio::net::lookup_host((host, 443)).await {
             tracing::warn!(%host, error = %e, "can't resolve an iroh host");
@@ -222,6 +226,7 @@ impl DaemonProtocol {
     async fn serve_run(&self, mut req: RunRequest, send: &mut SendStream, recv: RecvStream) -> Result<RunReport> {
         // Narrowing a Sprite's egress resets which relay IPs it lets through, so once the lockdown is confirmed, the
         // relay names are resolved again (see `resolve_iroh_hosts`) and iroh is told to reconnect.
+        KEEP_RESOLVED.lock().unwrap().extend(req.allowed_hosts.iter().cloned());
         if !req.blocked_hosts.is_empty() {
             self.runner.workspace.confirm_blocked(&req.blocked_hosts).await?;
             req.blocked_hosts.clear();

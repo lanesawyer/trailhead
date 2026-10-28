@@ -409,6 +409,8 @@ async fn sandboxes_are_prepared_under_install_egress_then_narrowed() {
     assert!(!egress.iter().any(|d| d == "github.com"), "clone egress is closed before the agent runs: {egress:?}");
     let blocked = r.daemon.requests().into_iter().next().unwrap().blocked_hosts;
     assert_eq!(blocked, ["github.com", "codeload.github.com"], "the daemon confirms the lockdown before starting");
+    let allowed = r.daemon.requests().into_iter().next().unwrap().allowed_hosts;
+    assert_eq!(allowed, ["iroh.link"], "named agent hosts are kept resolved; wildcards can't be");
 }
 
 #[tokio::test]

@@ -44,6 +44,19 @@ loop)
 error)
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"API Error: 403 forbidden"}'
   ;;
+flaky)
+  case " $* " in
+  *" --resume s1 "*)
+    asst f2 '{"type":"text","text":"Picking up again."}'
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"needs_input","summary":"x","question":"Resumed?"}}'
+    ;;
+  *)
+    asst f1 '{"type":"text","text":"Working."}'
+    echo '{"type":"assistant","message":{"id":"e1","model":"<synthetic>","content":[{"type":"text","text":"API Error"}],"usage":{"input_tokens":0,"output_tokens":0}}}'
+    echo '{"type":"result","subtype":"success","is_error":true,"result":"API Error: Connection dropped (ECONNRESET)"}'
+    ;;
+  esac
+  ;;
 esac
 "#;
 
@@ -126,6 +139,7 @@ async fn claude_code_sessions() {
     cli_errors_fail_the_run().await;
     resume_carries_feedback().await;
     subscription_mode_uses_only_the_oauth_token().await;
+    dropped_api_calls_resume_the_session().await;
 }
 
 async fn worker_changes_are_collected() {
@@ -250,4 +264,19 @@ async fn subscription_mode_uses_only_the_oauth_token() {
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
     }
+}
+
+async fn dropped_api_calls_resume_the_session() {
+    let r = rig();
+    let (out, events) = play(&r, "flaky", ctx(&r, Role::Worker, 10)).await;
+    assert_eq!(out, RunOutcome::NeedsInput { question: "Resumed?".into() }, "the resumed session finished the run");
+    let log = std::fs::read_to_string(&r.log).unwrap();
+    assert!(log.contains("--resume\ns1"), "resumed the same session: {log}");
+    let steps = events.iter().filter(|e| matches!(e, RunEvent::StepStarted { .. })).count();
+    assert_eq!(steps, 2, "steps from both processes count, and Claude Code's own <synthetic> message doesn't");
+
+    // An error resuming can't fix fails the attempt as before.
+    let (out, _) = play(&r, "error", ctx(&r, Role::Worker, 10)).await;
+    assert!(matches!(out, RunOutcome::Failed { ref reason } if reason.contains("403")), "{out:?}");
+    assert!(!std::fs::read_to_string(&r.log).unwrap().contains("--resume"));
 }

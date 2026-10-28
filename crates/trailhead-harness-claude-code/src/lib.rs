@@ -9,6 +9,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -48,6 +49,48 @@ impl ClaudeCode {
 
     async fn session(&self, ctx: RunContext, prompt: String, events: EventSink) -> Result<RunOutcome> {
         let start = git_head(&ctx.workdir).await?;
+        let mut stream = Stream::new(ctx.model.clone(), ctx.max_steps);
+        let mut resume: Option<String> = None;
+        let mut resumes = 0;
+        loop {
+            let prompt = match &resume {
+                None => prompt.clone(),
+                Some(_) => RESUME_PROMPT.to_string(),
+            };
+            match self.invoke(&ctx, &prompt, resume.as_deref(), &mut stream, &events).await? {
+                Invocation::StepLimit => {
+                    return Ok(RunOutcome::Failed { reason: format!("hit the step limit of {}", ctx.max_steps) });
+                }
+                Invocation::NoResult(why) => return Ok(RunOutcome::Failed { reason: why }),
+                Invocation::Result(result) => {
+                    // A dropped or failed API call ends Claude Code's session, but the session itself is saved, so the
+                    // agent can pick up where it was instead of the whole attempt starting over.
+                    if is_transient_api_error(&result)
+                        && resumes < MAX_RESUMES
+                        && let Some(id) = stream.session_id.clone()
+                    {
+                        resumes += 1;
+                        tracing::warn!(error = %result["result"], resumes, "claude's API call failed; resuming the session");
+                        tokio::time::sleep(Duration::from_secs(5 * resumes as u64)).await;
+                        resume = Some(id);
+                        stream.result = None;
+                        continue;
+                    }
+                    return outcome(&ctx, &start, &result).await;
+                }
+            }
+        }
+    }
+
+    /// One `claude --print` process, fresh or resuming a session, feeding `stream` until it exits.
+    async fn invoke(
+        &self,
+        ctx: &RunContext,
+        prompt: &str,
+        resume: Option<&str>,
+        stream: &mut Stream,
+        events: &EventSink,
+    ) -> Result<Invocation> {
         let mut cmd = Command::new(&self.binary);
         match &self.oauth_token {
             // An API key or base URL would take precedence over the token, so none may leak in from the environment.
@@ -61,13 +104,16 @@ impl ClaudeCode {
                 .env("ANTHROPIC_API_KEY", PLACEHOLDER_KEY)
                 .env_remove("CLAUDE_CODE_OAUTH_TOKEN"),
         };
-        let mut child = cmd
-            .args(["--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"])
+        cmd.args(["--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"])
             .arg("--model")
             .arg(&ctx.model.0)
             .arg("--json-schema")
-            .arg(schema(ctx.role).to_string())
-            .arg(&prompt)
+            .arg(schema(ctx.role).to_string());
+        if let Some(id) = resume {
+            cmd.arg("--resume").arg(id);
+        }
+        let mut child = cmd
+            .arg(prompt)
             .current_dir(&ctx.workdir)
             .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
             .env("DISABLE_AUTOUPDATER", "1")
@@ -92,7 +138,6 @@ impl ClaudeCode {
             tail.join("\n")
         });
 
-        let mut stream = Stream::new(ctx.model.clone(), ctx.max_steps);
         let mut lines = BufReader::new(stdout).lines();
         while let Some(line) = lines.next_line().await.map_err(|e| Error::Other(e.to_string()))? {
             match serde_json::from_str::<Value>(&line) {
@@ -105,16 +150,56 @@ impl ClaudeCode {
             }
             if stream.over_limit() {
                 let _ = child.kill().await;
-                return Ok(RunOutcome::Failed { reason: format!("hit the step limit of {}", ctx.max_steps) });
+                return Ok(Invocation::StepLimit);
             }
         }
         let status = child.wait().await.map_err(|e| Error::Other(e.to_string()))?;
         let stderr = stderr.await.unwrap_or_default();
-        let Some(result) = stream.result else {
-            return Ok(RunOutcome::Failed { reason: format!("claude exited ({status}) without a result: {stderr}") });
-        };
-        outcome(&ctx, &start, &result).await
+        Ok(match stream.result.clone() {
+            Some(result) => Invocation::Result(result),
+            None => Invocation::NoResult(format!("claude exited ({status}) without a result: {stderr}")),
+        })
     }
+}
+
+enum Invocation {
+    Result(Value),
+    StepLimit,
+    NoResult(String),
+}
+
+/// How many times one attempt resumes Claude Code after a failed API call before giving up.
+pub const MAX_RESUMES: usize = 3;
+
+const RESUME_PROMPT: &str = "Your previous request failed with a network or API error. Carry on with the task from \
+where you left off, then finish with the structured answer as before.";
+
+/// An error result from a failed or dropped API call, which resuming can get past: connection resets and timeouts,
+/// overload and server errors. Not auth, billing or invalid-request errors.
+fn is_transient_api_error(result: &Value) -> bool {
+    if result["is_error"] != true {
+        return false;
+    }
+    let text = result["result"].as_str().unwrap_or_default();
+    text.starts_with("API Error")
+        && [
+            "ECONNRESET",
+            "ETIMEDOUT",
+            "EPIPE",
+            "Connection",
+            "connection",
+            "socket",
+            "timed out",
+            "Overloaded",
+            "overloaded",
+            "529",
+            "500",
+            "502",
+            "503",
+            "504",
+        ]
+        .iter()
+        .any(|m| text.contains(m))
 }
 
 #[async_trait]
@@ -193,11 +278,12 @@ struct Stream {
     steps: u32,
     seen: HashSet<String>,
     result: Option<Value>,
+    session_id: Option<String>,
 }
 
 impl Stream {
     fn new(model: ModelId, max_steps: u32) -> Stream {
-        Stream { model, max_steps, steps: 0, seen: HashSet::new(), result: None }
+        Stream { model, max_steps, steps: 0, seen: HashSet::new(), result: None, session_id: None }
     }
 
     fn over_limit(&self) -> bool {
@@ -206,7 +292,12 @@ impl Stream {
 
     fn read(&mut self, msg: &Value) -> Vec<RunEvent> {
         let mut out = Vec::new();
+        if let Some(id) = msg["session_id"].as_str() {
+            self.session_id = Some(id.to_string());
+        }
         match msg["type"].as_str() {
+            // Claude Code's own messages (errors, notices) are labelled `<synthetic>` and cost nothing.
+            Some("assistant") if msg["message"]["model"] == "<synthetic>" => {}
             Some("assistant") => {
                 let m = &msg["message"];
                 // One model response can arrive as several messages, one per content block, each with its usage.

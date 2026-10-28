@@ -95,6 +95,11 @@ impl Factory {
         install.into_iter().filter(|d| !d.contains('*') && !agent.contains(d)).collect()
     }
 
+    /// The agent phase's named hosts (wildcards can't be looked up), which the daemon keeps resolved.
+    fn allowed_hosts(&self) -> Vec<String> {
+        self.agent_egress().domains.into_iter().filter(|d| !d.contains('*')).collect()
+    }
+
     fn install_egress(&self) -> Egress {
         let mut egress = self.agent_egress();
         let extra = self.config.egress.install.iter().cloned().chain(CLONE_DOMAINS.iter().map(|d| d.to_string()));
@@ -239,6 +244,7 @@ impl Factory {
             max_steps: profile.budget.steps,
             required_checks: self.config.required_checks(),
             blocked_hosts: self.blocked_hosts(),
+            allowed_hosts: self.allowed_hosts(),
             credential,
         };
         let prior = task.run.spend.unwrap_or_default();
@@ -304,6 +310,7 @@ impl Factory {
             max_steps: profile.budget.steps,
             required_checks: Vec::new(),
             blocked_hosts: self.blocked_hosts(),
+            allowed_hosts: self.allowed_hosts(),
             credential,
         };
         let prior = self.tracker.show(&task.key).await?.run.spend.unwrap_or_default();

@@ -161,6 +161,7 @@ async fn cancel_reaches_the_daemon() {
         max_steps: 5,
         required_checks: Vec::new(),
         blocked_hosts: Vec::new(),
+        allowed_hosts: Vec::new(),
         credential: cred,
     };
     let (events, _rx) = tokio::sync::mpsc::unbounded_channel();

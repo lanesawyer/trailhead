@@ -145,6 +145,7 @@ async fn daemon_in_a_sprite() {
                 max_steps: 1,
                 required_checks: Vec::new(),
                 blocked_hosts: vec!["github.com".into()],
+                allowed_hosts: vec!["api.anthropic.com".into()],
                 credential: cred,
             };
             let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -194,6 +195,7 @@ async fn daemon_in_a_sprite() {
                 max_steps: 1,
                 required_checks: Vec::new(),
                 blocked_hosts: Vec::new(),
+                allowed_hosts: Vec::new(),
                 credential: cred,
             };
             let (events, _rx) = tokio::sync::mpsc::unbounded_channel();

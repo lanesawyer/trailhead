@@ -44,6 +44,10 @@ pub struct RunRequest {
     /// Hosts that egress was just narrowed to exclude. Policy changes take effect a moment after the call that makes
     /// them, so the daemon waits until these stop resolving before the agent starts.
     pub blocked_hosts: Vec<String>,
+    /// Hosts the agent may reach, which the daemon keeps resolving: a Sprite only lets an IP through while its own
+    /// DNS has recently resolved it, and a long-lived connection whose allowance lapses gets reset.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
     /// The sandbox's own Trailhead sub-agent.
     pub credential: Credential,
 }
