@@ -148,4 +148,11 @@ impl Daemon for LocalDaemon {
         }
         Ok(())
     }
+
+    async fn shutdown(&self) {
+        let running: Vec<SandboxId> = self.cancels.lock().unwrap().keys().cloned().collect();
+        for sandbox in running {
+            let _ = self.cancel(&sandbox).await;
+        }
+    }
 }

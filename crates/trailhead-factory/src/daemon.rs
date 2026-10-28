@@ -138,4 +138,7 @@ pub trait Daemon: Send + Sync {
     async fn run(&self, sandbox: &SandboxId, req: RunRequest, events: EventSink) -> Result<RunReport>;
     /// Stops the running agent. A cancelled `run` returns `Error::Cancelled`.
     async fn cancel(&self, sandbox: &SandboxId) -> Result<()>;
+    /// Cancels every run in flight, because the control plane is stopping on purpose. Without this, a daemon would
+    /// keep an unobserved run going while it waits for a reattach.
+    async fn shutdown(&self) {}
 }

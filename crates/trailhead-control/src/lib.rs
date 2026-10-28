@@ -27,6 +27,9 @@ use trailhead_factory::{
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
 pub const CANCEL_GRACE: Duration = Duration::from_secs(60);
 
+/// How long a stopping control plane waits for its cancelled runs to end before abandoning them.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
+
 /// The `factory` label value on every sandbox this control plane starts.
 pub const FACTORY_LABEL: &str = "trailhead";
 
@@ -198,6 +201,16 @@ impl Factory {
                         dirty = true;
                     }
                 },
+            }
+        }
+        // Cancel rather than just drop the runs: a daemon that loses its stream keeps the run going for a while in
+        // case the control plane reattaches, and a stop on purpose mustn't leave it working unobserved (TRAIL-142).
+        if !running.is_empty() {
+            tracing::info!(runs = running.len(), "cancelling runs in flight");
+            self.daemon.shutdown().await;
+            let drained = tokio::time::timeout(SHUTDOWN_GRACE, async { while running.join_next().await.is_some() {} });
+            if drained.await.is_err() {
+                tracing::warn!(runs = running.len(), "runs didn't stop in time; abandoning them");
             }
         }
         running.shutdown().await;

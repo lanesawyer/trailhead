@@ -390,6 +390,38 @@ async fn run_loop_reconciles_then_works_the_queue_and_stops() {
     handle.await.unwrap().unwrap();
 }
 
+/// Starts the run loop on one hanging task, stops it once the task is running, and returns how long the stop took.
+async fn stop_mid_run(r: Rig) -> std::time::Duration {
+    let key = r.tracker.add_task("TRAIL", "Hangs", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100).hang());
+    let factory = Arc::new(r.factory);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle =
+        tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), std::time::Duration::from_secs(60), async {
+            let _ = stopped.await;
+        }));
+    let tracker = r.tracker.clone();
+    until("the task to start", || tracker.task(&key).status == Status::InProgress && !r.daemon.requests().is_empty())
+        .await;
+    let start = tokio::time::Instant::now();
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+    start.elapsed()
+}
+
+#[tokio::test(start_paused = true)]
+async fn stopping_the_run_loop_cancels_runs_in_flight() {
+    let took = stop_mid_run(rig()).await;
+    assert!(took < trailhead_control::SHUTDOWN_GRACE, "the cancel landed rather than waiting out the grace: {took:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_that_ignores_the_stop_is_abandoned_after_the_grace() {
+    let r = rig();
+    r.daemon.ignore_cancel();
+    assert_eq!(stop_mid_run(r).await, trailhead_control::SHUTDOWN_GRACE);
+}
+
 #[tokio::test]
 async fn run_loop_respects_the_sandbox_cap() {
     let r = two_at_a_time();

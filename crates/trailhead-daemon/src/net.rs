@@ -781,4 +781,10 @@ impl Daemon for RemoteDaemon {
         }
         Ok(())
     }
+
+    async fn shutdown(&self) {
+        for tx in self.cancels.lock().unwrap().values() {
+            let _ = tx.send(());
+        }
+    }
 }
