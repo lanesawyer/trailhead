@@ -161,11 +161,16 @@ async fn worker_changes_are_collected() {
     let tools: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            RunEvent::ToolCall { name } => Some(name.as_str()),
+            RunEvent::ToolCall { name, .. } => Some(name.as_str()),
             _ => None,
         })
         .collect();
     assert_eq!(tools, ["Bash", "Edit"]);
+    let first = events.iter().find_map(|e| match e {
+        RunEvent::ToolCall { detail, .. } => Some(detail.clone()),
+        _ => None,
+    });
+    assert_eq!(first, Some(Some("ls".to_string())), "the Bash call's command is its detail");
 
     let log = std::fs::read_to_string(&r.log).unwrap();
     assert!(log.contains("BASE=https://api.sprites.dev/v1/gateway/anthropic/c1"), "{log}");

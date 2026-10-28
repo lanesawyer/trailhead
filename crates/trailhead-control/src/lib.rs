@@ -430,6 +430,7 @@ impl Factory {
         let max_steps = profile.budget.steps;
         let deadline = tokio::time::sleep(Duration::from_secs(u64::from(profile.budget.minutes) * 60));
         tokio::pin!(deadline);
+        let key = req.task.key.0.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let run = self.daemon.run(&sandbox.id, req, tx);
         tokio::pin!(run);
@@ -440,7 +441,14 @@ impl Factory {
         let mut on_event = |ev: RunEvent, spent: &mut Usd| -> Option<String> {
             match ev {
                 RunEvent::Usage { model, usage } => *spent += self.provider.price(&model, &usage),
-                RunEvent::StepStarted { .. } => steps += 1,
+                RunEvent::StepStarted { step } => {
+                    steps += 1;
+                    tracing::info!(task = %key, step, spent = %(prior + *spent), "step");
+                }
+                RunEvent::ToolCall { name, detail } => {
+                    tracing::info!(task = %key, tool = %name, detail = detail.as_deref().unwrap_or(""), "tool");
+                }
+                RunEvent::NeedsInput { question } => tracing::info!(task = %key, %question, "asked"),
                 _ => {}
             }
             if *spent > limit {

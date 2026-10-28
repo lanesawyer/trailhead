@@ -73,6 +73,9 @@ pub enum RunEvent {
     },
     ToolCall {
         name: String,
+        /// A short, one-line summary of the call (the command, file or pattern), for progress logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     CheckpointTaken {
         checkpoint: CheckpointId,

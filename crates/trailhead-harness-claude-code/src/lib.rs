@@ -220,7 +220,7 @@ impl Stream {
                 for block in m["content"].as_array().into_iter().flatten() {
                     if block["type"] == "tool_use" {
                         let name = block["name"].as_str().unwrap_or("unknown").to_string();
-                        out.push(RunEvent::ToolCall { name });
+                        out.push(RunEvent::ToolCall { name, detail: detail(&block["input"]) });
                     }
                 }
             }
@@ -229,6 +229,14 @@ impl Stream {
         }
         out
     }
+}
+
+/// What a tool call is about, in one short line: a Bash command, a file path or a search pattern.
+fn detail(input: &Value) -> Option<String> {
+    let raw =
+        ["command", "file_path", "path", "pattern", "url", "description"].iter().find_map(|k| input[*k].as_str())?;
+    let line: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(if line.chars().count() > 120 { format!("{}…", line.chars().take(120).collect::<String>()) } else { line })
 }
 
 fn usage(u: &Value) -> Usage {
