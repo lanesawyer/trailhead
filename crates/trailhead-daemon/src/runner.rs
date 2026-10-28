@@ -156,28 +156,44 @@ impl Runner {
         start: &str,
         commits: Vec<trailhead_factory::Commit>,
         summary: String,
+        retried: &[String],
     ) -> Result<PrRef> {
         self.codehost.publish(&req.repo, start, &req.branch, &commits).await?;
         match &req.pr {
             Some(pr) => Ok(pr.clone()),
             None => {
+                let flaky: String = retried
+                    .iter()
+                    .map(|name| format!("\n\n⚠️ Check `{name}` failed, then passed when rerun."))
+                    .collect();
                 let new = NewPr {
                     branch: req.branch.clone(),
                     base: req.base_branch.clone(),
                     title: format!("{}: {}", req.task.key.0, req.task.title),
-                    body: format!("{summary}{}", pr_footer(req, agent)),
+                    body: format!("{summary}{flaky}{}", pr_footer(req, agent)),
                 };
                 self.codehost.open_pr(&req.repo, new).await
             }
         }
     }
 
-    async fn checks(&self, checks: &[Check]) -> Vec<CheckResult> {
+    /// Runs each check, rerunning one that fails once in case it was a flake. Returns the final results and the
+    /// names of checks that passed on the rerun.
+    async fn checks(&self, checks: &[Check]) -> (Vec<CheckResult>, Vec<String>) {
         let mut out = Vec::with_capacity(checks.len());
+        let mut retried = Vec::new();
         for check in checks {
-            out.push(self.workspace.check(check).await);
+            let mut result = self.workspace.check(check).await;
+            if !result.passed {
+                tracing::warn!(check = %check.name, "check failed; rerunning once");
+                result = self.workspace.check(check).await;
+                if result.passed {
+                    retried.push(check.name.clone());
+                }
+            }
+            out.push(result);
         }
-        out
+        (out, retried)
     }
 
     async fn finish(
@@ -191,10 +207,10 @@ impl Runner {
         let key = &req.task.key;
         match outcome {
             RunOutcome::Changes { commits, summary } => {
-                let checks = tokio::select! {
+                let (checks, retried) = tokio::select! {
                     biased;
                     _ = cancel.notified() => return Err(Error::Cancelled),
-                    checks = self.checks(&req.required_checks) => checks,
+                    done = self.checks(&req.required_checks) => done,
                 };
                 if let Some(failed) = checks.iter().find(|c| !c.passed) {
                     let reason = format!("check {} failed", failed.name);
@@ -204,7 +220,7 @@ impl Runner {
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), checks));
                 }
-                let pr = match self.publish(req, tracker.agent(), start, commits, summary).await {
+                let pr = match self.publish(req, tracker.agent(), start, commits, summary, &retried).await {
                     Ok(pr) => pr,
                     // The agent's work is done and checked; retrying the whole run would only hit the same wall, so
                     // park the task with the reason instead, keeping the sandbox and its checkout.
