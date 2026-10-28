@@ -269,6 +269,9 @@ pub(crate) struct EditArgs {
     pub(crate) on: Option<Vec<String>>,
     #[arg(short, long)]
     pub(crate) status: Option<String>,
+    /// Move it under this task (e.g. the factory's queue), or "none" to make it top-level.
+    #[arg(long)]
+    pub(crate) parent: Option<String>,
     /// Fail if the task changed since this version.
     #[arg(long)]
     pub(crate) version: Option<i64>,
