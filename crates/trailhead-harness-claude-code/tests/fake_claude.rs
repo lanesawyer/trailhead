@@ -11,7 +11,7 @@ use trailhead_harness_claude_code::{ClaudeCode, PLACEHOLDER_KEY};
 
 /// Writes its arguments and environment to `$FAKE_LOG`, then plays the scenario in `$FAKE_SCENARIO`.
 const FAKE: &str = r#"#!/bin/sh
-{ printf '%s\n' "$@"; echo "BASE=$ANTHROPIC_BASE_URL"; echo "KEY=$ANTHROPIC_API_KEY"; echo "OAUTH=$CLAUDE_CODE_OAUTH_TOKEN"; } > "$FAKE_LOG"
+{ printf '%s\n' "$@"; echo "BASE=$ANTHROPIC_BASE_URL"; echo "KEY=$ANTHROPIC_API_KEY"; echo "OAUTH=$CLAUDE_CODE_OAUTH_TOKEN"; echo "FACTORY_TASK=$TRAILHEAD_FACTORY_TASK"; } > "$FAKE_LOG"
 asst() { echo "{\"type\":\"assistant\",\"message\":{\"id\":\"$1\",\"model\":\"claude-sonnet-x\",\"content\":[$2],\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":1}}}"; }
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 case "$FAKE_SCENARIO" in
@@ -190,6 +190,10 @@ async fn worker_changes_are_collected() {
     assert!(log.contains("BASE=https://api.sprites.dev/v1/gateway/anthropic/c1"), "{log}");
     assert!(log.contains(&format!("KEY={PLACEHOLDER_KEY}")), "{log}");
     assert!(log.contains("--json-schema") && log.contains("claude-sonnet-x"), "{log}");
+    // A factory worker leaves tracking to the factory: no repo MCP servers, and it knows which task it's on.
+    assert!(log.contains("--strict-mcp-config"), "{log}");
+    assert!(log.lines().any(|l| l.starts_with("FACTORY_TASK=") && l.len() > "FACTORY_TASK=".len()), "{log}");
+    assert!(log.contains("skip AGENTS.md's"), "the prompt says the factory tracks the task: {log}");
 }
 
 async fn reviewer_verdict_from_result_text() {

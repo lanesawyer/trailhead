@@ -17,7 +17,12 @@ Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). 
 
 ## Tracking work
 
-Work on Trailhead is tracked in Trailhead, in the `TRAIL` project. This is how we dogfood it, so it isn't optional:
+Work on Trailhead is tracked in Trailhead, in the `TRAIL` project. It reaches this repo two ways, and they track differently:
+
+- **Factory runs.** Lane queues a task for the factory as a subtask of TRAIL-102 (`trailhead add "..." --parent TRAIL-102`). Its control plane runs Claude Code in a sandbox on that one task. If you were started that way, your prompt says so and `TRAILHEAD_FACTORY_TASK` is set: **skip the rest of this section.** The factory claims, records and closes the task for you, and `trailhead` isn't installed in the sandbox. Do the task, put follow-ups and anything surprising in your summary, and use `needs_input` for questions only Lane can answer.
+- **Interactive sessions.** Lane and an agent working together, as in Claude Code on his machine. Everything below applies. Leave tasks queued under TRAIL-102, or held by a `factory/...` agent, to the factory unless Lane says otherwise.
+
+In an interactive session, tracking isn't optional, because this is how we dogfood Trailhead:
 
 - **Start of a session:** run `trailhead --as claude ready -p TRAIL` and read the brief with `trailhead project show TRAIL`.
 - **Before writing code,** claim a task. If what Lane asked for has no task, create one and claim it. Don't do untracked work.

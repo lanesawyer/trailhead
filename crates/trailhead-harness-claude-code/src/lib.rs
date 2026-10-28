@@ -104,7 +104,10 @@ impl ClaudeCode {
                 .env("ANTHROPIC_API_KEY", PLACEHOLDER_KEY)
                 .env_remove("CLAUDE_CODE_OAUTH_TOKEN"),
         };
+        // The repo's own MCP servers (.mcp.json) are for interactive sessions; the factory tracks the task itself.
         cmd.args(["--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"])
+            .arg("--strict-mcp-config")
+            .env("TRAILHEAD_FACTORY_TASK", &ctx.task.key.0)
             .arg("--model")
             .arg(&ctx.model.0)
             .arg("--json-schema")
@@ -259,7 +262,8 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              tests, and run the repo's formatter, linter and tests. You don't need to commit or push; everything \
              you change in the checkout is published as one commit and a PR. If only a human can answer something \
              you need, stop and give needs_input with the question. If the task can't be done, give failed and \
-             say why.",
+             say why. The factory tracks this task in Trailhead for you, so skip AGENTS.md's \
+             \"Tracking work\" steps: don't claim, comment on or close tasks. Put follow-ups in your summary.",
             key = task.key.0,
             title = task.title,
             desc = task.description,
