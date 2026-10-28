@@ -11,8 +11,6 @@ mod openapi;
 mod params;
 mod ratelimit;
 mod routes;
-#[cfg(windows)]
-pub mod stop_event;
 mod stream;
 pub mod webhooks;
 
@@ -77,14 +75,9 @@ pub struct ServerInfo {
     pub started_at: time::OffsetDateTime,
 }
 
-/// Set by the CLI when it runs the server from a copy of its binary (on Windows,
-/// so the installed one can still be replaced): the installed binary's path,
-/// which the server reports as its `exe` so upgrades are still noticed.
-pub const SERVER_EXE_ENV: &str = "TRAILHEAD_SERVER_EXE";
-
 impl ServerInfo {
     pub fn current(db: Option<PathBuf>) -> Self {
-        let exe = std::env::var_os(SERVER_EXE_ENV).map(PathBuf::from).or_else(|| std::env::current_exe().ok());
+        let exe = std::env::current_exe().ok();
         ServerInfo {
             version: env!("CARGO_PKG_VERSION").into(),
             instance: None,
@@ -223,12 +216,11 @@ pub fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
     }
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     std::io::Write::write_all(&mut opts.open(path)?, format!("{secret}\n").as_bytes())
 }
 
-/// Runs the local server until Ctrl-C, SIGTERM or (on Windows) `trailhead server stop`, finishing in-flight requests first.
+/// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first.
 pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Error>> {
     let (store, ctx) = open_local(&cfg).await?;
     let state = Arc::new(AppState {
@@ -319,20 +311,10 @@ fn spawn_archiver(state: Arc<AppState>) {
 }
 
 async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-    }
-    #[cfg(windows)]
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
-        _ = stop_event::wait() => {}
+        _ = term.recv() => {}
     }
-    #[cfg(not(any(unix, windows)))]
-    tokio::signal::ctrl_c().await.ok();
 }

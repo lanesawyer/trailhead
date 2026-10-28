@@ -4,9 +4,9 @@ Decided: the factory core is agnostic to compute, agent harness, model provider,
 
 | Seam | Runs in | First implementation | Later |
 | --- | --- | --- | --- |
-| `Compute` | Control plane | Fly.io Sprites | Other microVM hosts, local VMs |
+| `Compute` | Control plane | Fly.io Sprites | Docker (TRAIL-119), other microVM hosts, local VMs |
 | `Harness` | Daemon, in the sandbox | Claude Code | Codex, an own agent loop |
-| `ModelProvider` | Both | Anthropic | OpenAI, OpenRouter |
+| `ModelProvider` | Both | Anthropic | OpenAI, OpenRouter, local models ([local-models.md](local-models.md)) |
 | `Tracker` | Both | Trailhead (in-process in the server, REST from the daemon) | Jira and others |
 | `CodeHost` | Both | GitHub | GitLab, Forgejo |
 

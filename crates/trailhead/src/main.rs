@@ -177,8 +177,7 @@ fn exit_quietly_on_broken_pipe() {
             .map(String::as_str)
             .or_else(|| info.payload().downcast_ref::<&str>().copied())
             .unwrap_or_default();
-        // EPIPE on Unix, ERROR_NO_DATA on Windows.
-        let broken_pipe = msg.contains("(os error 32)") || msg.contains("(os error 232)");
+        let broken_pipe = msg.contains("(os error 32)");
         if msg.starts_with("failed printing to std") && broken_pipe {
             std::process::exit(141);
         }

@@ -102,7 +102,18 @@ async fn spec_to_reviewed_pr_then_human_merge() {
 
     let opened = &r.codehost.prs()[0];
     assert_eq!(opened.spec.branch, "factory/trail-1");
-    assert_eq!(opened.comments, ["Looks right; tests cover it."]);
+    assert_eq!(
+        opened.comments,
+        ["🔍 **Review by `factory/trail-1-a1-r1` (`fake-opus`) · Verdict: Approve**\n\nLooks right; tests cover it."]
+    );
+    assert!(
+        opened
+            .spec
+            .body
+            .ends_with("🤖 Opened by the Trailhead factory · worker `factory/trail-1-a1` · `fake-sonnet` · TRAIL-1"),
+        "{}",
+        opened.spec.body
+    );
     let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
     assert!(review.diff.unwrap().contains("src/greet.rs"), "reviewer sees the diff");
     assert_eq!(review.model.0, "fake-opus");

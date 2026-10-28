@@ -16,10 +16,6 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ targe
 bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
-[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.zip"
-pkg-fmt = "zip"
-
 [dependencies]
 trailhead-core.workspace = true
 trailhead-server.workspace = true
@@ -35,8 +31,6 @@ jiff.workspace = true
 tracing-subscriber.workspace = true
 toml = { version = "1", default-features = false, features = ["parse", "display", "serde"] }
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_Console"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -14,6 +14,7 @@ Read this index first, then open only the file the work in front of you needs.
 | [engine-changes.md](engine-changes.md) | Changes the task engine needs for the factory, with ready-to-file `TRAIL` tasks |
 | [review.md](review.md) | Verification layers, risk tiers, per-repo gate policy, quorums, the policy ratchet |
 | [state.md](state.md) | Where run state lives (no control-plane database), reconcile on boot, how sandboxes reach Trailhead |
+| [local-models.md](local-models.md) | Running models on the compute host instead of hosted APIs (direction only, not scheduled) |
 | [budgets.md](budgets.md) | Cost and time limits, where spend numbers come from |
 | [observability.md](observability.md) | Tracing, OpenTelemetry, backend options |
 | [mvp.md](mvp.md) | The first slice, its milestones, and what "done" means |

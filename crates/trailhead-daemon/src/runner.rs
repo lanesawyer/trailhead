@@ -28,6 +28,21 @@ pub trait Workspace: Send + Sync {
 /// How often a worker renews its claim while the agent runs. Leases default to 30 minutes.
 pub const RENEW_EVERY: Duration = Duration::from_secs(10 * 60);
 
+/// Everything the factory posts goes out under the connector's account (Lane's, until TRAIL-95), so posts say which
+/// agent and model wrote them.
+fn pr_footer(req: &RunRequest, agent: &str) -> String {
+    format!("\n\n---\n🤖 Opened by the Trailhead factory · worker `{agent}` · `{}` · {}", req.model.0, req.task.key.0)
+}
+
+fn review_comment(v: &Verdict) -> String {
+    let verdict = match v.kind {
+        trailhead_factory::VerdictKind::Approve => "Approve",
+        trailhead_factory::VerdictKind::RequestChanges => "Request changes",
+    };
+    let model = v.model.as_ref().map(|m| format!(" (`{}`)", m.0)).unwrap_or_default();
+    format!("🔍 **Review by `{}`{model} · Verdict: {verdict}**\n\n{}", v.reviewer, v.body)
+}
+
 /// How much of a failed check's output goes on the task.
 const NOTE_TAIL: usize = 4000;
 
@@ -132,6 +147,7 @@ impl Runner {
     async fn publish(
         &self,
         req: &RunRequest,
+        agent: &str,
         commits: Vec<trailhead_factory::Commit>,
         summary: String,
     ) -> Result<PrRef> {
@@ -143,7 +159,7 @@ impl Runner {
                     branch: req.branch.clone(),
                     base: req.base_branch.clone(),
                     title: format!("{}: {}", req.task.key.0, req.task.title),
-                    body: summary,
+                    body: format!("{summary}{}", pr_footer(req, agent)),
                 };
                 self.codehost.open_pr(&req.repo, new).await
             }
@@ -174,7 +190,7 @@ impl Runner {
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), checks));
                 }
-                let pr = match self.publish(req, commits, summary).await {
+                let pr = match self.publish(req, tracker.agent(), commits, summary).await {
                     Ok(pr) => pr,
                     // The agent's work is done and checked; retrying the whole run would only hit the same wall, so
                     // park the task with the reason instead, keeping the sandbox and its checkout.
@@ -194,10 +210,11 @@ impl Runner {
             RunOutcome::Verdict { kind, body } => {
                 let verdict =
                     Verdict { kind, body, reviewer: tracker.agent().to_string(), model: Some(req.model.clone()) };
-                if let Some(pr) = &req.pr {
-                    self.codehost.comment(pr, &verdict.body).await?;
-                }
+                // Recorded first: if Trailhead refuses it, a retried review mustn't have already posted to GitHub.
                 tracker.record_verdict(key, &verdict).await?;
+                if let Some(pr) = &req.pr {
+                    self.codehost.comment(pr, &review_comment(&verdict)).await?;
+                }
                 Ok((RunResult::Reviewed(verdict), Vec::new()))
             }
             RunOutcome::NeedsInput { question } => {

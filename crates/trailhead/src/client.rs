@@ -423,6 +423,14 @@ pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32
     }
     for _ in 0..100 {
         if health(http, base, None).await.is_none() {
+            // It stops answering before it has finished exiting; it removes its pid file last.
+            let ours = || std::fs::read_to_string(&pid_file).is_ok_and(|p| p.trim() == pid.to_string());
+            for _ in 0..50 {
+                if !ours() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
             return Ok(Some(pid));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -431,62 +439,8 @@ pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32
 }
 
 /// Asks the process to shut down gracefully. Returns false if it wasn't running.
-#[cfg(unix)]
 fn signal_stop(pid: u32) -> Result<bool> {
     Ok(std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status()?.success())
-}
-
-/// Sets the server's stop event, which drains in-flight requests like SIGTERM. A server
-/// without one (started by an older binary) is killed outright.
-#[cfg(windows)]
-fn signal_stop(pid: u32) -> Result<bool> {
-    if trailhead_server::stop_event::request(pid)? {
-        return Ok(true);
-    }
-    let status = std::process::Command::new("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    Ok(status.success())
-}
-
-/// Windows can't replace a running executable, so a server running from the
-/// installed binary would make `cargo install` fail. Run it from a copy in the
-/// data directory instead, clearing out copies no server is using any more.
-#[cfg(windows)]
-fn server_copy(paths: &Paths, exe: &std::path::Path) -> Result<std::path::PathBuf> {
-    let dir = paths.data_dir.join("bin");
-    std::fs::create_dir_all(&dir)?;
-    for old in std::fs::read_dir(&dir)?.flatten() {
-        // A copy a running server still uses is locked; leave it for next time.
-        let _ = std::fs::remove_file(old.path());
-    }
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let copy = dir.join(format!("trailhead-server-{nanos}.exe"));
-    std::fs::copy(exe, &copy).context("couldn't copy the server binary")?;
-    Ok(copy)
-}
-
-/// A Windows child inherits every inheritable handle, not just the ones it's
-/// given as stdio, so the server would hold this process's stdout and stderr
-/// open for its whole life and anything capturing this command's output (a
-/// script, a test) would wait for the server to exit. Our own std handles
-/// never need to be inherited: `Stdio::inherit` duplicates them for the child.
-#[cfg(windows)]
-fn keep_std_handles_from_children() {
-    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation};
-    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
-    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-        // SAFETY: GetStdHandle has no preconditions, and SetHandleInformation only
-        // changes a flag on a handle this process owns (or fails harmlessly).
-        unsafe {
-            let h = GetStdHandle(id);
-            if !h.is_null() && h != INVALID_HANDLE_VALUE {
-                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
-            }
-        }
-    }
 }
 
 /// This binary's path. On Linux a process whose file was replaced by a reinstall
@@ -509,23 +463,9 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.server_log())?;
     let bind = format!("{}:{}", base.host_str().unwrap_or("127.0.0.1"), base.port_or_known_default().unwrap_or(7241));
     let exe = current_exe()?;
-    #[cfg(windows)]
-    let program = server_copy(&paths, &exe)?;
-    #[cfg(not(windows))]
-    let program = exe.clone();
-    let mut cmd = std::process::Command::new(program);
-    cmd.env(trailhead_server::SERVER_EXE_ENV, &exe)
-        .args(["serve", "--bind", &bind])
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
-    #[cfg(unix)]
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["serve", "--bind", &bind]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console, and Ctrl-C in this one doesn't reach it.
-    #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0000_0008 | 0x0000_0200);
-    #[cfg(windows)]
-    keep_std_handles_from_children();
     cmd.spawn().context("couldn't start the local server")?;
     // Generous, since a busy machine (a full `cargo test` in a factory sandbox) can take well over 10 s to start it.
     for _ in 0..300 {

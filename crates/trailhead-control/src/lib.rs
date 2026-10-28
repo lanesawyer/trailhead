@@ -12,6 +12,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::task::{self, JoinSet};
 
@@ -127,10 +128,17 @@ impl Factory {
         let mut keys: HashMap<task::Id, TaskKey> = HashMap::new();
         let mut dirty = false;
         loop {
+            // Shutdown is otherwise only noticed while idle; a stop during a long reconcile mustn't start new work.
+            if (&mut shutdown).now_or_never().is_some() {
+                break;
+            }
             if dirty {
                 dirty = false;
                 if let Err(e) = self.reconcile_except(&keys.values().cloned().collect()).await {
                     tracing::warn!(error = %e, "reconcile failed");
+                }
+                if (&mut shutdown).now_or_never().is_some() {
+                    break;
                 }
             }
             if let Err(e) = self.start_ready(&mut running, &mut keys).await {
