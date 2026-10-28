@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 
+use jiff::Timestamp;
 use serde::Serialize;
 use serde_json::Value;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::claims::{any_claim, put_claim};
@@ -299,7 +299,7 @@ impl Store {
     /// Reverts everything `actor_id` did since `since`. Anything someone else has
     /// touched since is skipped and reported rather than overwritten. A `since`
     /// before the undo window is clamped to it: older events aren't reverted.
-    pub async fn revert_actor(&self, ctx: &Ctx, actor_id: Uuid, since: OffsetDateTime) -> Result<UndoReport> {
+    pub async fn revert_actor(&self, ctx: &Ctx, actor_id: Uuid, since: Timestamp) -> Result<UndoReport> {
         self.write(ctx, async |tx| {
             let since = since.max(tx.now - UNDO_WINDOW);
             let events = query_events(

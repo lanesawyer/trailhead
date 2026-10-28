@@ -176,7 +176,7 @@ async fn post(
         }
     }
     let body = serde_json::to_vec(e).map_err(|err| (None, err.to_string()))?;
-    let signature = webhook_signature(secret, time::OffsetDateTime::now_utc().unix_timestamp(), &body);
+    let signature = webhook_signature(secret, jiff::Timestamp::now().as_second(), &body);
     let res = http
         .post(&hook.url)
         .header("content-type", "application/json")

@@ -37,7 +37,7 @@ impl From<TokenLimits> for TokenOptions {
         TokenOptions {
             projects: l.projects,
             rate_limit_per_minute: l.rate_limit_per_minute,
-            expires_in: l.expires_in_seconds.map(time::Duration::seconds),
+            expires_in: l.expires_in_seconds.map(jiff::SignedDuration::from_secs),
         }
     }
 }

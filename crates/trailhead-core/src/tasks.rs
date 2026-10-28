@@ -1,7 +1,8 @@
+use jiff::civil::Date;
+use jiff::{Timestamp, Zoned};
 use libsql::{Connection, Row};
 use serde::Serialize;
 use serde_json::Value;
-use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::claims::{drop_claim, live_claim, reap_expired};
@@ -75,7 +76,7 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result
     if after.due_on.is_none()
         && let Some(at) = after.due_at
     {
-        when::settle("due", &mut after.due_on, Some(at), &after.due_tz, false)?;
+        when::settle("due", &mut after.due_on, Some(&when::utc(at)), &after.due_tz, false)?;
     }
     let due_by = when::deadline(after.due_on, after.due_at, after.due_tz.as_deref())?;
     let mut rows = tx
@@ -162,11 +163,13 @@ pub struct NewTask {
     pub priority: Option<i64>,
     /// The day it's due. Optional when `due_at` is set: it's that time's day.
     pub due_on: Option<Date>,
-    pub due_at: Option<OffsetDateTime>,
+    /// Times keep the offset they were written with ([`parse_at`](crate::parse_at)): without a
+    /// zone, that offset decides the day.
+    pub due_at: Option<Zoned>,
     pub due_tz: Option<String>,
     /// The day to work on it. Optional when `scheduled_at` is set: it's that time's day.
     pub scheduled_on: Option<Date>,
-    pub scheduled_at: Option<OffsetDateTime>,
+    pub scheduled_at: Option<Zoned>,
     pub scheduled_tz: Option<String>,
     /// Parent task key or id.
     pub parent: Option<String>,
@@ -185,13 +188,13 @@ pub struct TaskPatch {
     /// removes the deadline.
     pub due_on: Option<Option<Date>>,
     /// Clearing the time keeps the day.
-    pub due_at: Option<Option<OffsetDateTime>>,
+    pub due_at: Option<Option<Zoned>>,
     pub due_tz: Option<Option<String>>,
     /// A new day drops any scheduled time unless `scheduled_at` comes with it;
     /// clearing it clears the time too.
     pub scheduled_on: Option<Option<Date>>,
     /// Clearing the time keeps the day.
-    pub scheduled_at: Option<Option<OffsetDateTime>>,
+    pub scheduled_at: Option<Option<Zoned>>,
     pub scheduled_tz: Option<Option<String>>,
     pub parent: Option<Option<String>>,
     /// RFC 7386 merge patch: `null` removes a key.
@@ -204,7 +207,7 @@ pub struct TaskFilter {
     /// Empty means every status that isn't done or cancelled.
     pub statuses: Vec<Status>,
     pub parent: Option<String>,
-    pub due_before: Option<OffsetDateTime>,
+    pub due_before: Option<Timestamp>,
     /// Tasks scheduled on or before this day, so overdue plans still show up "today".
     pub scheduled_through: Option<Date>,
     /// `(path, value)` pairs matched against `metadata` as text, e.g. `("team", "web")`.
@@ -320,10 +323,12 @@ impl Store {
         let priority = new.priority.unwrap_or(3);
         validate_priority(priority)?;
         let mut due_on = new.due_on;
-        when::settle("due", &mut due_on, new.due_at, &new.due_tz, false)?;
-        let due_by = when::deadline(due_on, new.due_at, new.due_tz.as_deref())?;
+        when::settle("due", &mut due_on, new.due_at.as_ref(), &new.due_tz, false)?;
+        let due_at = new.due_at.as_ref().map(Zoned::timestamp);
+        let due_by = when::deadline(due_on, due_at, new.due_tz.as_deref())?;
         let mut scheduled_on = new.scheduled_on;
-        when::settle("scheduled", &mut scheduled_on, new.scheduled_at, &new.scheduled_tz, true)?;
+        when::settle("scheduled", &mut scheduled_on, new.scheduled_at.as_ref(), &new.scheduled_tz, true)?;
+        let scheduled_at = new.scheduled_at.as_ref().map(Zoned::timestamp);
         let metadata = new.metadata.unwrap_or_else(|| Value::Object(Default::default()));
         if !metadata.is_object() {
             return Err(Error::Invalid("metadata must be a JSON object".into()));
@@ -376,7 +381,7 @@ impl Store {
                         title.clone(),
                         new.description.clone(),
                         priority,
-                        opt_ts_value(new.due_at),
+                        opt_ts_value(due_at),
                         new.due_tz.clone(),
                         opt_uuid_value(parent_id),
                         metadata.to_string(),
@@ -385,7 +390,7 @@ impl Store {
                         ctx.actor_id().to_string(),
                         tx.now_str(),
                         opt_date_value(scheduled_on),
-                        opt_ts_value(new.scheduled_at),
+                        opt_ts_value(scheduled_at),
                         new.scheduled_tz.clone(),
                         opt_date_value(due_on),
                         opt_ts_value(due_by),
@@ -436,8 +441,8 @@ impl Store {
                     after.due_tz = None;
                 }
             }
-            if let Some(at) = patch.due_at {
-                after.due_at = at;
+            if let Some(at) = &patch.due_at {
+                after.due_at = at.as_ref().map(Zoned::timestamp);
                 if at.is_some() && patch.due_on.is_none() {
                     after.due_on = None;
                 }
@@ -447,15 +452,16 @@ impl Store {
                 after.due_tz = tz;
             }
             if placed {
-                when::settle("due", &mut after.due_on, after.due_at, &after.due_tz, false)?;
+                let at = patch.due_at.clone().unwrap_or_else(|| after.due_at.map(when::utc));
+                when::settle("due", &mut after.due_on, at.as_ref(), &after.due_tz, false)?;
             }
             if let Some(d) = patch.scheduled_on {
                 after.scheduled_on = d;
                 after.scheduled_at = None;
                 after.scheduled_tz = None;
             }
-            if let Some(at) = patch.scheduled_at {
-                after.scheduled_at = at;
+            if let Some(at) = &patch.scheduled_at {
+                after.scheduled_at = at.as_ref().map(Zoned::timestamp);
                 if at.is_none() {
                     after.scheduled_tz = None;
                 } else if patch.scheduled_on.is_none() {
@@ -467,7 +473,8 @@ impl Store {
                 after.scheduled_tz = tz;
             }
             if placed {
-                when::settle("scheduled", &mut after.scheduled_on, after.scheduled_at, &after.scheduled_tz, true)?;
+                let at = patch.scheduled_at.clone().unwrap_or_else(|| after.scheduled_at.map(when::utc));
+                when::settle("scheduled", &mut after.scheduled_on, at.as_ref(), &after.scheduled_tz, true)?;
             }
             if let Some(parent) = &patch.parent {
                 after.parent_id = match parent {

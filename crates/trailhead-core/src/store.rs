@@ -2,10 +2,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use jiff::Timestamp;
 use libsql::{Connection, Database, TransactionBehavior};
 use serde::Serialize;
 use serde_json::Value;
-use time::OffsetDateTime;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -13,7 +13,7 @@ use crate::db::{self, fmt_ts, opt_uuid_value};
 use crate::error::Result;
 use crate::model::Entity;
 
-pub type Clock = Arc<dyn Fn() -> OffsetDateTime + Send + Sync>;
+pub type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 
 /// Who is acting, for whom, and which batch their writes belong to.
 #[derive(Debug, Clone)]
@@ -29,7 +29,7 @@ pub struct Ctx {
     /// sub-agents can't exceed it. `None` means unlimited.
     pub rate_limit: Option<i64>,
     /// When the authenticating token expires, so tokens it issues can't outlive it.
-    pub expires_at: Option<OffsetDateTime>,
+    pub expires_at: Option<Timestamp>,
 }
 
 impl Ctx {
@@ -155,7 +155,7 @@ impl Store {
             writer: Mutex::new(writer),
             readers: Default::default(),
             in_memory,
-            clock: Arc::new(OffsetDateTime::now_utc),
+            clock: Arc::new(Timestamp::now),
             changes: tokio::sync::watch::Sender::new(0),
         })
     }
@@ -186,7 +186,7 @@ impl Store {
         self.changes.subscribe()
     }
 
-    pub(crate) fn now(&self) -> OffsetDateTime {
+    pub(crate) fn now(&self) -> Timestamp {
         (self.clock)()
     }
 
@@ -242,7 +242,7 @@ impl Store {
 pub(crate) struct Tx {
     pub conn: Connection,
     pub ctx: Ctx,
-    pub now: OffsetDateTime,
+    pub now: Timestamp,
 }
 
 pub(crate) struct EventIn<'a> {

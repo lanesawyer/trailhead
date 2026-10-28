@@ -11,7 +11,7 @@ use utoipa::{IntoParams, ToSchema};
 use crate::auth::Auth;
 use crate::error::{ApiResult, Json, Path, Query, invalid};
 use crate::openapi::{ErrorBody, IfMatch, TaskParam};
-use crate::params::{parse_list, parse_opt_date, parse_opt_time, split_list};
+use crate::params::{parse_list, parse_opt_at, parse_opt_date, parse_opt_time, split_list};
 
 use super::{S, if_match, nullable, select_fields, with_etag};
 
@@ -153,10 +153,10 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
         description: b.description,
         priority: b.priority,
         due_on: parse_opt_date(b.due_on.as_deref())?,
-        due_at: parse_opt_time(b.due_at.as_deref())?,
+        due_at: parse_opt_at(b.due_at.as_deref())?,
         due_tz: b.due_tz,
         scheduled_on: parse_opt_date(b.scheduled_on.as_deref())?,
-        scheduled_at: parse_opt_time(b.scheduled_at.as_deref())?,
+        scheduled_at: parse_opt_at(b.scheduled_at.as_deref())?,
         scheduled_tz: b.scheduled_tz,
         parent: b.parent,
         metadata: b.metadata,
@@ -244,10 +244,10 @@ pub(crate) async fn update_task(
         status: b.status,
         priority: b.priority,
         due_on: b.due_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
-        due_at: b.due_at.map(|d| parse_opt_time(d.as_deref())).transpose()?,
+        due_at: b.due_at.map(|d| parse_opt_at(d.as_deref())).transpose()?,
         due_tz: b.due_tz,
         scheduled_on: b.scheduled_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
-        scheduled_at: b.scheduled_at.map(|t| parse_opt_time(t.as_deref())).transpose()?,
+        scheduled_at: b.scheduled_at.map(|t| parse_opt_at(t.as_deref())).transpose()?,
         scheduled_tz: b.scheduled_tz,
         parent: b.parent,
         metadata: b.metadata,

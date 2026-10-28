@@ -4,8 +4,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use super::print_json;
 use crate::cli::ServerCmd;
@@ -35,11 +33,10 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                 if let Some(v) = &info.version {
                     parts.push(format!("v{v}"));
                 }
-                if let Some(started) = info.started_at.as_deref().and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok())
-                {
-                    let up = OffsetDateTime::now_utc() - started;
-                    let since = short_time(&started.format(&Rfc3339)?);
-                    parts.push(format!("up {}h {}m (since {since})", up.whole_hours(), up.whole_minutes() % 60));
+                if let Some(started) = info.started_at.as_deref().and_then(|s| s.parse::<jiff::Timestamp>().ok()) {
+                    let up = jiff::Timestamp::now().duration_since(started);
+                    let since = short_time(&started.to_string());
+                    parts.push(format!("up {}h {}m (since {since})", up.as_hours(), up.as_mins() % 60));
                 }
                 println!("{}", parts.join(" · "));
                 if let Some(exe) = &info.exe {

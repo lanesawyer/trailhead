@@ -3,10 +3,10 @@
 //! pattern). The server does the HTTP; this module owns the state.
 
 use hmac::{Hmac, KeyInit, Mac};
+use jiff::{SignedDuration, Timestamp};
 use libsql::Row;
 use serde::Serialize;
 use sha2::Sha256;
-use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::db::{collect, fmt_ts, get_opt_ts, get_ts, get_uuid};
@@ -31,13 +31,10 @@ pub struct Webhook {
     /// The last event id delivered (or skipped as not matching).
     pub cursor: i64,
     pub failure_count: i64,
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub next_attempt_at: Option<OffsetDateTime>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
+    pub next_attempt_at: Option<Timestamp>,
+    pub created_at: Timestamp,
     /// Set after too many consecutive failures, or by hand. Disabled webhooks get nothing.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub disabled_at: Option<OffsetDateTime>,
+    pub disabled_at: Option<Timestamp>,
 }
 
 impl Webhook {
@@ -56,8 +53,7 @@ pub struct WebhookDelivery {
     pub status_code: Option<i64>,
     /// Set when the attempt failed.
     pub error: Option<String>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub at: OffsetDateTime,
+    pub at: Timestamp,
 }
 
 const WEBHOOK_COLS: &str = "id, workspace_id, owner_user_id, url, event_kinds, cursor, failure_count, next_attempt_at, created_at, disabled_at, secret";
@@ -91,8 +87,8 @@ pub fn webhook_signature(secret: &str, timestamp: i64, body: &[u8]) -> String {
 }
 
 /// Waits 2^n seconds after the nth consecutive failure, capped at an hour.
-fn backoff(failures: i64) -> Duration {
-    Duration::seconds(1i64 << failures.clamp(0, 12)).min(Duration::hours(1))
+fn backoff(failures: i64) -> SignedDuration {
+    SignedDuration::from_secs(1i64 << failures.clamp(0, 12)).min(SignedDuration::from_hours(1))
 }
 
 fn require_admin(ctx: &Ctx) -> Result<()> {
@@ -285,8 +281,8 @@ mod tests {
 
     #[test]
     fn backoff_doubles_and_caps() {
-        assert_eq!(backoff(1), Duration::seconds(2));
-        assert_eq!(backoff(5), Duration::seconds(32));
-        assert_eq!(backoff(19), Duration::hours(1));
+        assert_eq!(backoff(1), SignedDuration::from_secs(2));
+        assert_eq!(backoff(5), SignedDuration::from_secs(32));
+        assert_eq!(backoff(19), SignedDuration::from_hours(1));
     }
 }

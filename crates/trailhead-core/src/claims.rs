@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use jiff::{SignedDuration, Timestamp};
 use libsql::{Connection, Row};
 use serde::Serialize;
-use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::comments::latest_handoff;
@@ -55,7 +55,7 @@ pub(crate) async fn claim_held(conn: &Connection, c: &Claim) -> Error {
     }
 }
 
-pub(crate) async fn live_claim(conn: &Connection, task_id: Uuid, now: OffsetDateTime) -> Result<Option<Claim>> {
+pub(crate) async fn live_claim(conn: &Connection, task_id: Uuid, now: Timestamp) -> Result<Option<Claim>> {
     Ok(any_claim(conn, task_id).await?.filter(|c| c.is_live(now)))
 }
 
@@ -129,7 +129,7 @@ pub(crate) async fn reap_expired(tx: &Tx, task_id: Option<Uuid>) -> Result<usize
 /// When a new or renewed claim lapses. People's claims don't, unless they pass
 /// a TTL: leases exist so a crashed agent's work comes back, and anyone human
 /// can release a forgotten claim by hand.
-async fn expiry(tx: &Tx, task: &Task, ttl: Option<i64>) -> Result<Option<OffsetDateTime>> {
+async fn expiry(tx: &Tx, task: &Task, ttl: Option<i64>) -> Result<Option<Timestamp>> {
     if ttl.is_none() && tx.ctx.is_human() {
         return Ok(None);
     }
@@ -143,7 +143,7 @@ async fn expiry(tx: &Tx, task: &Task, ttl: Option<i64>) -> Result<Option<OffsetD
         }
     };
     validate_ttl(ttl)?;
-    Ok(Some(tx.now + Duration::seconds(ttl)))
+    Ok(Some(tx.now + SignedDuration::from_secs(ttl)))
 }
 
 /// Tells an agent that renews a lease it no longer holds what happened, so it

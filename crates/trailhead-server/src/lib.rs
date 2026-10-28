@@ -71,8 +71,7 @@ pub struct ServerInfo {
     /// That binary's modification time when the server started, in Unix milliseconds.
     pub exe_modified_ms: Option<u64>,
     pub db: Option<PathBuf>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub started_at: time::OffsetDateTime,
+    pub started_at: jiff::Timestamp,
 }
 
 impl ServerInfo {
@@ -85,7 +84,7 @@ impl ServerInfo {
             exe_modified_ms: exe.as_deref().and_then(modified_ms),
             exe,
             db,
-            started_at: time::OffsetDateTime::now_utc(),
+            started_at: jiff::Timestamp::now(),
         }
     }
 }

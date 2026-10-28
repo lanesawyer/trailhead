@@ -1,7 +1,7 @@
 mod common;
 
 use common::Env;
-use time::Duration;
+use jiff::SignedDuration;
 use trailhead_core::{Error, EventFilter, Status, TaskPatch};
 
 const DAY: i64 = 24 * 60 * 60;
@@ -75,8 +75,11 @@ async fn revert_clamps_since_to_the_window() {
     env.advance(91 * DAY);
     env.store.update_task(&a.next_batch(), &t.key, title("new edit"), None).await.unwrap();
 
-    let report =
-        env.store.revert_actor(&env.human.next_batch(), a.actor_id(), start - Duration::days(1)).await.unwrap();
+    let report = env
+        .store
+        .revert_actor(&env.human.next_batch(), a.actor_id(), start - SignedDuration::from_hours(24))
+        .await
+        .unwrap();
     assert_eq!(report.reverted.len(), 1);
     assert!(report.skipped.is_empty());
     assert_eq!(env.store.get_task(&env.human, &t.key).await.unwrap().title, "old edit");
@@ -86,9 +89,9 @@ async fn revert_clamps_since_to_the_window() {
 async fn archive_moves_only_a_prefix_by_id() {
     let env = Env::new().await;
     let first = env.task("first").await;
-    *env.clock.lock().unwrap() -= Duration::days(100);
+    *env.clock.lock().unwrap() -= SignedDuration::from_hours(100 * 24);
     let backdated = env.task("backdated").await;
-    *env.clock.lock().unwrap() += Duration::days(100);
+    *env.clock.lock().unwrap() += SignedDuration::from_hours(100 * 24);
 
     // `backdated` is old by its timestamp but follows an event inside the
     // window, so it stays put: nothing in `events` may predate the archive.

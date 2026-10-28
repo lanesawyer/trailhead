@@ -3,20 +3,20 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::Env;
-use time::{Duration, OffsetDateTime};
+use jiff::{SignedDuration, Timestamp};
 use trailhead_core::{
     Ctx, DEFAULT_REMINDER_WINDOW, DUE_SOON, EventFilter, NewProject, NewTask, OVERDUE, Status, Store, TaskPatch,
 };
 
-const WINDOW: Duration = DEFAULT_REMINDER_WINDOW;
+const WINDOW: SignedDuration = DEFAULT_REMINDER_WINDOW;
 
 async fn emit(env: &Env) -> Vec<(String, String)> {
     let events = env.store.emit_due_reminders(&env.human.next_batch(), WINDOW).await.unwrap();
     events.into_iter().map(|e| (e.task_key.unwrap_or_else(|| e.task_id.unwrap().to_string()), e.kind)).collect()
 }
 
-async fn due_task(env: &Env, title: &str, due_in: Duration) -> trailhead_core::Task {
-    env.task_with(NewTask { title: title.into(), due_at: Some(env.now() + due_in), ..Default::default() }).await
+async fn due_task(env: &Env, title: &str, due_in: SignedDuration) -> trailhead_core::Task {
+    env.task_with(NewTask { title: title.into(), due_at: Some(env.at_in(due_in)), ..Default::default() }).await
 }
 
 fn kinds(fired: &[(String, String)]) -> Vec<&str> {
@@ -26,7 +26,7 @@ fn kinds(fired: &[(String, String)]) -> Vec<&str> {
 #[tokio::test]
 async fn fires_once_inside_the_window_and_not_before() {
     let env = Env::new().await;
-    let t = due_task(&env, "ship", Duration::hours(30)).await;
+    let t = due_task(&env, "ship", SignedDuration::from_hours(30)).await;
     env.task("no due date").await;
 
     assert!(emit(&env).await.is_empty(), "30h out is outside the 24h window");
@@ -50,7 +50,7 @@ async fn fires_once_inside_the_window_and_not_before() {
 #[tokio::test]
 async fn first_seen_late_only_fires_overdue() {
     let env = Env::new().await;
-    due_task(&env, "late", Duration::hours(1)).await;
+    due_task(&env, "late", SignedDuration::from_hours(1)).await;
     env.advance(2 * 3600);
     assert_eq!(kinds(&emit(&env).await), vec![OVERDUE]);
 }
@@ -58,10 +58,10 @@ async fn first_seen_late_only_fires_overdue() {
 #[tokio::test]
 async fn skips_done_cancelled_and_deleted_tasks() {
     let env = Env::new().await;
-    let done = due_task(&env, "done", Duration::hours(1)).await;
-    let cancelled = due_task(&env, "cancelled", Duration::hours(1)).await;
-    let deleted = due_task(&env, "deleted", Duration::hours(1)).await;
-    let open = due_task(&env, "open", Duration::hours(1)).await;
+    let done = due_task(&env, "done", SignedDuration::from_hours(1)).await;
+    let cancelled = due_task(&env, "cancelled", SignedDuration::from_hours(1)).await;
+    let deleted = due_task(&env, "deleted", SignedDuration::from_hours(1)).await;
+    let open = due_task(&env, "open", SignedDuration::from_hours(1)).await;
     let set = |s| TaskPatch { status: Some(s), ..Default::default() };
     env.store.update_task(&env.human, &done.key, set(Status::Done), None).await.unwrap();
     env.store.update_task(&env.human, &cancelled.key, set(Status::Cancelled), None).await.unwrap();
@@ -74,10 +74,10 @@ async fn skips_done_cancelled_and_deleted_tasks() {
 #[tokio::test]
 async fn fires_again_after_due_date_moves_later() {
     let env = Env::new().await;
-    let t = due_task(&env, "moving", Duration::hours(2)).await;
+    let t = due_task(&env, "moving", SignedDuration::from_hours(2)).await;
     assert_eq!(kinds(&emit(&env).await), vec![DUE_SOON]);
 
-    let later = env.now() + Duration::hours(48);
+    let later = env.at_in(SignedDuration::from_hours(48));
     let patch = TaskPatch { due_at: Some(Some(later)), ..Default::default() };
     env.store.update_task(&env.human, &t.key, patch, None).await.unwrap();
     assert!(emit(&env).await.is_empty(), "the new due date is outside the window");
@@ -90,7 +90,7 @@ async fn fires_again_after_due_date_moves_later() {
 #[tokio::test]
 async fn undo_treats_reminders_as_no_ops() {
     let env = Env::new().await;
-    let t = due_task(&env, "undo me", Duration::hours(2)).await;
+    let t = due_task(&env, "undo me", SignedDuration::from_hours(2)).await;
     let edit = env.human.next_batch();
     let patch = TaskPatch { title: Some("renamed".into()), ..Default::default() };
     env.store.update_task(&edit, &t.key, patch, None).await.unwrap();
@@ -128,8 +128,8 @@ async fn undo_treats_reminders_as_no_ops() {
 async fn exactly_once_across_restarts() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("t.db");
-    let clock = Arc::new(Mutex::new(OffsetDateTime::now_utc()));
-    let open = async |clock: Arc<Mutex<OffsetDateTime>>| {
+    let clock = Arc::new(Mutex::new(Timestamp::now()));
+    let open = async |clock: Arc<Mutex<Timestamp>>| {
         let c = clock.clone();
         Store::open_local(&path).await.unwrap().with_clock(Arc::new(move || *c.lock().unwrap()))
     };
@@ -141,7 +141,7 @@ async fn exactly_once_across_restarts() {
         .create_project(&ctx, NewProject { key: "AUTH".into(), name: "Auth".into(), ..Default::default() })
         .await
         .unwrap();
-    let due = Some(*clock.lock().unwrap() + Duration::hours(1));
+    let due = Some((*clock.lock().unwrap() + SignedDuration::from_hours(1)).to_zoned(jiff::tz::TimeZone::UTC));
     let new = NewTask { project: "AUTH".into(), title: "t".into(), due_at: due, ..Default::default() };
     store.create_task(&ctx, new).await.unwrap();
     assert_eq!(store.emit_due_reminders(&ctx.next_batch(), WINDOW).await.unwrap().len(), 1);

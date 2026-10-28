@@ -2,21 +2,21 @@
 
 use std::sync::{Arc, Mutex};
 
+use jiff::{SignedDuration, Timestamp, Zoned};
 use tempfile::TempDir;
-use time::{Duration, OffsetDateTime};
 use trailhead_core::{Ctx, NewProject, NewTask, Store, Task};
 
 pub struct Env {
     pub store: Arc<Store>,
     pub human: Ctx,
-    pub clock: Arc<Mutex<OffsetDateTime>>,
+    pub clock: Arc<Mutex<Timestamp>>,
     _dir: TempDir,
 }
 
 impl Env {
     pub async fn new() -> Env {
         let dir = tempfile::tempdir().unwrap();
-        let clock = Arc::new(Mutex::new(OffsetDateTime::now_utc()));
+        let clock = Arc::new(Mutex::new(Timestamp::now()));
         let c = clock.clone();
         let store =
             Store::open_local(dir.path().join("t.db")).await.unwrap().with_clock(Arc::new(move || *c.lock().unwrap()));
@@ -44,11 +44,16 @@ impl Env {
     }
 
     pub fn advance(&self, secs: i64) {
-        *self.clock.lock().unwrap() += Duration::seconds(secs);
+        *self.clock.lock().unwrap() += SignedDuration::from_secs(secs);
     }
 
-    pub fn now(&self) -> OffsetDateTime {
+    pub fn now(&self) -> Timestamp {
         *self.clock.lock().unwrap()
+    }
+
+    /// A task time `d` from now, as given in UTC.
+    pub fn at_in(&self, d: SignedDuration) -> Zoned {
+        (self.now() + d).to_zoned(jiff::tz::TimeZone::UTC)
     }
 
     pub async fn ready_keys(&self) -> Vec<String> {

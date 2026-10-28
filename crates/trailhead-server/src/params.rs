@@ -1,21 +1,24 @@
 //! Parsing for query parameters and tool arguments, shared by REST and MCP.
 
-use time::format_description::well_known::Rfc3339;
-use time::macros::format_description;
-use time::{Date, OffsetDateTime};
-use trailhead_core::{Error, Result};
+use jiff::civil::Date;
+use jiff::{Timestamp, Zoned};
+use trailhead_core::{Error, Result, parse_at};
 
-pub fn parse_time(s: &str) -> Result<OffsetDateTime> {
-    OffsetDateTime::parse(s, &Rfc3339).map_err(|_| Error::Invalid(format!("{s:?} is not an RFC 3339 timestamp")))
+pub fn parse_time(s: &str) -> Result<Timestamp> {
+    parse_at(s).map(|z| z.timestamp())
 }
 
-pub fn parse_opt_time(s: Option<&str>) -> Result<Option<OffsetDateTime>> {
+pub fn parse_opt_time(s: Option<&str>) -> Result<Option<Timestamp>> {
     s.map(parse_time).transpose()
 }
 
+/// A task's time, keeping the offset it was written with.
+pub fn parse_opt_at(s: Option<&str>) -> Result<Option<Zoned>> {
+    s.map(parse_at).transpose()
+}
+
 pub fn parse_date(s: &str) -> Result<Date> {
-    Date::parse(s, &format_description!("[year]-[month]-[day]"))
-        .map_err(|_| Error::Invalid(format!("{s:?} is not a date like 2026-10-17")))
+    s.parse().map_err(|_| Error::Invalid(format!("{s:?} is not a date like 2026-10-17")))
 }
 
 pub fn parse_opt_date(s: Option<&str>) -> Result<Option<Date>> {

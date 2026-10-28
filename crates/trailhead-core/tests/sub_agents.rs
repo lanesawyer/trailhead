@@ -73,10 +73,10 @@ async fn agents_create_and_revoke_their_own_sub_agents() {
 async fn tokens_expire_and_never_outlive_their_issuer() {
     let env = Env::new().await;
     let parent = env.store.create_agent(&env.human, "factory").await.unwrap();
-    let hour = TokenOptions { expires_in: Some(time::Duration::hours(1)), ..Default::default() };
+    let hour = TokenOptions { expires_in: Some(jiff::SignedDuration::from_hours(1)), ..Default::default() };
     let (tok, secret) = env.store.create_token_with(&env.human, Principal::Agent(parent.id), "f", hour).await.unwrap();
-    let drift = tok.expires_at.unwrap() - (env.now() + time::Duration::hours(1));
-    assert!(drift.abs() < time::Duration::seconds(1), "{drift}");
+    let drift = tok.expires_at.unwrap().duration_since(env.now() + jiff::SignedDuration::from_hours(1));
+    assert!(drift.abs() < jiff::SignedDuration::from_secs(1), "{drift:?}");
     let (factory, _) = env.store.authenticate_token(&secret).await.unwrap();
 
     // A sub-agent's token inherits the expiry, can shorten it, and can't extend it.
@@ -84,14 +84,14 @@ async fn tokens_expire_and_never_outlive_their_issuer() {
     let (inherited, _) =
         env.store.create_token_with(&factory, Principal::Agent(kid.id), "a", TokenOptions::default()).await.unwrap();
     assert_eq!(inherited.expires_at, tok.expires_at);
-    let short = TokenOptions { expires_in: Some(time::Duration::minutes(10)), ..Default::default() };
+    let short = TokenOptions { expires_in: Some(jiff::SignedDuration::from_mins(10)), ..Default::default() };
     let (_, short_secret) = env.store.create_token_with(&factory, Principal::Agent(kid.id), "b", short).await.unwrap();
-    let long = TokenOptions { expires_in: Some(time::Duration::hours(2)), ..Default::default() };
+    let long = TokenOptions { expires_in: Some(jiff::SignedDuration::from_hours(2)), ..Default::default() };
     assert!(matches!(
         env.store.create_token_with(&factory, Principal::Agent(kid.id), "c", long).await,
         Err(Error::Forbidden(_))
     ));
-    let past = TokenOptions { expires_in: Some(time::Duration::seconds(0)), ..Default::default() };
+    let past = TokenOptions { expires_in: Some(jiff::SignedDuration::from_secs(0)), ..Default::default() };
     assert!(matches!(
         env.store.create_token_with(&factory, Principal::Agent(kid.id), "d", past).await,
         Err(Error::Invalid(_))

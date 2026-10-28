@@ -231,7 +231,7 @@ impl Tracker for CoreTracker {
             }
             Err(e) => return Err(map_err(e)),
         };
-        let expires_in = time::Duration::try_from(ttl).map_err(|e| Error::Other(e.to_string()))?;
+        let expires_in = jiff::SignedDuration::try_from(ttl).map_err(|e| Error::Other(e.to_string()))?;
         let opts = TokenOptions {
             projects: Some(vec![project.to_string()]),
             rate_limit_per_minute: None,

@@ -1,8 +1,7 @@
+use jiff::Timestamp;
+use jiff::civil::Date;
 use libsql::{Connection, Row, Rows};
 use serde_json::Value;
-use time::format_description::well_known::Rfc3339;
-use time::macros::format_description;
-use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -44,7 +43,7 @@ pub(crate) async fn migrate(conn: &Connection) -> Result<()> {
         }
         tx.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-            libsql::params![version, name, fmt_ts(OffsetDateTime::now_utc())],
+            libsql::params![version, name, fmt_ts(Timestamp::now())],
         )
         .await?;
         tx.commit().await?;
@@ -93,12 +92,11 @@ pub(crate) fn json_ids(ids: &[Uuid]) -> Result<String> {
 }
 
 /// Fixed-width UTC so timestamps compare correctly as text.
-pub(crate) fn fmt_ts(t: OffsetDateTime) -> String {
-    let fmt = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z");
-    t.to_offset(time::UtcOffset::UTC).format(&fmt).expect("valid timestamp")
+pub(crate) fn fmt_ts(t: Timestamp) -> String {
+    t.strftime("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()
 }
 
-pub(crate) fn opt_ts_value(t: Option<OffsetDateTime>) -> libsql::Value {
+pub(crate) fn opt_ts_value(t: Option<Timestamp>) -> libsql::Value {
     t.map(fmt_ts).into()
 }
 
@@ -108,12 +106,7 @@ pub(crate) fn opt_date_value(d: Option<Date>) -> libsql::Value {
 
 pub(crate) fn get_opt_date(row: &Row, i: i32) -> Result<Option<Date>> {
     let s: Option<String> = row.get(i)?;
-    s.as_deref()
-        .map(|s| {
-            Date::parse(s, &format_description!("[year]-[month]-[day]"))
-                .map_err(|e| Error::Corrupt(format!("date {s}: {e}")))
-        })
-        .transpose()
+    s.as_deref().map(|s| s.parse::<Date>().map_err(|e| Error::Corrupt(format!("date {s}: {e}")))).transpose()
 }
 
 pub(crate) fn opt_uuid_value(u: Option<Uuid>) -> libsql::Value {
@@ -130,18 +123,18 @@ pub(crate) fn get_opt_uuid(row: &Row, i: i32) -> Result<Option<Uuid>> {
     s.map(|s| Uuid::parse_str(&s).map_err(|e| Error::Corrupt(format!("uuid {s}: {e}")))).transpose()
 }
 
-pub(crate) fn get_ts(row: &Row, i: i32) -> Result<OffsetDateTime> {
+pub(crate) fn get_ts(row: &Row, i: i32) -> Result<Timestamp> {
     let s: String = row.get(i)?;
     parse_ts(&s)
 }
 
-pub(crate) fn get_opt_ts(row: &Row, i: i32) -> Result<Option<OffsetDateTime>> {
+pub(crate) fn get_opt_ts(row: &Row, i: i32) -> Result<Option<Timestamp>> {
     let s: Option<String> = row.get(i)?;
     s.as_deref().map(parse_ts).transpose()
 }
 
-fn parse_ts(s: &str) -> Result<OffsetDateTime> {
-    OffsetDateTime::parse(s, &Rfc3339).map_err(|e| Error::Corrupt(format!("timestamp {s}: {e}")))
+fn parse_ts(s: &str) -> Result<Timestamp> {
+    s.parse::<Timestamp>().map_err(|e| Error::Corrupt(format!("timestamp {s}: {e}")))
 }
 
 pub(crate) fn get_json(row: &Row, i: i32) -> Result<Value> {

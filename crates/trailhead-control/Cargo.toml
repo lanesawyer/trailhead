@@ -13,7 +13,7 @@ description = "Trailhead factory control plane: orchestrator, reconciler, budget
 [dependencies]
 trailhead-core.workspace = true
 trailhead-factory.workspace = true
-time.workspace = true
+jiff.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

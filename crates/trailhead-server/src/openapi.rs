@@ -132,7 +132,7 @@ pub struct Health {
     /// That binary's modification time when the server started, in Unix milliseconds.
     exe_modified_ms: Option<u64>,
     db: Option<String>,
-    started_at: time::OffsetDateTime,
+    started_at: jiff::Timestamp,
 }
 
 /// `GET /v1/me`: the caller.

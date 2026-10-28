@@ -7,6 +7,8 @@ use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use http::request::Parts;
+use jiff::Timestamp;
+use jiff::civil::Date;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
@@ -20,8 +22,6 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
-use time::format_description::well_known::Rfc3339;
-use time::{Date, OffsetDateTime};
 use trailhead_core::{
     Claim, Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewProject, NewTask, Project, ProjectPatch,
     ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch, TaskSort, Verdict,
@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::params::{parse_date, parse_list, parse_opt_date, parse_opt_time, parse_time};
+use crate::params::{parse_date, parse_list, parse_opt_at, parse_opt_date};
 
 const BRIEF_PREFIX: &str = "trailhead://projects/";
 
@@ -97,16 +97,13 @@ macro_rules! attempt {
 }
 
 /// `2026-10-17 13:00 PDT` in the zone it was planned in, else at UTC.
-fn local_time(t: OffsetDateTime, tz: Option<&str>) -> String {
+fn local_time(t: Timestamp, tz: Option<&str>) -> String {
     let zone = tz.and_then(|z| jiff::tz::TimeZone::get(z).ok()).unwrap_or(jiff::tz::TimeZone::UTC);
-    match jiff::Timestamp::from_second(t.unix_timestamp()) {
-        Ok(ts) => ts.to_zoned(zone).strftime("%Y-%m-%d %H:%M %Z").to_string(),
-        Err(_) => t.to_string(),
-    }
+    t.to_zoned(zone).strftime("%Y-%m-%d %H:%M %Z").to_string()
 }
 
 /// A day, or a day and time: `2026-10-17` or `2026-10-17 13:00 PDT`.
-fn when(on: Option<Date>, at: Option<OffsetDateTime>, tz: Option<&str>) -> Option<String> {
+fn when(on: Option<Date>, at: Option<Timestamp>, tz: Option<&str>) -> Option<String> {
     match (at, on) {
         (Some(at), _) => Some(local_time(at, tz)),
         (None, Some(day)) => Some(day.to_string()),
@@ -164,8 +161,8 @@ fn comment_line(c: &Comment) -> String {
 /// "until <time>", or "since <time>, no expiry" for a claim that never lapses.
 fn lease(c: &Claim) -> String {
     match c.expires_at {
-        Some(e) => format!("until {}", e.format(&Rfc3339).unwrap_or_default()),
-        None => format!("since {}, no expiry", c.claimed_at.format(&Rfc3339).unwrap_or_default()),
+        Some(e) => format!("until {e}"),
+        None => format!("since {}, no expiry", c.claimed_at),
     }
 }
 
@@ -419,9 +416,9 @@ impl TrailheadMcp {
     }
 
     async fn do_create_task(&self, ctx: &Ctx, a: CreateArgs) -> Result<CallToolResult, ErrorData> {
-        let due_at = attempt!(a.due_at.as_deref().map(parse_time).transpose());
+        let due_at = attempt!(parse_opt_at(a.due_at.as_deref()));
         let scheduled_on = attempt!(parse_opt_date(a.scheduled_on.as_deref()));
-        let scheduled_at = attempt!(parse_opt_time(a.scheduled_at.as_deref()));
+        let scheduled_at = attempt!(parse_opt_at(a.scheduled_at.as_deref()));
         let new = NewTask {
             project: a.project,
             title: a.title,
@@ -596,10 +593,10 @@ impl TrailheadMcp {
             status,
             priority: a.priority,
             due_on: attempt!(clearable(a.due_on.as_deref(), parse_date)),
-            due_at: attempt!(clearable(a.due_at.as_deref(), parse_time)),
+            due_at: attempt!(clearable(a.due_at.as_deref(), trailhead_core::parse_at)),
             due_tz: a.due_tz.map(Some),
             scheduled_on: attempt!(clearable(a.scheduled_on.as_deref(), parse_date)),
-            scheduled_at: attempt!(clearable(a.scheduled_at.as_deref(), parse_time)),
+            scheduled_at: attempt!(clearable(a.scheduled_at.as_deref(), trailhead_core::parse_at)),
             scheduled_tz: a.scheduled_tz.map(Some),
             ..Default::default()
         };

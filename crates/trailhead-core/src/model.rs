@@ -1,8 +1,7 @@
+use jiff::Timestamp;
+use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use time::{Date, OffsetDateTime};
-
-time::serde::format_description!(pub iso_date, Date, "[year]-[month]-[day]");
 use uuid::Uuid;
 
 use crate::error::Error;
@@ -92,8 +91,7 @@ pub struct Workspace {
     pub id: Uuid,
     pub name: String,
     pub default_claim_ttl: i64,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,8 +101,7 @@ pub struct User {
     pub workspace_id: Uuid,
     pub name: String,
     pub email: Option<String>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -118,11 +115,10 @@ pub struct Agent {
     #[serde(default)]
     pub parent_agent_id: Option<Uuid>,
     pub name: String,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
+    pub created_at: Timestamp,
     /// Revoking an agent also revokes every sub-agent under it.
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub revoked_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    pub revoked_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,12 +139,9 @@ pub struct Project {
     #[serde(default)]
     pub reviewers: Vec<Uuid>,
     pub version: i64,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    pub updated_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub deleted_at: Option<OffsetDateTime>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub deleted_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,21 +158,20 @@ pub struct Task {
     pub priority: i64,
     /// The day the task is due (`YYYY-MM-DD`). Without `due_at`, it's due by the end of
     /// that day in `due_tz`.
-    #[serde(default, with = "iso_date::option")]
+    #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Date))]
     pub due_on: Option<Date>,
     /// An optional time on `due_on` it's due by, e.g. 5pm.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub due_at: Option<OffsetDateTime>,
+    pub due_at: Option<Timestamp>,
     /// The IANA zone the deadline was set in; it decides the day and when the day ends.
     pub due_tz: Option<String>,
     /// The day the task is planned to be worked (`YYYY-MM-DD`), separate from its due date.
-    #[serde(default, with = "iso_date::option")]
+    #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Date))]
     pub scheduled_on: Option<Date>,
     /// An optional time on `scheduled_on`, e.g. 1pm that day.
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub scheduled_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    pub scheduled_at: Option<Timestamp>,
     /// The IANA zone `scheduled_at` was planned in; it decides which day it falls on.
     #[serde(default)]
     pub scheduled_tz: Option<String>,
@@ -189,12 +181,9 @@ pub struct Task {
     pub source: Option<String>,
     pub external_id: Option<String>,
     pub created_by: Uuid,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    pub updated_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub deleted_at: Option<OffsetDateTime>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub deleted_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -204,15 +193,13 @@ pub struct Claim {
     pub workspace_id: Uuid,
     pub holder_id: Uuid,
     pub on_behalf_of: Uuid,
-    #[serde(with = "time::serde::rfc3339")]
-    pub claimed_at: OffsetDateTime,
+    pub claimed_at: Timestamp,
     /// `null` for a claim that never expires: people's claims, unless they asked for a TTL.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub expires_at: Option<OffsetDateTime>,
+    pub expires_at: Option<Timestamp>,
 }
 
 impl Claim {
-    pub fn is_live(&self, now: OffsetDateTime) -> bool {
+    pub fn is_live(&self, now: Timestamp) -> bool {
         self.expires_at.is_none_or(|e| e > now)
     }
 }
@@ -234,12 +221,9 @@ pub struct Comment {
     /// The model behind an agent's review, when it says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub resolved_at: Option<OffsetDateTime>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub deleted_at: Option<OffsetDateTime>,
+    pub resolved_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    pub deleted_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -248,8 +232,7 @@ pub struct Dependency {
     pub workspace_id: Uuid,
     pub blocker_id: Uuid,
     pub blocked_id: Uuid,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -270,8 +253,7 @@ pub struct Event {
     pub before: Option<Value>,
     pub after: Option<Value>,
     pub undoes: Option<i64>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub at: OffsetDateTime,
+    pub at: Timestamp,
 }
 
 string_enum!(Entity {

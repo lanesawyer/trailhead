@@ -20,7 +20,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v7", "serde"] }
 thiserror = "2"
-time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
 sha2 = "0.11"
 getrandom = "0.4"
 hex = "0.4"
@@ -48,8 +47,8 @@ trailhead-factory-host = { path = "crates/trailhead-factory-host" }
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 http = "1"
 futures-util = { version = "0.3", default-features = false }
-jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
-utoipa = { version = "6", features = ["uuid", "time"] }
+jiff = { version = "0.2", features = ["serde", "tzdb-bundle-always"] }
+utoipa = { version = "6", features = ["uuid", "jiff_0_2"] }
 keyring = "4"
 hmac = "0.13"
 iroh = "1.4"

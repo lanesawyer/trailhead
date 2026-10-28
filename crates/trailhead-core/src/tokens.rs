@@ -1,7 +1,7 @@
+use jiff::{SignedDuration, Timestamp};
 use libsql::Row;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::db::{collect, first, fmt_ts, get_opt_json, get_opt_ts, get_ts, get_uuid};
@@ -27,17 +27,14 @@ pub struct Token {
     pub workspace_id: Uuid,
     pub principal: Principal,
     pub name: String,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub revoked_at: Option<OffsetDateTime>,
+    pub created_at: Timestamp,
+    pub revoked_at: Option<Timestamp>,
     /// Projects the token is limited to. `None` means every project.
     pub projects: Option<Vec<Uuid>>,
     /// `None` means unlimited.
     pub rate_limit_per_minute: Option<i64>,
     /// When it stops working. `None` means never.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub expires_at: Option<OffsetDateTime>,
+    pub expires_at: Option<Timestamp>,
 }
 
 /// Changes to an existing token's limits. `None` leaves a field alone; `Some(None)`
@@ -56,7 +53,7 @@ pub struct TokenOptions {
     pub projects: Option<Vec<String>>,
     pub rate_limit_per_minute: Option<i64>,
     /// How long until it stops working. `None` means never, unless the caller's own token expires.
-    pub expires_in: Option<Duration>,
+    pub expires_in: Option<SignedDuration>,
 }
 
 fn token_from_row(row: &Row) -> Result<Token> {

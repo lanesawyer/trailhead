@@ -1,16 +1,16 @@
+use jiff::SignedDuration;
 use sha2::{Digest, Sha256};
-use time::Duration;
 
 use crate::db::{fmt_ts, get_ts};
 use crate::error::{Error, Result};
 use crate::store::{Ctx, Store};
 
 /// How long a key is remembered, counted from the first request.
-const KEY_TTL: Duration = Duration::hours(24);
+const KEY_TTL: SignedDuration = SignedDuration::from_hours(24);
 
 /// A first request that hasn't finished after this long is presumed dead (say,
 /// the server crashed), and a retry may take its key over.
-const IN_FLIGHT_TTL: Duration = Duration::minutes(5);
+const IN_FLIGHT_TTL: SignedDuration = SignedDuration::from_mins(5);
 
 /// A response saved under an idempotency key, replayed verbatim on retry.
 #[derive(Debug, Clone, PartialEq, Eq)]

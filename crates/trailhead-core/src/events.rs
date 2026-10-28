@@ -1,5 +1,5 @@
+use jiff::{SignedDuration, Timestamp};
 use libsql::Row;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::db::{collect, fmt_ts, get_enum, get_opt_json, get_opt_uuid, get_ts, get_uuid};
@@ -10,7 +10,7 @@ use crate::store::{Ctx, Store};
 use crate::tasks::find_task;
 
 /// Undo and revert reach back this far. Older events move to `events_archive`.
-pub const UNDO_WINDOW: time::Duration = time::Duration::days(90);
+pub const UNDO_WINDOW: SignedDuration = SignedDuration::from_hours(90 * 24);
 
 /// Events moved per transaction by [`Store::archive_events`].
 const ARCHIVE_BATCH: i64 = 500;
@@ -68,7 +68,7 @@ pub struct EventFilter {
     pub project: Option<String>,
     pub actor_id: Option<Uuid>,
     pub batch_id: Option<Uuid>,
-    pub since: Option<OffsetDateTime>,
+    pub since: Option<Timestamp>,
     pub limit: Option<i64>,
     pub newest_first: bool,
     /// Also read `events_archive`. Ids are kept on archiving, so order is unchanged.

@@ -1,5 +1,5 @@
+use jiff::{SignedDuration, Timestamp};
 use libsql::Connection;
-use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::db::{collect, fmt_ts, get_opt_ts, get_uuid};
@@ -10,7 +10,7 @@ use crate::store::{Ctx, EventIn, Store};
 use crate::tasks::{TASK_COLS, task_from_row};
 
 /// How long before a deadline a `task.due_soon` reminder fires.
-pub const DEFAULT_REMINDER_WINDOW: Duration = Duration::hours(24);
+pub const DEFAULT_REMINDER_WINDOW: SignedDuration = SignedDuration::from_hours(24);
 
 pub const DUE_SOON: &str = "task.due_soon";
 pub const OVERDUE: &str = "task.overdue";
@@ -29,9 +29,9 @@ pub(crate) const NOT_NOTIFICATION_SQL: &str = "kind NOT IN ('task.due_soon', 'ta
 async fn pending(
     conn: &Connection,
     ws: Uuid,
-    now: OffsetDateTime,
-    window: Duration,
-) -> Result<Vec<(Task, OffsetDateTime, String)>> {
+    now: Timestamp,
+    window: SignedDuration,
+) -> Result<Vec<(Task, Timestamp, String)>> {
     let rows = conn
         .query(
             &format!(
@@ -74,7 +74,7 @@ impl Store {
     /// `task.overdue` once the due date passes, each at most once per due date.
     /// Done, cancelled and deleted tasks are skipped. Returns the new events, all
     /// in `ctx`'s batch and attributed to the workspace owner.
-    pub async fn emit_due_reminders(&self, ctx: &Ctx, window: Duration) -> Result<Vec<Event>> {
+    pub async fn emit_due_reminders(&self, ctx: &Ctx, window: SignedDuration) -> Result<Vec<Event>> {
         if pending(&*self.reader()?, ctx.workspace_id, self.now(), window).await?.is_empty() {
             return Ok(Vec::new());
         }
