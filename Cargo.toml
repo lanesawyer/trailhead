@@ -52,3 +52,7 @@ jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 utoipa = { version = "6", features = ["uuid", "time"] }
 keyring = "4"
 hmac = "0.13"
+
+[profile.dev]
+# Line tables only: backtraces keep file:line, but builds, links and target/ shrink a lot.
+debug = "line-tables-only"
