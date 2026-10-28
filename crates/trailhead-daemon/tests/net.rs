@@ -339,3 +339,18 @@ async fn subscription_token_goes_in_the_secrets_file_only() {
     assert!(!format!("{secrets:?} {program:?}").contains("sk-ant-oat-test"), "never in debug output");
     assert!(!program.args.iter().any(|a| a.contains("sk-ant")), "never on the command line");
 }
+
+#[tokio::test]
+async fn daemon_log_filter_goes_on_the_command_line_when_set() {
+    let control = endpoint(SecretKey::generate(), None).await;
+    let remote =
+        RemoteDaemon::new(control.clone(), MASTER, Arc::new(FakeCompute::new()), Launch::new(b"daemon".to_vec()));
+    let program = remote.program(&SandboxId("s".into()));
+    assert!(!program.args.iter().any(|a| a == "--log"));
+
+    let launch = Launch { log: Some("info,iroh=debug".into()), ..Launch::new(b"daemon".to_vec()) };
+    let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
+    let args = remote.program(&SandboxId("s".into())).args;
+    let at = args.iter().position(|a| a == "--log").expect("--log is set");
+    assert_eq!(args[at + 1], "info,iroh=debug");
+}

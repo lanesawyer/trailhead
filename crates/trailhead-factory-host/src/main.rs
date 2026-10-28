@@ -179,7 +179,8 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File), String> {
         .await
         .map_err(|e| format!("binding the iroh endpoint: {e}"))?;
     let (compute, launch) = compute(&config.compute, opts, &paths, Launch::new(binary))?;
-    let launch = Launch { claude_oauth_token: opts.claude_oauth_token.clone(), ..launch };
+    let launch =
+        Launch { claude_oauth_token: opts.claude_oauth_token.clone(), log: config.daemon.log.clone(), ..launch };
     let daemon = Arc::new(RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch));
     let tunnel =
         Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, daemon.peers())).spawn();
