@@ -218,6 +218,32 @@ async fn failed_check_requeues_and_next_attempt_gets_a_fresh_sandbox() {
 }
 
 #[tokio::test]
+async fn check_that_passes_on_rerun_still_opens_the_pr_with_a_note() {
+    let r = rig();
+    r.tracker.add_task("TRAIL", "Flaky", "");
+    r.daemon.fail_check_times("lint", "flaked", 1);
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+    let prs = r.codehost.prs();
+    assert_eq!(prs.len(), 1);
+    assert!(prs[0].spec.body.contains("Check `lint` failed, then passed when rerun."), "{}", prs[0].spec.body);
+}
+
+#[tokio::test]
+async fn check_that_fails_twice_fails_the_attempt() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Broken", "");
+    r.daemon.fail_check_times("lint", "still broken", 2);
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Failed { reason } if reason.contains("lint")), "{:?}", ran[0].1);
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    assert!(r.codehost.prs().is_empty());
+}
+
+#[tokio::test]
 async fn agent_question_parks_the_task() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Ambiguous", "");

@@ -21,7 +21,8 @@ pub const FAKE_BASE: &str = "base0000";
 /// A checkout that doesn't exist: prepares are recorded and checks pass unless told to fail.
 #[derive(Default)]
 pub struct FakeWorkspace {
-    failing: Mutex<BTreeMap<String, String>>,
+    /// Check name to its failing output and how many more runs fail (`None`: all of them).
+    failing: Mutex<BTreeMap<String, (String, Option<usize>)>>,
     prepared: Mutex<Vec<PrepareRequest>>,
     prepares_started: AtomicUsize,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
@@ -52,8 +53,21 @@ impl Workspace for FakeWorkspace {
     }
 
     async fn check(&self, check: &Check) -> CheckResult {
-        match self.failing.lock().unwrap().get(&check.name) {
-            Some(output) => CheckResult { name: check.name.clone(), passed: false, output: output.clone() },
+        let mut failing = self.failing.lock().unwrap();
+        let output = match failing.get_mut(&check.name) {
+            Some((output, None)) => Some(output.clone()),
+            Some((output, Some(left))) => {
+                *left -= 1;
+                let output = output.clone();
+                if *left == 0 {
+                    failing.remove(&check.name);
+                }
+                Some(output)
+            }
+            None => None,
+        };
+        match output {
+            Some(output) => CheckResult { name: check.name.clone(), passed: false, output },
             None => CheckResult { name: check.name.clone(), passed: true, output: String::new() },
         }
     }
@@ -99,7 +113,17 @@ impl LocalDaemon {
 
     /// Makes a named check fail with this output on every later run.
     pub fn fail_check(&self, name: &str, output: &str) {
-        self.workspace.failing.lock().unwrap().insert(name.to_string(), output.to_string());
+        self.workspace.failing.lock().unwrap().insert(name.to_string(), (output.to_string(), None));
+    }
+
+    /// Makes a named check fail its next `times` runs, then pass. Zero times means it passes.
+    pub fn fail_check_times(&self, name: &str, output: &str, times: usize) {
+        let mut failing = self.workspace.failing.lock().unwrap();
+        if times == 0 {
+            failing.remove(name);
+        } else {
+            failing.insert(name.to_string(), (output.to_string(), Some(times)));
+        }
     }
 
     pub fn pass_check(&self, name: &str) {
