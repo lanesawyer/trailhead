@@ -12,7 +12,7 @@ The task engine stays the foundation and stays usable on its own: a fast, headle
 
 The factory is the fourth way, and the one the project now centers on: Trailhead drives the agents itself. A task with an approved spec becomes a sandboxed run, a pull request, a review and a merge, with the claims, questions, handoffs and spend recorded on the task.
 
-There is no official Trailhead app. The todo use case becomes a separate client (working names `trailhead-todo` or `trailhead-ticklist`); Lane's reader app is the first real client and the dogfood test.
+The factory has an official app: a native Bevy client for watching runs, steering them and writing specs (`docs/factory/ui.md`). It is a client of the API like any other, kept in this repo outside the default build, so the engine stays headless. The todo use case is still a separate client (working names `trailhead-todo` or `trailhead-ticklist`), and Lane's reader app stays a client of its own.
 
 The long-term ambition is to replace other task tools, not to sync with them.
 
@@ -186,12 +186,13 @@ Factory (`docs/factory/mvp.md`), tracked under TRAIL-75:
    - M0: spikes on the unknowns (iroh in a locked-down Sprite, Claude Code through the Anthropic connector, a PR through the GitHub connector, checkpoint seeding).
    - M1: factory types, the five traits, fakes, and the lifecycle in CI. Done, along with the in-process `Tracker`, the run loop, typed review verdicts and token expiry.
    - M2: Sprites compute. M3: the in-sandbox daemon over iroh with the Claude Code harness. M4: sandboxes reaching Trailhead over the tunnel. M5: GitHub and the reviewer agent.
-5. **Factory after the MVP.** Suspend during review (resume affinity), risk tiers and quorums, a merger agent and auto-merge, a planner agent, profile escalation, the provider usage API and daily cap, previews, more repos, OTLP export.
+5. **Factory after the MVP.** First the rough edges the MVP's live runs hit (attempt caps, resuming parked tasks, `factory status` and `logs`, sandboxes that won't release). Then suspend during review (resume affinity), risk tiers and quorums, a merger agent and auto-merge, a planner agent, profile escalation, the provider usage API and daily cap, previews, more repos, OTLP export.
+6. **Factory UI.** The Bevy app in `docs/factory/ui.md`, started once the factory runs unattended without regular fixes. It needs the factory status surface from phase 5 first.
 
 Deferred:
 
-6. **Teams.** Until a second person needs it. Other humans join the same server with their own accounts; the data model already carries workspaces, users and per-human permissions. Multiple workspaces and multi-process hosting (Turso, shared rate limits) come only if needed.
-7. **Importers.** One-way, one-time imports from Todoist, Vikunja, GitHub Issues, Jira; for the factory, Jira specs first.
+7. **Teams.** Until a second person needs it. Other humans join the same server with their own accounts; the data model already carries workspaces, users and per-human permissions. Multiple workspaces and multi-process hosting (Turso, shared rate limits) come only if needed.
+8. **Importers.** One-way, one-time imports from Todoist, Vikunja, GitHub Issues, Jira; for the factory, Jira specs first.
 
 ## Decisions log
 
@@ -199,6 +200,7 @@ Decisions made while building, including where the build refines or departs from
 
 - **The factory is built into Trailhead (2026-10-26).** The task engine becomes one part of a software factory; the server is the control plane when the `factory` feature is on, and the todo use case becomes a separate client. See `docs/factory/overview.md`.
 - **Typed review verdicts (factory).** A `review` comment kind carries `approve` or `request_changes` and optionally the reviewing model. It records a verdict without moving the task, so the factory's gates and quorums count records rather than prose. CLI: `trailhead verdict` (`trailhead review` already sends a task for review).
+- **An official UI (2026-10-28).** This replaces "no official Trailhead app": the factory gets a first-party native client in Bevy, because watching agents move between sandboxes and tasks is the main thing a person does with it. It stays a client: it reads through the API and writes through commands, never touching `trailhead-core` or the database. It lives at `clients/trailhead-ui`, outside `default-members`, so `cargo build`, CI and sandboxes never compile Bevy. The todo client is still separate. See `docs/factory/ui.md`.
 - **Token expiry (factory).** Tokens take an optional expiry and never outlive the token that issued them, so the factory's per-sandbox sub-agent tokens clean themselves up if revoking is missed.
 
 - **Storage seam (Phase 1).** The seam is the `Store` API rather than a Rust trait: libsql types never leave `trailhead-core`, and only `Store::open_local`/`open_remote` know which backend is in use. Swapping backends means rewriting the crate's query layer, not its callers. Revisit if a second backend actually lands.
@@ -242,7 +244,7 @@ Decisions made while building, including where the build refines or departs from
 
 ## Non-goals
 
-- An official Trailhead todo app inside this repo; it's a separate client.
+- An official todo app inside this repo; it's a separate client. (The factory's UI is official; see the decisions log.)
 - Two-way sync with any other tool.
 - Replicas, offline sync or merging between instances.
 - Browser clients calling the API directly.

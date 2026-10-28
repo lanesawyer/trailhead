@@ -16,4 +16,4 @@ Proposal: instrument everything with `tracing` and export through OpenTelemetry,
 
 Starting point: `tracing` logs only for the MVP; OTLP export and a backend after. The backend choice is open ([open-questions.md](open-questions.md)).
 
-Human interface for now: logs plus the Trailhead reader app. A web UI (Astro with astro-bulma) is a later decision.
+Human interface: logs for now, then the Bevy app in [ui.md](ui.md).

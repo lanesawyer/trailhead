@@ -51,4 +51,4 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 | Protocol | Strongly typed | Shared Rust types over Iroh; daemon name TBD |
 | Specs | Human-led, written with AI, entered through Trailhead | Approved spec is the source of acceptance criteria |
 | Control plane location | Runs anywhere | Starts on Lane's machine |
-| Human interface | Logs plus the Trailhead reader app for now | Possible web UI later on Astro with astro-bulma |
+| Human interface | Native Bevy app with feathers ([ui.md](ui.md)) | In this repo outside the default build; a client of the API like any other |
