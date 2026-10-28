@@ -24,10 +24,10 @@ The long-term ambition is to replace other task tools, not to sync with them.
 4. **Agents pay for every token.** Responses are compact by default, with full detail on request.
 5. **One server, reachable anywhere.** An instance is one server and one SQLite file, the single authority for its data. It runs on a Linux box, wherever is convenient (Lane's PC, a home box, a VPS), and agents on other machines reach it over a tunnel. Trailhead assumes it is online and connected; there are no replicas and nothing syncs between instances.
 6. **Trailhead is the source of truth.** Other tools can be notified or imported from, never synced with.
-7. **The factory coordinates; sandboxes act.** The server is the control plane: it orchestrates, enforces budgets and decides review gates, and holds no agent credentials. Sandboxes are untrusted and disposable, reach only declared egress, and call model providers and the code host through injected credentials.
+7. **The factory coordinates; sandboxes act.** The control plane (today a separate `trailhead-factory` process beside the server, sharing its database; inside the server later, TRAIL-164) orchestrates, enforces budgets and decides review gates, and holds no agent credentials. Sandboxes are untrusted and disposable, reach only declared egress, and call model providers and the code host through injected credentials.
 8. **Humans review by risk, not by habit.** Per-repo policy decides when a human is required; loosening it always needs one.
 9. **Pluggable where vendors differ.** Compute, agent harness, model provider, tracker and code host are traits with in-memory fakes, so the whole lifecycle runs in CI with no network or spend.
-10. **The engine works without the factory.** Factory crates sit behind a Cargo feature; `cargo install trailhead` without it is still the small task engine.
+10. **The engine works without the factory.** `cargo install trailhead` is the small task engine; the factory is a separate binary built from this repo for now. The goal is a default-on `factory` feature of the `trailhead` CLI (TRAIL-116), so a slim build stays possible.
 
 ## License
 
