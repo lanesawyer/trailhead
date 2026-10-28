@@ -4949,6 +4949,7 @@ name = "trailhead-control"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "serde_json",
  "time",
  "tokio",

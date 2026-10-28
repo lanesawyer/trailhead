@@ -194,10 +194,11 @@ impl Runner {
             RunOutcome::Verdict { kind, body } => {
                 let verdict =
                     Verdict { kind, body, reviewer: tracker.agent().to_string(), model: Some(req.model.clone()) };
+                // Recorded first: if Trailhead refuses it, a retried review mustn't have already posted to GitHub.
+                tracker.record_verdict(key, &verdict).await?;
                 if let Some(pr) = &req.pr {
                     self.codehost.comment(pr, &verdict.body).await?;
                 }
-                tracker.record_verdict(key, &verdict).await?;
                 Ok((RunResult::Reviewed(verdict), Vec::new()))
             }
             RunOutcome::NeedsInput { question } => {

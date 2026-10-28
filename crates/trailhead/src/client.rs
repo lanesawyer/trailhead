@@ -423,6 +423,14 @@ pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32
     }
     for _ in 0..100 {
         if health(http, base, None).await.is_none() {
+            // It stops answering before it has finished exiting; it removes its pid file last.
+            let ours = || std::fs::read_to_string(&pid_file).is_ok_and(|p| p.trim() == pid.to_string());
+            for _ in 0..50 {
+                if !ours() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
             return Ok(Some(pid));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
