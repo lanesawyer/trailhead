@@ -151,12 +151,21 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router), String> {
     Ok((Arc::new(factory), tunnel))
 }
 
+fn check_result(failed: usize) -> Result<(), String> {
+    match failed {
+        0 => Ok(()),
+        1 => Err("1 check failed".into()),
+        n => Err(format!("{n} checks failed")),
+    }
+}
+
 async fn main_inner(cli: Cli) -> Result<(), String> {
     match cli.cmd {
         Cmd::Check(opts) => {
             let (factory, tunnel) = setup(&opts).await?;
             let project = &factory.config.repo.project;
             let queue = factory.config.repo.queue.clone().map(trailhead_factory::TaskKey);
+            let mut failed = 0;
             match factory.tracker.ready(project, queue.as_ref(), 10).await {
                 Ok(ready) => {
                     let scope = queue.as_ref().map_or(project.clone(), |q| format!("{project}, under {}", q.0));
@@ -165,15 +174,22 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
                         println!("  {} {}", t.key.0, t.title);
                     }
                 }
-                Err(e) => println!("tracker: acting as {AGENT}; {e}"),
+                Err(e) => {
+                    failed += 1;
+                    println!("tracker: acting as {AGENT}; {e}");
+                }
             }
             match factory.compute.list(&Default::default()).await {
                 Ok(live) => println!("compute: Sprites reachable; {} sandbox(es) visible", live.len()),
-                Err(e) => println!("compute: {e}"),
+                Err(e) => {
+                    failed += 1;
+                    println!("compute: {e}");
+                }
             }
             println!("endpoint: {}", tunnel.endpoint().id());
             println!("tunnel: forwarding to {}", opts.server);
-            tunnel.shutdown().await.map_err(|e| e.to_string())
+            tunnel.shutdown().await.map_err(|e| e.to_string())?;
+            check_result(failed)
         }
         Cmd::Run(opts) => {
             let (factory, tunnel) = setup(&opts).await?;
@@ -198,5 +214,17 @@ async fn main() -> std::process::ExitCode {
             eprintln!("trailhead-factory: {e}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_result;
+
+    #[test]
+    fn check_result_counts_failures() {
+        assert_eq!(check_result(0), Ok(()));
+        assert_eq!(check_result(1), Err("1 check failed".into()));
+        assert_eq!(check_result(2), Err("2 checks failed".into()));
     }
 }
