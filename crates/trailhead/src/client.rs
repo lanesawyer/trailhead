@@ -527,7 +527,8 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     #[cfg(windows)]
     keep_std_handles_from_children();
     cmd.spawn().context("couldn't start the local server")?;
-    for _ in 0..100 {
+    // Generous, since a busy machine (a full `cargo test` in a factory sandbox) can take well over 10 s to start it.
+    for _ in 0..300 {
         if health(http, base, None).await.is_some() {
             return remember_tunnel(&paths, base, false);
         }
