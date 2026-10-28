@@ -54,6 +54,7 @@ To use the other machine as yourself, mint the token with `trailhead token add l
 
 ## Integrations
 
+- [Docs site](https://lanesawyer.github.io/trailhead/): these docs as a book, built with mdBook (`mdbook serve` to preview; needs Pages set to "GitHub Actions" in the repo settings).
 - [OpenClaw](docs/integrations/openclaw.md): mount Trailhead's MCP server and agent skill.
 
 ## Development
