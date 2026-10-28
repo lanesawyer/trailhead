@@ -44,7 +44,7 @@ run finished task=TRAIL-105 outcome=…
 | Outcome | What you see | What you do |
 | --- | --- | --- |
 | PR opened | Task `in_review`, a PR on GitHub with the reviewer's comment, a typed verdict on the task | Review and merge on GitHub, then `trailhead --as-me done TRAIL-n -m "merged"` |
-| Checks failed | A note on the task with the end of the failing check's output; the task is open again and retried | Usually nothing. If it keeps failing, Ctrl-C and read the note (attempt cap: TRAIL-107) |
+| Checks failed | A note on the task with the end of the failing check's output; the task is open again and retried | Usually nothing. The next attempt is told what failed; after `max_attempts` (`[repo]`, default 3) the task is parked with a question summarizing the failure |
 | Question | Task `needs_input` with a question comment; its Sprite stays busy | Answer it, set the task open, restart the factory (TRAIL-108 removes the restart) |
 | Budget or time breach | As a question, saying which limit it hit | Raise the budget in `factory.toml` or cancel the task |
 | Usage window nearly full | `subscription usage window nearly full; starting no new runs until it resets`, with how long until the reset | Nothing; runs start again at the reset. Change `[usage] pause_at` in `factory.toml` to leave more or less room |
@@ -59,7 +59,6 @@ run finished task=TRAIL-105 outcome=…
 
 ## Known rough edges
 
-- No attempt cap; retries don't see why the last attempt failed (TRAIL-107).
 - Answering a question needs a restart (TRAIL-108).
 - No `status` or `logs` commands (TRAIL-109); no way to move a task into the queue (TRAIL-110).
 - No notifications (TRAIL-111); runs in a terminal rather than as a service (TRAIL-112); no single-instance lock (TRAIL-113).

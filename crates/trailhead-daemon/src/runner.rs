@@ -192,7 +192,9 @@ impl Runner {
                 };
                 if let Some(failed) = checks.iter().find(|c| !c.passed) {
                     let reason = format!("check {} failed", failed.name);
-                    tracker.note(key, &failure_note(&checks)).await?;
+                    let note = failure_note(&checks);
+                    tracker.note(key, &note).await?;
+                    tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), checks));
                 }
@@ -229,6 +231,8 @@ impl Runner {
             }
             RunOutcome::Failed { reason } => {
                 if req.role == Role::Worker {
+                    let failure = Some(format!("The agent gave up: {reason}"));
+                    tracker.report(key, RunUpdate { failure, ..Default::default() }).await?;
                     tracker.release(key).await?;
                 }
                 Ok((RunResult::Failed(reason), Vec::new()))

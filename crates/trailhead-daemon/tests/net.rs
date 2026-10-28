@@ -122,7 +122,12 @@ fn request(run: &str, key: TaskKey, credential: Credential) -> RunRequest {
     RunRequest {
         run: run.into(),
         role: Role::Worker,
-        task: trailhead_factory::TaskSpec { key, title: "Slow".into(), description: String::new() },
+        task: trailhead_factory::TaskSpec {
+            key,
+            title: "Slow".into(),
+            description: String::new(),
+            previous_failure: None,
+        },
         repo: trailhead_factory::Repo { owner: "o".into(), name: "r".into() },
         base_branch: "main".into(),
         branch: format!("factory/{run}"),

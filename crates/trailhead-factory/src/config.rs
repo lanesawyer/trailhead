@@ -71,6 +71,9 @@ pub struct RepoConfig {
     /// A task whose subtasks are the factory's work. Without one, every ready task in the project is.
     #[serde(default)]
     pub queue: Option<String>,
+    /// Attempts a task gets before it's parked for a human instead of retried.
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
 }
 
 fn default_base_branch() -> String {
@@ -78,6 +81,9 @@ fn default_base_branch() -> String {
 }
 fn default_max_sandboxes() -> usize {
     1
+}
+fn default_max_attempts() -> u32 {
+    3
 }
 fn default_worker() -> String {
     "worker".into()

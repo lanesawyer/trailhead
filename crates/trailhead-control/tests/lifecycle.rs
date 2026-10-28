@@ -727,3 +727,36 @@ async fn a_refused_publish_parks_the_task_instead_of_redoing_the_work() {
     assert!(question.body.contains("POST /repos/lanesawyer/trailhead/git/refs"), "{}", question.body);
     assert_eq!(busy(&r.compute), ["trailhead-w1"], "the sandbox keeps the finished checkout");
 }
+
+#[tokio::test]
+async fn a_task_that_keeps_failing_is_parked_after_max_attempts_and_retries_see_the_last_failure() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Lint me", "");
+    r.daemon.fail_check("lint", "warning: unused variable");
+    for attempt in 1..=3 {
+        r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+        let ran = r.factory.tick().await.unwrap();
+        assert_eq!(ran.len(), 1, "attempt {attempt} runs");
+        if attempt < 3 {
+            assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+            assert_eq!(r.tracker.task(&key).status, Status::Open);
+        } else {
+            assert!(matches!(&ran[0].1, Outcome::Parked { reason } if reason.contains("lint")), "{:?}", ran[0].1);
+        }
+    }
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.attempt, Some(3));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("3 failed attempts") && questions[0].body.contains("unused variable"));
+    assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
+
+    let ctxs = r.harness.contexts();
+    assert_eq!(ctxs.len(), 3);
+    assert_eq!(ctxs[0].task.previous_failure, None);
+    for ctx in &ctxs[1..] {
+        let note = ctx.task.previous_failure.as_deref().expect("the last failure is passed on");
+        assert!(note.contains("`lint` failed") && note.contains("warning: unused variable"), "{note}");
+    }
+}

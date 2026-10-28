@@ -269,6 +269,9 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
             desc = task.description,
         ),
     };
+    if let Some(failure) = &task.previous_failure {
+        p.push_str(&format!("\n\nA previous attempt at this task failed:\n{failure}\n\nFix what broke."));
+    }
     if let Some(f) = feedback {
         p.push_str(&format!("\n\nA reviewer asked for changes:\n{}\n\nAddress them.", f.body));
     }

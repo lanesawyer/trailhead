@@ -368,6 +368,23 @@ impl Factory {
             RunResult::Failed(reason) => {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
                 self.release_worker(&sandbox).await?;
+                let max = self.config.repo.max_attempts;
+                if attempt >= max {
+                    // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
+                    let last = self.tracker.show(&task.key).await?.run.failure.unwrap_or_else(|| reason.clone());
+                    sub.claim(&task.key).await?;
+                    sub.ask(
+                        &task.key,
+                        &format!(
+                            "Gave up after {attempt} failed attempts (the limit is {max}). The last failure: \
+                             {reason}\n\n{last}\n\nFix the cause, then reopen the task; raise `max_attempts` to \
+                             allow more tries."
+                        ),
+                    )
+                    .await?;
+                    self.tracker.revoke_sub_agent(&name).await?;
+                    return Ok(Outcome::Parked { reason });
+                }
                 self.tracker.revoke_sub_agent(&name).await?;
                 Ok(Outcome::Failed { reason })
             }
@@ -806,5 +823,10 @@ fn token_ttl(profile: &Profile) -> Duration {
 }
 
 fn spec(task: &Task) -> TaskSpec {
-    TaskSpec { key: task.key.clone(), title: task.title.clone(), description: task.description.clone() }
+    TaskSpec {
+        key: task.key.clone(),
+        title: task.title.clone(),
+        description: task.description.clone(),
+        previous_failure: task.run.failure.clone(),
+    }
 }

@@ -105,7 +105,12 @@ fn rig() -> Rig {
 fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
     RunContext {
         role,
-        task: TaskSpec { key: TaskKey("TRAIL-1".into()), title: "Add a greeting".into(), description: "hi()".into() },
+        task: TaskSpec {
+            key: TaskKey("TRAIL-1".into()),
+            title: "Add a greeting".into(),
+            description: "hi()".into(),
+            previous_failure: None,
+        },
         workdir: r.repo.clone(),
         model: ModelId("claude-sonnet-x".into()),
         endpoint: Endpoint { base_url: "https://api.sprites.dev/v1/gateway/anthropic/c1".into() },

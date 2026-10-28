@@ -19,7 +19,7 @@ Draft signatures; the testkit fakes are the first test of whether they're right.
 - **`Compute::set_labels`** is the kill switch: removing the `role` label cuts connector access.
 - **`CodeHost::diff`** gives the reviewer the change without the author's transcript.
 - **`ModelProvider::spend`** waits for the daily cap, which is out of the MVP.
-- **Run metadata** (`RunUpdate`): `attempt`, `sandbox`, `profile`, `pr`, `review_rounds`, `reviewed`, `spend`. Reviewer sandboxes and sub-agents are named per round (`trail-42-a1-r1`), so a review interrupted by a crash can be retried under a fresh identity.
+- **Run metadata** (`RunUpdate`): `attempt`, `sandbox`, `profile`, `pr`, `review_rounds`, `reviewed`, `spend`, `failure` (why the last attempt failed, passed to the next as `TaskSpec.previous_failure`). Reviewer sandboxes and sub-agents are named per round (`trail-42-a1-r1`), so a review interrupted by a crash can be retried under a fresh identity.
 
 ```rust
 #[async_trait]

@@ -12,6 +12,9 @@ pub struct TaskSpec {
     pub key: TaskKey,
     pub title: String,
     pub description: String,
+    /// Why the previous attempt at the task failed, when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
