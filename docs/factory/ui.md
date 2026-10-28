@@ -13,7 +13,7 @@ The factory's own client for people: watch runs live, steer them, and author tas
 | Home | This repo, outside the default build (`default-members`); moving it to its own repo later is cheap | Decided |
 | Offline | No local actions without a live connection; no optimistic updates | Decided |
 | Identity | A user-principal token, the same kind the CLI holds | Decided (already built) |
-| Transport | Embedded iroh, dialing the control plane's API tunnel | Leaning |
+| Transport | Embedded iroh, dialing the control plane on its own UI protocol, not the daemons' API tunnel | Decided (2026-10-28) |
 | Platforms | Linux first, matching Trailhead; macOS and Windows stay open (TRAIL-131) | Leaning |
 | Name | Working name `trailhead-ui`; Lookout is a candidate ([naming.md](naming.md)) | Open |
 
@@ -62,11 +62,12 @@ Nothing new. Tokens already have a `principal` of user or agent, and every write
 
 ## Transport
 
-Leaning: embed iroh and dial the control plane's `trailhead/api/0` endpoint, the API tunnel sandboxes already use. It forwards each stream to the server's loopback port, so the UI's HTTP client talks to a local port exactly as the daemon does.
+Decided (2026-10-28): the UI is the factory's UI, so it connects to the control plane over iroh, using its own protocol (`trailhead/ui/0`) on the control plane's endpoint. It does not use the daemons' API tunnel (`trailhead/api/0`).
 
-- **Gap:** `ApiTunnel` only admits daemons the control plane started (`Peers`). The UI needs a persisted allowlist of client endpoint ids, added by a human (for example `trailhead factory allow <endpoint-id>`). Admission only: the bearer token still decides what the UI can do.
-- **Gap:** the API tunnel exists only while the factory runs. Authoring tasks with the factory stopped needs the plain server, which today is reached with `dumbpipe`.
-- **Alternative:** dial the server's `dumbpipe` ticket from inside the app, the path people already use. Works without the factory, but couples the UI to dumbpipe's wire protocol.
+- **What it carries.** The factory status snapshot and stream ([Factory status](#factory-status)), and Trailhead API requests forwarded to the server's loopback port as the API tunnel does, so the UI's HTTP client talks to a local port.
+- **Admission.** A persisted allowlist of UI endpoint ids, added by a person (for example `trailhead factory allow <endpoint-id>`), plus the user's bearer token on every API request. The allowlist decides who can connect, and the token decides what they can do.
+- **Why not the API tunnel.** That tunnel admits only daemons this control plane started, and only reaches the Trailhead API. Keeping the UI out of it means a compromised sandbox can't see factory status or reach steering, and how daemons get in can change without touching the UI.
+- **Factory stopped.** There's little to watch, so the map shows Trailhead's last known state marked "factory stopped". The task board may fall back to the server URL the CLI already uses. Once the control plane moves into the server process (later work in [mvp.md](mvp.md)), the server and the factory are one endpoint, and this case mostly goes away.
 
 ## Factory status
 
@@ -108,5 +109,5 @@ Prerequisite, on the factory side: the status surface above, built with `factory
 1. Spike multiline spec editing in feathers' text input.
 2. Net thread: login, the three-step sync, the stream, and the `Connection` state, over a plain loopback URL first.
 3. Task board and inspector against a local server.
-4. Remote use, over whichever transport is chosen (open; see [Transport](#transport)).
+4. The `trailhead/ui/0` protocol and its allowlist, then remote use.
 5. Trail map.

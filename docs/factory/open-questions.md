@@ -14,7 +14,6 @@
 - [ ] Outcome tracking: success rate, escalations, review rounds and spend per profile and task type.
 - [ ] Repo onboarding: an agent proposes stack, checks, profiles and policy for a human to confirm.
 - [ ] Names for the factory, the daemon and the todo client ([naming.md](naming.md)).
-- [ ] UI transport: admit UI clients to the API tunnel, or dial the server's `dumbpipe` ticket ([ui.md](ui.md#transport)).
 - [ ] The factory status surface the UI and `factory status`/`logs` share: its shape, and how clients reach it ([ui.md](ui.md#factory-status)).
 - [ ] First repo for the MVP (Trailhead itself is the candidate).
 
