@@ -131,7 +131,11 @@ async fn lifecycle_over_iroh() {
     assert_eq!(task.status, Status::InReview);
     // Usage streamed over the wire as events is what the control plane priced.
     assert_eq!(task.run.spend, Some(Usd::dollars(0.35)));
-    assert_eq!(r.codehost.prs()[0].comments, ["Looks right."]);
+    let comment = &r.codehost.prs()[0].comments[0];
+    assert!(
+        comment.starts_with("🔍 **Review by `factory/trail-1-a1-r1`") && comment.ends_with("Looks right."),
+        "{comment}"
+    );
 
     let prepared: Vec<_> = r.local.prepared().into_iter().map(|(s, _)| s).collect();
     assert!(prepared.is_empty(), "prepare went over the wire, not through LocalDaemon::prepare");
