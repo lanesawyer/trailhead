@@ -239,6 +239,41 @@ async fn a_run_survives_a_dropped_connection() {
 }
 
 #[tokio::test]
+async fn a_prepare_survives_a_dropped_connection() {
+    let mut r = Rig::new().await;
+    r.serve("cold").await;
+    let sandbox = r.sandbox("cold").await;
+    let gate = Arc::new(Notify::new());
+    r.local.gate_prepare(gate.clone());
+    let req = r.factory().config.prepare_request(Role::Worker);
+    let remote = r.remote.clone();
+    let prepare = tokio::spawn({
+        let sandbox = sandbox.clone();
+        async move { remote.prepare(&sandbox, req).await }
+    });
+    until(|| r.local.prepares_started() == 1).await;
+
+    // The connection drops partway through a long build.
+    r.remote.forget(&sandbox).await;
+    until(|| r.compute.wakes("cold") == 2).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    gate.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(20), prepare).await.unwrap().unwrap().unwrap();
+    assert_eq!(r.local.prepares_started(), 1, "the retry joined the prepare in flight");
+}
+
+async fn until(mut cond: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("timed out waiting");
+}
+
+#[tokio::test]
 async fn an_abandoned_run_is_cancelled() {
     let mut r = Rig::new().await;
     r.serve_with("lonely", Duration::from_millis(200)).await;

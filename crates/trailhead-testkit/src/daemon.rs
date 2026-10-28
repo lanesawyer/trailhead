@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -20,6 +20,8 @@ use crate::FakeTracker;
 pub struct FakeWorkspace {
     failing: Mutex<BTreeMap<String, String>>,
     prepared: Mutex<Vec<PrepareRequest>>,
+    prepares_started: AtomicUsize,
+    prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
 
 #[async_trait]
@@ -29,6 +31,11 @@ impl Workspace for FakeWorkspace {
     }
 
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
+        self.prepares_started.fetch_add(1, Ordering::SeqCst);
+        let gate = self.prepare_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         self.prepared.lock().unwrap().push(req.clone());
         Ok(())
     }
@@ -90,6 +97,16 @@ impl LocalDaemon {
 
     pub fn pass_check(&self, name: &str) {
         self.workspace.failing.lock().unwrap().remove(name);
+    }
+
+    /// Makes every later prepare wait for `gate`, like a cold build.
+    pub fn gate_prepare(&self, gate: Arc<Notify>) {
+        *self.workspace.prepare_gate.lock().unwrap() = Some(gate);
+    }
+
+    /// Prepares the workspace has begun, including ones still running.
+    pub fn prepares_started(&self) -> usize {
+        self.workspace.prepares_started.load(Ordering::SeqCst)
     }
 
     /// Makes the daemon ignore cancels, like a wedged or hostile sandbox.

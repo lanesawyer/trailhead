@@ -47,7 +47,7 @@ const CONNECT_PATIENCE: Duration = Duration::from_secs(90);
 /// How long it keeps dialing a running daemon, which may need to resume from a pause and rebuild its connections.
 const RECONNECT_PATIENCE: Duration = Duration::from_secs(60);
 
-/// How many times one run may lose its connection and reattach before the control plane gives up on it.
+/// How many times one run or prepare may lose its connection before the control plane gives up on it.
 const MAX_REATTACH: u32 = 10;
 
 /// How long a daemon keeps a run going with no control plane following it before cancelling it. Covers QUIC noticing
@@ -204,7 +204,15 @@ pub struct DaemonProtocol {
     holds: Option<Arc<SpriteHolds>>,
     endpoint: Option<Endpoint>,
     runs: Arc<Mutex<HashMap<String, Arc<LiveRun>>>>,
+    preparing: Arc<Mutex<Option<Preparing>>>,
     attach_patience: Duration,
+}
+
+/// The latest prepare, so a control plane that lost its connection and asks again joins it rather than racing it in
+/// the same checkout.
+struct Preparing {
+    req: PrepareRequest,
+    done: watch::Receiver<Option<Result<()>>>,
 }
 
 impl std::fmt::Debug for DaemonProtocol {
@@ -221,6 +229,7 @@ impl DaemonProtocol {
             holds: None,
             endpoint: None,
             runs: Arc::default(),
+            preparing: Arc::default(),
             attach_patience: ATTACH_PATIENCE,
         }
     }
@@ -248,7 +257,7 @@ impl DaemonProtocol {
         let _hold = self.holds.as_ref().map(|h| h.hold());
         let (live, seen) = match first {
             ToDaemon::Prepare(req) => {
-                let reply = match self.runner.prepare(&req).await {
+                let reply = match self.prepare(req).await {
                     Ok(()) => FromDaemon::Prepared,
                     Err(e) => FromDaemon::Failed(e),
                 };
@@ -282,6 +291,36 @@ impl DaemonProtocol {
             self.watch_detached(live, follower);
         }
         followed
+    }
+
+    /// Prepares on its own task, so a dropped connection doesn't stop it. The same request while it's still going
+    /// waits for it instead of starting another.
+    async fn prepare(&self, req: PrepareRequest) -> Result<()> {
+        let mut done = {
+            let mut preparing = self.preparing.lock().unwrap();
+            match preparing.as_ref().filter(|p| p.req == req && p.done.borrow().is_none()) {
+                Some(p) => {
+                    tracing::info!("joining the prepare in flight");
+                    p.done.clone()
+                }
+                None => {
+                    let (tx, rx) = watch::channel(None);
+                    let runner = self.runner.clone();
+                    let hold = self.holds.as_ref().map(|h| h.hold());
+                    tokio::spawn({
+                        let req = req.clone();
+                        async move {
+                            let _hold = hold;
+                            let _ = tx.send(Some(runner.prepare(&req).await));
+                        }
+                    });
+                    *preparing = Some(Preparing { req, done: rx.clone() });
+                    rx
+                }
+            }
+        };
+        let finished = done.wait_for(Option::is_some).await.map_err(|_| Error::Other("prepare panicked".into()))?;
+        finished.clone().expect("waited for a result")
     }
 
     fn find(&self, run: &str) -> Option<Arc<LiveRun>> {
@@ -686,18 +725,35 @@ impl RemoteDaemon {
 
 #[async_trait]
 impl Daemon for RemoteDaemon {
-    /// Starts the daemon unless this control plane already has a live connection to it.
+    /// Starts the daemon unless this control plane already has a live connection to it. A connection that drops
+    /// while the daemon prepares is redialed and the request sent again; the daemon joins the prepare in flight.
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
         let connected = self.conns.lock().unwrap().get(sandbox).is_some_and(|c| c.close_reason().is_none());
         if !connected {
             self.compute.start(sandbox, &self.program(sandbox)).await?;
         }
-        let (mut send, mut recv) = self.open(sandbox, CONNECT_PATIENCE).await?;
-        write_frame(&mut send, &ToDaemon::Prepare(req)).await?;
-        match read_frame::<FromDaemon>(&mut recv).await? {
-            Some(FromDaemon::Prepared) => Ok(()),
-            Some(FromDaemon::Failed(e)) => Err(e),
-            other => Err(io_err(format!("unexpected reply to prepare: {other:?}"))),
+        let mut patience = CONNECT_PATIENCE;
+        let mut lost = 0;
+        loop {
+            let (mut send, mut recv) = self.open(sandbox, patience).await?;
+            let reply = match write_frame(&mut send, &ToDaemon::Prepare(req.clone())).await {
+                Ok(()) => read_frame::<FromDaemon>(&mut recv).await,
+                Err(e) => Err(e),
+            };
+            let error = match reply {
+                Ok(Some(FromDaemon::Prepared)) => return Ok(()),
+                Ok(Some(FromDaemon::Failed(e))) => return Err(e),
+                Ok(Some(other)) => return Err(io_err(format!("unexpected reply to prepare: {other:?}"))),
+                Ok(None) => io_err(format!("the daemon in {} went away", sandbox.0)),
+                Err(e) => e,
+            };
+            lost += 1;
+            if lost > MAX_REATTACH {
+                return Err(io_err(format!("lost the prepare in {} {MAX_REATTACH} times: {error}", sandbox.0)));
+            }
+            tracing::warn!(sandbox = %sandbox.0, %error, "lost the daemon while it prepared; asking again");
+            self.disconnect(sandbox);
+            patience = RECONNECT_PATIENCE;
         }
     }
 
