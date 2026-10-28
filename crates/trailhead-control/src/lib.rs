@@ -223,6 +223,7 @@ impl Factory {
             },
         )
         .await?;
+        tracing::info!(task = %task.key.0, run = %name, "preparing a worker sandbox");
         let sandbox = self.acquire_worker(task).await?;
         sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
