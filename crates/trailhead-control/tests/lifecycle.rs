@@ -486,3 +486,24 @@ async fn a_pooled_sandbox_that_cant_be_restored_is_destroyed_without_stopping_re
     assert_eq!(done.released, ["trailhead-w1"]);
     assert_eq!(done.destroyed, ["trail-99-a1"]);
 }
+
+#[tokio::test]
+async fn a_refused_publish_parks_the_task_instead_of_redoing_the_work() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Fix CI", "");
+    r.codehost.refuse_publish("github 404 Not Found on POST /repos/lanesawyer/trailhead/git/refs: Not Found");
+    r.harness.push(Role::Worker, Script::new(changes()));
+
+    let ran = r.factory.tick().await.unwrap();
+    assert!(
+        matches!(&ran[0].1, Outcome::Parked { reason } if reason.contains("publishing to GitHub failed")),
+        "{:?}",
+        ran[0].1
+    );
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked for Lane, not requeued");
+    assert_eq!(task.run.attempt, Some(1));
+    let question = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap();
+    assert!(question.body.contains("POST /repos/lanesawyer/trailhead/git/refs"), "{}", question.body);
+    assert_eq!(busy(&r.compute), ["trailhead-w1"], "the sandbox keeps the finished checkout");
+}

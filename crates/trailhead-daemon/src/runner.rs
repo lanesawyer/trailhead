@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{Notify, mpsc};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Credential, Error, EventSink, Harness, NewPr, PrepareRequest, Result, Role,
+    Check, CheckResult, CodeHost, Credential, Error, EventSink, Harness, NewPr, PrRef, PrepareRequest, Result, Role,
     RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, RunUpdate, Tracker, Usage, Verdict,
 };
 
@@ -129,6 +129,27 @@ impl Runner {
         Ok((outcome, usage))
     }
 
+    async fn publish(
+        &self,
+        req: &RunRequest,
+        commits: Vec<trailhead_factory::Commit>,
+        summary: String,
+    ) -> Result<PrRef> {
+        self.codehost.publish(&req.repo, &req.base_branch, &req.branch, &commits).await?;
+        match &req.pr {
+            Some(pr) => Ok(pr.clone()),
+            None => {
+                let new = NewPr {
+                    branch: req.branch.clone(),
+                    base: req.base_branch.clone(),
+                    title: format!("{}: {}", req.task.key.0, req.task.title),
+                    body: summary,
+                };
+                self.codehost.open_pr(&req.repo, new).await
+            }
+        }
+    }
+
     async fn checks(&self, checks: &[Check]) -> Vec<CheckResult> {
         let mut out = Vec::with_capacity(checks.len());
         for check in checks {
@@ -153,17 +174,17 @@ impl Runner {
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), checks));
                 }
-                self.codehost.publish(&req.repo, &req.base_branch, &req.branch, &commits).await?;
-                let pr = match &req.pr {
-                    Some(pr) => pr.clone(),
-                    None => {
-                        let new = NewPr {
-                            branch: req.branch.clone(),
-                            base: req.base_branch.clone(),
-                            title: format!("{}: {}", key.0, req.task.title),
-                            body: summary,
-                        };
-                        self.codehost.open_pr(&req.repo, new).await?
+                let pr = match self.publish(req, commits, summary).await {
+                    Ok(pr) => pr,
+                    // The agent's work is done and checked; retrying the whole run would only hit the same wall, so
+                    // park the task with the reason instead, keeping the sandbox and its checkout.
+                    Err(e) => {
+                        let question = format!(
+                            "The agent finished and the checks passed, but publishing to GitHub failed: {e}. Fix the \
+                             cause, then reopen the task."
+                        );
+                        tracker.ask(key, &question).await?;
+                        return Ok((RunResult::NeedsInput(question), checks));
                     }
                 };
                 tracker.report(key, RunUpdate { pr: Some(pr.clone()), ..Default::default() }).await?;

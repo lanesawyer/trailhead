@@ -63,21 +63,30 @@ impl GitHub {
         }
     }
 
-    async fn send(&self, req: RequestBuilder) -> Result<(StatusCode, Value)> {
-        let res = req.send().await.map_err(|e| Error::Other(format!("github: {e}")))?;
+    /// Sends, returning the status, the body, and which call this was (`POST /repos/o/r/git/refs`) for error messages.
+    async fn send(&self, req: RequestBuilder) -> Result<(StatusCode, Value, String)> {
+        let req = req.build().map_err(|e| Error::Other(format!("github: {e}")))?;
+        let path = req.url().path();
+        let path = path.find("/repos/").map_or(path, |i| &path[i..]);
+        let call = format!("{} {path}", req.method());
+        let res = self.http.execute(req).await.map_err(|e| Error::Other(format!("github {call}: {e}")))?;
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
         let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-        Ok((status, body))
+        Ok((status, body, call))
     }
 
     /// Sends and requires success, mapping GitHub's errors onto the factory's.
     async fn call(&self, req: RequestBuilder) -> Result<Value> {
-        let (status, body) = self.send(req).await?;
+        let (status, body, call) = self.send(req).await?;
         if status.is_success() {
             return Ok(body);
         }
-        let msg = format!("github {status}: {}", body["message"].as_str().unwrap_or(&body.to_string()));
+        let mut msg = format!("github {status} on {call}: {}", body["message"].as_str().unwrap_or(&body.to_string()));
+        // GitHub answers a token without the `workflow` scope with a bare 404 when a commit touches a workflow.
+        if status == StatusCode::NOT_FOUND && call.contains("/git/") {
+            msg.push_str(" (if the change touches .github/workflows, the credential needs the `workflow` scope)");
+        }
         Err(match status {
             StatusCode::NOT_FOUND => Error::NotFound(msg),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Forbidden(msg),
@@ -230,7 +239,7 @@ impl CodeHost for GitHub {
 
     async fn merge(&self, pr: &PrRef) -> Result<MergeOutcome> {
         let path = format!("{}/pulls/{}/merge", Self::repo_path(&pr.repo), pr.number);
-        let (status, body) =
+        let (status, body, _) =
             self.send(self.request(Method::PUT, &path).json(&json!({ "merge_method": "squash" }))).await?;
         match status {
             s if s.is_success() => Ok(MergeOutcome::Merged),

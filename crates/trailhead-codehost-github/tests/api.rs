@@ -24,6 +24,7 @@ struct Git {
     prs: Vec<Value>,
     comments: Vec<(u64, String)>,
     unmergeable: bool,
+    workflow_scope: bool,
     auth: Vec<Option<String>>,
 }
 
@@ -47,6 +48,7 @@ fn seed() -> Shared {
     git.commits
         .insert(commit.clone(), json!({ "sha": commit, "tree": { "sha": tree }, "parents": [], "message": "init" }));
     git.refs.insert("main".into(), commit);
+    git.workflow_scope = true;
     Arc::new(Mutex::new(git))
 }
 
@@ -80,6 +82,11 @@ async fn patch_ref(
 
 async fn create_ref(State(g): State<Shared>, Json(b): Json<Value>) -> Response {
     let mut g = g.lock().unwrap();
+    // Like GitHub with a token lacking the `workflow` scope: a bare 404 for a commit that touches a workflow.
+    let tree = g.commits[b["sha"].as_str().unwrap()]["tree"]["sha"].as_str().unwrap().to_string();
+    if !g.workflow_scope && g.trees[&tree].keys().any(|p| p.starts_with(".github/workflows/")) {
+        return not_found();
+    }
     let name = b["ref"].as_str().unwrap().strip_prefix("refs/heads/").unwrap().to_string();
     if g.refs.contains_key(&name) {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "message": "Reference already exists" })))
@@ -293,4 +300,16 @@ async fn prs_open_once_and_take_reviews_and_merges() {
     assert_eq!(gh.merge(&pr).await.unwrap(), MergeOutcome::Merged);
     git.lock().unwrap().unmergeable = true;
     assert_eq!(gh.merge(&pr).await.unwrap(), MergeOutcome::Conflict);
+}
+
+#[tokio::test]
+async fn a_refused_workflow_change_names_the_call_and_the_scope() {
+    let (git, url) = serve().await;
+    git.lock().unwrap().workflow_scope = false;
+    let gh = GitHub::gateway(&url);
+    let commit =
+        Commit { message: "ci".into(), changes: vec![change(".github/workflows/ci.yml", Some(b"on: push\n"))] };
+    let err = gh.publish(&repo(), "main", "factory/trail-105", &[commit]).await.unwrap_err().to_string();
+    assert!(err.contains("POST /repos/lanesawyer/trailhead/git/refs"), "{err}");
+    assert!(err.contains("`workflow` scope"), "{err}");
 }

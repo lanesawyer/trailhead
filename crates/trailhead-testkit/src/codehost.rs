@@ -17,6 +17,7 @@ struct State {
     branches: BTreeMap<(String, String), Vec<Commit>>,
     prs: Vec<FakePr>,
     conflicts: bool,
+    refuse_publish: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -39,6 +40,11 @@ impl FakeCodeHost {
     }
 
     /// Makes every later merge report a conflict.
+    /// Makes every later publish fail with this message, like GitHub refusing a push.
+    pub fn refuse_publish(&self, why: &str) {
+        self.state.lock().unwrap().refuse_publish = Some(why.to_string());
+    }
+
     pub fn set_conflicts(&self, on: bool) {
         self.state.lock().unwrap().conflicts = on;
     }
@@ -57,6 +63,9 @@ impl FakeCodeHost {
 impl CodeHost for FakeCodeHost {
     async fn publish(&self, repo: &Repo, _base: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let mut s = self.state.lock().unwrap();
+        if let Some(why) = &s.refuse_publish {
+            return Err(Error::NotFound(why.clone()));
+        }
         s.branches.entry((repo.slug(), branch.to_string())).or_default().extend_from_slice(commits);
         Ok(())
     }
