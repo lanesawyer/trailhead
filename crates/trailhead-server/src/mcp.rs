@@ -600,7 +600,7 @@ impl TrailheadMcp {
             scheduled_on: attempt!(clearable(a.scheduled_on.as_deref(), parse_date)),
             scheduled_at: attempt!(clearable(a.scheduled_at.as_deref(), trailhead_core::parse_at)),
             scheduled_tz: a.scheduled_tz.map(Some),
-            parent: a.parent.map(|p| Some(p.trim().to_owned()).filter(|p| !p.is_empty())),
+            parent: attempt!(clearable(a.parent.as_deref(), |p| Ok(p.to_owned()))),
             ..Default::default()
         };
         let task = attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await);

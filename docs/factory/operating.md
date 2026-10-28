@@ -22,7 +22,7 @@ Local sandboxes on Docker instead of Sprites (`docs/factory/sandbox.md#docker`):
 ## Handing it work
 
 - The factory only takes ready subtasks of the queue task (`[repo] queue` in `factory.toml`, TRAIL-102), highest priority first, up to `max_sandboxes` at once. Putting a task under the queue is the approval: there's no separate "go".
-- Create work there: `trailhead --as-me add "title" -p TRAIL --parent TRAIL-102 -P 2 -d "spec"`. To move an existing task in, `PATCH /v1/tasks/TRAIL-n` with `{"parent": "TRAIL-102"}` until `trailhead edit --parent` lands (TRAIL-110).
+- Create work there: `trailhead --as-me add "title" -p TRAIL --parent TRAIL-102 -P 2 -d "spec"`. To move an existing task in, `trailhead --as-me edit TRAIL-n --parent TRAIL-102`; `--parent none` takes it back out.
 - Write the spec as you would for a careful contractor: which files, acceptance criteria, what not to touch, how to check it. TRAIL-105 is a good example.
 - **The agent sees only the title and description.** Comments, including `decision` comments, don't reach it, so fold any decision into the description before queuing.
 - **Keep queued tasks from colliding.** Each run branches from `main` as it is when the run starts, and PRs wait for you to merge, so two queued tasks that edit the same files produce conflicting PRs. Chain them with `trailhead block TRAIL-a TRAIL-b`: the second waits until the first is done, which is when you merge it.
@@ -65,7 +65,7 @@ run finished task=TRAIL-105 outcome=…
 ## Known rough edges
 
 - Answering a question needs a restart (TRAIL-108).
-- No `status` or `logs` commands (TRAIL-109); moving a task into the queue needs the REST call above (TRAIL-110).
+- No `status` or `logs` commands (TRAIL-109).
 - New work is noticed on the next poll, not immediately (TRAIL-158).
 - Reviewers try to build and can't, wasting time (TRAIL-136).
 - A pooled Sprite has 8 GB and no swap; heavy builds have restarted one mid-run (TRAIL-140).
