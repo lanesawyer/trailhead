@@ -4,7 +4,7 @@ Decided: the factory core is agnostic to compute, agent harness, model provider,
 
 | Seam | Runs in | Implementation today | Later |
 | --- | --- | --- | --- |
-| `Compute` | Control plane | Fly.io Sprites (`trailhead-compute-sprites`) | Docker (TRAIL-119), other microVM hosts, local VMs |
+| `Compute` | Control plane | Fly.io Sprites (`trailhead-compute-sprites`), Docker (`trailhead-compute-docker`) | Other microVM hosts, local VMs |
 | `Harness` | Daemon, in the sandbox | Claude Code (`trailhead-harness-claude-code`) | Codex, an own agent loop |
 | `ModelProvider` | Both | Anthropic (`trailhead-provider-anthropic`) | OpenAI, OpenRouter, local models ([local-models.md](local-models.md)); TRAIL-125 |
 | `Tracker` | Both | Trailhead: in-process over `trailhead-core` in the control plane (`CoreTracker`), REST from the daemon (`RestTracker`) | Jira and others |
@@ -40,6 +40,7 @@ The code in `crates/trailhead-factory` is authoritative; this is what each trait
 | `trailhead-factory-host` | The `trailhead-factory` binary: runs the control plane beside the server, sharing its database, and forwards the daemons' API tunnel to it. Moving the control plane into the server is TRAIL-164 |
 | `trailhead-daemon` | In-sandbox daemon: harness host, checks, publishing; the iroh transport (`RemoteDaemon`, `DaemonProtocol`) and `RestTracker` |
 | `trailhead-compute-sprites` | `Compute` for Fly.io Sprites (own thin API wrapper) |
+| `trailhead-compute-docker` | `Compute` for Docker or Podman's Docker API, through bollard; behind the host's `docker` feature |
 | `trailhead-harness-claude-code` | `Harness` wrapping the Claude Code CLI |
 | `trailhead-provider-anthropic` | `ModelProvider` for Anthropic |
 | `trailhead-codehost-github` | `CodeHost` for GitHub through the Sprites connector, with the Git Data API |

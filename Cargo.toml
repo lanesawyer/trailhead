@@ -41,6 +41,7 @@ trailhead-control = { path = "crates/trailhead-control" }
 trailhead-daemon = { path = "crates/trailhead-daemon", default-features = false }
 trailhead-harness-claude-code = { path = "crates/trailhead-harness-claude-code" }
 trailhead-compute-sprites = { path = "crates/trailhead-compute-sprites" }
+trailhead-compute-docker = { path = "crates/trailhead-compute-docker" }
 trailhead-codehost-github = { path = "crates/trailhead-codehost-github" }
 trailhead-provider-anthropic = { path = "crates/trailhead-provider-anthropic" }
 trailhead-factory-host = { path = "crates/trailhead-factory-host" }
@@ -53,6 +54,8 @@ keyring = "4"
 hmac = "0.13"
 iroh = "1.4"
 tempfile = "3"
+bollard = "0.21"
+tar = "0.4"
 
 [profile.dev]
 # Line tables only: backtraces keep file:line, but builds, links and target/ shrink a lot.

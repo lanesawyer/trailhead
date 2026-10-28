@@ -1,5 +1,11 @@
+[vars]
+# The engine `mise run docker-up` starts.
+docker_host = "unix://{{env.HOME}}/.lima/trailhead/sock/docker.sock"
+
 [tools]
+docker-cli = "latest"
 fnox = { version = "latest", workflow = "release.yml" }
+lima = "latest"
 rust = "latest"
 
 [tasks.test-live-sprites]
@@ -20,3 +26,27 @@ run = [
   "cargo build --release -p trailhead-factory-host",
   "fnox exec -- {{config_root}}/target/release/trailhead-factory run --config {{config_root}}/factory.toml --daemon {{config_root}}/target/release/trailhead-daemon",
 ]
+
+[tasks.docker-up]
+description = "Start the Docker engine for local sandboxes: rootless Docker in a lima VM, no host mounts (on Linux it needs qemu and /dev/kvm)"
+run = """
+if limactl list -q | grep -qx trailhead; then
+  limactl start --tty=false trailhead
+else
+  limactl start --tty=false --name=trailhead --cpus=4 --memory=4 --disk=60 --mount-none template:docker
+fi
+"""
+
+[tasks.docker-down]
+description = "Stop the local sandboxes' Docker VM"
+run = "limactl stop trailhead"
+
+[tasks.docker-image]
+description = "Build the sandbox image the Docker Compute starts by default (trailhead-sandbox:latest)"
+env = { DOCKER_HOST = "{{vars.docker_host}}" }
+run = "docker build -t trailhead-sandbox:latest crates/trailhead-compute-docker/image"
+
+[tasks.test-live-docker]
+description = "Run the Docker Compute test against the lima VM's engine (creates and destroys one container)"
+env = { DOCKER_HOST = "{{vars.docker_host}}" }
+run = "cargo test -p trailhead-compute-docker --test live -- --ignored --nocapture"

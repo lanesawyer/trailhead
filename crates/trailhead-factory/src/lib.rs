@@ -15,7 +15,7 @@ pub use codehost::{CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, Rep
 pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };
-pub use config::{Budget, Checks, FactoryConfig, Gate, Profile, Role, UsageConfig};
+pub use config::{Budget, Checks, ComputeConfig, FactoryConfig, Gate, Profile, Role, UsageConfig};
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, FromDaemon, PrepareRequest, RunReport, RunRequest, RunResult, ToDaemon,
 };

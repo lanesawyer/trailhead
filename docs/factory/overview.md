@@ -34,7 +34,7 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 | Language | Rust | Control plane and in-sandbox daemon |
 | Home | Inside Trailhead | Server is the control plane; factory behind a Cargo feature. For now a separate binary beside the server (TRAIL-164, TRAIL-116) |
 | Plugin seams | `Compute`, `Harness`, `ModelProvider`, `Tracker`, `CodeHost` | Traits in core; vendor crates compiled in by feature; in-memory fakes for tests |
-| Compute | Fly.io Sprites | Own thin wrapper over the Sprites HTTP API, not the unofficial `sprites` crate |
+| Compute | Fly.io Sprites; Docker for local sandboxes | Own thin wrapper over the Sprites HTTP API, not the unofficial `sprites` crate. Docker through bollard, selected with `[compute] kind = "docker"` (TRAIL-119); on dev machines it's rootless Docker in a lima VM that mise installs |
 | Environment | mise, hidden behind standard checks | Users give stack and commands for setup, fmt, lint, typecheck, test, build |
 | Bootstrap | Lazy pool of warm Sprites | Each worker Sprite is restored to its own warm checkpoint before and after every task; the pool grows to `max_sandboxes`; reviewers get fresh Sprites |
 | Rollback | Checkpoints as transactions | Checkpoint before each agent step; restore on failure or rejection |

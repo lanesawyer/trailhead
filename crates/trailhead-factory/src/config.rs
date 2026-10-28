@@ -41,6 +41,24 @@ pub struct FactoryConfig {
     pub egress: EgressConfig,
     #[serde(default)]
     pub usage: UsageConfig,
+    #[serde(default)]
+    pub compute: ComputeConfig,
+}
+
+/// Where sandboxes run. Sprites unless the factory file says otherwise.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ComputeConfig {
+    #[default]
+    Sprites,
+    /// A Docker engine on this machine or reachable through `DOCKER_HOST`. Unset fields take the Docker Compute's
+    /// defaults.
+    Docker {
+        image: Option<String>,
+        network: Option<String>,
+        /// The OCI runtime, such as `runsc` (gVisor).
+        runtime: Option<String>,
+    },
 }
 
 /// Subscription usage windows (`docs/factory/budgets.md`): at or past `pause_at[window]` percent, no new runs
@@ -334,6 +352,18 @@ require = ["checks", "agent_review", "human"]
         let bad = SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"nope\"");
         assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
         let bad = SAMPLE.replace("\"agent_review\", \"human\"", "\"agent_review\", \"vibes\"");
+        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn compute_defaults_to_sprites() {
+        assert_eq!(FactoryConfig::parse(SAMPLE).unwrap().compute, ComputeConfig::Sprites);
+        let docker = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nruntime = \"runsc\"\n");
+        assert_eq!(
+            FactoryConfig::parse(&docker).unwrap().compute,
+            ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()) }
+        );
+        let bad = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nimgae = \"x\"\n");
         assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
     }
 

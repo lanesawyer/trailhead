@@ -14,6 +14,10 @@ description = "Runs the Trailhead factory's control plane next to a local Trailh
 name = "trailhead-factory"
 path = "src/main.rs"
 
+[features]
+# The Docker Compute (`[compute] kind = "docker"`).
+docker = ["dep:trailhead-compute-docker"]
+
 [dependencies]
 trailhead-core.workspace = true
 trailhead-server.workspace = true
@@ -21,6 +25,7 @@ trailhead-factory.workspace = true
 trailhead-control.workspace = true
 trailhead-daemon = { workspace = true, features = ["net"] }
 trailhead-compute-sprites.workspace = true
+trailhead-compute-docker = { workspace = true, optional = true }
 trailhead-provider-anthropic.workspace = true
 clap.workspace = true
 hex.workspace = true

@@ -4,6 +4,9 @@
 //! SPRITES_TOKEN=... trailhead-factory run --config factory.toml --daemon target/release/trailhead-daemon
 //! ```
 //!
+//! Sandboxes run on Sprites unless the factory file sets `[compute] kind = "docker"`, which needs this binary built
+//! with the `docker` feature.
+//!
 //! It opens the server's database as the `factory` agent, keeps its iroh identity and daemon master key in the
 //! credential store (so a restart can still reach the sandboxes it started), serves the API tunnel to the server
 //! and runs the factory loop. `check` does everything up to the loop and prints what it found.
@@ -23,7 +26,7 @@ use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory};
 use trailhead_core::{Ctx, Store};
 use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
-use trailhead_factory::FactoryConfig;
+use trailhead_factory::{Compute, ComputeConfig, FactoryConfig};
 use trailhead_provider_anthropic::Anthropic;
 use trailhead_server::creds::{Cred, CredStore};
 
@@ -54,8 +57,9 @@ struct Opts {
     /// Where sandboxes send model calls: a connector's gateway URL, or the API.
     #[arg(long, default_value = trailhead_provider_anthropic::API_URL)]
     model_endpoint: String,
+    /// Needed when sandboxes run on Sprites.
     #[arg(long, env = "SPRITES_TOKEN", hide_env_values = true)]
-    sprites_token: String,
+    sprites_token: Option<String>,
     /// How often to look for ready work.
     #[arg(long, default_value_t = 30)]
     poll_secs: u64,
@@ -134,8 +138,8 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router), String> {
         .bind()
         .await
         .map_err(|e| format!("binding the iroh endpoint: {e}"))?;
-    let compute = Arc::new(SpritesCompute::new(opts.sprites_token.clone()).map_err(|e| e.to_string())?);
-    let launch = Launch { claude_oauth_token: opts.claude_oauth_token.clone(), ..Launch::new(binary) };
+    let (compute, launch) = compute(&config.compute, opts, &paths, Launch::new(binary))?;
+    let launch = Launch { claude_oauth_token: opts.claude_oauth_token.clone(), ..launch };
     let daemon = Arc::new(RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch));
     let tunnel =
         Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, daemon.peers())).spawn();
@@ -144,6 +148,48 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router), String> {
     let factory =
         Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon);
     Ok((Arc::new(factory), tunnel))
+}
+
+/// The sandboxes' `Compute`, and where the daemon lives in them.
+#[cfg_attr(not(feature = "docker"), allow(unused_variables))]
+fn compute(
+    config: &ComputeConfig,
+    opts: &Opts,
+    paths: &trailhead_server::Paths,
+    launch: Launch,
+) -> Result<(Arc<dyn Compute>, Launch), String> {
+    match config {
+        ComputeConfig::Sprites => {
+            let token = opts.sprites_token.clone().ok_or("Sprites compute needs SPRITES_TOKEN")?;
+            Ok((Arc::new(SpritesCompute::new(token).map_err(|e| e.to_string())?), launch))
+        }
+        #[cfg(feature = "docker")]
+        ComputeConfig::Docker { image, network, runtime } => {
+            use trailhead_compute_docker::{DockerCompute, DockerConfig, HOME};
+            let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"));
+            if let Some(image) = image {
+                docker.image = image.clone();
+            }
+            if let Some(network) = network {
+                docker.network = network.clone();
+            }
+            docker.runtime = runtime.clone();
+            let compute = DockerCompute::new(docker).map_err(|e| e.to_string())?;
+            let launch = Launch { dir: format!("{HOME}/.trailhead"), workdir: format!("{HOME}/work"), ..launch };
+            Ok((Arc::new(compute), launch))
+        }
+        #[cfg(not(feature = "docker"))]
+        ComputeConfig::Docker { .. } => {
+            Err("Docker compute needs trailhead-factory built with `--features docker`".into())
+        }
+    }
+}
+
+fn compute_name(config: &ComputeConfig) -> &'static str {
+    match config {
+        ComputeConfig::Sprites => "Sprites",
+        ComputeConfig::Docker { .. } => "Docker",
+    }
 }
 
 fn check_result(failed: usize) -> Result<(), String> {
@@ -175,7 +221,11 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
                 }
             }
             match factory.compute.list(&Default::default()).await {
-                Ok(live) => println!("compute: Sprites reachable; {} sandbox(es) visible", live.len()),
+                Ok(live) => println!(
+                    "compute: {} reachable; {} sandbox(es) visible",
+                    compute_name(&factory.config.compute),
+                    live.len()
+                ),
                 Err(e) => {
                     failed += 1;
                     println!("compute: {e}");

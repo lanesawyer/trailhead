@@ -17,6 +17,8 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 - The factory clones from GitHub, not your checkout: push `main` before queuing work that builds on local commits.
 - Run only one at a time. Two would share an iroh identity and undo each other's runs (TRAIL-113).
 
+Local sandboxes on Docker instead of Sprites (`docs/factory/sandbox.md#docker`): `mise run docker-up` and `mise run docker-image` once, `[compute] kind = "docker"` in the factory file, and the control plane built with `--features docker` and run with `DOCKER_HOST` set to the VM's socket. Until TRAIL-174 and TRAIL-175 land, Docker sandboxes have unfiltered egress and can't publish to GitHub, so this is for trying it out, not for real runs.
+
 ## Handing it work
 
 - The factory only takes ready subtasks of the queue task (`[repo] queue` in `factory.toml`, TRAIL-102), highest priority first, up to `max_sandboxes` at once. Putting a task under the queue is the approval: there's no separate "go".

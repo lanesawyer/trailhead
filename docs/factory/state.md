@@ -14,6 +14,8 @@ Decided: the control plane keeps no database of its own. Run state lives in Trai
 | Sub-agent to revoke when a task ends | Trailhead (agent named after the task) |
 | Global daily spend | Provider usage API ([budgets.md](budgets.md)) |
 
+On Docker (TRAIL-119), where the table says Sprites API read the Docker engine for which sandboxes exist, plus the Docker Compute's state files (`<data dir>/factory/docker/<name>.json`) for their labels, since Docker labels can't change after creation. Those files belong to the `Compute`, not the control plane: it still keeps no database, and a lost file leaves that container unlabelled, so reconcile no longer sees it and it stays until removed by hand (`docker ps --filter label=dev.trailhead.sandbox`).
+
 ## Rules that make it safe
 
 - **Deterministic names.** A task's sandbox and sub-agent are named from the task key and attempt (`trail-42-a1`), so a crash between creating a sandbox and recording it leaves something the reconciler can find.

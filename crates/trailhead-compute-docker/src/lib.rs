@@ -1,0 +1,533 @@
+//! `Compute` for Docker, or Podman through its Docker API: sandboxed agents on your own machine.
+//!
+//! Mapping (`docs/factory/sandbox.md`):
+//!
+//! - A sandbox's id is its container name, which stays put when a restore recreates the container.
+//! - Docker labels can't change after creation, so a sandbox's labels live in a state file per sandbox in the state
+//!   directory. The container carries only [`MARKER`], which `list` filters on and `docker ps --filter label=...`
+//!   shows.
+//! - A checkpoint is a `docker commit` of the container, and restoring recreates the container from that image.
+//! - Programs are supervised by `supervise.sh`, the container's main process, which restarts them when they exit
+//!   and starts them again when the container restarts (it runs with `restart: unless-stopped`).
+//! - Egress is all or nothing for now: none disconnects the container from every network, and anything else
+//!   connects it to the sandbox network unfiltered. The filtering proxy is its own task.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+use bollard::Docker;
+use bollard::errors::Error as DockerError;
+use bollard::exec::{StartExecOptions, StartExecResults};
+use bollard::models::{
+    ContainerConfig, ContainerCreateBody, ExecConfig, HostConfig, NetworkConnectRequest, NetworkCreateRequest,
+    NetworkDisconnectRequest, RestartPolicy, RestartPolicyNameEnum,
+};
+use bollard::query_parameters::{
+    CommitContainerOptions, CreateContainerOptions, InspectContainerOptions, ListContainersOptions, ListImagesOptions,
+    RemoveContainerOptions, RemoveImageOptions, UploadToContainerOptions,
+};
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
+use trailhead_factory::{
+    CheckpointId, Compute, Egress, Error, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec,
+};
+
+/// The label every sandbox container carries, set to its name.
+pub const MARKER: &str = "dev.trailhead.sandbox";
+/// The label on checkpoint images, set to the sandbox they came from, so `destroy` can remove them.
+pub const CHECKPOINT_OF: &str = "dev.trailhead.checkpoint-of";
+/// The repository checkpoint images are committed to.
+pub const CHECKPOINT_REPO: &str = "trailhead-checkpoint";
+/// The sandbox image built by `mise run docker-image`.
+pub const DEFAULT_IMAGE: &str = "trailhead-sandbox:latest";
+pub const DEFAULT_NETWORK: &str = "trailhead-sandboxes";
+/// Where the daemon lives in [`DEFAULT_IMAGE`], whose user is `trailhead`.
+pub const HOME: &str = "/home/trailhead";
+
+const SUPERVISE: &str = include_str!("supervise.sh");
+const SUPERVISE_PATH: &str = "/opt/trailhead/supervise";
+
+/// How long `start` watches a new program for an early exit.
+const START_WATCH: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Clone)]
+pub struct DockerConfig {
+    pub image: String,
+    pub network: String,
+    /// The OCI runtime, such as `runsc` for gVisor. Docker's default (`runc`) when unset.
+    pub runtime: Option<String>,
+    /// Where sandboxes' labels and egress are kept.
+    pub state_dir: PathBuf,
+}
+
+impl DockerConfig {
+    pub fn new(state_dir: impl Into<PathBuf>) -> DockerConfig {
+        DockerConfig {
+            image: DEFAULT_IMAGE.into(),
+            network: DEFAULT_NETWORK.into(),
+            runtime: None,
+            state_dir: state_dir.into(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DockerCompute {
+    docker: Docker,
+    config: DockerConfig,
+    network: std::sync::Arc<OnceCell<()>>,
+}
+
+/// What Docker can't hold for a sandbox.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct State {
+    labels: Labels,
+    egress: Egress,
+}
+
+impl DockerCompute {
+    /// Connects through `DOCKER_HOST`, or the platform's default socket.
+    pub fn new(config: DockerConfig) -> Result<DockerCompute> {
+        let docker = Docker::connect_with_defaults().map_err(docker_err)?;
+        Ok(DockerCompute::with_client(docker, config))
+    }
+
+    pub fn with_client(docker: Docker, config: DockerConfig) -> DockerCompute {
+        DockerCompute { docker, config, network: Default::default() }
+    }
+
+    /// The recent output of a program started with `start`.
+    pub async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
+        let log = format!("$HOME/.trailhead/programs/{}/log", shell_quote(program));
+        let (_, out) = self.exec(&id.0, None, &format!("tail -n 3000 {log}")).await?;
+        Ok(out)
+    }
+
+    fn state_path(&self, name: &str) -> PathBuf {
+        self.config.state_dir.join(format!("{name}.json"))
+    }
+
+    async fn read_state(&self, name: &str) -> Result<State> {
+        match tokio::fs::read(self.state_path(name)).await {
+            Ok(raw) => serde_json::from_slice(&raw).map_err(|e| Error::Other(format!("sandbox {name} state: {e}"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
+            Err(e) => Err(io_err(&self.state_path(name), e)),
+        }
+    }
+
+    /// Written beside the file and renamed over it, so a crash never leaves half a state file.
+    async fn write_state(&self, name: &str, state: &State) -> Result<()> {
+        let path = self.state_path(name);
+        tokio::fs::create_dir_all(&self.config.state_dir).await.map_err(|e| io_err(&self.config.state_dir, e))?;
+        let tmp = path.with_extension("json.new");
+        let raw = serde_json::to_vec_pretty(state).expect("state serializes");
+        tokio::fs::write(&tmp, raw).await.map_err(|e| io_err(&tmp, e))?;
+        tokio::fs::rename(&tmp, &path).await.map_err(|e| io_err(&path, e))
+    }
+
+    async fn ensure_network(&self) -> Result<()> {
+        self.network
+            .get_or_try_init(|| async {
+                match self.docker.inspect_network(&self.config.network, None).await {
+                    Ok(_) => return Ok(()),
+                    Err(e) if status(&e) == Some(404) => {}
+                    Err(e) => return Err(docker_err(e)),
+                }
+                let req = NetworkCreateRequest {
+                    name: self.config.network.clone(),
+                    driver: Some("bridge".into()),
+                    labels: Some(HashMap::from([(MARKER.to_string(), "network".to_string())])),
+                    ..Default::default()
+                };
+                match self.docker.create_network(req).await {
+                    Ok(_) => Ok(()),
+                    // Another control plane made it first.
+                    Err(e) if status(&e) == Some(409) => Ok(()),
+                    Err(e) => Err(docker_err(e)),
+                }
+            })
+            .await
+            .copied()
+    }
+
+    /// Whether a container exists, by name.
+    async fn exists(&self, name: &str) -> Result<bool> {
+        match self.docker.inspect_container(name, None::<InspectContainerOptions>).await {
+            Ok(_) => Ok(true),
+            Err(e) if status(&e) == Some(404) => Ok(false),
+            Err(e) => Err(docker_err(e)),
+        }
+    }
+
+    /// Creates and starts the sandbox's container from `image`. A fresh image gets the supervisor first; a checkpoint
+    /// already has it.
+    async fn run_container(&self, name: &str, image: &str, fresh: bool) -> Result<()> {
+        self.ensure_network().await?;
+        let body = ContainerCreateBody {
+            image: Some(image.into()),
+            cmd: Some(vec![SUPERVISE_PATH.into()]),
+            entrypoint: Some(vec![]),
+            labels: Some(HashMap::from([(MARKER.to_string(), name.to_string())])),
+            host_config: Some(HostConfig {
+                init: Some(true),
+                network_mode: Some(self.config.network.clone()),
+                restart_policy: Some(RestartPolicy {
+                    name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                    maximum_retry_count: None,
+                }),
+                runtime: self.config.runtime.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let opts = CreateContainerOptions { name: Some(name.into()), ..Default::default() };
+        self.docker.create_container(Some(opts), body).await.map_err(docker_err)?;
+        if fresh {
+            let tar = tar_of(&[("opt/trailhead/supervise", SUPERVISE.as_bytes(), 0o755, 0, 0)], &["opt/trailhead"])?;
+            self.upload(name, "/", tar).await?;
+        }
+        self.docker.start_container(name, None).await.map_err(docker_err)
+    }
+
+    async fn upload(&self, name: &str, dir: &str, tar: Vec<u8>) -> Result<()> {
+        let opts = UploadToContainerOptions { path: dir.into(), ..Default::default() };
+        self.docker.upload_to_container(name, Some(opts), bollard::body_full(tar.into())).await.map_err(docker_err)
+    }
+
+    /// Runs a shell command in the container and waits for it, returning its exit code and output.
+    async fn exec(&self, name: &str, user: Option<&str>, script: &str) -> Result<(i64, String)> {
+        let config = ExecConfig {
+            cmd: Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            user: user.map(str::to_string),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+        let exec = self.docker.create_exec(name, config).await.map_err(docker_err)?;
+        let mut out = String::new();
+        if let StartExecResults::Attached { mut output, .. } =
+            self.docker.start_exec(&exec.id, None::<StartExecOptions>).await.map_err(docker_err)?
+        {
+            while let Some(chunk) = output.next().await {
+                out.push_str(&chunk.map_err(docker_err)?.to_string());
+            }
+        }
+        let code = self.docker.inspect_exec(&exec.id).await.map_err(docker_err)?.exit_code.unwrap_or(-1);
+        Ok((code, out))
+    }
+
+    /// Runs a command in the background, outliving the exec.
+    async fn spawn(&self, name: &str, cmd: Vec<String>) -> Result<()> {
+        let config = ExecConfig { cmd: Some(cmd), ..Default::default() };
+        let exec = self.docker.create_exec(name, config).await.map_err(docker_err)?;
+        let opts = StartExecOptions { detach: true, ..Default::default() };
+        self.docker.start_exec(&exec.id, Some(opts)).await.map_err(docker_err).map(drop)
+    }
+
+    async fn sandbox(&self, name: &str) -> Result<Sandbox> {
+        let state = self.read_state(name).await?;
+        Ok(Sandbox { id: SandboxId(name.into()), name: name.into(), labels: state.labels })
+    }
+
+    async fn apply_egress(&self, name: &str, egress: &Egress) -> Result<()> {
+        self.ensure_network().await?;
+        let info = self.docker.inspect_container(name, None::<InspectContainerOptions>).await.map_err(docker_err)?;
+        let connected =
+            info.network_settings.and_then(|n| n.networks).is_some_and(|nets| nets.contains_key(&self.config.network));
+        let network = &self.config.network;
+        if egress.domains.is_empty() && connected {
+            let req = NetworkDisconnectRequest { container: name.into(), force: Some(true) };
+            self.docker.disconnect_network(network, req).await.map_err(docker_err)?;
+        } else if !egress.domains.is_empty() && !connected {
+            let req = NetworkConnectRequest { container: name.into(), endpoint_config: None };
+            self.docker.connect_network(network, req).await.map_err(docker_err)?;
+        }
+        if !egress.domains.is_empty() {
+            tracing::warn!(sandbox = name, domains = ?egress.domains, "docker egress isn't filtered yet: the sandbox can reach anything");
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Compute for DockerCompute {
+    async fn create(&self, spec: &SandboxSpec) -> Result<Sandbox> {
+        if self.exists(&spec.name).await? {
+            return self.sandbox(&spec.name).await;
+        }
+        let state = State { labels: spec.labels.clone(), egress: spec.egress.clone() };
+        self.write_state(&spec.name, &state).await?;
+        match self.run_container(&spec.name, &self.config.image, true).await {
+            // Lost a race with another create of the same name.
+            Err(Error::Conflict(_)) => return self.sandbox(&spec.name).await,
+            other => other?,
+        }
+        self.apply_egress(&spec.name, &spec.egress).await?;
+        self.sandbox(&spec.name).await
+    }
+
+    async fn list(&self, labels: &Labels) -> Result<Vec<Sandbox>> {
+        let opts = ListContainersOptions {
+            all: true,
+            filters: Some(HashMap::from([("label".to_string(), vec![MARKER.to_string()])])),
+            ..Default::default()
+        };
+        let containers = self.docker.list_containers(Some(opts)).await.map_err(docker_err)?;
+        let mut out = Vec::new();
+        for c in containers {
+            let Some(name) = c.labels.as_ref().and_then(|l| l.get(MARKER)) else { continue };
+            let sandbox = self.sandbox(name).await?;
+            if labels.iter().all(|(k, v)| sandbox.labels.get(k) == Some(v)) {
+                out.push(sandbox);
+            }
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    async fn checkpoint(&self, id: &SandboxId, note: &str) -> Result<CheckpointId> {
+        let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+        let tag = format!("{}-{millis}", id.0);
+        let opts = CommitContainerOptions {
+            container: Some(id.0.clone()),
+            repo: Some(CHECKPOINT_REPO.into()),
+            tag: Some(tag.clone()),
+            comment: Some(note.into()),
+            pause: true,
+            changes: Some(format!("LABEL {CHECKPOINT_OF}={}", id.0)),
+            ..Default::default()
+        };
+        self.docker.commit_container(opts, ContainerConfig::default()).await.map_err(docker_err)?;
+        Ok(CheckpointId(format!("{CHECKPOINT_REPO}:{tag}")))
+    }
+
+    /// Recreates the container from the checkpoint's image, keeping its name, labels and egress. Its programs start
+    /// again from the image.
+    async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()> {
+        self.docker.inspect_image(&cp.0).await.map_err(docker_err)?;
+        let state = self.read_state(&id.0).await?;
+        let opts = RemoveContainerOptions { force: true, ..Default::default() };
+        match self.docker.remove_container(&id.0, Some(opts)).await {
+            Err(e) if status(&e) != Some(404) => return Err(docker_err(e)),
+            _ => {}
+        }
+        self.run_container(&id.0, &cp.0, false).await?;
+        self.apply_egress(&id.0, &state.egress).await
+    }
+
+    /// Writes the files as the container's user (each beside its target, then renamed over it, so a running binary
+    /// can be replaced), writes the program's run script and has the supervisor (re)start it. A program that exits
+    /// within the first few seconds is an error carrying its output.
+    async fn start(&self, id: &SandboxId, program: &Program) -> Result<()> {
+        let name = &id.0;
+        let (code, out) = self.exec(name, None, "id -u; id -g; echo \"$HOME\"").await?;
+        let [uid, gid, home] = out.lines().collect::<Vec<_>>()[..] else {
+            return Err(Error::Other(format!("sandbox {name}: unexpected identity ({code}): {out}")));
+        };
+        let (uid, gid) = (parse_id(uid)?, parse_id(gid)?);
+        let dir = format!("{home}/.trailhead/programs/{}", program.name);
+        let run = run_script(&program.cmd, &program.args);
+        let mut files: Vec<(&str, &[u8], u32)> =
+            program.files.iter().map(|f| (f.path.as_str(), f.contents.as_slice(), f.mode)).collect();
+        let run_path = format!("{dir}/run");
+        files.push((&run_path, run.as_bytes(), 0o755));
+
+        let parents: Vec<&str> = files.iter().map(|(p, _, _)| parent(p)).collect();
+        let mkdir = format!("mkdir -p {}", parents.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" "));
+        let (code, out) = self.exec(name, None, &mkdir).await?;
+        if code != 0 {
+            return Err(Error::Other(format!("sandbox {name}: {mkdir} ({code}): {}", out.trim())));
+        }
+        let mut renames = Vec::new();
+        for (path, contents, mode) in &files {
+            let (dir, file) = (parent(path), path.rsplit('/').next().unwrap_or(path));
+            let tmp = format!(".{file}.new");
+            self.upload(name, dir, tar_of(&[(&tmp, contents, *mode, uid, gid)], &[])?).await?;
+            renames.push(format!("mv -f {} {}", shell_quote(&format!("{dir}/{tmp}")), shell_quote(path)));
+        }
+        let (code, out) = self.exec(name, None, &renames.join(" && ")).await?;
+        if code != 0 {
+            return Err(Error::Other(format!("sandbox {name}: moving files into place ({code}): {}", out.trim())));
+        }
+
+        self.spawn(name, vec!["setsid".into(), SUPERVISE_PATH.into(), program.name.clone()]).await?;
+        tokio::time::sleep(START_WATCH).await;
+        let check = format!("cat {0}/exits; echo ---; tail -n 50 {0}/log", shell_quote(&dir));
+        let (_, out) = self.exec(name, None, &check).await?;
+        let (exits, log) = out.split_once("---\n").unwrap_or((&out, ""));
+        match exits.lines().next() {
+            Some(code) => Err(Error::Other(format!("program {} exited ({code}): {}", program.name, log.trim()))),
+            None => Ok(()),
+        }
+    }
+
+    /// Containers don't pause, but one can be stopped (by hand, or by the Docker host restarting without it), so
+    /// this starts it if it isn't running.
+    async fn wake(&self, id: &SandboxId) -> Result<()> {
+        let info = self.docker.inspect_container(&id.0, None::<InspectContainerOptions>).await.map_err(docker_err)?;
+        if info.state.and_then(|s| s.running) == Some(true) {
+            return Ok(());
+        }
+        self.docker.start_container(&id.0, None).await.map_err(docker_err)
+    }
+
+    async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()> {
+        let mut state = self.read_state(&id.0).await?;
+        state.egress = egress.clone();
+        self.write_state(&id.0, &state).await?;
+        self.apply_egress(&id.0, egress).await
+    }
+
+    async fn set_labels(&self, id: &SandboxId, labels: &Labels) -> Result<()> {
+        if !self.exists(&id.0).await? {
+            return Err(Error::NotFound(format!("sandbox {}", id.0)));
+        }
+        let mut state = self.read_state(&id.0).await?;
+        state.labels = labels.clone();
+        self.write_state(&id.0, &state).await
+    }
+
+    /// Removes the container, its checkpoint images and its state file.
+    async fn destroy(&self, id: &SandboxId) -> Result<()> {
+        let opts = RemoveContainerOptions { force: true, ..Default::default() };
+        match self.docker.remove_container(&id.0, Some(opts)).await {
+            Err(e) if status(&e) != Some(404) => return Err(docker_err(e)),
+            _ => {}
+        }
+        let filter = format!("{CHECKPOINT_OF}={}", id.0);
+        let opts = ListImagesOptions {
+            filters: Some(HashMap::from([("label".to_string(), vec![filter])])),
+            ..Default::default()
+        };
+        for image in self.docker.list_images(Some(opts)).await.map_err(docker_err)? {
+            let opts = RemoveImageOptions { force: true, ..Default::default() };
+            match self.docker.remove_image(&image.id, Some(opts), None).await {
+                Err(e) if status(&e) != Some(404) => return Err(docker_err(e)),
+                _ => {}
+            }
+        }
+        match tokio::fs::remove_file(self.state_path(&id.0)).await {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_err(&self.state_path(&id.0), e)),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A script that runs `cmd` with `args`, quoted for `sh`.
+pub fn run_script(cmd: &str, args: &[String]) -> String {
+    let words: Vec<String> = std::iter::once(cmd).chain(args.iter().map(String::as_str)).map(shell_quote).collect();
+    format!("#!/bin/sh\nexec {}\n", words.join(" "))
+}
+
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+fn parent(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some(("", _)) => "/",
+        Some((dir, _)) => dir,
+        None => ".",
+    }
+}
+
+fn parse_id(s: &str) -> Result<u64> {
+    s.trim().parse().map_err(|_| Error::Other(format!("unexpected id: {s}")))
+}
+
+/// A tar of files (path, contents, mode, uid, gid) and directories, owned as given so the sandbox's user can use them.
+fn tar_of(files: &[(&str, &[u8], u32, u64, u64)], dirs: &[&str]) -> Result<Vec<u8>> {
+    let mut tar = tar::Builder::new(Vec::new());
+    for dir in dirs {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_mode(0o755);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_size(0);
+        tar.append_data(&mut header, dir, std::io::empty()).map_err(|e| Error::Other(e.to_string()))?;
+    }
+    for (path, contents, mode, uid, gid) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(*mode);
+        header.set_uid(*uid);
+        header.set_gid(*gid);
+        header.set_size(contents.len() as u64);
+        tar.append_data(&mut header, path, *contents).map_err(|e| Error::Other(e.to_string()))?;
+    }
+    tar.into_inner().map_err(|e| Error::Other(e.to_string()))
+}
+
+fn status(e: &DockerError) -> Option<u16> {
+    match e {
+        DockerError::DockerResponseServerError { status_code, .. } => Some(*status_code),
+        _ => None,
+    }
+}
+
+fn docker_err(e: DockerError) -> Error {
+    let msg = format!("docker: {e}");
+    match status(&e) {
+        Some(404) => Error::NotFound(msg),
+        Some(409) => Error::Conflict(msg),
+        Some(401 | 403) => Error::Forbidden(msg),
+        _ => Error::Other(msg),
+    }
+}
+
+fn io_err(path: &Path, e: std::io::Error) -> Error {
+    Error::Other(format!("{}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_scripts_quote_every_word() {
+        let args = vec!["--secrets".into(), "/home/trailhead/it's.json".into()];
+        assert_eq!(
+            run_script("/home/trailhead/.trailhead/trailhead-daemon", &args),
+            "#!/bin/sh\nexec '/home/trailhead/.trailhead/trailhead-daemon' '--secrets' '/home/trailhead/it'\\''s.json'\n"
+        );
+    }
+
+    #[test]
+    fn parents() {
+        assert_eq!(parent("/home/trailhead/.trailhead/secrets.json"), "/home/trailhead/.trailhead");
+        assert_eq!(parent("/x"), "/");
+        assert_eq!(parent("x"), ".");
+    }
+
+    #[test]
+    fn tars_carry_owner_and_mode() {
+        let raw = tar_of(&[(".secrets.json.new", b"{}", 0o600, 1001, 1002)], &["opt/trailhead"]).unwrap();
+        let mut archive = tar::Archive::new(raw.as_slice());
+        let entries: Vec<_> = archive
+            .entries()
+            .unwrap()
+            .map(|e| {
+                let h = e.unwrap().header().clone();
+                (h.path().unwrap().display().to_string(), h.mode().unwrap(), h.uid().unwrap(), h.gid().unwrap())
+            })
+            .collect();
+        assert_eq!(entries, [("opt/trailhead".into(), 0o755, 0, 0), (".secrets.json.new".into(), 0o600, 1001, 1002)]);
+    }
+
+    #[tokio::test]
+    async fn state_round_trips_and_defaults_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let docker = Docker::connect_with_http("http://127.0.0.1:1", 1, bollard::API_DEFAULT_VERSION).unwrap();
+        let compute = DockerCompute::with_client(docker, DockerConfig::new(dir.path().join("state")));
+        assert_eq!(compute.read_state("trail-1-a1").await.unwrap(), State::default());
+        let state = State {
+            labels: Labels::from([("role".into(), "worker".into())]),
+            egress: Egress { domains: vec!["crates.io".into()] },
+        };
+        compute.write_state("trail-1-a1", &state).await.unwrap();
+        assert_eq!(compute.read_state("trail-1-a1").await.unwrap(), state);
+    }
+}
