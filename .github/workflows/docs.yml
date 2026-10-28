@@ -19,12 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install mdBook (the version mise.toml pins)
-        run: |
-          v=$(sed -n 's/^mdbook = "\(.*\)"$/\1/p' mise.toml)
-          curl -sSL "https://github.com/rust-lang/mdBook/releases/download/v$v/mdbook-v$v-x86_64-unknown-linux-gnu.tar.gz" | tar -xz -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-      - run: mdbook build
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: mdbook
+      - run: mise run docs
       - uses: actions/upload-pages-artifact@v3
         if: github.event_name == 'push'
         with:
