@@ -12,10 +12,10 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 ## Starting and stopping
 
 - `mise run factory` builds the daemon and the control plane in release mode and runs it in the foreground. Its output is the log.
-- `trailhead-factory check --config factory.toml` (under `fnox exec --`) reports what it can see without running anything: queued tasks, Sprites, its iroh endpoint.
+- `trailhead-factory check --config factory.toml` (under `fnox exec --`) reports what it can see without running anything: queued tasks, Sprites, its iroh endpoint. Stop `run` first; they share the lock below.
 - Ctrl-C stops it. Runs in flight are cancelled first (up to 15 seconds), and the next start's reconcile requeues their tasks and returns their pooled Sprites to idle. Restarting is always safe, though a cancelled run counts as an attempt (TRAIL-159).
 - The factory clones from GitHub, not your checkout: push `main` before queuing work that builds on local commits.
-- Run only one at a time. Two would share an iroh identity and undo each other's runs (TRAIL-113).
+- One control plane per machine, whatever repo it runs: they share an iroh identity and would undo each other's runs. `run` and `check` take an exclusive lock on `<data dir>/factory/control.lock` before touching anything, and a second one fails with `a control plane is already running on this machine (pid N, running owner/repo, …)`. The lock goes when the process exits, even after a crash, so stop the running one first; `check` can't run beside it.
 
 Local sandboxes on Docker instead of Sprites (`docs/factory/sandbox.md#docker`): `mise run docker-up` and `mise run docker-image` once, `[compute] kind = "docker"` in the factory file, and the control plane built with `--features docker` and run with `DOCKER_HOST` set to the VM's socket. Until TRAIL-174 and TRAIL-175 land, Docker sandboxes have unfiltered egress and can't publish to GitHub, so this is for trying it out, not for real runs.
 
@@ -69,5 +69,5 @@ run finished task=TRAIL-105 outcome=…
 - New work is noticed on the next poll, not immediately (TRAIL-158).
 - Reviewers try to build and can't, wasting time (TRAIL-136).
 - A pooled Sprite has 8 GB and no swap; heavy builds have restarted one mid-run (TRAIL-140).
-- No notifications (TRAIL-111); runs in a terminal rather than as a service (TRAIL-112); no single-instance lock (TRAIL-113).
+- No notifications (TRAIL-111); runs in a terminal rather than as a service (TRAIL-112).
 - The GitHub connector has classic `repo` scope on all of Lane's repos and lets every Sprite use it (TRAIL-95).
