@@ -28,6 +28,7 @@ use trailhead_factory::{
 };
 
 use crate::Runner;
+#[cfg(unix)]
 use crate::awake::SpriteHolds;
 
 pub const ALPN: &[u8] = b"trailhead/daemon/0";
@@ -178,6 +179,7 @@ pub fn watch_network(endpoint: Endpoint) {
 pub struct DaemonProtocol {
     runner: Arc<Runner>,
     control_plane: EndpointId,
+    #[cfg(unix)]
     holds: Option<Arc<SpriteHolds>>,
     endpoint: Option<Endpoint>,
 }
@@ -190,7 +192,13 @@ impl std::fmt::Debug for DaemonProtocol {
 
 impl DaemonProtocol {
     pub fn new(runner: Arc<Runner>, control_plane: EndpointId) -> DaemonProtocol {
-        DaemonProtocol { runner, control_plane, holds: None, endpoint: None }
+        DaemonProtocol {
+            runner,
+            control_plane,
+            #[cfg(unix)]
+            holds: None,
+            endpoint: None,
+        }
     }
 
     /// The daemon's own endpoint, to tell iroh when a lockdown has cut its connections.
@@ -200,6 +208,7 @@ impl DaemonProtocol {
     }
 
     /// Holds the Sprite awake while a request is in flight.
+    #[cfg(unix)]
     pub fn holding(mut self, holds: Arc<SpriteHolds>) -> DaemonProtocol {
         self.holds = Some(holds);
         self
@@ -207,6 +216,7 @@ impl DaemonProtocol {
 
     async fn serve_stream(&self, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
         let Some(first) = read_frame::<ToDaemon>(&mut recv).await? else { return Ok(()) };
+        #[cfg(unix)]
         let _hold = self.holds.as_ref().map(|h| h.hold());
         let reply = match first {
             ToDaemon::Prepare(req) => match self.runner.prepare(&req).await {

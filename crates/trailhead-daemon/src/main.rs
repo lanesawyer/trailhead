@@ -10,6 +10,7 @@ use iroh::Endpoint;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use trailhead_codehost_github::{GitHub, Identity};
+#[cfg(unix)]
 use trailhead_daemon::awake::{SPRITE_API_SOCKET, SpriteHolds};
 use trailhead_daemon::net::{
     ALPN, DaemonProtocol, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
@@ -133,6 +134,7 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     tracing::info!(id = %endpoint.id(), %control_plane, "trailhead-daemon listening");
     watch_network(endpoint.clone());
     let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone());
+    #[cfg(unix)]
     if std::path::Path::new(SPRITE_API_SOCKET).exists() {
         protocol = protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET));
     }

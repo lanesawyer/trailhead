@@ -87,6 +87,7 @@ async fn confirm_blocked_waits_for_hosts_to_stop_resolving() {
     assert!(matches!(err, trailhead_factory::Error::Forbidden(ref m) if m.contains("localhost")), "{err:?}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn sprite_holds_heartbeat_then_linger() {
     use std::sync::{Arc, Mutex};

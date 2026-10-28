@@ -133,7 +133,7 @@ jobs:
           ref: ${{ needs.release.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       # Publishes trailhead-core, trailhead-server and trailhead in dependency order.
-      - run: cargo publish --workspace --locked
+      - run: cargo publish --locked -p trailhead-core -p trailhead-server -p trailhead
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
