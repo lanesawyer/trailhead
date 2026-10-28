@@ -1,0 +1,13 @@
+[book]
+title = "Trailhead"
+description = "Headless, agent-native task engine and software factory"
+src = "docs"
+language = "en"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/lanesawyer/trailhead"
+edit-url-template = "https://github.com/lanesawyer/trailhead/edit/main/{path}"

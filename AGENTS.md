@@ -20,6 +20,7 @@ Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). 
 - `cargo test` runs everything, including the concurrency suite in `crates/trailhead-core/tests/concurrency.rs`.
 - `cargo clippy --all-targets` and `cargo fmt --all` must be clean.
 - Local secrets come from Bitwarden Secrets Manager through fnox (`fnox.toml`; needs `BWS_ACCESS_TOKEN`). Tests that hit real services are `#[ignore]`d and run as mise tasks, e.g. `mise run test-live-sprites`.
+- The docs in `docs/` build into an mdBook (`mise run docs`); list any new page in `docs/SUMMARY.md` or it is left out of the book.
 - Migrations are numbered `.sql` files in `crates/trailhead-core/migrations`, registered in `src/db.rs`. Never edit an applied migration; add a new one.
 
 ## Tracking work

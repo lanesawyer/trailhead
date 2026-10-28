@@ -6,6 +6,7 @@ docker_host = "unix://{{env.HOME}}/.lima/trailhead/sock/docker.sock"
 docker-cli = "latest"
 fnox = { version = "latest", workflow = "release.yml" }
 lima = "latest"
+mdbook = "0.5.4"
 rust = "latest"
 
 [tasks.test-live-sprites]
@@ -50,3 +51,7 @@ run = "docker build -t trailhead-sandbox:latest crates/trailhead-compute-docker/
 description = "Run the Docker Compute test against the lima VM's engine (creates and destroys one container)"
 env = { DOCKER_HOST = "{{vars.docker_host}}" }
 run = "cargo test -p trailhead-compute-docker --test live -- --ignored --nocapture"
+
+[tasks.docs]
+description = "Build the docs (docs/) into a book with mdBook; `mdbook serve` previews it"
+run = "mdbook build"
