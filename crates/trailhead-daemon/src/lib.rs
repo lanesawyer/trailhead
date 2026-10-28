@@ -9,7 +9,6 @@ mod runner;
 mod workspace;
 
 #[cfg(feature = "net")]
-#[cfg(unix)]
 pub mod awake;
 #[cfg(feature = "net")]
 pub mod net;

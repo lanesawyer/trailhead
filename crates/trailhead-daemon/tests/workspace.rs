@@ -27,11 +27,6 @@ fn upstream(root: &Path) -> std::path::PathBuf {
     src
 }
 
-/// A checked-out file's text with Unix line endings: git on Windows checks files out with CRLF (`core.autocrlf`).
-fn text(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
-}
-
 fn check(name: &str, command: &str) -> Check {
     Check { name: name.into(), command: command.into() }
 }
@@ -49,7 +44,7 @@ async fn prepare_clones_runs_setup_and_resets() {
     };
 
     ws.prepare(&req).await.unwrap();
-    assert_eq!(text(&ws.dir().join("README.md")), "v1\n");
+    assert_eq!(std::fs::read_to_string(ws.dir().join("README.md")).unwrap(), "v1\n");
     assert!(ws.dir().join(".setup-ran").exists());
 
     // A later prepare picks up new upstream commits and drops the agent's leftovers, but keeps ignored files.
@@ -62,7 +57,7 @@ async fn prepare_clones_runs_setup_and_resets() {
     std::fs::create_dir_all(ws.dir().join("target")).unwrap();
     std::fs::write(ws.dir().join("target/cache"), "keep").unwrap();
     ws.prepare(&req).await.unwrap();
-    assert_eq!(text(&ws.dir().join("README.md")), "v2\n");
+    assert_eq!(std::fs::read_to_string(ws.dir().join("README.md")).unwrap(), "v2\n");
     assert!(!ws.dir().join("scratch.txt").exists());
     assert!(ws.dir().join("target/cache").exists(), "build caches survive");
 
@@ -92,7 +87,6 @@ async fn confirm_blocked_waits_for_hosts_to_stop_resolving() {
     assert!(matches!(err, trailhead_factory::Error::Forbidden(ref m) if m.contains("localhost")), "{err:?}");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn sprite_holds_heartbeat_then_linger() {
     use std::sync::{Arc, Mutex};

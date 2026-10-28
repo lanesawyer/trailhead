@@ -1,4 +1,3 @@
-#![cfg(unix)]
 //! `ClaudeCode` against a stand-in `claude` script that speaks `stream-json` and edits the checkout.
 
 use std::path::{Path, PathBuf};
