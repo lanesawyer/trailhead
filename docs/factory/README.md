@@ -17,6 +17,7 @@ Read this index first, then open only the file the work in front of you needs.
 | [budgets.md](budgets.md) | Cost and time limits, where spend numbers come from |
 | [observability.md](observability.md) | Tracing, OpenTelemetry, backend options |
 | [mvp.md](mvp.md) | The first slice, its milestones, and what "done" means |
+| [operating.md](operating.md) | Running the factory day to day: starting it, handing it work, watching runs, outcomes |
 | [open-questions.md](open-questions.md) | Undecided questions and hands-on tests still to run |
 | [naming.md](naming.md) | Name ideas for the factory and its parts |
 
