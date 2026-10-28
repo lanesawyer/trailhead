@@ -9,13 +9,12 @@ pub use core_tracker::{CoreTracker, METADATA_KEY};
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::task::{self, JoinSet};
-use tokio::time::Instant;
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
@@ -27,22 +26,8 @@ use trailhead_factory::{
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
 pub const CANCEL_GRACE: Duration = Duration::from_secs(60);
 
-/// How long a stopping control plane waits for its cancelled runs to end before abandoning them.
-pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
-
 /// The `factory` label value on every sandbox this control plane starts.
 pub const FACTORY_LABEL: &str = "trailhead";
-
-/// How many times reconcile tries to release a pooled sandbox before giving up on it and starting a new one.
-pub const RELEASE_ATTEMPTS: u32 = 5;
-
-/// How long a pooled sandbox may go on failing to release before the factory gives up on it, however few tries
-/// that took.
-pub const RELEASE_PATIENCE: Duration = Duration::from_secs(10 * 60);
-
-/// The first wait between tries at a troubled sandbox, doubling up to [`MAX_BACKOFF`].
-const FIRST_BACKOFF: Duration = Duration::from_secs(30);
-const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
@@ -53,16 +38,6 @@ pub struct Factory {
     pub tracker: Arc<dyn Tracker>,
     pub provider: Arc<dyn ModelProvider>,
     pub daemon: Arc<dyn Daemon>,
-    troubled: Mutex<HashMap<String, Trouble>>,
-}
-
-/// A pooled sandbox that keeps failing to release. Kept in memory only, so a restart counts again from zero.
-struct Trouble {
-    failures: u32,
-    since: Instant,
-    next_try: Instant,
-    /// Given up on: out of the pool and the sandbox cap, even if labelling it broken failed too.
-    abandoned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,21 +65,9 @@ pub struct Reconciled {
     pub released: Vec<String>,
     pub requeued: Vec<String>,
     pub reviewed: Vec<String>,
-    /// Pooled sandboxes that kept failing to release, now out of the pool.
-    pub abandoned: Vec<String>,
 }
 
 impl Factory {
-    pub fn new(
-        config: FactoryConfig,
-        compute: Arc<dyn Compute>,
-        tracker: Arc<dyn Tracker>,
-        provider: Arc<dyn ModelProvider>,
-        daemon: Arc<dyn Daemon>,
-    ) -> Factory {
-        Factory { config, compute, tracker, provider, daemon, troubled: Mutex::default() }
-    }
-
     fn project(&self) -> &str {
         &self.config.repo.project
     }
@@ -203,16 +166,6 @@ impl Factory {
                 },
             }
         }
-        // Cancel rather than just drop the runs: a daemon that loses its stream keeps the run going for a while in
-        // case the control plane reattaches, and a stop on purpose mustn't leave it working unobserved (TRAIL-142).
-        if !running.is_empty() {
-            tracing::info!(runs = running.len(), "cancelling runs in flight");
-            self.daemon.shutdown().await;
-            let drained = tokio::time::timeout(SHUTDOWN_GRACE, async { while running.join_next().await.is_some() {} });
-            if drained.await.is_err() {
-                tracing::warn!(runs = running.len(), "runs didn't stop in time; abandoning them");
-            }
-        }
         running.shutdown().await;
         Ok(())
     }
@@ -223,8 +176,11 @@ impl Factory {
         keys: &mut HashMap<task::Id, TaskKey>,
     ) -> Result<()> {
         let busy: HashSet<TaskKey> = keys.values().cloned().collect();
+        let mut workers = self.base_labels();
+        workers.insert(label::ROLE.into(), Role::Worker.as_str().into());
         let others = self
-            .occupied()
+            .compute
+            .list(&workers)
             .await?
             .into_iter()
             .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !busy.contains(&TaskKey(t.clone()))))
@@ -243,25 +199,12 @@ impl Factory {
         Ok(())
     }
 
-    /// The worker sandboxes that take a place in the cap: any with a worker role, and busy pooled ones, which
-    /// include a parked task's whose kill switch took its role away. Abandoned ones don't count (TRAIL-135).
-    async fn occupied(&self) -> Result<Vec<Sandbox>> {
-        let mut workers = self.base_labels();
-        workers.insert(label::ROLE.into(), Role::Worker.as_str().into());
-        let mut busy = self.pool_labels();
-        busy.insert(label::STATE.into(), label::BUSY.into());
-        let mut out: Vec<Sandbox> = Vec::new();
-        for s in self.compute.list(&workers).await?.into_iter().chain(self.compute.list(&busy).await?) {
-            if !self.abandoned(&s.name) && !out.iter().any(|o| o.name == s.name) {
-                out.push(s);
-            }
-        }
-        Ok(out)
-    }
-
     /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
     pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
-        let room = self.config.repo.max_sandboxes.saturating_sub(self.occupied().await?.len());
+        let mut workers = self.base_labels();
+        workers.insert(label::ROLE.into(), Role::Worker.as_str().into());
+        let live = self.compute.list(&workers).await?.len();
+        let room = self.config.repo.max_sandboxes.saturating_sub(live);
         if room == 0 {
             return Ok(Vec::new());
         }
@@ -298,7 +241,6 @@ impl Factory {
         sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
         let req = RunRequest {
-            run: name.clone(),
             role: Role::Worker,
             task: spec(task),
             repo: self.config.repo.repo(),
@@ -347,6 +289,23 @@ impl Factory {
             RunResult::Failed(reason) => {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
                 self.release_worker(&sandbox).await?;
+                let max = self.config.repo.max_attempts;
+                if attempt >= max {
+                    // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
+                    let last = self.tracker.show(&task.key).await?.run.failure.unwrap_or_else(|| reason.clone());
+                    sub.claim(&task.key).await?;
+                    sub.ask(
+                        &task.key,
+                        &format!(
+                            "Gave up after {attempt} failed attempts (the limit is {max}). The last failure: \
+                             {reason}\n\n{last}\n\nFix the cause, then reopen the task; raise `max_attempts` to \
+                             allow more tries."
+                        ),
+                    )
+                    .await?;
+                    self.tracker.revoke_sub_agent(&name).await?;
+                    return Ok(Outcome::Parked { reason });
+                }
                 self.tracker.revoke_sub_agent(&name).await?;
                 Ok(Outcome::Failed { reason })
             }
@@ -365,7 +324,6 @@ impl Factory {
         let sandbox = self.create_sandbox(&name, task, Role::Reviewer).await?;
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
         let req = RunRequest {
-            run: name.clone(),
             role: Role::Reviewer,
             task: spec(task),
             repo: self.config.repo.repo(),
@@ -441,7 +399,7 @@ impl Factory {
     /// The prepared checkout becomes the new warm checkpoint, so the next task starts from it.
     async fn acquire_worker(&self, task: &Task) -> Result<Sandbox> {
         let idle = self.compute.list(&self.pooled(label::IDLE, None, None)).await?;
-        let (sandbox, warm) = match idle.into_iter().find(|s| !self.abandoned(&s.name)) {
+        let (sandbox, warm) = match idle.into_iter().next() {
             Some(s) => {
                 let warm = s.labels.get(label::WARM).cloned();
                 (s, warm)
@@ -599,7 +557,15 @@ impl Factory {
             }
             // One sandbox's failure is logged and skipped rather than stopping the control plane from starting.
             if sandbox.labels.contains_key(label::POOL) {
-                self.reconcile_pooled(sandbox, &mut done).await;
+                // A pooled sandbox stays; one left busy by an interrupted run goes back to idle.
+                if sandbox.labels.get(label::STATE).map(String::as_str) != Some(label::IDLE) {
+                    match self.release_worker(sandbox).await {
+                        Ok(()) => done.released.push(sandbox.name.clone()),
+                        Err(e) => {
+                            tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't release a pooled sandbox")
+                        }
+                    }
+                }
                 continue;
             }
             match self.compute.destroy(&sandbox.id).await {
@@ -639,102 +605,16 @@ impl Factory {
     }
 }
 
-impl Factory {
-    /// A pooled sandbox stays; one left busy by an interrupted run goes back to idle. One that keeps failing to
-    /// release is given up on, so it can't hold the pool's only place while every retry fails (TRAIL-135).
-    async fn reconcile_pooled(&self, sandbox: &Sandbox, done: &mut Reconciled) {
-        let name = &sandbox.name;
-        let state = sandbox.labels.get(label::STATE).map(String::as_str);
-        if !self.due(name) {
-            return;
-        }
-        if state == Some(label::BROKEN) || self.abandoned(name) {
-            match self.compute.destroy(&sandbox.id).await {
-                Ok(()) => {
-                    tracing::info!(sandbox = %name, "destroyed a broken pooled sandbox");
-                    self.troubled.lock().unwrap().remove(name);
-                    done.destroyed.push(name.clone());
-                }
-                Err(e) => {
-                    tracing::debug!(sandbox = %name, error = %e, "a broken pooled sandbox still can't be destroyed");
-                    self.failed(name);
-                }
-            }
-            return;
-        }
-        if state == Some(label::IDLE) {
-            return;
-        }
-        match self.release_worker(sandbox).await {
-            Ok(()) => {
-                self.troubled.lock().unwrap().remove(name);
-                done.released.push(name.clone());
-            }
-            Err(e) if self.failed(name) => {
-                self.abandon(sandbox, &e).await;
-                done.abandoned.push(name.clone());
-            }
-            Err(e) => tracing::warn!(sandbox = %name, error = %e, "couldn't release a pooled sandbox; will retry"),
-        }
-    }
-
-    /// Takes a sandbox out of the pool for good: destroyed if the compute host allows it, otherwise labelled
-    /// [`label::BROKEN`] without a role (so it loses connector access) and destroyed by a later reconcile.
-    async fn abandon(&self, sandbox: &Sandbox, error: &Error) {
-        let name = &sandbox.name;
-        tracing::error!(
-            sandbox = %name,
-            %error,
-            "giving up on a pooled sandbox that won't release; leaving it out of the pool and starting a new one"
-        );
-        if let Some(t) = self.troubled.lock().unwrap().get_mut(name) {
-            t.abandoned = true;
-        }
-        if self.compute.destroy(&sandbox.id).await.is_ok() {
-            self.troubled.lock().unwrap().remove(name);
-            return;
-        }
-        let mut labels = self.pool_labels();
-        labels.insert(label::STATE.into(), label::BROKEN.into());
-        if let Err(e) = self.compute.set_labels(&sandbox.id, &labels).await {
-            tracing::error!(
-                sandbox = %name,
-                error = %e,
-                "couldn't label it broken either; it's out of the pool until this control plane restarts"
-            );
-        }
-    }
-
-    fn abandoned(&self, name: &str) -> bool {
-        self.troubled.lock().unwrap().get(name).is_some_and(|t| t.abandoned)
-    }
-
-    /// Whether a troubled sandbox's backoff has run out, or it isn't troubled.
-    fn due(&self, name: &str) -> bool {
-        self.troubled.lock().unwrap().get(name).is_none_or(|t| Instant::now() >= t.next_try)
-    }
-
-    /// Records a failure and backs off. True once the sandbox has used up its tries or its patience.
-    fn failed(&self, name: &str) -> bool {
-        let now = Instant::now();
-        let mut troubled = self.troubled.lock().unwrap();
-        let t = troubled.entry(name.to_string()).or_insert(Trouble {
-            failures: 0,
-            since: now,
-            next_try: now,
-            abandoned: false,
-        });
-        t.failures += 1;
-        t.next_try = now + FIRST_BACKOFF.saturating_mul(1 << (t.failures - 1).min(8)).min(MAX_BACKOFF);
-        !t.abandoned && (t.failures >= RELEASE_ATTEMPTS || now - t.since >= RELEASE_PATIENCE)
-    }
-}
-
 /// A sandbox's token outlives its wall-clock budget by a margin, so a missed revoke cleans itself up.
 fn token_ttl(profile: &Profile) -> Duration {
     Duration::from_secs((u64::from(profile.budget.minutes) + 30) * 60)
 }
 
 fn spec(task: &Task) -> TaskSpec {
-    TaskSpec { key: task.key.clone(), title: task.title.clone(), description: task.description.clone() }
+    TaskSpec {
+        key: task.key.clone(),
+        title: task.title.clone(),
+        description: task.description.clone(),
+        previous_failure: task.run.failure.clone(),
+    }
 }

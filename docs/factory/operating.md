@@ -44,7 +44,7 @@ run finished task=TRAIL-105 outcome=…
 | Outcome | What you see | What you do |
 | --- | --- | --- |
 | PR opened | Task `in_review`, a PR on GitHub with the reviewer's comment, a typed verdict on the task | Review and merge on GitHub, then `trailhead --as-me done TRAIL-n -m "merged"` |
-| Checks failed | A note on the task with the end of the failing check's output; the task is open again and retried | Usually nothing. If it keeps failing, Ctrl-C and read the note (attempt cap: TRAIL-107) |
+| Checks failed | A note on the task with the end of the failing check's output; the task is open again and retried | Usually nothing. The next attempt is told what failed; after `max_attempts` (`[repo]`, default 3) the task is parked with a question summarizing the failure |
 | Question | Task `needs_input` with a question comment; its Sprite stays busy | Answer it, set the task open, restart the factory (TRAIL-108 removes the restart) |
 | Budget or time breach | As a question, saying which limit it hit | Raise the budget in `factory.toml` or cancel the task |
 | Dropped model call | `claude's API call failed; resuming the session` in the log | Nothing; it resumes up to three times |
@@ -52,13 +52,12 @@ run finished task=TRAIL-105 outcome=…
 ## Sandboxes and cost
 
 - Workers run in a lazy pool of warm Sprites (`trailhead-w1`, …, up to `max_sandboxes`). The first task pays a cold build of the repo (about 12 minutes for Trailhead today; TRAIL-120 should cut it). After that, each task restores the warm checkpoint and builds incrementally, in about a minute.
-- Between tasks, pooled Sprites are restored (wiping the last task), have no egress and no connector access, and pause about two minutes after their last task. A paused Sprite costs only storage. Stopping the factory doesn't delete the pool; destroy a Sprite in the Sprites dashboard if you want it gone. A Sprite that keeps failing to release is given up on after five tries or ten minutes: an `ERROR` line in the log, the label `state=broken`, and a new Sprite for the next task. Destroy it in the dashboard if the factory can't.
+- Between tasks, pooled Sprites are restored (wiping the last task), have no egress and no connector access, and pause about two minutes after their last task. A paused Sprite costs only storage. Stopping the factory doesn't delete the pool; destroy a Sprite in the Sprites dashboard if you want it gone.
 - Reviewers get a fresh Sprite each, skip the build, and are destroyed after.
 - Each run is capped by its profile's budget: dollars (API-equivalent in subscription mode), minutes and steps.
 
 ## Known rough edges
 
-- No attempt cap; retries don't see why the last attempt failed (TRAIL-107).
 - Answering a question needs a restart (TRAIL-108).
 - No `status` or `logs` commands (TRAIL-109); no way to move a task into the queue (TRAIL-110).
 - No notifications (TRAIL-111); runs in a terminal rather than as a service (TRAIL-112); no single-instance lock (TRAIL-113).

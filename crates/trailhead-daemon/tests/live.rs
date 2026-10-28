@@ -134,9 +134,13 @@ async fn daemon_in_a_sprite() {
             // Code can't reach a model (no Anthropic connector here), and the daemon releases the task again.
             let cred = tracker.create_sub_agent("live-a1", "LIVE", Duration::from_secs(900)).await.unwrap();
             let req = RunRequest {
-                run: "live-a1".into(),
                 role: Role::Worker,
-                task: TaskSpec { key: key.clone(), title: "Live run".into(), description: worker_task() },
+                task: TaskSpec {
+                    key: key.clone(),
+                    title: "Live run".into(),
+                    description: worker_task(),
+                    previous_failure: None,
+                },
                 repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
                 base_branch: "main".into(),
                 branch: "factory/live-1".into(),
@@ -185,9 +189,13 @@ async fn daemon_in_a_sprite() {
                 url: "https://github.com/lanesawyer/trailhead/pull/3".into(),
             };
             let review = RunRequest {
-                run: "live-r1".into(),
                 role: Role::Reviewer,
-                task: TaskSpec { key: key.clone(), title: "Live run".into(), description: "Say hi.".into() },
+                task: TaskSpec {
+                    key: key.clone(),
+                    title: "Live run".into(),
+                    description: "Say hi.".into(),
+                    previous_failure: None,
+                },
                 repo: pr.repo.clone(),
                 base_branch: "main".into(),
                 branch: "spike/m0-github-connector".into(),

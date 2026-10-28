@@ -58,11 +58,14 @@ pub struct RunUpdate {
     /// Total spend across attempts and reviews.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend: Option<Usd>,
+    /// Why the last attempt failed, which the next attempt is told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 impl RunUpdate {
     pub fn merge(&mut self, update: RunUpdate) {
-        let RunUpdate { attempt, sandbox, host, profile, pr, review_rounds, reviewed, spend } = update;
+        let RunUpdate { attempt, sandbox, host, profile, pr, review_rounds, reviewed, spend, failure } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
         self.host = host.or(self.host.take());
@@ -71,6 +74,7 @@ impl RunUpdate {
         self.review_rounds = review_rounds.or(self.review_rounds.take());
         self.reviewed = reviewed.or(self.reviewed.take());
         self.spend = spend.or(self.spend.take());
+        self.failure = failure.or(self.failure.take());
     }
 
     pub fn is_empty(&self) -> bool {
