@@ -103,13 +103,13 @@ fn load_or_create_keys(creds: &CredStore) -> Result<(SecretKey, [u8; 32]), Strin
     Ok((endpoint, master))
 }
 
-/// Takes the exclusive lock for running one repo's control plane, held until the returned file drops (or the process
-/// dies). Two control planes share an iroh identity and each would reconcile the other's busy sandboxes as interrupted.
-fn lock_repo(data_dir: &Path, repo: &str) -> Result<File, String> {
+/// Takes the machine's control-plane lock, held until the returned file drops (or the process dies). Every control
+/// plane on a machine shares one iroh identity (`load_or_create_keys`), so two at once, for any repos, flap each
+/// other's daemon connections and reconcile each other's busy sandboxes as interrupted.
+fn lock_control_plane(data_dir: &Path, repo: &str) -> Result<File, String> {
     let dir = data_dir.join("factory");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let name: String = repo.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
-    let path = dir.join(format!("{name}.lock"));
+    let path = dir.join("control.lock");
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -120,19 +120,22 @@ fn lock_repo(data_dir: &Path, repo: &str) -> Result<File, String> {
     match file.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
-            let mut pid = String::new();
-            let _ = file.read_to_string(&mut pid);
-            let pid = pid.trim();
-            let who = if pid.is_empty() { "another process".to_string() } else { format!("pid {pid}") };
+            let mut holder = String::new();
+            let _ = file.read_to_string(&mut holder);
+            let who = match holder.trim().split_once(' ') {
+                Some((pid, repo)) => format!("pid {pid}, running {repo}"),
+                None if !holder.trim().is_empty() => format!("pid {}", holder.trim()),
+                None => "another process".to_string(),
+            };
             return Err(format!(
-                "a control plane for {repo} is already running ({who}, lock {}); stop it first",
+                "a control plane is already running on this machine ({who}, lock {}); stop it first",
                 path.display()
             ));
         }
         Err(TryLockError::Error(e)) => return Err(format!("{}: {e}", path.display())),
     }
     file.set_len(0).and_then(|()| file.rewind()).map_err(|e| format!("{}: {e}", path.display()))?;
-    write!(file, "{}", std::process::id()).map_err(|e| format!("{}: {e}", path.display()))?;
+    write!(file, "{} {repo}", std::process::id()).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(file)
 }
 
@@ -150,7 +153,7 @@ async fn factory_ctx(store: &Store, create: bool) -> Result<Ctx, String> {
     store.agent_ctx(ws.id, agent.id).await.map_err(|e| e.to_string())
 }
 
-async fn setup(opts: &Opts, exclusive: bool) -> Result<(Arc<Factory>, Router, Option<File>), String> {
+async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File), String> {
     let config = std::fs::read_to_string(&opts.config).map_err(|e| format!("{}: {e}", opts.config.display()))?;
     let mut config = FactoryConfig::parse(&config).map_err(|e| e.to_string())?;
     if opts.claude_oauth_token.is_some() {
@@ -160,7 +163,8 @@ async fn setup(opts: &Opts, exclusive: bool) -> Result<(Arc<Factory>, Router, Op
     let binary = std::fs::read(&opts.daemon).map_err(|e| format!("daemon binary {}: {e}", opts.daemon.display()))?;
 
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let lock = if exclusive { Some(lock_repo(&paths.data_dir, &config.repo.repo().slug())?) } else { None };
+    // Before the store opens or the endpoint binds, so a refused start changes nothing.
+    let lock = lock_control_plane(&paths.data_dir, &config.repo.repo().slug())?;
     let db = paths.db();
     if let Some(dir) = db.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -239,7 +243,7 @@ fn check_result(failed: usize) -> Result<(), String> {
 async fn main_inner(cli: Cli) -> Result<(), String> {
     match cli.cmd {
         Cmd::Check(opts) => {
-            let (factory, tunnel, _) = setup(&opts, false).await?;
+            let (factory, tunnel, _lock) = setup(&opts).await?;
             let project = &factory.config.repo.project;
             let queue = factory.config.repo.queue.clone().map(trailhead_factory::TaskKey);
             let mut failed = 0;
@@ -273,7 +277,7 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
             check_result(failed)
         }
         Cmd::Run(opts) => {
-            let (factory, tunnel, _lock) = setup(&opts, true).await?;
+            let (factory, tunnel, _lock) = setup(&opts).await?;
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!("stopping; runs in flight are requeued on the next start");
@@ -300,17 +304,16 @@ async fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_result, lock_repo};
+    use super::{check_result, lock_control_plane};
 
     #[test]
-    fn second_lock_on_a_repo_is_refused_naming_the_holder() {
+    fn second_control_plane_is_refused_naming_the_holder() {
         let dir = tempfile::tempdir().unwrap();
-        let held = lock_repo(dir.path(), "acme/app").unwrap();
-        let err = lock_repo(dir.path(), "acme/app").unwrap_err();
-        assert!(err.contains(&format!("pid {}", std::process::id())), "{err}");
-        assert!(lock_repo(dir.path(), "acme/other").is_ok());
+        let held = lock_control_plane(dir.path(), "acme/app").unwrap();
+        let err = lock_control_plane(dir.path(), "acme/other").unwrap_err();
+        assert!(err.contains(&format!("pid {}, running acme/app", std::process::id())), "{err}");
         drop(held);
-        assert!(lock_repo(dir.path(), "acme/app").is_ok());
+        assert!(lock_control_plane(dir.path(), "acme/other").is_ok());
     }
 
     #[test]
