@@ -682,6 +682,9 @@ impl RemoteDaemon {
             let lost = match sent {
                 Err(e) => e,
                 Ok(()) => {
+                    if reattached > 0 {
+                        tracing::info!(sandbox = %sandbox.0, %run, seen, "reattached to the run");
+                    }
                     let mut incoming = frames::<FromDaemon>(recv);
                     loop {
                         tokio::select! {
