@@ -143,6 +143,9 @@ pub(crate) async fn edit(cx: &Ctx, a: EditArgs) -> Result<()> {
     if let Some(st) = a.status {
         body["status"] = json!(st);
     }
+    if let Some(p) = a.parent {
+        body["parent"] = if p == "none" { Value::Null } else { json!(p) };
+    }
     if let Some(v) = a.version {
         body["version"] = json!(v);
     }

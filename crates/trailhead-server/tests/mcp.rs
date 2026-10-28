@@ -208,6 +208,24 @@ async fn agents_schedule_tasks_over_mcp() {
 }
 
 #[tokio::test]
+async fn agents_move_tasks_between_parents_over_mcp() {
+    let s = start().await;
+    let client = connect(&s.url, &s.agent).await;
+    call(&client, "create_task", json!({"project": "AUTH", "title": "queue"})).await;
+    call(&client, "create_task", json!({"project": "AUTH", "title": "work"})).await;
+    let under = json!({"parent": "AUTH-3"});
+    let (err, out) = call(&client, "update_task", json!({"task": "AUTH-4", "parent": "AUTH-3"})).await;
+    assert!(!err, "{out}");
+    let (_, out) = call(&client, "list_tasks", under.clone()).await;
+    assert!(out.starts_with("AUTH-4 ") && out.lines().count() == 1, "{out}");
+    let (err, out) = call(&client, "update_task", json!({"task": "AUTH-4", "parent": ""})).await;
+    assert!(!err, "{out}");
+    let (_, out) = call(&client, "list_tasks", under).await;
+    assert_eq!(out, "no tasks");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn agents_create_projects_and_write_briefs() {
     let s = start().await;
     let client = connect(&s.url, &s.agent).await;
