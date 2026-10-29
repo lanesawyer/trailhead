@@ -92,6 +92,37 @@ pub struct RunUpdate {
     /// The task was skipped for having no grade, and said so (`set one to queue it`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ungraded: Option<bool>,
+    /// The PR head commit the agent review last ran on, so a verdict on an older head isn't counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_head: Option<String>,
+    /// The merger's last decision on the PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<MergeDecision>,
+}
+
+/// The merger's decision on a PR's current head (`docs/factory/review.md#the-merger`). Written whole, and its
+/// optional fields serialize as `null` when unset so that a write clears them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeDecision {
+    pub grade: u8,
+    /// The head commit the gates were evaluated on.
+    pub head: String,
+    /// The gates that passed: `checks`, `ci`, `agent_review`, `human`.
+    pub passed: Vec<String>,
+    /// The gates still to pass, and for CI that failed, the names of the failing checks.
+    pub waiting: Vec<String>,
+    #[serde(default)]
+    pub failing: Vec<String>,
+    /// Every gate passed and the grade auto-merges, so a merger that was on would merge now.
+    pub would_merge: bool,
+    /// The head the control plane moved the task to `approved` on, which tells its approval from Lane's.
+    pub approved_head: Option<String>,
+    /// The head Lane approved the task on.
+    pub human_head: Option<String>,
+    /// Why the control plane couldn't act on the decision, such as not being a delegated reviewer.
+    pub problem: Option<String>,
+    /// What was last said on the PR about this, so it's said once per change.
+    pub message: String,
 }
 
 /// A merged PR: who merged it, which PR, and the commit it became.
@@ -144,6 +175,8 @@ impl RunUpdate {
             merged,
             grade,
             ungraded,
+            reviewed_head,
+            merge,
         } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
@@ -162,6 +195,8 @@ impl RunUpdate {
         self.merged = merged.or(self.merged.take());
         self.grade = grade.or(self.grade.take());
         self.ungraded = ungraded.or(self.ungraded.take());
+        self.reviewed_head = reviewed_head.or(self.reviewed_head.take());
+        self.merge = merge.or(self.merge.take());
     }
 
     /// The review the next run has to address: the last one that asked for changes, unless a later review has
@@ -251,6 +286,11 @@ pub trait Tracker: Send + Sync {
     async fn release(&self, task: &TaskKey) -> Result<()>;
     async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()>;
     async fn request_review(&self, task: &TaskKey) -> Result<()>;
+    /// Moves a task in review to `approved`. Only a human or a project's delegated reviewer can; anyone else gets
+    /// `Forbidden`.
+    async fn approve(&self, task: &TaskKey) -> Result<()>;
+    /// Sends an approved task back to review, as a push after its approval needs a new one.
+    async fn unapprove(&self, task: &TaskKey) -> Result<()>;
     /// Sends a task in review back to the queue, unheld, for a rework run to pick up.
     async fn reopen(&self, task: &TaskKey) -> Result<()>;
     /// Raises the task's grade. Trailhead lets an agent raise a grade but never set the first or lower it.
