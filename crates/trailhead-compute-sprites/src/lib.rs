@@ -90,8 +90,14 @@ impl SpritesCompute {
         self.http.request(method, url).bearer_auth(&self.token)
     }
 
+    /// `request` for calls that answer in moments (wake, list, get), so a hanging API fails them in `QUICK_TIMEOUT`
+    /// rather than the client's 300s, which `send_idempotent` would then multiply by its tries.
+    fn quick_request(&self, method: Method, url: Url) -> RequestBuilder {
+        self.request(method, url).timeout(QUICK_TIMEOUT)
+    }
+
     async fn get_sprite(&self, name: &str) -> Result<Option<Sandbox>> {
-        let res = send_idempotent(self.request(Method::GET, self.url(&[name]))).await?;
+        let res = send_idempotent(self.quick_request(Method::GET, self.url(&[name]))).await?;
         if res.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -157,7 +163,8 @@ impl Compute for SpritesCompute {
                     q.append_pair("continuation_token", token);
                 }
             }
-            let page: SpriteList = json_body(ok(send_idempotent(self.request(Method::GET, url)).await?).await?).await?;
+            let page: SpriteList =
+                json_body(ok(send_idempotent(self.quick_request(Method::GET, url)).await?).await?).await?;
             out.extend(
                 page.sprites
                     .into_iter()
@@ -242,7 +249,7 @@ impl Compute for SpritesCompute {
             .append_pair("cmd", "-d")
             .append_pair("cmd", WAKE_HOLD)
             .append_pair("cmd", "http://sprite/v1/tasks/trailhead-wake");
-        ok(send_idempotent(self.request(Method::POST, url)).await?).await.map(drop)
+        ok(send_idempotent(self.quick_request(Method::POST, url)).await?).await.map(drop)
     }
 
     async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()> {
@@ -365,6 +372,9 @@ fn http_err(e: reqwest::Error) -> Error {
 async fn send(req: RequestBuilder) -> Result<Response> {
     req.send().await.map_err(http_err)
 }
+
+/// How long wake, list and get_sprite wait for one answer.
+const QUICK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Extra tries `send_idempotent` makes after a transient failure.
 const RETRIES: u32 = 3;

@@ -138,6 +138,7 @@ fn request(run: &str, key: TaskKey, credential: Credential) -> RunRequest {
         endpoint: trailhead_factory::Endpoint { base_url: "http://gateway.invalid".into() },
         max_steps: 5,
         required_checks: Vec::new(),
+        worker_checks: Vec::new(),
         blocked_hosts: Vec::new(),
         allowed_hosts: Vec::new(),
         credential,
@@ -390,4 +391,18 @@ async fn daemon_log_filter_goes_on_the_command_line_when_set() {
     let args = remote.program(&SandboxId("s".into())).args;
     let at = args.iter().position(|a| a == "--log").expect("--log is set");
     assert_eq!(args[at + 1], "info,iroh=debug");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hanging_wake_gives_up_at_the_deadline() {
+    let mut r = Rig::new().await;
+    r.serve("stuck").await;
+    let sandbox = r.sandbox("stuck").await;
+    r.compute.hang_wakes("stuck");
+    let req = r.factory().config.prepare_request(Role::Worker, None);
+
+    let started = tokio::time::Instant::now();
+    let res = tokio::time::timeout(Duration::from_secs(300), r.remote.prepare(&sandbox, req)).await;
+    assert!(res.expect("wake is bounded by the connect deadline").is_err());
+    assert!(started.elapsed() < Duration::from_secs(120), "{:?}", started.elapsed());
 }

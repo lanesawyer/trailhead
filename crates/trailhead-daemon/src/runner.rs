@@ -119,6 +119,7 @@ impl Runner {
             endpoint: req.endpoint.clone(),
             max_steps: req.max_steps,
             diff,
+            checks: req.worker_checks.clone(),
         };
         tracing::info!(task = %key, "agent starting");
         // Where the agent's work starts, which is what it's published on top of.

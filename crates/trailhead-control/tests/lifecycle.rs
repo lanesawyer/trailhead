@@ -125,6 +125,9 @@ async fn spec_to_reviewed_pr_then_human_merge() {
     let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
     assert!(review.diff.unwrap().contains("src/greet.rs"), "reviewer sees the diff");
     assert_eq!(review.model.0, "fake-opus");
+    let names: Vec<_> = review.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["fmt", "lint", "test"], "the reviewer is told which checks the worker ran");
+    assert!(review.checks.iter().all(|c| c.passed));
 
     assert_eq!(busy(&r.compute), Vec::<String>::new(), "no sandbox stays busy after the run");
     let pooled = r.compute.get("trailhead-w1").expect("the worker's sandbox stays in the pool");
@@ -1233,4 +1236,40 @@ async fn a_deliberate_stop_gives_the_attempt_back() {
     assert!(matches!(ran, Outcome::Reviewed { .. }), "{ran:?}");
     assert_eq!(r.tracker.task(&key).run.attempt, Some(1));
     assert!(r.tracker.agents().contains(&"factory/trail-1-a1-1".to_string()), "{:?}", r.tracker.agents());
+}
+
+#[tokio::test]
+async fn two_runs_starting_together_never_take_the_same_idle_sandbox() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_sandboxes = 4"));
+    let first = r.tracker.add_task("TRAIL", "First", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&first).status, Status::InReview);
+
+    let a = r.tracker.add_task("TRAIL", "A", "");
+    let b = r.tracker.add_task("TRAIL", "B", "");
+    // Both workers wait on a gate, so the two runs are in flight together.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    for _ in 0..2 {
+        r.harness.push(Role::Worker, Script::new(changes()).wait_for(gate.clone()));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+    }
+    let (ta, tb) = (r.tracker.task(&a), r.tracker.task(&b));
+    let release = async {
+        until("both workers to start", || r.harness.contexts().len() >= 3).await;
+        gate.notify_one();
+        gate.notify_one();
+    };
+    let (ra, rb, ()) = tokio::join!(r.factory.run_task(&ta), r.factory.run_task(&tb), release);
+    ra.unwrap();
+    rb.unwrap();
+    assert_eq!(r.tracker.task(&a).status, Status::InReview);
+    assert_eq!(r.tracker.task(&b).status, Status::InReview);
+
+    let hosts = [r.tracker.task(&a).run.host.clone().unwrap(), r.tracker.task(&b).run.host.clone().unwrap()];
+    assert_ne!(hosts[0], hosts[1], "each run gets its own sandbox");
+    let mut names: Vec<_> = r.compute.sandboxes().into_iter().map(|s| s.name).filter(|n| n.contains("-w")).collect();
+    names.sort();
+    assert_eq!(names, ["trailhead-w1", "trailhead-w2"], "one reused the idle sandbox, the other got a new one");
 }
