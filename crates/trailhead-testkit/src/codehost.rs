@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    ChangedFile, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
+    ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
 };
 
 #[derive(Debug, Clone)]
@@ -18,6 +18,8 @@ pub struct FakePr {
     pub mergeable: Option<bool>,
     /// What the host lists as changed, when a test sets it; otherwise it follows the published commits.
     pub files: Option<Vec<ChangedFile>>,
+    /// CI on the PR's head: pending until a test says otherwise.
+    pub ci: CiState,
 }
 
 #[derive(Default)]
@@ -86,6 +88,24 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.files = Some(files)).unwrap();
     }
 
+    /// Sets how CI stands on the PR's head. A new head starts over at pending.
+    pub fn set_ci(&self, pr: &PrRef, ci: CiState) {
+        self.find(pr, |p, _| p.ci = ci).unwrap();
+    }
+
+    /// Someone pushes to the PR's branch, moving its head and restarting CI.
+    pub fn push_to(&self, pr: &PrRef) {
+        let (key, head) = self
+            .find(pr, |p, s| {
+                let key = (pr.repo.slug(), p.spec.branch.clone());
+                let head = format!("{}+", s.heads[&key]);
+                p.ci = CiState::Pending;
+                (key, head)
+            })
+            .unwrap();
+        self.state.lock().unwrap().heads.insert(key, head);
+    }
+
     /// The commit a merged PR became: made up from its number.
     pub fn merge_commit(pr: &PrRef) -> String {
         format!("merge-{}", pr.number)
@@ -135,6 +155,7 @@ impl CodeHost for FakeCodeHost {
             closed: false,
             mergeable: Some(true),
             files: None,
+            ci: CiState::Pending,
         });
         Ok(r)
     }
@@ -186,6 +207,15 @@ impl CodeHost for FakeCodeHost {
 
     async fn title(&self, pr: &PrRef) -> Result<String> {
         self.find(pr, |p, _| p.spec.title.clone())
+    }
+
+    async fn head(&self, pr: &PrRef) -> Result<String> {
+        self.find(pr, |p, s| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default())
+    }
+
+    async fn ci(&self, pr: &PrRef) -> Result<Ci> {
+        let head = CodeHost::head(self, pr).await?;
+        self.find(pr, |p, _| Ci { head, state: p.ci.clone() })
     }
 
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
