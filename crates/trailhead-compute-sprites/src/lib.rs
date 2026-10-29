@@ -437,6 +437,19 @@ async fn json_body<T: serde::de::DeserializeOwned>(res: Response) -> Result<T> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn status_maps_to_error_variants() {
+        for (code, retried) in [(400, false), (408, true), (422, false), (429, true), (502, true)] {
+            let res = Response::from(http::Response::builder().status(code).body("nope\n").unwrap());
+            let err = ok(res).await.unwrap_err();
+            assert!(err.to_string().contains("nope"), "{code}: {err}");
+            match (retried, &err) {
+                (false, Error::Rejected(_)) | (true, Error::Other(_)) => {}
+                _ => panic!("{code} mapped to {err:?}"),
+            }
+        }
+    }
+
     #[test]
     fn labels_round_trip() {
         let labels = Labels::from([("repo".into(), "lanesawyer/trailhead".into()), ("role".into(), "worker".into())]);
