@@ -222,6 +222,12 @@ impl Compute for SpritesCompute {
             let rename = json!({ "source": tmp, "dest": file.path, "workingDir": "/", "asRoot": false });
             ok(send(self.request(Method::POST, self.url(&[&id.0, "fs", "rename"])).json(&rename)).await?).await?;
         }
+        // A service that is already running (a Sprite restored from a checkpoint) keeps its old process through a
+        // redefine and a start, so stop it first. A service that isn't running or doesn't exist yet is fine.
+        let stop = self.request(Method::POST, self.url(&[&id.0, "services", &program.name, "stop"]));
+        if let Err(e) = send(stop).await {
+            tracing::debug!(sandbox = %id.0, program = %program.name, error = %e, "stopping the old service");
+        }
         let service = json!({ "cmd": program.cmd, "args": program.args, "needs": [] });
         let url = self.url(&[&id.0, "services", &program.name]);
         ok(send(self.request(Method::PUT, url).json(&service)).await?).await?;

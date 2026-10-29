@@ -12,7 +12,7 @@ use iroh::protocol::Router;
 use trailhead_codehost_github::{GitHub, Identity};
 use trailhead_daemon::awake::{SPRITE_API_SOCKET, SpriteHolds};
 use trailhead_daemon::net::{
-    ALPN, DaemonProtocol, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
+    ALPN, DaemonProtocol, build_id, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
 };
 use trailhead_daemon::{Connect, GitWorkspace, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{
@@ -145,7 +145,15 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     };
     tracing::info!(id = %endpoint.id(), %control_plane, "trailhead-daemon listening");
     watch_network(endpoint.clone());
-    let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone());
+    let build = match std::env::current_exe().and_then(std::fs::read) {
+        Ok(binary) => build_id(&binary),
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't read the daemon's own executable; the control plane will restart it");
+            "unknown".into()
+        }
+    };
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), %build, "trailhead-daemon build");
+    let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone()).build(build);
     if std::path::Path::new(SPRITE_API_SOCKET).exists() {
         protocol = protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET));
     }

@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -16,8 +18,11 @@ struct Live {
     wakes: usize,
 }
 
+type StartHook = Arc<dyn Fn(SandboxId) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct FakeCompute {
+    on_start: Arc<Mutex<Option<StartHook>>>,
     live: Arc<Mutex<BTreeMap<SandboxId, Live>>>,
     failing: Arc<Mutex<BTreeSet<(String, &'static str)>>>,
     wake_failures: Arc<Mutex<BTreeMap<String, usize>>>,
@@ -60,6 +65,16 @@ impl FakeCompute {
     pub fn programs(&self, name: &str) -> Vec<Program> {
         let live = self.live.lock().unwrap();
         live.get(&SandboxId(name.into())).map(|l| l.programs.clone()).unwrap_or_default()
+    }
+
+    /// Runs `f` after every `start`, as the supervisor would replace the process. A test uses it to swap the
+    /// daemon a sandbox runs.
+    pub fn on_start<F, Fut>(&self, f: F)
+    where
+        F: Fn(SandboxId) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        *self.on_start.lock().unwrap() = Some(Arc::new(move |id| Box::pin(f(id))));
     }
 
     /// Makes the next `n` wakes of a sandbox fail with a transient 5xx before they start succeeding.
@@ -164,7 +179,12 @@ impl Compute for FakeCompute {
             l.programs.retain(|p| p.name != program.name);
             l.programs.push(program.clone());
             Ok(())
-        })
+        })?;
+        let hook = self.on_start.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(id.clone()).await;
+        }
+        Ok(())
     }
 
     async fn wake(&self, id: &SandboxId) -> Result<()> {
