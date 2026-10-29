@@ -332,3 +332,31 @@ async fn one_connection_serves_several_registered_sub_agents() {
     assert_eq!(out, "you hold no claims", "the parent doesn't hold its sub-agent's claim");
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn grade_is_set_cleared_and_filtered_over_mcp() {
+    let s = start().await;
+    let human = connect(&s.url, &s.human).await;
+    let (err, out) = call(&human, "update_task", json!({"task": "AUTH-1", "grade": "3"})).await;
+    assert!(!err && out.contains("(grade 3)"), "{out}");
+    let (_, out) = call(&human, "list_tasks", json!({"project": "AUTH", "grade": "3"})).await;
+    assert!(out.contains("AUTH-1") && !out.contains("AUTH-2"), "{out}");
+    let (_, out) = call(&human, "ready", json!({"project": "AUTH", "grade": "ungraded"})).await;
+    assert!(out.contains("AUTH-2") && !out.contains("AUTH-1"), "{out}");
+    let (err, out) = call(&human, "ready", json!({"grade": "nope"})).await;
+    assert!(err && out.starts_with("error[invalid]"), "{out}");
+    let (err, out) = call(&human, "update_task", json!({"task": "AUTH-1", "grade": "9"})).await;
+    assert!(err && out.starts_with("error[invalid]"), "{out}");
+
+    let (err, out) = call(&human, "update_task", json!({"task": "AUTH-1", "grade": "none"})).await;
+    assert!(!err, "{out}");
+    assert!(!out.contains("grade"), "{out}");
+    let (_, out) = call(&human, "ready", json!({"project": "AUTH", "grade": "graded"})).await;
+    assert!(!out.contains("AUTH-"), "{out}");
+    human.cancel().await.unwrap();
+
+    let agent = connect(&s.url, &s.agent).await;
+    let (err, out) = call(&agent, "update_task", json!({"task": "AUTH-1", "grade": "2"})).await;
+    assert!(err && out.starts_with("error[forbidden]"), "{out}");
+    agent.cancel().await.unwrap();
+}
