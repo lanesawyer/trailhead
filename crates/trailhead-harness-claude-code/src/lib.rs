@@ -240,12 +240,58 @@ pub fn schema(role: Role) -> Value {
     })
 }
 
+/// The most the human-context section of a prompt may take, in bytes.
+const HUMAN_CONTEXT_CAP: usize = 6000;
+
+/// Lane's answers and the task's decisions and notes, for after the description. Empty when there are none. Past
+/// the cap the oldest notes are dropped; answers are kept first, each cut short if very long.
+fn human_section(task: &trailhead_factory::TaskSpec) -> String {
+    let ctx = &task.context;
+    let mut budget = HUMAN_CONTEXT_CAP;
+    let mut out = String::new();
+    if !ctx.answers.is_empty() {
+        out.push_str("\n\nQuestions you asked earlier and Lane's answers:");
+        for a in &ctx.answers {
+            let entry =
+                format!("\n- Q: {}\n  A ({}, {}): {}", clip(&a.question, 1000), a.by, a.date, clip(&a.answer, 2000));
+            budget = budget.saturating_sub(entry.len());
+            out.push_str(&entry);
+        }
+    }
+    let mut kept = Vec::new();
+    for n in ctx.notes.iter().rev() {
+        let entry = format!("\n- {}, {}: {}", n.author, n.date, clip(&n.body, 2000));
+        if entry.len() > budget {
+            break;
+        }
+        budget -= entry.len();
+        kept.push(entry);
+    }
+    if !kept.is_empty() {
+        out.push_str("\n\nDecisions and notes on this task, oldest first:");
+        kept.iter().rev().for_each(|e| out.push_str(e));
+    }
+    out
+}
+
+/// `s` cut to at most `max` bytes on a character boundary, marked when cut.
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… (cut)", &s[..end])
+}
+
 pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
     let task = &ctx.task;
     let mut p = match ctx.role {
         Role::Reviewer => format!(
             "You are reviewing a pull request for task {key}: {title}.\n\n\
-             Task:\n{desc}\n\n\
+             Task:\n{desc}{human}\n\n\
              The change under review:\n```diff\n{diff}\n```\n\n\
              Check it against the task and the repo's conventions (AGENTS.md). Read code in the checkout as needed, \
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
@@ -253,11 +299,12 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
             key = task.key.0,
             title = task.title,
             desc = task.description,
+            human = human_section(task),
             diff = ctx.diff.as_deref().unwrap_or("(no diff)"),
         ),
         _ => format!(
             "Implement task {key}: {title}.\n\n\
-             Task:\n{desc}\n\n\
+             Task:\n{desc}{human}\n\n\
              Work in this checkout and follow the repo's conventions (AGENTS.md). Make the change, add or update \
              tests, and run the repo's formatter, linter and tests. You don't need to commit or push; everything \
              you change in the checkout is published as one commit and a PR. If only a human can answer something \
@@ -267,6 +314,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
             key = task.key.0,
             title = task.title,
             desc = task.description,
+            human = human_section(task),
         ),
     };
     if let Some(failure) = &task.previous_failure {

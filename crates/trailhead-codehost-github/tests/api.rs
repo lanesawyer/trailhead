@@ -25,6 +25,9 @@ struct Git {
     comments: Vec<(u64, String)>,
     unmergeable: bool,
     workflow_scope: bool,
+    /// How many more file listings answer 502, and how many were asked for.
+    files_failures: usize,
+    files_calls: usize,
     auth: Vec<Option<String>>,
 }
 
@@ -158,7 +161,12 @@ async fn list_pulls(
 }
 
 async fn pull_files(State(g): State<Shared>, Path((_, _, n)): Path<(String, String, u64)>) -> Response {
-    let g = g.lock().unwrap();
+    let mut g = g.lock().unwrap();
+    g.files_calls += 1;
+    if g.files_failures > 0 {
+        g.files_failures -= 1;
+        return (StatusCode::BAD_GATEWAY, "Bad Gateway").into_response();
+    }
     let Some(pr) = g.prs.get(n as usize - 1) else { return not_found() };
     let head = &g.refs[pr["head"].as_str().unwrap()];
     let tree = &g.trees[g.commits[head]["tree"]["sha"].as_str().unwrap()];
@@ -347,4 +355,33 @@ async fn a_refused_workflow_change_names_the_call_and_the_scope() {
     let err = gh.publish(&repo(), &main, "factory/trail-105", &[commit]).await.unwrap_err().to_string();
     assert!(err.contains("POST /repos/lanesawyer/trailhead/git/refs"), "{err}");
     assert!(err.contains("`workflow` scope"), "{err}");
+}
+
+#[tokio::test]
+async fn reads_are_retried_through_a_flaky_gateway() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))] };
+    let main = head(&git, "main");
+    gh.publish(&repo(), &main, "factory/trail-1", &[commit]).await.unwrap();
+    let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };
+    let pr = gh.open_pr(&repo(), new).await.unwrap();
+
+    git.lock().unwrap().files_failures = 2;
+    let diff = gh.diff(&pr).await.unwrap();
+    assert!(diff.contains("+++ b/a.txt"), "{diff}");
+    assert_eq!(git.lock().unwrap().files_calls, 3);
+
+    // Past the retries, the last answer comes back.
+    git.lock().unwrap().files_failures = 10;
+    let err = gh.diff(&pr).await.unwrap_err();
+    assert!(err.to_string().contains("502"), "{err}");
+}
+
+#[tokio::test]
+async fn a_transport_error_says_why() {
+    let gh = GitHub::gateway("http://127.0.0.1:1");
+    let pr = trailhead_factory::PrRef { repo: repo(), number: 1, url: String::new() };
+    let err = gh.diff(&pr).await.unwrap_err().to_string();
+    assert!(err.contains("error sending request") && err.matches(": ").count() > 2, "{err}");
 }

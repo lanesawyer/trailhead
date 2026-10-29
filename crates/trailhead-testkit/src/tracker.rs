@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use trailhead_factory::{Credential, Error, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict, VerdictKind};
+use trailhead_factory::{
+    Answered, Credential, Error, HumanContext, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, Verdict,
+    VerdictKind, is_factory_agent,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FakeComment {
@@ -87,6 +90,11 @@ impl FakeTracker {
 
     pub fn comments(&self, key: &TaskKey) -> Vec<FakeComment> {
         self.state.lock().unwrap().comments.get(key).cloned().unwrap_or_default()
+    }
+
+    /// A person's `decision` comment on a task, as from the CLI.
+    pub fn decide(&self, key: &TaskKey, body: &str) {
+        push_comment(&mut self.state.lock().unwrap(), key, "lane", "decision", body);
     }
 
     pub fn is_revoked(&self, agent: &str) -> bool {
@@ -193,6 +201,36 @@ impl Tracker for FakeTracker {
         self.check_live()?;
         let s = self.state.lock().unwrap();
         s.tasks.get(task).cloned().ok_or_else(|| Error::NotFound(task.0.clone()))
+    }
+
+    async fn human_context(&self, task: &TaskKey) -> Result<HumanContext> {
+        self.check_live()?;
+        let s = self.state.lock().unwrap();
+        let mut out = HumanContext::default();
+        // The fake dates everything the same; answers follow their question.
+        let date = "2026-01-01".to_string();
+        let comments = s.comments.get(task).map(Vec::as_slice).unwrap_or_default();
+        for (i, c) in comments.iter().enumerate() {
+            match c.kind.as_str() {
+                "question" => {
+                    let answer =
+                        comments[i + 1..].iter().take_while(|n| n.kind != "question").find(|n| n.kind == "answer");
+                    if let Some(a) = answer {
+                        out.answers.push(Answered {
+                            question: c.body.clone(),
+                            answer: a.body.clone(),
+                            by: a.author.clone(),
+                            date: date.clone(),
+                        });
+                    }
+                }
+                "decision" | "note" if !is_factory_agent(&c.author) => {
+                    out.notes.push(TaskNote { author: c.author.clone(), date: date.clone(), body: c.body.clone() });
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
     }
 
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {

@@ -8,7 +8,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
-use trailhead_factory::{Credential, Error, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict, VerdictKind};
+use trailhead_factory::{
+    Credential, Error, HumanContext, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict, VerdictKind,
+};
 
 /// The metadata key the factory's run fields live under (`trailhead_control::METADATA_KEY`).
 const METADATA_KEY: &str = "factory";
@@ -148,6 +150,10 @@ impl Tracker for RestTracker {
     async fn show(&self, key: &TaskKey) -> Result<Task> {
         let detail = self.send(self.request(Method::GET, &format!("/tasks/{}", key.0))).await?;
         task(&detail["task"], &detail["claim"])
+    }
+
+    async fn human_context(&self, _: &TaskKey) -> Result<HumanContext> {
+        Err(unsupported("read a task's comments"))
     }
 
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {

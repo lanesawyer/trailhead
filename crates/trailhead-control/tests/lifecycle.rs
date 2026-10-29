@@ -255,6 +255,39 @@ async fn agent_question_parks_the_task() {
 }
 
 #[tokio::test]
+async fn the_next_worker_sees_the_answer_to_its_question() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    r.tracker.answer(&key, "The core crate.");
+    r.factory.reconcile().await.unwrap();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let ctxs = r.harness.contexts();
+    assert!(ctxs[0].task.context.is_empty());
+    let answers = &ctxs[1].task.context.answers;
+    assert_eq!(answers.len(), 1);
+    assert_eq!((answers[0].question.as_str(), answers[0].answer.as_str()), ("Which crate?", "The core crate."));
+    assert!(ctxs[1].task.context.notes.is_empty(), "the factory's own comments aren't passed on");
+}
+
+#[tokio::test]
+async fn a_decision_on_a_queued_task_reaches_the_first_run() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Lock", "");
+    r.tracker.decide(&key, "Use a per-machine flock.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let notes = &r.harness.contexts()[0].task.context.notes;
+    assert_eq!(notes.len(), 1);
+    assert_eq!((notes[0].author.as_str(), notes[0].body.as_str()), ("lane", "Use a per-machine flock."));
+}
+
+#[tokio::test]
 async fn sandbox_cap_limits_concurrent_runs() {
     let r = rig();
     r.tracker.add_task("TRAIL", "One", "");
@@ -789,6 +822,63 @@ async fn a_task_that_keeps_failing_is_parked_after_max_attempts_and_retries_see_
         let note = ctx.task.previous_failure.as_deref().expect("the last failure is passed on");
         assert!(note.contains("`lint` failed") && note.contains("warning: unused variable"), "{note}");
     }
+}
+
+#[tokio::test]
+async fn a_review_that_cant_start_doesnt_stop_reconcile() {
+    let r = rig();
+    let tracker: Arc<dyn Tracker> = Arc::new(r.tracker.clone());
+
+    // TRAIL-1: its PR is open but unreviewed, and the reviewer's sandbox can't be set up.
+    let unreviewed = r.tracker.add_task("TRAIL", "Unreviewed", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&unreviewed)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    r.compute.fail(&trailhead_factory::review_name(&unreviewed, 1, 2), "set_egress");
+
+    // TRAIL-2: crashed mid-run, after it in the list.
+    let crashed = r.tracker.add_task("TRAIL", "Crashed", "");
+    let name = run_name(&crashed, 1);
+    tracker.create_sub_agent(&name, "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
+    let sub = tracker.sub_agent(&name);
+    sub.claim(&crashed).await.unwrap();
+    sub.report(&crashed, update(1, &name)).await.unwrap();
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "{done:?}");
+    assert_eq!(done.requeued, [crashed.0], "the rest is still reconciled");
+    assert_eq!(r.tracker.task(&unreviewed).status, Status::InReview, "left for the next reconcile");
+}
+
+#[tokio::test]
+async fn a_review_left_from_before_a_restart_doesnt_hold_up_workers() {
+    let r = rig();
+    let unreviewed = r.tracker.add_task("TRAIL", "Unreviewed", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.factory.run_task(&r.tracker.task(&unreviewed)).await.unwrap();
+
+    // The boot review is slow; a ready task starts anyway.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    r.harness.push(Role::Reviewer, Script::new(approve()).wait_for(gate.clone()));
+    let ready = r.tracker.add_task("TRAIL", "Ready", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "?".into() }));
+
+    let factory = Arc::new(r.factory);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle =
+        tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), std::time::Duration::from_millis(5), async {
+            let _ = stopped.await;
+        }));
+    let tracker = r.tracker.clone();
+    until("the ready task to run", || tracker.task(&ready).status == Status::NeedsInput).await;
+    assert_eq!(tracker.task(&unreviewed).run.reviewed, None, "the review is still going");
+
+    gate.notify_one();
+    until("the review to land", || tracker.task(&unreviewed).run.reviewed == Some(1)).await;
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
 }
 
 #[tokio::test]

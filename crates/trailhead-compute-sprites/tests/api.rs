@@ -28,6 +28,9 @@ struct Sprite {
     files: BTreeMap<String, (Vec<u8>, String)>,
     services: BTreeMap<String, Value>,
     started: Vec<String>,
+    /// Statuses the next execs answer with, in order, before they start succeeding.
+    exec_failures: Vec<u16>,
+    exec_calls: usize,
 }
 
 #[derive(Default)]
@@ -217,6 +220,10 @@ async fn exec(
 ) -> Response {
     let mut api = api.lock().unwrap();
     let Some(s) = api.sprites.get_mut(&name) else { return StatusCode::NOT_FOUND.into_response() };
+    s.exec_calls += 1;
+    if !s.exec_failures.is_empty() {
+        return StatusCode::from_u16(s.exec_failures.remove(0)).unwrap().into_response();
+    }
     let args: Vec<String> = url_args(&q.unwrap_or_default());
     s.started.push(format!("exec {}", args.join(" ")));
     "".into_response()
@@ -429,4 +436,20 @@ async fn an_interrupted_restore_is_retried() {
 
     let unknown = compute.restore(&id, &CheckpointId("v9".into())).await;
     assert!(matches!(unknown, Err(Error::NotFound(_))), "an error event isn't retried: {unknown:?}");
+}
+
+#[tokio::test]
+async fn wake_retries_server_errors_and_rate_limits_but_not_client_errors() {
+    let (api, url) = serve().await;
+    let compute = SpritesCompute::with_url(&url, TOKEN).unwrap();
+    let id = compute.create(&spec("w", &[], &[])).await.unwrap().id;
+
+    api.lock().unwrap().sprites.get_mut("w").unwrap().exec_failures = vec![502, 429];
+    compute.wake(&id).await.unwrap();
+    assert_eq!(api.lock().unwrap().sprites["w"].exec_calls, 3, "two failures, then success");
+
+    api.lock().unwrap().sprites.get_mut("w").unwrap().exec_failures = vec![400, 502];
+    let err = compute.wake(&id).await.unwrap_err();
+    assert!(err.to_string().contains("400"), "{err}");
+    assert_eq!(api.lock().unwrap().sprites["w"].exec_calls, 4, "a 400 fails at once");
 }

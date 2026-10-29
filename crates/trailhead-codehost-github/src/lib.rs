@@ -69,7 +69,26 @@ impl GitHub {
         let path = req.url().path();
         let path = path.find("/repos/").map_or(path, |i| &path[i..]);
         let call = format!("{} {path}", req.method());
-        let res = self.http.execute(req).await.map_err(|e| Error::Other(format!("github {call}: {e}")))?;
+        let mut wait = Duration::from_millis(500);
+        for tries in 1..=RETRIES {
+            if req.method() != Method::GET {
+                break;
+            }
+            let Some(again) = req.try_clone() else { break };
+            let failure = match self.http.execute(again).await {
+                Ok(res) if transient(res.status()) => res.status().to_string(),
+                Ok(res) => return Self::read(res, call).await,
+                Err(e) => causes(&e),
+            };
+            tracing::warn!(%call, error = %failure, tries, "github call failed; retrying");
+            tokio::time::sleep(wait).await;
+            wait *= 2;
+        }
+        let res = self.http.execute(req).await.map_err(|e| Error::Other(format!("github {call}: {}", causes(&e))))?;
+        Self::read(res, call).await
+    }
+
+    async fn read(res: reqwest::Response, call: String) -> Result<(StatusCode, Value, String)> {
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
         let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
@@ -147,6 +166,25 @@ impl GitHub {
             self.call(self.request(Method::GET, &path).query(&[("head", head.as_str()), ("state", "open")])).await?;
         Ok(prs.as_array().and_then(|a| a.first()).map(|p| pr_ref(repo, p)))
     }
+}
+
+/// Extra tries a GET makes after a transient failure.
+const RETRIES: u32 = 3;
+
+/// Whether GitHub's (or the gateway's) answer is worth asking again for: a server error, or told to slow down.
+fn transient(status: StatusCode) -> bool {
+    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
+}
+
+/// The error with its sources: reqwest's own message ("error sending request for url ...") leaves out why.
+fn causes(e: &reqwest::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        out.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    out
 }
 
 /// One file of a PR as a unified diff section. GitHub omits `patch` for binary and very large files.

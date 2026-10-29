@@ -12,7 +12,7 @@ Read this index first, then open only the file the work in front of you needs.
 | [agents.md](agents.md) | The in-sandbox daemon and its contract, agent profiles and models, specs and agent context |
 | [lifecycle.md](lifecycle.md) | How a task moves from spec to merged PR, mapped onto Trailhead statuses and claims |
 | [engine-changes.md](engine-changes.md) | Changes the task engine needs for the factory, with ready-to-file `TRAIL` tasks |
-| [review.md](review.md) | Verification layers, risk tiers, per-repo gate policy, quorums, the policy ratchet |
+| [review.md](review.md) | Verification layers, grades (risk tiers), per-repo gate policy, the merger and auto-merge, quorums, the policy ratchet |
 | [state.md](state.md) | Where run state lives (no control-plane database), reconcile on boot, how sandboxes reach Trailhead |
 | [local-models.md](local-models.md) | Running models on the compute host instead of hosted APIs (direction only, not scheduled) |
 | [budgets.md](budgets.md) | Cost and time limits, where spend numbers come from, pausing near a subscription's usage window |

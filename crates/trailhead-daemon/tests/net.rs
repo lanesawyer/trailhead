@@ -127,6 +127,7 @@ fn request(run: &str, key: TaskKey, credential: Credential) -> RunRequest {
             title: "Slow".into(),
             description: String::new(),
             previous_failure: None,
+            context: Default::default(),
         },
         repo: trailhead_factory::Repo { owner: "o".into(), name: "r".into() },
         base_branch: "main".into(),
@@ -244,6 +245,36 @@ async fn a_run_survives_a_dropped_connection() {
 }
 
 #[tokio::test]
+async fn a_run_survives_the_compute_api_failing_while_reattaching() {
+    let mut r = Rig::new().await;
+    r.serve("blip").await;
+    let sandbox = r.sandbox("blip").await;
+    let key = r.tracker.add_task("TRAIL", "Blip", "");
+    let gate = Arc::new(Notify::new());
+    r.harness.push(Role::Worker, Script::new(changes()).steps(2, 100).wait_for(gate.clone()));
+    let cred = r.tracker.create_sub_agent("blip-a1", "TRAIL", Duration::from_secs(600)).await.unwrap();
+    let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let remote = r.remote.clone();
+    let run = tokio::spawn({
+        let sandbox = sandbox.clone();
+        let req = request("blip-a1", key.clone(), cred);
+        async move { remote.run(&sandbox, req, events).await }
+    });
+    for _ in 0..4 {
+        tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+    }
+
+    r.compute.fail_wakes("blip", 2);
+    r.remote.forget(&sandbox).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    gate.notify_one();
+
+    let report = tokio::time::timeout(Duration::from_secs(20), run).await.unwrap().unwrap().unwrap();
+    assert!(matches!(report.result, RunResult::PrOpened(_)), "{:?}", report.result);
+    assert_eq!(r.harness.contexts().len(), 1, "the run went on rather than starting again");
+}
+
+#[tokio::test]
 async fn a_prepare_survives_a_dropped_connection() {
     let mut r = Rig::new().await;
     r.serve("cold").await;
@@ -338,4 +369,19 @@ async fn subscription_token_goes_in_the_secrets_file_only() {
     assert_eq!(program.files[1].mode, 0o600);
     assert!(!format!("{secrets:?} {program:?}").contains("sk-ant-oat-test"), "never in debug output");
     assert!(!program.args.iter().any(|a| a.contains("sk-ant")), "never on the command line");
+}
+
+#[tokio::test]
+async fn daemon_log_filter_goes_on_the_command_line_when_set() {
+    let control = endpoint(SecretKey::generate(), None).await;
+    let remote =
+        RemoteDaemon::new(control.clone(), MASTER, Arc::new(FakeCompute::new()), Launch::new(b"daemon".to_vec()));
+    let program = remote.program(&SandboxId("s".into()));
+    assert!(!program.args.iter().any(|a| a == "--log"));
+
+    let launch = Launch { log: Some("info,iroh=debug".into()), ..Launch::new(b"daemon".to_vec()) };
+    let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
+    let args = remote.program(&SandboxId("s".into())).args;
+    let at = args.iter().position(|a| a == "--log").expect("--log is set");
+    assert_eq!(args[at + 1], "info,iroh=debug");
 }

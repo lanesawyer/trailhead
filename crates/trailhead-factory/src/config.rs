@@ -43,6 +43,16 @@ pub struct FactoryConfig {
     pub usage: UsageConfig,
     #[serde(default)]
     pub compute: ComputeConfig,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+}
+
+/// How the daemon in each sandbox is started.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonConfig {
+    /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`. The daemon's default when unset.
+    pub log: Option<String>,
 }
 
 /// Where sandboxes run. Sprites unless the factory file says otherwise.
@@ -364,6 +374,15 @@ require = ["checks", "agent_review", "human"]
             ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()) }
         );
         let bad = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nimgae = \"x\"\n");
+        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn daemon_log_is_optional() {
+        assert_eq!(FactoryConfig::parse(SAMPLE).unwrap().daemon, DaemonConfig::default());
+        let with = format!("{SAMPLE}\n[daemon]\nlog = \"info,iroh=debug\"\n");
+        assert_eq!(FactoryConfig::parse(&with).unwrap().daemon.log.as_deref(), Some("info,iroh=debug"));
+        let bad = format!("{SAMPLE}\n[daemon]\nlogg = \"x\"\n");
         assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
     }
 

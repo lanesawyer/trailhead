@@ -42,6 +42,7 @@ run finished task=TRAIL-105 outcome=…
 
 - `trailhead show TRAIL-n` shows the status, the claim (`factory/trail-n-aK` while running, renewed as it goes), notes and questions. The `factory` metadata holds the attempt, the pooled Sprite (`host`), spend and the PR.
 - `trailhead watch` streams changes.
+- To chase connection drops, set `[daemon] log = "info,iroh=debug"` in `factory.toml` (any `tracing` filter). Each daemon then starts with `--log <filter>`; without it they keep their default. It applies to daemons started after a restart of the factory.
 - A Sandbox's own daemon log is in the Sprites API for now (`/v1/sprites/<name>/services/trailhead-daemon/logs`); `trailhead factory logs` is TRAIL-109.
 
 ## What happens to a task

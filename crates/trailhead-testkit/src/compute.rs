@@ -20,6 +20,7 @@ struct Live {
 pub struct FakeCompute {
     live: Arc<Mutex<BTreeMap<SandboxId, Live>>>,
     failing: Arc<Mutex<BTreeSet<(String, &'static str)>>>,
+    wake_failures: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl FakeCompute {
@@ -56,6 +57,11 @@ impl FakeCompute {
     pub fn programs(&self, name: &str) -> Vec<Program> {
         let live = self.live.lock().unwrap();
         live.get(&SandboxId(name.into())).map(|l| l.programs.clone()).unwrap_or_default()
+    }
+
+    /// Makes the next `n` wakes of a sandbox fail with a transient 5xx before they start succeeding.
+    pub fn fail_wakes(&self, name: &str, n: usize) {
+        self.wake_failures.lock().unwrap().insert(name.to_string(), n);
     }
 
     pub fn wakes(&self, name: &str) -> usize {
@@ -139,6 +145,10 @@ impl Compute for FakeCompute {
     }
 
     async fn wake(&self, id: &SandboxId) -> Result<()> {
+        if let Some(left) = self.wake_failures.lock().unwrap().get_mut(&id.0).filter(|n| **n > 0) {
+            *left -= 1;
+            return Err(Error::Other("sprites api 502 Bad Gateway: ".into()));
+        }
         self.with(id, |l| {
             l.wakes += 1;
             Ok(())

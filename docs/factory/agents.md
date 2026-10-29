@@ -28,6 +28,8 @@ Decided: strongly typed. Shared Rust types for every message between the control
 
 The Claude Code harness (`trailhead-harness-claude-code`) runs `claude --print --output-format stream-json` in the checkout, with `ANTHROPIC_BASE_URL` set to the run's endpoint and a placeholder key. It ends with structured output against a per-role schema (`done`, `needs_input` or `failed` for workers; `approve` or `request_changes` for reviewers). The step limit is enforced by killing the CLI, and a worker's changes are everything that differs from where the run started.
 
+The prompt is the task's title and description, then what people have said on the task, because `trailhead` isn't installed in the sandbox and the agent can't read comments itself: a "Questions you asked earlier and Lane's answers" section (each resolved question with its answer) and a "Decisions and notes on this task" section (`decision` and `note` comments, oldest first, with author and date). The control plane fetches them from the tracker at the start of each run and leaves out the factory's own bookkeeping (comments by `factory/...` agents other than their questions). Either section is left out when empty. The two together are capped at about 6 KB: past that the oldest notes are dropped. After them come the previous failure, when there was one, and a reviewer's requested changes.
+
 ## Agent profiles
 
 Decided: every run uses a named profile binding a role to a harness, a provider, a model and default limits. Profiles live in each repo's factory file. Tasks pick a profile; nothing hard-codes a model.
@@ -38,7 +40,7 @@ The Rust orchestrator stays deterministic. Model-driven "orchestration" means a 
 | --- | --- | --- |
 | Planner | Opus | Break a spec into tasks, pick profiles, write acceptance criteria |
 | Worker | Sonnet | Implement a task, fix failing checks, respond to review |
-| Reviewer | Sonnet or Opus by tier | Review a diff against the task; Opus for T2 and T3 |
+| Reviewer | Sonnet or Opus by grade | Review a diff against the task, and raise its grade if warranted; Opus for grades 3 and 4 |
 | Utility | Haiku | Summarize logs, draft PR text, classify failures, update status |
 
 ```toml
@@ -70,7 +72,7 @@ Decided: specs come from humans, written together with an AI, and enter through 
 
 - **Where specs start.** In Trailhead, a chat, or a doc; later imported one-way from Jira (Trailhead's planned importers). Committing an approved spec to a repo is an ordinary task whose output is a markdown file.
 - **Spec stage.** A human starts a spec; a planner agent drafts, asks questions and revises; the human approves. The approved spec is the source of acceptance criteria.
-- **Task spec.** Goal, acceptance criteria, link to the parent spec, profile, tier hint, budget.
+- **Task spec.** Goal, acceptance criteria, link to the parent spec, profile, grade hint, budget.
 - **Repo context.** `AGENTS.md` for conventions, plus the factory file for stack, checks, profiles and policy.
 - **Per-profile context.** Each profile names its instruction files and skills. Reviewers get the task, diff and check results, never the author's transcript.
-- **Typed model decisions.** Where a model makes a decision the factory acts on (tier hint, is it done, review verdict), it returns structured output against a schema. A dedicated decision model such as Jev (TypeSafeAI, which has a Sprites connector) could handle some yes/no and score calls; evaluate once the decision points are known.
+- **Typed model decisions.** Where a model makes a decision the factory acts on (grade raise, is it done, review verdict), it returns structured output against a schema. A dedicated decision model such as Jev (TypeSafeAI, which has a Sprites connector) could handle some yes/no and score calls; evaluate once the decision points are known.

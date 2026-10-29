@@ -22,7 +22,9 @@ pub use daemon::{
 pub use harness::{EventSink, Feedback, Harness, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict, VerdictKind};
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
-pub use tracker::{Credential, RunUpdate, Status, Task, TaskKey, Tracker};
+pub use tracker::{
+    Answered, Credential, HumanContext, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, is_factory_agent,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 pub enum Error {

@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use trailhead_factory::{
     Endpoint, Feedback, Harness, ModelId, Role, RunContext, RunEvent, RunOutcome, TaskKey, TaskSpec, VerdictKind,
 };
-use trailhead_harness_claude_code::{ClaudeCode, PLACEHOLDER_KEY};
+use trailhead_harness_claude_code::{ClaudeCode, PLACEHOLDER_KEY, prompt};
 
 /// Writes its arguments and environment to `$FAKE_LOG`, then plays the scenario in `$FAKE_SCENARIO`.
 const FAKE: &str = r#"#!/bin/sh
@@ -110,6 +110,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
             title: "Add a greeting".into(),
             description: "hi()".into(),
             previous_failure: None,
+            context: Default::default(),
         },
         workdir: r.repo.clone(),
         model: ModelId("claude-sonnet-x".into()),
@@ -298,4 +299,35 @@ async fn dropped_api_calls_resume_the_session() {
     let (out, _) = play(&r, "error", ctx(&r, Role::Worker, 10)).await;
     assert!(matches!(out, RunOutcome::Failed { ref reason } if reason.contains("403")), "{out:?}");
     assert!(!std::fs::read_to_string(&r.log).unwrap().contains("--resume"));
+}
+
+#[test]
+fn prompt_carries_answers_and_notes_and_stays_bounded() {
+    use trailhead_factory::{Answered, TaskNote};
+    let r = rig();
+    let plain = prompt(&ctx(&r, Role::Worker, 0), None);
+    assert!(!plain.contains("Lane's answers") && !plain.contains("Decisions and notes"), "{plain}");
+
+    let mut c = ctx(&r, Role::Worker, 0);
+    c.task.context.answers.push(Answered {
+        question: "Which crate?".into(),
+        answer: "The core crate.".into(),
+        by: "lane".into(),
+        date: "2026-10-29".into(),
+    });
+    for i in 0..100 {
+        c.task.context.notes.push(TaskNote {
+            author: "lane".into(),
+            date: "2026-10-29".into(),
+            body: format!("note {i}: {}", "x".repeat(500)),
+        });
+    }
+    let p = prompt(&c, None);
+    let (task_at, answers_at) = (p.find("Task:\nhi()").unwrap(), p.find("Questions you asked earlier").unwrap());
+    assert!(
+        task_at < answers_at && p.contains("Q: Which crate?") && p.contains("A (lane, 2026-10-29): The core crate.")
+    );
+    assert!(p.contains("Decisions and notes on this task"));
+    assert!(p.contains("note 99:") && !p.contains("note 0:"), "the oldest notes go first");
+    assert!(p.len() < 9000, "{}", p.len());
 }
