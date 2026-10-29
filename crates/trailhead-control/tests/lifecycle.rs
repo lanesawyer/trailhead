@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use trailhead_control::{Factory, Outcome, Reconciled};
 use trailhead_factory::{
-    CiState, CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, RaiseGrade, Role,
+    CiState, CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, MergedBy, RaiseGrade, Role,
     RunOutcome, SandboxSpec, Status, TaskKey, Tracker, Usd, VerdictKind, conventional_title, label, run_name,
 };
 use trailhead_testkit::{
@@ -135,6 +135,8 @@ async fn spec_to_reviewed_pr_then_human_merge() {
     let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
     assert!(review.diff.unwrap().contains("src/greet.rs"), "reviewer sees the diff");
     assert_eq!(review.model.0, "fake-opus");
+    let reviewer_prep = r.daemon.prepared().into_iter().find(|(id, _)| id.0 == "trail-1-a1-r1").unwrap().1;
+    assert_eq!(reviewer_prep.branch.as_deref(), Some("factory/trail-1"), "the reviewer's checkout is the PR head");
     let names: Vec<_> = review.checks.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["fmt", "lint", "test"], "the reviewer is told which checks the worker ran");
     assert!(review.checks.iter().all(|c| c.passed));
@@ -150,7 +152,8 @@ async fn spec_to_reviewed_pr_then_human_merge() {
     assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "review" && c.body.starts_with("approve")));
 
     // The human merges and finishes.
-    assert_eq!(r.codehost.merge(pr).await.unwrap(), MergeOutcome::Merged);
+    let head = CodeHost::head(&r.codehost, pr).await.unwrap();
+    assert_eq!(r.codehost.merge(pr, &head).await.unwrap(), MergeOutcome::Merged);
     r.tracker.finish(&key, "merged").await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::Done);
     assert!(r.factory.tick().await.unwrap().is_empty());
@@ -425,9 +428,9 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
     assert_eq!(r.tracker.task(&crashed).status, Status::Open);
     assert!(r.tracker.is_revoked("factory/trail-1-a1"));
     assert_eq!(r.tracker.task(&unreviewed).run.reviewed, Some(1));
-    assert_eq!(r.tracker.task(&unreviewed).run.review_rounds, Some(2));
+    assert_eq!(r.tracker.task(&unreviewed).run.review_rounds, Some(1));
     assert!(r.tracker.is_revoked("factory/trail-2-a1-r1"));
-    assert!(r.tracker.is_revoked("factory/trail-2-a1-r2"));
+    assert!(r.tracker.is_revoked("factory/trail-2-a1-r1-1"));
     assert_eq!(r.tracker.task(&parked).status, Status::NeedsInput);
 
     // A second pass finds nothing to do.
@@ -1009,7 +1012,7 @@ async fn a_review_that_cant_start_doesnt_stop_reconcile() {
     r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
     let ran = r.factory.run_task(&r.tracker.task(&unreviewed)).await.unwrap();
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
-    r.compute.fail(&trailhead_factory::review_name(&unreviewed, 1, 2), "set_egress");
+    r.compute.fail(&format!("{}-1", trailhead_factory::review_name(&unreviewed, 1, 1)), "set_egress");
 
     // TRAIL-2: crashed mid-run, after it in the list.
     let crashed = r.tracker.add_task("TRAIL", "Crashed", "");
@@ -1023,6 +1026,23 @@ async fn a_review_that_cant_start_doesnt_stop_reconcile() {
     assert!(done.reviewed.is_empty(), "{done:?}");
     assert_eq!(done.requeued, [crashed.0], "the rest is still reconciled");
     assert_eq!(r.tracker.task(&unreviewed).status, Status::InReview, "left for the next reconcile");
+}
+
+#[tokio::test]
+async fn a_review_whose_context_cant_be_read_creates_no_sandbox() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Unreviewed", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let before = r.compute.sandboxes().len();
+
+    r.tracker.fail_human_context(true);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "{done:?}");
+    assert_eq!(r.compute.sandboxes().len(), before, "no sandbox is held for a review that couldn't start");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
 }
 
 #[tokio::test]
@@ -1182,7 +1202,11 @@ async fn requested_changes_start_a_rework_on_the_pr_branch_with_the_review() {
     assert!(worker_reqs[1].feedback.is_some());
     let prepared = r.daemon.prepared();
     assert!(prepared.iter().any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1")));
-    assert_eq!(prepared.iter().filter(|(_, p)| p.branch.is_some()).count(), 1, "only the rework checks out the PR");
+    let on_pr = |worker: bool| {
+        prepared.iter().filter(|(id, p)| p.branch.is_some() && id.0.starts_with("trailhead-w") == worker).count()
+    };
+    assert_eq!(on_pr(true), 1, "only the rework checks out the PR among workers");
+    assert_eq!(on_pr(false), 2, "and both reviewers check it out");
 }
 
 #[tokio::test]
@@ -1625,6 +1649,26 @@ async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() 
     assert!(questions[0].body.contains("it's not the task") && questions[0].body.contains("connection lost"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_that_never_starts_doesnt_use_up_a_review_round() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Slow to review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+
+    r.daemon.fail_runs(1, "connection lost");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).run.review_rounds.unwrap_or(0), 0);
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(1));
+    assert_eq!(task.status, Status::Open, "reworks instead of parking at max_review_rounds");
+}
+
 #[tokio::test]
 async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_conventional_pr_title() {
     let r = rig();
@@ -1849,7 +1893,8 @@ async fn shadow_mode_waits_for_ci_then_approves_and_says_each_change_once() {
     assert!(!r.codehost.prs()[0].merged, "shadow mode never merges");
 
     // Lane merges on GitHub and the task is closed as done.
-    r.codehost.merge(&pr).await.unwrap();
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.merged, std::slice::from_ref(&key.0));
     assert_eq!(r.tracker.task(&key).status, Status::Done);
@@ -1949,4 +1994,95 @@ async fn with_merge_mode_off_gates_are_recorded_and_tasks_approved_but_the_pr_is
     assert_eq!(r.tracker.task(&key).status, Status::Approved);
     assert!(!r.tracker.task(&key).run.merge.unwrap().would_merge);
     assert!(said(&r).is_empty());
+}
+
+fn merging() -> String {
+    SHADOW.replace("shadow", "on")
+}
+
+#[tokio::test]
+async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(said(&r)[1..], ["Grade 1: checks, CI and review passed; merging."]);
+    assert!(r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Done);
+    let merged = task.run.merged.expect("recorded");
+    assert_eq!((merged.by, merged.pr), (MergedBy::Merger, pr.clone()));
+    let handoff = r.tracker.comments(&key).into_iter().find(|c| c.kind == "handoff").expect("a handoff").body;
+    assert!(
+        handoff.contains(&pr.url) && handoff.contains("Grade 1; gates passed: checks, ci, agent_review"),
+        "{handoff}"
+    );
+}
+
+#[tokio::test]
+async fn a_conflict_at_merge_reworks_the_pr_instead_of_forcing_it() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open, "back to running for a rework");
+    assert!(task.run.pending_changes().is_some_and(|c| c.conflict));
+}
+
+#[tokio::test]
+async fn a_merge_the_host_refuses_is_tried_again_not_reworked() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.refuse_merge(Some("Required status check \"test\" is expected."));
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Approved, "still approved, not sent to a rework");
+    assert!(task.run.pending_changes().is_none());
+
+    r.codehost.refuse_merge(None);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_pr_behind_its_base_is_updated_before_it_is_merged() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "not merged while behind");
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn lane_approving_a_grade_three_task_gets_it_merged() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "waits for Lane");
+    r.tracker.approve_as_human(&key);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn merge_mode_on_without_reviewer_rights_falls_back_to_saying_what_it_would_do() {
+    let (r, queue) = queued_rig_with(&merging());
+    r.tracker.set_delegated("factory", false);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+    assert!(said(&r).last().unwrap().contains("passed, but the factory can't move the task to approved"));
 }

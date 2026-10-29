@@ -62,7 +62,7 @@ impl CodeHost for NoCodeHost {
     async fn comment(&self, _: &PrRef, _: &str) -> Result<()> {
         Err(Error::Forbidden(self.0.clone()))
     }
-    async fn merge(&self, _: &PrRef) -> Result<MergeOutcome> {
+    async fn merge(&self, _: &PrRef, _: &str) -> Result<MergeOutcome> {
         Err(Error::Forbidden(self.0.clone()))
     }
     async fn behind(&self, _: &PrRef) -> Result<bool> {

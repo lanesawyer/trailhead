@@ -35,6 +35,7 @@ struct State {
     prs: Vec<FakePr>,
     conflicts: bool,
     refuse_publish: Option<String>,
+    refuse_merge: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -66,12 +67,18 @@ impl FakeCodeHost {
         self.state.lock().unwrap().prs.clone()
     }
 
-    /// Makes every later merge report a conflict.
     /// Makes every later publish fail with this message, like GitHub refusing a push.
     pub fn refuse_publish(&self, why: &str) {
         self.state.lock().unwrap().refuse_publish = Some(why.to_string());
     }
 
+    /// Makes every later merge refused with this message, like a required check GitHub is still waiting on, until
+    /// called with `None`.
+    pub fn refuse_merge(&self, why: Option<&str>) {
+        self.state.lock().unwrap().refuse_merge = why.map(str::to_string);
+    }
+
+    /// Makes every later merge report a conflict.
     pub fn set_conflicts(&self, on: bool) {
         self.state.lock().unwrap().conflicts = on;
     }
@@ -191,11 +198,20 @@ impl CodeHost for FakeCodeHost {
         self.find(pr, |p, _| p.comments.push(body.to_string()))
     }
 
-    async fn merge(&self, pr: &PrRef) -> Result<MergeOutcome> {
-        let conflicts = self.state.lock().unwrap().conflicts;
-        self.find(pr, |p, _| {
+    async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome> {
+        let (conflicts, refused) = {
+            let s = self.state.lock().unwrap();
+            (s.conflicts, s.refuse_merge.clone())
+        };
+        self.find(pr, |p, s| {
+            if s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).map(String::as_str) != Some(head) {
+                return MergeOutcome::HeadMoved;
+            }
             if conflicts {
                 return MergeOutcome::Conflict;
+            }
+            if let Some(why) = refused {
+                return MergeOutcome::Refused(why);
             }
             p.merged = true;
             MergeOutcome::Merged

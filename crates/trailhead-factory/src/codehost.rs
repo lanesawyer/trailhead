@@ -51,8 +51,12 @@ pub struct PrRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MergeOutcome {
     Merged,
-    /// Sends the task back to running.
+    /// The PR conflicts with its base branch: sends the task back to running.
     Conflict,
+    /// The PR's head is no longer the commit the merge was asked for; nothing was merged.
+    HeadMoved,
+    /// The host won't merge it for another reason, such as a required check or the branch rules; nothing was merged.
+    Refused(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +111,8 @@ pub trait CodeHost: Send + Sync {
     async fn open_pr(&self, repo: &Repo, pr: NewPr) -> Result<PrRef>;
     async fn diff(&self, pr: &PrRef) -> Result<String>;
     async fn comment(&self, pr: &PrRef, body: &str) -> Result<()>;
-    async fn merge(&self, pr: &PrRef) -> Result<MergeOutcome>;
+    /// Squash-merges the PR, but only while its head is still `head`, the commit the gates passed on.
+    async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome>;
     /// Whether the PR is still open (and if it merges cleanly), was merged (by anyone), or was closed without
     /// merging. One call, so reconcile costs the host one request per PR.
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState>;

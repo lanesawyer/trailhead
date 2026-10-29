@@ -337,15 +337,20 @@ impl CodeHost for GitHub {
         self.call(self.request(Method::POST, &path).json(&json!({ "body": body }))).await.map(drop)
     }
 
-    async fn merge(&self, pr: &PrRef) -> Result<MergeOutcome> {
+    async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome> {
         let path = format!("{}/pulls/{}/merge", Self::repo_path(&pr.repo), pr.number);
-        let (status, body, _) =
-            self.send(self.request(Method::PUT, &path).json(&json!({ "merge_method": "squash" }))).await?;
+        let req = self.request(Method::PUT, &path).json(&json!({ "merge_method": "squash", "sha": head }));
+        let (status, body, _) = self.send(req).await?;
+        let message = body["message"].as_str().unwrap_or_default().to_string();
         match status {
             s if s.is_success() => Ok(MergeOutcome::Merged),
-            // Not mergeable, or the head moved: the task goes back to running.
-            StatusCode::METHOD_NOT_ALLOWED | StatusCode::CONFLICT => Ok(MergeOutcome::Conflict),
-            s => Err(Error::Other(format!("github {s}: {}", body["message"].as_str().unwrap_or_default()))),
+            StatusCode::CONFLICT => Ok(MergeOutcome::HeadMoved),
+            // GitHub says 405 for a conflict and for a merge its rules refuse (a required check, say) alike.
+            StatusCode::METHOD_NOT_ALLOWED => match self.pr_state(pr).await? {
+                PrState::Open { mergeable: Some(false) } => Ok(MergeOutcome::Conflict),
+                _ => Ok(MergeOutcome::Refused(message)),
+            },
+            s => Err(Error::Other(format!("github {s}: {message}"))),
         }
     }
 
