@@ -4,7 +4,9 @@
 owner = "lanesawyer"
 name = "trailhead"
 project = "TRAIL"
-max_sandboxes = 1
+max_sandboxes = 2
+# Until TRAIL-159 and TRAIL-172 stop infrastructure blips counting, leave room for a few.
+max_attempts = 5
 # Only subtasks of this task are the factory's work.
 queue = "TRAIL-102"
 
@@ -21,6 +23,10 @@ test = "cargo test"
 [egress]
 # crates.io and rustup while installing dependencies; nothing extra while the agent works.
 install = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang.org"]
+
+[daemon]
+# Chasing TRAIL-187 (run not found on the daemon after a reattach).
+log = "info,iroh=debug"
 
 [usage]
 # Subscription usage windows, in percent: at or past these, no new runs start until the window resets, leaving
