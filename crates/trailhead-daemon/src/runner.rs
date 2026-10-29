@@ -136,6 +136,7 @@ impl Runner {
             diff,
             checks: req.worker_checks.clone(),
             title,
+            base_branch: (req.role == Role::Reviewer).then(|| req.base_branch.clone()),
         };
         tracing::info!(task = %key, "agent starting");
         // Where the agent's work starts, which is what it's published on top of.

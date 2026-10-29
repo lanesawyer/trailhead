@@ -50,6 +50,25 @@ impl CoreTracker {
         Ok(ctx.next_batch())
     }
 
+    /// A name for each comment author: an agent's name, else a person's, else the raw id.
+    async fn author_names(&self, ctx: &Ctx, comments: &[trailhead_core::Comment]) -> Result<HashMap<Uuid, String>> {
+        let mut names: HashMap<Uuid, String> = HashMap::new();
+        for a in self.store.list_agents(ctx).await.map_err(map_err)? {
+            names.insert(a.id, a.name);
+        }
+        for c in comments {
+            if let Entry::Vacant(e) = names.entry(c.author_id) {
+                // Not an agent, so a person.
+                let name = match self.store.get_user(ctx, c.author_id).await {
+                    Ok(u) => u.name,
+                    Err(_) => c.author_id.to_string(),
+                };
+                e.insert(name);
+            }
+        }
+        Ok(names)
+    }
+
     async fn task(&self, ctx: &Ctx, t: trailhead_core::Task) -> Result<Task> {
         let claims = self.store.live_claims(ctx, &[t.id]).await.map_err(map_err)?;
         let run = match t.metadata.get(METADATA_KEY) {
@@ -172,20 +191,7 @@ impl Tracker for CoreTracker {
     async fn human_context(&self, task: &TaskKey) -> Result<HumanContext> {
         let ctx = self.ctx().await?;
         let comments = self.store.list_comments(&ctx, &task.0).await.map_err(map_err)?;
-        let mut names: HashMap<Uuid, String> = HashMap::new();
-        for a in self.store.list_agents(&ctx).await.map_err(map_err)? {
-            names.insert(a.id, a.name);
-        }
-        for c in &comments {
-            if let Entry::Vacant(e) = names.entry(c.author_id) {
-                // Not an agent, so a person.
-                let name = match self.store.get_user(&ctx, c.author_id).await {
-                    Ok(u) => u.name,
-                    Err(_) => c.author_id.to_string(),
-                };
-                e.insert(name);
-            }
-        }
+        let names = self.author_names(&ctx, &comments).await?;
         let date = |c: &trailhead_core::Comment| c.created_at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
         let mut out = HumanContext::default();
         // An answer is the note posted to the question's author as the question is resolved.
@@ -227,14 +233,7 @@ impl Tracker for CoreTracker {
         let comments = self.store.list_comments(&ctx, &task.0).await.map_err(map_err)?;
         let Some(c) = comments.iter().rev().find(|c| c.kind == CommentKind::Review) else { return Ok(None) };
         let Some(verdict) = c.verdict else { return Ok(None) };
-        let reviewer =
-            match self.store.list_agents(&ctx).await.map_err(map_err)?.into_iter().find(|a| a.id == c.author_id) {
-                Some(a) => a.name,
-                None => match self.store.get_user(&ctx, c.author_id).await {
-                    Ok(u) => u.name,
-                    Err(_) => c.author_id.to_string(),
-                },
-            };
+        let reviewer = self.author_names(&ctx, std::slice::from_ref(c)).await?.remove(&c.author_id).unwrap_or_default();
         let kind = match verdict {
             trailhead_core::Verdict::Approve => VerdictKind::Approve,
             trailhead_core::Verdict::RequestChanges => VerdictKind::RequestChanges,
@@ -286,6 +285,24 @@ impl Tracker for CoreTracker {
     }
 
     async fn request_review(&self, task: &TaskKey) -> Result<()> {
+        self.set_status(task, trailhead_core::Status::InReview).await
+    }
+
+    async fn approve(&self, task: &TaskKey) -> Result<()> {
+        match self.set_status(task, trailhead_core::Status::Approved).await {
+            // Core's only refusal here is that the caller may not approve: it isn't a human or a delegated reviewer, or
+            // it did the work in review.
+            Err(Error::Conflict(why)) if why == trailhead_core::Error::ReviewRequired.to_string() => {
+                Err(Error::Forbidden(format!(
+                    "{} can't approve {}: it isn't a delegated reviewer, or it did the work",
+                    self.agent, task.0
+                )))
+            }
+            result => result,
+        }
+    }
+
+    async fn unapprove(&self, task: &TaskKey) -> Result<()> {
         self.set_status(task, trailhead_core::Status::InReview).await
     }
 

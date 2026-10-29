@@ -191,15 +191,9 @@ fn meta_patch(pairs: &[String]) -> Result<Value> {
     Ok(patch)
 }
 
-/// A grade is 1 to 4; "none" clears it.
+/// A grade is 1 to 4; "none" clears it. The rules live in core.
 fn parse_grade(g: &str) -> Result<Option<i64>> {
-    if g.eq_ignore_ascii_case("none") {
-        return Ok(None);
-    }
-    match g.parse::<i64>() {
-        Ok(n) if (1..=4).contains(&n) => Ok(Some(n)),
-        _ => anyhow::bail!("--grade must be 1 to 4, or none to clear it"),
-    }
+    trailhead_core::parse_grade(g).context("--grade")
 }
 
 fn merge(body: &mut Value, fields: Value) {

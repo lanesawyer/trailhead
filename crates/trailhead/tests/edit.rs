@@ -28,3 +28,13 @@ fn edit_sets_and_removes_metadata() {
     assert!(!shown.contains("attempt") && shown.contains(r#""note":"hi""#), "{shown}");
     assert!(!th.run(&["edit", "QA-1", "--meta", "nonsense"]).status.success());
 }
+
+#[test]
+fn edit_rejects_a_parent_that_would_make_a_cycle() {
+    let th = Instance::new();
+    th.stdout(&["project", "add", "QA", "Queue"]);
+    th.stdout(&["add", "a", "-p", "QA"]);
+    th.stdout(&["add", "b", "-p", "QA"]);
+    th.stdout(&["edit", "QA-1", "--parent", "QA-2"]);
+    assert!(!th.run(&["edit", "QA-2", "--parent", "QA-1"]).status.success());
+}
