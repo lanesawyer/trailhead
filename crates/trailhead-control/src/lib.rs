@@ -803,7 +803,7 @@ impl Factory {
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
         let sub = self.tracker.sub_agent(&name);
-        let sandbox = match self.create_sandbox(&name, task, Role::Reviewer).await {
+        let sandbox = match self.create_sandbox(&name, task, Role::Reviewer, Some(Self::branch(task))).await {
             Ok(sandbox) => sandbox,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
@@ -1001,14 +1001,15 @@ impl Factory {
         self.tracker.reopen(&task.key).await
     }
 
-    async fn create_sandbox(&self, name: &str, task: &Task, role: Role) -> Result<Sandbox> {
+    /// A sandbox for `task`, its checkout prepared on `branch` when given (a reviewer's is the PR's head).
+    async fn create_sandbox(&self, name: &str, task: &Task, role: Role, branch: Option<String>) -> Result<Sandbox> {
         let mut labels = self.base_labels();
         labels.insert(label::TASK.into(), task.key.0.clone());
         labels.insert(label::ROLE.into(), role.as_str().into());
         // Install egress only while the checkout is prepared, then narrowed before any agent runs.
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = self.compute.create(&spec).await?;
-        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, None)).await?;
+        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, branch)).await?;
         self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
         Ok(sandbox)
     }

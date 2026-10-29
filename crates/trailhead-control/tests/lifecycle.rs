@@ -135,6 +135,8 @@ async fn spec_to_reviewed_pr_then_human_merge() {
     let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
     assert!(review.diff.unwrap().contains("src/greet.rs"), "reviewer sees the diff");
     assert_eq!(review.model.0, "fake-opus");
+    let reviewer_prep = r.daemon.prepared().into_iter().find(|(id, _)| id.0 == "trail-1-a1-r1").unwrap().1;
+    assert_eq!(reviewer_prep.branch.as_deref(), Some("factory/trail-1"), "the reviewer's checkout is the PR head");
     let names: Vec<_> = review.checks.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["fmt", "lint", "test"], "the reviewer is told which checks the worker ran");
     assert!(review.checks.iter().all(|c| c.passed));
@@ -1182,7 +1184,11 @@ async fn requested_changes_start_a_rework_on_the_pr_branch_with_the_review() {
     assert!(worker_reqs[1].feedback.is_some());
     let prepared = r.daemon.prepared();
     assert!(prepared.iter().any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1")));
-    assert_eq!(prepared.iter().filter(|(_, p)| p.branch.is_some()).count(), 1, "only the rework checks out the PR");
+    let on_pr = |worker: bool| {
+        prepared.iter().filter(|(id, p)| p.branch.is_some() && id.0.starts_with("trailhead-w") == worker).count()
+    };
+    assert_eq!(on_pr(true), 1, "only the rework checks out the PR among workers");
+    assert_eq!(on_pr(false), 2, "and both reviewers check it out");
 }
 
 #[tokio::test]
