@@ -53,7 +53,7 @@ quorum = { reviewers = 3, agree = 3, distinct_models = true }
 mode = "shadow"          # off | shadow | on
 ```
 
-Gates are keyed by grade (`[gates.1]` to `[gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. `[merge] mode = "on"` is rejected at startup until the merge task lands. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203); merging isn't.
+Gates are keyed by grade (`[gates.1]` to `[gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[merge] mode = "on"` (TRAIL-205).
 
 Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. Lane grades the queue once grades exist and widens auto-merge from there. With the rules above, code in `crates/` raises a grade-1 task to 2, so only docs and similar work merges on its own.
 
