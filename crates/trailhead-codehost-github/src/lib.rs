@@ -346,18 +346,12 @@ impl CodeHost for GitHub {
             s if s.is_success() => Ok(MergeOutcome::Merged),
             StatusCode::CONFLICT => Ok(MergeOutcome::HeadMoved),
             // GitHub says 405 for a conflict and for a merge its rules refuse (a required check, say) alike.
-            StatusCode::METHOD_NOT_ALLOWED => match self.mergeable(pr).await? {
-                Some(false) => Ok(MergeOutcome::Conflict),
+            StatusCode::METHOD_NOT_ALLOWED => match self.pr_state(pr).await? {
+                PrState::Open { mergeable: Some(false) } => Ok(MergeOutcome::Conflict),
                 _ => Ok(MergeOutcome::Refused(message)),
             },
             s => Err(Error::Other(format!("github {s}: {message}"))),
         }
-    }
-
-    async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>> {
-        let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
-        // Null while GitHub is still working it out; asking again later gets the answer.
-        Ok(self.call(self.request(Method::GET, &path)).await?["mergeable"].as_bool())
     }
 
     async fn behind(&self, pr: &PrRef) -> Result<bool> {
@@ -413,7 +407,8 @@ impl CodeHost for GitHub {
         } else if p["state"].as_str() == Some("closed") {
             PrState::Closed
         } else {
-            PrState::Open
+            // Null while GitHub is still working it out; asking again later gets the answer.
+            PrState::Open { mergeable: p["mergeable"].as_bool() }
         })
     }
 
