@@ -32,6 +32,8 @@ use trailhead_factory::{Compute, ComputeConfig, FactoryConfig};
 use trailhead_provider_anthropic::Anthropic;
 use trailhead_server::creds::{Cred, CredStore};
 
+mod wake;
+
 /// The agent the control plane acts as; sandboxes get its sub-agents.
 const AGENT: &str = "factory";
 /// Where the control plane's iroh key and daemon master key are kept.
@@ -153,7 +155,14 @@ async fn factory_ctx(store: &Store, create: bool) -> Result<Ctx, String> {
     store.agent_ctx(ws.id, agent.id).await.map_err(|e| e.to_string())
 }
 
-async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File), String> {
+/// What the run loop's wake-up watcher reads the project's changes with.
+struct Wake {
+    store: Arc<Store>,
+    ctx: Ctx,
+    project: String,
+}
+
+async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String> {
     let config = std::fs::read_to_string(&opts.config).map_err(|e| format!("{}: {e}", opts.config.display()))?;
     let mut config = FactoryConfig::parse(&config).map_err(|e| e.to_string())?;
     if opts.claude_oauth_token.is_some() {
@@ -170,7 +179,8 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let store = Arc::new(Store::open_local(&db).await.map_err(|e| e.to_string())?);
-    let tracker = CoreTracker::new(store.clone(), factory_ctx(&store, opts.create_agent).await?, AGENT);
+    let ctx = factory_ctx(&store, opts.create_agent).await?;
+    let tracker = CoreTracker::new(store.clone(), ctx.clone(), AGENT);
     let (key, master) = load_or_create_keys(&paths.creds())?;
 
     let endpoint = Endpoint::builder(presets::N0)
@@ -188,7 +198,8 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File), String> {
 
     let factory =
         Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon);
-    Ok((Arc::new(factory), tunnel, lock))
+    let wake = Wake { store, ctx, project: factory.config.repo.project.clone() };
+    Ok((Arc::new(factory), tunnel, lock, wake))
 }
 
 /// The sandboxes' `Compute`, and where the daemon lives in them.
@@ -244,7 +255,7 @@ fn check_result(failed: usize) -> Result<(), String> {
 async fn main_inner(cli: Cli) -> Result<(), String> {
     match cli.cmd {
         Cmd::Check(opts) => {
-            let (factory, tunnel, _lock) = setup(&opts).await?;
+            let (factory, tunnel, _lock, _) = setup(&opts).await?;
             let project = &factory.config.repo.project;
             let queue = factory.config.repo.queue.clone().map(trailhead_factory::TaskKey);
             let mut failed = 0;
@@ -278,12 +289,21 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
             check_result(failed)
         }
         Cmd::Run(opts) => {
-            let (factory, tunnel, _lock) = setup(&opts).await?;
+            let (factory, tunnel, _lock, source) = setup(&opts).await?;
+            let wake = Arc::new(Notify::new());
+            let watcher = tokio::spawn(wake::wake_on_changes(
+                source.store,
+                source.ctx,
+                source.project,
+                wake.clone(),
+                wake::INTERVAL,
+            ));
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!("stopping; runs in flight are requeued on the next start");
             };
-            let ran = factory.run(Arc::new(Notify::new()), Duration::from_secs(opts.poll_secs), shutdown).await;
+            let ran = factory.run(wake, Duration::from_secs(opts.poll_secs), shutdown).await;
+            watcher.abort();
             tunnel.shutdown().await.map_err(|e| e.to_string())?;
             ran.map_err(|e| e.to_string())
         }
