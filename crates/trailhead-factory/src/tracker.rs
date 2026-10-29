@@ -61,11 +61,32 @@ pub struct RunUpdate {
     /// Why the last attempt failed, which the next attempt is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// The review that last asked for changes, which the rework on the PR branch is told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_requested: Option<ChangesRequested>,
+}
+
+/// A review that asked for changes: who, and what they said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangesRequested {
+    pub reviewer: String,
+    pub body: String,
 }
 
 impl RunUpdate {
     pub fn merge(&mut self, update: RunUpdate) {
-        let RunUpdate { attempt, sandbox, host, profile, pr, review_rounds, reviewed, spend, failure } = update;
+        let RunUpdate {
+            attempt,
+            sandbox,
+            host,
+            profile,
+            pr,
+            review_rounds,
+            reviewed,
+            spend,
+            failure,
+            changes_requested,
+        } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
         self.host = host.or(self.host.take());
@@ -75,6 +96,7 @@ impl RunUpdate {
         self.reviewed = reviewed.or(self.reviewed.take());
         self.spend = spend.or(self.spend.take());
         self.failure = failure.or(self.failure.take());
+        self.changes_requested = changes_requested.or(self.changes_requested.take());
     }
 
     pub fn is_empty(&self) -> bool {
@@ -156,6 +178,8 @@ pub trait Tracker: Send + Sync {
     async fn release(&self, task: &TaskKey) -> Result<()>;
     async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()>;
     async fn request_review(&self, task: &TaskKey) -> Result<()>;
+    /// Sends a task in review back to the queue, unheld, for a rework run to pick up.
+    async fn reopen(&self, task: &TaskKey) -> Result<()>;
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()>;
     async fn ask(&self, task: &TaskKey, question: &str) -> Result<()>;
     /// A note on the task, such as why an attempt failed, without changing it.

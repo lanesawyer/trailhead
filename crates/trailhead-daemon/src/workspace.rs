@@ -57,7 +57,7 @@ impl Workspace for GitWorkspace {
         self.dir.clone()
     }
 
-    /// Clones the base branch, or resets an existing checkout to it. Ignored files such as build output stay, so a
+    /// Clones the base branch, or resets an existing checkout to it, then moves to the request's branch if it has one. Ignored files such as build output stay, so a
     /// sandbox reused for another round keeps its caches.
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
         let base = &req.base_branch;
@@ -71,6 +71,11 @@ impl Workspace for GitWorkspace {
             let url = format!("{}/{}/{}.git", self.remote_base.trim_end_matches('/'), req.repo.owner, req.repo.name);
             let dir = self.dir.to_string_lossy();
             self.git(parent, &["clone", "--quiet", "--branch", base, &url, &dir]).await?;
+        }
+        if let Some(branch) = &req.branch {
+            // A rework builds on the PR branch's head, so what it publishes lands on top of it.
+            self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await?;
+            self.git(&self.dir, &["checkout", "--quiet", "-B", branch, &format!("origin/{branch}")]).await?;
         }
         if let Some(setup) = &req.setup {
             let result = self.check(setup).await;

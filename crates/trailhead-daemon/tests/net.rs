@@ -133,6 +133,7 @@ fn request(run: &str, key: TaskKey, credential: Credential) -> RunRequest {
         base_branch: "main".into(),
         branch: format!("factory/{run}"),
         pr: None,
+        feedback: None,
         model: trailhead_factory::ModelId("fake-sonnet".into()),
         endpoint: trailhead_factory::Endpoint { base_url: "http://gateway.invalid".into() },
         max_steps: 5,
@@ -281,7 +282,7 @@ async fn a_prepare_survives_a_dropped_connection() {
     let sandbox = r.sandbox("cold").await;
     let gate = Arc::new(Notify::new());
     r.local.gate_prepare(gate.clone());
-    let req = r.factory().config.prepare_request(Role::Worker);
+    let req = r.factory().config.prepare_request(Role::Worker, None);
     let remote = r.remote.clone();
     let prepare = tokio::spawn({
         let sandbox = sandbox.clone();

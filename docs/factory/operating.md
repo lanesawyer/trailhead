@@ -50,6 +50,7 @@ run finished task=TRAIL-105 outcome=…
 | Outcome | What you see | What you do |
 | --- | --- | --- |
 | PR opened | Task `in_review`, a PR on GitHub with the reviewer's comment, a typed verdict on the task | Check CI is green and the diff's size is believable, merge on GitHub, then `trailhead --as-me done TRAIL-n -m "merged"`, which also unblocks anything chained behind it |
+| Reviewer requested changes | The review is posted on the PR and kept in the task's metadata; the task is open again and the next run starts from the PR branch head with the review in its prompt | Usually nothing. After `max_review_rounds` (`[repo]`, default 3) rounds the task is parked with a question holding the last review; fix the PR or settle it, then reopen (the count starts again) |
 | Checks failed | A note on the task with the end of the failing check's output; the task is open again and retried | Usually nothing. The next attempt is told what failed; after `max_attempts` (`[repo]`, default 3) the task is parked with a question summarizing the failure |
 | Question | Task `needs_input` with a question comment; its Sprite stays busy | Answer it, set the task open, restart the factory (TRAIL-108 removes the restart) |
 | Budget or time breach | As a question, saying which limit it hit | Raise the budget in `factory.toml` or cancel the task |

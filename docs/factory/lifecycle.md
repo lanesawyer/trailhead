@@ -17,7 +17,7 @@ Statuses: `open`, `in_progress`, `needs_input`, `in_review`, `done`, `cancelled`
 | Running | Claim + `in_progress`; the daemon renews the lease | Fits |
 | PR open / Review | `in_review`; PR URL, grade, profile in `metadata` | Fits, but the claim is released |
 | Agent review verdict | One delegated reviewer approves straight to `done` | Gap: no verdict record, no quorum |
-| Changes requested | `in_review` → `in_progress` or `open` | Gap: nothing keeps it for the original sandbox |
+| Changes requested | `in_review` → `open` (reopened by the control plane, review kept in `metadata`) | Fits; the rework starts a fresh sandbox, not the original one |
 | Merging | Approval is a `review` verdict; `done` means merged | Fits, by convention (TRAIL-86) |
 | Parked | `ask` → `needs_input` | Fits, but the agent lease expires while parked and an answer sends it back to `open` |
 | Done / Cancelled | `done`, `cancelled` | Fits |
@@ -26,7 +26,7 @@ Statuses: `open`, `in_progress`, `needs_input`, `in_review`, `done`, `cancelled`
 ## Conventions
 
 - **Sandbox per task, capped per repo.** No file locking; overlapping work is resolved through PRs and merge conflicts, which go through the same gates. A merge conflict sends the task back to Running.
-- **Suspend during review.** The sandbox hibernates while waiting, so requested changes resume with context. Needs resume affinity; until then (and in the MVP), requested changes start a fresh sandbox from the PR branch.
+- **Suspend during review.** The sandbox hibernates while waiting, so requested changes resume with context. Needs resume affinity; until then (and in the MVP), requested changes start a fresh sandbox from the PR branch. The control plane records the review (reviewer and body) in the task's `factory` metadata and reopens the task; the next run checks out `origin/<branch>`, is resumed with the review as feedback, publishes on top of the PR head and pushes to the same PR. Review rounds count across reworks; when round `max_review_rounds` (default 3) still asks for changes, the task is parked as `needs_input` with the last review in the question. A check that passed only on rerun during a rework is posted as a PR comment, since the PR body was written when it opened.
 - **Verdicts live in Trailhead, not GitHub reviews.** Sandboxes act on GitHub as the user who authorized the connector, and GitHub doesn't let a PR's author approve it (inferred, untested). Agent reviews post as PR comments.
 - **Merger.** On factory projects the only delegated reviewer is the control plane's own identity, acting as the merger ([review.md](review.md#the-merger)). Approval is never a status: agents record it as a typed `review` verdict, and the task stays `in_review`. `done` means merged. The merger sets it after merging once the grade's gates pass, or after seeing a PR Lane merged. Other agents record verdicts but can't finish tasks. Lane adds the factory's identity to the project's reviewers once; only a human can.
 - **Who can write task metadata.** Agents can't edit a task another actor holds, so the daemon writes its own run metadata as the claim holder. If the control plane needs to write it, Trailhead must let a parent agent act on tasks its sub-agents hold.

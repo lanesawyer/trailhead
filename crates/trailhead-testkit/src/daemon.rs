@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 use trailhead_daemon::{RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Daemon, EventSink, Harness, PrepareRequest, Result, RunReport, RunRequest, SandboxId,
-    Tracker,
+    Check, CheckResult, CodeHost, Daemon, EventSink, Harness, PrepareRequest, Repo, Result, RunReport, RunRequest,
+    SandboxId, Tracker,
 };
 
 pub use trailhead_daemon::Connect;
@@ -18,12 +18,18 @@ use crate::FakeTracker;
 /// The commit every fake checkout is at.
 pub const FAKE_BASE: &str = "base0000";
 
+/// Where a branch's head is on the code host, for a fake checkout of that branch to start from.
+pub type Heads = Arc<dyn Fn(&Repo, &str) -> Option<String> + Send + Sync>;
+
 /// A checkout that doesn't exist: prepares are recorded and checks pass unless told to fail.
 #[derive(Default)]
 pub struct FakeWorkspace {
     /// Check name to its failing output and how many more runs fail (`None`: all of them).
     failing: Mutex<BTreeMap<String, (String, Option<usize>)>>,
     prepared: Mutex<Vec<PrepareRequest>>,
+    /// The branch the checkout is on after the latest prepare, when it isn't the base.
+    branch: Mutex<Option<(Repo, String)>>,
+    heads: Mutex<Option<Heads>>,
     prepares_started: AtomicUsize,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
@@ -40,6 +46,7 @@ impl Workspace for FakeWorkspace {
         if let Some(gate) = gate {
             gate.notified().await;
         }
+        *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
         self.prepared.lock().unwrap().push(req.clone());
         Ok(())
     }
@@ -49,7 +56,12 @@ impl Workspace for FakeWorkspace {
     }
 
     async fn head(&self) -> Result<String> {
-        Ok(FAKE_BASE.to_string())
+        let on = self.branch.lock().unwrap().clone();
+        let heads = self.heads.lock().unwrap().clone();
+        match (on, heads) {
+            (Some((repo, branch)), Some(heads)) => Ok(heads(&repo, &branch).unwrap_or_else(|| FAKE_BASE.to_string())),
+            _ => Ok(FAKE_BASE.to_string()),
+        }
     }
 
     async fn check(&self, check: &Check) -> CheckResult {
@@ -104,6 +116,12 @@ impl LocalDaemon {
             prepared: Mutex::default(),
             requests: Mutex::default(),
         }
+    }
+
+    /// Lets fake checkouts of a branch start at its head on the code host, as a rework's does.
+    pub fn with_heads(self, heads: impl Fn(&Repo, &str) -> Option<String> + Send + Sync + 'static) -> LocalDaemon {
+        *self.workspace.heads.lock().unwrap() = Some(Arc::new(heads));
+        self
     }
 
     /// The runner, for serving it over another transport.
