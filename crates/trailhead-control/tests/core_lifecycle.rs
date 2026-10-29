@@ -488,3 +488,38 @@ async fn a_merge_the_agent_started_itself_is_published_as_a_merge_commit() {
     assert_eq!(commits.last().unwrap().merges, [FAKE_BASE_MERGE], "published as a merge commit");
     assert_eq!(r.show(&key).await.status, Status::InReview);
 }
+
+#[tokio::test]
+async fn the_factory_approves_again_after_it_sent_the_task_back_for_a_new_head() {
+    let config = format!(
+        "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
+    );
+    let r = rig_with(&config).await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let new = NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(1), ..Default::default() };
+    let key = TaskKey(r.store.create_task(&r.human, new).await.unwrap().key);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let pr = r.show(&key).await.run.pr.unwrap();
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::Approved);
+
+    r.codehost.push_to(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let shown = r.show(&key).await;
+    r.factory.review(&shown, &pr, 1, &[]).await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(
+        task.status,
+        Status::Approved,
+        "the factory didn't do the work, so it can approve again: {:?}",
+        task.run.merge
+    );
+    assert!(task.run.merge.unwrap().problem.is_none());
+}
