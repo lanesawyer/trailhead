@@ -379,7 +379,8 @@ async fn a_merged_pr_finishes_its_task_and_unblocks_what_is_chained_behind_it() 
     let blocked = r.store.blockers(&r.human, &next.0).await.unwrap();
     assert_eq!(blocked.len(), 1);
 
-    r.codehost.merge(&pr).await.unwrap();
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.merged, std::slice::from_ref(&key.0));
     let task = r.show(&key).await;

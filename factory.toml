@@ -36,7 +36,7 @@ max_lines = 600          # bigger diffs are at least grade 3
 1 = { require = ["checks", "ci"], auto_merge = true }
 2 = { require = ["checks", "ci", "agent_review"], auto_merge = false }
 3 = { require = ["checks", "ci", "agent_review", "human"], auto_merge = false }
-4 = { require = ["checks", "human"], auto_merge = false }
+4 = { require = ["checks", "ci", "human"], auto_merge = false }
 
 [merge]
 # Shadow: says on each PR what the merger would do and doesn't merge. `on` isn't built yet (docs/factory/operating.md).
