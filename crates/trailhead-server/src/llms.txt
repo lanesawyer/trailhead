@@ -39,19 +39,20 @@ The `description` is the current spec and gets edited; comments are the append-o
 
 ## Statuses
 
-`open`, `in_progress`, `needs_input`, `in_review`, `done`, `cancelled`. Allowed moves (anything else is `409 invalid_transition` with `from` and `to`):
+`open`, `in_progress`, `needs_input`, `in_review`, `approved`, `done`, `cancelled`. Allowed moves (anything else is `409 invalid_transition` with `from` and `to`):
 
 - `open` -> `in_progress`, `needs_input`, `in_review`, `done`, `cancelled`
 - `in_progress` -> `open`, `needs_input`, `in_review`, `done`, `cancelled`
 - `needs_input` -> `open`, `in_progress`, `cancelled`
-- `in_review` -> `open`, `in_progress`, `needs_input`, `done`, `cancelled`
+- `in_review` -> `open`, `in_progress`, `needs_input`, `approved`, `done`, `cancelled`
+- `approved` -> `open`, `in_review`, `done`, `cancelled`
 - `done`, `cancelled` -> `open`
 
 Moving to anything but `in_progress` or `needs_input` releases the claim.
 
 ## Review
 
-A project with `require_review: true` won't let agents set `done`; send work to `in_review` instead. In every project, only a human (or a delegated reviewer, below) can move `in_review` to `done`; other agents get `403 review_required`.
+A project with `require_review: true` won't let agents set `done`; send work to `in_review` instead. In every project, only a human (or a delegated reviewer, below) can move `in_review` to `approved` or `done`, or `approved` to `done`; other agents get `403 review_required`.
 
 A project's `reviewers` (set by a human: `PATCH /v1/projects/KEY {"reviewers": ["agent-name"]}`) are agents allowed to approve like a human.
 

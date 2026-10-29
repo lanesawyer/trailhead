@@ -128,17 +128,21 @@ fn validate_priority(p: i64) -> Result<()> {
 }
 
 /// Agents may only finish work through review when the project requires it, and
-/// only a human can approve.
+/// only a human (or a delegated reviewer who doesn't hold the task) can approve.
 async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
-    if to != Status::Done || tx.ctx.is_human() {
+    let finishes = to == Status::Done || to == Status::Approved;
+    if !finishes || tx.ctx.is_human() {
         return Ok(());
     }
     let project = load_project(&tx.conn, tx.ctx.workspace_id, &task.project_id.to_string(), true).await?;
-    // A delegated reviewer approves like a human would.
+    let in_review = matches!(task.status, Status::InReview | Status::Approved);
+    let gated = to == Status::Approved || in_review || project.require_review;
+    // A delegated reviewer approves like a human would, but not work it holds.
     if tx.ctx.agent_id.is_some_and(|a| project.reviewers.contains(&a)) {
-        return Ok(());
+        let holds = live_claim(&tx.conn, task.id, tx.now).await?.is_some_and(|c| c.holder_id == tx.ctx.actor_id());
+        return if gated && holds { Err(Error::ReviewRequired) } else { Ok(()) };
     }
-    if task.status == Status::InReview || project.require_review { Err(Error::ReviewRequired) } else { Ok(()) }
+    if gated { Err(Error::ReviewRequired) } else { Ok(()) }
 }
 
 /// Agents can't touch a task another actor holds. Humans can, so they can always

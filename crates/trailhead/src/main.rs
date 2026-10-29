@@ -86,6 +86,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Release { task } => claims::release(&cx, &task).await,
         Cmd::Done { task, message } => tasks::finish(&cx, &task, "done", message).await,
         Cmd::Review { task, message } => tasks::finish(&cx, &task, "in_review", message).await,
+        Cmd::Approve { task, message } => tasks::finish(&cx, &task, "approved", message).await,
         Cmd::Cancel { task } => tasks::finish(&cx, &task, "cancelled", None).await,
         Cmd::Reopen { task } => tasks::finish(&cx, &task, "open", None).await,
         Cmd::Rm { task } => tasks::rm(&cx, &task).await,

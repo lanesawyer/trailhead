@@ -31,7 +31,7 @@ pub(crate) async fn ls(
     today: bool,
     limit: Option<i64>,
 ) -> Result<()> {
-    let status = status.or(all.then(|| "open,in_progress,needs_input,in_review,done,cancelled".into()));
+    let status = status.or(all.then(|| "open,in_progress,needs_input,in_review,approved,done,cancelled".into()));
     let q = params([
         ("project", project.or(cx.project.clone())),
         ("status", status),
