@@ -472,7 +472,8 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     assert_eq!(again, &pr, "pushed to the same PR");
 
     let prepared = r.daemon.prepared();
-    let rework: Vec<_> = prepared.iter().filter(|(_, p)| p.branch.is_some()).collect();
+    let rework: Vec<_> =
+        prepared.iter().filter(|(id, p)| p.branch.is_some() && id.0.starts_with("trailhead-w")).collect();
     assert_eq!(rework.len(), 1);
     assert!(rework[0].1.merge_base, "the checkout has the base branch merged in");
     let commits = r.codehost.commits(&pr.repo, "factory/trail-1");

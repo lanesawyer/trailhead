@@ -134,6 +134,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
         diff: (role == Role::Reviewer).then(|| "+pub fn hi() {}".into()),
         checks: Vec::new(),
         title: None,
+        base_branch: (role == Role::Reviewer).then(|| "main".into()),
     }
 }
 
@@ -276,7 +277,7 @@ async fn reviewers_get_a_capped_diff() {
     play(&r, "review", c).await;
     let log = std::fs::read_to_string(&r.log).unwrap();
     assert!(log.contains("diff --git a/f0 b/f0") && !log.contains("diff --git a/f9 b/f9"), "cut");
-    assert!(log.contains("git diff origin/<base>...HEAD"), "tells the reviewer how to read the rest");
+    assert!(log.contains("git diff origin/main...HEAD"), "tells the reviewer how to read the rest");
     let at = log.find("[The diff is").unwrap();
     assert!(log[..at].trim_end().ends_with("+line of code"), "cut on a file boundary");
 }
