@@ -36,6 +36,9 @@ pub struct RunContext {
     /// For reviewers: the PR's title, which becomes the squash commit's subject, so the reviewer can check it.
     #[serde(default)]
     pub title: Option<String>,
+    /// For reviewers: the branch the PR targets, which `origin/<base>` names in the checkout.
+    #[serde(default)]
+    pub base_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,9 +240,19 @@ pub fn is_conventional(title: &str) -> bool {
 /// it's missing or not conventional, `chore: {task title} [{key}]`. The flag is false for the fallback.
 pub fn conventional_title(agent_title: Option<&str>, key: &TaskKey, task_title: &str) -> (String, bool) {
     match agent_title.map(str::trim).filter(|t| is_conventional(t)) {
-        Some(t) => (format!("{t} [{}]", key.0), true),
-        None => (format!("chore: {} [{}]", task_title.trim(), key.0), false),
+        Some(t) => (format!("{} [{}]", strip_trailing_key(t, key), key.0), true),
+        None => (format!("chore: {} [{}]", strip_trailing_key(task_title.trim(), key), key.0), false),
     }
+}
+
+/// `title` without any trailing `[KEY]` for this task, so appending the key again can't duplicate it.
+fn strip_trailing_key<'a>(title: &'a str, key: &TaskKey) -> &'a str {
+    let suffix = format!("[{}]", key.0);
+    let mut t = title.trim_end();
+    while let Some(rest) = t.strip_suffix(&suffix) {
+        t = rest.trim_end();
+    }
+    t
 }
 
 #[cfg(test)]
@@ -266,6 +279,12 @@ mod tests {
         }
         let key = TaskKey("TRAIL-9".into());
         assert_eq!(conventional_title(Some(" fix(core): a "), &key, "T"), ("fix(core): a [TRAIL-9]".into(), true));
+        assert_eq!(
+            conventional_title(Some("fix(core): a [TRAIL-9] [TRAIL-9]"), &key, "T"),
+            ("fix(core): a [TRAIL-9]".into(), true)
+        );
+        assert_eq!(conventional_title(Some("fix(core): a [TRAIL-8]"), &key, "T").0, "fix(core): a [TRAIL-8] [TRAIL-9]");
+        assert_eq!(conventional_title(None, &key, "T [TRAIL-9]").0, "chore: T [TRAIL-9]");
         assert_eq!(conventional_title(Some("nope"), &key, "T"), ("chore: T [TRAIL-9]".into(), false));
         assert_eq!(conventional_title(None, &key, "T"), ("chore: T [TRAIL-9]".into(), false));
     }

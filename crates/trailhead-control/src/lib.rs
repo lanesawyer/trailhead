@@ -284,7 +284,22 @@ impl Factory {
         poll: Duration,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
+        self.run_draining(wake, poll, std::future::pending(), shutdown).await
+    }
+
+    /// [`Factory::run`] with a first, gentler stop: once `drain` fires no run or review is started (reconcile keeps
+    /// putting things right), the runs in flight finish as usual, and the loop returns when none are left. `shutdown`
+    /// still cancels them, drain or not.
+    pub async fn run_draining(
+        self: Arc<Self>,
+        wake: Arc<Notify>,
+        poll: Duration,
+        drain: impl Future<Output = ()>,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<()> {
         tokio::pin!(shutdown);
+        tokio::pin!(drain);
+        let mut draining = false;
         let mut running: JoinSet<Result<Outcome>> = JoinSet::new();
         let mut keys: HashMap<task::Id, TaskKey> = HashMap::new();
         // Reviews reconcile found due, running beside the worker runs without taking a worker's place in the cap.
@@ -296,6 +311,10 @@ impl Factory {
             if (&mut shutdown).now_or_never().is_some() {
                 break;
             }
+            if draining && running.is_empty() {
+                tracing::info!("drained; no runs left");
+                break;
+            }
             if dirty {
                 dirty = false;
                 match self.reconcile_deferring(&keys.values().cloned().collect()).await {
@@ -304,6 +323,8 @@ impl Factory {
                             let reviewing: Vec<&str> = due.reviews.iter().map(|t| t.key.0.as_str()).collect();
                             tracing::info!(?done, ?reviewing, "reconciled");
                         }
+                        // What reconcile found due is picked up again by the next start.
+                        let due = if draining { Due::default() } else { due };
                         for (task, sandbox) in due.runs {
                             let key = task.key.clone();
                             let factory = self.clone();
@@ -324,12 +345,22 @@ impl Factory {
                     break;
                 }
             }
-            if let Err(e) = self.start_ready(&mut running, &mut keys, reviews.len()).await {
+            if !draining && let Err(e) = self.start_ready(&mut running, &mut keys, reviews.len()).await {
                 tracing::warn!(error = %e, "couldn't start ready tasks");
             }
             let resume = self.paused_until().map(|(_, _, resets_at)| until(resets_at));
             tokio::select! {
                 _ = &mut shutdown => break,
+                _ = &mut drain, if !draining => {
+                    draining = true;
+                    let mut flying: Vec<&str> = keys.values().map(|k| k.0.as_str()).collect();
+                    flying.sort();
+                    tracing::info!(
+                        "draining: {} runs in flight ({}); Ctrl-C again to cancel them",
+                        flying.len(),
+                        flying.join(", ")
+                    );
+                }
                 _ = wake.notified() => {}
                 _ = tokio::time::sleep(resume.unwrap_or_default()), if resume.is_some() => {}
                 _ = tokio::time::sleep(poll) => dirty = true,
@@ -712,7 +743,7 @@ impl Factory {
                 }
                 let max = self.config.repo.max_attempts;
                 // Counted from the last review that asked for changes, so reworks get attempts of their own.
-                let failed = attempt - task.run.attempt_base.unwrap_or(0);
+                let failed = attempt.saturating_sub(task.run.attempt_base.unwrap_or(0));
                 if failed >= max {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
                     let last = self
@@ -839,6 +870,8 @@ impl Factory {
         if let Some(grade) = &grade {
             self.record_grade(&shown, grade).await?;
         }
+        // Read before anything is created, so a tracker that fails here holds no sub-agent or sandbox.
+        let context = self.tracker.human_context(&task.key).await?;
         // The commit the review is of, so a verdict isn't counted for a head pushed after it.
         let head = match &self.codehost {
             Some(codehost) => Some(codehost.head(pr).await?),
@@ -854,12 +887,11 @@ impl Factory {
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
         let sub = self.tracker.sub_agent(&name);
-        let sandbox = match self.create_sandbox(&name, task, Role::Reviewer).await {
+        let sandbox = match self.create_sandbox(&name, task, Role::Reviewer, Some(Self::branch(task))).await {
             Ok(sandbox) => sandbox,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
-        let context = self.tracker.human_context(&task.key).await?;
         let req = RunRequest {
             run: name.clone(),
             role: Role::Reviewer,
@@ -887,7 +919,6 @@ impl Factory {
             Ok(run) => run,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
-        self.setbacks.lock().unwrap().remove(&task.key);
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
         let (spend, reviewed, reviewed_head) = match &run {
@@ -901,6 +932,7 @@ impl Factory {
         self.tracker.revoke_sub_agent(&name).await?;
         match run {
             Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
+                self.setbacks.lock().unwrap().remove(&task.key);
                 if let (Some(raise), Some(mut grade)) = (&verdict.raise_grade, grade)
                     && grade.raise(raise.grade, &raise.reason)
                 {
@@ -921,9 +953,14 @@ impl Factory {
             }
             Run::Report(report, _) => {
                 tracing::warn!(task = %task.key.0, result = ?report.result, "review didn't produce a verdict");
+                // No verdict, no round. The retry count moves the next try's names off this one's revoked sub-agent.
+                let give_back =
+                    RunUpdate { review_rounds: Some(round - 1), retries: Some(retries + 1), ..RunUpdate::default() };
+                self.tracker.report(&task.key, give_back).await?;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
             Run::Breach(reason, _) => {
+                self.setbacks.lock().unwrap().remove(&task.key);
                 tracing::warn!(task = %task.key.0, %reason, "reviewer breached its budget");
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
@@ -1139,11 +1176,17 @@ impl Factory {
     /// reviews it again. At `max_infra_failures` in a row the task is parked instead, saying so. Returns the error to
     /// surface.
     async fn review_infra_failed(&self, task: &Task, name: &str, error: Error, round: u32, retries: u32) -> Error {
+        // A deliberate stop gives the round back like a failure, but isn't one: no count, no backoff, no parking.
+        let cancelled = matches!(error, Error::Cancelled);
         let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _)| *n);
         let failures = held + 1;
         let max = self.config.repo.max_infra_failures.max(1);
-        tracing::warn!(task = %task.key.0, %error, failures, max, "reviewer failed on the infrastructure; the round doesn't count");
-        self.set_back(&task.key, failures);
+        if cancelled {
+            tracing::info!(task = %task.key.0, "review cancelled; the round doesn't count");
+        } else {
+            tracing::warn!(task = %task.key.0, %error, failures, max, "reviewer failed on the infrastructure; the round doesn't count");
+            self.set_back(&task.key, failures);
+        }
         // The retry's sub-agent and sandbox names carry the retry count: this one's sub-agent is revoked for good.
         let give_back =
             RunUpdate { review_rounds: Some(round - 1), retries: Some(retries + 1), ..RunUpdate::default() };
@@ -1153,7 +1196,7 @@ impl Factory {
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the reviewer's sub-agent; reconcile will");
         }
-        if failures >= max {
+        if !cancelled && failures >= max {
             let question = format!(
                 "The infrastructure failed {failures} times in a row while reviewing the PR (the limit is {max}); \
                  it's not the task. The last error: {error}\n\nFix the cause, then reopen the task; raise \
@@ -1220,14 +1263,15 @@ impl Factory {
         self.tracker.reopen(&task.key).await
     }
 
-    async fn create_sandbox(&self, name: &str, task: &Task, role: Role) -> Result<Sandbox> {
+    /// A sandbox for `task`, its checkout prepared on `branch` when given (a reviewer's is the PR's head).
+    async fn create_sandbox(&self, name: &str, task: &Task, role: Role, branch: Option<String>) -> Result<Sandbox> {
         let mut labels = self.base_labels();
         labels.insert(label::TASK.into(), task.key.0.clone());
         labels.insert(label::ROLE.into(), role.as_str().into());
         // Install egress only while the checkout is prepared, then narrowed before any agent runs.
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = self.compute.create(&spec).await?;
-        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, None)).await?;
+        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, branch)).await?;
         self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
         Ok(sandbox)
     }
@@ -1577,21 +1621,22 @@ impl Factory {
 
     /// Whether the task's PR was merged or closed, which is dealt with here: a merge, by whoever, finishes the task and
     /// a closed PR parks it.
-    async fn pr_settled(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
-        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return Ok(false) };
+    /// `None` when it did; when it's still open (or there's no PR to ask about), `Some` of whether it merges cleanly.
+    async fn pr_settled(&self, task: &Task, done: &mut Reconciled) -> Result<Option<Option<bool>>> {
+        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return Ok(Some(None)) };
         match codehost.pr_state(pr).await? {
             PrState::Merged { commit } => {
                 // A merge the factory didn't make: whoever did it, a person did it outside the factory.
                 self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
                 done.merged.push(task.key.0.clone());
-                Ok(true)
+                Ok(None)
             }
             PrState::Closed => {
                 self.park_closed(task, pr).await?;
                 done.closed.push(task.key.0.clone());
-                Ok(true)
+                Ok(None)
             }
-            PrState::Open => Ok(false),
+            PrState::Open { mergeable } => Ok(Some(mergeable)),
         }
     }
 
@@ -1609,15 +1654,23 @@ impl Factory {
             }
             Status::Open => self.tracker.revoke_sub_agent(name).await?,
             Status::Approved => {
-                if self.pr_settled(task, done).await? {
+                let Some(mergeable) = self.pr_settled(task, done).await? else { return Ok(false) };
+                // Main may have moved since the approval: a PR that now conflicts goes back for a rework, which
+                // would otherwise wait for a merge attempt (and never come, in shadow mode or at a grade that
+                // doesn't auto-merge).
+                if let Some(pr) = &task.run.pr
+                    && mergeable == Some(false)
+                {
+                    self.tracker.unapprove(&task.key).await?;
+                    let attempt = task.run.attempt.unwrap_or(1);
+                    self.rework_conflict(task, pr, attempt).await?;
+                    done.conflicted.push(task.key.0.clone());
                     return Ok(false);
                 }
                 self.evaluate_gates(&task.key).await?;
             }
             Status::InReview => {
-                if self.pr_settled(task, done).await? {
-                    return Ok(false);
-                }
+                let Some(mergeable) = self.pr_settled(task, done).await? else { return Ok(false) };
                 let attempt = task.run.attempt.unwrap_or(1);
                 // Changes were requested on this attempt but the task never left review: finish reopening it.
                 if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt) {
@@ -1627,9 +1680,8 @@ impl Factory {
                     return Ok(false);
                 }
                 if let Some(pr) = &task.run.pr
-                    && let Some(codehost) = &self.codehost
-                    // Not yet worked out by the host: the next reconcile asks again.
-                    && codehost.mergeable(pr).await? == Some(false)
+                    // Not yet worked out by the host (`None`): the next reconcile asks again.
+                    && mergeable == Some(false)
                 {
                     self.rework_conflict(task, pr, attempt).await?;
                     done.conflicted.push(task.key.0.clone());

@@ -73,11 +73,11 @@ pub enum BranchUpdate {
 /// Where a PR stands on the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrState {
-    Open,
+    /// Still open. `mergeable` is whether it merges cleanly into its base: `Some(false)` when it conflicts, `None`
+    /// while the host is still working it out.
+    Open { mergeable: Option<bool> },
     /// Merged, into the base branch as `commit` when the host says which.
-    Merged {
-        commit: Option<String>,
-    },
+    Merged { commit: Option<String> },
     /// Closed without merging.
     Closed,
 }
@@ -113,11 +113,9 @@ pub trait CodeHost: Send + Sync {
     async fn comment(&self, pr: &PrRef, body: &str) -> Result<()>;
     /// Squash-merges the PR, but only while its head is still `head`, the commit the gates passed on.
     async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome>;
-    /// Whether the PR is still open, was merged (by anyone), or was closed without merging.
+    /// Whether the PR is still open (and if it merges cleanly), was merged (by anyone), or was closed without
+    /// merging. One call, so reconcile costs the host one request per PR.
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState>;
-    /// Whether the open PR merges cleanly into its base: `Some(false)` when it conflicts, `None` while the host is
-    /// still working it out.
-    async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>>;
     /// Whether the PR's branch lacks commits that are on its base branch, which a repo requiring branches to be up to
     /// date refuses to merge (TRAIL-212).
     async fn behind(&self, pr: &PrRef) -> Result<bool>;

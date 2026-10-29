@@ -135,6 +135,8 @@ async fn spec_to_reviewed_pr_then_human_merge() {
     let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
     assert!(review.diff.unwrap().contains("src/greet.rs"), "reviewer sees the diff");
     assert_eq!(review.model.0, "fake-opus");
+    let reviewer_prep = r.daemon.prepared().into_iter().find(|(id, _)| id.0 == "trail-1-a1-r1").unwrap().1;
+    assert_eq!(reviewer_prep.branch.as_deref(), Some("factory/trail-1"), "the reviewer's checkout is the PR head");
     let names: Vec<_> = review.checks.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["fmt", "lint", "test"], "the reviewer is told which checks the worker ran");
     assert!(review.checks.iter().all(|c| c.passed));
@@ -426,9 +428,9 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
     assert_eq!(r.tracker.task(&crashed).status, Status::Open);
     assert!(r.tracker.is_revoked("factory/trail-1-a1"));
     assert_eq!(r.tracker.task(&unreviewed).run.reviewed, Some(1));
-    assert_eq!(r.tracker.task(&unreviewed).run.review_rounds, Some(2));
+    assert_eq!(r.tracker.task(&unreviewed).run.review_rounds, Some(1));
     assert!(r.tracker.is_revoked("factory/trail-2-a1-r1"));
-    assert!(r.tracker.is_revoked("factory/trail-2-a1-r2"));
+    assert!(r.tracker.is_revoked("factory/trail-2-a1-r1-1"));
     assert_eq!(r.tracker.task(&parked).status, Status::NeedsInput);
 
     // A second pass finds nothing to do.
@@ -658,6 +660,70 @@ async fn a_run_that_ignores_the_stop_is_abandoned_after_the_grace() {
     let r = rig();
     r.daemon.ignore_cancel();
     assert_eq!(stop_mid_run(r).await, trailhead_control::SHUTDOWN_GRACE);
+}
+
+/// The run loop on one task held at a gate, drained once it runs, with a second task queued during the drain.
+struct Drain {
+    r: Rig,
+    first: TaskKey,
+    second: TaskKey,
+    gate: Arc<tokio::sync::Notify>,
+    cancel: tokio::sync::oneshot::Sender<()>,
+    handle: tokio::task::JoinHandle<trailhead_factory::Result<()>>,
+}
+
+async fn drain_one_in_flight(mut r: Rig) -> Drain {
+    let first = r.tracker.add_task("TRAIL", "First", "");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    r.harness.push(Role::Worker, Script::new(changes()).wait_for(gate.clone()));
+    let factory = Arc::new(std::mem::replace(&mut r.factory, rig().factory));
+    let (drain, draining) = tokio::sync::oneshot::channel::<()>();
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let handle = tokio::spawn(factory.run_draining(
+        wake.clone(),
+        std::time::Duration::from_secs(60),
+        async {
+            let _ = draining.await;
+        },
+        async {
+            let _ = cancelled.await;
+        },
+    ));
+    let tracker = r.tracker.clone();
+    until("the first task to start", || tracker.task(&first).status == Status::InProgress).await;
+    drain.send(()).unwrap();
+    let second = r.tracker.add_task("TRAIL", "Second", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    wake.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(r.tracker.task(&second).status, Status::Open, "a drain starts nothing new");
+    assert!(!handle.is_finished(), "the run in flight keeps the drain going");
+    Drain { r, first, second, gate, cancel, handle }
+}
+
+#[tokio::test]
+async fn a_drain_starts_nothing_new_and_returns_when_the_run_in_flight_finishes() {
+    let r = rig();
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let d = drain_one_in_flight(r).await;
+
+    d.gate.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(10), d.handle).await.unwrap().unwrap().unwrap();
+
+    // The finished worker run went on to its review, and nothing else began.
+    assert_eq!(d.r.tracker.task(&d.first).status, Status::InReview);
+    assert_eq!(d.r.tracker.task(&d.first).run.reviewed, Some(1));
+    assert_eq!(d.r.tracker.task(&d.second).status, Status::Open);
+}
+
+#[tokio::test]
+async fn a_second_signal_during_a_drain_cancels_the_run() {
+    let d = drain_one_in_flight(rig()).await;
+
+    d.cancel.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), d.handle).await.unwrap().unwrap().unwrap();
+    assert_eq!(d.r.tracker.task(&d.second).status, Status::Open);
 }
 
 #[tokio::test]
@@ -1010,7 +1076,7 @@ async fn a_review_that_cant_start_doesnt_stop_reconcile() {
     r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
     let ran = r.factory.run_task(&r.tracker.task(&unreviewed)).await.unwrap();
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
-    r.compute.fail(&trailhead_factory::review_name(&unreviewed, 1, 2), "set_egress");
+    r.compute.fail(&format!("{}-1", trailhead_factory::review_name(&unreviewed, 1, 1)), "set_egress");
 
     // TRAIL-2: crashed mid-run, after it in the list.
     let crashed = r.tracker.add_task("TRAIL", "Crashed", "");
@@ -1024,6 +1090,23 @@ async fn a_review_that_cant_start_doesnt_stop_reconcile() {
     assert!(done.reviewed.is_empty(), "{done:?}");
     assert_eq!(done.requeued, [crashed.0], "the rest is still reconciled");
     assert_eq!(r.tracker.task(&unreviewed).status, Status::InReview, "left for the next reconcile");
+}
+
+#[tokio::test]
+async fn a_review_whose_context_cant_be_read_creates_no_sandbox() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Unreviewed", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let before = r.compute.sandboxes().len();
+
+    r.tracker.fail_human_context(true);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "{done:?}");
+    assert_eq!(r.compute.sandboxes().len(), before, "no sandbox is held for a review that couldn't start");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
 }
 
 #[tokio::test]
@@ -1183,7 +1266,11 @@ async fn requested_changes_start_a_rework_on_the_pr_branch_with_the_review() {
     assert!(worker_reqs[1].feedback.is_some());
     let prepared = r.daemon.prepared();
     assert!(prepared.iter().any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1")));
-    assert_eq!(prepared.iter().filter(|(_, p)| p.branch.is_some()).count(), 1, "only the rework checks out the PR");
+    let on_pr = |worker: bool| {
+        prepared.iter().filter(|(id, p)| p.branch.is_some() && id.0.starts_with("trailhead-w") == worker).count()
+    };
+    assert_eq!(on_pr(true), 1, "only the rework checks out the PR among workers");
+    assert_eq!(on_pr(false), 2, "and both reviewers check it out");
 }
 
 #[tokio::test]
@@ -1624,6 +1711,47 @@ async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() 
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task") && questions[0].body.contains("connection lost"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_review_cancelled_on_purpose_isnt_an_infrastructure_failure() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 1"));
+    let key = r.tracker.add_task("TRAIL", "Stopped mid-review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let rounds = r.tracker.task(&key).run.review_rounds.unwrap_or(0);
+
+    r.daemon.cancel_runs(1);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "not parked, though the cap is one failure");
+    assert_eq!(task.run.review_rounds.unwrap_or(0), rounds, "the round is given back");
+
+    // No backoff either: the next pass reviews it at once.
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed.len(), 1, "{done:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_that_never_starts_doesnt_use_up_a_review_round() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Slow to review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+
+    r.daemon.fail_runs(1, "connection lost");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).run.review_rounds.unwrap_or(0), 0);
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(1));
+    assert_eq!(task.status, Status::Open, "reworks instead of parking at max_review_rounds");
 }
 
 #[tokio::test]
