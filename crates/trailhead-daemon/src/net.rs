@@ -586,6 +586,8 @@ pub struct RemoteDaemon {
     master: [u8; 32],
     compute: Arc<dyn Compute>,
     launch: Launch,
+    /// [`build_id`] of `launch.binary`, hashed once here rather than on every prepare.
+    build: String,
     conns: Mutex<HashMap<SandboxId, Connection>>,
     cancels: Mutex<HashMap<SandboxId, mpsc::UnboundedSender<()>>>,
     peers: Peers,
@@ -593,11 +595,13 @@ pub struct RemoteDaemon {
 
 impl RemoteDaemon {
     pub fn new(endpoint: Endpoint, master: [u8; 32], compute: Arc<dyn Compute>, launch: Launch) -> RemoteDaemon {
+        let build = build_id(&launch.binary);
         RemoteDaemon {
             endpoint,
             master,
             compute,
             launch,
+            build,
             conns: Mutex::default(),
             cancels: Mutex::default(),
             peers: Peers::default(),
@@ -700,7 +704,7 @@ impl RemoteDaemon {
     /// the fields of any newer request. A stale daemon is restarted onto the current binary; one still stale
     /// after that is an error.
     async fn ensure_current(&self, sandbox: &SandboxId) -> Result<()> {
-        let want = build_id(&self.launch.binary);
+        let want = self.build.as_str();
         let running = self.running_version(sandbox).await?;
         if let Some(v) = running.as_ref().filter(|v| v.build == want) {
             tracing::info!(sandbox = %sandbox.0, version = %v.version, build = %v.build, "daemon version");

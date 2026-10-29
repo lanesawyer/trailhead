@@ -319,6 +319,24 @@ async fn subtask_blocking_parent_unblocks_on_done() {
 }
 
 #[tokio::test]
+async fn parent_cycles_are_rejected() {
+    let env = Env::new().await;
+    let a = env.task("a").await;
+    let b = env.task("b").await;
+    let c = env.task("c").await;
+    let under = |p: &str| TaskPatch { parent: Some(Some(p.to_string())), ..Default::default() };
+    env.store.update_task(&env.human, &a.key, under(&b.key), None).await.unwrap();
+    env.store.update_task(&env.human, &b.key, under(&c.key), None).await.unwrap();
+    // Direct and indirect ancestors can't become the parent.
+    for (task, parent) in [(&b, &a), (&c, &a), (&c, &b), (&a, &a)] {
+        let err = env.store.update_task(&env.human, &task.key, under(&parent.key), None).await.unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+    }
+    let d = env.task("d").await;
+    env.store.update_task(&env.human, &d.key, under(&a.key), None).await.unwrap();
+}
+
+#[tokio::test]
 async fn dependency_cycles_are_rejected() {
     let env = Env::new().await;
     let a = env.task("a").await;

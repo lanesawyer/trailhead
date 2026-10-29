@@ -6,8 +6,8 @@ use std::sync::Arc;
 use trailhead_control::{CoreTracker, Factory, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, ProjectPatch, Store, TaskPatch};
 use trailhead_factory::{
-    CodeHost, Commit, FactoryConfig, FileChange, Role, RunOutcome, RunUpdate, Status, TaskKey, Tracker, Usd,
-    VerdictKind, label,
+    CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Role, RunOutcome, RunUpdate, Status, TaskKey,
+    Tracker, Usd, Verdict, VerdictKind, label,
 };
 use trailhead_testkit::{
     Connect, FAKE_BASE_MERGE, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon, Script, ScriptedHarness,
@@ -125,7 +125,11 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
         Script::new(RunOutcome::Verdict {
             kind: VerdictKind::Approve,
             body: "LGTM".into(),
-            follow_ups: vec![],
+            follow_ups: vec![FollowUp {
+                title: "Cover the edge".into(),
+                description: "No test for empty input.".into(),
+                priority: Some(2),
+            }],
             raise_grade: None,
         }),
     );
@@ -133,6 +137,19 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
     let ran = r.factory.tick().await.unwrap();
     let Outcome::Reviewed { pr, verdict } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
     assert_eq!(verdict.reviewer, "factory/trail-1-a1-r1");
+
+    let filed_key = r.tracker.find_open_by_title("TRAIL", "cover the edge ").await.unwrap().expect("a filed follow-up");
+    assert_ne!(filed_key, key);
+    // The reviewer's comment lists the key only if create_task returned it.
+    let comment = r.codehost.prs()[0].comments.last().unwrap().clone();
+    assert!(comment.contains(&format!("`{}` Cover the edge", filed_key.0)), "{comment}");
+    assert!(!comment.contains("(already open)"), "{comment}");
+    let filed = r.store.get_task(&r.human, &filed_key.0).await.unwrap();
+    assert_eq!(filed.title, "Cover the edge");
+    assert_eq!(filed.priority, 2);
+    assert_eq!(filed.status, trailhead_core::Status::Open);
+    assert!(filed.description.starts_with("No test for empty input."), "{}", filed.description);
+    assert!(filed.description.contains(&key.0), "{}", filed.description);
 
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
@@ -292,6 +309,17 @@ async fn human_context_pairs_answers_and_skips_the_factorys_own_notes() {
     assert_eq!((ctx.notes[0].author.as_str(), ctx.notes[0].body.as_str()), ("Lane", "Use a flock."));
 }
 
+#[tokio::test]
+async fn last_review_names_its_reviewer_like_human_context_does() {
+    let r = rig().await;
+    let key = r.task("Reviewed by hand").await;
+    assert!(r.tracker.last_review(&key).await.unwrap().is_none());
+    let review = trailhead_core::NewComment::review(trailhead_core::Verdict::RequestChanges, "Add a test.");
+    r.store.add_comment(&r.human, &key.0, review).await.unwrap();
+    let verdict = r.tracker.last_review(&key).await.unwrap().unwrap();
+    assert_eq!((verdict.reviewer.as_str(), verdict.body.as_str()), ("Lane", "Add a test."));
+}
+
 fn request_changes(body: &str) -> RunOutcome {
     RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into(), follow_ups: vec![], raise_grade: None }
 }
@@ -379,7 +407,8 @@ async fn a_merged_pr_finishes_its_task_and_unblocks_what_is_chained_behind_it() 
     let blocked = r.store.blockers(&r.human, &next.0).await.unwrap();
     assert_eq!(blocked.len(), 1);
 
-    r.codehost.merge(&pr).await.unwrap();
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.merged, std::slice::from_ref(&key.0));
     let task = r.show(&key).await;
@@ -488,4 +517,70 @@ async fn a_merge_the_agent_started_itself_is_published_as_a_merge_commit() {
     let commits = r.codehost.commits(&pr.repo, "factory/trail-1");
     assert_eq!(commits.last().unwrap().merges, [FAKE_BASE_MERGE], "published as a merge commit");
     assert_eq!(r.show(&key).await.status, Status::InReview);
+}
+
+#[tokio::test]
+async fn last_review_reads_the_reviewers_verdict_and_the_latest_wins() {
+    let r = rig().await;
+    let key = r.task("Add a greeting").await;
+    assert!(r.tracker.last_review(&key).await.unwrap().is_none(), "no review yet");
+
+    let cred =
+        r.tracker.create_sub_agent("trail-1-a1-r1", "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
+    let reviewer = CoreTracker::authenticate(r.store.clone(), &cred).await.unwrap();
+    let verdict = |kind, body: &str, model: &str| Verdict {
+        kind,
+        body: body.into(),
+        reviewer: String::new(),
+        model: Some(ModelId(model.into())),
+        raise_grade: None,
+    };
+
+    reviewer.record_verdict(&key, &verdict(VerdictKind::RequestChanges, "Add a test.", "opus")).await.unwrap();
+    let last = r.tracker.last_review(&key).await.unwrap().expect("a review");
+    assert_eq!(last.kind, VerdictKind::RequestChanges);
+    assert_eq!(last.body, "Add a test.");
+    assert_eq!(last.reviewer, "factory/trail-1-a1-r1");
+    assert_eq!(last.model, Some(ModelId("opus".into())));
+
+    reviewer.record_verdict(&key, &verdict(VerdictKind::Approve, "LGTM now.", "sonnet")).await.unwrap();
+    let last = r.tracker.last_review(&key).await.unwrap().expect("a review");
+    assert_eq!(last.kind, VerdictKind::Approve, "the later approve wins over the earlier request_changes");
+    assert_eq!(last.body, "LGTM now.");
+    assert_eq!(last.model, Some(ModelId("sonnet".into())));
+}
+
+#[tokio::test]
+async fn the_factory_approves_again_after_it_sent_the_task_back_for_a_new_head() {
+    let config = format!(
+        "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
+    );
+    let r = rig_with(&config).await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let new = NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(1), ..Default::default() };
+    let key = TaskKey(r.store.create_task(&r.human, new).await.unwrap().key);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let pr = r.show(&key).await.run.pr.unwrap();
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::Approved);
+
+    r.codehost.push_to(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let shown = r.show(&key).await;
+    r.factory.review(&shown, &pr, 1, &[]).await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(
+        task.status,
+        Status::Approved,
+        "the factory didn't do the work, so it can approve again: {:?}",
+        task.run.merge
+    );
+    assert!(task.run.merge.unwrap().problem.is_none());
 }
