@@ -57,8 +57,8 @@ impl Workspace for GitWorkspace {
         self.dir.clone()
     }
 
-    /// Clones the base branch, or resets an existing checkout to it, then moves to the request's branch if it has one. Ignored files such as build output stay, so a
-    /// sandbox reused for another round keeps its caches.
+    /// Clones the base branch, or resets an existing checkout to it, then moves to the request's branch if it has one.
+    /// Ignored files such as build output stay, so a sandbox reused for another round keeps its caches.
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
         let base = &req.base_branch;
         if self.dir.join(".git").exists() {

@@ -68,13 +68,19 @@ pub struct RunUpdate {
     /// The review that last asked for changes, which the rework on the PR branch is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_requested: Option<ChangesRequested>,
+    /// The attempt the last review asked to change. `max_attempts` counts the runs after it, so reworks don't use up
+    /// the attempts of the task as a whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_base: Option<u32>,
 }
 
-/// A review that asked for changes: who, and what they said.
+/// A review that asked for changes: who, what they said, and the attempt whose PR it reviewed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangesRequested {
     pub reviewer: String,
     pub body: String,
+    #[serde(default)]
+    pub attempt: u32,
 }
 
 impl RunUpdate {
@@ -91,6 +97,7 @@ impl RunUpdate {
             failure,
             retries,
             changes_requested,
+            attempt_base,
         } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
@@ -103,6 +110,13 @@ impl RunUpdate {
         self.failure = failure.or(self.failure.take());
         self.retries = retries.or(self.retries.take());
         self.changes_requested = changes_requested.or(self.changes_requested.take());
+        self.attempt_base = attempt_base.or(self.attempt_base.take());
+    }
+
+    /// The review the next run has to address: the last one that asked for changes, unless a later review has
+    /// since finished on another attempt.
+    pub fn pending_changes(&self) -> Option<&ChangesRequested> {
+        self.changes_requested.as_ref().filter(|c| self.reviewed.is_none_or(|r| r == c.attempt))
     }
 
     pub fn is_empty(&self) -> bool {

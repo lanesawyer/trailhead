@@ -345,6 +345,7 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
             released: vec![],
             requeued: vec![crashed.0.clone()],
             reviewed: vec![unreviewed.0.clone()],
+            reworked: vec![],
             abandoned: vec![],
         }
     );
@@ -952,8 +953,7 @@ async fn requested_changes_start_a_rework_on_the_pr_branch_with_the_review() {
     assert_eq!(worker_reqs[0].feedback, None);
     assert!(worker_reqs[1].feedback.is_some());
     let prepared = r.daemon.prepared();
-    let worker_prepares: Vec<_> = prepared.iter().filter(|(_, p)| p.setup.is_none() || p.branch.is_some()).collect();
-    assert!(worker_prepares.iter().any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1")));
+    assert!(prepared.iter().any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1")));
     assert_eq!(prepared.iter().filter(|(_, p)| p.branch.is_some()).count(), 1, "only the rework checks out the PR");
 }
 
@@ -976,6 +976,74 @@ async fn requested_changes_past_the_cap_park_the_task_with_the_last_review() {
     assert!(questions[0].body.contains("after 2 review rounds"), "{}", questions[0].body);
     assert!(questions[0].body.contains("second complaint"), "{}", questions[0].body);
     assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't reworked");
+}
+
+#[tokio::test]
+async fn a_rework_that_fails_its_check_is_retried_not_parked() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    for body in ["first complaint", "second complaint"] {
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(request_changes(body)));
+        r.factory.tick().await.unwrap();
+    }
+
+    // Attempt 3 is the third run, but only the first failure since the last review asked for changes.
+    r.daemon.fail_check("lint", "warning: unused variable");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+
+    r.daemon.pass_check("lint");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { verdict, .. } if verdict.kind == VerdictKind::Approve));
+    assert_eq!(r.tracker.task(&key).run.attempt, Some(4));
+
+    let feedback = r.harness.feedbacks();
+    assert_eq!(feedback.len(), 3, "every rework is told the review");
+    assert!(feedback[0].body.contains("first complaint"));
+    assert!(feedback[1..].iter().all(|f| f.body.contains("second complaint")), "{feedback:?}");
+}
+
+#[tokio::test]
+async fn a_rework_request_cut_short_is_finished_by_reconcile() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    // The review was recorded, but the control plane stopped before the task left review.
+    r.tracker.set_status(&key, Status::InReview);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reworked, std::slice::from_ref(&key.0));
+    assert!(done.reviewed.is_empty(), "the review isn't run again: {done:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    assert!(r.factory.reconcile().await.unwrap().reworked.is_empty());
+}
+
+#[tokio::test]
+async fn an_addressed_review_isnt_passed_to_later_runs() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+
+    // Lane sends the approved task back.
+    r.tracker.set_status(&key, Status::Open);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.harness.feedbacks().len(), 1, "only the first rework was told the review");
+    assert!(r.factory.reconcile().await.unwrap().reworked.is_empty());
 }
 
 #[tokio::test]

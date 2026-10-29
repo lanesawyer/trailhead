@@ -97,6 +97,8 @@ pub struct Reconciled {
     pub released: Vec<String>,
     pub requeued: Vec<String>,
     pub reviewed: Vec<String>,
+    /// Tasks whose review asked for changes but stayed in review, now reopened for a rework or parked.
+    pub reworked: Vec<String>,
     /// Pooled sandboxes that kept failing to release, now out of the pool.
     pub abandoned: Vec<String>,
 }
@@ -380,8 +382,7 @@ impl Factory {
             pr: task.run.pr.clone(),
             feedback: task
                 .run
-                .changes_requested
-                .as_ref()
+                .pending_changes()
                 .filter(|_| rework)
                 .map(|c| Feedback { body: format!("Review by {}:\n\n{}", c.reviewer, c.body) }),
             model: self.provider.resolve(profile.model),
@@ -425,7 +426,8 @@ impl Factory {
 
         match report.result {
             RunResult::PrOpened(pr) => {
-                // MVP: no suspend during review; requested changes reopen the task (`rework`) and a new run starts from the PR branch.
+                // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
+                // starts from the PR branch.
                 self.release_worker(&sandbox).await?;
                 self.tracker.revoke_sub_agent(&name).await?;
                 self.review(task, &pr, attempt).await
@@ -435,14 +437,16 @@ impl Factory {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
                 self.release_worker(&sandbox).await?;
                 let max = self.config.repo.max_attempts;
-                if attempt >= max {
+                // Counted from the last review that asked for changes, so reworks get attempts of their own.
+                let failed = attempt - task.run.attempt_base.unwrap_or(0);
+                if failed >= max {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
                     let last = self.tracker.show(&task.key).await?.run.failure.unwrap_or_else(|| reason.clone());
                     sub.claim(&task.key).await?;
                     sub.ask(
                         &task.key,
                         &format!(
-                            "Gave up after {attempt} failed attempts (the limit is {max}). The last failure: \
+                            "Gave up after {failed} failed attempts (the limit is {max}). The last failure: \
                              {reason}\n\n{last}\n\nFix the cause, then reopen the task; raise `max_attempts` to \
                              allow more tries."
                         ),
@@ -534,8 +538,12 @@ impl Factory {
         let run = self.run_metered(&sandbox, req, &profile, prior).await;
         self.compute.destroy(&sandbox.id).await?;
         let run = run?;
+        // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
+        // a review can't be counted as done without its rework being requested or the task parked.
         let (spend, reviewed) = match &run {
-            Run::Report(RunReport { result: RunResult::Reviewed(_), .. }, s) => (*s, Some(attempt)),
+            Run::Report(RunReport { result: RunResult::Reviewed(v), .. }, s) => {
+                (*s, (v.kind != VerdictKind::RequestChanges).then_some(attempt))
+            }
             Run::Report(_, s) | Run::Breach(_, s) => (*s, None),
         };
         sub.report(&task.key, RunUpdate { spend: Some(spend), reviewed, ..RunUpdate::default() }).await?;
@@ -543,7 +551,9 @@ impl Factory {
         match run {
             Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
                 if verdict.kind == VerdictKind::RequestChanges {
-                    self.request_rework(task, &verdict, round).await?;
+                    let requested =
+                        ChangesRequested { reviewer: verdict.reviewer.clone(), body: verdict.body.clone(), attempt };
+                    self.request_rework(task, requested, round).await?;
                 }
                 Ok(Outcome::Reviewed { pr: pr.clone(), verdict })
             }
@@ -560,31 +570,37 @@ impl Factory {
 
     /// A review asked for changes: the task goes back to the queue with the review in its metadata, so the next run
     /// starts a fresh sandbox from the PR branch and is told what to fix. The task is parked instead once `round`
-    /// reviews have asked for changes, which is when a human should look.
-    async fn request_rework(&self, task: &Task, verdict: &Verdict, round: u32) -> Result<()> {
-        let requested = ChangesRequested { reviewer: verdict.reviewer.clone(), body: verdict.body.clone() };
+    /// reviews have asked for changes, which is when a human should look. Reconcile finishes this if it's cut short.
+    async fn request_rework(&self, task: &Task, requested: ChangesRequested, round: u32) -> Result<()> {
         let max = self.config.repo.max_review_rounds;
+        let (reviewer, body) = (requested.reviewer.clone(), requested.body.clone());
         // Recorded before the task is reopened, so the run that picks it up can't miss the review.
+        let update = RunUpdate {
+            reviewed: Some(requested.attempt),
+            attempt_base: Some(requested.attempt),
+            changes_requested: Some(requested),
+            ..RunUpdate::default()
+        };
+        self.tracker.report(&task.key, update).await?;
         if round >= max {
             tracing::warn!(task = %task.key.0, round, "the reviewer still wants changes; parking");
-            // A fresh count for when a human reopens the task after sorting it out.
-            let update =
-                RunUpdate { review_rounds: Some(0), changes_requested: Some(requested), ..RunUpdate::default() };
-            self.tracker.report(&task.key, update).await?;
             self.tracker.reopen(&task.key).await?;
             self.tracker.claim(&task.key).await?;
             let question = format!(
-                "The reviewer still wants changes after {round} review rounds (the limit is {max}). The last review, by \
-                 {}:\n\n{}\n\nFix the PR or settle the disagreement, then reopen the task; raise \
-                 `max_review_rounds` to allow more rounds.",
-                verdict.reviewer, verdict.body
+                "The reviewer still wants changes after {round} review rounds (the limit is {max}). The last review, \
+                 by {reviewer}:\n\n{body}\n\nFix the PR or settle the disagreement, then reopen the task; raise \
+                 `max_review_rounds` to allow more rounds."
             );
-            return self.tracker.ask(&task.key, &question).await;
+            self.tracker.ask(&task.key, &question).await?;
+            // A fresh count for when a human reopens the task after sorting it out. Last, so a reconcile that finishes
+            // a park cut short still sees the round that hit the limit.
+            let fresh = RunUpdate { review_rounds: Some(0), ..RunUpdate::default() };
+            if let Err(e) = self.tracker.report(&task.key, fresh).await {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't reset the review rounds");
+            }
+            return Ok(());
         }
         tracing::info!(task = %task.key.0, round, "changes requested; reopening for a rework");
-        self.tracker
-            .report(&task.key, RunUpdate { changes_requested: Some(requested), ..RunUpdate::default() })
-            .await?;
         self.tracker.reopen(&task.key).await
     }
 
@@ -847,6 +863,13 @@ impl Factory {
             Status::Open => self.tracker.revoke_sub_agent(name).await?,
             Status::InReview => {
                 let attempt = task.run.attempt.unwrap_or(1);
+                // Changes were requested on this attempt but the task never left review: finish reopening it.
+                if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt) {
+                    let round = task.run.review_rounds.unwrap_or(1);
+                    self.request_rework(task, requested.clone(), round).await?;
+                    done.reworked.push(task.key.0.clone());
+                    return Ok(false);
+                }
                 return Ok(task.run.pr.is_some() && task.run.reviewed != Some(attempt));
             }
             _ => {}
