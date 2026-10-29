@@ -6,7 +6,7 @@ use std::sync::Arc;
 use trailhead_control::{CoreTracker, Factory, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, ProjectPatch, Store, TaskPatch};
 use trailhead_factory::{
-    CodeHost, Commit, FactoryConfig, FileChange, Role, RunOutcome, RunUpdate, Status, TaskKey, Tracker, Usd,
+    CodeHost, Commit, FactoryConfig, FileChange, FollowUp, Role, RunOutcome, RunUpdate, Status, TaskKey, Tracker, Usd,
     VerdictKind, label,
 };
 use trailhead_testkit::{
@@ -125,7 +125,11 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
         Script::new(RunOutcome::Verdict {
             kind: VerdictKind::Approve,
             body: "LGTM".into(),
-            follow_ups: vec![],
+            follow_ups: vec![FollowUp {
+                title: "Cover the edge".into(),
+                description: "No test for empty input.".into(),
+                priority: Some(2),
+            }],
             raise_grade: None,
         }),
     );
@@ -133,6 +137,15 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
     let ran = r.factory.tick().await.unwrap();
     let Outcome::Reviewed { pr, verdict } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
     assert_eq!(verdict.reviewer, "factory/trail-1-a1-r1");
+
+    let filed = r.tracker.find_open_by_title("TRAIL", "cover the edge ").await.unwrap().expect("a filed follow-up");
+    assert_ne!(filed, key);
+    let filed = r.store.get_task(&r.human, &filed.0).await.unwrap();
+    assert_eq!(filed.title, "Cover the edge");
+    assert_eq!(filed.priority, 2);
+    assert_eq!(filed.status, trailhead_core::Status::Open);
+    assert!(filed.description.starts_with("No test for empty input."), "{}", filed.description);
+    assert!(filed.description.contains(&key.0), "{}", filed.description);
 
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
