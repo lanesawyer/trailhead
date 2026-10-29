@@ -193,6 +193,28 @@ async fn a_parked_sandbox_keeps_its_place_in_the_cap() {
 }
 
 #[tokio::test]
+async fn reopening_a_parked_task_frees_its_place_without_a_reconcile() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(busy(&r.compute), ["trailhead-w1"]);
+
+    // Still parked: the place stays taken.
+    r.tracker.add_task("TRAIL", "Next", "");
+    assert!(r.factory.tick().await.unwrap().is_empty());
+
+    r.tracker.answer(&key, "The core crate.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(!ran.is_empty(), "the reopened task started without a reconcile");
+    let answered =
+        r.harness.contexts().iter().any(|c| c.task.context.answers.iter().any(|a| a.answer == "The core crate."));
+    assert!(answered, "the next attempt has the answer in its prompt");
+}
+
+#[tokio::test]
 async fn too_many_steps_is_a_breach() {
     let r = rig();
     r.tracker.add_task("TRAIL", "Chatty", "");
