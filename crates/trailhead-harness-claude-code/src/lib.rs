@@ -274,16 +274,16 @@ fn human_section(task: &trailhead_factory::TaskSpec) -> String {
     out
 }
 
-/// What a reviewer is told about the checks the worker already ran: they passed or failed in the worker's sandbox,
-/// and this sandbox can't build anyway, so the reviewer reads instead of rebuilding.
+/// What a reviewer is told about building and the checks the worker already ran. The don't-build line goes in even
+/// with no results, as when reconcile starts the review after a restart: this sandbox can't build either way.
 fn checks_section(checks: &[CheckResult]) -> String {
-    if checks.is_empty() {
-        return String::new();
-    }
     let mut out = String::from(
-        "\n\nThe worker already ran these checks in its own sandbox, where the dependencies are installed. This \
-         sandbox has no network, so don't build or run tests: review the diff and read code instead.\n",
+        "\n\nThis sandbox can't fetch dependencies, so don't build or run tests: review the diff and read code instead.",
     );
+    if checks.is_empty() {
+        return out;
+    }
+    out.push_str(" The worker already ran these checks in its own sandbox, where the dependencies are installed:\n");
     for c in checks {
         out.push_str(&format!("- {}: {}\n", c.name, if c.passed { "passed" } else { "FAILED" }));
         if !c.passed {

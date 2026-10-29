@@ -311,6 +311,13 @@ async fn dropped_api_calls_resume_the_session() {
 }
 
 #[test]
+fn a_reviewer_with_no_check_results_is_still_told_not_to_build() {
+    let r = rig();
+    let p = prompt(&ctx(&r, Role::Reviewer, 0), None);
+    assert!(p.contains("don't build or run tests") && !p.contains("already ran these checks"), "{p}");
+}
+
+#[test]
 fn prompt_carries_answers_and_notes_and_stays_bounded() {
     use trailhead_factory::{Answered, TaskNote};
     let r = rig();
