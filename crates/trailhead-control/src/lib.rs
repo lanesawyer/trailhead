@@ -992,7 +992,8 @@ impl Factory {
         self.tracker.reopen(&task.key).await?;
         self.tracker.claim(&task.key).await?;
         let question = format!(
-            "The PR {} was closed without being merged. If the work is abandoned, cancel this task. To carry on,              reopen the PR on the code host and then reopen this task, and the next run continues on the PR's branch.",
+            "The PR {} was closed without being merged. If the work is abandoned, cancel this task. To carry on, \
+             reopen the PR on the code host and then reopen this task, and the next run continues on the PR's branch.",
             pr.url
         );
         self.tracker.ask(&task.key, &question).await
