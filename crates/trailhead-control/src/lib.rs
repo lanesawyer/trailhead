@@ -174,17 +174,10 @@ impl Factory {
         tokio::pin!(shutdown);
         let mut running: JoinSet<Result<Outcome>> = JoinSet::new();
         let mut keys: HashMap<task::Id, TaskKey> = HashMap::new();
+        // Reviews reconcile found due, running beside the worker runs without taking a worker's place in the cap.
+        let mut reviews: HashSet<task::Id> = HashSet::new();
         // A failed boot reconcile (the compute API down, say) is retried in the loop rather than ending the process.
-        let mut dirty = match self.reconcile().await {
-            Ok(done) => {
-                tracing::info!(?done, "reconciled");
-                false
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "reconcile failed");
-                true
-            }
-        };
+        let mut dirty = true;
         loop {
             // Shutdown is otherwise only noticed while idle; a stop during a long reconcile mustn't start new work.
             if (&mut shutdown).now_or_never().is_some() {
@@ -192,14 +185,27 @@ impl Factory {
             }
             if dirty {
                 dirty = false;
-                if let Err(e) = self.reconcile_except(&keys.values().cloned().collect()).await {
-                    tracing::warn!(error = %e, "reconcile failed");
+                match self.reconcile_deferring(&keys.values().cloned().collect()).await {
+                    Ok((done, due)) => {
+                        if done != Reconciled::default() || !due.is_empty() {
+                            let reviewing: Vec<&str> = due.iter().map(|t| t.key.0.as_str()).collect();
+                            tracing::info!(?done, ?reviewing, "reconciled");
+                        }
+                        for task in due {
+                            let key = task.key.clone();
+                            let factory = self.clone();
+                            let handle = running.spawn(async move { factory.resume_review(&task).await });
+                            keys.insert(handle.id(), key);
+                            reviews.insert(handle.id());
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "reconcile failed"),
                 }
                 if (&mut shutdown).now_or_never().is_some() {
                     break;
                 }
             }
-            if let Err(e) = self.start_ready(&mut running, &mut keys).await {
+            if let Err(e) = self.start_ready(&mut running, &mut keys, reviews.len()).await {
                 tracing::warn!(error = %e, "couldn't start ready tasks");
             }
             let resume = self.paused_until().map(|(_, _, resets_at)| until(resets_at));
@@ -210,15 +216,18 @@ impl Factory {
                 _ = tokio::time::sleep(poll) => dirty = true,
                 Some(joined) = running.join_next_with_id() => match joined {
                     Ok((id, Ok(outcome))) => {
+                        reviews.remove(&id);
                         let key = keys.remove(&id);
                         tracing::info!(task = ?key, ?outcome, "run finished");
                     }
                     Ok((id, Err(e))) => {
+                        reviews.remove(&id);
                         let key = keys.remove(&id);
                         tracing::warn!(task = ?key, error = %e, "run failed; reconciling");
                         dirty = true;
                     }
                     Err(e) => {
+                        reviews.remove(&e.id());
                         let key = keys.remove(&e.id());
                         tracing::error!(task = ?key, error = %e, "run panicked; reconciling");
                         dirty = true;
@@ -244,6 +253,7 @@ impl Factory {
         self: &Arc<Self>,
         running: &mut JoinSet<Result<Outcome>>,
         keys: &mut HashMap<task::Id, TaskKey>,
+        reviewing: usize,
     ) -> Result<()> {
         if self.usage_paused() {
             return Ok(());
@@ -255,7 +265,7 @@ impl Factory {
             .into_iter()
             .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !busy.contains(&TaskKey(t.clone()))))
             .count();
-        let room = self.config.repo.max_sandboxes.saturating_sub(keys.len() + others);
+        let room = self.config.repo.max_sandboxes.saturating_sub(keys.len() - reviewing + others);
         if room == 0 {
             return Ok(());
         }
@@ -633,7 +643,21 @@ impl Factory {
 
     /// [`Factory::reconcile`], leaving alone the tasks this process is running right now.
     pub async fn reconcile_except(&self, running: &HashSet<TaskKey>) -> Result<Reconciled> {
+        let (mut done, due) = self.reconcile_deferring(running).await?;
+        for task in due {
+            match self.resume_review(&task).await {
+                Ok(_) => done.reviewed.push(task.key.0.clone()),
+                Err(e) => tracing::warn!(task = %task.key.0, error = %e, "couldn't review; the next reconcile retries"),
+            }
+        }
+        Ok(done)
+    }
+
+    /// [`Factory::reconcile_except`] without running the reviews it finds due: they're returned for the caller to run,
+    /// so the run loop can start workers alongside them instead of waiting (TRAIL-196).
+    async fn reconcile_deferring(&self, running: &HashSet<TaskKey>) -> Result<(Reconciled, Vec<Task>)> {
         let mut done = Reconciled::default();
+        let mut due = Vec::new();
         let live = self.compute.list(&self.base_labels()).await?;
         let tasks: Vec<Task> =
             self.tracker.in_flight(self.project()).await?.into_iter().filter(|t| !running.contains(&t.key)).collect();
@@ -662,15 +686,30 @@ impl Factory {
 
         // Likewise one task's failure, a review that can't start for instance, mustn't stop the others or the boot.
         for task in &tasks {
-            if let Err(e) = self.reconcile_task(task, &mut done).await {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't reconcile a task; the next reconcile retries");
+            match self.reconcile_task(task, &mut done).await {
+                Ok(true) => due.push(task.clone()),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't reconcile a task; the next reconcile retries")
+                }
             }
         }
-        Ok(done)
+        Ok((done, due))
     }
 
-    async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<()> {
-        let Some(name) = &task.run.sandbox else { return Ok(()) };
+    /// Reviews a task whose PR was left unreviewed, retiring the sub-agent of the round that didn't finish.
+    async fn resume_review(&self, task: &Task) -> Result<Outcome> {
+        let attempt = task.run.attempt.unwrap_or(1);
+        let pr = task.run.pr.as_ref().ok_or_else(|| Error::Other(format!("{} has no PR to review", task.key.0)))?;
+        if let Some(round) = task.run.review_rounds.filter(|r| *r > 0) {
+            self.tracker.revoke_sub_agent(&review_name(&task.key, attempt, round)).await?;
+        }
+        self.review(task, pr, attempt).await
+    }
+
+    /// Puts one in-flight task right; true when its PR is due a review.
+    async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
+        let Some(name) = &task.run.sandbox else { return Ok(false) };
         match task.status {
             Status::InProgress => {
                 let sub = self.tracker.sub_agent(name);
@@ -683,19 +722,11 @@ impl Factory {
             Status::Open => self.tracker.revoke_sub_agent(name).await?,
             Status::InReview => {
                 let attempt = task.run.attempt.unwrap_or(1);
-                if let Some(pr) = &task.run.pr
-                    && task.run.reviewed != Some(attempt)
-                {
-                    if let Some(round) = task.run.review_rounds.filter(|r| *r > 0) {
-                        self.tracker.revoke_sub_agent(&review_name(&task.key, attempt, round)).await?;
-                    }
-                    self.review(task, pr, attempt).await?;
-                    done.reviewed.push(task.key.0.clone());
-                }
+                return Ok(task.run.pr.is_some() && task.run.reviewed != Some(attempt));
             }
             _ => {}
         }
-        Ok(())
+        Ok(false)
     }
 }
 

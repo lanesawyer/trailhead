@@ -850,3 +850,33 @@ async fn a_review_that_cant_start_doesnt_stop_reconcile() {
     assert_eq!(done.requeued, [crashed.0], "the rest is still reconciled");
     assert_eq!(r.tracker.task(&unreviewed).status, Status::InReview, "left for the next reconcile");
 }
+
+#[tokio::test]
+async fn a_review_left_from_before_a_restart_doesnt_hold_up_workers() {
+    let r = rig();
+    let unreviewed = r.tracker.add_task("TRAIL", "Unreviewed", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.factory.run_task(&r.tracker.task(&unreviewed)).await.unwrap();
+
+    // The boot review is slow; a ready task starts anyway.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    r.harness.push(Role::Reviewer, Script::new(approve()).wait_for(gate.clone()));
+    let ready = r.tracker.add_task("TRAIL", "Ready", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "?".into() }));
+
+    let factory = Arc::new(r.factory);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle =
+        tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), std::time::Duration::from_millis(5), async {
+            let _ = stopped.await;
+        }));
+    let tracker = r.tracker.clone();
+    until("the ready task to run", || tracker.task(&ready).status == Status::NeedsInput).await;
+    assert_eq!(tracker.task(&unreviewed).run.reviewed, None, "the review is still going");
+
+    gate.notify_one();
+    until("the review to land", || tracker.task(&unreviewed).run.reviewed == Some(1)).await;
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
