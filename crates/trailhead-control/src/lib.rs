@@ -1584,21 +1584,22 @@ impl Factory {
 
     /// Whether the task's PR was merged or closed, which is dealt with here: a merge, by whoever, finishes the task and
     /// a closed PR parks it.
-    async fn pr_settled(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
-        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return Ok(false) };
+    /// `None` when it did; when it's still open (or there's no PR to ask about), `Some` of whether it merges cleanly.
+    async fn pr_settled(&self, task: &Task, done: &mut Reconciled) -> Result<Option<Option<bool>>> {
+        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return Ok(Some(None)) };
         match codehost.pr_state(pr).await? {
             PrState::Merged { commit } => {
                 // A merge the factory didn't make: whoever did it, a person did it outside the factory.
                 self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
                 done.merged.push(task.key.0.clone());
-                Ok(true)
+                Ok(None)
             }
             PrState::Closed => {
                 self.park_closed(task, pr).await?;
                 done.closed.push(task.key.0.clone());
-                Ok(true)
+                Ok(None)
             }
-            PrState::Open => Ok(false),
+            PrState::Open { mergeable } => Ok(Some(mergeable)),
         }
     }
 
@@ -1616,15 +1617,13 @@ impl Factory {
             }
             Status::Open => self.tracker.revoke_sub_agent(name).await?,
             Status::Approved => {
-                if self.pr_settled(task, done).await? {
+                if self.pr_settled(task, done).await?.is_none() {
                     return Ok(false);
                 }
                 self.evaluate_gates(&task.key).await?;
             }
             Status::InReview => {
-                if self.pr_settled(task, done).await? {
-                    return Ok(false);
-                }
+                let Some(mergeable) = self.pr_settled(task, done).await? else { return Ok(false) };
                 let attempt = task.run.attempt.unwrap_or(1);
                 // Changes were requested on this attempt but the task never left review: finish reopening it.
                 if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt) {
@@ -1634,9 +1633,8 @@ impl Factory {
                     return Ok(false);
                 }
                 if let Some(pr) = &task.run.pr
-                    && let Some(codehost) = &self.codehost
-                    // Not yet worked out by the host: the next reconcile asks again.
-                    && codehost.mergeable(pr).await? == Some(false)
+                    // Not yet worked out by the host (`None`): the next reconcile asks again.
+                    && mergeable == Some(false)
                 {
                     self.rework_conflict(task, pr, attempt).await?;
                     done.conflicted.push(task.key.0.clone());
