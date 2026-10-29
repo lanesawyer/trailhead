@@ -839,7 +839,10 @@ impl Factory {
         // approval without a mark is Lane's.
         let mut approved_head = prev.as_ref().and_then(|d| d.approved_head.clone());
         let mut human_head = prev.as_ref().and_then(|d| d.human_head.clone());
-        if status == Status::Approved {
+        if status == Status::InReview {
+            // However it got back to review (a push, Lane, a rework), no earlier approval applies.
+            (approved_head, human_head) = (None, None);
+        } else {
             if approved_head.is_none() && human_head.is_none() {
                 human_head = Some(head.clone());
             }
@@ -891,18 +894,20 @@ impl Factory {
             problem: None,
             message: String::new(),
         };
-        // What's stored now, to leave the task alone when nothing changed.
-        let mut stored = prev.clone();
         // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
         if gates_pass && status == Status::InReview {
             decision.approved_head = Some(head.clone());
-            self.tracker.report(key, RunUpdate { merge: Some(decision.clone()), ..RunUpdate::default() }).await?;
-            stored = Some(decision.clone());
+            // The mark goes down before the approval so it can't pass for Lane's. Not again while approving is known
+            // to fail, which would write the task every pass.
+            if prev.as_ref().is_none_or(|d| d.problem.is_none()) {
+                self.tracker.report(key, RunUpdate { merge: Some(decision.clone()), ..RunUpdate::default() }).await?;
+            }
             match self.tracker.approve(key).await {
                 Ok(()) => tracing::info!(task = %key.0, %head, "gates passed; approved"),
                 Err(Error::Forbidden(why)) => {
                     let problem = format!(
-                        "the factory can't move the task to approved ({why}); a person has to list `{}` as a                          reviewer of project {}",
+                        "the factory can't move the task to approved ({why}); a person has to list `{}` as a \
+                         reviewer of project {}",
                         self.tracker.agent(),
                         self.project()
                     );
@@ -914,7 +919,7 @@ impl Factory {
             }
         }
         decision.message = decision_message(&grade, &decision, gate.auto_merge);
-        if stored.as_ref() == Some(&decision) {
+        if prev.as_ref() == Some(&decision) {
             return Ok(());
         }
         if self.config.merge.mode == MergeMode::Shadow && prev.as_ref().is_none_or(|d| d.message != decision.message) {
