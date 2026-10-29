@@ -11,7 +11,9 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, RelayMode, SecretKey};
 use tokio::sync::Notify;
 use trailhead_control::{Factory, Outcome};
-use trailhead_daemon::net::{ALPN, DaemonProtocol, Launch, RemoteDaemon, read_frame, sandbox_key, write_frame};
+use trailhead_daemon::net::{
+    ALPN, DaemonProtocol, Launch, RemoteDaemon, build_id, read_frame, sandbox_key, write_frame,
+};
 use trailhead_factory::{
     Commit, Compute, Credential, Daemon, DaemonSecrets, Error, FactoryConfig, FileChange, FromDaemon, Labels, Role,
     RunEvent, RunOutcome, RunRequest, RunResult, SandboxId, SandboxSpec, Status, TaskKey, ToDaemon, Tracker, Usd,
@@ -55,6 +57,24 @@ async fn endpoint(key: SecretKey, lookup: Option<Arc<MemoryLookup>>) -> Endpoint
     builder.bind().await.unwrap()
 }
 
+async fn spawn_daemon(
+    remote: &RemoteDaemon,
+    local: &LocalDaemon,
+    lookup: &MemoryLookup,
+    sandbox: &str,
+    attach_patience: Duration,
+    build: String,
+) -> Router {
+    let program = remote.program(&SandboxId(sandbox.into()));
+    let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
+    let key = trailhead_daemon::net::parse_secret_key(&secrets.secret_key).unwrap();
+    let control_plane = trailhead_daemon::net::parse_endpoint_id(&secrets.control_plane).unwrap();
+    let ep = endpoint(key, None).await;
+    lookup.add_endpoint_info(ep.addr());
+    let protocol = DaemonProtocol::new(local.runner(), control_plane).attach_patience(attach_patience).build(build);
+    Router::builder(ep).accept(ALPN, protocol).spawn()
+}
+
 struct Rig {
     tracker: FakeTracker,
     compute: FakeCompute,
@@ -91,14 +111,13 @@ impl Rig {
     }
 
     async fn serve_with(&mut self, sandbox: &str, attach_patience: Duration) {
-        let program = self.remote.program(&SandboxId(sandbox.into()));
-        let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
-        let key = trailhead_daemon::net::parse_secret_key(&secrets.secret_key).unwrap();
-        let control_plane = trailhead_daemon::net::parse_endpoint_id(&secrets.control_plane).unwrap();
-        let ep = endpoint(key, None).await;
-        self.lookup.add_endpoint_info(ep.addr());
-        let protocol = DaemonProtocol::new(self.local.runner(), control_plane).attach_patience(attach_patience);
-        self.routers.push(Router::builder(ep).accept(ALPN, protocol).spawn());
+        let router = self.daemon(sandbox, attach_patience, build_id(b"daemon")).await;
+        self.routers.push(router);
+    }
+
+    /// A daemon of the given build, not yet kept by the rig.
+    async fn daemon(&self, sandbox: &str, attach_patience: Duration, build: String) -> Router {
+        spawn_daemon(&self.remote, &self.local, &self.lookup, sandbox, attach_patience, build).await
     }
 
     /// A sandbox the fake compute knows about, so the control plane can wake it before dialing.
@@ -423,4 +442,58 @@ async fn a_permanent_wake_failure_fails_at_once() {
     assert!(matches!(err, Error::Rejected(_)), "{err:?}");
     assert_eq!(r.compute.wake_attempts("refused"), 1, "not retried");
     assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+}
+
+#[tokio::test]
+async fn a_daemon_of_an_older_build_is_restarted_before_prepare() {
+    let r = Rig::new().await;
+    let sandbox = r.sandbox("restored").await;
+    // The checkpoint's process: running the previous build.
+    let old = Arc::new(tokio::sync::Mutex::new(Some(
+        r.daemon("restored", trailhead_daemon::net::ATTACH_PATIENCE, build_id(b"old daemon")).await,
+    )));
+    let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (remote, local, lookup) = (r.remote.clone(), r.local.clone(), r.lookup.clone());
+    r.compute.on_start({
+        let (old, starts) = (old.clone(), starts.clone());
+        move |_| {
+            let (old, starts) = (old.clone(), starts.clone());
+            let (remote, local, lookup) = (remote.clone(), local.clone(), lookup.clone());
+            async move {
+                // The first start finds the old process still running; the restart replaces it.
+                let nth = starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if nth == 1 {
+                    let router = old.lock().await.take().unwrap();
+                    router.shutdown().await.unwrap();
+                    let new = spawn_daemon(
+                        &remote,
+                        &local,
+                        &lookup,
+                        "restored",
+                        trailhead_daemon::net::ATTACH_PATIENCE,
+                        build_id(b"daemon"),
+                    )
+                    .await;
+                    *old.lock().await = Some(new);
+                }
+            }
+        }
+    });
+    let req = r.factory().config.prepare_request(Role::Worker, None);
+    r.remote.prepare(&sandbox, req).await.unwrap();
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 2, "started, found it stale, started again");
+    assert_eq!(r.local.prepares_started(), 1);
+}
+
+#[tokio::test]
+async fn a_daemon_that_stays_stale_fails_the_prepare_loudly() {
+    let mut r = Rig::new().await;
+    let sandbox = r.sandbox("stuck-old").await;
+    let old = r.daemon("stuck-old", trailhead_daemon::net::ATTACH_PATIENCE, build_id(b"old daemon")).await;
+    r.routers.push(old);
+    let req = r.factory().config.prepare_request(Role::Worker, None);
+    let err = r.remote.prepare(&sandbox, req).await.unwrap_err();
+    assert!(err.to_string().contains("not the current build"), "{err}");
+    assert_eq!(r.compute.programs("stuck-old").len(), 1, "the daemon was started again, replacing the program");
+    assert_eq!(r.local.prepares_started(), 0, "never prepared by a stale daemon");
 }

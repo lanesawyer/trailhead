@@ -19,13 +19,13 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, watch};
 use trailhead_factory::{
-    Compute, Daemon, DaemonSecrets, Error, EventSink, FromDaemon, PrepareRequest, Program, Result, RunEvent, RunReport,
-    RunRequest, SandboxFile, SandboxId, ToDaemon,
+    Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, PrepareRequest, Program, Result,
+    RunEvent, RunReport, RunRequest, SandboxFile, SandboxId, ToDaemon,
 };
 
 use crate::Runner;
@@ -72,6 +72,11 @@ pub fn parse_secret_key(hex_key: &str) -> Result<SecretKey> {
 
 pub fn parse_endpoint_id(hex_id: &str) -> Result<EndpointId> {
     hex_id.trim().parse().map_err(|e| Error::Config(format!("endpoint id {hex_id}: {e}")))
+}
+
+/// The identity of a daemon binary: the hex SHA-256 of its bytes.
+pub fn build_id(binary: &[u8]) -> String {
+    hex::encode(Sha256::digest(binary))
 }
 
 fn io_err(e: impl std::fmt::Display) -> Error {
@@ -206,6 +211,7 @@ pub struct DaemonProtocol {
     runs: Arc<Mutex<HashMap<String, Arc<LiveRun>>>>,
     preparing: Arc<Mutex<Option<Preparing>>>,
     attach_patience: Duration,
+    version: DaemonVersion,
 }
 
 /// The latest prepare, so a control plane that lost its connection and asks again joins it rather than racing it in
@@ -231,7 +237,14 @@ impl DaemonProtocol {
             runs: Arc::default(),
             preparing: Arc::default(),
             attach_patience: ATTACH_PATIENCE,
+            version: DaemonVersion { version: env!("CARGO_PKG_VERSION").into(), build: "unknown".into() },
         }
+    }
+
+    /// Sets the build the daemon reports: [`build_id`] of its own executable.
+    pub fn build(mut self, build: String) -> DaemonProtocol {
+        self.version.build = build;
+        self
     }
 
     /// How long a run may go unfollowed before it's cancelled; [`ATTACH_PATIENCE`] unless a test wants less.
@@ -277,6 +290,7 @@ impl DaemonProtocol {
                     return reply_with(&mut send, &FromDaemon::Failed(e)).await;
                 }
             },
+            ToDaemon::Version => return reply_with(&mut send, &FromDaemon::Version(self.version.clone())).await,
             ToDaemon::Cancel => {
                 return reply_with(&mut send, &FromDaemon::Failed(Error::Other("cancel without a run".into()))).await;
             }
@@ -671,6 +685,48 @@ impl RemoteDaemon {
         Ok(conn)
     }
 
+    /// The version the daemon in the sandbox reports, or `None` when it predates version reporting (or hung up).
+    async fn running_version(&self, sandbox: &SandboxId) -> Result<Option<DaemonVersion>> {
+        let (mut send, mut recv) = self.open(sandbox, CONNECT_PATIENCE).await?;
+        write_frame(&mut send, &ToDaemon::Version).await?;
+        Ok(match read_frame::<FromDaemon>(&mut recv).await {
+            Ok(Some(FromDaemon::Version(v))) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Makes sure the daemon that runs is the binary this control plane uploads. A sandbox restored from a
+    /// checkpoint can come back with the previous build's process still running, which would silently drop
+    /// the fields of any newer request. A stale daemon is restarted onto the current binary; one still stale
+    /// after that is an error.
+    async fn ensure_current(&self, sandbox: &SandboxId) -> Result<()> {
+        let want = build_id(&self.launch.binary);
+        let running = self.running_version(sandbox).await?;
+        if let Some(v) = running.as_ref().filter(|v| v.build == want) {
+            tracing::info!(sandbox = %sandbox.0, version = %v.version, build = %v.build, "daemon version");
+            return Ok(());
+        }
+        tracing::warn!(
+            sandbox = %sandbox.0,
+            running = ?running.as_ref().map(|v| (&v.version, &v.build)),
+            %want,
+            "the daemon in the sandbox is not the current build; restarting it"
+        );
+        self.disconnect(sandbox);
+        self.compute.start(sandbox, &self.program(sandbox)).await?;
+        match self.running_version(sandbox).await? {
+            Some(v) if v.build == want => {
+                tracing::info!(sandbox = %sandbox.0, version = %v.version, build = %v.build, "daemon restarted onto the current build");
+                Ok(())
+            }
+            other => Err(Error::Other(format!(
+                "the daemon in {} is still not the current build after a restart (running {:?}, want {want})",
+                sandbox.0,
+                other.map(|v| v.build)
+            ))),
+        }
+    }
+
     async fn open(&self, sandbox: &SandboxId, patience: Duration) -> Result<(SendStream, RecvStream)> {
         let conn = self.connection(sandbox, patience).await?;
         conn.open_bi().await.map_err(io_err)
@@ -717,7 +773,9 @@ impl RemoteDaemon {
                                 }
                                 Some(Ok(FromDaemon::Report(report))) => return Ok(report),
                                 Some(Ok(FromDaemon::Failed(e))) => return Err(e),
-                                Some(Ok(FromDaemon::Prepared)) => return Err(io_err("unexpected Prepared during a run")),
+                                Some(Ok(FromDaemon::Prepared | FromDaemon::Version(_))) => {
+                                    return Err(io_err("unexpected reply during a run"));
+                                }
                                 Some(Err(e)) => break e,
                                 None => break io_err(format!("the daemon in {} went away", sandbox.0)),
                             },
@@ -751,6 +809,7 @@ impl Daemon for RemoteDaemon {
         if !connected {
             self.compute.start(sandbox, &self.program(sandbox)).await?;
         }
+        self.ensure_current(sandbox).await?;
         let mut patience = CONNECT_PATIENCE;
         let mut lost = 0;
         loop {

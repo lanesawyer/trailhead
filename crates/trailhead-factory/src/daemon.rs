@@ -105,6 +105,18 @@ pub enum ToDaemon {
         seen: u64,
     },
     Cancel,
+    /// Asks which build of the daemon is answering. A daemon that predates this fails the request.
+    Version,
+}
+
+/// Which build of the daemon is running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonVersion {
+    /// The daemon crate's version.
+    pub version: String,
+    /// SHA-256 of the daemon's executable, hex. The control plane compares it with the binary it uploads, so
+    /// it catches a stale process as well as a stale protocol.
+    pub build: String,
 }
 
 /// Daemon to control plane: `Event`s while a run streams, then exactly one of the rest.
@@ -112,6 +124,7 @@ pub enum ToDaemon {
 pub enum FromDaemon {
     Event(RunEvent),
     Prepared,
+    Version(DaemonVersion),
     Report(RunReport),
     Failed(Error),
 }

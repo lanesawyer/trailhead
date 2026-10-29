@@ -177,7 +177,8 @@ async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
     if gated { Err(Error::ReviewRequired) } else { Ok(()) }
 }
 
-/// Whether the acting agent claimed the task or sent it to review.
+/// Whether the acting agent claimed the task or sent it to review. An undone send to review
+/// still counts: the agent did the work either way.
 async fn did_work(tx: &Tx, task: &Task) -> Result<bool> {
     let me = tx.ctx.actor_id().to_string();
     let mut rows = tx

@@ -440,3 +440,22 @@ async fn a_pr_that_keeps_conflicting_parks_for_lane_at_the_review_round_cap() {
     assert!(question.body.contains("keeps conflicting") && question.body.contains("2"), "{}", question.body);
     assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty(), "parked once");
 }
+
+#[tokio::test]
+async fn a_merge_the_agent_started_itself_is_published_as_a_merge_commit() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+
+    // The checkout had no merge under way when prepared; the agent runs `git merge --no-commit` itself.
+    r.daemon.agent_merges();
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let commits = r.codehost.commits(&pr.repo, "factory/trail-1");
+    assert_eq!(commits.last().unwrap().merges, [FAKE_BASE_MERGE], "published as a merge commit");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+}
