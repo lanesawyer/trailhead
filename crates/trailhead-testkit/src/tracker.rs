@@ -247,6 +247,21 @@ impl Tracker for FakeTracker {
         Ok(out)
     }
 
+    async fn last_review(&self, task: &TaskKey) -> Result<Option<Verdict>> {
+        self.check_live()?;
+        let s = self.state.lock().unwrap();
+        let comments = s.comments.get(task).map(Vec::as_slice).unwrap_or_default();
+        Ok(comments.iter().rev().find(|c| c.kind == "review").and_then(|c| {
+            let (kind, body) = c.body.split_once(": ")?;
+            let kind = match kind {
+                "approve" => VerdictKind::Approve,
+                "request_changes" => VerdictKind::RequestChanges,
+                _ => return None,
+            };
+            Some(Verdict { kind, body: body.to_string(), reviewer: c.author.clone(), model: None })
+        }))
+    }
+
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
         self.check_live()?;
         let s = self.state.lock().unwrap();

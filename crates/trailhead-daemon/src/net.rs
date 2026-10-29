@@ -637,7 +637,7 @@ impl RemoteDaemon {
         let deadline = tokio::time::Instant::now() + patience;
         let mut wait = Duration::from_millis(250);
         // The sandbox may have paused since the last request, and a dial won't wake it. The compute API can blip
-        // as well, so a failed wake is retried like a failed dial, unless retrying can't help.
+        // as well, so a failed wake is retried like a failed dial, unless retrying can't help (any error but `Other`).
         loop {
             // Bounded by the deadline, since a hanging compute API plus its own retries would outlast the patience.
             let woke = tokio::time::timeout_at(deadline, self.compute.wake(sandbox))

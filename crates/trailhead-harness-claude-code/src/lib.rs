@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use trailhead_factory::{
     CheckResult, Commit, Error, EventSink, Feedback, FileChange, FollowUp, Harness, ModelId, Result, Role, RunContext,
@@ -115,20 +115,27 @@ impl ClaudeCode {
         if let Some(id) = resume {
             cmd.arg("--resume").arg(id);
         }
+        // The prompt goes on stdin: one argv argument is capped at 128 KiB on Linux, and a reviewer's diff can exceed it.
         let mut child = cmd
-            .arg(prompt)
             .current_dir(&ctx.workdir)
             .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
             .env("DISABLE_AUTOUPDATER", "1")
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Cancelling the run drops this future; the agent must not outlive it.
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| Error::Other(format!("can't start {}: {e}", self.binary.display())))?;
+        let mut stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
+        // Written from its own task so a prompt bigger than the pipe can't deadlock against output we haven't read.
+        // A write error (the agent exited early) shows up as its missing result.
+        let input = prompt.as_bytes().to_vec();
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&input).await;
+        });
         let stderr = tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             let mut tail = Vec::new();
@@ -235,20 +242,31 @@ pub fn schema(role: Role) -> Value {
 /// The most the human-context section of a prompt may take, in bytes.
 const HUMAN_CONTEXT_CAP: usize = 6000;
 
+/// The most the answers may take of the human-context section, so notes keep the rest.
+const ANSWERS_CAP: usize = 4000;
+
 /// Lane's answers and the task's decisions and notes, for after the description. Empty when there are none. Past
-/// the cap the oldest notes are dropped; answers are kept first, each cut short if very long.
+/// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
+/// is always kept.
 fn human_section(task: &trailhead_factory::TaskSpec) -> String {
     let ctx = &task.context;
     let mut budget = HUMAN_CONTEXT_CAP;
     let mut out = String::new();
-    if !ctx.answers.is_empty() {
-        out.push_str("\n\nQuestions you asked earlier and Lane's answers:");
-        for a in &ctx.answers {
-            let entry =
-                format!("\n- Q: {}\n  A ({}, {}): {}", clip(&a.question, 1000), a.by, a.date, clip(&a.answer, 2000));
-            budget = budget.saturating_sub(entry.len());
-            out.push_str(&entry);
+    let mut answers = Vec::new();
+    let mut answers_budget = ANSWERS_CAP;
+    for a in ctx.answers.iter().rev() {
+        let entry =
+            format!("\n- Q: {}\n  A ({}, {}): {}", clip(&a.question, 1000), a.by, a.date, clip(&a.answer, 2000));
+        if entry.len() > answers_budget && !answers.is_empty() {
+            break;
         }
+        answers_budget = answers_budget.saturating_sub(entry.len());
+        budget = budget.saturating_sub(entry.len());
+        answers.push(entry);
+    }
+    if !answers.is_empty() {
+        out.push_str("\n\nQuestions you asked earlier and Lane's answers:");
+        answers.iter().rev().for_each(|e| out.push_str(e));
     }
     let mut kept = Vec::new();
     for n in ctx.notes.iter().rev() {
@@ -309,6 +327,29 @@ fn clip(s: &str, max: usize) -> String {
     format!("{}… (cut)", &s[..end])
 }
 
+/// The most of the diff a reviewer's prompt embeds, in bytes. The rest it reads from the checkout.
+pub const DIFF_CAP: usize = 100 * 1024;
+
+/// The diff cut to `cap` bytes at a file boundary (a `diff --git` line), with a note saying how to read the rest.
+fn capped_diff(diff: &str, cap: usize) -> String {
+    if diff.len() <= cap {
+        return diff.to_string();
+    }
+    let mut end = cap;
+    while !diff.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Back up to the start of the file whose diff straddles the cap; one huge first file is cut mid-file.
+    let at = diff[..end].rfind("\ndiff --git ").map(|i| i + 1).unwrap_or(end);
+    format!(
+        "{}\n[The diff is {} bytes and was cut here at {} bytes. Read the rest with `git diff origin/<base>...HEAD` \
+         in the checkout, where <base> is the PR's base branch.]",
+        diff[..at].trim_end(),
+        diff.len(),
+        at
+    )
+}
+
 pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
     let task = &ctx.task;
     let mut p = match ctx.role {
@@ -325,7 +366,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
             title = task.title,
             desc = task.description,
             human = human_section(task),
-            diff = ctx.diff.as_deref().unwrap_or("(no diff)"),
+            diff = ctx.diff.as_deref().map_or("(no diff)".into(), |d| capped_diff(d, DIFF_CAP)),
             checks = checks_section(&ctx.checks),
         ),
         _ => format!(

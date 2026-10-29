@@ -30,7 +30,8 @@ pub use projects::{NewProject, ProjectPatch};
 pub use reminders::{DEFAULT_REMINDER_WINDOW, DUE_SOON, OVERDUE};
 pub use store::{Clock, Ctx, Store};
 pub use tasks::{
-    MatchField, NewTask, SearchFilter, SearchHit, SearchMatch, TaskDetail, TaskFilter, TaskPatch, TaskSort,
+    GradeFilter, MatchField, NewTask, SearchFilter, SearchHit, SearchMatch, TaskDetail, TaskFilter, TaskPatch,
+    TaskSort, parse_grade,
 };
 pub use tokens::{Principal, Token, TokenOptions, TokenPatch};
 pub use undo::{Reverted, Skipped, UndoReport};

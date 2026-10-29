@@ -12,7 +12,7 @@ use trailhead_harness_claude_code::{ClaudeCode, PLACEHOLDER_KEY, prompt};
 
 /// Writes its arguments and environment to `$FAKE_LOG`, then plays the scenario in `$FAKE_SCENARIO`.
 const FAKE: &str = r#"#!/bin/sh
-{ printf '%s\n' "$@"; echo "BASE=$ANTHROPIC_BASE_URL"; echo "KEY=$ANTHROPIC_API_KEY"; echo "OAUTH=$CLAUDE_CODE_OAUTH_TOKEN"; echo "FACTORY_TASK=$TRAILHEAD_FACTORY_TASK"; } > "$FAKE_LOG"
+{ printf '%s\n' "$@"; cat; echo "BASE=$ANTHROPIC_BASE_URL"; echo "KEY=$ANTHROPIC_API_KEY"; echo "OAUTH=$CLAUDE_CODE_OAUTH_TOKEN"; echo "FACTORY_TASK=$TRAILHEAD_FACTORY_TASK"; } > "$FAKE_LOG"
 asst() { echo "{\"type\":\"assistant\",\"message\":{\"id\":\"$1\",\"model\":\"claude-sonnet-x\",\"content\":[$2],\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":1}}}"; }
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 case "$FAKE_SCENARIO" in
@@ -146,6 +146,8 @@ async fn play(r: &Rig, scenario: &str, ctx: RunContext) -> (RunOutcome, Vec<RunE
 async fn claude_code_sessions() {
     worker_changes_are_collected().await;
     reviewer_verdict_from_result_text().await;
+    oversized_prompts_go_on_stdin().await;
+    reviewers_get_a_capped_diff().await;
     approving_review_carries_follow_ups().await;
     questions_park_the_task().await;
     no_changes_is_a_failure().await;
@@ -240,6 +242,29 @@ async fn reviewer_verdict_from_result_text() {
     assert!(log.contains("- test: passed") && log.contains("- lint: FAILED"), "check results: {log}");
     assert!(log.contains("warning: unused import") && log.contains("don't build or run tests"), "{log}");
     assert!(log.contains("request_changes"), "the reviewer's schema offers verdicts");
+}
+
+async fn oversized_prompts_go_on_stdin() {
+    let r = rig();
+    let mut c = ctx(&r, Role::Worker, 10);
+    c.task.description = "y".repeat(300 * 1024);
+    let (out, _) = play(&r, "worker", c).await;
+    assert!(matches!(out, RunOutcome::Changes { .. }), "{out:?}");
+    let log = std::fs::read_to_string(&r.log).unwrap();
+    assert!(log.contains(&"y".repeat(300 * 1024)), "the whole prompt arrived");
+}
+
+async fn reviewers_get_a_capped_diff() {
+    let r = rig();
+    let mut c = ctx(&r, Role::Reviewer, 0);
+    let file = |n: usize| format!("diff --git a/f{n} b/f{n}\n{}\n", "+line of code\n".repeat(2000));
+    c.diff = Some((0..10).map(file).collect());
+    play(&r, "review", c).await;
+    let log = std::fs::read_to_string(&r.log).unwrap();
+    assert!(log.contains("diff --git a/f0 b/f0") && !log.contains("diff --git a/f9 b/f9"), "cut");
+    assert!(log.contains("git diff origin/<base>...HEAD"), "tells the reviewer how to read the rest");
+    let at = log.find("[The diff is").unwrap();
+    assert!(log[..at].trim_end().ends_with("+line of code"), "cut on a file boundary");
 }
 
 async fn approving_review_carries_follow_ups() {
@@ -368,5 +393,29 @@ fn prompt_carries_answers_and_notes_and_stays_bounded() {
     );
     assert!(p.contains("Decisions and notes on this task"));
     assert!(p.contains("note 99:") && !p.contains("note 0:"), "the oldest notes go first");
+    assert!(p.len() < 9000, "{}", p.len());
+}
+
+#[test]
+fn many_long_answers_keep_the_newest_and_leave_room_for_notes() {
+    use trailhead_factory::{Answered, TaskNote};
+    let r = rig();
+    let mut c = ctx(&r, Role::Worker, 0);
+    for i in 0..20 {
+        c.task.context.answers.push(Answered {
+            question: format!("question {i}? {}", "q".repeat(2000)),
+            answer: format!("answer {i}: {}", "a".repeat(3000)),
+            by: "lane".into(),
+            date: "2026-10-29".into(),
+        });
+    }
+    c.task.context.notes.push(TaskNote {
+        author: "lane".into(),
+        date: "2026-10-29".into(),
+        body: "a note that must survive".into(),
+    });
+    let p = prompt(&c, None);
+    assert!(p.contains("answer 19:") && !p.contains("answer 0:"), "the oldest answers go first");
+    assert!(p.contains("a note that must survive"), "notes aren't crowded out");
     assert!(p.len() < 9000, "{}", p.len());
 }
