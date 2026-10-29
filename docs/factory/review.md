@@ -15,7 +15,7 @@ Named after the climbing classes of the Yosemite Decimal System: the higher the 
 | 1 | A walk on a trail | Docs, new or changed tests, formatting | Checks + CI; auto-merge |
 | 2 | Off-trail | Ordinary code within existing modules | Checks + CI + agent review; auto-merge |
 | 3 | Scrambling, above Treeline | New or upgraded dependencies, schema or migrations, public API changes, large diffs | Checks + CI + agent review + human |
-| 4 | Exposed | Auth, secrets handling, sandbox egress, CI workflows, the factory's own policy (`factory.toml`) and profiles | Human required; agent review advisory |
+| 4 | Exposed | Auth, secrets handling, sandbox egress, CI workflows, the factory's own policy (`factory.toml`) and profiles | Checks + CI + human; agent review advisory |
 
 How grades are set:
 
@@ -53,7 +53,7 @@ quorum = { reviewers = 3, agree = 3, distinct_models = true }
 mode = "shadow"          # off | shadow | on
 ```
 
-Gates are keyed by grade (`[gates.1]` to `[gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. `[merge] mode = "on"` is rejected at startup until the merge task lands. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203); merging isn't.
+Gates are keyed by grade (`[gates.1]` to `[gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[merge] mode = "on"` (TRAIL-205).
 
 Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. Lane grades the queue once grades exist and widens auto-merge from there. With the rules above, code in `crates/` raises a grade-1 task to 2, so only docs and similar work merges on its own.
 
@@ -73,7 +73,7 @@ The control plane acts as the merger. It is the factory project's only delegated
 4. What it does with an `approved` task depends on `[merge] mode` and the grade's `auto_merge`:
    - **`off`:** nothing; Lane merges every PR.
    - **`shadow`:** it posts what it *would* do and doesn't merge, including, when the PR is behind `main`, that it would update the branch first ("Would merge `main` into the branch, wait for CI on the new head, then squash-merge."). Lane merges as today, and compares. The default until Lane switches it.
-   - **`on`:** for a grade with `auto_merge`, it first brings the PR up to date (below), then squash-merges it. A merge conflict sends the task back to running, to rework the PR on top of `main`. For other grades, Lane's approval is the human gate and the merger merges after it.
+   - **`on`:** for a grade with `auto_merge`, it first brings the PR up to date (below), then squash-merges it, pinned to the head its gates passed on. A merge conflict sends the task back to running, to rework the PR on top of `main`; a moved head or a merge the host refuses for another reason is tried again on the next pass, not reworked. For other grades, Lane's approval is the human gate and the merger merges after it.
 
    **Updating the branch (TRAIL-212).** `main` requires its checks to pass on a branch that's up to date with it (strict status checks), so a green run against an old base isn't enough: PR #21 merged on one while `main` had since changed a signature, and `main` stopped compiling. Before merging, the merger asks the host whether the PR is behind its base (`CodeHost::behind`). If it is, it merges the base branch into the PR branch (`CodeHost::update_branch`: a merge commit, never a rebase and force-push) and goes back to waiting for CI on the new head. It merges only when CI is green on a head that isn't behind. Another PR landing meanwhile just repeats this.
    - **Conflicts.** If the base branch doesn't merge cleanly, the task goes back to running for a rework on top of `main`, as for any merge conflict ([lifecycle.md](lifecycle.md)). Only a real merge conflict does: the host also refuses an update when there's nothing to merge in (an update it queued earlier has landed, so the merger looks at the head again) or when the head moved since the merger read it (the update names the head it read, so a push that raced it isn't merged over). Those are not conflicts, since a conflict costs a review round (TRAIL-199); the first is `UpToDate` and the second an error the merger retries on its next tick.
