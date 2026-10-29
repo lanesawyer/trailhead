@@ -28,6 +28,8 @@ Decided: strongly typed. Shared Rust types for every message between the control
 
 The Claude Code harness (`trailhead-harness-claude-code`) runs `claude --print --output-format stream-json` in the checkout, with `ANTHROPIC_BASE_URL` set to the run's endpoint and a placeholder key. It ends with structured output against a per-role schema (`done`, `needs_input` or `failed` for workers; `approve` or `request_changes` for reviewers). The step limit is enforced by killing the CLI, and a worker's changes are everything that differs from where the run started.
 
+The prompt is the task's title and description, then what people have said on the task, because `trailhead` isn't installed in the sandbox and the agent can't read comments itself: a "Questions you asked earlier and Lane's answers" section (each resolved question with its answer) and a "Decisions and notes on this task" section (`decision` and `note` comments, oldest first, with author and date). The control plane fetches them from the tracker at the start of each run and leaves out the factory's own bookkeeping (comments by `factory/...` agents other than their questions). Either section is left out when empty. The two together are capped at about 6 KB: past that the oldest notes are dropped. After them come the previous failure, when there was one, and a reviewer's requested changes.
+
 ## Agent profiles
 
 Decided: every run uses a named profile binding a role to a harness, a provider, a model and default limits. Profiles live in each repo's factory file. Tasks pick a profile; nothing hard-codes a model.

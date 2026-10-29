@@ -1,12 +1,18 @@
 //! [`Tracker`] in-process on a Trailhead [`Store`], for when the server is the control plane.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
 use trailhead_core::{CommentKind, Ctx, NewComment, Principal, Store, TaskFilter, TaskPatch, TokenOptions};
-use trailhead_factory::{Credential, Error, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict, VerdictKind};
+use trailhead_factory::{
+    Answered, Credential, Error, HumanContext, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, Verdict,
+    VerdictKind, is_factory_agent,
+};
+use uuid::Uuid;
 
 /// The metadata key the factory's run fields live under.
 pub const METADATA_KEY: &str = "factory";
@@ -150,6 +156,59 @@ impl Tracker for CoreTracker {
         let ctx = self.ctx().await?;
         let t = self.store.get_task(&ctx, &task.0).await.map_err(map_err)?;
         self.task(&ctx, t).await
+    }
+
+    async fn human_context(&self, task: &TaskKey) -> Result<HumanContext> {
+        let ctx = self.ctx().await?;
+        let comments = self.store.list_comments(&ctx, &task.0).await.map_err(map_err)?;
+        let mut names: HashMap<Uuid, String> = HashMap::new();
+        for a in self.store.list_agents(&ctx).await.map_err(map_err)? {
+            names.insert(a.id, a.name);
+        }
+        for c in &comments {
+            if let Entry::Vacant(e) = names.entry(c.author_id) {
+                // Not an agent, so a person.
+                let name = match self.store.get_user(&ctx, c.author_id).await {
+                    Ok(u) => u.name,
+                    Err(_) => c.author_id.to_string(),
+                };
+                e.insert(name);
+            }
+        }
+        let date = |c: &trailhead_core::Comment| c.created_at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
+        let mut out = HumanContext::default();
+        // An answer is the note posted to the question's author as the question is resolved.
+        let mut answer_ids = std::collections::HashSet::new();
+        for q in comments.iter().filter(|c| c.kind == CommentKind::Question) {
+            let Some(resolved_at) = q.resolved_at else { continue };
+            let answer = comments.iter().find(|a| {
+                a.kind == CommentKind::Note
+                    && a.addressed_to == Some(q.author_id)
+                    && a.created_at >= q.created_at
+                    && a.created_at <= resolved_at
+                    && !answer_ids.contains(&a.id)
+            });
+            if let Some(a) = answer {
+                answer_ids.insert(a.id);
+                out.answers.push(Answered {
+                    question: q.body.clone(),
+                    answer: a.body.clone(),
+                    by: names[&a.author_id].clone(),
+                    date: date(a),
+                });
+            }
+        }
+        for c in &comments {
+            if !matches!(c.kind, CommentKind::Decision | CommentKind::Note) || answer_ids.contains(&c.id) {
+                continue;
+            }
+            let author = &names[&c.author_id];
+            if is_factory_agent(author) {
+                continue;
+            }
+            out.notes.push(TaskNote { author: author.clone(), date: date(c), body: c.body.clone() });
+        }
+        Ok(out)
     }
 
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {

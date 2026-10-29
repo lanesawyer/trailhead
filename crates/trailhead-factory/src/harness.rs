@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{CheckpointId, Commit, Endpoint, ModelId, Result, Role, TaskKey, Usage};
+use crate::{CheckpointId, Commit, Endpoint, HumanContext, ModelId, Result, Role, TaskKey, Usage};
 
 /// What the agent is asked to do: the task's spec as Trailhead holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,6 +15,9 @@ pub struct TaskSpec {
     /// Why the previous attempt at the task failed, when there was one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_failure: Option<String>,
+    /// Lane's answers to the agent's earlier questions, and the task's decisions and notes.
+    #[serde(default, skip_serializing_if = "HumanContext::is_empty")]
+    pub context: HumanContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

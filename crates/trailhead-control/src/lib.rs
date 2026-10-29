@@ -19,9 +19,9 @@ use tokio::time::Instant;
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
-    CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, IROH_DOMAINS, Labels, ModelProvider, PrRef, Profile,
-    Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey,
-    TaskSpec, Tracker, Usd, Verdict, label, review_name, run_name,
+    CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, HumanContext, IROH_DOMAINS, Labels, ModelProvider,
+    PrRef, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status,
+    Task, TaskKey, TaskSpec, Tracker, Usd, Verdict, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -318,10 +318,11 @@ impl Factory {
         let sandbox = self.acquire_worker(task).await?;
         sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
+        let context = self.tracker.human_context(&task.key).await?;
         let req = RunRequest {
             run: name.clone(),
             role: Role::Worker,
-            task: spec(task),
+            task: spec(task, context),
             repo: self.config.repo.repo(),
             base_branch: self.config.repo.base_branch.clone(),
             branch: Self::branch(task),
@@ -402,10 +403,11 @@ impl Factory {
         let sub = self.tracker.sub_agent(&name);
         let sandbox = self.create_sandbox(&name, task, Role::Reviewer).await?;
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
+        let context = self.tracker.human_context(&task.key).await?;
         let req = RunRequest {
             run: name.clone(),
             role: Role::Reviewer,
-            task: spec(task),
+            task: spec(task, context),
             repo: self.config.repo.repo(),
             base_branch: self.config.repo.base_branch.clone(),
             branch: Self::branch(task),
@@ -822,11 +824,12 @@ fn token_ttl(profile: &Profile) -> Duration {
     Duration::from_secs((u64::from(profile.budget.minutes) + 30) * 60)
 }
 
-fn spec(task: &Task) -> TaskSpec {
+fn spec(task: &Task, context: HumanContext) -> TaskSpec {
     TaskSpec {
         key: task.key.clone(),
         title: task.title.clone(),
         description: task.description.clone(),
         previous_failure: task.run.failure.clone(),
+        context,
     }
 }
