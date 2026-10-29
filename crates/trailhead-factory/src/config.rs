@@ -47,6 +47,28 @@ pub struct FactoryConfig {
     pub compute: ComputeConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub merge: MergeConfig,
+}
+
+/// `[merge]`: what the merger does with a PR whose gates passed (`docs/factory/review.md#the-merger`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeConfig {
+    #[serde(default)]
+    pub mode: MergeMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeMode {
+    /// Nothing: Lane merges every PR, and the PR isn't commented on.
+    #[default]
+    Off,
+    /// Says on the PR what it would do, and doesn't merge.
+    Shadow,
+    /// Merges the grades that allow it. Not built yet, so `FactoryConfig::parse` refuses it.
+    On,
 }
 
 /// `[grades]`: path globs that raise a PR to at least grade 2, 3 or 4 (keyed by the grade), and the diff size over
@@ -302,16 +324,26 @@ impl FactoryConfig {
                 return Err(Error::Config(format!("[grades] has `{grade}`; path rules are for grades 2, 3 and 4")));
             }
         }
-        let known = ["checks", "agent_review", "human", "quorum"];
+        if self.merge.mode == MergeMode::On {
+            return Err(Error::Config(
+                "[merge] mode = \"on\" isn't supported yet: the factory can't merge until the merger lands; use \
+                 \"shadow\" to see what it would merge"
+                    .into(),
+            ));
+        }
+        let known = ["checks", "ci", "agent_review", "human", "quorum"];
         let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
-        for (tier, gate) in &self.gates {
+        for (grade, gate) in &self.gates {
+            if !matches!(grade.as_str(), "1" | "2" | "3" | "4") {
+                return Err(Error::Config(format!("[gates.{grade}]: gates are per grade, 1 to 4")));
+            }
             for r in &gate.require {
                 if !known.contains(&r.as_str()) && !checks.contains(&r.as_str()) {
-                    return Err(Error::Config(format!("gate {tier} requires unknown {r}")));
+                    return Err(Error::Config(format!("gate {grade} requires unknown {r}")));
                 }
             }
             if gate.require.iter().any(|r| r == "quorum") && gate.quorum.is_none() {
-                return Err(Error::Config(format!("gate {tier} requires a quorum but doesn't define one")));
+                return Err(Error::Config(format!("gate {grade} requires a quorum but doesn't define one")));
             }
         }
         Ok(())
@@ -325,13 +357,23 @@ impl FactoryConfig {
         &self.profiles[&self.repo.reviewer]
     }
 
-    /// The default tier's gate, `t1` unless the repo defines no tiers.
+    /// The gate a PR of this grade must pass: the repo's `[gates.N]`, or the table in `docs/factory/review.md#grades`.
+    pub fn gate(&self, grade: u8) -> Gate {
+        if let Some(gate) = self.gates.get(&grade.to_string()) {
+            return gate.clone();
+        }
+        let (require, auto_merge): (&[&str], bool) = match grade {
+            0 | 1 => (&["checks", "ci"], true),
+            2 => (&["checks", "ci", "agent_review"], true),
+            3 => (&["checks", "ci", "agent_review", "human"], false),
+            _ => (&["checks", "human"], false),
+        };
+        Gate { require: require.iter().map(|r| r.to_string()).collect(), auto_merge, quorum: None }
+    }
+
+    /// The lowest grade's gate, which decides what a worker's checks must cover before it opens a PR.
     pub fn default_gate(&self) -> Gate {
-        self.gates.get("t1").cloned().unwrap_or(Gate {
-            require: vec!["checks".into(), "agent_review".into()],
-            auto_merge: false,
-            quorum: None,
-        })
+        self.gate(1)
     }
 
     /// The checks a worker must pass before opening a PR under the default gate.
@@ -369,6 +411,10 @@ mod tests {
         let config = FactoryConfig::parse(include_str!("../../../factory.toml")).unwrap();
         assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
         assert_eq!(config.grades, GradesConfig::default(), "this repo's rules are the documented example");
+        assert_eq!(config.merge.mode, MergeMode::Shadow);
+        assert!(config.gate(1).auto_merge);
+        assert!(!config.gate(2).auto_merge, "only grade 1 auto-merges, to start");
+        assert_eq!(config.gate(3).require, ["checks", "ci", "agent_review", "human"]);
     }
 
     #[test]
@@ -428,7 +474,7 @@ provider = "anthropic"
 model = "opus"
 budget = { usd = 2, minutes = 20, steps = 20 }
 
-[gates.t1]
+[gates.1]
 require = ["checks", "agent_review", "human"]
 "#;
 
@@ -450,6 +496,37 @@ require = ["checks", "agent_review", "human"]
         assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
         let bad = SAMPLE.replace("\"agent_review\", \"human\"", "\"agent_review\", \"vibes\"");
         assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn gates_default_to_the_table_and_merge_mode_to_off() {
+        let mut c =
+            FactoryConfig::parse(&SAMPLE.replace("[gates.1]\nrequire = [\"checks\", \"agent_review\", \"human\"]", ""))
+                .unwrap();
+        assert_eq!(c.merge.mode, MergeMode::Off);
+        assert_eq!(c.gate(1).require, ["checks", "ci"]);
+        assert!(c.gate(2).auto_merge);
+        assert_eq!(c.gate(3).require, ["checks", "ci", "agent_review", "human"]);
+        assert!(!c.gate(3).auto_merge);
+        assert_eq!(c.gate(4).require, ["checks", "human"]);
+
+        let custom =
+            format!("{SAMPLE}\n[gates.2]\nrequire = [\"ci\"]\nauto_merge = true\n[merge]\nmode = \"shadow\"\n");
+        c = FactoryConfig::parse(&custom).unwrap();
+        assert_eq!(c.gate(2).require, ["ci"]);
+        assert_eq!(c.gate(1).require, ["checks", "agent_review", "human"]);
+        assert_eq!(c.merge.mode, MergeMode::Shadow);
+    }
+
+    #[test]
+    fn merge_mode_on_and_gates_for_unknown_grades_are_rejected() {
+        let on = format!("{SAMPLE}\n[merge]\nmode = \"on\"\n");
+        let Err(Error::Config(why)) = FactoryConfig::parse(&on) else { panic!("on was accepted") };
+        assert!(why.contains("isn't supported yet"), "{why}");
+        for bad in ["[merge]\nmode = \"yes\"", "[gates.t1]\nrequire = []", "[gates.5]\nrequire = []"] {
+            let err = FactoryConfig::parse(&format!("{SAMPLE}\n{bad}\n")).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
+        }
     }
 
     #[test]
