@@ -307,4 +307,10 @@ impl CodeHost for GitHub {
             PrState::Open
         })
     }
+
+    async fn title(&self, pr: &PrRef) -> Result<String> {
+        let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
+        let p = self.call(self.request(Method::GET, &path)).await?;
+        Ok(p["title"].as_str().unwrap_or_default().to_string())
+    }
 }

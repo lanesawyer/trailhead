@@ -1487,3 +1487,22 @@ async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() 
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task") && questions[0].body.contains("connection lost"));
 }
+
+#[tokio::test]
+async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_conventional_pr_title() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    let outcome = RunOutcome::Changes {
+        commits: vec![Commit {
+            message: "added a greeting".into(),
+            changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            merges: vec![],
+        }],
+        summary: "Adds a greeting.".into(),
+    };
+    r.harness.push(Role::Worker, Script::new(outcome));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    let opened = r.codehost.prs().pop().expect("a PR");
+    assert_eq!(opened.spec.title, "chore: Add a greeting [TRAIL-1]");
+}

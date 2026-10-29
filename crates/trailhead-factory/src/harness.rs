@@ -33,6 +33,9 @@ pub struct RunContext {
     /// For reviewers: the checks the worker already ran in its own sandbox, which the reviewer shouldn't rerun.
     #[serde(default)]
     pub checks: Vec<CheckResult>,
+    /// For reviewers: the PR's title, which becomes the squash commit's subject, so the reviewer can check it.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

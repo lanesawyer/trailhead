@@ -133,6 +133,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
         max_steps,
         diff: (role == Role::Reviewer).then(|| "+pub fn hi() {}".into()),
         checks: Vec::new(),
+        title: None,
     }
 }
 
@@ -389,6 +390,18 @@ async fn dropped_api_calls_resume_the_session() {
     let (out, _) = play(&r, "error", ctx(&r, Role::Worker, 10)).await;
     assert!(matches!(out, RunOutcome::Failed { ref reason } if reason.contains("403")), "{out:?}");
     assert!(!std::fs::read_to_string(&r.log).unwrap().contains("--resume"));
+}
+
+#[test]
+fn a_reviewer_sees_the_pr_title_it_must_check() {
+    let r = rig();
+    let mut c = ctx(&r, Role::Reviewer, 0);
+    c.title = Some("feat(cli): add a greeting [TRAIL-1]".into());
+    let p = prompt(&c, None);
+    assert!(p.contains("The PR's title is `feat(cli): add a greeting [TRAIL-1]`"), "{p}");
+    assert!(p.contains("`... [TRAIL-1]`"), "{p}");
+    let p = prompt(&ctx(&r, Role::Reviewer, 0), None);
+    assert!(p.contains("couldn't be read"), "{p}");
 }
 
 #[test]

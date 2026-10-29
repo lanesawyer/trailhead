@@ -173,4 +173,8 @@ impl CodeHost for FakeCodeHost {
             _ => PrState::Open,
         })
     }
+
+    async fn title(&self, pr: &PrRef) -> Result<String> {
+        self.find(pr, |p, _| p.spec.title.clone())
+    }
 }

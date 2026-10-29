@@ -354,6 +354,19 @@ fn capped_diff(diff: &str, cap: usize) -> String {
     )
 }
 
+/// What a reviewer is told about the PR's title, which a squash merge makes the commit subject on main.
+fn pr_title_section(title: Option<&str>, key: &str) -> String {
+    let shown = match title {
+        Some(t) => format!("The PR's title is `{t}`."),
+        None => "The PR's title couldn't be read, so don't judge it.".into(),
+    };
+    format!(
+        "\n\n{shown} It must be a conventional commit (`type(scope): message`, which the repo's changelog \
+         requires) that fits the change: a fix titled feat, or a wrong scope, is a reason to request changes. The \
+         task key comes last in square brackets (`... [{key}]`), not parentheses."
+    )
+}
+
 pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
     let task = &ctx.task;
     let mut p = match ctx.role {
@@ -365,15 +378,14 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
              they belong. Your summary is posted on the PR as the review. When you approve, put anything worth doing \
              later that shouldn't hold this change up in `follow_ups`, each with a title and description: the factory \
-             files them as tasks, so don't repeat them in the summary. The PR's title must be a conventional commit \
-             (`type(scope): message`, as the repo's changelog requires) that fits the change: a fix titled feat or \
-             a wrong scope is a reason to request changes. The task key must come last, in square brackets (`... [{key}]`), not parentheses: request changes if the title uses parentheses or leaves the key out.",
+             files them as tasks, so don't repeat them in the summary.{pr_title}",
             key = task.key.0,
             title = task.title,
             desc = task.description,
             human = human_section(task),
             diff = ctx.diff.as_deref().map_or("(no diff)".into(), |d| capped_diff(d, DIFF_CAP)),
             checks = checks_section(&ctx.checks),
+            pr_title = pr_title_section(ctx.title.as_deref(), &task.key.0),
         ),
         _ => format!(
             "Implement task {key}: {title}.\n\n\
@@ -385,8 +397,8 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              say why. When you finish, give `title`: a conventional commit title for the change, like \
              `fix(factory): send the prompt on stdin so big PRs can be reviewed`, with the type (feat, fix, \
              perf, refactor, docs, test, chore, ci or build) that fits what you did and the crate or area as \
-             scope; the factory appends the task key. The factory tracks this task in Trailhead for you, so skip AGENTS.md's \
-             \"Tracking work\" steps: don't claim, comment on or close tasks. Put follow-ups in your summary.",
+             scope; the factory appends the task key. The factory tracks this task in Trailhead for you, so skip \
+             AGENTS.md's \"Tracking work\" steps: don't claim, comment on or close tasks. Put follow-ups in your summary.",
             key = task.key.0,
             title = task.title,
             desc = task.description,
