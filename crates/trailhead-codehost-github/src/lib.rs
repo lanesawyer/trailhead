@@ -310,12 +310,6 @@ impl CodeHost for GitHub {
         }
     }
 
-    async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>> {
-        let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
-        // Null while GitHub is still working it out; asking again later gets the answer.
-        Ok(self.call(self.request(Method::GET, &path)).await?["mergeable"].as_bool())
-    }
-
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
         let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
         let p = self.call(self.request(Method::GET, &path)).await?;
@@ -324,7 +318,8 @@ impl CodeHost for GitHub {
         } else if p["state"].as_str() == Some("closed") {
             PrState::Closed
         } else {
-            PrState::Open
+            // Null while GitHub is still working it out; asking again later gets the answer.
+            PrState::Open { mergeable: p["mergeable"].as_bool() }
         })
     }
 

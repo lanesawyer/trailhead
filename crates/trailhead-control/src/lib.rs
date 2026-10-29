@@ -1365,6 +1365,7 @@ impl Factory {
             }
             Status::Open => self.tracker.revoke_sub_agent(name).await?,
             Status::InReview => {
+                let mut mergeable = None;
                 if let Some(pr) = &task.run.pr
                     && let Some(codehost) = &self.codehost
                 {
@@ -1380,7 +1381,7 @@ impl Factory {
                             done.closed.push(task.key.0.clone());
                             return Ok(false);
                         }
-                        PrState::Open => {}
+                        PrState::Open { mergeable: m } => mergeable = m,
                     }
                 }
                 let attempt = task.run.attempt.unwrap_or(1);
@@ -1392,9 +1393,8 @@ impl Factory {
                     return Ok(false);
                 }
                 if let Some(pr) = &task.run.pr
-                    && let Some(codehost) = &self.codehost
-                    // Not yet worked out by the host: the next reconcile asks again.
-                    && codehost.mergeable(pr).await? == Some(false)
+                    // Not yet worked out by the host (`None`): the next reconcile asks again.
+                    && mergeable == Some(false)
                 {
                     self.rework_conflict(task, pr, attempt).await?;
                     done.conflicted.push(task.key.0.clone());

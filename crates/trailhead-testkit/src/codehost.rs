@@ -172,15 +172,11 @@ impl CodeHost for FakeCodeHost {
         })
     }
 
-    async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>> {
-        self.find(pr, |p, _| p.mergeable)
-    }
-
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
         self.find(pr, |p, _| match (p.merged, p.closed) {
             (true, _) => PrState::Merged { commit: Some(FakeCodeHost::merge_commit(&p.pr)) },
             (false, true) => PrState::Closed,
-            _ => PrState::Open,
+            _ => PrState::Open { mergeable: p.mergeable },
         })
     }
 

@@ -58,11 +58,11 @@ pub enum MergeOutcome {
 /// Where a PR stands on the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrState {
-    Open,
+    /// Still open. `mergeable` is whether it merges cleanly into its base: `Some(false)` when it conflicts, `None`
+    /// while the host is still working it out.
+    Open { mergeable: Option<bool> },
     /// Merged, into the base branch as `commit` when the host says which.
-    Merged {
-        commit: Option<String>,
-    },
+    Merged { commit: Option<String> },
     /// Closed without merging.
     Closed,
 }
@@ -78,11 +78,9 @@ pub trait CodeHost: Send + Sync {
     async fn diff(&self, pr: &PrRef) -> Result<String>;
     async fn comment(&self, pr: &PrRef, body: &str) -> Result<()>;
     async fn merge(&self, pr: &PrRef) -> Result<MergeOutcome>;
-    /// Whether the PR is still open, was merged (by anyone), or was closed without merging.
+    /// Whether the PR is still open (and if it merges cleanly), was merged (by anyone), or was closed without
+    /// merging. One call, so reconcile costs the host one request per PR.
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState>;
-    /// Whether the open PR merges cleanly into its base: `Some(false)` when it conflicts, `None` while the host is
-    /// still working it out.
-    async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>>;
     /// The PR's current title, which a squash merge takes as its commit subject.
     async fn title(&self, pr: &PrRef) -> Result<String>;
     /// The files the PR changes, with how and by how many lines, for grading it.
