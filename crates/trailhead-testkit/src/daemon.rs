@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 use trailhead_daemon::{RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Daemon, EventSink, Harness, PrepareRequest, Repo, Result, RunReport, RunRequest,
-    SandboxId, Tracker,
+    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, PrepareRequest, Repo, Result, RunEvent, RunReport,
+    RunRequest, SandboxId, Tracker,
 };
 
 pub use trailhead_daemon::Connect;
@@ -110,6 +110,9 @@ pub struct LocalDaemon {
     requests: Mutex<Vec<RunRequest>>,
     /// Errors the next runs fail with before the agent does anything, like a lost daemon.
     run_errors: Mutex<Vec<trailhead_factory::Error>>,
+    /// Runs that are going in a sandbox from before this control plane: their events so far, and how they end.
+    ongoing: Mutex<HashMap<String, (Vec<RunEvent>, RunReport)>>,
+    attached: Mutex<Vec<String>>,
 }
 
 impl LocalDaemon {
@@ -133,6 +136,8 @@ impl LocalDaemon {
             prepared: Mutex::default(),
             requests: Mutex::default(),
             run_errors: Mutex::default(),
+            ongoing: Mutex::default(),
+            attached: Mutex::default(),
         }
     }
 
@@ -173,6 +178,17 @@ impl LocalDaemon {
         for _ in 0..times {
             errors.push(trailhead_factory::Error::Other(error.to_string()));
         }
+    }
+
+    /// A run already going in a sandbox, as after a control plane restart: an attach to it replays `events`, then
+    /// ends with `report`. Any other run is unknown to the daemon.
+    pub fn ongoing(&self, run: &str, events: Vec<RunEvent>, report: RunReport) {
+        self.ongoing.lock().unwrap().insert(run.to_string(), (events, report));
+    }
+
+    /// The runs attached to so far, oldest first.
+    pub fn attached(&self) -> Vec<String> {
+        self.attached.lock().unwrap().clone()
     }
 
     pub fn pass_check(&self, name: &str) {
@@ -223,6 +239,17 @@ impl Daemon for LocalDaemon {
             return Err(error);
         }
         self.runner.run(req, events, self.cancel_handle(sandbox)).await
+    }
+
+    async fn attach(&self, _sandbox: &SandboxId, run: &str, events: EventSink) -> Result<RunReport> {
+        self.attached.lock().unwrap().push(run.to_string());
+        let Some((replay, report)) = self.ongoing.lock().unwrap().remove(run) else {
+            return Err(Error::NotFound(format!("run {run} on this daemon")));
+        };
+        for ev in replay {
+            let _ = events.send(ev);
+        }
+        Ok(report)
     }
 
     async fn cancel(&self, sandbox: &SandboxId) -> Result<()> {

@@ -14,7 +14,7 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 
 - `mise run factory` builds the daemon and the control plane in release mode and runs it in the foreground. Its output is the log.
 - `trailhead-factory check --config factory.toml` (under `fnox exec --`) reports what it can see without running anything: queued tasks, Sprites, its iroh endpoint. Stop `run` first; they share the lock below.
-- Ctrl-C stops it. Runs in flight are cancelled first (up to 15 seconds), and the next start's reconcile requeues their tasks and returns their pooled Sprites to idle. Restarting is always safe, though a cancelled run counts as an attempt (TRAIL-159).
+- Ctrl-C stops it. Runs in flight are cancelled first (up to 15 seconds), and the next start's reconcile requeues their tasks (a run the control plane merely crashed on is followed again instead, if its daemon still has it) and returns their pooled Sprites to idle. Restarting is always safe, though a cancelled run counts as an attempt (TRAIL-159).
 - The factory clones from GitHub, not your checkout: push `main` before queuing work that builds on local commits.
 - One control plane per machine, whatever repo it runs: they share an iroh identity and would undo each other's runs. `run` and `check` take an exclusive lock on `<data dir>/factory/control.lock` before touching anything, and a second one fails with `a control plane is already running on this machine (pid N, running owner/repo, …)`. The lock goes when the process exits, even after a crash, so stop the running one first; `check` can't run beside it.
 
