@@ -6,8 +6,8 @@ use std::sync::Arc;
 use trailhead_control::{CoreTracker, Factory, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, ProjectPatch, Store, TaskPatch};
 use trailhead_factory::{
-    CodeHost, Commit, FactoryConfig, FileChange, Role, RunOutcome, RunUpdate, Status, TaskKey, Tracker, Usd,
-    VerdictKind, label,
+    CodeHost, Commit, FactoryConfig, FileChange, ModelId, Role, RunOutcome, RunUpdate, Status, TaskKey, Tracker, Usd,
+    Verdict, VerdictKind, label,
 };
 use trailhead_testkit::{
     Connect, FAKE_BASE_MERGE, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon, Script, ScriptedHarness,
@@ -487,4 +487,35 @@ async fn a_merge_the_agent_started_itself_is_published_as_a_merge_commit() {
     let commits = r.codehost.commits(&pr.repo, "factory/trail-1");
     assert_eq!(commits.last().unwrap().merges, [FAKE_BASE_MERGE], "published as a merge commit");
     assert_eq!(r.show(&key).await.status, Status::InReview);
+}
+
+#[tokio::test]
+async fn last_review_reads_the_reviewers_verdict_and_the_latest_wins() {
+    let r = rig().await;
+    let key = r.task("Add a greeting").await;
+    assert!(r.tracker.last_review(&key).await.unwrap().is_none(), "no review yet");
+
+    let cred =
+        r.tracker.create_sub_agent("trail-1-a1-r1", "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
+    let reviewer = CoreTracker::authenticate(r.store.clone(), &cred).await.unwrap();
+    let verdict = |kind, body: &str, model: &str| Verdict {
+        kind,
+        body: body.into(),
+        reviewer: String::new(),
+        model: Some(ModelId(model.into())),
+        raise_grade: None,
+    };
+
+    reviewer.record_verdict(&key, &verdict(VerdictKind::RequestChanges, "Add a test.", "opus")).await.unwrap();
+    let last = r.tracker.last_review(&key).await.unwrap().expect("a review");
+    assert_eq!(last.kind, VerdictKind::RequestChanges);
+    assert_eq!(last.body, "Add a test.");
+    assert_eq!(last.reviewer, "factory/trail-1-a1-r1");
+    assert_eq!(last.model, Some(ModelId("opus".into())));
+
+    reviewer.record_verdict(&key, &verdict(VerdictKind::Approve, "LGTM now.", "sonnet")).await.unwrap();
+    let last = r.tracker.last_review(&key).await.unwrap().expect("a review");
+    assert_eq!(last.kind, VerdictKind::Approve, "the later approve wins over the earlier request_changes");
+    assert_eq!(last.body, "LGTM now.");
+    assert_eq!(last.model, Some(ModelId("sonnet".into())));
 }
