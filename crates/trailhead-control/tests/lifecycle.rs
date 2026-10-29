@@ -77,6 +77,7 @@ fn changes() -> RunOutcome {
         commits: vec![Commit {
             message: "feat: greet".into(),
             changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            merges: vec![],
         }],
         summary: "Adds a greeting.".into(),
     }
@@ -349,6 +350,7 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
             requeued: vec![crashed.0.clone()],
             reviewed: vec![unreviewed.0.clone()],
             reworked: vec![],
+            conflicted: vec![],
             merged: vec![],
             closed: vec![],
             abandoned: vec![],

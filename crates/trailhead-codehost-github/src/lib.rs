@@ -150,7 +150,8 @@ impl GitHub {
         }
         let tree = json!({ "base_tree": base_tree, "tree": entries });
         let tree = self.call(self.request(Method::POST, &format!("{r}/git/trees")).json(&tree)).await?;
-        let mut body = json!({ "message": commit.message, "tree": tree["sha"], "parents": [parent] });
+        let parents: Vec<&str> = std::iter::once(parent).chain(commit.merges.iter().map(String::as_str)).collect();
+        let mut body = json!({ "message": commit.message, "tree": tree["sha"], "parents": parents });
         if let Some(a) = &self.author {
             body["author"] = json!({ "name": a.name, "email": a.email });
             body["committer"] = body["author"].clone();
@@ -287,6 +288,12 @@ impl CodeHost for GitHub {
             StatusCode::METHOD_NOT_ALLOWED | StatusCode::CONFLICT => Ok(MergeOutcome::Conflict),
             s => Err(Error::Other(format!("github {s}: {}", body["message"].as_str().unwrap_or_default()))),
         }
+    }
+
+    async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>> {
+        let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
+        // Null while GitHub is still working it out; asking again later gets the answer.
+        Ok(self.call(self.request(Method::GET, &path)).await?["mergeable"].as_bool())
     }
 
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {

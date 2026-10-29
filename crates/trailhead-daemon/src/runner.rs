@@ -26,6 +26,8 @@ pub trait Workspace: Send + Sync {
     async fn confirm_blocked(&self, hosts: &[String]) -> Result<()>;
     /// The commit sha the checkout is at.
     async fn head(&self) -> Result<String>;
+    /// The commit being merged into the checkout, while a merge is under way (`PrepareRequest::merge_base`).
+    async fn merge_head(&self) -> Result<Option<String>>;
 }
 
 /// How often a worker renews its claim while the agent runs. Leases default to 30 minutes.
@@ -124,7 +126,14 @@ impl Runner {
         tracing::info!(task = %key, "agent starting");
         // Where the agent's work starts, which is what it's published on top of.
         let start = self.workspace.head().await?;
-        let (outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events).await?;
+        let merging = self.workspace.merge_head().await?;
+        let (mut outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events).await?;
+        // The agent finished a merge of the base branch: publish it as one, or the PR would still conflict.
+        if let (Some(merging), RunOutcome::Changes { commits, .. }) = (merging, &mut outcome)
+            && let Some(last) = commits.last_mut()
+        {
+            last.merges.push(merging);
+        }
         tracing::info!(task = %key, "agent finished");
         let (result, checks) = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start).await?;
         Ok(RunReport { result, checks, usage })

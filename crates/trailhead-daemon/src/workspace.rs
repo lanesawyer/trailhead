@@ -62,6 +62,8 @@ impl Workspace for GitWorkspace {
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
         let base = &req.base_branch;
         if self.dir.join(".git").exists() {
+            // A merge left under way (a warm checkpoint taken mid-rework) would block the checkout.
+            let _ = self.git(&self.dir, &["merge", "--abort"]).await;
             self.git(&self.dir, &["fetch", "--quiet", "origin", base]).await?;
             self.git(&self.dir, &["checkout", "--quiet", "-B", base, &format!("origin/{base}")]).await?;
             self.git(&self.dir, &["clean", "--quiet", "-fd"]).await?;
@@ -83,7 +85,21 @@ impl Workspace for GitWorkspace {
                 return Err(Error::Other(format!("setup failed: {}", result.output.trim())));
             }
         }
+        if req.merge_base && req.branch.is_some() {
+            // After setup, which would trip over conflict markers. Conflicts are the point: the agent resolves them.
+            let base = format!("origin/{}", req.base_branch);
+            let merged = self.git(&self.dir, &["merge", "--no-commit", "--no-ff", "--quiet", &base]).await;
+            if let Err(e) = merged
+                && self.merge_head().await?.is_none()
+            {
+                return Err(e);
+            }
+        }
         Ok(())
+    }
+
+    async fn merge_head(&self) -> Result<Option<String>> {
+        Ok(self.git_output(&self.dir, &["rev-parse", "--quiet", "--verify", "MERGE_HEAD"]).await.ok())
     }
 
     async fn head(&self) -> Result<String> {

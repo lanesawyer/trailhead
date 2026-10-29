@@ -106,6 +106,9 @@ pub struct ChangesRequested {
     pub body: String,
     #[serde(default)]
     pub attempt: u32,
+    /// Not a review: the PR no longer merges cleanly with the base branch, and the rework merges it in (TRAIL-199).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflict: bool,
 }
 
 impl RunUpdate {

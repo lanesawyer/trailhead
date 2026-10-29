@@ -9,7 +9,9 @@ use trailhead_factory::{
     CodeHost, Commit, FactoryConfig, FileChange, Role, RunOutcome, RunUpdate, Status, TaskKey, Tracker, Usd,
     VerdictKind, label,
 };
-use trailhead_testkit::{Connect, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon, Script, ScriptedHarness};
+use trailhead_testkit::{
+    Connect, FAKE_BASE_MERGE, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon, Script, ScriptedHarness,
+};
 
 const CONFIG: &str = r#"
 [repo]
@@ -43,6 +45,7 @@ struct Rig {
     compute: FakeCompute,
     codehost: FakeCodeHost,
     harness: Arc<ScriptedHarness>,
+    daemon: Arc<LocalDaemon>,
 }
 
 async fn rig() -> Rig {
@@ -79,10 +82,10 @@ async fn rig_with(config: &str) -> Rig {
         Arc::new(compute.clone()),
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
-        daemon,
+        daemon.clone(),
     )
     .with_codehost(Arc::new(codehost.clone()));
-    Rig { store, human, factory, tracker, compute, codehost, harness }
+    Rig { store, human, factory, tracker, compute, codehost, harness, daemon }
 }
 
 impl Rig {
@@ -106,6 +109,7 @@ fn changes() -> RunOutcome {
         commits: vec![Commit {
             message: "feat: greet".into(),
             changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            merges: vec![],
         }],
         summary: "Adds a greeting.".into(),
     }
@@ -378,4 +382,61 @@ async fn a_pr_closed_without_merging_parks_its_task_for_lane() {
     assert!(question.body.contains(&pr.url) && question.body.contains("closed without being merged"));
     assert!(!question.body.contains("  "), "no stray runs of spaces: {}", question.body);
     assert!(r.factory.reconcile().await.unwrap().closed.is_empty(), "asked once");
+}
+
+fn approve() -> RunOutcome {
+    RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into(), follow_ups: vec![] }
+}
+
+#[tokio::test]
+async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+
+    r.codehost.set_mergeable(&pr, None);
+    assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty(), "no answer yet: ask again later");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+
+    r.codehost.set_mergeable(&pr, Some(false));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.conflicted, std::slice::from_ref(&key.0));
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Open, "back in the queue for a rework");
+    assert_eq!(task.run.review_rounds, Some(2), "a conflict uses up a review round");
+    let wanted = task.run.changes_requested.expect("the rework is told why");
+    assert!(wanted.conflict && wanted.body.contains(&pr.url), "{wanted:?}");
+
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    let Outcome::Reviewed { pr: again, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+    assert_eq!(again, &pr, "pushed to the same PR");
+
+    let prepared = r.daemon.prepared();
+    let rework: Vec<_> = prepared.iter().filter(|(_, p)| p.branch.is_some()).collect();
+    assert_eq!(rework.len(), 1);
+    assert!(rework[0].1.merge_base, "the checkout has the base branch merged in");
+    let commits = r.codehost.commits(&pr.repo, "factory/trail-1");
+    assert!(commits[0].merges.is_empty());
+    assert_eq!(commits.last().unwrap().merges, [FAKE_BASE_MERGE], "published as a merge commit");
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview, "reviewed again");
+    assert_eq!(task.run.review_rounds, Some(3));
+    assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
+}
+
+#[tokio::test]
+async fn a_pr_that_keeps_conflicting_parks_for_lane_at_the_review_round_cap() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 2")).await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.conflicted, std::slice::from_ref(&key.0));
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::NeedsInput);
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
+    assert!(question.body.contains("keeps conflicting") && question.body.contains("2"), "{}", question.body);
+    assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty(), "parked once");
 }

@@ -305,7 +305,13 @@ impl FactoryConfig {
             Role::Worker => self.checks.setup.as_ref().map(|c| Check { name: "setup".into(), command: c.clone() }),
             _ => None,
         };
-        PrepareRequest { repo: self.repo.repo(), base_branch: self.repo.base_branch.clone(), branch, setup }
+        PrepareRequest {
+            repo: self.repo.repo(),
+            base_branch: self.repo.base_branch.clone(),
+            branch,
+            merge_base: false,
+            setup,
+        }
     }
 }
 

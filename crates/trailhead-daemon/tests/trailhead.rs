@@ -168,6 +168,7 @@ fn changes() -> RunOutcome {
         commits: vec![Commit {
             message: "feat: greet".into(),
             changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            merges: vec![],
         }],
         summary: "Adds a greeting.".into(),
     }
