@@ -20,6 +20,8 @@ pub struct GitWorkspace {
     /// Where repos are cloned from; tests point it at a local directory.
     remote_base: String,
     block_patience: Duration,
+    /// Extra environment for git; tests use it to hide the machine's git config.
+    git_env: Vec<(String, String)>,
 }
 
 impl GitWorkspace {
@@ -28,11 +30,21 @@ impl GitWorkspace {
     }
 
     pub fn with_remote(dir: impl Into<PathBuf>, remote_base: impl Into<String>) -> GitWorkspace {
-        GitWorkspace { dir: dir.into(), remote_base: remote_base.into(), block_patience: BLOCK_PATIENCE }
+        GitWorkspace {
+            dir: dir.into(),
+            remote_base: remote_base.into(),
+            block_patience: BLOCK_PATIENCE,
+            git_env: Vec::new(),
+        }
     }
 
     pub fn with_block_patience(mut self, patience: Duration) -> GitWorkspace {
         self.block_patience = patience;
+        self
+    }
+
+    pub fn with_git_env(mut self, key: impl Into<String>, value: impl Into<String>) -> GitWorkspace {
+        self.git_env.push((key.into(), value.into()));
         self
     }
 
@@ -41,7 +53,13 @@ impl GitWorkspace {
     }
 
     async fn git_output(&self, cwd: &Path, args: &[&str]) -> Result<String> {
-        let out = Command::new("git").args(args).current_dir(cwd).stdin(Stdio::null()).output().await;
+        let out = Command::new("git")
+            .args(args)
+            .envs(self.git_env.clone())
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .output()
+            .await;
         let out = out.map_err(|e| Error::Other(format!("git {}: {e}", args.join(" "))))?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
@@ -88,7 +106,24 @@ impl Workspace for GitWorkspace {
         if req.merge_base && req.branch.is_some() {
             // After setup, which would trip over conflict markers. Conflicts are the point: the agent resolves them.
             let base = format!("origin/{}", req.base_branch);
-            let merged = self.git(&self.dir, &["merge", "--no-commit", "--no-ff", "--quiet", &base]).await;
+            // Even --no-commit wants a committer identity, and a sandbox or CI runner may have none. The daemon
+            // publishes through the GitHub API, so this one never lands in history.
+            let merged = self
+                .git(
+                    &self.dir,
+                    &[
+                        "-c",
+                        "user.name=trailhead-factory",
+                        "-c",
+                        "user.email=factory@trailhead.invalid",
+                        "merge",
+                        "--no-commit",
+                        "--no-ff",
+                        "--quiet",
+                        &base,
+                    ],
+                )
+                .await;
             if let Err(e) = merged
                 && self.merge_head().await?.is_none()
             {

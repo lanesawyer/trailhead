@@ -177,7 +177,14 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
     git(&src, &["push", "--quiet", bare.to_str().unwrap(), "main"]);
 
     let remote = format!("file://{}", root.path().join("remote").display());
-    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    // No global git identity, as on a CI runner: the merge must not depend on the machine's config.
+    let home = root.path().join("empty-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote)
+        .with_git_env("HOME", home.to_str().unwrap())
+        .with_git_env("XDG_CONFIG_HOME", home.to_str().unwrap())
+        .with_git_env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .with_git_env("GIT_CONFIG_NOSYSTEM", "1");
     let req = PrepareRequest {
         repo: Repo { owner: "acme".into(), name: "widget".into() },
         base_branch: "main".into(),
