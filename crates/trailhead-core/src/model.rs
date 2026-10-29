@@ -156,6 +156,9 @@ pub struct Task {
     pub status: Status,
     /// 1 (urgent) to 4 (low).
     pub priority: i64,
+    /// Optional risk grade, 1 (lowest) to 4. A human sets, lowers or clears it; an agent can only raise it.
+    #[serde(default)]
+    pub grade: Option<i64>,
     /// The day the task is due (`YYYY-MM-DD`). Without `due_at`, it's due by the end of
     /// that day in `due_tz`.
     #[serde(default)]
