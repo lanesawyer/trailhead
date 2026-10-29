@@ -10,10 +10,13 @@ use base64::Engine;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
-    ChangedFile, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
+    ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
 };
 
 pub const API_URL: &str = "https://api.github.com";
+
+/// GitHub pages check runs 100 at a time; a commit with more than this many is read as far as this.
+const MAX_CHECK_PAGES: u32 = 10;
 
 /// GitHub pages a PR's files 100 at a time, up to 3,000.
 const MAX_FILE_PAGES: u32 = 30;
@@ -223,6 +226,41 @@ fn changed_file(f: &Value) -> ChangedFile {
     }
 }
 
+/// CI from a commit's check runs and its commit statuses (the combined status's list, since its own `state` reads
+/// pending when there are none). Any failure fails it, naming what failed; otherwise it's pending until something has
+/// reported and everything has finished.
+fn summarize_ci(runs: &[Value], statuses: &[Value]) -> CiState {
+    let mut failed = Vec::new();
+    let mut pending = runs.is_empty() && statuses.is_empty();
+    for run in runs {
+        let name = run["name"].as_str().unwrap_or("check").to_string();
+        if run["status"].as_str() != Some("completed") {
+            pending = true;
+            continue;
+        }
+        match run["conclusion"].as_str() {
+            Some("success" | "neutral" | "skipped") => {}
+            _ => failed.push(name),
+        }
+    }
+    for status in statuses {
+        let name = status["context"].as_str().unwrap_or("status").to_string();
+        match status["state"].as_str() {
+            Some("success") => {}
+            Some("failure" | "error") => failed.push(name),
+            _ => pending = true,
+        }
+    }
+    if !failed.is_empty() {
+        failed.dedup();
+        CiState::Failed { checks: failed }
+    } else if pending {
+        CiState::Pending
+    } else {
+        CiState::Passed
+    }
+}
+
 fn pr_ref(repo: &Repo, p: &Value) -> PrRef {
     PrRef {
         repo: repo.clone(),
@@ -334,6 +372,32 @@ impl CodeHost for GitHub {
         Ok(p["title"].as_str().unwrap_or_default().to_string())
     }
 
+    async fn head(&self, pr: &PrRef) -> Result<String> {
+        let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
+        let p = self.call(self.request(Method::GET, &path)).await?;
+        p["head"]["sha"].as_str().map(str::to_string).ok_or_else(|| Error::Other("PR without a head sha".into()))
+    }
+
+    async fn ci(&self, pr: &PrRef) -> Result<Ci> {
+        let head = CodeHost::head(self, pr).await?;
+        let r = Self::repo_path(&pr.repo);
+        let mut runs = Vec::new();
+        for page in 1..=MAX_CHECK_PAGES {
+            let req = self
+                .request(Method::GET, &format!("{r}/commits/{head}/check-runs"))
+                .query(&[("per_page", "100"), ("page", &page.to_string())]);
+            let found = self.call(req).await?;
+            let found = found["check_runs"].as_array().map(Vec::as_slice).unwrap_or_default();
+            runs.extend_from_slice(found);
+            if found.len() < 100 {
+                break;
+            }
+        }
+        let combined = self.call(self.request(Method::GET, &format!("{r}/commits/{head}/status"))).await?;
+        let statuses = combined["statuses"].as_array().map(Vec::as_slice).unwrap_or_default();
+        Ok(Ci { state: summarize_ci(&runs, statuses), head })
+    }
+
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
         let path = format!("{}/pulls/{}/files", Self::repo_path(&pr.repo), pr.number);
         let mut out = Vec::new();
@@ -347,5 +411,51 @@ impl CodeHost for GitHub {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(name: &str, status: &str, conclusion: Option<&str>) -> Value {
+        json!({ "name": name, "status": status, "conclusion": conclusion })
+    }
+
+    fn status(context: &str, state: &str) -> Value {
+        json!({ "context": context, "state": state })
+    }
+
+    #[test]
+    fn ci_with_nothing_reported_is_pending() {
+        assert_eq!(summarize_ci(&[], &[]), CiState::Pending);
+    }
+
+    #[test]
+    fn ci_passes_when_every_run_and_status_succeeded_or_was_skipped() {
+        let runs = [run("test", "completed", Some("success")), run("docs", "completed", Some("skipped"))];
+        assert_eq!(summarize_ci(&runs, &[status("deploy", "success")]), CiState::Passed);
+        assert_eq!(summarize_ci(&[], &[status("deploy", "success")]), CiState::Passed);
+    }
+
+    #[test]
+    fn ci_is_pending_while_a_run_or_status_hasnt_finished() {
+        let runs = [run("test", "completed", Some("success")), run("lint", "in_progress", None)];
+        assert_eq!(summarize_ci(&runs, &[]), CiState::Pending);
+        let done = [run("test", "completed", Some("success"))];
+        assert_eq!(summarize_ci(&done, &[status("deploy", "pending")]), CiState::Pending);
+    }
+
+    #[test]
+    fn ci_fails_naming_what_failed_even_while_other_checks_run() {
+        let runs = [
+            run("test", "completed", Some("failure")),
+            run("lint", "in_progress", None),
+            run("fmt", "completed", Some("timed_out")),
+        ];
+        assert_eq!(
+            summarize_ci(&runs, &[status("deploy", "error")]),
+            CiState::Failed { checks: vec!["test".into(), "fmt".into(), "deploy".into()] }
+        );
     }
 }

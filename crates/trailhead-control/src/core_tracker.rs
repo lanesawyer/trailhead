@@ -289,6 +289,20 @@ impl Tracker for CoreTracker {
         self.set_status(task, trailhead_core::Status::InReview).await
     }
 
+    async fn approve(&self, task: &TaskKey) -> Result<()> {
+        match self.set_status(task, trailhead_core::Status::Approved).await {
+            // Core's only refusal here is that the caller may not approve: it isn't a human or a delegated reviewer.
+            Err(Error::Conflict(why)) if why == trailhead_core::Error::ReviewRequired.to_string() => {
+                Err(Error::Forbidden(format!("{} can't approve {}: it isn't a delegated reviewer", self.agent, task.0)))
+            }
+            result => result,
+        }
+    }
+
+    async fn unapprove(&self, task: &TaskKey) -> Result<()> {
+        self.set_status(task, trailhead_core::Status::InReview).await
+    }
+
     async fn reopen(&self, task: &TaskKey) -> Result<()> {
         self.set_status(task, trailhead_core::Status::Open).await
     }
