@@ -602,6 +602,17 @@ impl Store {
                         if p.id == before.id {
                             return Err(Error::Invalid("a task can't be its own parent".into()));
                         }
+                        // Walk up from the new parent; the task being moved must not be an ancestor.
+                        let mut up = p.parent_id;
+                        while let Some(id) = up {
+                            if id == before.id {
+                                return Err(Error::Invalid(format!(
+                                    "{} is under {}, so it can't become its parent",
+                                    p.key, before.key
+                                )));
+                            }
+                            up = load_task(&tx.conn, ctx.workspace_id, &id.to_string(), true).await?.parent_id;
+                        }
                         Some(p.id)
                     }
                     None => None,
