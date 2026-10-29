@@ -25,7 +25,7 @@ worker)
   echo 'v2' > README.md
   rm old.txt
   asst m2 '{"type":"tool_use","id":"t2","name":"Edit","input":{}}'
-  echo '{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"outcome":"done","summary":"Adds hi()."}}'
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"outcome":"done","summary":"Adds hi().","title":"feat(core): add a greeting"}}'
   ;;
 review)
   asst r1 '{"type":"text","text":"Reviewing."}'
@@ -42,6 +42,16 @@ question)
 nothing)
   asst n1 '{"type":"text","text":"Done."}'
   echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"done","summary":"Nothing to do."}}'
+  ;;
+badtitle)
+  asst b1 '{"type":"text","text":"Done."}'
+  echo 'v3' > README.md
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"done","summary":"x","title":"TRAIL-1: Add a greeting"}}'
+  ;;
+rework)
+  asst w1 '{"type":"text","text":"Fixed."}'
+  echo 'v4' > README.md
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"done","summary":"x","title":"fix(cli): use a doc comment"}}'
   ;;
 loop)
   for i in 1 2 3 4 5 6; do asst "l$i" '{"type":"tool_use","id":"x","name":"Bash","input":{}}'; done
@@ -151,6 +161,8 @@ async fn claude_code_sessions() {
     approving_review_carries_follow_ups().await;
     questions_park_the_task().await;
     no_changes_is_a_failure().await;
+    invalid_titles_fall_back().await;
+    rework_commits_are_conventional().await;
     step_limit_kills_the_agent().await;
     cli_errors_fail_the_run().await;
     resume_carries_feedback().await;
@@ -165,7 +177,7 @@ async fn worker_changes_are_collected() {
     let RunOutcome::Changes { commits, summary } = out else { panic!("{out:?}") };
     assert_eq!(summary, "Adds hi().");
     assert_eq!(commits.len(), 1);
-    assert_eq!(commits[0].message, "TRAIL-1: Add a greeting");
+    assert_eq!(commits[0].message, "feat(core): add a greeting (TRAIL-1)");
     let mut changes: Vec<_> =
         commits[0].changes.iter().map(|c| (c.path.as_str(), c.contents.as_deref().map(|b| b.to_vec()))).collect();
     changes.sort();
@@ -288,6 +300,27 @@ async fn no_changes_is_a_failure() {
     let r = rig();
     let (out, _) = play(&r, "nothing", ctx(&r, Role::Worker, 10)).await;
     assert!(matches!(out, RunOutcome::Failed { ref reason } if reason.contains("changed nothing")), "{out:?}");
+}
+
+async fn invalid_titles_fall_back() {
+    let r = rig();
+    let (out, _) = play(&r, "badtitle", ctx(&r, Role::Worker, 10)).await;
+    let RunOutcome::Changes { commits, .. } = out else { panic!("{out:?}") };
+    assert_eq!(commits[0].message, "chore: Add a greeting (TRAIL-1)");
+}
+
+async fn rework_commits_are_conventional() {
+    let r = rig();
+    // SAFETY: as in `play`.
+    unsafe {
+        std::env::set_var("FAKE_SCENARIO", "rework");
+        std::env::set_var("FAKE_LOG", &r.log);
+    }
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let feedback = Feedback { body: "Use a doc comment.".into() };
+    let out = r.harness.resume(ctx(&r, Role::Worker, 10), feedback, tx).await.unwrap();
+    let RunOutcome::Changes { commits, .. } = out else { panic!("{out:?}") };
+    assert_eq!(commits[0].message, "fix(cli): use a doc comment (TRAIL-1)");
 }
 
 async fn step_limit_kills_the_agent() {

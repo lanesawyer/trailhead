@@ -108,6 +108,7 @@ async fn spec_to_reviewed_pr_then_human_merge() {
 
     let opened = &r.codehost.prs()[0];
     assert_eq!(opened.spec.branch, "factory/trail-1");
+    assert_eq!(opened.spec.title, "feat: greet", "the PR is titled with the commit subject the repo squashes to");
     let start = r.codehost.start(&opened.pr.repo, "factory/trail-1");
     assert_eq!(start.as_deref(), Some(FAKE_BASE), "published on the commit the checkout started from");
     assert_eq!(

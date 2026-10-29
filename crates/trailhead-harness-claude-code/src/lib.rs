@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use trailhead_factory::{
     CheckResult, Commit, Error, EventSink, Feedback, FileChange, FollowUp, Harness, ModelId, Result, Role, RunContext,
-    RunEvent, RunOutcome, Usage, VerdictKind,
+    RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
 };
 
 /// What `ANTHROPIC_API_KEY` is set to. The gateway replaces credentials, so this only has to be non-empty.
@@ -220,6 +220,10 @@ pub fn schema(role: Role) -> Value {
                 "type": "string",
                 "description": "For done: the PR description. For a review: the review comment. Otherwise: why.",
             },
+            "title": {
+                "type": "string",
+                "description": "For done: a conventional commit title for the change, `type(scope): message`, with type one of feat, fix, perf, refactor, docs, test, chore, ci, build and scope the crate or area (factory, core, server, cli, daemon, docs). The task key is appended for you. E.g. `fix(factory): send the prompt on stdin so big PRs can be reviewed`.",
+            },
             "question": { "type": "string", "description": "For needs_input: the one question for a human." },
             "follow_ups": {
                 "type": "array",
@@ -350,7 +354,9 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
              they belong. Your summary is posted on the PR as the review. When you approve, put anything worth doing \
              later that shouldn't hold this change up in `follow_ups`, each with a title and description: the factory \
-             files them as tasks, so don't repeat them in the summary.",
+             files them as tasks, so don't repeat them in the summary. The PR's title must be a conventional commit \
+             (`type(scope): message`, as the repo's changelog requires) that fits the change: a fix titled feat or \
+             a wrong scope is a reason to request changes.",
             key = task.key.0,
             title = task.title,
             desc = task.description,
@@ -365,7 +371,10 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              tests, and run the repo's formatter, linter and tests. You don't need to commit or push; everything \
              you change in the checkout is published as one commit and a PR. If only a human can answer something \
              you need, stop and give needs_input with the question. If the task can't be done, give failed and \
-             say why. The factory tracks this task in Trailhead for you, so skip AGENTS.md's \
+             say why. When you finish, give `title`: a conventional commit title for the change, like \
+             `fix(factory): send the prompt on stdin so big PRs can be reviewed`, with the type (feat, fix, \
+             perf, refactor, docs, test, chore, ci or build) that fits what you did and the crate or area as \
+             scope; the factory appends the task key. The factory tracks this task in Trailhead for you, so skip AGENTS.md's \
              \"Tracking work\" steps: don't claim, comment on or close tasks. Put follow-ups in your summary.",
             key = task.key.0,
             title = task.title,
@@ -515,7 +524,10 @@ async fn outcome(ctx: &RunContext, start: &str, result: &Value) -> Result<RunOut
             if changes.is_empty() {
                 RunOutcome::Failed { reason: "claude reported done but changed nothing".into() }
             } else {
-                let message = format!("{}: {}", ctx.task.key.0, ctx.task.title);
+                let (message, valid) = conventional_title(answer["title"].as_str(), &ctx.task.key, &ctx.task.title);
+                if !valid {
+                    tracing::warn!(task = %ctx.task.key.0, title = ?answer["title"], "no conventional title from the agent; using chore");
+                }
                 RunOutcome::Changes { commits: vec![Commit { message, changes }], summary }
             }
         }

@@ -181,6 +181,7 @@ impl Runner {
         summary: String,
         retried: &[String],
     ) -> Result<PrRef> {
+        let title = commits.first().and_then(|c| c.message.lines().next()).map(str::to_string);
         self.codehost.publish(&req.repo, start, &req.branch, &commits).await?;
         let flaky: String =
             retried.iter().map(|name| format!("\n\n⚠️ Check `{name}` failed, then passed when rerun.")).collect();
@@ -196,7 +197,7 @@ impl Runner {
                 let new = NewPr {
                     branch: req.branch.clone(),
                     base: req.base_branch.clone(),
-                    title: format!("{}: {}", req.task.key.0, req.task.title),
+                    title: title.unwrap_or_else(|| format!("chore: {} ({})", req.task.title, req.task.key.0)),
                     body: format!("{summary}{flaky}{}", pr_footer(req, agent)),
                 };
                 self.codehost.open_pr(&req.repo, new).await

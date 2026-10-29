@@ -50,7 +50,7 @@ run finished task=TRAIL-105 outcome=…
 
 | Outcome | What you see | What you do |
 | --- | --- | --- |
-| PR opened | Task `in_review`, a PR on GitHub with the reviewer's comment, a typed verdict on the task | Check CI is green and the diff's size is believable, and merge on GitHub |
+| PR opened | Task `in_review`, a PR on GitHub titled as a conventional commit with the task key last (`fix(factory): send the prompt on stdin (TRAIL-226)`; `chore: {task title} (TRAIL-n)` if the agent gave none), which is what the changelog picks up, with the reviewer's comment, a typed verdict on the task | Check CI is green and the diff's size is believable, and merge on GitHub |
 | PR merged | Within a poll (`--poll-secs`, default 30 s) the task is `done`, with a handoff naming the PR and the merge commit, and `merged` (who, PR, commit) in its `factory` metadata. Tasks chained behind it unblock | Nothing. If `GITHUB_TOKEN` isn't set, or the factory isn't a project reviewer, finish it yourself: `trailhead --as-me done TRAIL-n -m "merged"` |
 | PR closed without merging | The task is `needs_input` with a question naming the PR | Abandoned: cancel the task. To carry on, reopen the PR on GitHub, then reopen the task; the next run continues on the PR's branch |
 | Reviewer approved with follow-ups | The PR comment ends with a "Follow-ups filed in Trailhead" list; each is a new open task in the project, not queued under TRAIL-102, whose description says which task and PR it came from. A title that's already an open task is listed as "(already open)" and not filed again. A request for changes files nothing | Triage them: queue the ones worth doing under TRAIL-102, cancel the rest |
