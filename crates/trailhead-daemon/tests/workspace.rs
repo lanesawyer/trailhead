@@ -45,6 +45,7 @@ async fn prepare_clones_runs_setup_and_resets() {
     let req = PrepareRequest {
         repo: Repo { owner: "acme".into(), name: "widget".into() },
         base_branch: "main".into(),
+        branch: None,
         setup: Some(check("setup", "touch .setup-ran")),
     };
 
@@ -71,6 +72,33 @@ async fn prepare_clones_runs_setup_and_resets() {
     let failing = PrepareRequest { setup: Some(check("setup", "echo boom; exit 3")), ..req };
     let err = ws.prepare(&failing).await.unwrap_err().to_string();
     assert!(err.contains("setup failed") && err.contains("boom"), "{err}");
+}
+
+#[tokio::test]
+async fn prepare_can_check_out_a_branchs_remote_head() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    let bare = root.path().join("remote/acme/widget.git");
+    git(&src, &["checkout", "--quiet", "-b", "factory/w-1"]);
+    std::fs::write(src.join("feature.txt"), "work\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "--quiet", "-m", "feature"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "factory/w-1"]);
+
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: Some("factory/w-1".into()),
+        setup: None,
+    };
+    ws.prepare(&req).await.unwrap();
+    assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "the work starts from the PR head");
+    assert!(ws.dir().join("feature.txt").exists());
+
+    ws.prepare(&PrepareRequest { branch: None, ..req }).await.unwrap();
+    assert_eq!(ws.head().await.unwrap(), rev(&src, "main"), "a later plain prepare is back on the base");
 }
 
 #[tokio::test]

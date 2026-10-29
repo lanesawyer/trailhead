@@ -19,9 +19,10 @@ use tokio::time::Instant;
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
-    CheckResult, CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, HumanContext, IROH_DOMAINS, Labels,
-    ModelProvider, PrRef, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox,
-    SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict, label, review_name, run_name,
+    ChangesRequested, CheckResult, CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, Feedback, HumanContext,
+    IROH_DOMAINS, Labels, ModelProvider, PrRef, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult,
+    RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict, VerdictKind, label,
+    review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -60,6 +61,9 @@ pub struct Factory {
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// The reset a pause was last logged for, so a pause is logged once rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
+    /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
+    /// starting together never take the same sandbox.
+    pool_pick: tokio::sync::Mutex<()>,
 }
 
 /// A pooled sandbox that keeps failing to release. Kept in memory only, so a restart counts again from zero.
@@ -96,6 +100,8 @@ pub struct Reconciled {
     pub released: Vec<String>,
     pub requeued: Vec<String>,
     pub reviewed: Vec<String>,
+    /// Tasks whose review asked for changes but stayed in review, now reopened for a rework or parked.
+    pub reworked: Vec<String>,
     /// Pooled sandboxes that kept failing to release, now out of the pool.
     pub abandoned: Vec<String>,
 }
@@ -118,6 +124,7 @@ impl Factory {
             setbacks: Mutex::default(),
             quota: Mutex::default(),
             pause_logged: Mutex::default(),
+            pool_pick: tokio::sync::Mutex::default(),
         }
     }
 
@@ -348,16 +355,18 @@ impl Factory {
             RunUpdate {
                 attempt: Some(attempt),
                 sandbox: Some(name.clone()),
-                review_rounds: Some(0),
                 profile: Some(self.config.repo.worker.clone()),
                 ..RunUpdate::default()
             },
         )
         .await?;
         tracing::info!(task = %task.key.0, run = %name, "preparing a worker sandbox");
+        // A task with a PR is a rework: the checkout starts from the PR branch's head, and the worker is told what the
+        // review asked for.
+        let rework = task.run.pr.is_some();
         let prepared = async {
             let context = self.tracker.human_context(&task.key).await?;
-            let sandbox = self.acquire_worker(task).await?;
+            let sandbox = self.acquire_worker(task, rework.then(|| Self::branch(task))).await?;
             sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
             Ok::<_, Error>((sandbox, context))
         };
@@ -375,6 +384,11 @@ impl Factory {
             base_branch: self.config.repo.base_branch.clone(),
             branch: Self::branch(task),
             pr: task.run.pr.clone(),
+            feedback: task
+                .run
+                .pending_changes()
+                .filter(|_| rework)
+                .map(|c| Feedback { body: format!("Review by {}:\n\n{}", c.reviewer, c.body) }),
             model: self.provider.resolve(profile.model),
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
@@ -417,7 +431,8 @@ impl Factory {
 
         match report.result {
             RunResult::PrOpened(pr) => {
-                // MVP: no suspend during review; requested changes start a new run from the PR branch.
+                // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
+                // starts from the PR branch.
                 self.release_worker(&sandbox).await?;
                 self.tracker.revoke_sub_agent(&name).await?;
                 self.review(task, &pr, attempt, &report.checks).await
@@ -427,14 +442,16 @@ impl Factory {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
                 self.release_worker(&sandbox).await?;
                 let max = self.config.repo.max_attempts;
-                if attempt >= max {
+                // Counted from the last review that asked for changes, so reworks get attempts of their own.
+                let failed = attempt - task.run.attempt_base.unwrap_or(0);
+                if failed >= max {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
                     let last = self.tracker.show(&task.key).await?.run.failure.unwrap_or_else(|| reason.clone());
                     sub.claim(&task.key).await?;
                     sub.ask(
                         &task.key,
                         &format!(
-                            "Gave up after {attempt} failed attempts (the limit is {max}). The last failure: \
+                            "Gave up after {failed} failed attempts (the limit is {max}). The last failure: \
                              {reason}\n\n{last}\n\nFix the cause, then reopen the task; raise `max_attempts` to \
                              allow more tries."
                         ),
@@ -513,6 +530,7 @@ impl Factory {
             base_branch: self.config.repo.base_branch.clone(),
             branch: Self::branch(task),
             pr: Some(pr.clone()),
+            feedback: None,
             model: self.provider.resolve(profile.model),
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
@@ -526,14 +544,23 @@ impl Factory {
         let run = self.run_metered(&sandbox, req, &profile, prior).await;
         self.compute.destroy(&sandbox.id).await?;
         let run = run?;
+        // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
+        // a review can't be counted as done without its rework being requested or the task parked.
         let (spend, reviewed) = match &run {
-            Run::Report(RunReport { result: RunResult::Reviewed(_), .. }, s) => (*s, Some(attempt)),
+            Run::Report(RunReport { result: RunResult::Reviewed(v), .. }, s) => {
+                (*s, (v.kind != VerdictKind::RequestChanges).then_some(attempt))
+            }
             Run::Report(_, s) | Run::Breach(_, s) => (*s, None),
         };
         sub.report(&task.key, RunUpdate { spend: Some(spend), reviewed, ..RunUpdate::default() }).await?;
         self.tracker.revoke_sub_agent(&name).await?;
         match run {
             Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
+                if verdict.kind == VerdictKind::RequestChanges {
+                    let requested =
+                        ChangesRequested { reviewer: verdict.reviewer.clone(), body: verdict.body.clone(), attempt };
+                    self.request_rework(task, requested, round).await?;
+                }
                 Ok(Outcome::Reviewed { pr: pr.clone(), verdict })
             }
             Run::Report(report, _) => {
@@ -547,6 +574,42 @@ impl Factory {
         }
     }
 
+    /// A review asked for changes: the task goes back to the queue with the review in its metadata, so the next run
+    /// starts a fresh sandbox from the PR branch and is told what to fix. The task is parked instead once `round`
+    /// reviews have asked for changes, which is when a human should look. Reconcile finishes this if it's cut short.
+    async fn request_rework(&self, task: &Task, requested: ChangesRequested, round: u32) -> Result<()> {
+        let max = self.config.repo.max_review_rounds;
+        let (reviewer, body) = (requested.reviewer.clone(), requested.body.clone());
+        // Recorded before the task is reopened, so the run that picks it up can't miss the review.
+        let update = RunUpdate {
+            reviewed: Some(requested.attempt),
+            attempt_base: Some(requested.attempt),
+            changes_requested: Some(requested),
+            ..RunUpdate::default()
+        };
+        self.tracker.report(&task.key, update).await?;
+        if round >= max {
+            tracing::warn!(task = %task.key.0, round, "the reviewer still wants changes; parking");
+            self.tracker.reopen(&task.key).await?;
+            self.tracker.claim(&task.key).await?;
+            let question = format!(
+                "The reviewer still wants changes after {round} review rounds (the limit is {max}). The last review, \
+                 by {reviewer}:\n\n{body}\n\nFix the PR or settle the disagreement, then reopen the task; raise \
+                 `max_review_rounds` to allow more rounds."
+            );
+            self.tracker.ask(&task.key, &question).await?;
+            // A fresh count for when a human reopens the task after sorting it out. Last, so a reconcile that finishes
+            // a park cut short still sees the round that hit the limit.
+            let fresh = RunUpdate { review_rounds: Some(0), ..RunUpdate::default() };
+            if let Err(e) = self.tracker.report(&task.key, fresh).await {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't reset the review rounds");
+            }
+            return Ok(());
+        }
+        tracing::info!(task = %task.key.0, round, "changes requested; reopening for a rework");
+        self.tracker.reopen(&task.key).await
+    }
+
     async fn create_sandbox(&self, name: &str, task: &Task, role: Role) -> Result<Sandbox> {
         let mut labels = self.base_labels();
         labels.insert(label::TASK.into(), task.key.0.clone());
@@ -554,7 +617,7 @@ impl Factory {
         // Install egress only while the checkout is prepared, then narrowed before any agent runs.
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = self.compute.create(&spec).await?;
-        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role)).await?;
+        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, None)).await?;
         self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
         Ok(sandbox)
     }
@@ -581,7 +644,8 @@ impl Factory {
     /// A worker sandbox for `task` from the repo's pool (`docs/factory/sandbox.md`): an idle one restored to its warm
     /// checkpoint, or a new one when none is idle. The tick's room check keeps the pool within `max_sandboxes`.
     /// The prepared checkout becomes the new warm checkpoint, so the next task starts from it.
-    async fn acquire_worker(&self, task: &Task) -> Result<Sandbox> {
+    async fn acquire_worker(&self, task: &Task, branch: Option<String>) -> Result<Sandbox> {
+        let pick = self.pool_pick.lock().await;
         let idle = self.compute.list(&self.pooled(label::IDLE, None, None)).await?;
         let (sandbox, warm) = match idle.into_iter().find(|s| !self.abandoned(&s.name)) {
             Some(s) => {
@@ -599,12 +663,13 @@ impl Factory {
             }
         };
         self.compute.set_labels(&sandbox.id, &self.pooled(label::BUSY, warm.as_deref(), Some(task))).await?;
+        drop(pick);
         self.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
         if let Some(cp) = &warm {
             self.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
             self.daemon.forget(&sandbox.id).await;
         }
-        self.daemon.prepare(&sandbox.id, self.config.prepare_request(Role::Worker)).await?;
+        self.daemon.prepare(&sandbox.id, self.config.prepare_request(Role::Worker, branch)).await?;
         let cp = self.compute.checkpoint(&sandbox.id, "warm").await?;
         let labels = self.pooled(label::BUSY, Some(&cp.0), Some(task));
         self.compute.set_labels(&sandbox.id, &labels).await?;
@@ -806,6 +871,13 @@ impl Factory {
             Status::Open => self.tracker.revoke_sub_agent(name).await?,
             Status::InReview => {
                 let attempt = task.run.attempt.unwrap_or(1);
+                // Changes were requested on this attempt but the task never left review: finish reopening it.
+                if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt) {
+                    let round = task.run.review_rounds.unwrap_or(1);
+                    self.request_rework(task, requested.clone(), round).await?;
+                    done.reworked.push(task.key.0.clone());
+                    return Ok(false);
+                }
                 return Ok(task.run.pr.is_some() && task.run.reviewed != Some(attempt));
             }
             _ => {}

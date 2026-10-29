@@ -44,6 +44,11 @@ impl FakeCodeHost {
         self.state.lock().unwrap().starts.get(&(repo.slug(), branch.to_string())).cloned()
     }
 
+    /// A branch's head: a made-up sha per publish, none before the first.
+    pub fn head(&self, repo: &Repo, branch: &str) -> Option<String> {
+        self.state.lock().unwrap().heads.get(&(repo.slug(), branch.to_string())).cloned()
+    }
+
     pub fn prs(&self) -> Vec<FakePr> {
         self.state.lock().unwrap().prs.clone()
     }

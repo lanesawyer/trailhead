@@ -23,7 +23,8 @@ pub use harness::{EventSink, Feedback, Harness, RunContext, RunEvent, RunOutcome
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use tracker::{
-    Answered, Credential, HumanContext, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, is_factory_agent,
+    Answered, ChangesRequested, Credential, HumanContext, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker,
+    is_factory_agent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]

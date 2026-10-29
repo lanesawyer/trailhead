@@ -45,6 +45,10 @@ struct Rig {
 }
 
 async fn rig() -> Rig {
+    rig_with(CONFIG).await
+}
+
+async fn rig_with(config: &str) -> Rig {
     let store = Arc::new(Store::open_local(":memory:").await.unwrap());
     let (ws, user) = store.bootstrap_local("Lane").await.unwrap();
     let human = Ctx::user(ws.id, user.id);
@@ -64,9 +68,13 @@ async fn rig() -> Rig {
         let s = s.clone();
         Box::pin(async move { Ok(Arc::new(CoreTracker::authenticate(s, &cred).await?) as Arc<dyn Tracker>) })
     });
-    let daemon = Arc::new(LocalDaemon::connecting(harness.clone(), Arc::new(codehost.clone()), connect));
+    let heads = codehost.clone();
+    let daemon = Arc::new(
+        LocalDaemon::connecting(harness.clone(), Arc::new(codehost.clone()), connect)
+            .with_heads(move |repo, branch| heads.head(repo, branch)),
+    );
     let factory = Factory::new(
-        FactoryConfig::parse(CONFIG).unwrap(),
+        FactoryConfig::parse(config).unwrap(),
         Arc::new(compute.clone()),
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
@@ -255,4 +263,49 @@ async fn human_context_pairs_answers_and_skips_the_factorys_own_notes() {
     assert_eq!(ctx.answers[0].by, "Lane");
     assert_eq!(ctx.notes.len(), 1, "{:?}", ctx.notes);
     assert_eq!((ctx.notes[0].author.as_str(), ctx.notes[0].body.as_str()), ("Lane", "Use a flock."));
+}
+
+fn request_changes(body: &str) -> RunOutcome {
+    RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into() }
+}
+
+#[tokio::test]
+async fn requested_changes_reopen_then_rework_on_the_real_engine() {
+    let r = rig().await;
+    let key = r.task("Add a greeting").await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Open, "the control plane can reopen a task in review");
+    assert_eq!(task.run.reviewed, Some(1));
+
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness
+        .push(Role::Reviewer, Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(
+        matches!(&ran[0].1, Outcome::Reviewed { verdict, .. } if verdict.kind == VerdictKind::Approve),
+        "{:?}",
+        ran[0].1
+    );
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+    assert_eq!(r.codehost.prs().len(), 1);
+}
+
+#[tokio::test]
+async fn requested_changes_past_the_cap_park_on_the_real_engine() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 1")).await;
+    let key = r.task("Add a greeting").await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Still wrong.")));
+    r.factory.tick().await.unwrap();
+
+    // Parking reopens the task, then claims it and asks as the control plane's own identity.
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.holder.as_deref(), Some("factory"));
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
+    assert!(question.body.contains("after 1 review rounds") && question.body.contains("Still wrong."));
 }

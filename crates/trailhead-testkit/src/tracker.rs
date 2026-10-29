@@ -289,6 +289,17 @@ impl Tracker for FakeTracker {
         })
     }
 
+    async fn reopen(&self, task: &TaskKey) -> Result<()> {
+        self.write(task, |t, _| {
+            if t.status != Status::InReview {
+                return Err(Error::Conflict(format!("{} isn't in review", t.key.0)));
+            }
+            t.holder = None;
+            t.status = Status::Open;
+            Ok(())
+        })
+    }
+
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()> {
         self.write(task, |t, _| {
             if t.status != Status::InReview {
