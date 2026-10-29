@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use crate::{ChangedFile, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Repo {
@@ -85,4 +85,6 @@ pub trait CodeHost: Send + Sync {
     async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>>;
     /// The PR's current title, which a squash merge takes as its commit subject.
     async fn title(&self, pr: &PrRef) -> Result<String>;
+    /// The files the PR changes, with how and by how many lines, for grading it.
+    async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>>;
 }

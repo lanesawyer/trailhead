@@ -7,9 +7,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{Notify, mpsc};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, NewPr, PrRef, PrepareRequest,
-    Result, Role, RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, RunUpdate, TaskKey, Tracker,
-    Usage, Verdict, VerdictKind,
+    Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, NewPr, PrGrade, PrRef,
+    PrepareRequest, Result, Role, RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, RunUpdate,
+    TaskKey, Tracker, Usage, Verdict, VerdictKind,
 };
 
 /// Turns a run's credential into a tracker handle acting as the sandbox's sub-agent.
@@ -46,13 +46,16 @@ struct Filed {
     existing: bool,
 }
 
-fn review_comment(v: &Verdict, filed: &[Filed]) -> String {
+fn review_comment(v: &Verdict, grade: Option<&PrGrade>, filed: &[Filed]) -> String {
     let verdict = match v.kind {
         trailhead_factory::VerdictKind::Approve => "Approve",
         trailhead_factory::VerdictKind::RequestChanges => "Request changes",
     };
     let model = v.model.as_ref().map(|m| format!(" (`{}`)", m.0)).unwrap_or_default();
     let mut comment = format!("🔍 **Review by `{}`{model} · Verdict: {verdict}**\n\n{}", v.reviewer, v.body);
+    if let Some(grade) = grade {
+        comment.push_str(&format!("\n\n{}", grade.describe()));
+    }
     if !filed.is_empty() {
         comment.push_str("\n\nFollow-ups filed in Trailhead:");
         for f in filed {
@@ -340,9 +343,14 @@ impl Runner {
                 tracker.request_review(key).await?;
                 Ok((RunResult::PrOpened(pr), checks))
             }
-            RunOutcome::Verdict { kind, body, follow_ups } => {
-                let verdict =
-                    Verdict { kind, body, reviewer: tracker.agent().to_string(), model: Some(req.model.clone()) };
+            RunOutcome::Verdict { kind, body, follow_ups, raise_grade } => {
+                let verdict = Verdict {
+                    kind,
+                    body,
+                    reviewer: tracker.agent().to_string(),
+                    model: Some(req.model.clone()),
+                    raise_grade,
+                };
                 // Recorded first: if Trailhead refuses it, a retried review mustn't have already posted to GitHub.
                 tracker.record_verdict(key, &verdict).await?;
                 // Only an approval files them: a rework may well fix what a request for changes mentions.
@@ -352,7 +360,12 @@ impl Runner {
                     Vec::new()
                 };
                 if let Some(pr) = &req.pr {
-                    self.codehost.comment(pr, &review_comment(&verdict, &filed)).await?;
+                    // The grade as the control plane will settle it, with the reviewer's raise.
+                    let mut grade = req.grade.clone();
+                    if let (Some(g), Some(raise)) = (&mut grade, &verdict.raise_grade) {
+                        g.raise(raise.grade, &raise.reason);
+                    }
+                    self.codehost.comment(pr, &review_comment(&verdict, grade.as_ref(), &filed)).await?;
                 }
                 Ok((RunResult::Reviewed(verdict), Vec::new()))
             }

@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{PrRef, Result, Usd, Verdict};
+use crate::{PrGrade, PrRef, Result, Usd, Verdict};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TaskKey(pub String);
@@ -29,6 +29,8 @@ pub struct Task {
     pub title: String,
     pub description: String,
     pub status: Status,
+    /// The task's risk grade, 1 to 4. The factory works only graded tasks.
+    pub grade: Option<u8>,
     /// The agent holding the claim, if any.
     pub holder: Option<String>,
     /// The `factory` object in the task's metadata ([`RunUpdate`] fields).
@@ -80,6 +82,12 @@ pub struct RunUpdate {
     /// How the task's PR was merged, once it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
+    /// The PR's grade and what raised it above the task's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<PrGrade>,
+    /// The task was skipped for having no grade, and said so (`set one to queue it`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ungraded: Option<bool>,
 }
 
 /// A merged PR: who merged it, which PR, and the commit it became.
@@ -129,6 +137,8 @@ impl RunUpdate {
             changes_requested,
             attempt_base,
             merged,
+            grade,
+            ungraded,
         } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
@@ -144,6 +154,8 @@ impl RunUpdate {
         self.changes_requested = changes_requested.or(self.changes_requested.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
         self.merged = merged.or(self.merged.take());
+        self.grade = grade.or(self.grade.take());
+        self.ungraded = ungraded.or(self.ungraded.take());
     }
 
     /// The review the next run has to address: the last one that asked for changes, unless a later review has
@@ -235,6 +247,8 @@ pub trait Tracker: Send + Sync {
     async fn request_review(&self, task: &TaskKey) -> Result<()>;
     /// Sends a task in review back to the queue, unheld, for a rework run to pick up.
     async fn reopen(&self, task: &TaskKey) -> Result<()>;
+    /// Raises the task's grade. Trailhead lets an agent raise a grade but never set the first or lower it.
+    async fn raise_grade(&self, task: &TaskKey, grade: u8) -> Result<()>;
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()>;
     async fn ask(&self, task: &TaskKey, question: &str) -> Result<()>;
     /// A note on the task, such as why an attempt failed, without changing it.

@@ -187,6 +187,7 @@ async fn work_flows_from_trailhead_over_the_tunnel() {
             kind: VerdictKind::Approve,
             body: "Looks right.".into(),
             follow_ups: vec![],
+            raise_grade: None,
         })
         .steps(1, 10_000),
     );

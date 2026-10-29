@@ -16,7 +16,7 @@ use trailhead_daemon::net::{
 };
 use trailhead_daemon::{Connect, GitWorkspace, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{
-    CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, PrState, Repo, Result, Tracker,
+    ChangedFile, CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, PrState, Repo, Result, Tracker,
 };
 use trailhead_harness_claude_code::ClaudeCode;
 
@@ -73,6 +73,10 @@ impl CodeHost for NoCodeHost {
     }
 
     async fn title(&self, _: &PrRef) -> Result<String> {
+        Err(Error::Forbidden(self.0.clone()))
+    }
+
+    async fn files(&self, _: &PrRef) -> Result<Vec<ChangedFile>> {
         Err(Error::Forbidden(self.0.clone()))
     }
 }

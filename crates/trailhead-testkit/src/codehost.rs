@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use trailhead_factory::{CodeHost, Commit, Error, MergeOutcome, NewPr, PrRef, PrState, Repo, Result};
+use trailhead_factory::{
+    ChangedFile, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
+};
 
 #[derive(Debug, Clone)]
 pub struct FakePr {
@@ -14,6 +16,8 @@ pub struct FakePr {
     pub closed: bool,
     /// What the host says of whether it merges cleanly: `None` while it is still working it out.
     pub mergeable: Option<bool>,
+    /// What the host lists as changed, when a test sets it; otherwise it follows the published commits.
+    pub files: Option<Vec<ChangedFile>>,
 }
 
 #[derive(Default)]
@@ -77,6 +81,11 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.mergeable = mergeable).unwrap();
     }
 
+    /// Sets the files the host lists for a PR, such as a lockfile the fake agent never wrote.
+    pub fn set_files(&self, pr: &PrRef, files: Vec<ChangedFile>) {
+        self.find(pr, |p, _| p.files = Some(files)).unwrap();
+    }
+
     /// The commit a merged PR became: made up from its number.
     pub fn merge_commit(pr: &PrRef) -> String {
         format!("merge-{}", pr.number)
@@ -125,6 +134,7 @@ impl CodeHost for FakeCodeHost {
             merged: false,
             closed: false,
             mergeable: Some(true),
+            files: None,
         });
         Ok(r)
     }
@@ -176,5 +186,27 @@ impl CodeHost for FakeCodeHost {
 
     async fn title(&self, pr: &PrRef) -> Result<String> {
         self.find(pr, |p, _| p.spec.title.clone())
+    }
+
+    async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
+        self.find(pr, |p, s| {
+            if let Some(files) = &p.files {
+                return files.clone();
+            }
+            // The last commit to touch a path decides how it ends up.
+            let mut by_path: BTreeMap<String, ChangedFile> = BTreeMap::new();
+            for c in s.branches.get(&(pr.repo.slug(), p.spec.branch.clone())).into_iter().flatten() {
+                for change in &c.changes {
+                    let (status, additions) = match &change.contents {
+                        Some(body) => (FileStatus::Added, body.iter().filter(|b| **b == b'\n').count().max(1) as u32),
+                        None => (FileStatus::Removed, 0),
+                    };
+                    let file =
+                        ChangedFile { path: change.path.clone(), status, additions, deletions: 0, previous_path: None };
+                    by_path.insert(change.path.clone(), file);
+                }
+            }
+            by_path.into_values().collect()
+        })
     }
 }

@@ -6,6 +6,7 @@ pub mod codehost;
 pub mod compute;
 pub mod config;
 pub mod daemon;
+pub mod grade;
 pub mod harness;
 pub mod money;
 pub mod provider;
@@ -15,14 +16,15 @@ pub use codehost::{CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, PrS
 pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };
-pub use config::{Budget, Checks, ComputeConfig, FactoryConfig, Gate, Profile, Role, UsageConfig};
+pub use config::{Budget, Checks, ComputeConfig, FactoryConfig, Gate, GradesConfig, Profile, Role, UsageConfig};
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
     RunResult, ToDaemon,
 };
+pub use grade::{ChangedFile, FileStatus, Grader, PrGrade, glob_match};
 pub use harness::{
-    EventSink, Feedback, FollowUp, Harness, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict, VerdictKind,
-    conventional_title, is_conventional,
+    EventSink, Feedback, FollowUp, Harness, RaiseGrade, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict,
+    VerdictKind, conventional_title, is_conventional,
 };
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};

@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use base64::Engine;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
-use trailhead_factory::{CodeHost, Commit, Error, MergeOutcome, NewPr, PrRef, PrState, Repo, Result};
+use trailhead_factory::{
+    ChangedFile, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
+};
 
 pub const API_URL: &str = "https://api.github.com";
 
@@ -203,6 +205,24 @@ fn file_diff(f: &Value) -> String {
     format!("diff --git a/{old} b/{name}\n--- {from}\n+++ {to}\n{body}")
 }
 
+fn changed_file(f: &Value) -> ChangedFile {
+    let status = match f["status"].as_str().unwrap_or_default() {
+        "added" => FileStatus::Added,
+        "modified" => FileStatus::Modified,
+        "removed" => FileStatus::Removed,
+        "renamed" => FileStatus::Renamed,
+        _ => FileStatus::Other,
+    };
+    let count = |k: &str| u32::try_from(f[k].as_u64().unwrap_or_default()).unwrap_or(u32::MAX);
+    ChangedFile {
+        path: f["filename"].as_str().unwrap_or_default().to_string(),
+        status,
+        additions: count("additions"),
+        deletions: count("deletions"),
+        previous_path: f["previous_filename"].as_str().map(str::to_string),
+    }
+}
+
 fn pr_ref(repo: &Repo, p: &Value) -> PrRef {
     PrRef {
         repo: repo.clone(),
@@ -312,5 +332,20 @@ impl CodeHost for GitHub {
         let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
         let p = self.call(self.request(Method::GET, &path)).await?;
         Ok(p["title"].as_str().unwrap_or_default().to_string())
+    }
+
+    async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
+        let path = format!("{}/pulls/{}/files", Self::repo_path(&pr.repo), pr.number);
+        let mut out = Vec::new();
+        for page in 1..=MAX_FILE_PAGES {
+            let req = self.request(Method::GET, &path).query(&[("per_page", "100"), ("page", &page.to_string())]);
+            let files = self.call(req).await?;
+            let files = files.as_array().map(Vec::as_slice).unwrap_or_default();
+            out.extend(files.iter().map(changed_file));
+            if files.len() < 100 {
+                return Ok(out);
+            }
+        }
+        Ok(out)
     }
 }

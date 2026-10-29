@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Check, Error, ModelAlias, PrepareRequest, Repo, Result, Usd};
+use crate::{Check, Error, Grader, ModelAlias, PrepareRequest, Repo, Result, Usd};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -38,6 +38,8 @@ pub struct FactoryConfig {
     #[serde(default)]
     pub gates: BTreeMap<String, Gate>,
     #[serde(default)]
+    pub grades: GradesConfig,
+    #[serde(default)]
     pub egress: EgressConfig,
     #[serde(default)]
     pub usage: UsageConfig,
@@ -45,6 +47,44 @@ pub struct FactoryConfig {
     pub compute: ComputeConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+}
+
+/// `[grades]`: path globs that raise a PR to at least grade 2, 3 or 4 (keyed by the grade), and the diff size over
+/// which it is at least grade 3 (`docs/factory/review.md#grades`). Without the section, the defaults of the example
+/// there; with it, the rules it lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GradesConfig {
+    #[serde(default = "default_max_lines")]
+    pub max_lines: u32,
+    #[serde(flatten)]
+    pub rules: BTreeMap<String, Vec<String>>,
+}
+
+fn default_max_lines() -> u32 {
+    600
+}
+
+impl Default for GradesConfig {
+    fn default() -> GradesConfig {
+        let globs = |g: &[&str]| g.iter().map(|s| s.to_string()).collect();
+        GradesConfig {
+            max_lines: default_max_lines(),
+            rules: BTreeMap::from([
+                ("2".to_string(), globs(&["crates/**"])),
+                ("3".to_string(), globs(&["**/Cargo.toml", "Cargo.lock", "**/migrations/**"])),
+                ("4".to_string(), globs(&[".github/**", "factory.toml", "fnox.toml", "mise.toml"])),
+            ]),
+        }
+    }
+}
+
+impl GradesConfig {
+    /// The classifier for these rules. Keys are checked when the file is parsed.
+    pub fn grader(&self) -> Grader<'_> {
+        let rules =
+            self.rules.iter().filter_map(|(k, globs)| Some((k.parse::<u8>().ok()?, globs.as_slice()))).collect();
+        Grader { rules, max_lines: self.max_lines }
+    }
 }
 
 /// How the daemon in each sandbox is started.
@@ -257,6 +297,11 @@ impl FactoryConfig {
                 return Err(Error::Config(format!("profile {name} escalates to unknown profile {next}")));
             }
         }
+        for grade in self.grades.rules.keys() {
+            if !matches!(grade.as_str(), "2" | "3" | "4") {
+                return Err(Error::Config(format!("[grades] has `{grade}`; path rules are for grades 2, 3 and 4")));
+            }
+        }
         let known = ["checks", "agent_review", "human", "quorum"];
         let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
         for (tier, gate) in &self.gates {
@@ -323,6 +368,28 @@ mod tests {
     fn the_repos_own_factory_toml_parses() {
         let config = FactoryConfig::parse(include_str!("../../../factory.toml")).unwrap();
         assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
+        assert_eq!(config.grades, GradesConfig::default(), "this repo's rules are the documented example");
+    }
+
+    #[test]
+    fn grades_default_to_the_documented_rules_and_parse_from_the_file() {
+        let base = SAMPLE;
+        let config = FactoryConfig::parse(base).unwrap();
+        assert_eq!(config.grades, GradesConfig::default());
+
+        let custom = format!("{base}\n[grades]\n3 = [\"Cargo.lock\"]\nmax_lines = 50\n");
+        let config = FactoryConfig::parse(&custom).unwrap();
+        assert_eq!(config.grades.max_lines, 50);
+        assert_eq!(config.grades.rules.keys().collect::<Vec<_>>(), ["3"]);
+        assert_eq!(config.grades.grader().rules.len(), 1);
+
+        let no_limit = format!("{base}\n[grades]\n2 = [\"src/**\"]\n");
+        assert_eq!(FactoryConfig::parse(&no_limit).unwrap().grades.max_lines, 600);
+
+        for bad in ["1 = [\"a\"]", "5 = [\"a\"]", "x = [\"a\"]", "max_line = 5"] {
+            let err = FactoryConfig::parse(&format!("{base}\n[grades]\n{bad}\n")).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
+        }
     }
 
     const SAMPLE: &str = r#"

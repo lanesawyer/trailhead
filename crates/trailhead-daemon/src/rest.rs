@@ -96,6 +96,7 @@ fn task(t: &Value, claim: &Value) -> Result<Task> {
         title: t["title"].as_str().unwrap_or_default().to_string(),
         description: t["description"].as_str().unwrap_or_default().to_string(),
         status: status(t["status"].as_str().unwrap_or_default())?,
+        grade: t["grade"].as_u64().and_then(|g| u8::try_from(g).ok()),
         holder,
         run,
         key: TaskKey(key),
@@ -200,6 +201,10 @@ impl Tracker for RestTracker {
 
     async fn reopen(&self, key: &TaskKey) -> Result<()> {
         self.patch(key, json!({ "status": "open" })).await
+    }
+
+    async fn raise_grade(&self, key: &TaskKey, grade: u8) -> Result<()> {
+        self.patch(key, json!({ "grade": grade })).await
     }
 
     async fn record_verdict(&self, key: &TaskKey, verdict: &Verdict) -> Result<()> {

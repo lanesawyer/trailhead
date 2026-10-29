@@ -12,7 +12,9 @@ use axum::{Json, Router};
 use base64::Engine;
 use serde_json::{Value, json};
 use trailhead_codehost_github::{GitHub, Identity};
-use trailhead_factory::{CodeHost, Commit, Error, FileChange, MergeOutcome, NewPr, PrRef, PrState, Repo};
+use trailhead_factory::{
+    ChangedFile, CodeHost, Commit, Error, FileChange, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo,
+};
 
 #[derive(Default)]
 struct Git {
@@ -175,13 +177,13 @@ async fn pull_files(State(g): State<Shared>, Path((_, _, n)): Path<(String, Stri
     for (path, blob) in tree {
         let content = String::from_utf8_lossy(&g.blobs[blob]).into_owned();
         match base.get(path) {
-            None => files.push(json!({ "filename": path, "status": "added", "patch": format!("@@ -0,0 +1 @@\n+{}", content.trim_end()) })),
+            None => files.push(json!({ "filename": path, "status": "added", "additions": 1, "deletions": 0, "patch": format!("@@ -0,0 +1 @@\n+{}", content.trim_end()) })),
             Some(b) if b != blob => files.push(json!({ "filename": path, "status": "modified", "patch": "@@ -1 +1 @@" })),
             Some(_) => {}
         }
     }
     for path in base.keys().filter(|p| !tree.contains_key(*p)) {
-        files.push(json!({ "filename": path, "status": "removed" }));
+        files.push(json!({ "filename": path, "status": "removed", "additions": 0, "deletions": 3 }));
     }
     Json(json!(files)).into_response()
 }
@@ -366,6 +368,22 @@ async fn prs_open_once_and_take_reviews_and_merges() {
     let diff = gh.diff(&pr).await.unwrap();
     assert!(diff.contains("diff --git a/a.txt b/a.txt\n--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1 @@\n+a\n"), "{diff}");
     assert!(diff.contains("--- a/old.txt\n+++ /dev/null\n(deleted)"), "{diff}");
+    let files = gh.files(&pr).await.unwrap();
+    let a = ChangedFile {
+        path: "a.txt".into(),
+        status: FileStatus::Added,
+        additions: 1,
+        deletions: 0,
+        previous_path: None,
+    };
+    let old = ChangedFile {
+        path: "old.txt".into(),
+        status: FileStatus::Removed,
+        additions: 0,
+        deletions: 3,
+        previous_path: None,
+    };
+    assert_eq!(files, [a, old]);
     gh.comment(&pr, "Looks right.").await.unwrap();
     assert_eq!(git.lock().unwrap().comments, [(1, "Looks right.".to_string())]);
 

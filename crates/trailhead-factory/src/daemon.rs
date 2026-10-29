@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Credential, Endpoint, Error, EventSink, Feedback, ModelId, PrRef, Repo, Result, Role, RunEvent, SandboxId,
+    Credential, Endpoint, Error, EventSink, Feedback, ModelId, PrGrade, PrRef, Repo, Result, Role, RunEvent, SandboxId,
     TaskSpec, Usage, Verdict,
 };
 
@@ -45,6 +45,9 @@ pub struct RunRequest {
     /// The branch a worker publishes to; a reviewer reads the PR instead.
     pub branch: String,
     pub pr: Option<PrRef>,
+    /// For a reviewer: the PR's grade, which its comment states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<PrGrade>,
     /// For a rework: the review that asked for changes, which the worker is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<Feedback>,

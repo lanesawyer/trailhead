@@ -21,9 +21,9 @@ use tokio::sync::mpsc;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::{
     ChangesRequested, CheckResult, CheckpointId, CodeHost, Compute, Daemon, Egress, Error, FactoryConfig, Feedback,
-    HumanContext, IROH_DOMAINS, Labels, Merged, MergedBy, ModelProvider, PrRef, PrState, PrepareRequest, Profile,
-    Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey,
-    TaskSpec, Tracker, Usd, Verdict, VerdictKind, label, review_name, run_name,
+    HumanContext, IROH_DOMAINS, Labels, Merged, MergedBy, ModelProvider, PrGrade, PrRef, PrState, PrepareRequest,
+    Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task,
+    TaskKey, TaskSpec, Tracker, Usd, Verdict, VerdictKind, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -67,6 +67,8 @@ pub struct Factory {
     setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
+    /// Tasks already reported as ungraded, so a poll doesn't say it again.
+    ungraded: Mutex<HashSet<TaskKey>>,
     /// The reset a pause was last logged for, so a pause is logged once rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
@@ -146,6 +148,7 @@ impl Factory {
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
             quota: Mutex::default(),
+            ungraded: Mutex::default(),
             pause_logged: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
         }
@@ -308,7 +311,7 @@ impl Factory {
         if room == 0 {
             return Ok(());
         }
-        let ready = self.tracker.ready(self.project(), self.queue().as_ref(), room).await?;
+        let ready = self.ready_graded(room).await?;
         for task in ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)) {
             let key = task.key.clone();
             let factory = self.clone();
@@ -316,6 +319,37 @@ impl Factory {
             keys.insert(handle.id(), key);
         }
         Ok(())
+    }
+
+    /// Up to `room` ready tasks that are the factory's work. Under a queue that means graded ones: grading a task is
+    /// what queues it. An ungraded one is skipped and reported once, in the log and on the task, rather than on every
+    /// poll (`docs/factory/review.md#grades`).
+    async fn ready_graded(&self, room: usize) -> Result<Vec<Task>> {
+        let queue = self.queue();
+        if queue.is_none() {
+            return self.tracker.ready(self.project(), None, room).await;
+        }
+        // Ungraded tasks mustn't crowd graded ones out of the limit.
+        let ready = self.tracker.ready(self.project(), queue.as_ref(), 1000).await?;
+        let (graded, ungraded): (Vec<Task>, Vec<Task>) = ready.into_iter().partition(|t| t.grade.is_some());
+        for task in ungraded {
+            self.report_ungraded(&task).await;
+        }
+        Ok(graded.into_iter().take(room).collect())
+    }
+
+    async fn report_ungraded(&self, task: &Task) {
+        if task.run.ungraded == Some(true) || !self.ungraded.lock().unwrap().insert(task.key.clone()) {
+            return;
+        }
+        tracing::info!(task = %task.key.0, "no grade; skipping it until a human sets one");
+        let told = async {
+            self.tracker.note(&task.key, "no grade; set one to queue it").await?;
+            self.tracker.report(&task.key, RunUpdate { ungraded: Some(true), ..RunUpdate::default() }).await
+        };
+        if let Err(e) = told.await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't note that the task has no grade");
+        }
     }
 
     /// The worker sandboxes that take a place in the cap: any with a worker role, and busy pooled ones, which
@@ -344,7 +378,7 @@ impl Factory {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        let ready = self.tracker.ready(self.project(), self.queue().as_ref(), room).await?;
+        let ready = self.ready_graded(room).await?;
         for task in ready.into_iter().filter(|t| self.setback_over(&t.key)) {
             let outcome = self.run_task(&task).await?;
             out.push((task, outcome));
@@ -434,6 +468,7 @@ impl Factory {
             repo: self.config.repo.repo(),
             base_branch: self.config.repo.base_branch.clone(),
             branch: Self::branch(task),
+            grade: None,
             pr: task.run.pr.clone(),
             feedback,
             model: self.provider.resolve(profile.model),
@@ -644,6 +679,11 @@ impl Factory {
     /// Runs the reviewer on an open PR in its own fresh sandbox.
     pub async fn review(&self, task: &Task, pr: &PrRef, attempt: u32, checks: &[CheckResult]) -> Result<Outcome> {
         let shown = self.tracker.show(&task.key).await?;
+        // Graded before anything starts, so a code host that fails here leaves the review to be tried again whole.
+        let grade = self.grade_pr(&shown, pr).await?;
+        if let Some(grade) = &grade {
+            self.record_grade(&shown, grade).await?;
+        }
         let round = shown.run.review_rounds.unwrap_or(0) + 1;
         let retries = shown.run.retries.unwrap_or(0);
         let name = reviewer_name(&task.key, attempt, round, retries);
@@ -667,6 +707,7 @@ impl Factory {
             repo: self.config.repo.repo(),
             base_branch: self.config.repo.base_branch.clone(),
             branch: Self::branch(task),
+            grade: grade.clone(),
             pr: Some(pr.clone()),
             feedback: None,
             model: self.provider.resolve(profile.model),
@@ -698,6 +739,11 @@ impl Factory {
         self.tracker.revoke_sub_agent(&name).await?;
         match run {
             Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
+                if let (Some(raise), Some(mut grade)) = (&verdict.raise_grade, grade)
+                    && grade.raise(raise.grade, &raise.reason)
+                {
+                    self.record_grade(&shown, &grade).await?;
+                }
                 if verdict.kind == VerdictKind::RequestChanges {
                     let requested = ChangesRequested {
                         reviewer: verdict.reviewer.clone(),
@@ -718,6 +764,45 @@ impl Factory {
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
         }
+    }
+
+    /// The PR's grade (`docs/factory/review.md#grades`): the task's, raised by what its files match and its size.
+    /// Without a code host only the task's own grade is known, and a task with none has no grade.
+    async fn grade_pr(&self, task: &Task, pr: &PrRef) -> Result<Option<PrGrade>> {
+        let Some(codehost) = &self.codehost else {
+            return Ok(task.grade.map(|g| PrGrade { grade: g, task: Some(g), reasons: Vec::new() }));
+        };
+        let files = codehost.files(pr).await?;
+        // A task still at the grade an earlier review raised it to keeps the grade it started at, and that reasons.
+        let recorded = task.run.grade.as_ref().filter(|r| task.grade == Some(r.grade));
+        let started = recorded.map_or(task.grade, |r| r.task);
+        let mut grade = self.config.grades.grader().grade(started, &files);
+        if let Some(r) = recorded.filter(|r| r.grade >= grade.grade) {
+            grade = r.clone();
+        }
+        // A person may have raised the task since.
+        if let Some(g) = task.grade.filter(|g| *g > grade.grade) {
+            grade.grade = g;
+            grade.reasons.push(format!("the task was raised to {g}"));
+        }
+        Ok(Some(grade))
+    }
+
+    /// Writes a PR's grade to the task's metadata and, when it is above the task's own, raises the task to it with a
+    /// note saying what did. Agents can only raise a grade, and only one a human has set.
+    async fn record_grade(&self, task: &Task, grade: &PrGrade) -> Result<()> {
+        let current = self.tracker.show(&task.key).await?;
+        if let Some(have) = current.grade.filter(|have| grade.grade > *have) {
+            self.tracker.raise_grade(&task.key, grade.grade).await?;
+            let why = grade.reasons.join("; ");
+            let note = format!("Raised to grade {} (task was {have}): {why}", grade.grade);
+            tracing::info!(task = %task.key.0, "{note}");
+            self.tracker.note(&task.key, &note).await?;
+        }
+        if current.run.grade.as_ref() != Some(grade) {
+            self.tracker.report(&task.key, RunUpdate { grade: Some(grade.clone()), ..RunUpdate::default() }).await?;
+        }
+        Ok(())
     }
 
     /// A reviewer that failed on the infrastructure (TRAIL-213): the round doesn't count toward `max_review_rounds`,
