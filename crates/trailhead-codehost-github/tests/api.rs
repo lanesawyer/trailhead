@@ -209,16 +209,14 @@ async fn merge(
 ) -> Response {
     assert_eq!(b["merge_method"], "squash");
     let mut g = g.lock().unwrap();
-    if !g.unmergeable {
-        let pr = &mut g.prs[n as usize - 1];
-        pr["state"] = json!("closed");
-        pr["merged"] = json!(true);
-        pr["merge_commit_sha"] = json!(format!("squash{n}"));
-    }
     if g.unmergeable {
         return (StatusCode::METHOD_NOT_ALLOWED, Json(json!({ "message": "Pull Request is not mergeable" })))
             .into_response();
     }
+    let pr = &mut g.prs[n as usize - 1];
+    pr["state"] = json!("closed");
+    pr["merged"] = json!(true);
+    pr["merge_commit_sha"] = json!(format!("squash{n}"));
     Json(json!({ "merged": true })).into_response()
 }
 
