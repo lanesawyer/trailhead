@@ -118,6 +118,14 @@ pub struct Reconciled {
     pub abandoned: Vec<String>,
 }
 
+/// A reviewer's name: the round's, with the count of infrastructure retries so a retried round gets a fresh one.
+fn reviewer_name(task: &TaskKey, attempt: u32, round: u32, retries: u32) -> String {
+    match retries {
+        0 => review_name(task, attempt, round),
+        n => format!("{}-{n}", review_name(task, attempt, round)),
+    }
+}
+
 impl Factory {
     pub fn new(
         config: FactoryConfig,
@@ -632,13 +640,21 @@ impl Factory {
 
     /// Runs the reviewer on an open PR in its own fresh sandbox.
     pub async fn review(&self, task: &Task, pr: &PrRef, attempt: u32, checks: &[CheckResult]) -> Result<Outcome> {
-        let round = self.tracker.show(&task.key).await?.run.review_rounds.unwrap_or(0) + 1;
-        let name = review_name(&task.key, attempt, round);
+        let shown = self.tracker.show(&task.key).await?;
+        let round = shown.run.review_rounds.unwrap_or(0) + 1;
+        let retries = shown.run.retries.unwrap_or(0);
+        let name = reviewer_name(&task.key, attempt, round, retries);
         self.tracker.report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() }).await?;
         let profile = self.config.reviewer().clone();
-        let credential = self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await?;
+        let credential = match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
+            Ok(credential) => credential,
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
+        };
         let sub = self.tracker.sub_agent(&name);
-        let sandbox = self.create_sandbox(&name, task, Role::Reviewer).await?;
+        let sandbox = match self.create_sandbox(&name, task, Role::Reviewer).await {
+            Ok(sandbox) => sandbox,
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
+        };
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
         let context = self.tracker.human_context(&task.key).await?;
         let req = RunRequest {
@@ -662,7 +678,11 @@ impl Factory {
         let prior = self.tracker.show(&task.key).await?.run.spend.unwrap_or_default();
         let run = self.run_metered(&sandbox, req, &profile, prior).await;
         self.compute.destroy(&sandbox.id).await?;
-        let run = run?;
+        let run = match run {
+            Ok(run) => run,
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
+        };
+        self.setbacks.lock().unwrap().remove(&task.key);
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
         let (spend, reviewed) = match &run {
@@ -691,6 +711,48 @@ impl Factory {
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
         }
+    }
+
+    /// A reviewer that failed on the infrastructure (TRAIL-213): the round doesn't count toward `max_review_rounds`,
+    /// and the task waits out the same growing backoff as a worker's infrastructure failures before reconcile
+    /// reviews it again. At `max_infra_failures` in a row the task is parked instead, saying so. Returns the error to
+    /// surface.
+    async fn review_infra_failed(&self, task: &Task, name: &str, error: Error, round: u32, retries: u32) -> Error {
+        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _)| *n);
+        let failures = held + 1;
+        let max = self.config.repo.max_infra_failures.max(1);
+        tracing::warn!(task = %task.key.0, %error, failures, max, "reviewer failed on the infrastructure; the round doesn't count");
+        self.set_back(&task.key, failures);
+        // The retry's sub-agent and sandbox names carry the retry count: this one's sub-agent is revoked for good.
+        let give_back =
+            RunUpdate { review_rounds: Some(round - 1), retries: Some(retries + 1), ..RunUpdate::default() };
+        if let Err(e) = self.tracker.report(&task.key, give_back).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't give the review round back");
+        }
+        if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the reviewer's sub-agent; reconcile will");
+        }
+        if failures >= max {
+            let question = format!(
+                "The infrastructure failed {failures} times in a row while reviewing the PR (the limit is {max}); \
+                 it's not the task. The last error: {error}\n\nFix the cause, then reopen the task; raise \
+                 `max_infra_failures` to allow more tries."
+            );
+            let parked = async {
+                self.tracker.reopen(&task.key).await?;
+                self.tracker.claim(&task.key).await?;
+                self.tracker.ask(&task.key, &question).await
+            };
+            match parked.await {
+                Ok(()) => {
+                    self.setbacks.lock().unwrap().remove(&task.key);
+                }
+                Err(e) => {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; the next reconcile tries again")
+                }
+            }
+        }
+        error
     }
 
     /// A review asked for changes: the task goes back to the queue with the review in its metadata, so the next run
@@ -970,7 +1032,8 @@ impl Factory {
         let attempt = task.run.attempt.unwrap_or(1);
         let pr = task.run.pr.as_ref().ok_or_else(|| Error::Other(format!("{} has no PR to review", task.key.0)))?;
         if let Some(round) = task.run.review_rounds.filter(|r| *r > 0) {
-            self.tracker.revoke_sub_agent(&review_name(&task.key, attempt, round)).await?;
+            let retries = task.run.retries.unwrap_or(0);
+            self.tracker.revoke_sub_agent(&reviewer_name(&task.key, attempt, round, retries)).await?;
         }
         self.review(task, pr, attempt, &[]).await
     }
@@ -1047,7 +1110,7 @@ impl Factory {
                     done.reworked.push(task.key.0.clone());
                     return Ok(false);
                 }
-                return Ok(task.run.pr.is_some() && task.run.reviewed != Some(attempt));
+                return Ok(task.run.pr.is_some() && task.run.reviewed != Some(attempt) && self.setback_over(&task.key));
             }
             _ => {}
         }

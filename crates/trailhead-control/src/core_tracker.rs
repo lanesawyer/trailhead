@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
-use trailhead_core::{CommentKind, Ctx, NewComment, Principal, Store, TaskFilter, TaskPatch, TokenOptions};
+use trailhead_core::{
+    CommentKind, Ctx, GradeFilter, NewComment, Principal, Store, TaskFilter, TaskPatch, TokenOptions,
+};
 use trailhead_factory::{
     Answered, Credential, Error, HumanContext, ModelId, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker,
     Verdict, VerdictKind, is_factory_agent,
@@ -135,7 +137,9 @@ impl Tracker for CoreTracker {
     async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
         let tasks = match queue {
-            None => self.store.ready(&ctx, Some(project), Some(limit as i64)).await.map_err(map_err)?,
+            None => {
+                self.store.ready(&ctx, Some(project), Some(limit as i64), GradeFilter::Any).await.map_err(map_err)?
+            }
             Some(queue) => {
                 let filter = TaskFilter {
                     project: Some(project.to_string()),
@@ -145,7 +149,8 @@ impl Tracker for CoreTracker {
                 };
                 let queued: std::collections::HashSet<_> =
                     self.store.list_tasks(&ctx, filter).await.map_err(map_err)?.into_iter().map(|t| t.id).collect();
-                let ready = self.store.ready(&ctx, Some(project), Some(1000)).await.map_err(map_err)?;
+                let ready =
+                    self.store.ready(&ctx, Some(project), Some(1000), GradeFilter::Any).await.map_err(map_err)?;
                 ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
             }
         };
