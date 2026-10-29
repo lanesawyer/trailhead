@@ -1,6 +1,7 @@
 //! MCP at `/mcp` for agents without a shell. Tools mirror the CLI and answer in
 //! the same terse one-line-per-task text, because agents pay for every token.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -150,12 +151,34 @@ fn project_text(p: &Project) -> String {
     format!("{}\n\n{brief}", project_line(p))
 }
 
-fn comment_line(c: &Comment) -> String {
-    let mut tags = c.kind.to_string();
-    if c.kind == CommentKind::Question {
-        tags.push_str(if c.resolved_at.is_some() { ", resolved" } else { ", open" });
+/// `2026-10-29 14:03 UTC`, the server having no local zone.
+fn short_time(ts: Timestamp) -> String {
+    ts.strftime("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+/// Same shape as the CLI's comment line, with the time in UTC.
+fn comment_line(c: &Comment, names: &dyn Fn(Uuid) -> String) -> String {
+    let mut tags = vec![c.kind.to_string()];
+    if let Some(to) = c.addressed_to {
+        tags.push(format!("to {}", names(to)));
     }
-    format!("[{tags}] id {}: {}", c.id, c.body)
+    if c.kind == CommentKind::Question {
+        tags.push(if c.resolved_at.is_some() { "resolved".into() } else { "open".into() });
+    }
+    if let Some(v) = c.verdict {
+        tags.push(v.to_string().replace('_', " "));
+    }
+    if let Some(m) = &c.model {
+        tags.push(m.clone());
+    }
+    format!(
+        "[{}] {} {}: {}\n    id {}",
+        tags.join(", "),
+        short_time(c.created_at),
+        names(c.author_id),
+        c.body.replace('\n', "\n    "),
+        c.id
+    )
 }
 
 /// "until <time>", or "since <time>, no expiry" for a claim that never lapses.
@@ -166,11 +189,11 @@ fn lease(c: &Claim) -> String {
     }
 }
 
-fn detail_text(d: &TaskDetail) -> String {
+fn detail_text(d: &TaskDetail, names: &dyn Fn(Uuid) -> String) -> String {
     let t = &d.task;
     let mut out = vec![task_line(t)];
     if let Some(c) = &d.claim {
-        out.push(format!("claimed by {} {}", c.holder_id, lease(c)));
+        out.push(format!("claimed by {} {}", names(c.holder_id), lease(c)));
     }
     if !d.blocked_by.is_empty() {
         out.push(format!("blocked by {}", d.blocked_by.join(", ")));
@@ -187,7 +210,7 @@ fn detail_text(d: &TaskDetail) -> String {
     }
     if !d.comments.is_empty() {
         out.push(String::new());
-        out.extend(d.comments.iter().map(comment_line));
+        out.extend(d.comments.iter().map(|c| comment_line(c, names)));
     }
     out.join("\n")
 }
@@ -560,7 +583,16 @@ impl TrailheadMcp {
         Parameters(a): Parameters<TaskArg>,
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
-        text(detail_text(&attempt!(self.state.store.task_detail(&ctx, &a.task).await)))
+        let detail = attempt!(self.state.store.task_detail(&ctx, &a.task).await);
+        let mut known: HashMap<Uuid, String> = HashMap::new();
+        if let Ok(u) = self.state.store.get_user(&ctx, ctx.user_id).await {
+            known.insert(u.id, u.name);
+        }
+        for ag in attempt!(self.state.store.list_agents(&ctx).await) {
+            known.insert(ag.id, ag.name);
+        }
+        let names = |id: Uuid| known.get(&id).cloned().unwrap_or_else(|| id.to_string().chars().take(8).collect());
+        text(detail_text(&detail, &names))
     }
 
     #[tool(

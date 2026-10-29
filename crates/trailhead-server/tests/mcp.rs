@@ -105,6 +105,17 @@ async fn agent_works_a_task_over_mcp() {
     assert!(!err, "{out}");
     let (_, out) = call(&client, "show", json!({"task": "AUTH-2"})).await;
     assert!(out.contains("[handoff]") && out.contains("done, tests pass"), "{out}");
+    assert!(out.contains(" UTC claude: done, tests pass"), "{out}");
+
+    let (err, out) = call(
+        &client,
+        "comment",
+        json!({"task": "AUTH-2", "body": "not yet", "kind": "review", "verdict": "request_changes", "model": "m-1"}),
+    )
+    .await;
+    assert!(!err, "{out}");
+    let (_, out) = call(&client, "show", json!({"task": "AUTH-2"})).await;
+    assert!(out.contains("[review, request changes, m-1] ") && out.contains(" claude: not yet"), "{out}");
 
     let (err, out) = call(&client, "create_task", json!({"project": "AUTH", "title": "oops"})).await;
     assert!(!err, "{out}");
