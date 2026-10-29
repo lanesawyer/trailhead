@@ -11,7 +11,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use trailhead_control::{CoreTracker, Factory, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Store};
 use trailhead_daemon::net::{
-    ALPN, API_ALPN, ApiTunnel, DaemonProtocol, Launch, RemoteDaemon, open_api_tunnel, parse_endpoint_id,
+    ALPN, API_ALPN, ApiTunnel, DaemonProtocol, Launch, RemoteDaemon, build_id, open_api_tunnel, parse_endpoint_id,
     parse_secret_key,
 };
 use trailhead_daemon::{Connect, RENEW_EVERY, RestTracker, Runner};
@@ -143,7 +143,7 @@ impl Rig {
             connect,
             renew_every: RENEW_EVERY,
         };
-        let protocol = DaemonProtocol::new(Arc::new(runner), control_plane);
+        let protocol = DaemonProtocol::new(Arc::new(runner), control_plane).build(build_id(b"daemon"));
         self.routers.push(Router::builder(ep).accept(ALPN, protocol).spawn());
     }
 

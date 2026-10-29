@@ -19,6 +19,7 @@ Decided: strongly typed. Shared Rust types for every message between the control
 
 - **In:** `Prepare` (repo, base branch, `setup` check), then `Run` (task spec, repo and branch, model and endpoint, step limit, required checks with their commands, hosts that must be blocked, Trailhead sub-agent token).
 - **Out:** `Prepared`, or a `Report` (result, check results, usage totals), or `Failed` with a typed error.
+- **Version:** `Version` asks which build is running; the daemon answers `Version` with its crate version and the SHA-256 of its executable. Before `Prepare`, the control plane compares that with the binary it uploads and, on a mismatch (or a daemon too old to answer), restarts the daemon with `Compute::start` and checks again, failing the prepare if it still differs.
 - **Stream:** `Event`s while a run goes (step started, tool call, usage per model call, needs input).
 - **Control:** `Cancel`. Pause and checkpoint-now stay with the control plane, which checkpoints through `Compute`.
 - **Wire.** ALPN `trailhead/daemon/0`. One bidirectional stream per request, framed as a 4-byte big-endian length plus JSON.

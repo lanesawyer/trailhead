@@ -17,7 +17,8 @@ pub use compute::{
 };
 pub use config::{Budget, Checks, ComputeConfig, FactoryConfig, Gate, Profile, Role, UsageConfig};
 pub use daemon::{
-    Check, CheckResult, Daemon, DaemonSecrets, FromDaemon, PrepareRequest, RunReport, RunRequest, RunResult, ToDaemon,
+    Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
+    RunResult, ToDaemon,
 };
 pub use harness::{
     EventSink, Feedback, FollowUp, Harness, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict, VerdictKind,
