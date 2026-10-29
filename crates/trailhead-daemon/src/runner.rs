@@ -197,7 +197,9 @@ impl Runner {
                 let new = NewPr {
                     branch: req.branch.clone(),
                     base: req.base_branch.clone(),
-                    title: title.unwrap_or_else(|| format!("chore: {} ({})", req.task.title, req.task.key.0)),
+                    title: title.unwrap_or_else(|| {
+                        trailhead_factory::conventional_title(None, &req.task.key, &req.task.title).0
+                    }),
                     body: format!("{summary}{flaky}{}", pr_footer(req, agent)),
                 };
                 self.codehost.open_pr(&req.repo, new).await

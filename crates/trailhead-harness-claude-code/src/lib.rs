@@ -356,7 +356,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              later that shouldn't hold this change up in `follow_ups`, each with a title and description: the factory \
              files them as tasks, so don't repeat them in the summary. The PR's title must be a conventional commit \
              (`type(scope): message`, as the repo's changelog requires) that fits the change: a fix titled feat or \
-             a wrong scope is a reason to request changes.",
+             a wrong scope is a reason to request changes. The task key must come last, in square brackets (`... [{key}]`), not parentheses: request changes if the title uses parentheses or leaves the key out.",
             key = task.key.0,
             title = task.title,
             desc = task.description,

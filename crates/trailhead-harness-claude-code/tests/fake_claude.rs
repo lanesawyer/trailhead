@@ -177,7 +177,7 @@ async fn worker_changes_are_collected() {
     let RunOutcome::Changes { commits, summary } = out else { panic!("{out:?}") };
     assert_eq!(summary, "Adds hi().");
     assert_eq!(commits.len(), 1);
-    assert_eq!(commits[0].message, "feat(core): add a greeting (TRAIL-1)");
+    assert_eq!(commits[0].message, "feat(core): add a greeting [TRAIL-1]");
     let mut changes: Vec<_> =
         commits[0].changes.iter().map(|c| (c.path.as_str(), c.contents.as_deref().map(|b| b.to_vec()))).collect();
     changes.sort();
@@ -306,7 +306,7 @@ async fn invalid_titles_fall_back() {
     let r = rig();
     let (out, _) = play(&r, "badtitle", ctx(&r, Role::Worker, 10)).await;
     let RunOutcome::Changes { commits, .. } = out else { panic!("{out:?}") };
-    assert_eq!(commits[0].message, "chore: Add a greeting (TRAIL-1)");
+    assert_eq!(commits[0].message, "chore: Add a greeting [TRAIL-1]");
 }
 
 async fn rework_commits_are_conventional() {
@@ -320,7 +320,7 @@ async fn rework_commits_are_conventional() {
     let feedback = Feedback { body: "Use a doc comment.".into() };
     let out = r.harness.resume(ctx(&r, Role::Worker, 10), feedback, tx).await.unwrap();
     let RunOutcome::Changes { commits, .. } = out else { panic!("{out:?}") };
-    assert_eq!(commits[0].message, "fix(cli): use a doc comment (TRAIL-1)");
+    assert_eq!(commits[0].message, "fix(cli): use a doc comment [TRAIL-1]");
 }
 
 async fn step_limit_kills_the_agent() {

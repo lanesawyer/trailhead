@@ -6,7 +6,7 @@ use std::sync::Arc;
 use trailhead_control::{Factory, Outcome, Reconciled};
 use trailhead_factory::{
     CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, Role, RunOutcome, SandboxSpec,
-    Status, TaskKey, Tracker, Usd, VerdictKind, label, run_name,
+    Status, TaskKey, Tracker, Usd, VerdictKind, conventional_title, label, run_name,
 };
 use trailhead_testkit::{
     FAKE_BASE, FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness,
@@ -75,7 +75,7 @@ fn rig_with(config: &str) -> Rig {
 fn changes() -> RunOutcome {
     RunOutcome::Changes {
         commits: vec![Commit {
-            message: "feat: greet".into(),
+            message: conventional_title(Some("feat(core): greet"), &TaskKey("TRAIL-1".into()), "").0,
             changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
         }],
         summary: "Adds a greeting.".into(),
@@ -108,7 +108,10 @@ async fn spec_to_reviewed_pr_then_human_merge() {
 
     let opened = &r.codehost.prs()[0];
     assert_eq!(opened.spec.branch, "factory/trail-1");
-    assert_eq!(opened.spec.title, "feat: greet", "the PR is titled with the commit subject the repo squashes to");
+    assert_eq!(
+        opened.spec.title, "feat(core): greet [TRAIL-1]",
+        "the PR is titled with the commit subject the repo squashes to"
+    );
     let start = r.codehost.start(&opened.pr.repo, "factory/trail-1");
     assert_eq!(start.as_deref(), Some(FAKE_BASE), "published on the commit the checkout started from");
     assert_eq!(

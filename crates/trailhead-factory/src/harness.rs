@@ -218,11 +218,11 @@ pub fn is_conventional(title: &str) -> bool {
 }
 
 /// The commit subject and PR title for a task: the agent's conventional `title` with the task key appended, or, when
-/// it's missing or not conventional, `chore: {task title} ({key})`. The flag is false for the fallback.
+/// it's missing or not conventional, `chore: {task title} [{key}]`. The flag is false for the fallback.
 pub fn conventional_title(agent_title: Option<&str>, key: &TaskKey, task_title: &str) -> (String, bool) {
     match agent_title.map(str::trim).filter(|t| is_conventional(t)) {
-        Some(t) => (format!("{t} ({})", key.0), true),
-        None => (format!("chore: {} ({})", task_title.trim(), key.0), false),
+        Some(t) => (format!("{t} [{}]", key.0), true),
+        None => (format!("chore: {} [{}]", task_title.trim(), key.0), false),
     }
 }
 
@@ -249,8 +249,8 @@ mod tests {
             assert!(!is_conventional(bad), "{bad}");
         }
         let key = TaskKey("TRAIL-9".into());
-        assert_eq!(conventional_title(Some(" fix(core): a "), &key, "T"), ("fix(core): a (TRAIL-9)".into(), true));
-        assert_eq!(conventional_title(Some("nope"), &key, "T"), ("chore: T (TRAIL-9)".into(), false));
-        assert_eq!(conventional_title(None, &key, "T"), ("chore: T (TRAIL-9)".into(), false));
+        assert_eq!(conventional_title(Some(" fix(core): a "), &key, "T"), ("fix(core): a [TRAIL-9]".into(), true));
+        assert_eq!(conventional_title(Some("nope"), &key, "T"), ("chore: T [TRAIL-9]".into(), false));
+        assert_eq!(conventional_title(None, &key, "T"), ("chore: T [TRAIL-9]".into(), false));
     }
 }
