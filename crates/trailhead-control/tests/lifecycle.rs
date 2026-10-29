@@ -1419,3 +1419,36 @@ async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_re
     let ran = r.factory.tick().await.unwrap();
     assert_eq!(ran.len(), 1, "no backoff left over from before the park");
 }
+
+#[tokio::test(start_paused = true)]
+async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 3"));
+    let key = r.tracker.add_task("TRAIL", "Unreviewable", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let rounds = r.tracker.task(&key).run.review_rounds;
+
+    r.daemon.fail_runs(3, "connection lost");
+    let secs = std::time::Duration::from_secs;
+    for (n, wait) in [60, 120].into_iter().enumerate() {
+        let done = r.factory.reconcile().await.unwrap();
+        assert!(done.reviewed.is_empty(), "failure {} isn't a review", n + 1);
+        assert_eq!(r.tracker.task(&key).status, Status::InReview, "failure {} is retried", n + 1);
+        assert_eq!(r.tracker.task(&key).run.review_rounds, rounds, "the failed round is given back");
+        // Backing off: the reviewer isn't started again, so the failure queued for it stays unused.
+        r.factory.reconcile().await.unwrap();
+        tokio::time::advance(secs(wait - 1)).await;
+        r.factory.reconcile().await.unwrap();
+        assert_eq!(r.tracker.task(&key).status, Status::InReview, "still a second short of {wait}s");
+        tokio::time::advance(secs(2)).await;
+    }
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.review_rounds, rounds);
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("it's not the task") && questions[0].body.contains("connection lost"));
+}
