@@ -117,7 +117,9 @@ pub trait Harness: Send + Sync {
 /// overload, a server error) and not with the task: a resume can get past it, and it doesn't count as a failed
 /// attempt. Not auth, billing or invalid-request errors. One matcher, so resuming and attempt counting agree.
 pub fn is_transient_api_error(text: &str) -> bool {
-    let Some(at) = text.find("API Error") else {
+    // The label leads the text, as Claude Code writes it (maybe after `claude: `); a free-text reason that only
+    // mentions an API error somewhere isn't API trouble.
+    let Some(at) = text.find("API Error").filter(|at| matches!(text[..*at].trim(), "" | "claude:")) else {
         return false;
     };
     const PHRASES: &[&str] = &[
@@ -137,7 +139,7 @@ pub fn is_transient_api_error(text: &str) -> bool {
         "Overloaded",
         "overloaded",
     ];
-    if PHRASES.iter().any(|p| text.contains(p)) {
+    if PHRASES.iter().any(|p| text[at..].contains(p)) {
         return true;
     }
     // The status right after the label, as in `API Error: 503 {...}` or `API Error (529 ...)`; as a whole number, so
@@ -167,6 +169,7 @@ mod api_error_tests {
             "API Error: 401 authentication failed",
             "I got a 503 from the test server",
             "the build timed out",
+            "Couldn't fix the API Error handling; the test run timed out",
         ] {
             assert!(!is_transient_api_error(no), "{no}");
         }
