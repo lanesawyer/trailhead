@@ -5040,6 +5040,7 @@ dependencies = [
  "async-trait",
  "axum",
  "futures-util",
+ "http 1.5.0",
  "reqwest",
  "serde",
  "serde_json",

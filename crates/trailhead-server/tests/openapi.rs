@@ -127,3 +127,15 @@ async fn task_list_schema_describes_included_claims() {
     let named = serde_json::to_string(&schemas["NamedClaim"]).unwrap();
     assert!(named.contains("\"holder\"") && named.contains("#/components/schemas/Claim"), "{named}");
 }
+
+#[tokio::test]
+async fn update_task_documents_a_nullable_grade() {
+    let doc = fetch_doc().await;
+    let grade = &doc["components"]["schemas"]["UpdateTask"]["properties"]["grade"];
+    let text = serde_json::to_string(grade).unwrap();
+    assert!(text.contains("integer") && text.contains("null"), "{text}");
+    let create = &doc["components"]["schemas"]["CreateTask"]["properties"]["grade"];
+    assert!(create.is_object(), "{create}");
+    let params = doc["paths"]["/v1/ready"]["get"]["parameters"].as_array().unwrap();
+    assert!(params.iter().any(|p| p["name"] == "grade"));
+}

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use trailhead_control::{Factory, Outcome, Reconciled};
 use trailhead_factory::{
-    CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, RaiseGrade, Role, RunOutcome,
-    SandboxSpec, Status, TaskKey, Tracker, Usd, VerdictKind, conventional_title, label, run_name,
+    CiState, CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, MergedBy, RaiseGrade, Role,
+    RunOutcome, SandboxSpec, Status, TaskKey, Tracker, Usd, VerdictKind, conventional_title, label, run_name,
 };
 use trailhead_testkit::{
     FAKE_BASE, FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness,
@@ -150,7 +150,8 @@ async fn spec_to_reviewed_pr_then_human_merge() {
     assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "review" && c.body.starts_with("approve")));
 
     // The human merges and finishes.
-    assert_eq!(r.codehost.merge(pr).await.unwrap(), MergeOutcome::Merged);
+    let head = CodeHost::head(&r.codehost, pr).await.unwrap();
+    assert_eq!(r.codehost.merge(pr, &head).await.unwrap(), MergeOutcome::Merged);
     r.tracker.finish(&key, "merged").await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::Done);
     assert!(r.factory.tick().await.unwrap().is_empty());
@@ -1646,7 +1647,12 @@ async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_convent
 
 /// A rig whose factory works only the subtasks of TRAIL-1 and reads PRs through the code host, which grading needs.
 fn queued_rig() -> (Rig, TaskKey) {
-    let mut r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nqueue = \"TRAIL-1\""));
+    queued_rig_with("")
+}
+
+fn queued_rig_with(extra: &str) -> (Rig, TaskKey) {
+    let config = CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nqueue = \"TRAIL-1\"");
+    let mut r = rig_with(&format!("{config}\n{extra}"));
     let queue = r.tracker.add_task("TRAIL", "Factory queue", "");
     let codehost = Arc::new(r.codehost.clone());
     r.factory = r.factory.with_codehost(codehost);
@@ -1789,4 +1795,251 @@ async fn a_reviewer_cant_lower_the_grade() {
     r.factory.tick().await.unwrap();
     assert_eq!(r.tracker.task(&key).grade, Some(3));
     assert!(r.codehost.prs()[0].comments[0].ends_with("\n\nGrade 3"));
+}
+
+const SHADOW: &str = r#"
+[gates.1]
+require = ["checks", "ci", "agent_review"]
+auto_merge = true
+
+[gates.3]
+require = ["checks", "ci", "agent_review", "human"]
+auto_merge = false
+
+[merge]
+mode = "shadow"
+"#;
+
+/// A graded task worked up to an approved review, with CI still pending.
+async fn reviewed(r: &Rig, queue: &TaskKey, grade: u8, path: &str) -> (TaskKey, trailhead_factory::PrRef) {
+    let key = r.tracker.add_subtask(queue, "Do it", "");
+    r.tracker.set_grade(&key, grade);
+    r.harness.push(Role::Worker, Script::new(changes_to(path)));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+    (key, pr)
+}
+
+/// What was said on the PR after the review's own comment.
+fn said(r: &Rig) -> Vec<String> {
+    r.codehost.prs()[0].comments.iter().skip(1).cloned().collect()
+}
+
+#[tokio::test]
+async fn shadow_mode_waits_for_ci_then_approves_and_says_each_change_once() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+    assert_eq!(said(&r), ["Grade 1: waiting for CI."]);
+
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(said(&r).len(), 1, "an unchanged decision isn't said again");
+
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(said(&r)[1..], ["Grade 1: checks, CI and review passed; would merge (shadow)."]);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Approved);
+    let decision = task.run.merge.expect("recorded");
+    assert_eq!((decision.grade, decision.would_merge), (1, true));
+    assert_eq!(decision.passed, ["checks", "ci", "agent_review"]);
+    assert!(decision.waiting.is_empty());
+    assert!(!r.codehost.prs()[0].merged, "shadow mode never merges");
+
+    // Lane merges on GitHub and the task is closed as done.
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.merged, std::slice::from_ref(&key.0));
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_grade_three_pr_waits_for_lane_who_approves_it() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(
+        said(&r),
+        [
+            "Grade 3 (task was 1; Cargo.lock changed): waiting for CI and Lane.",
+            "Grade 3 (task was 1; Cargo.lock changed): waiting for Lane."
+        ]
+    );
+    assert_eq!(r.tracker.task(&key).status, Status::InReview, "the factory doesn't approve for Lane");
+
+    r.tracker.approve_as_human(&key);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Approved);
+    assert_eq!(
+        said(&r)[2..],
+        [
+            "Grade 3 (task was 1; Cargo.lock changed): checks, CI, review and Lane's approval passed; not auto-merged at this grade, so Lane merges."
+        ]
+    );
+    let decision = task.run.merge.unwrap();
+    assert!(!decision.would_merge);
+    assert_eq!(decision.approved_head, None, "it was Lane's approval, not the factory's");
+    assert_eq!(decision.human_head.as_deref(), Some(decision.head.as_str()));
+}
+
+#[tokio::test]
+async fn an_approval_on_an_old_head_doesnt_count() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+
+    // Someone pushes: the approval is withdrawn, and the review of the old head doesn't cover the new one.
+    r.codehost.push_to(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+    assert_eq!(said(&r).last().unwrap(), "Grade 1: waiting for CI and review.");
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::InReview, "CI alone isn't enough");
+    assert_eq!(said(&r).last().unwrap(), "Grade 1: waiting for review.");
+
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let shown = r.tracker.task(&key);
+    r.factory.review(&shown, &pr, 1, &[]).await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+    assert_eq!(said(&r).last().unwrap(), "Grade 1: checks, CI and review passed; would merge (shadow).");
+}
+
+#[tokio::test]
+async fn failed_ci_names_the_failing_checks_and_blocks_approval() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["lint".into(), "test".into()] });
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+    assert_eq!(said(&r).last().unwrap(), "Grade 1: CI failed (lint, test).");
+    assert_eq!(r.tracker.task(&key).run.merge.unwrap().failing, ["lint", "test"]);
+}
+
+#[tokio::test]
+async fn without_delegated_reviewer_rights_the_factory_says_so_and_only_records() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    r.tracker.set_delegated("factory", false);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    let decision = task.run.merge.unwrap();
+    assert_eq!(decision.approved_head, None);
+    assert!(decision.problem.as_deref().unwrap().contains("isn't a delegated reviewer"), "{decision:?}");
+    assert!(said(&r).last().unwrap().contains("passed, but the factory can't move the task to approved"));
+    assert_eq!(notes(&r, &key).len(), 1, "said once");
+}
+
+#[tokio::test]
+async fn with_merge_mode_off_gates_are_recorded_and_tasks_approved_but_the_pr_is_left_alone() {
+    let (r, queue) = queued_rig();
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+    assert!(!r.tracker.task(&key).run.merge.unwrap().would_merge);
+    assert!(said(&r).is_empty());
+}
+
+fn merging() -> String {
+    SHADOW.replace("shadow", "on")
+}
+
+#[tokio::test]
+async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(said(&r)[1..], ["Grade 1: checks, CI and review passed; merging."]);
+    assert!(r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Done);
+    let merged = task.run.merged.expect("recorded");
+    assert_eq!((merged.by, merged.pr), (MergedBy::Merger, pr.clone()));
+    let handoff = r.tracker.comments(&key).into_iter().find(|c| c.kind == "handoff").expect("a handoff").body;
+    assert!(
+        handoff.contains(&pr.url) && handoff.contains("Grade 1; gates passed: checks, ci, agent_review"),
+        "{handoff}"
+    );
+}
+
+#[tokio::test]
+async fn a_conflict_at_merge_reworks_the_pr_instead_of_forcing_it() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open, "back to running for a rework");
+    assert!(task.run.pending_changes().is_some_and(|c| c.conflict));
+}
+
+#[tokio::test]
+async fn a_merge_the_host_refuses_is_tried_again_not_reworked() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.refuse_merge(Some("Required status check \"test\" is expected."));
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Approved, "still approved, not sent to a rework");
+    assert!(task.run.pending_changes().is_none());
+
+    r.codehost.refuse_merge(None);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_pr_behind_its_base_is_updated_before_it_is_merged() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "not merged while behind");
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn lane_approving_a_grade_three_task_gets_it_merged() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "waits for Lane");
+    r.tracker.approve_as_human(&key);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn merge_mode_on_without_reviewer_rights_falls_back_to_saying_what_it_would_do() {
+    let (r, queue) = queued_rig_with(&merging());
+    r.tracker.set_delegated("factory", false);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+    assert!(said(&r).last().unwrap().contains("passed, but the factory can't move the task to approved"));
 }
