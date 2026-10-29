@@ -1153,3 +1153,105 @@ async fn a_deliberate_stop_gives_the_attempt_back() {
     assert_eq!(r.tracker.task(&key).run.attempt, Some(1));
     assert!(r.tracker.agents().contains(&"factory/trail-1-a1-1".to_string()), "{:?}", r.tracker.agents());
 }
+
+fn api_timeout() -> RunOutcome {
+    RunOutcome::Failed { reason: "claude: API Error: No response from API (waited 3m)".into() }
+}
+
+#[tokio::test]
+async fn the_agents_api_timeouts_dont_use_up_attempts() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Slow API", "");
+    for _ in 0..2 {
+        r.harness.push(Role::Worker, Script::new(api_timeout()));
+        let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+        assert!(matches!(ran, Outcome::Failed { .. }), "{ran:?}");
+        let task = r.tracker.task(&key);
+        assert_eq!(task.status, Status::Open, "not parked");
+        assert_eq!(task.holder, None);
+        assert_eq!(task.run.attempt, Some(0));
+    }
+    assert_eq!(r.tracker.task(&key).run.infra_failures, Some(2));
+    assert!(r.tracker.comments(&key).iter().all(|c| c.kind != "question"));
+    assert!(r.factory.tick().await.unwrap().is_empty(), "backing off");
+
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::Reviewed { .. }), "{ran:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.attempt, Some(1));
+    assert_eq!(task.run.infra_failures, Some(0), "an agent that ends the run resets the count");
+    let agents = r.tracker.agents();
+    for name in ["factory/trail-1-a1-1", "factory/trail-1-a1-2"] {
+        assert!(agents.contains(&name.to_string()), "{name} in {agents:?}");
+    }
+}
+
+#[tokio::test]
+async fn infrastructure_failures_past_the_cap_park_the_task_as_the_infrastructures_fault() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 3"));
+    let key = r.tracker.add_task("TRAIL", "Lost daemon", "");
+    r.daemon.fail_runs(3, "not found: run trail-1 on this daemon");
+    for n in 1..=3 {
+        let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+        assert!(err.to_string().contains("not found: run"), "{err}");
+        let task = r.tracker.task(&key);
+        if n < 3 {
+            assert_eq!(task.status, Status::Open, "failure {n} is retried");
+        }
+    }
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    let body = &questions[0].body;
+    assert!(body.contains("it's not the task") && body.contains("not found: run trail-1"), "{body}");
+    assert!(!body.contains("failed attempts"), "{body}");
+    assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
+}
+
+#[tokio::test(start_paused = true)]
+async fn infrastructure_retries_wait_longer_each_time_up_to_a_cap() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Down for a while", "");
+    r.daemon.fail_runs(7, "connection lost");
+    let secs = std::time::Duration::from_secs;
+    // 1, 2, 4, 8, then 15 minutes at most.
+    for (n, wait) in [60, 120, 240, 480, 900, 900, 900].into_iter().enumerate() {
+        assert!(r.factory.tick().await.is_err(), "failure {}", n + 1);
+        assert_eq!(r.tracker.task(&key).run.infra_failures, Some(n as u32 + 1));
+        // Reconcile frees the failed run's sandbox, as the run loop does; the task itself still waits.
+        r.factory.reconcile().await.unwrap();
+        assert!(r.factory.tick().await.unwrap().is_empty(), "backing off for {wait}s");
+        tokio::time::advance(secs(wait - 1)).await;
+        assert!(r.factory.tick().await.unwrap().is_empty(), "still a second short of {wait}s");
+        tokio::time::advance(secs(2)).await;
+    }
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "under the cap of 10");
+}
+
+#[tokio::test]
+async fn failures_that_are_the_agents_or_the_tasks_still_use_up_attempts() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Gives up", "");
+    // Not API trouble, though it mentions one: a 400 about max_tokens: 5000.
+    for reason in ["I couldn't make the build pass", "API Error: 400 invalid request, max_tokens: 5000"] {
+        r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: reason.into() }));
+    }
+    for _ in 0..2 {
+        let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+        assert!(matches!(ran, Outcome::Failed { .. }), "{ran:?}");
+    }
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.attempt, Some(2));
+    assert_eq!(task.run.infra_failures.unwrap_or(0), 0);
+
+    r.daemon.fail_check("lint", "warning: unused variable");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(&ran, Outcome::Parked { .. }), "{ran:?}");
+    let body = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap().body;
+    assert!(body.contains("Gave up after 3 failed attempts"), "{body}");
+}

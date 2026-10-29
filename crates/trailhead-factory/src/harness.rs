@@ -112,3 +112,63 @@ pub trait Harness: Send + Sync {
     async fn run(&self, ctx: RunContext, events: EventSink) -> Result<RunOutcome>;
     async fn resume(&self, ctx: RunContext, feedback: Feedback, events: EventSink) -> Result<RunOutcome>;
 }
+
+/// Whether Claude Code's error text is trouble with the API call (a dropped connection, a timeout or no response,
+/// overload, a server error) and not with the task: a resume can get past it, and it doesn't count as a failed
+/// attempt. Not auth, billing or invalid-request errors. One matcher, so resuming and attempt counting agree.
+pub fn is_transient_api_error(text: &str) -> bool {
+    let Some(at) = text.find("API Error") else {
+        return false;
+    };
+    const PHRASES: &[&str] = &[
+        "No response from API",
+        "ECONNRESET",
+        "ETIMEDOUT",
+        "EPIPE",
+        "Connection error",
+        "Connection reset",
+        "connection reset",
+        "Connection closed",
+        "connection closed",
+        "socket hang up",
+        "socket closed",
+        "timed out",
+        "Request timeout",
+        "Overloaded",
+        "overloaded",
+    ];
+    if PHRASES.iter().any(|p| text.contains(p)) {
+        return true;
+    }
+    // The status right after the label, as in `API Error: 503 {...}` or `API Error (529 ...)`; as a whole number, so
+    // that `max_tokens: 5000` further along isn't taken for a 500.
+    let status = text[at + "API Error".len()..].trim_start_matches([':', '(', ' ']);
+    let digits = status.bytes().take_while(u8::is_ascii_digit).count();
+    digits == 3 && status.starts_with('5')
+}
+
+#[cfg(test)]
+mod api_error_tests {
+    use super::is_transient_api_error;
+
+    #[test]
+    fn matches_api_trouble_not_the_tasks() {
+        for yes in [
+            "claude: API Error: No response from API (waited 3m)",
+            "API Error: 503 {\"type\":\"error\"}",
+            "API Error (529 overloaded_error)",
+            "API Error: Request timed out",
+            "API Error: ECONNRESET",
+        ] {
+            assert!(is_transient_api_error(yes), "{yes}");
+        }
+        for no in [
+            "API Error: 400 invalid request, max_tokens: 5000",
+            "API Error: 401 authentication failed",
+            "I got a 503 from the test server",
+            "the build timed out",
+        ] {
+            assert!(!is_transient_api_error(no), "{no}");
+        }
+    }
+}

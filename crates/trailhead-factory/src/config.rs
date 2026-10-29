@@ -102,7 +102,7 @@ pub struct RepoConfig {
     /// Attempts a task gets before it's parked for a human instead of retried.
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
-    /// Infrastructure failures in a row (sandbox, daemon or API trouble, not the task) before a task is parked for a
+    /// Infrastructure failures in a row (sandbox, daemon or API trouble, not the task) at which a task is parked for a
     /// human instead of retried after a backoff.
     #[serde(default = "default_max_infra_failures")]
     pub max_infra_failures: u32,

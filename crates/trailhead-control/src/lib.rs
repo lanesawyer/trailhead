@@ -18,6 +18,7 @@ use tokio::task::{self, JoinSet};
 use tokio::time::Instant;
 
 use tokio::sync::mpsc;
+use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::{
     ChangesRequested, CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, Feedback, HumanContext,
     IROH_DOMAINS, Labels, ModelProvider, PrRef, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult,
@@ -345,21 +346,24 @@ impl Factory {
                 }
                 return Err(e);
             }
-            Err(e) => return Err(e),
+            // No sub-agent, so nothing holds the claim: back off and count it, as the factory's own identity.
+            Err(e) => return Err(self.infra_failed(task, &self.tracker, &name, e, task.run.infra_failures).await),
         };
         let sub = self.tracker.sub_agent(&name);
+        let infra_prior = task.run.infra_failures;
         // Claiming as the sub-agent before creating the sandbox keeps two control planes from racing for one task.
-        sub.claim(&task.key).await?;
-        sub.report(
-            &task.key,
-            RunUpdate {
-                attempt: Some(attempt),
-                sandbox: Some(name.clone()),
-                profile: Some(self.config.repo.worker.clone()),
-                ..RunUpdate::default()
-            },
-        )
-        .await?;
+        if let Err(e) = sub.claim(&task.key).await {
+            return Err(self.infra_failed(task, &sub, &name, e, infra_prior).await);
+        }
+        let started = RunUpdate {
+            attempt: Some(attempt),
+            sandbox: Some(name.clone()),
+            profile: Some(self.config.repo.worker.clone()),
+            ..RunUpdate::default()
+        };
+        if let Err(e) = sub.report(&task.key, started).await {
+            return Err(self.infra_failed(task, &sub, &name, e, infra_prior).await);
+        }
         tracing::info!(task = %task.key.0, run = %name, "preparing a worker sandbox");
         // A task with a PR is a rework: the checkout starts from the PR branch's head, and the worker is told what the
         // review asked for.
@@ -372,7 +376,7 @@ impl Factory {
         };
         let (sandbox, context) = match prepared.await {
             Ok(prepared) => prepared,
-            Err(e) => return Err(self.not_started(task, &sub, &name, e).await),
+            Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior).await),
         };
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
         let req = RunRequest {
@@ -406,14 +410,19 @@ impl Factory {
             }
             // The daemon was lost without reattaching, or the like: the agent didn't give up, so the attempt is
             // given back (TRAIL-172).
-            Err(e) => return Err(self.infra_failed(task, &sub, &name, e).await),
+            Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior).await),
         };
 
         let (report, spend) = match run {
             Run::Breach(reason, spend) => {
                 tracing::warn!(task = %task.key.0, %reason, "budget breached; parking");
-                self.compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await?;
-                self.cut_off(&sandbox).await?;
+                let parked = async {
+                    self.compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await?;
+                    self.cut_off(&sandbox).await
+                };
+                if let Err(e) = parked.await {
+                    return Err(self.infra_failed(task, &sub, &name, e, infra_prior).await);
+                }
                 sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await?;
                 sub.ask(
                     &task.key,
@@ -427,29 +436,44 @@ impl Factory {
             }
             Run::Report(report, spend) => (report, spend),
         };
-        // The agent ended the run itself, so the infrastructure is working again.
-        self.setbacks.lock().unwrap().remove(&task.key);
-        let infra_failures = task.run.infra_failures.filter(|n| *n > 0).map(|_| 0);
-        sub.report(&task.key, RunUpdate { spend: Some(spend), infra_failures, ..RunUpdate::default() }).await?;
+        // An agent that ends the run itself shows the infrastructure working again, unless what it ended with is its
+        // API trouble.
+        let api_trouble = matches!(&report.result, RunResult::Failed(reason) if is_transient_api_error(reason));
+        let infra_prior = if api_trouble { infra_prior } else { Some(0) };
+        if !api_trouble {
+            self.setbacks.lock().unwrap().remove(&task.key);
+        }
+        let infra_failures = if api_trouble { None } else { task.run.infra_failures.filter(|n| *n > 0).map(|_| 0) };
+        let update = RunUpdate { spend: Some(spend), infra_failures, ..RunUpdate::default() };
+        if let Err(e) = sub.report(&task.key, update).await {
+            return Err(self.infra_failed(task, &sub, &name, e, infra_prior).await);
+        }
 
         match report.result {
             RunResult::PrOpened(pr) => {
                 // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
                 // starts from the PR branch.
-                self.release_worker(&sandbox).await?;
+                if let Err(e) = self.release_worker(&sandbox).await {
+                    return Err(self.infra_failed(task, &sub, &name, e, infra_prior).await);
+                }
                 self.tracker.revoke_sub_agent(&name).await?;
                 self.review(task, &pr, attempt).await
             }
             RunResult::NeedsInput(question) => Ok(Outcome::Parked { reason: question }),
             RunResult::Failed(reason) => {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
-                self.release_worker(&sandbox).await?;
-                if is_infrastructure_failure(&reason) {
-                    // The agent's own API trouble says nothing about the task. The daemon released the task, so
-                    // claim it again as the sub-agent to give the attempt back.
-                    sub.claim(&task.key).await?;
-                    let error = Error::Other(reason.clone());
-                    self.infra_failed(task, &sub, &name, error).await;
+                if let Err(e) = self.release_worker(&sandbox).await {
+                    return Err(self.infra_failed(task, &sub, &name, e, infra_prior).await);
+                }
+                if api_trouble {
+                    // The agent's own API trouble says nothing about the task. The daemon released the task before
+                    // this control plane could reclaim it; within one control plane the task stays in `busy`, so
+                    // nothing else takes it in between. Claiming it again as the sub-agent gives the attempt back.
+                    let error = match sub.claim(&task.key).await {
+                        Ok(()) => Error::Other(reason.clone()),
+                        Err(e) => e,
+                    };
+                    self.infra_failed(task, &sub, &name, error, infra_prior).await;
                     return Ok(Outcome::Failed { reason });
                 }
                 let max = self.config.repo.max_attempts;
@@ -457,7 +481,14 @@ impl Factory {
                 let failed = attempt - task.run.attempt_base.unwrap_or(0);
                 if failed >= max {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
-                    let last = self.tracker.show(&task.key).await?.run.failure.unwrap_or_else(|| reason.clone());
+                    let last = self
+                        .tracker
+                        .show(&task.key)
+                        .await?
+                        .run
+                        .failure
+                        .filter(|f| !f.is_empty())
+                        .unwrap_or_else(|| reason.clone());
                     sub.claim(&task.key).await?;
                     sub.ask(
                         &task.key,
@@ -478,19 +509,20 @@ impl Factory {
         }
     }
 
-    /// A run that failed before its agent started (TRAIL-159).
-    async fn not_started(&self, task: &Task, sub: &Arc<dyn Tracker>, name: &str, error: Error) -> Error {
-        tracing::warn!(task = %task.key.0, %error, "run failed before the agent started");
-        self.infra_failed(task, sub, name, error).await
-    }
-
     /// A run that failed on the infrastructure, not the task (TRAIL-159, TRAIL-172): the task goes back to the queue
     /// without the attempt counting toward `max_attempts`, and waits out a backoff that grows with each such failure.
-    /// Past `max_infra_failures` it's parked instead, saying so. The run's sub-agent must hold the claim. Returns the
+    /// At `max_infra_failures` in a row it's parked instead, saying so. The run's sub-agent must hold the claim. Returns the
     /// error to surface.
-    async fn infra_failed(&self, task: &Task, sub: &Arc<dyn Tracker>, name: &str, error: Error) -> Error {
-        let failures = task.run.infra_failures.unwrap_or(0) + 1;
-        let max = self.config.repo.max_infra_failures;
+    async fn infra_failed(
+        &self,
+        task: &Task,
+        sub: &Arc<dyn Tracker>,
+        name: &str,
+        error: Error,
+        prior: Option<u32>,
+    ) -> Error {
+        let failures = prior.unwrap_or(0) + 1;
+        let max = self.config.repo.max_infra_failures.max(1);
         let park = failures >= max;
         tracing::warn!(task = %task.key.0, %error, failures, max, "infrastructure failure; the attempt doesn't count");
         self.set_back(&task.key, failures);
@@ -500,6 +532,8 @@ impl Factory {
             attempt: Some(task.run.attempt.unwrap_or(0)),
             retries: Some(task.run.retries.unwrap_or(0) + 1),
             infra_failures: Some(if park { 0 } else { failures }),
+            // The agent's own text, if it wrote any, isn't about the task: the next run isn't told it as a failure.
+            failure: Some(String::new()),
             ..RunUpdate::default()
         };
         if let Err(e) = sub.report(&task.key, update).await {
@@ -1051,33 +1085,6 @@ fn backoff(failures: u32, first: Duration, max: Duration) -> Duration {
     first.saturating_mul(1 << failures.saturating_sub(1).min(8)).min(max)
 }
 
-/// Whether a worker's failure reason is Claude Code's API trouble (timeouts, no response, overload, 5xx), which is
-/// no fault of the task.
-fn is_infrastructure_failure(reason: &str) -> bool {
-    reason.contains("API Error")
-        && [
-            "No response from API",
-            "timed out",
-            "Timeout",
-            "timeout",
-            "ECONNRESET",
-            "ETIMEDOUT",
-            "EPIPE",
-            "Connection",
-            "connection",
-            "socket",
-            "Overloaded",
-            "overloaded",
-            "529",
-            "500",
-            "502",
-            "503",
-            "504",
-        ]
-        .iter()
-        .any(|m| reason.contains(m))
-}
-
 fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
@@ -1097,7 +1104,7 @@ fn spec(task: &Task, context: HumanContext) -> TaskSpec {
         key: task.key.clone(),
         title: task.title.clone(),
         description: task.description.clone(),
-        previous_failure: task.run.failure.clone(),
+        previous_failure: task.run.failure.clone().filter(|f| !f.is_empty()),
         context,
     }
 }
