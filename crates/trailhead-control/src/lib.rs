@@ -381,18 +381,22 @@ impl Factory {
         if candidates.is_empty() {
             return Ok(held);
         }
-        let reopened: Vec<Task> =
-            self.tracker.in_flight(self.project()).await?.into_iter().filter(|t| t.status == Status::Open).collect();
         let mut released = Vec::new();
         for sandbox in candidates {
-            let Some(task) = reopened.iter().find(|t| sandbox.labels.get(label::TASK) == Some(&t.key.0)) else {
-                continue;
+            let Some(key) = sandbox.labels.get(label::TASK) else { continue };
+            let task = match self.tracker.show(&TaskKey(key.clone())).await {
+                Ok(task) if task.status == Status::Open => task,
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!(task = %key, error = %e, "couldn't look up a parked task's status");
+                    continue;
+                }
             };
             let mut done = Reconciled::default();
             self.reconcile_pooled(sandbox, &mut done).await;
             if !done.released.is_empty() || !done.abandoned.is_empty() || !done.destroyed.is_empty() {
                 tracing::info!(task = %task.key.0, sandbox = %sandbox.name, "released the sandbox of a reopened task");
-                if let Err(e) = self.reconcile_task(task, &mut done).await {
+                if let Err(e) = self.reconcile_task(&task, &mut done).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't clean up a reopened task; reconcile will");
                 }
                 released.push(sandbox.name.clone());
