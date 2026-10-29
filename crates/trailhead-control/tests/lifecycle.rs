@@ -1044,6 +1044,35 @@ async fn requested_changes_start_a_rework_on_the_pr_branch_with_the_review() {
 }
 
 #[tokio::test]
+async fn a_rework_started_by_hand_gets_the_prs_last_review_as_feedback() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+
+    // A review that never went through request_rework, then a person reopens the task.
+    let verdict = trailhead_factory::Verdict {
+        kind: VerdictKind::RequestChanges,
+        body: "Add a test for `hi()`.".into(),
+        reviewer: "factory/trail-1-a1-r1".into(),
+        model: None,
+    };
+    r.tracker.record_verdict(&key, &verdict).await.unwrap();
+    assert_eq!(r.tracker.task(&key).run.changes_requested, None);
+    r.tracker.set_status(&key, Status::Open);
+
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let feedback = r.harness.feedbacks();
+    assert_eq!(feedback.len(), 1);
+    assert!(feedback[0].body.contains("Add a test for `hi()`."), "{}", feedback[0].body);
+}
+
+#[tokio::test]
 async fn requested_changes_past_the_cap_park_the_task_with_the_last_review() {
     let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 2"));
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
