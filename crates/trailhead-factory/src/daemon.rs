@@ -165,6 +165,12 @@ pub trait Daemon: Send + Sync {
     async fn forget(&self, _sandbox: &SandboxId) {}
     /// Runs one agent step in the sandbox, streaming events, until it finishes or is cancelled.
     async fn run(&self, sandbox: &SandboxId, req: RunRequest, events: EventSink) -> Result<RunReport>;
+    /// Follows a run this control plane didn't start, or lost track of in a restart: the daemon replays the run's
+    /// events from the first, then the rest as usual. A run the daemon doesn't know fails with `Error::NotFound`,
+    /// which is also what a daemon without reattach says.
+    async fn attach(&self, _sandbox: &SandboxId, run: &str, _events: EventSink) -> Result<RunReport> {
+        Err(Error::NotFound(format!("run {run}: this daemon can't reattach")))
+    }
     /// Stops the running agent. A cancelled `run` returns `Error::Cancelled`.
     async fn cancel(&self, sandbox: &SandboxId) -> Result<()>;
     /// Cancels every run in flight, because the control plane is stopping on purpose. Without this, a daemon would

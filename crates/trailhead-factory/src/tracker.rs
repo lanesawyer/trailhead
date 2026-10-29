@@ -48,6 +48,10 @@ pub struct RunUpdate {
     /// The pooled sandbox the run is on, when it isn't one named after the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// When the run's agent was started, in unix seconds, so a control plane that reattaches after a restart keeps
+    /// the run's wall-clock budget honest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,6 +130,7 @@ impl RunUpdate {
             attempt,
             sandbox,
             host,
+            started,
             profile,
             pr,
             review_rounds,
@@ -143,6 +148,7 @@ impl RunUpdate {
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
         self.host = host.or(self.host.take());
+        self.started = started.or(self.started.take());
         self.profile = profile.or(self.profile.take());
         self.pr = pr.or(self.pr.take());
         self.review_rounds = review_rounds.or(self.review_rounds.take());

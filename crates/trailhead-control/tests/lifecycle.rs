@@ -356,6 +356,7 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
         Reconciled {
             destroyed: vec!["trail-1-a1".into(), "trail-99-a1".into()],
             released: vec![],
+            reattached: vec![],
             requeued: vec![crashed.0.clone()],
             reviewed: vec![unreviewed.0.clone()],
             reworked: vec![],
@@ -377,6 +378,81 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
 
     // A second pass finds nothing to do.
     assert_eq!(factory.reconcile().await.unwrap(), Reconciled::default());
+}
+
+/// A worker run the last control plane left going: its task in progress under the run's sub-agent, on a busy pooled
+/// sandbox, with `before` already spent by earlier runs and the run started `ago` back.
+async fn going(r: &Rig, before: Usd, ago: i64) -> TaskKey {
+    let key = r.tracker.add_task("TRAIL", "Going", "");
+    let name = run_name(&key, 1);
+    let tracker: Arc<dyn Tracker> = Arc::new(r.tracker.clone());
+    tracker.create_sub_agent(&name, "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
+    let sub = tracker.sub_agent(&name);
+    sub.claim(&key).await.unwrap();
+    let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - ago;
+    let report = trailhead_factory::RunUpdate {
+        host: Some("trailhead-w1".into()),
+        started: Some(started),
+        spend: Some(before),
+        ..update(1, &name)
+    };
+    sub.report(&key, report).await.unwrap();
+    let labels = trailhead_factory::Labels::from([
+        (label::FACTORY.into(), "trailhead".into()),
+        (label::REPO.into(), "lanesawyer/trailhead".into()),
+        (label::POOL.into(), "worker".into()),
+        (label::STATE.into(), label::BUSY.into()),
+        (label::TASK.into(), key.0.clone()),
+        (label::ROLE.into(), "worker".into()),
+    ]);
+    r.compute.create(&SandboxSpec { name: "trailhead-w1".into(), labels, egress: Default::default() }).await.unwrap();
+    key
+}
+
+fn spent(tokens: u64) -> trailhead_factory::RunEvent {
+    let usage = trailhead_factory::Usage { input_tokens: tokens, ..Default::default() };
+    trailhead_factory::RunEvent::Usage { model: trailhead_factory::ModelId("sonnet".into()), usage }
+}
+
+#[tokio::test]
+async fn reconcile_reattaches_to_a_run_still_going_and_counts_all_its_spend() {
+    let r = rig();
+    let key = going(&r, Usd::dollars(0.5), 120).await;
+    let report = trailhead_factory::RunReport {
+        result: trailhead_factory::RunResult::NeedsInput("Which greeting?".into()),
+        checks: vec![],
+        usage: Default::default(),
+    };
+    r.daemon.ongoing("trail-1-a1", vec![spent(400_000), spent(600_000)], report);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reattached, std::slice::from_ref(&key.0));
+    assert!(done.requeued.is_empty() && done.released.is_empty(), "{done:?}");
+    assert_eq!(r.daemon.attached(), ["trail-1-a1"]);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.spend, Some(Usd::dollars(1.5)), "the earlier runs' spend plus the replayed usage");
+    assert_eq!(task.run.attempt, Some(1), "the attempt counts, as it would have had the run not been interrupted");
+    assert_eq!(task.status, Status::InProgress, "nothing requeued it");
+    let sandbox = r.compute.get("trailhead-w1").unwrap();
+    assert_eq!(sandbox.labels.get(label::STATE).map(String::as_str), Some(label::BUSY));
+}
+
+#[tokio::test]
+async fn a_run_the_daemon_has_lost_goes_back_to_the_queue_without_using_an_attempt() {
+    let r = rig();
+    let key = going(&r, Usd::ZERO, 60).await;
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reattached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open);
+    assert_eq!(task.holder, None);
+    assert_eq!(task.run.attempt, Some(0), "given back");
+    assert!(r.tracker.is_revoked("factory/trail-1-a1"));
+
+    // The sandbox it left busy is dealt with by the next pass.
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.released, ["trailhead-w1"]);
 }
 
 /// Sandboxes that aren't idle in the pool: busy, parked, or not pooled at all.
