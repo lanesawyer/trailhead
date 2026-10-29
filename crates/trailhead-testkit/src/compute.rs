@@ -109,12 +109,17 @@ impl Compute for FakeCompute {
     }
 
     async fn list(&self, labels: &Labels) -> Result<Vec<Sandbox>> {
-        let live = self.live.lock().unwrap();
-        Ok(live
+        let found: Vec<Sandbox> = self
+            .live
+            .lock()
+            .unwrap()
             .values()
             .filter(|l| labels.iter().all(|(k, v)| l.sandbox.labels.get(k) == Some(v)))
             .map(|l| l.sandbox.clone())
-            .collect())
+            .collect();
+        // A real list is a network call: other tasks run before the answer is used.
+        tokio::task::yield_now().await;
+        Ok(found)
     }
 
     async fn checkpoint(&self, id: &SandboxId, note: &str) -> Result<CheckpointId> {
