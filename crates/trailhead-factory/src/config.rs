@@ -102,6 +102,10 @@ pub struct RepoConfig {
     /// Attempts a task gets before it's parked for a human instead of retried.
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
+    /// Infrastructure failures in a row (sandbox, daemon or API trouble, not the task) before a task is parked for a
+    /// human instead of retried after a backoff.
+    #[serde(default = "default_max_infra_failures")]
+    pub max_infra_failures: u32,
     /// Reviews of one task that may ask for changes before it's parked for a human instead of reworked again.
     #[serde(default = "default_max_review_rounds")]
     pub max_review_rounds: u32,
@@ -115,6 +119,9 @@ fn default_max_sandboxes() -> usize {
 }
 fn default_max_attempts() -> u32 {
     3
+}
+fn default_max_infra_failures() -> u32 {
+    10
 }
 fn default_max_review_rounds() -> u32 {
     3

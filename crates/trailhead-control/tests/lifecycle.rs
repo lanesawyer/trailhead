@@ -1117,7 +1117,7 @@ async fn a_failure_before_the_agent_starts_is_retried_after_a_backoff() {
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     assert!(r.factory.tick().await.unwrap().is_empty(), "still backing off");
-    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
     let ran = r.factory.tick().await.unwrap();
     assert_eq!(ran.len(), 1, "retried once the backoff is over");
     assert_eq!(r.tracker.task(&key).run.attempt, Some(1));

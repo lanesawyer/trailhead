@@ -45,6 +45,10 @@ pub const RELEASE_PATIENCE: Duration = Duration::from_secs(10 * 60);
 const FIRST_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
+/// The first wait before retrying a task after an infrastructure failure, doubling up to [`MAX_INFRA_BACKOFF`].
+const FIRST_INFRA_BACKOFF: Duration = Duration::from_secs(60);
+const MAX_INFRA_BACKOFF: Duration = Duration::from_secs(15 * 60);
+
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
@@ -55,7 +59,7 @@ pub struct Factory {
     pub provider: Arc<dyn ModelProvider>,
     pub daemon: Arc<dyn Daemon>,
     troubled: Mutex<HashMap<String, Trouble>>,
-    /// Tasks whose last runs failed before the agent started: how many in a row, and when to try again.
+    /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
@@ -334,7 +338,7 @@ impl Factory {
             Ok(credential) => credential,
             // The name was used by a run whose give-back didn't land; skip past it rather than retry it forever.
             Err(e @ Error::Forbidden(_)) => {
-                self.set_back(&task.key);
+                self.set_back(&task.key, 1);
                 let update = RunUpdate { retries: Some(retries + 1), ..RunUpdate::default() };
                 if let Err(e) = self.tracker.report(&task.key, update).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't skip a used run name");
@@ -370,7 +374,6 @@ impl Factory {
             Ok(prepared) => prepared,
             Err(e) => return Err(self.not_started(task, &sub, &name, e).await),
         };
-        self.setbacks.lock().unwrap().remove(&task.key);
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
         let req = RunRequest {
             run: name.clone(),
@@ -401,7 +404,9 @@ impl Factory {
                 self.give_back_attempt(task, &sub).await;
                 return Err(Error::Cancelled);
             }
-            Err(e) => return Err(e),
+            // The daemon was lost without reattaching, or the like: the agent didn't give up, so the attempt is
+            // given back (TRAIL-172).
+            Err(e) => return Err(self.infra_failed(task, &sub, &name, e).await),
         };
 
         let (report, spend) = match run {
@@ -422,7 +427,10 @@ impl Factory {
             }
             Run::Report(report, spend) => (report, spend),
         };
-        sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await?;
+        // The agent ended the run itself, so the infrastructure is working again.
+        self.setbacks.lock().unwrap().remove(&task.key);
+        let infra_failures = task.run.infra_failures.filter(|n| *n > 0).map(|_| 0);
+        sub.report(&task.key, RunUpdate { spend: Some(spend), infra_failures, ..RunUpdate::default() }).await?;
 
         match report.result {
             RunResult::PrOpened(pr) => {
@@ -436,6 +444,14 @@ impl Factory {
             RunResult::Failed(reason) => {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
                 self.release_worker(&sandbox).await?;
+                if is_infrastructure_failure(&reason) {
+                    // The agent's own API trouble says nothing about the task. The daemon released the task, so
+                    // claim it again as the sub-agent to give the attempt back.
+                    sub.claim(&task.key).await?;
+                    let error = Error::Other(reason.clone());
+                    self.infra_failed(task, &sub, &name, error).await;
+                    return Ok(Outcome::Failed { reason });
+                }
                 let max = self.config.repo.max_attempts;
                 // Counted from the last review that asked for changes, so reworks get attempts of their own.
                 let failed = attempt - task.run.attempt_base.unwrap_or(0);
@@ -462,15 +478,43 @@ impl Factory {
         }
     }
 
-    /// A run that failed before its agent started (TRAIL-159): the task goes back to the queue without the attempt
-    /// counting toward `max_attempts`, and waits out a backoff that grows with each failure in a row. Returns the
-    /// error to surface.
+    /// A run that failed before its agent started (TRAIL-159).
     async fn not_started(&self, task: &Task, sub: &Arc<dyn Tracker>, name: &str, error: Error) -> Error {
-        tracing::warn!(task = %task.key.0, %error, "run failed before the agent started; the attempt doesn't count");
-        self.set_back(&task.key);
-        // Before the release: the run's sub-agent holds the claim, so only it can report.
-        self.give_back_attempt(task, sub).await;
-        if let Err(e) = sub.release(&task.key).await {
+        tracing::warn!(task = %task.key.0, %error, "run failed before the agent started");
+        self.infra_failed(task, sub, name, error).await
+    }
+
+    /// A run that failed on the infrastructure, not the task (TRAIL-159, TRAIL-172): the task goes back to the queue
+    /// without the attempt counting toward `max_attempts`, and waits out a backoff that grows with each such failure.
+    /// Past `max_infra_failures` it's parked instead, saying so. The run's sub-agent must hold the claim. Returns the
+    /// error to surface.
+    async fn infra_failed(&self, task: &Task, sub: &Arc<dyn Tracker>, name: &str, error: Error) -> Error {
+        let failures = task.run.infra_failures.unwrap_or(0) + 1;
+        let max = self.config.repo.max_infra_failures;
+        let park = failures >= max;
+        tracing::warn!(task = %task.key.0, %error, failures, max, "infrastructure failure; the attempt doesn't count");
+        self.set_back(&task.key, failures);
+        // Before the release: the run's sub-agent holds the claim, so only it can report. A parked task starts its
+        // count again when Lane reopens it.
+        let update = RunUpdate {
+            attempt: Some(task.run.attempt.unwrap_or(0)),
+            retries: Some(task.run.retries.unwrap_or(0) + 1),
+            infra_failures: Some(if park { 0 } else { failures }),
+            ..RunUpdate::default()
+        };
+        if let Err(e) = sub.report(&task.key, update).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
+        }
+        if park {
+            let question = format!(
+                "The infrastructure failed {failures} times in a row (the limit is {max}); it's not the task. The \
+                 last error: {error}\n\nFix the cause, then reopen the task; raise `max_infra_failures` to allow \
+                 more tries."
+            );
+            if let Err(e) = sub.ask(&task.key, &question).await {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; reconcile will requeue it");
+            }
+        } else if let Err(e) = sub.release(&task.key).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't release the task; reconcile will");
         }
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {
@@ -492,16 +536,13 @@ impl Factory {
         }
     }
 
-    /// Holds a task back for a backoff that grows with each failure before its agent started, in a row.
-    fn set_back(&self, key: &TaskKey) {
-        let now = Instant::now();
-        let mut setbacks = self.setbacks.lock().unwrap();
-        let entry = setbacks.entry(key.clone()).or_insert((0, now));
-        entry.0 += 1;
-        entry.1 = now + backoff(entry.0);
+    /// Holds a task back for a backoff that grows with each infrastructure failure in a row.
+    fn set_back(&self, key: &TaskKey, failures: u32) {
+        let wait = backoff(failures, FIRST_INFRA_BACKOFF, MAX_INFRA_BACKOFF);
+        self.setbacks.lock().unwrap().insert(key.clone(), (failures, Instant::now() + wait));
     }
 
-    /// Whether a task that failed before its agent started has waited out its backoff.
+    /// Whether a task that failed on the infrastructure has waited out its backoff.
     fn setback_over(&self, key: &TaskKey) -> bool {
         self.setbacks.lock().unwrap().get(key).is_none_or(|(_, next_try)| Instant::now() >= *next_try)
     }
@@ -1000,14 +1041,41 @@ impl Factory {
             abandoned: false,
         });
         t.failures += 1;
-        t.next_try = now + backoff(t.failures);
+        t.next_try = now + backoff(t.failures, FIRST_BACKOFF, MAX_BACKOFF);
         !t.abandoned && (t.failures >= RELEASE_ATTEMPTS || now - t.since >= RELEASE_PATIENCE)
     }
 }
 
-/// The wait after the `failures`th failure in a row: [`FIRST_BACKOFF`], doubling up to [`MAX_BACKOFF`].
-fn backoff(failures: u32) -> Duration {
-    FIRST_BACKOFF.saturating_mul(1 << (failures - 1).min(8)).min(MAX_BACKOFF)
+/// The wait after the `failures`th failure in a row: `first`, doubling up to `max`.
+fn backoff(failures: u32, first: Duration, max: Duration) -> Duration {
+    first.saturating_mul(1 << failures.saturating_sub(1).min(8)).min(max)
+}
+
+/// Whether a worker's failure reason is Claude Code's API trouble (timeouts, no response, overload, 5xx), which is
+/// no fault of the task.
+fn is_infrastructure_failure(reason: &str) -> bool {
+    reason.contains("API Error")
+        && [
+            "No response from API",
+            "timed out",
+            "Timeout",
+            "timeout",
+            "ECONNRESET",
+            "ETIMEDOUT",
+            "EPIPE",
+            "Connection",
+            "connection",
+            "socket",
+            "Overloaded",
+            "overloaded",
+            "529",
+            "500",
+            "502",
+            "503",
+            "504",
+        ]
+        .iter()
+        .any(|m| reason.contains(m))
 }
 
 fn unix_now() -> i64 {
