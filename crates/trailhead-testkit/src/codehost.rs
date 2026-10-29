@@ -223,12 +223,12 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate> {
-        let conflicts = self.state.lock().unwrap().conflicts;
-        if conflicts {
-            return Ok(BranchUpdate::Conflict);
-        }
+        // Like the host: nothing to merge means up to date, even if conflicts are on.
         if !self.find(pr, |p, _| p.behind)? {
             return Ok(BranchUpdate::UpToDate);
+        }
+        if self.state.lock().unwrap().conflicts {
+            return Ok(BranchUpdate::Conflict);
         }
         let branch = self.find(pr, |p, _| {
             p.behind = false;
@@ -289,5 +289,43 @@ impl CodeHost for FakeCodeHost {
             }
             by_path.into_values().collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn open(host: &FakeCodeHost) -> PrRef {
+        let repo = Repo { owner: "o".into(), name: "r".into() };
+        let spec = NewPr { branch: "b".into(), base: "main".into(), title: "t".into(), body: String::new() };
+        host.publish(&repo, "base", "b", &[]).await.unwrap();
+        host.open_pr(&repo, spec).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn update_branch_merges_only_when_behind() {
+        let host = FakeCodeHost::new();
+        let pr = open(&host).await;
+        assert!(!host.behind(&pr).await.unwrap());
+        assert_eq!(host.update_branch(&pr).await.unwrap(), BranchUpdate::UpToDate);
+
+        host.set_behind(&pr, true);
+        assert!(host.behind(&pr).await.unwrap());
+        assert_eq!(host.update_branch(&pr).await.unwrap(), BranchUpdate::Updated);
+        assert!(!host.behind(&pr).await.unwrap());
+        assert_eq!(host.update_branch(&pr).await.unwrap(), BranchUpdate::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn update_branch_conflicts_only_when_behind() {
+        let host = FakeCodeHost::new();
+        let pr = open(&host).await;
+        host.set_conflicts(true);
+        assert_eq!(host.update_branch(&pr).await.unwrap(), BranchUpdate::UpToDate);
+
+        host.set_behind(&pr, true);
+        assert_eq!(host.update_branch(&pr).await.unwrap(), BranchUpdate::Conflict);
+        assert!(host.behind(&pr).await.unwrap());
     }
 }
