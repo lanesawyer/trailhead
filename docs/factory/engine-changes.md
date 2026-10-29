@@ -18,7 +18,9 @@ Done: a `review` comment kind carries a `verdict` (`approve` or `request_changes
 trailhead add "Typed review verdicts: review comment kind with approve/request_changes" -p TRAIL -P 2
 ```
 
-## 3. Approved vs merged (TRAIL-86)
+## 3. Approved vs merged (TRAIL-86, decided)
+
+Decided (2026-10-29): no `approved` status. Approval is the typed `review` verdict (#2), the task stays `in_review`, and `done` means merged. The factory's identity is the project's only delegated reviewer and acts as the merger ([review.md](review.md#the-merger)). The original note follows.
 
 Today approval and finishing are one step. Document the convention that a project's only delegated reviewer is a merger agent that moves the task to `done` after merging, or add an `approved` status. Depends on 2.
 

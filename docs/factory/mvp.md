@@ -19,7 +19,7 @@ Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with 
 ## Out of scope
 
 - Suspend during review: requested changes start a fresh sandbox from the PR branch, so resume affinity isn't needed yet.
-- Tiers beyond one default, quorums, auto-merge, the merger agent. (Typed verdicts shipped anyway, as TRAIL-84.)
+- Grades (risk tiers), quorums, auto-merge, the merger. (Typed verdicts shipped anyway, as TRAIL-84.)
 - Planner agent and spec collaboration: Lane writes the task spec by hand.
 - Provider usage API, daily cap, workspace spend limit.
 - Multiple repos, profile escalation, previews, outcome tracking, onboarding agent, OTLP export.

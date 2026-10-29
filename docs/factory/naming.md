@@ -9,7 +9,8 @@ Undecided. The theme is PNW hiking and climbing, to match Trailhead. With the fa
 | Ranger | Backcountry ranger | In-sandbox daemon |
 | Belay | Holding the rope so nothing climbs unprotected | Review gate |
 | Waterbar | Drainage bar that keeps water from wrecking a trail | Verification gate |
-| Treeline | Where routine ends and exposure begins | Human-review tier boundary |
+| Grade | Climbing's Yosemite Decimal classes, by exposure | A change's risk tier (decided, [review.md](review.md#grades)) |
+| Treeline | Where routine ends and exposure begins | The line between grades that auto-merge and grades that need a human (decided) |
 | Lookout | PNW fire lookouts | Observability |
 | Cairn | Rock-pile trail marker | Checkpoints |
 | Bivy | Emergency overnight shelter | Suspended, resumable sandbox |

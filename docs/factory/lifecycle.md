@@ -15,10 +15,10 @@ Statuses: `open`, `in_progress`, `needs_input`, `in_review`, `done`, `cancelled`
 | Planned | Planner creates subtasks with `parent_id`, `blocked_by` the spec task | Fits |
 | Queued | `open` + ready queue; repo cap enforced by the control plane | Fits |
 | Running | Claim + `in_progress`; the daemon renews the lease | Fits |
-| PR open / Review | `in_review`; PR URL, tier, profile in `metadata` | Fits, but the claim is released |
+| PR open / Review | `in_review`; PR URL, grade, profile in `metadata` | Fits, but the claim is released |
 | Agent review verdict | One delegated reviewer approves straight to `done` | Gap: no verdict record, no quorum |
 | Changes requested | `in_review` → `in_progress` or `open` | Gap: nothing keeps it for the original sandbox |
-| Merging | No state; approval is `done` | Gap: approved and merged are the same step |
+| Merging | Approval is a `review` verdict; `done` means merged | Fits, by convention (TRAIL-86) |
 | Parked | `ask` → `needs_input` | Fits, but the agent lease expires while parked and an answer sends it back to `open` |
 | Done / Cancelled | `done`, `cancelled` | Fits |
 | Spend, budget | `metadata` JSON, filterable by key | Fits, by convention |
@@ -28,5 +28,5 @@ Statuses: `open`, `in_progress`, `needs_input`, `in_review`, `done`, `cancelled`
 - **Sandbox per task, capped per repo.** No file locking; overlapping work is resolved through PRs and merge conflicts, which go through the same gates. A merge conflict sends the task back to Running.
 - **Suspend during review.** The sandbox hibernates while waiting, so requested changes resume with context. Needs resume affinity; until then (and in the MVP), requested changes start a fresh sandbox from the PR branch.
 - **Verdicts live in Trailhead, not GitHub reviews.** Sandboxes act on GitHub as the user who authorized the connector, and GitHub doesn't let a PR's author approve it (inferred, untested). Agent reviews post as PR comments.
-- **Merger.** On factory projects the only delegated reviewer is a merger agent the control plane drives. It moves a task to `done` after merging, once the tier's gates pass. Other agents record verdicts but can't finish tasks.
+- **Merger.** On factory projects the only delegated reviewer is the control plane's own identity, acting as the merger ([review.md](review.md#the-merger)). Approval is never a status: agents record it as a typed `review` verdict, and the task stays `in_review`. `done` means merged. The merger sets it after merging once the grade's gates pass, or after seeing a PR Lane merged. Other agents record verdicts but can't finish tasks. Lane adds the factory's identity to the project's reviewers once; only a human can.
 - **Who can write task metadata.** Agents can't edit a task another actor holds, so the daemon writes its own run metadata as the claim holder. If the control plane needs to write it, Trailhead must let a parent agent act on tasks its sub-agents hold.

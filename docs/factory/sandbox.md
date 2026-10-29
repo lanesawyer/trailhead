@@ -74,7 +74,7 @@ Sprites egress is a DNS-based allowlist set from outside through the API. Change
 
 Decided: registry egress only during install phases. The risk isn't secrets, since the sandbox holds none; it's a malicious or typosquatted package whose install script acts with the sandbox's connector identity. Mitigations:
 
-- **New dependency raises the tier.** Adding or upgrading a dependency is at least T2 by default, configurable per repo.
+- **New dependency raises the grade.** Adding or upgrading a dependency is at least grade 3 by default, configurable per repo ([review.md](review.md#grades)).
 - **Supply-chain checks.** An audit tool per ecosystem (for example `cargo-deny` or `osv-scanner`) runs with the other checks.
 - **Narrow connector scopes.** An author sandbox's GitHub connector reaches only its own repo.
 

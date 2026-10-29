@@ -42,10 +42,10 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 | Identity | Per-sandbox Trailhead sub-agent token | The tunnel ticket controls who can connect; the token decides what they can do |
 | Secrets | Sprites Connectors | Anthropic first (swappable) and GitHub; sandboxes never hold raw tokens |
 | Network | Deny by default | Iroh relay and connector gateway; registries only during install |
-| Dependencies | Workers may install; gate at merge | New dependency raises the review tier |
+| Dependencies | Workers may install; gate at merge | New dependency raises the review grade |
 | Agent profiles | Per repo | Opus, Sonnet, Haiku mapped by role; utility calls run in sandboxes too |
 | Scheduling | One sandbox per task, cap per repo | No file locking; overlap resolved through PRs and merge conflicts |
-| Review gates | Configurable per repo | Fully autonomous repos allowed; top tier uses an independent agent quorum; loosening policy always needs a human |
+| Review gates | Configurable per repo | Fully autonomous repos allowed; top grade uses an independent agent quorum; loosening policy always needs a human |
 | Run state | No control-plane database | Trailhead plus the Sprites API; reconcile on boot |
 | Trailhead access | Existing REST/MCP over Trailhead's iroh tunnel | One server, one SQLite file, wherever it runs; Turso deferred |
 | Protocol | Strongly typed | Shared Rust types over Iroh; daemon name TBD |
