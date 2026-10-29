@@ -12,11 +12,16 @@ pub mod money;
 pub mod provider;
 pub mod tracker;
 
-pub use codehost::{CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, PrState, Repo};
+pub use codehost::{
+    BranchUpdate, Ci, CiState, CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, PrState, Repo,
+};
 pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };
-pub use config::{Budget, Checks, ComputeConfig, FactoryConfig, Gate, GradesConfig, Profile, Role, UsageConfig};
+pub use config::{
+    Budget, Checks, ComputeConfig, FactoryConfig, Gate, GradesConfig, MergeConfig, MergeMode, Profile, Role,
+    UsageConfig,
+};
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
     RunResult, ToDaemon,
@@ -29,8 +34,8 @@ pub use harness::{
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use tracker::{
-    Answered, ChangesRequested, Credential, HumanContext, Merged, MergedBy, RunUpdate, Status, Task, TaskKey, TaskNote,
-    Tracker, is_factory_agent,
+    Answered, ChangesRequested, Credential, HumanContext, MergeDecision, Merged, MergedBy, RunUpdate, Status, Task,
+    TaskKey, TaskNote, Tracker, is_factory_agent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
