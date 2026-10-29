@@ -1735,6 +1735,29 @@ async fn an_ungraded_task_is_skipped_and_reported_once_until_a_human_grades_it()
     let ran = r.factory.tick().await.unwrap();
     assert_eq!(ran.len(), 1);
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
+    assert_ne!(r.tracker.task(&key).run.ungraded, Some(true), "graded, so the flag is cleared");
+}
+
+#[tokio::test]
+async fn a_task_whose_grade_is_cleared_is_reported_ungraded_again() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Document it", "");
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    assert_eq!(r.tracker.task(&key).run.ungraded, Some(true));
+
+    // Graded and picked up, the flag is cleared.
+    r.tracker.set_grade(&key, 1);
+    assert_eq!(r.factory.tick().await.unwrap().len(), 1);
+    assert_ne!(r.tracker.task(&key).run.ungraded, Some(true));
+
+    // Reopened with its grade taken away, it's said again.
+    r.tracker.set_status(&key, Status::Open);
+    r.tracker.clear_grade(&key);
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    assert_eq!(notes(&r, &key), ["no grade; set one to queue it", "no grade; set one to queue it"]);
+    assert_eq!(r.tracker.task(&key).run.ungraded, Some(true));
 }
 
 #[tokio::test]
