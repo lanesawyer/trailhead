@@ -235,20 +235,31 @@ pub fn schema(role: Role) -> Value {
 /// The most the human-context section of a prompt may take, in bytes.
 const HUMAN_CONTEXT_CAP: usize = 6000;
 
+/// The most the answers may take of the human-context section, so notes keep the rest.
+const ANSWERS_CAP: usize = 4000;
+
 /// Lane's answers and the task's decisions and notes, for after the description. Empty when there are none. Past
-/// the cap the oldest notes are dropped; answers are kept first, each cut short if very long.
+/// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
+/// is always kept.
 fn human_section(task: &trailhead_factory::TaskSpec) -> String {
     let ctx = &task.context;
     let mut budget = HUMAN_CONTEXT_CAP;
     let mut out = String::new();
-    if !ctx.answers.is_empty() {
-        out.push_str("\n\nQuestions you asked earlier and Lane's answers:");
-        for a in &ctx.answers {
-            let entry =
-                format!("\n- Q: {}\n  A ({}, {}): {}", clip(&a.question, 1000), a.by, a.date, clip(&a.answer, 2000));
-            budget = budget.saturating_sub(entry.len());
-            out.push_str(&entry);
+    let mut answers = Vec::new();
+    let mut answers_budget = ANSWERS_CAP;
+    for a in ctx.answers.iter().rev() {
+        let entry =
+            format!("\n- Q: {}\n  A ({}, {}): {}", clip(&a.question, 1000), a.by, a.date, clip(&a.answer, 2000));
+        if entry.len() > answers_budget && !answers.is_empty() {
+            break;
         }
+        answers_budget = answers_budget.saturating_sub(entry.len());
+        budget = budget.saturating_sub(entry.len());
+        answers.push(entry);
+    }
+    if !answers.is_empty() {
+        out.push_str("\n\nQuestions you asked earlier and Lane's answers:");
+        answers.iter().rev().for_each(|e| out.push_str(e));
     }
     let mut kept = Vec::new();
     for n in ctx.notes.iter().rev() {
