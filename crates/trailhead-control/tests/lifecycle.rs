@@ -425,9 +425,9 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
     assert_eq!(r.tracker.task(&crashed).status, Status::Open);
     assert!(r.tracker.is_revoked("factory/trail-1-a1"));
     assert_eq!(r.tracker.task(&unreviewed).run.reviewed, Some(1));
-    assert_eq!(r.tracker.task(&unreviewed).run.review_rounds, Some(2));
+    assert_eq!(r.tracker.task(&unreviewed).run.review_rounds, Some(1));
     assert!(r.tracker.is_revoked("factory/trail-2-a1-r1"));
-    assert!(r.tracker.is_revoked("factory/trail-2-a1-r2"));
+    assert!(r.tracker.is_revoked("factory/trail-2-a1-r1-1"));
     assert_eq!(r.tracker.task(&parked).status, Status::NeedsInput);
 
     // A second pass finds nothing to do.
@@ -1009,7 +1009,7 @@ async fn a_review_that_cant_start_doesnt_stop_reconcile() {
     r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
     let ran = r.factory.run_task(&r.tracker.task(&unreviewed)).await.unwrap();
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
-    r.compute.fail(&trailhead_factory::review_name(&unreviewed, 1, 2), "set_egress");
+    r.compute.fail(&format!("{}-1", trailhead_factory::review_name(&unreviewed, 1, 1)), "set_egress");
 
     // TRAIL-2: crashed mid-run, after it in the list.
     let crashed = r.tracker.add_task("TRAIL", "Crashed", "");
@@ -1623,6 +1623,26 @@ async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() 
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task") && questions[0].body.contains("connection lost"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_that_never_starts_doesnt_use_up_a_review_round() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Slow to review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+
+    r.daemon.fail_runs(1, "connection lost");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).run.review_rounds.unwrap_or(0), 0);
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(1));
+    assert_eq!(task.status, Status::Open, "reworks instead of parking at max_review_rounds");
 }
 
 #[tokio::test]
