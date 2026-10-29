@@ -344,7 +344,7 @@ fn clip(s: &str, max: usize) -> String {
 pub const DIFF_CAP: usize = 100 * 1024;
 
 /// The diff cut to `cap` bytes at a file boundary (a `diff --git` line), with a note saying how to read the rest.
-fn capped_diff(diff: &str, cap: usize) -> String {
+fn capped_diff(diff: &str, cap: usize, base: Option<&str>) -> String {
     if diff.len() <= cap {
         return diff.to_string();
     }
@@ -354,9 +354,12 @@ fn capped_diff(diff: &str, cap: usize) -> String {
     }
     // Back up to the start of the file whose diff straddles the cap; one huge first file is cut mid-file.
     let at = diff[..end].rfind("\ndiff --git ").map(|i| i + 1).unwrap_or(end);
+    let command = match base {
+        Some(base) => format!("`git diff origin/{base}...HEAD` in the checkout"),
+        None => "`git diff origin/<base>...HEAD` in the checkout, where <base> is the PR's base branch".into(),
+    };
     format!(
-        "{}\n[The diff is {} bytes and was cut here at {} bytes. Read the rest with `git diff origin/<base>...HEAD` \
-         in the checkout, where <base> is the PR's base branch.]",
+        "{}\n[The diff is {} bytes and was cut here at {} bytes. Read the rest with {command}.]",
         diff[..at].trim_end(),
         diff.len(),
         at
@@ -394,7 +397,11 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
             title = task.title,
             desc = task.description,
             human = human_section(task),
-            diff = ctx.diff.as_deref().map_or("(no diff)".into(), |d| capped_diff(d, DIFF_CAP)),
+            diff = ctx.diff.as_deref().map_or("(no diff)".into(), |d| capped_diff(
+                d,
+                DIFF_CAP,
+                ctx.base_branch.as_deref()
+            )),
             checks = checks_section(&ctx.checks),
             pr_title = pr_title_section(ctx.title.as_deref(), &task.key.0),
         ),

@@ -309,6 +309,17 @@ async fn human_context_pairs_answers_and_skips_the_factorys_own_notes() {
     assert_eq!((ctx.notes[0].author.as_str(), ctx.notes[0].body.as_str()), ("Lane", "Use a flock."));
 }
 
+#[tokio::test]
+async fn last_review_names_its_reviewer_like_human_context_does() {
+    let r = rig().await;
+    let key = r.task("Reviewed by hand").await;
+    assert!(r.tracker.last_review(&key).await.unwrap().is_none());
+    let review = trailhead_core::NewComment::review(trailhead_core::Verdict::RequestChanges, "Add a test.");
+    r.store.add_comment(&r.human, &key.0, review).await.unwrap();
+    let verdict = r.tracker.last_review(&key).await.unwrap().unwrap();
+    assert_eq!((verdict.reviewer.as_str(), verdict.body.as_str()), ("Lane", "Add a test."));
+}
+
 fn request_changes(body: &str) -> RunOutcome {
     RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into(), follow_ups: vec![], raise_grade: None }
 }
@@ -461,7 +472,8 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     assert_eq!(again, &pr, "pushed to the same PR");
 
     let prepared = r.daemon.prepared();
-    let rework: Vec<_> = prepared.iter().filter(|(_, p)| p.branch.is_some()).collect();
+    let rework: Vec<_> =
+        prepared.iter().filter(|(id, p)| p.branch.is_some() && id.0.starts_with("trailhead-w")).collect();
     assert_eq!(rework.len(), 1);
     assert!(rework[0].1.merge_base, "the checkout has the base branch merged in");
     let commits = r.codehost.commits(&pr.repo, "factory/trail-1");
