@@ -73,6 +73,7 @@ fn status(s: &str) -> Result<Status> {
         "in_progress" => Status::InProgress,
         "needs_input" => Status::NeedsInput,
         "in_review" => Status::InReview,
+        "approved" => Status::Approved,
         "done" => Status::Done,
         "cancelled" => Status::Cancelled,
         other => return Err(Error::Other(format!("unknown status {other}"))),
@@ -163,7 +164,7 @@ impl Tracker for RestTracker {
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
         let query = [
             ("project", project),
-            ("status", "open,in_progress,needs_input,in_review"),
+            ("status", "open,in_progress,needs_input,in_review,approved"),
             ("include", "claim"),
             ("limit", "1000"),
         ];

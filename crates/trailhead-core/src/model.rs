@@ -42,6 +42,7 @@ string_enum!(Status {
     InProgress => "in_progress",
     NeedsInput => "needs_input",
     InReview => "in_review",
+    Approved => "approved",
     Done => "done",
     Cancelled => "cancelled",
 });
@@ -60,7 +61,8 @@ impl Status {
             Open => matches!(to, InProgress | NeedsInput | InReview | Done | Cancelled),
             InProgress => matches!(to, Open | NeedsInput | InReview | Done | Cancelled),
             NeedsInput => matches!(to, Open | InProgress | Cancelled),
-            InReview => matches!(to, Open | InProgress | NeedsInput | Done | Cancelled),
+            InReview => matches!(to, Open | InProgress | NeedsInput | Approved | Done | Cancelled),
+            Approved => matches!(to, Open | InReview | Done | Cancelled),
             Done | Cancelled => matches!(to, Open),
         }
     }
@@ -134,7 +136,7 @@ pub struct Project {
     /// Seconds. Falls back to the workspace default when unset.
     pub claim_ttl: Option<i64>,
     pub require_review: bool,
-    /// Agents allowed to approve review work here (`in_review` → `done`), on top of
+    /// Agents allowed to approve review work here (`in_review` → `approved` or `done`), on top of
     /// any human. Only humans can change this list.
     #[serde(default)]
     pub reviewers: Vec<Uuid>,

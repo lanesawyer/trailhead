@@ -249,7 +249,7 @@ pub struct ReadyArgs {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ListArgs {
     project: Option<String>,
-    /// Comma-separated statuses: open, in_progress, needs_input, in_review, done, cancelled.
+    /// Comma-separated statuses: open, in_progress, needs_input, in_review, approved, done, cancelled.
     /// Defaults to everything not done or cancelled.
     status: Option<String>,
     /// Parent task key, to list subtasks.
@@ -317,7 +317,7 @@ pub struct UpdateArgs {
     task: String,
     title: Option<String>,
     description: Option<String>,
-    /// open, in_progress, needs_input, in_review, done or cancelled.
+    /// open, in_progress, needs_input, in_review, approved, done or cancelled.
     status: Option<String>,
     priority: Option<i64>,
     /// Risk grade: 1 to 4, or `none` to clear it. Agents can only raise an existing grade.
@@ -664,7 +664,7 @@ impl TrailheadMcp {
     }
 
     #[tool(
-        description = "Change a task's fields or status. Setting status done or in_review releases your claim. To finish, set status done with a handoff in one call.",
+        description = "Change a task's fields or status. Setting status done, approved or in_review releases your claim. To finish, set status done with a handoff in one call.",
         annotations(read_only_hint = false, open_world_hint = false)
     )]
     async fn update_task(

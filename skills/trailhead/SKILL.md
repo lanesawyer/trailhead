@@ -58,7 +58,7 @@ The CLI prints one terse line per task; add `--json` for full detail. MCP answer
    - `progress`: short status on long work.
    - `question`: only for what a human (or another agent) must answer. It parks the task in `needs_input` and takes it out of the ready queue until resolved. Don't ask what you can find out yourself.
    - `note`: anything else.
-5. **Finish with a handoff**: what changed, what's left, anything surprising. `done -m` / `update_task` with `handoff` posts it and closes the task in one step. If the project requires review, or you are unsure the work is accepted, use `review`/`in_review`; only a human can move a task from `in_review` to `done`.
+5. **Finish with a handoff**: what changed, what's left, anything surprising. `done -m` / `update_task` with `handoff` posts it and closes the task in one step. If the project requires review, or you are unsure the work is accepted, use `review`/`in_review`; only a human or a delegated reviewer (never one who did the work) can move a task from `in_review` to `approved` or `done`.
 6. **Stopping partway**: leave a handoff saying exactly what's left, then release. Never just walk away holding a claim.
 
 ## Etiquette

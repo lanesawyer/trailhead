@@ -109,6 +109,12 @@ pub(crate) enum Cmd {
         #[arg(short, long)]
         message: Option<String>,
     },
+    /// Approve work in review: cleared to finish. Humans and a project's reviewers.
+    Approve {
+        task: String,
+        #[arg(short, long)]
+        message: Option<String>,
+    },
     Cancel {
         task: String,
     },

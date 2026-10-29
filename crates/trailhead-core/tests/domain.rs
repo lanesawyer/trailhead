@@ -804,6 +804,162 @@ async fn delegated_reviewers_can_approve() {
 }
 
 #[tokio::test]
+async fn approved_sits_between_review_and_done() {
+    let env = Env::new().await;
+    let worker = env.agent("worker").await;
+    let lead = env.agent("lead").await;
+    let patch = ProjectPatch { reviewers: Some(vec!["lead".to_string()]), ..Default::default() };
+    env.store.update_project(&env.human, "AUTH", patch, None).await.unwrap();
+
+    let t = env.task("approve me").await;
+    env.store.claim(&worker, &t.key, None).await.unwrap();
+    // Only work in review can be approved.
+    assert!(matches!(
+        env.store.update_task(&env.human, &t.key, status(Status::Approved), None).await,
+        Err(Error::InvalidTransition { .. })
+    ));
+    env.store.update_task(&worker, &t.key, status(Status::InReview), None).await.unwrap();
+    // The worker can't approve or finish its own work.
+    for to in [Status::Approved, Status::Done] {
+        assert!(matches!(env.store.update_task(&worker, &t.key, status(to), None).await, Err(Error::ReviewRequired)));
+    }
+    // A delegated reviewer approves; the claim stays released and the task isn't ready.
+    let approved = env.store.update_task(&lead, &t.key, status(Status::Approved), None).await.unwrap();
+    assert_eq!(approved.status, Status::Approved);
+    assert!(env.store.task_detail(&env.human, &t.key).await.unwrap().claim.is_none());
+    assert!(env.ready_keys().await.is_empty());
+    let listed = TaskFilter { statuses: vec![Status::Approved], ..Default::default() };
+    assert_eq!(env.store.list_tasks(&env.human, listed).await.unwrap().len(), 1);
+    // Finishing needs the same rights as finishing from review.
+    assert!(matches!(
+        env.store.update_task(&worker, &t.key, status(Status::Done), None).await,
+        Err(Error::ReviewRequired)
+    ));
+    // Changes needed: back to review, then approved again, then done by a human.
+    let back = env.store.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
+    assert_eq!(back.status, Status::InReview);
+    env.store.update_task(&env.human, &t.key, status(Status::Approved), None).await.unwrap();
+    let done = env.store.update_task(&env.human, &t.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(done.status, Status::Done);
+
+    // Approved can also go back to open, and in_review can finish directly.
+    let u = env.task("sent back").await;
+    env.store.update_task(&env.human, &u.key, status(Status::InReview), None).await.unwrap();
+    let ev = env.store.update_task(&env.human, &u.key, status(Status::Approved), None).await.unwrap();
+    assert_eq!(ev.status, Status::Approved);
+    env.store.update_task(&env.human, &u.key, status(Status::Open), None).await.unwrap();
+    assert_eq!(env.ready_keys().await, vec![u.key.clone()]);
+    env.store.update_task(&env.human, &u.key, status(Status::InReview), None).await.unwrap();
+    let direct = env.store.update_task(&env.human, &u.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(direct.status, Status::Done);
+}
+
+#[tokio::test]
+async fn reviewers_cannot_approve_their_own_work() {
+    let env = Env::new().await;
+    let lead = env.agent("lead").await;
+    let other = env.agent("other").await;
+    let patch = ProjectPatch {
+        require_review: Some(true),
+        reviewers: Some(vec!["lead".into(), "other".into()]),
+        ..Default::default()
+    };
+    env.store.update_project(&env.human, "AUTH", patch, None).await.unwrap();
+
+    let t = env.task("mine").await;
+    env.store.claim(&lead, &t.key, None).await.unwrap();
+    // Holding it, it can't skip review.
+    assert!(matches!(
+        env.store.update_task(&lead, &t.key, status(Status::Approved), None).await,
+        Err(Error::InvalidTransition { .. })
+    ));
+    env.store.update_task(&lead, &t.key, status(Status::InReview), None).await.unwrap();
+    for to in [Status::Approved, Status::Done] {
+        assert!(matches!(env.store.update_task(&lead, &t.key, status(to), None).await, Err(Error::ReviewRequired)));
+    }
+    env.store.update_task(&other, &t.key, status(Status::Approved), None).await.unwrap();
+    // Nor can it finish what another reviewer approved.
+    assert!(matches!(
+        env.store.update_task(&lead, &t.key, status(Status::Done), None).await,
+        Err(Error::ReviewRequired)
+    ));
+    let done = env.store.update_task(&other, &t.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(done.status, Status::Done);
+
+    // A reviewer who only moved a task to review (no claim) can't approve it either.
+    let u = env.task("pushed").await;
+    env.store.update_task(&lead, &u.key, status(Status::InReview), None).await.unwrap();
+    assert!(matches!(
+        env.store.update_task(&lead, &u.key, status(Status::Approved), None).await,
+        Err(Error::ReviewRequired)
+    ));
+
+    // A reviewer holding in-progress work still finishes it where the plan allows.
+    let w = env.task("held").await;
+    env.store.claim(&lead, &w.key, None).await.unwrap();
+    assert!(env.store.update_task(&lead, &w.key, status(Status::Done), None).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_reviewer_approves_work_it_only_parked_in_an_earlier_round() {
+    let env = Env::new().await;
+    let factory = env.agent("factory").await;
+    let worker = env.agent("worker").await;
+    let patch = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    env.store.update_project(&env.human, "AUTH", patch, None).await.unwrap();
+
+    // The factory claims a task only to park it; a worker later does the work.
+    let t = env.task("parked once").await;
+    env.store.claim(&factory, &t.key, None).await.unwrap();
+    env.store.update_task(&factory, &t.key, status(Status::Open), None).await.unwrap();
+    env.store.claim(&worker, &t.key, None).await.unwrap();
+    env.store.update_task(&worker, &t.key, status(Status::InReview), None).await.unwrap();
+    env.store.update_task(&factory, &t.key, status(Status::Approved), None).await.unwrap();
+    let done = env.store.update_task(&factory, &t.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(done.status, Status::Done);
+
+    // The last claim before the move into review still counts when someone else makes the move.
+    let u = env.task("sent by another").await;
+    env.store.claim(&factory, &u.key, None).await.unwrap();
+    env.store.update_task(&env.human, &u.key, status(Status::InReview), None).await.unwrap();
+    assert!(matches!(
+        env.store.update_task(&factory, &u.key, status(Status::Done), None).await,
+        Err(Error::ReviewRequired)
+    ));
+}
+
+#[tokio::test]
+async fn held_work_cannot_skip_to_approved() {
+    let env = Env::new().await;
+    let lead = env.agent("lead").await;
+    let patch = ProjectPatch { reviewers: Some(vec!["lead".to_string()]), ..Default::default() };
+    env.store.update_project(&env.human, "AUTH", patch, None).await.unwrap();
+    // A held task can't jump to approved.
+    let held = env.task("held").await;
+    env.store.claim(&lead, &held.key, None).await.unwrap();
+    assert!(matches!(
+        env.store.update_task(&lead, &held.key, status(Status::Approved), None).await,
+        Err(Error::InvalidTransition { .. })
+    ));
+    // A reviewer still finishes its own work in a project without required review.
+    let own = env.task("own").await;
+    env.store.claim(&lead, &own.key, None).await.unwrap();
+    let done = env.store.update_task(&lead, &own.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(done.status, Status::Done);
+}
+
+#[tokio::test]
+async fn undo_reverses_approval() {
+    let env = Env::new().await;
+    let t = env.task("undo approve").await;
+    env.store.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
+    let human = env.human.next_batch();
+    env.store.update_task(&human, &t.key, status(Status::Approved), None).await.unwrap();
+    env.store.undo_batch(&env.human, human.batch_id).await.unwrap();
+    assert_eq!(env.store.get_task(&env.human, &t.key).await.unwrap().status, Status::InReview);
+}
+
+#[tokio::test]
 async fn list_tasks_sorts_and_pages() {
     let env = Env::new().await;
     let a = env.task_with(NewTask { title: "a".into(), priority: Some(1), ..Default::default() }).await;
