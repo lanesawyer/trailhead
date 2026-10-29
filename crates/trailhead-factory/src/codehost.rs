@@ -59,6 +59,9 @@ pub enum MergeOutcome {
 pub enum BranchUpdate {
     /// The base branch is merged into the PR branch; its head is now a new commit, and CI starts over on it.
     Updated,
+    /// The PR branch already has everything on the base branch, say because an update queued earlier has landed.
+    /// Nothing changed; look at the head again.
+    UpToDate,
     /// The base branch doesn't merge into the PR branch cleanly. Sends the task back to running.
     Conflict,
 }
@@ -95,7 +98,8 @@ pub trait CodeHost: Send + Sync {
     /// date refuses to merge (TRAIL-212).
     async fn behind(&self, pr: &PrRef) -> Result<bool>;
     /// Merges the base branch into the PR's branch as a merge commit, never a rebase and force-push, so a reviewer's
-    /// verdict on the old head still describes the work.
+    /// verdict on the old head still describes the work. A failure that isn't a merge conflict (the head moved under
+    /// the update, say) is an error, not `Conflict`, which costs a rework.
     async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate>;
     /// The PR's current title, which a squash merge takes as its commit subject.
     async fn title(&self, pr: &PrRef) -> Result<String>;

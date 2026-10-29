@@ -323,18 +323,41 @@ impl CodeHost for GitHub {
             return Err(Error::Other(format!("github: PR {} has no base or head", pr.number)));
         };
         let cmp = self.call(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
-        Ok(cmp["behind_by"].as_u64().unwrap_or(0) > 0)
+        // `behind` gates merging, so a response without the count is an error, not "up to date".
+        let behind_by = cmp["behind_by"]
+            .as_u64()
+            .ok_or_else(|| Error::Other(format!("github: comparing PR {} with {base} has no behind_by", pr.number)))?;
+        Ok(behind_by > 0)
     }
 
     async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate> {
-        let path = format!("{}/pulls/{}/update-branch", Self::repo_path(&pr.repo), pr.number);
-        let (status, body, _) = self.send(self.request(Method::PUT, &path)).await?;
+        let r = Self::repo_path(&pr.repo);
+        let p = self.call(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
+        let Some(head) = p["head"]["sha"].as_str() else {
+            return Err(Error::Other(format!("github: PR {} has no head", pr.number)));
+        };
+        // Naming the head we read makes a push that raced us fail instead of getting merged over.
+        let request = self
+            .request(Method::PUT, &format!("{r}/pulls/{}/update-branch", pr.number))
+            .json(&json!({ "expected_head_sha": head }));
+        let (status, body, _) = self.send(request).await?;
+        let message = body["message"].as_str().unwrap_or_default();
         match status {
             // GitHub queues the merge and answers 202.
             s if s.is_success() => Ok(BranchUpdate::Updated),
-            // Merge conflicts, or nothing to merge in.
-            StatusCode::UNPROCESSABLE_ENTITY => Ok(BranchUpdate::Conflict),
-            s => Err(Error::Other(format!("github {s}: {}", body["message"].as_str().unwrap_or_default()))),
+            // 422 is also nothing to merge in (a queued update landed already) and a head that moved; only a real
+            // merge conflict sends the task back to running.
+            StatusCode::UNPROCESSABLE_ENTITY => {
+                let lower = message.to_lowercase();
+                if lower.contains("merge conflict") {
+                    Ok(BranchUpdate::Conflict)
+                } else if lower.contains("no new commits") {
+                    Ok(BranchUpdate::UpToDate)
+                } else {
+                    Err(Error::Other(format!("github {status}: {message}")))
+                }
+            }
+            s => Err(Error::Other(format!("github {s}: {message}"))),
         }
     }
 

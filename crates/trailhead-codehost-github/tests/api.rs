@@ -27,6 +27,8 @@ struct Git {
     prs: Vec<Value>,
     comments: Vec<(u64, String)>,
     unmergeable: bool,
+    /// A 422 message `update-branch` answers with, whatever the branches look like.
+    update_refusal: Option<String>,
     workflow_scope: bool,
     /// How many more file listings answer 502, and how many were asked for.
     files_failures: usize,
@@ -38,6 +40,20 @@ impl Git {
     fn id(&mut self, kind: &str) -> String {
         self.next += 1;
         format!("{kind}{}", self.next)
+    }
+
+    /// 0 when `head`'s history includes `tip`, otherwise 1.
+    fn behind_by(&self, tip: &str, head: &str) -> u64 {
+        let mut todo = vec![head.to_string()];
+        while let Some(sha) = todo.pop() {
+            if sha == tip {
+                return 0;
+            }
+            todo.extend(
+                self.commits[&sha]["parents"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()),
+            );
+        }
+        1
     }
 }
 
@@ -217,25 +233,39 @@ async fn get_pull(State(g): State<Shared>, Path((_, _, n)): Path<(String, String
 async fn compare(State(g): State<Shared>, Path((_, _, spec)): Path<(String, String, String)>) -> Response {
     let g = g.lock().unwrap();
     let (base, head) = spec.split_once("...").unwrap();
-    let tip = &g.refs[base];
-    let mut todo = vec![head.to_string()];
-    while let Some(sha) = todo.pop() {
-        if sha == *tip {
-            return Json(json!({ "behind_by": 0 })).into_response();
-        }
-        todo.extend(g.commits[&sha]["parents"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()));
-    }
-    Json(json!({ "behind_by": 1 })).into_response()
+    Json(json!({ "behind_by": g.behind_by(&g.refs[base], head) })).into_response()
 }
 
-async fn update_branch(State(g): State<Shared>, Path((_, _, n)): Path<(String, String, u64)>) -> Response {
+async fn update_branch(
+    State(g): State<Shared>,
+    Path((_, _, n)): Path<(String, String, u64)>,
+    Json(b): Json<Value>,
+) -> Response {
     let mut g = g.lock().unwrap();
+    if let Some(message) = &g.update_refusal {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "message": message }))).into_response();
+    }
+    let branch = g.prs[n as usize - 1]["head"].as_str().unwrap().to_string();
+    if b["expected_head_sha"] != json!(g.refs[&branch]) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "message": "expected head sha didn't match current head ref." })),
+        )
+            .into_response();
+    }
+    let main = g.refs["main"].clone();
+    if g.behind_by(&main, &g.refs[&branch]) == 0 {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "message": "There are no new commits on the base branch." })),
+        )
+            .into_response();
+    }
     if g.unmergeable {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "message": "merge conflict between base and head" })))
             .into_response();
     }
-    let branch = g.prs[n as usize - 1]["head"].as_str().unwrap().to_string();
-    let (old, main) = (g.refs[&branch].clone(), g.refs["main"].clone());
+    let old = g.refs[&branch].clone();
     let tree = g.commits[&old]["tree"].clone();
     let sha = g.id("commit");
     g.commits.insert(sha.clone(), json!({ "sha": sha, "tree": tree, "parents": [old, main] }));
@@ -558,10 +588,33 @@ async fn a_branch_behind_main_is_updated_with_a_merge_commit() {
     }
     assert!(!gh.behind(&pr).await.unwrap());
 
+    // GitHub applies an update after its 202, so a second ask can find nothing left to merge: that's no conflict.
+    git.lock().unwrap().unmergeable = true;
+    assert_eq!(gh.update_branch(&pr).await.unwrap(), BranchUpdate::UpToDate);
+    git.lock().unwrap().unmergeable = false;
+
     // Main moves again and the merge conflicts: GitHub answers 422.
     let again = Commit { message: "again".into(), changes: vec![change("a.txt", Some(b"c"))], merges: vec![] };
     let main = head(&git, "main");
     gh.publish(&repo(), &main, "main", &[again]).await.unwrap();
     git.lock().unwrap().unmergeable = true;
     assert_eq!(gh.update_branch(&pr).await.unwrap(), BranchUpdate::Conflict);
+}
+
+#[tokio::test]
+async fn a_422_that_is_not_a_conflict_is_an_error() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let started = head(&git, "main");
+    let work = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))], merges: vec![] };
+    gh.publish(&repo(), &started, "factory/trail-1", &[work]).await.unwrap();
+    let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };
+    let pr = gh.open_pr(&repo(), new).await.unwrap();
+    let landed = Commit { message: "meanwhile".into(), changes: vec![change("b.txt", Some(b"b"))], merges: vec![] };
+    gh.publish(&repo(), &started, "main", &[landed]).await.unwrap();
+
+    // The head moved under the update: GitHub answers 422 too, and that must not cost a rework.
+    git.lock().unwrap().update_refusal = Some("expected head sha didn't match current head ref.".into());
+    let err = gh.update_branch(&pr).await.unwrap_err();
+    assert!(matches!(&err, Error::Other(m) if m.contains("expected head sha")), "{err:?}");
 }

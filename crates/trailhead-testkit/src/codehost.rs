@@ -193,6 +193,9 @@ impl CodeHost for FakeCodeHost {
         if conflicts {
             return Ok(BranchUpdate::Conflict);
         }
+        if !self.find(pr, |p, _| p.behind)? {
+            return Ok(BranchUpdate::UpToDate);
+        }
         let branch = self.find(pr, |p, _| {
             p.behind = false;
             p.spec.branch.clone()
