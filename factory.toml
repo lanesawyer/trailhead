@@ -39,8 +39,9 @@ max_lines = 600          # bigger diffs are at least grade 3
 4 = { require = ["checks", "ci", "human"], auto_merge = false }
 
 [merge]
-# Shadow: says on each PR what the merger would do and doesn't merge. `on` isn't built yet (docs/factory/operating.md).
-mode = "shadow"
+# On: squash-merges an approved PR whose grade has auto_merge (grade 1 here), or that Lane approved. To stop it, set
+# "shadow" (says what it would do, merges nothing) and restart the factory; Ctrl-C drains (docs/factory/operating.md).
+mode = "on"
 
 [daemon]
 # Chasing TRAIL-187 (run not found on the daemon after a reattach).
