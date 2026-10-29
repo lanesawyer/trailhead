@@ -18,11 +18,12 @@ use tokio::task::{self, JoinSet};
 use tokio::time::Instant;
 
 use tokio::sync::mpsc;
+use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::{
-    ChangesRequested, CheckpointId, CodeHost, Compute, Daemon, Egress, Error, FactoryConfig, Feedback, HumanContext,
-    IROH_DOMAINS, Labels, Merged, MergedBy, ModelProvider, PrRef, PrState, Profile, Result, Role, RunEvent, RunReport,
-    RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict,
-    VerdictKind, label, review_name, run_name,
+    ChangesRequested, CheckResult, CheckpointId, CodeHost, Compute, Daemon, Egress, Error, FactoryConfig, Feedback,
+    HumanContext, IROH_DOMAINS, Labels, Merged, MergedBy, ModelProvider, PrRef, PrState, Profile, Result, Role,
+    RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec,
+    Tracker, Usd, Verdict, VerdictKind, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -45,6 +46,10 @@ pub const RELEASE_PATIENCE: Duration = Duration::from_secs(10 * 60);
 const FIRST_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
+/// The first wait before retrying a task after an infrastructure failure, doubling up to [`MAX_INFRA_BACKOFF`].
+const FIRST_INFRA_BACKOFF: Duration = Duration::from_secs(60);
+const MAX_INFRA_BACKOFF: Duration = Duration::from_secs(15 * 60);
+
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
@@ -58,12 +63,15 @@ pub struct Factory {
     /// doesn't notice merges or closed PRs.
     pub codehost: Option<Arc<dyn CodeHost>>,
     troubled: Mutex<HashMap<String, Trouble>>,
-    /// Tasks whose last runs failed before the agent started: how many in a row, and when to try again.
+    /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// The reset a pause was last logged for, so a pause is logged once rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
+    /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
+    /// starting together never take the same sandbox.
+    pool_pick: tokio::sync::Mutex<()>,
 }
 
 /// A pooled sandbox that keeps failing to release. Kept in memory only, so a restart counts again from zero.
@@ -129,6 +137,7 @@ impl Factory {
             setbacks: Mutex::default(),
             quota: Mutex::default(),
             pause_logged: Mutex::default(),
+            pool_pick: tokio::sync::Mutex::default(),
         }
     }
 
@@ -348,28 +357,38 @@ impl Factory {
             Ok(credential) => credential,
             // The name was used by a run whose give-back didn't land; skip past it rather than retry it forever.
             Err(e @ Error::Forbidden(_)) => {
-                self.set_back(&task.key);
+                self.set_back(&task.key, 1);
                 let update = RunUpdate { retries: Some(retries + 1), ..RunUpdate::default() };
                 if let Err(e) = self.tracker.report(&task.key, update).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't skip a used run name");
                 }
                 return Err(e);
             }
-            Err(e) => return Err(e),
+            // No sub-agent, so nothing holds the claim: back off and count it, as the factory's own identity. Revoking
+            // the sub-agent that was never created fails, and that warning is expected.
+            Err(e) => {
+                // Parking and releasing need the claim, so take it as the factory's own identity first.
+                if let Err(claim) = self.tracker.claim(&task.key).await {
+                    tracing::warn!(task = %task.key.0, error = %claim, "couldn't claim the task to back it off");
+                }
+                return Err(self.infra_failed(task, &self.tracker, &name, e, task.run.infra_failures, None).await);
+            }
         };
         let sub = self.tracker.sub_agent(&name);
+        let infra_prior = task.run.infra_failures;
         // Claiming as the sub-agent before creating the sandbox keeps two control planes from racing for one task.
-        sub.claim(&task.key).await?;
-        sub.report(
-            &task.key,
-            RunUpdate {
-                attempt: Some(attempt),
-                sandbox: Some(name.clone()),
-                profile: Some(self.config.repo.worker.clone()),
-                ..RunUpdate::default()
-            },
-        )
-        .await?;
+        if let Err(e) = sub.claim(&task.key).await {
+            return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
+        }
+        let started = RunUpdate {
+            attempt: Some(attempt),
+            sandbox: Some(name.clone()),
+            profile: Some(self.config.repo.worker.clone()),
+            ..RunUpdate::default()
+        };
+        if let Err(e) = sub.report(&task.key, started).await {
+            return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
+        }
         tracing::info!(task = %task.key.0, run = %name, "preparing a worker sandbox");
         // A task with a PR is a rework: the checkout starts from the PR branch's head, and the worker is told what the
         // review asked for.
@@ -382,9 +401,8 @@ impl Factory {
         };
         let (sandbox, context) = match prepared.await {
             Ok(prepared) => prepared,
-            Err(e) => return Err(self.not_started(task, &sub, &name, e).await),
+            Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await),
         };
-        self.setbacks.lock().unwrap().remove(&task.key);
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
         let req = RunRequest {
             run: name.clone(),
@@ -403,6 +421,7 @@ impl Factory {
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
             required_checks: self.config.required_checks(),
+            worker_checks: Vec::new(),
             blocked_hosts: self.blocked_hosts(),
             allowed_hosts: self.allowed_hosts(),
             credential,
@@ -415,9 +434,13 @@ impl Factory {
                 self.give_back_attempt(task, &sub).await;
                 return Err(Error::Cancelled);
             }
-            Err(e) => return Err(e),
+            // The daemon was lost without reattaching, or the like: the agent didn't give up, so the attempt is
+            // given back (TRAIL-172).
+            Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await),
         };
 
+        // From here the agent has ended the run, so its attempt counts. Errors go to reconcile as before, except after
+        // the agent's own API trouble, which gives the attempt back (TRAIL-172). A breach is the agent's doing too.
         let (report, spend) = match run {
             Run::Breach(reason, spend) => {
                 tracing::warn!(task = %task.key.0, %reason, "budget breached; parking");
@@ -436,7 +459,18 @@ impl Factory {
             }
             Run::Report(report, spend) => (report, spend),
         };
-        sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await?;
+        // An agent that ends the run itself shows the infrastructure working again, unless what it ended with is its
+        // API trouble.
+        let api_trouble = matches!(&report.result, RunResult::Failed(reason) if is_transient_api_error(reason));
+        if !api_trouble {
+            self.setbacks.lock().unwrap().remove(&task.key);
+        }
+        let infra_failures = if api_trouble { None } else { task.run.infra_failures.filter(|n| *n > 0).map(|_| 0) };
+        let update = RunUpdate { spend: Some(spend), infra_failures, ..RunUpdate::default() };
+        match sub.report(&task.key, update).await {
+            Err(e) if api_trouble => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await),
+            reported => reported?,
+        }
 
         match report.result {
             RunResult::PrOpened(pr) => {
@@ -444,18 +478,42 @@ impl Factory {
                 // starts from the PR branch.
                 self.release_worker(&sandbox).await?;
                 self.tracker.revoke_sub_agent(&name).await?;
-                self.review(task, &pr, attempt).await
+                self.review(task, &pr, attempt, &report.checks).await
             }
             RunResult::NeedsInput(question) => Ok(Outcome::Parked { reason: question }),
             RunResult::Failed(reason) => {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
-                self.release_worker(&sandbox).await?;
+                match self.release_worker(&sandbox).await {
+                    Err(e) if api_trouble => {
+                        return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
+                    }
+                    released => released?,
+                }
+                if api_trouble {
+                    // The agent's own API trouble says nothing about the task. The daemon released the task before
+                    // this control plane could reclaim it; within one control plane the task stays in `busy`, so
+                    // nothing else takes it in between. Claiming it again as the sub-agent gives the attempt back.
+                    let error = match sub.claim(&task.key).await {
+                        Ok(()) => Error::Other(reason.clone()),
+                        Err(e) => e,
+                    };
+                    let restore = Some(task.run.failure.clone().unwrap_or_default());
+                    self.infra_failed(task, &sub, &name, error, infra_prior, restore).await;
+                    return Ok(Outcome::Failed { reason });
+                }
                 let max = self.config.repo.max_attempts;
                 // Counted from the last review that asked for changes, so reworks get attempts of their own.
                 let failed = attempt - task.run.attempt_base.unwrap_or(0);
                 if failed >= max {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
-                    let last = self.tracker.show(&task.key).await?.run.failure.unwrap_or_else(|| reason.clone());
+                    let last = self
+                        .tracker
+                        .show(&task.key)
+                        .await?
+                        .run
+                        .failure
+                        .filter(|f| !f.is_empty())
+                        .unwrap_or_else(|| reason.clone());
                     sub.claim(&task.key).await?;
                     sub.ask(
                         &task.key,
@@ -476,15 +534,62 @@ impl Factory {
         }
     }
 
-    /// A run that failed before its agent started (TRAIL-159): the task goes back to the queue without the attempt
-    /// counting toward `max_attempts`, and waits out a backoff that grows with each failure in a row. Returns the
+    /// A run that failed on the infrastructure, not the task (TRAIL-159, TRAIL-172): the task goes back to the queue
+    /// without the attempt counting toward `max_attempts`, and waits out a backoff that grows with each such failure.
+    /// At `max_infra_failures` in a row it's parked instead, saying so. The run's sub-agent must hold the claim. Returns the
     /// error to surface.
-    async fn not_started(&self, task: &Task, sub: &Arc<dyn Tracker>, name: &str, error: Error) -> Error {
-        tracing::warn!(task = %task.key.0, %error, "run failed before the agent started; the attempt doesn't count");
-        self.set_back(&task.key);
-        // Before the release: the run's sub-agent holds the claim, so only it can report.
-        self.give_back_attempt(task, sub).await;
-        if let Err(e) = sub.release(&task.key).await {
+    async fn infra_failed(
+        &self,
+        task: &Task,
+        sub: &Arc<dyn Tracker>,
+        name: &str,
+        error: Error,
+        prior: Option<u32>,
+        failure: Option<String>,
+    ) -> Error {
+        // The in-memory count too, so the backoff still grows when the tracker is what's failing and the persisted
+        // count didn't get written.
+        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _)| *n);
+        let failures = prior.unwrap_or(0).max(held) + 1;
+        let max = self.config.repo.max_infra_failures.max(1);
+        let park = failures >= max;
+        tracing::warn!(task = %task.key.0, %error, failures, max, "infrastructure failure; the attempt doesn't count");
+        self.set_back(&task.key, failures);
+        // Before the release: the run's sub-agent holds the claim, so only it can report. A parked task starts its
+        // count again when Lane reopens it.
+        let update = RunUpdate {
+            attempt: Some(task.run.attempt.unwrap_or(0)),
+            retries: Some(task.run.retries.unwrap_or(0) + 1),
+            infra_failures: Some(if park { 0 } else { failures }),
+            // Set only when this run's agent wrote text that isn't about the task (its API trouble): the failure the
+            // task had before the run is put back, so the next attempt is still told what failed.
+            failure,
+            ..RunUpdate::default()
+        };
+        if let Err(e) = sub.report(&task.key, update).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
+        }
+        if park {
+            let question = format!(
+                "The infrastructure failed {failures} times in a row (the limit is {max}); it's not the task. The \
+                 last error: {error}\n\nFix the cause, then reopen the task; raise `max_infra_failures` to allow \
+                 more tries."
+            );
+            match sub.ask(&task.key, &question).await {
+                // Reopened by Lane, it starts again with no wait, as its count does.
+                Ok(()) => {
+                    self.setbacks.lock().unwrap().remove(&task.key);
+                }
+                Err(e) => {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; reconcile will requeue it");
+                    // Not parked, so the count mustn't start again: the next failure tries to park once more.
+                    let keep = RunUpdate { infra_failures: Some(failures), ..RunUpdate::default() };
+                    if let Err(e) = sub.report(&task.key, keep).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't keep the infrastructure failure count");
+                    }
+                }
+            }
+        } else if let Err(e) = sub.release(&task.key).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't release the task; reconcile will");
         }
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {
@@ -506,22 +611,19 @@ impl Factory {
         }
     }
 
-    /// Holds a task back for a backoff that grows with each failure before its agent started, in a row.
-    fn set_back(&self, key: &TaskKey) {
-        let now = Instant::now();
-        let mut setbacks = self.setbacks.lock().unwrap();
-        let entry = setbacks.entry(key.clone()).or_insert((0, now));
-        entry.0 += 1;
-        entry.1 = now + backoff(entry.0);
+    /// Holds a task back for a backoff that grows with each infrastructure failure in a row.
+    fn set_back(&self, key: &TaskKey, failures: u32) {
+        let wait = backoff(failures, FIRST_INFRA_BACKOFF, MAX_INFRA_BACKOFF);
+        self.setbacks.lock().unwrap().insert(key.clone(), (failures, Instant::now() + wait));
     }
 
-    /// Whether a task that failed before its agent started has waited out its backoff.
+    /// Whether a task that failed on the infrastructure has waited out its backoff.
     fn setback_over(&self, key: &TaskKey) -> bool {
         self.setbacks.lock().unwrap().get(key).is_none_or(|(_, next_try)| Instant::now() >= *next_try)
     }
 
     /// Runs the reviewer on an open PR in its own fresh sandbox.
-    pub async fn review(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<Outcome> {
+    pub async fn review(&self, task: &Task, pr: &PrRef, attempt: u32, checks: &[CheckResult]) -> Result<Outcome> {
         let round = self.tracker.show(&task.key).await?.run.review_rounds.unwrap_or(0) + 1;
         let name = review_name(&task.key, attempt, round);
         self.tracker.report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() }).await?;
@@ -544,6 +646,7 @@ impl Factory {
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
             required_checks: Vec::new(),
+            worker_checks: checks.to_vec(),
             blocked_hosts: self.blocked_hosts(),
             allowed_hosts: self.allowed_hosts(),
             credential,
@@ -653,6 +756,7 @@ impl Factory {
     /// checkpoint, or a new one when none is idle. The tick's room check keeps the pool within `max_sandboxes`.
     /// The prepared checkout becomes the new warm checkpoint, so the next task starts from it.
     async fn acquire_worker(&self, task: &Task, branch: Option<String>) -> Result<Sandbox> {
+        let pick = self.pool_pick.lock().await;
         let idle = self.compute.list(&self.pooled(label::IDLE, None, None)).await?;
         let (sandbox, warm) = match idle.into_iter().find(|s| !self.abandoned(&s.name)) {
             Some(s) => {
@@ -670,6 +774,7 @@ impl Factory {
             }
         };
         self.compute.set_labels(&sandbox.id, &self.pooled(label::BUSY, warm.as_deref(), Some(task))).await?;
+        drop(pick);
         self.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
         if let Some(cp) = &warm {
             self.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
@@ -859,7 +964,7 @@ impl Factory {
         if let Some(round) = task.run.review_rounds.filter(|r| *r > 0) {
             self.tracker.revoke_sub_agent(&review_name(&task.key, attempt, round)).await?;
         }
-        self.review(task, pr, attempt).await
+        self.review(task, pr, attempt, &[]).await
     }
 
     /// Closes a task whose PR has merged: records who merged it, which PR and the commit in the task's metadata, then
@@ -1063,14 +1168,14 @@ impl Factory {
             abandoned: false,
         });
         t.failures += 1;
-        t.next_try = now + backoff(t.failures);
+        t.next_try = now + backoff(t.failures, FIRST_BACKOFF, MAX_BACKOFF);
         !t.abandoned && (t.failures >= RELEASE_ATTEMPTS || now - t.since >= RELEASE_PATIENCE)
     }
 }
 
-/// The wait after the `failures`th failure in a row: [`FIRST_BACKOFF`], doubling up to [`MAX_BACKOFF`].
-fn backoff(failures: u32) -> Duration {
-    FIRST_BACKOFF.saturating_mul(1 << (failures - 1).min(8)).min(MAX_BACKOFF)
+/// The wait after the `failures`th failure in a row: `first`, doubling up to `max`.
+fn backoff(failures: u32, first: Duration, max: Duration) -> Duration {
+    first.saturating_mul(1 << failures.saturating_sub(1).min(8)).min(max)
 }
 
 fn unix_now() -> i64 {
@@ -1092,7 +1197,7 @@ fn spec(task: &Task, context: HumanContext) -> TaskSpec {
         key: task.key.clone(),
         title: task.title.clone(),
         description: task.description.clone(),
-        previous_failure: task.run.failure.clone(),
+        previous_failure: task.run.failure.clone().filter(|f| !f.is_empty()),
         context,
     }
 }

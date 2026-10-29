@@ -65,6 +65,10 @@ pub struct RunUpdate {
     /// sub-agent, so a retry's name carries this count to stay unique.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries: Option<u32>,
+    /// Runs in a row that failed on the infrastructure, before or after the agent started (TRAIL-172). They don't
+    /// count as attempts; `max_infra_failures` caps them. Reset when an agent ends a run, or when the cap parks the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infra_failures: Option<u32>,
     /// The review that last asked for changes, which the rework on the PR branch is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_requested: Option<ChangesRequested>,
@@ -117,6 +121,7 @@ impl RunUpdate {
             spend,
             failure,
             retries,
+            infra_failures,
             changes_requested,
             attempt_base,
             merged,
@@ -131,6 +136,7 @@ impl RunUpdate {
         self.spend = spend.or(self.spend.take());
         self.failure = failure.or(self.failure.take());
         self.retries = retries.or(self.retries.take());
+        self.infra_failures = infra_failures.or(self.infra_failures.take());
         self.changes_requested = changes_requested.or(self.changes_requested.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
         self.merged = merged.or(self.merged.take());
@@ -228,6 +234,16 @@ pub trait Tracker: Send + Sync {
     /// A note on the task, such as why an attempt failed, without changing it.
     async fn note(&self, task: &TaskKey, body: &str) -> Result<()>;
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()>;
+    /// Files a new task in `project`, not under the factory's queue, and returns its key.
+    async fn create_task(
+        &self,
+        project: &str,
+        title: &str,
+        description: &str,
+        priority: Option<i64>,
+    ) -> Result<TaskKey>;
+    /// An unfinished task in `project` with this title (ignoring case and surrounding space), if there is one.
+    async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>>;
 
     /// Creates (or reuses) a project-scoped sub-agent and a fresh token for it that expires after `ttl`,
     /// in case revoking it is missed.

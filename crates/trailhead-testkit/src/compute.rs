@@ -21,6 +21,7 @@ pub struct FakeCompute {
     live: Arc<Mutex<BTreeMap<SandboxId, Live>>>,
     failing: Arc<Mutex<BTreeSet<(String, &'static str)>>>,
     wake_failures: Arc<Mutex<BTreeMap<String, usize>>>,
+    hung_wakes: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl FakeCompute {
@@ -62,6 +63,11 @@ impl FakeCompute {
     /// Makes the next `n` wakes of a sandbox fail with a transient 5xx before they start succeeding.
     pub fn fail_wakes(&self, name: &str, n: usize) {
         self.wake_failures.lock().unwrap().insert(name.to_string(), n);
+    }
+
+    /// Makes every wake of a sandbox hang, as a stalled compute API would.
+    pub fn hang_wakes(&self, name: &str) {
+        self.hung_wakes.lock().unwrap().insert(name.to_string());
     }
 
     pub fn wakes(&self, name: &str) -> usize {
@@ -109,12 +115,17 @@ impl Compute for FakeCompute {
     }
 
     async fn list(&self, labels: &Labels) -> Result<Vec<Sandbox>> {
-        let live = self.live.lock().unwrap();
-        Ok(live
+        let found: Vec<Sandbox> = self
+            .live
+            .lock()
+            .unwrap()
             .values()
             .filter(|l| labels.iter().all(|(k, v)| l.sandbox.labels.get(k) == Some(v)))
             .map(|l| l.sandbox.clone())
-            .collect())
+            .collect();
+        // A real list is a network call: other tasks run before the answer is used.
+        tokio::task::yield_now().await;
+        Ok(found)
     }
 
     async fn checkpoint(&self, id: &SandboxId, note: &str) -> Result<CheckpointId> {
@@ -145,6 +156,9 @@ impl Compute for FakeCompute {
     }
 
     async fn wake(&self, id: &SandboxId) -> Result<()> {
+        if self.hung_wakes.lock().unwrap().contains(&id.0) {
+            std::future::pending::<()>().await;
+        }
         if let Some(left) = self.wake_failures.lock().unwrap().get_mut(&id.0).filter(|n| **n > 0) {
             *left -= 1;
             return Err(Error::Other("sprites api 502 Bad Gateway: ".into()));

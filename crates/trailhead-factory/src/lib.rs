@@ -19,7 +19,9 @@ pub use config::{Budget, Checks, ComputeConfig, FactoryConfig, Gate, Profile, Ro
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, FromDaemon, PrepareRequest, RunReport, RunRequest, RunResult, ToDaemon,
 };
-pub use harness::{EventSink, Feedback, Harness, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict, VerdictKind};
+pub use harness::{
+    EventSink, Feedback, FollowUp, Harness, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict, VerdictKind,
+};
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use tracker::{
