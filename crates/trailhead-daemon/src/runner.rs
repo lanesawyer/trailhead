@@ -7,8 +7,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{Notify, mpsc};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Credential, Error, EventSink, Harness, NewPr, PrRef, PrepareRequest, Result, Role,
-    RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, RunUpdate, Tracker, Usage, Verdict,
+    Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, NewPr, PrRef, PrepareRequest,
+    Result, Role, RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, RunUpdate, TaskKey, Tracker,
+    Usage, Verdict, VerdictKind,
 };
 
 /// Turns a run's credential into a tracker handle acting as the sandbox's sub-agent.
@@ -36,14 +37,32 @@ fn pr_footer(req: &RunRequest, agent: &str) -> String {
     format!("\n\n---\n🤖 Opened by the Trailhead factory · worker `{agent}` · `{}` · {}", req.model.0, req.task.key.0)
 }
 
-fn review_comment(v: &Verdict) -> String {
+/// A follow-up that is now a task: newly filed, or already open under that title.
+struct Filed {
+    key: TaskKey,
+    title: String,
+    existing: bool,
+}
+
+fn review_comment(v: &Verdict, filed: &[Filed]) -> String {
     let verdict = match v.kind {
         trailhead_factory::VerdictKind::Approve => "Approve",
         trailhead_factory::VerdictKind::RequestChanges => "Request changes",
     };
     let model = v.model.as_ref().map(|m| format!(" (`{}`)", m.0)).unwrap_or_default();
-    format!("🔍 **Review by `{}`{model} · Verdict: {verdict}**\n\n{}", v.reviewer, v.body)
+    let mut comment = format!("🔍 **Review by `{}`{model} · Verdict: {verdict}**\n\n{}", v.reviewer, v.body);
+    if !filed.is_empty() {
+        comment.push_str("\n\nFollow-ups filed in Trailhead:");
+        for f in filed {
+            let already = if f.existing { " (already open)" } else { "" };
+            comment.push_str(&format!("\n- `{}` {}{already}", f.key.0, f.title));
+        }
+    }
+    comment
 }
+
+/// The most follow-ups one review may file, so a runaway reviewer can't flood the project.
+const MAX_FOLLOW_UPS: usize = 10;
 
 /// How much of a failed check's output goes on the task.
 const NOTE_TAIL: usize = 4000;
@@ -186,6 +205,50 @@ impl Runner {
 
     /// Runs each check, rerunning one that fails once in case it was a flake. Returns the final results and the
     /// names of checks that passed on the rerun.
+    /// Files each follow-up as a task in the reviewed task's project, unqueued, pointing back at the task and PR. A
+    /// title already open is reused. One that can't be filed is logged and skipped: the review stands without it.
+    async fn file_follow_ups(
+        &self,
+        tracker: &dyn Tracker,
+        source: &TaskKey,
+        pr: Option<&PrRef>,
+        follow_ups: &[FollowUp],
+    ) -> Vec<Filed> {
+        let project = source.0.rsplit_once('-').map_or(source.0.as_str(), |(p, _)| p);
+        let mut filed: Vec<Filed> = Vec::new();
+        for f in follow_ups.iter().take(MAX_FOLLOW_UPS) {
+            let title = f.title.trim().to_string();
+            if title.is_empty() || filed.iter().any(|x| x.title.eq_ignore_ascii_case(&title)) {
+                continue;
+            }
+            let result = match tracker.find_open_by_title(project, &title).await {
+                Ok(Some(key)) => Ok(Filed { key, title: title.clone(), existing: true }),
+                Ok(None) => {
+                    let mut description = f.description.trim().to_string();
+                    if !description.is_empty() {
+                        description.push_str("\n\n");
+                    }
+                    description.push_str(&format!("Raised by the reviewer of {}", source.0));
+                    if let Some(pr) = pr {
+                        description.push_str(&format!(" ({})", pr.url));
+                    }
+                    description.push('.');
+                    tracker.create_task(project, &title, &description, f.priority).await.map(|key| Filed {
+                        key,
+                        title: title.clone(),
+                        existing: false,
+                    })
+                }
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(f) => filed.push(f),
+                Err(e) => tracing::warn!(task = %source.0, %title, error = %e, "couldn't file a review follow-up"),
+            }
+        }
+        filed
+    }
+
     async fn checks(&self, checks: &[Check]) -> (Vec<CheckResult>, Vec<String>) {
         let mut out = Vec::with_capacity(checks.len());
         let mut retried = Vec::new();
@@ -244,13 +307,19 @@ impl Runner {
                 tracker.request_review(key).await?;
                 Ok((RunResult::PrOpened(pr), checks))
             }
-            RunOutcome::Verdict { kind, body } => {
+            RunOutcome::Verdict { kind, body, follow_ups } => {
                 let verdict =
                     Verdict { kind, body, reviewer: tracker.agent().to_string(), model: Some(req.model.clone()) };
                 // Recorded first: if Trailhead refuses it, a retried review mustn't have already posted to GitHub.
                 tracker.record_verdict(key, &verdict).await?;
+                // Only an approval files them: a rework may well fix what a request for changes mentions.
+                let filed = if kind == VerdictKind::Approve {
+                    self.file_follow_ups(tracker, key, req.pr.as_ref(), &follow_ups).await
+                } else {
+                    Vec::new()
+                };
                 if let Some(pr) = &req.pr {
-                    self.codehost.comment(pr, &review_comment(&verdict)).await?;
+                    self.codehost.comment(pr, &review_comment(&verdict, &filed)).await?;
                 }
                 Ok((RunResult::Reviewed(verdict), Vec::new()))
             }

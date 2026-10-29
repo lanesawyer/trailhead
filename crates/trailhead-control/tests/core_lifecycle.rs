@@ -114,8 +114,10 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
     let r = rig().await;
     let key = r.task("Add a greeting").await;
     r.harness.push(Role::Worker, Script::new(changes()).steps(2, 100_000));
-    r.harness
-        .push(Role::Reviewer, Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into() }));
+    r.harness.push(
+        Role::Reviewer,
+        Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into(), follow_ups: vec![] }),
+    );
 
     let ran = r.factory.tick().await.unwrap();
     let Outcome::Reviewed { pr, verdict } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
@@ -266,7 +268,7 @@ async fn human_context_pairs_answers_and_skips_the_factorys_own_notes() {
 }
 
 fn request_changes(body: &str) -> RunOutcome {
-    RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into() }
+    RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into(), follow_ups: vec![] }
 }
 
 #[tokio::test]
@@ -281,8 +283,10 @@ async fn requested_changes_reopen_then_rework_on_the_real_engine() {
     assert_eq!(task.run.reviewed, Some(1));
 
     r.harness.push(Role::Worker, Script::new(changes()));
-    r.harness
-        .push(Role::Reviewer, Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into() }));
+    r.harness.push(
+        Role::Reviewer,
+        Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into(), follow_ups: vec![] }),
+    );
     let ran = r.factory.tick().await.unwrap();
     assert!(
         matches!(&ran[0].1, Outcome::Reviewed { verdict, .. } if verdict.kind == VerdictKind::Approve),

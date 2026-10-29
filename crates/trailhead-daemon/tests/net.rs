@@ -163,7 +163,12 @@ async fn lifecycle_over_iroh() {
     r.harness.push(Role::Worker, Script::new(changes()).steps(3, 100_000));
     r.harness.push(
         Role::Reviewer,
-        Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Looks right.".into() }).steps(1, 50_000),
+        Script::new(RunOutcome::Verdict {
+            kind: VerdictKind::Approve,
+            body: "Looks right.".into(),
+            follow_ups: vec![],
+        })
+        .steps(1, 50_000),
     );
 
     let ran = r.factory().tick().await.unwrap();
