@@ -790,3 +790,33 @@ async fn a_task_that_keeps_failing_is_parked_after_max_attempts_and_retries_see_
         assert!(note.contains("`lint` failed") && note.contains("warning: unused variable"), "{note}");
     }
 }
+
+#[tokio::test]
+async fn failures_before_the_agent_starts_dont_use_up_attempts() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Broken host", "");
+    for n in 1..=3 {
+        r.compute.fail(&format!("trailhead-w{n}"), "set_labels");
+    }
+    for _ in 0..3 {
+        let task = r.tracker.task(&key);
+        assert!(r.factory.run_task(&task).await.is_err());
+        let task = r.tracker.task(&key);
+        assert_eq!(task.status, Status::Open, "not parked");
+        assert_eq!(task.holder, None);
+        assert_eq!(task.run.attempt.unwrap_or(0), 0);
+    }
+    assert!(r.tracker.comments(&key).iter().all(|c| c.kind != "question"));
+
+    // Fixed: the next attempt is attempt 1.
+    for n in 1..=3 {
+        r.compute.heal(&format!("trailhead-w{n}"));
+    }
+    r.factory.reconcile().await.unwrap();
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.tracker.task(&key).run.attempt, Some(1));
+    assert!(r.tracker.agents().contains(&"factory/trail-1-a1-3".to_string()), "{:?}", r.tracker.agents());
+}

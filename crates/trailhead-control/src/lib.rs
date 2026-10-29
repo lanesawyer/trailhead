@@ -44,6 +44,9 @@ pub const RELEASE_PATIENCE: Duration = Duration::from_secs(10 * 60);
 const FIRST_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
+/// How many revoked variants of an attempt's name a run skips before giving up.
+const MAX_NAME_TRIES: u32 = 100;
+
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
@@ -54,6 +57,8 @@ pub struct Factory {
     pub provider: Arc<dyn ModelProvider>,
     pub daemon: Arc<dyn Daemon>,
     troubled: Mutex<HashMap<String, Trouble>>,
+    /// Tasks whose last runs failed before the agent started: how many in a row, and when to try again.
+    setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// The reset a pause was last logged for, so a pause is logged once rather than on every poll.
@@ -113,6 +118,7 @@ impl Factory {
             provider,
             daemon,
             troubled: Mutex::default(),
+            setbacks: Mutex::default(),
             quota: Mutex::default(),
             pause_logged: Mutex::default(),
         }
@@ -252,7 +258,7 @@ impl Factory {
             return Ok(());
         }
         let ready = self.tracker.ready(self.project(), self.queue().as_ref(), room).await?;
-        for task in ready.into_iter().filter(|t| !busy.contains(&t.key)) {
+        for task in ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)) {
             let key = task.key.clone();
             let factory = self.clone();
             let handle = running.spawn(async move { factory.run_task(&task).await });
@@ -297,9 +303,21 @@ impl Factory {
     /// One attempt at a task: a fresh sandbox, the worker, then the reviewer.
     pub async fn run_task(&self, task: &Task) -> Result<Outcome> {
         let attempt = task.run.attempt.unwrap_or(0) + 1;
-        let name = run_name(&task.key, attempt);
         let profile = self.config.worker().clone();
-        let credential = self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await?;
+        // An attempt that failed before its agent started was given back and its sub-agent revoked, which can't be
+        // undone, so the retry's run takes the next free variant of the attempt's name.
+        let mut tries = 0;
+        let (name, credential) = loop {
+            let name = match tries {
+                0 => run_name(&task.key, attempt),
+                n => format!("{}-{n}", run_name(&task.key, attempt)),
+            };
+            match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
+                Ok(credential) => break (name, credential),
+                Err(Error::Forbidden(_)) if tries < MAX_NAME_TRIES => tries += 1,
+                Err(e) => return Err(e),
+            }
+        };
         let sub = self.tracker.sub_agent(&name);
         // Claiming as the sub-agent before creating the sandbox keeps two control planes from racing for one task.
         sub.claim(&task.key).await?;
@@ -315,8 +333,16 @@ impl Factory {
         )
         .await?;
         tracing::info!(task = %task.key.0, run = %name, "preparing a worker sandbox");
-        let sandbox = self.acquire_worker(task).await?;
-        sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
+        let prepared = async {
+            let sandbox = self.acquire_worker(task).await?;
+            sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
+            Ok::<_, Error>(sandbox)
+        };
+        let sandbox = match prepared.await {
+            Ok(sandbox) => sandbox,
+            Err(e) => return Err(self.not_started(task, &sub, &name, e).await),
+        };
+        self.setbacks.lock().unwrap().remove(&task.key);
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
         let req = RunRequest {
             run: name.clone(),
@@ -335,7 +361,15 @@ impl Factory {
             credential,
         };
         let prior = task.run.spend.unwrap_or_default();
-        let run = self.run_metered(&sandbox, req, &profile, prior).await?;
+        let run = match self.run_metered(&sandbox, req, &profile, prior).await {
+            Ok(run) => run,
+            Err(Error::Cancelled) => {
+                // A stop on purpose cancelled the run; the next boot's reconcile requeues it without a strike.
+                self.give_back_attempt(task).await;
+                return Err(Error::Cancelled);
+            }
+            Err(e) => return Err(e),
+        };
 
         let (report, spend) = match run {
             Run::Breach(reason, spend) => {
@@ -390,6 +424,41 @@ impl Factory {
             }
             RunResult::Reviewed(_) => Err(Error::Other("a worker returned a review".into())),
         }
+    }
+
+    /// A run that failed before its agent started (TRAIL-159): the task goes back to the queue without the attempt
+    /// counting toward `max_attempts`, and waits out a backoff that grows with each failure in a row. Returns the
+    /// error to surface.
+    async fn not_started(&self, task: &Task, sub: &Arc<dyn Tracker>, name: &str, error: Error) -> Error {
+        tracing::warn!(task = %task.key.0, %error, "run failed before the agent started; the attempt doesn't count");
+        {
+            let now = Instant::now();
+            let mut setbacks = self.setbacks.lock().unwrap();
+            let entry = setbacks.entry(task.key.clone()).or_insert((0, now));
+            entry.0 += 1;
+            entry.1 = now + backoff(entry.0);
+        }
+        if let Err(e) = sub.release(&task.key).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't release the task; reconcile will");
+        }
+        self.give_back_attempt(task).await;
+        if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the run's sub-agent; reconcile will");
+        }
+        error
+    }
+
+    /// Restores the attempt count the task had before this run took the next number.
+    async fn give_back_attempt(&self, task: &Task) {
+        let update = RunUpdate { attempt: Some(task.run.attempt.unwrap_or(0)), ..RunUpdate::default() };
+        if let Err(e) = self.tracker.report(&task.key, update).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
+        }
+    }
+
+    /// Whether a task that failed before its agent started has waited out its backoff.
+    fn setback_over(&self, key: &TaskKey) -> bool {
+        self.setbacks.lock().unwrap().get(key).is_none_or(|(_, next_try)| Instant::now() >= *next_try)
     }
 
     /// Runs the reviewer on an open PR in its own fresh sandbox.
@@ -803,9 +872,14 @@ impl Factory {
             abandoned: false,
         });
         t.failures += 1;
-        t.next_try = now + FIRST_BACKOFF.saturating_mul(1 << (t.failures - 1).min(8)).min(MAX_BACKOFF);
+        t.next_try = now + backoff(t.failures);
         !t.abandoned && (t.failures >= RELEASE_ATTEMPTS || now - t.since >= RELEASE_PATIENCE)
     }
+}
+
+/// The wait after the `failures`th failure in a row: [`FIRST_BACKOFF`], doubling up to [`MAX_BACKOFF`].
+fn backoff(failures: u32) -> Duration {
+    FIRST_BACKOFF.saturating_mul(1 << (failures - 1).min(8)).min(MAX_BACKOFF)
 }
 
 fn unix_now() -> i64 {
