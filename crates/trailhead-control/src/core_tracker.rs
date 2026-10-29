@@ -252,6 +252,10 @@ impl Tracker for CoreTracker {
         self.set_status(task, trailhead_core::Status::InReview).await
     }
 
+    async fn reopen(&self, task: &TaskKey) -> Result<()> {
+        self.set_status(task, trailhead_core::Status::Open).await
+    }
+
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()> {
         let ctx = self.ctx().await?;
         let kind = match verdict.kind {

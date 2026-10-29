@@ -193,6 +193,10 @@ impl Tracker for RestTracker {
         self.patch(key, json!({ "status": "in_review" })).await
     }
 
+    async fn reopen(&self, key: &TaskKey) -> Result<()> {
+        self.patch(key, json!({ "status": "open" })).await
+    }
+
     async fn record_verdict(&self, key: &TaskKey, verdict: &Verdict) -> Result<()> {
         let kind = match verdict.kind {
             VerdictKind::Approve => "approve",

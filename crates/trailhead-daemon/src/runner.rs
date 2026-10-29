@@ -120,7 +120,10 @@ impl Runner {
         events: &EventSink,
     ) -> Result<(RunOutcome, Usage)> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let run = self.harness.run(ctx, tx);
+        let run = match (&req.feedback, req.role) {
+            (Some(feedback), Role::Worker) => self.harness.resume(ctx, feedback.clone(), tx),
+            _ => self.harness.run(ctx, tx),
+        };
         tokio::pin!(run);
         let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + self.renew_every, self.renew_every);
         let mut usage = Usage::default();
@@ -159,13 +162,17 @@ impl Runner {
         retried: &[String],
     ) -> Result<PrRef> {
         self.codehost.publish(&req.repo, start, &req.branch, &commits).await?;
+        let flaky: String =
+            retried.iter().map(|name| format!("\n\n⚠️ Check `{name}` failed, then passed when rerun.")).collect();
         match &req.pr {
-            Some(pr) => Ok(pr.clone()),
+            Some(pr) => {
+                // The PR is already open, so a note on a flaky check goes on it as a comment.
+                if !flaky.is_empty() {
+                    self.codehost.comment(pr, &format!("{}{}", flaky.trim_start(), pr_footer(req, agent))).await?;
+                }
+                Ok(pr.clone())
+            }
             None => {
-                let flaky: String = retried
-                    .iter()
-                    .map(|name| format!("\n\n⚠️ Check `{name}` failed, then passed when rerun."))
-                    .collect();
                 let new = NewPr {
                     branch: req.branch.clone(),
                     base: req.base_branch.clone(),
