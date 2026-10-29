@@ -360,7 +360,7 @@ impl FactoryConfig {
             0 | 1 => (&["checks", "ci"], true),
             2 => (&["checks", "ci", "agent_review"], true),
             3 => (&["checks", "ci", "agent_review", "human"], false),
-            _ => (&["checks", "human"], false),
+            _ => (&["checks", "ci", "human"], false),
         };
         Gate { require: require.iter().map(|r| r.to_string()).collect(), auto_merge, quorum: None }
     }
@@ -502,7 +502,7 @@ require = ["checks", "agent_review", "human"]
         assert!(c.gate(2).auto_merge);
         assert_eq!(c.gate(3).require, ["checks", "ci", "agent_review", "human"]);
         assert!(!c.gate(3).auto_merge);
-        assert_eq!(c.gate(4).require, ["checks", "human"]);
+        assert_eq!(c.gate(4).require, ["checks", "ci", "human"]);
 
         let custom =
             format!("{SAMPLE}\n[gates.2]\nrequire = [\"ci\"]\nauto_merge = true\n[merge]\nmode = \"shadow\"\n");

@@ -1074,7 +1074,7 @@ impl Factory {
             }
             return Ok(());
         }
-        match codehost.merge(pr).await? {
+        match codehost.merge(pr, &decision.head).await? {
             MergeOutcome::Merged => {
                 let commit = match codehost.pr_state(pr).await? {
                     PrState::Merged { commit } => commit,
@@ -1083,6 +1083,15 @@ impl Factory {
                 self.close_merged(task, Merged { by: MergedBy::Merger, pr: pr.clone(), commit }).await
             }
             MergeOutcome::Conflict => self.rework_conflict(task, pr, attempt).await,
+            // Nothing to rework: the next pass looks at the new head, or tries again once the host allows it.
+            MergeOutcome::HeadMoved => {
+                tracing::info!(task = %task.key.0, pr = %pr.url, "the PR moved before the merge; looking again next pass");
+                Ok(())
+            }
+            MergeOutcome::Refused(why) => {
+                tracing::warn!(task = %task.key.0, pr = %pr.url, %why, "the code host refused the merge; trying again next pass");
+                Ok(())
+            }
         }
     }
 

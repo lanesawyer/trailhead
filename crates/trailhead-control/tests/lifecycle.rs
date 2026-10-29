@@ -150,7 +150,8 @@ async fn spec_to_reviewed_pr_then_human_merge() {
     assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "review" && c.body.starts_with("approve")));
 
     // The human merges and finishes.
-    assert_eq!(r.codehost.merge(pr).await.unwrap(), MergeOutcome::Merged);
+    let head = CodeHost::head(&r.codehost, pr).await.unwrap();
+    assert_eq!(r.codehost.merge(pr, &head).await.unwrap(), MergeOutcome::Merged);
     r.tracker.finish(&key, "merged").await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::Done);
     assert!(r.factory.tick().await.unwrap().is_empty());
@@ -1849,7 +1850,8 @@ async fn shadow_mode_waits_for_ci_then_approves_and_says_each_change_once() {
     assert!(!r.codehost.prs()[0].merged, "shadow mode never merges");
 
     // Lane merges on GitHub and the task is closed as done.
-    r.codehost.merge(&pr).await.unwrap();
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.merged, std::slice::from_ref(&key.0));
     assert_eq!(r.tracker.task(&key).status, Status::Done);
@@ -1985,6 +1987,24 @@ async fn a_conflict_at_merge_reworks_the_pr_instead_of_forcing_it() {
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Open, "back to running for a rework");
     assert!(task.run.pending_changes().is_some_and(|c| c.conflict));
+}
+
+#[tokio::test]
+async fn a_merge_the_host_refuses_is_tried_again_not_reworked() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.refuse_merge(Some("Required status check \"test\" is expected."));
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Approved, "still approved, not sent to a rework");
+    assert!(task.run.pending_changes().is_none());
+
+    r.codehost.refuse_merge(None);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
 }
 
 #[tokio::test]
