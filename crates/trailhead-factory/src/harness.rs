@@ -36,6 +36,9 @@ pub struct RunContext {
     /// For reviewers: the PR's title, which becomes the squash commit's subject, so the reviewer can check it.
     #[serde(default)]
     pub title: Option<String>,
+    /// For reviewers: the branch the PR targets, which `origin/<base>` names in the checkout.
+    #[serde(default)]
+    pub base_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
