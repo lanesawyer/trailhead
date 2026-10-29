@@ -39,6 +39,10 @@ pub enum Error {
     Forbidden(String),
     #[error("invalid config: {0}")]
     Config(String),
+    /// The remote refused the request and repeating it won't change that (a 400 or 422, say), unlike
+    /// [`Error::Other`], which may be a blip worth retrying.
+    #[error("rejected: {0}")]
+    Rejected(String),
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]

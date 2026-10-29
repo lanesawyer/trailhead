@@ -403,11 +403,23 @@ impl Factory {
         let rework = task.run.pr.is_some();
         let prepared = async {
             let context = self.tracker.human_context(&task.key).await?;
+            // A review that never went through request_rework (an older one, or a task reopened by hand) left no
+            // changes_requested; the review comment is the feedback then (TRAIL-218).
+            let feedback = match task.run.pending_changes().filter(|_| rework) {
+                Some(c) => Some(Feedback { body: format!("Review by {}:\n\n{}", c.reviewer, c.body) }),
+                None if rework => match self.tracker.last_review(&task.key).await? {
+                    Some(v) if v.kind == VerdictKind::RequestChanges => {
+                        Some(Feedback { body: format!("Review by {}:\n\n{}", v.reviewer, v.body) })
+                    }
+                    _ => None,
+                },
+                None => None,
+            };
             let sandbox = self.acquire_worker(task, rework.then(|| Self::branch(task))).await?;
             sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
-            Ok::<_, Error>((sandbox, context))
+            Ok::<_, Error>((sandbox, context, feedback))
         };
-        let (sandbox, context) = match prepared.await {
+        let (sandbox, context, feedback) = match prepared.await {
             Ok(prepared) => prepared,
             Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await),
         };
@@ -420,11 +432,7 @@ impl Factory {
             base_branch: self.config.repo.base_branch.clone(),
             branch: Self::branch(task),
             pr: task.run.pr.clone(),
-            feedback: task
-                .run
-                .pending_changes()
-                .filter(|_| rework)
-                .map(|c| Feedback { body: format!("Review by {}:\n\n{}", c.reviewer, c.body) }),
+            feedback,
             model: self.provider.resolve(profile.model),
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
