@@ -405,7 +405,7 @@ mod tests {
         let config = FactoryConfig::parse(include_str!("../../../factory.toml")).unwrap();
         assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
         assert_eq!(config.grades, GradesConfig::default(), "this repo's rules are the documented example");
-        assert_eq!(config.merge.mode, MergeMode::Shadow);
+        assert_eq!(config.merge.mode, MergeMode::On);
         assert!(config.gate(1).auto_merge);
         assert!(!config.gate(2).auto_merge, "only grade 1 auto-merges, to start");
         assert_eq!(config.gate(3).require, ["checks", "ci", "agent_review", "human"]);
