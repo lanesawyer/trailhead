@@ -453,6 +453,29 @@ async fn run_loop_reconciles_then_works_the_queue_and_stops() {
     handle.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn a_wake_starts_new_work_without_waiting_for_a_long_poll() {
+    let r = rig();
+    let factory = Arc::new(r.factory);
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let poll = std::time::Duration::from_secs(600);
+    let handle = tokio::spawn(factory.run(wake.clone(), poll, async {
+        let _ = stopped.await;
+    }));
+
+    // The loop is idle on its ten-minute poll; only the wake can start the new task.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let key = r.tracker.add_task("TRAIL", "late", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "?".into() }));
+    wake.notify_one();
+    let tracker = r.tracker.clone();
+    until("the task to park", || tracker.task(&key).status == Status::NeedsInput).await;
+
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
 /// Starts the run loop on one hanging task, stops it once the task is running, and returns how long the stop took.
 async fn stop_mid_run(r: Rig) -> std::time::Duration {
     let key = r.tracker.add_task("TRAIL", "Hangs", "");
