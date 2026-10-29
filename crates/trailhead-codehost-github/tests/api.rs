@@ -280,6 +280,10 @@ async fn merge(
 ) -> Response {
     assert_eq!(b["merge_method"], "squash");
     let mut g = g.lock().unwrap();
+    let branch = g.prs[n as usize - 1]["head"].as_str().unwrap().to_string();
+    if b["sha"] != json!(g.refs[&branch]) {
+        return (StatusCode::CONFLICT, Json(json!({ "message": "Head branch was modified" }))).into_response();
+    }
     if g.unmergeable {
         return (StatusCode::METHOD_NOT_ALLOWED, Json(json!({ "message": "Pull Request is not mergeable" })))
             .into_response();
@@ -458,9 +462,17 @@ async fn prs_open_once_and_take_reviews_and_merges() {
     gh.comment(&pr, "Looks right.").await.unwrap();
     assert_eq!(git.lock().unwrap().comments, [(1, "Looks right.".to_string())]);
 
-    assert_eq!(gh.merge(&pr).await.unwrap(), MergeOutcome::Merged);
+    // The merge is pinned to the head the caller saw: an older one is refused as moved, and nothing merges.
+    let tip = head(&git, "factory/trail-1");
+    assert_eq!(gh.merge(&pr, "stale").await.unwrap(), MergeOutcome::HeadMoved);
+    // A 405 is a conflict only when GitHub says the PR doesn't merge cleanly; otherwise its rules refused it.
     git.lock().unwrap().unmergeable = true;
-    assert_eq!(gh.merge(&pr).await.unwrap(), MergeOutcome::Conflict);
+    assert_eq!(gh.merge(&pr, &tip).await.unwrap(), MergeOutcome::Refused("Pull Request is not mergeable".into()));
+    git.lock().unwrap().prs[0]["mergeable"] = json!(false);
+    assert_eq!(gh.merge(&pr, &tip).await.unwrap(), MergeOutcome::Conflict);
+    git.lock().unwrap().prs[0]["mergeable"] = json!(true);
+    git.lock().unwrap().unmergeable = false;
+    assert_eq!(gh.merge(&pr, &tip).await.unwrap(), MergeOutcome::Merged);
 }
 
 #[tokio::test]
@@ -478,7 +490,7 @@ async fn pr_state_tells_open_from_merged_from_closed() {
     }
     assert_eq!(gh.pr_state(&prs[0]).await.unwrap(), PrState::Open);
 
-    gh.merge(&prs[1]).await.unwrap();
+    gh.merge(&prs[1], &head(&git, "factory/trail-2")).await.unwrap();
     assert_eq!(gh.pr_state(&prs[1]).await.unwrap(), PrState::Merged { commit: Some("squash2".into()) });
 
     // Closed without merging: GitHub says `closed` and `merged: false`.

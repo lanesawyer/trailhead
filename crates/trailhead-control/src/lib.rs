@@ -20,11 +20,11 @@ use tokio::time::Instant;
 use tokio::sync::mpsc;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::{
-    ChangesRequested, CheckResult, CheckpointId, CiState, CodeHost, Compute, Daemon, Egress, Error, FactoryConfig,
-    Feedback, HumanContext, IROH_DOMAINS, Labels, MergeDecision, MergeMode, Merged, MergedBy, ModelProvider, PrGrade,
-    PrRef, PrState, PrepareRequest, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate,
-    Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict, VerdictKind, label, review_name,
-    run_name,
+    BranchUpdate, ChangesRequested, CheckResult, CheckpointId, CiState, CodeHost, Compute, Daemon, Egress, Error,
+    FactoryConfig, Feedback, HumanContext, IROH_DOMAINS, Labels, MergeDecision, MergeMode, MergeOutcome, Merged,
+    MergedBy, ModelProvider, PrGrade, PrRef, PrState, PrepareRequest, Profile, Result, Role, RunEvent, RunReport,
+    RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict,
+    VerdictKind, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -141,8 +141,9 @@ pub struct Reconciled {
 }
 
 /// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
-/// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for Lane.`
-fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool) -> String {
+/// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for Lane.` `merging` is whether the merger is on and will
+/// merge now.
+fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool) -> String {
     fn join(items: Vec<String>) -> String {
         match items.as_slice() {
             [] => String::new(),
@@ -177,6 +178,7 @@ fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool) -> Str
     let passed = join(passed.collect());
     match (&d.problem, d.would_merge, auto_merge) {
         (Some(problem), ..) => format!("{head}: {passed} passed, but {problem}."),
+        _ if merging => format!("{head}: {passed} passed; merging."),
         (None, true, _) => format!("{head}: {passed} passed; would merge (shadow)."),
         (None, false, true) => format!("{head}: {passed} passed; Lane merges."),
         (None, false, false) => format!("{head}: {passed} passed; not auto-merged at this grade, so Lane merges."),
@@ -931,7 +933,8 @@ impl Factory {
     /// The merger (`docs/factory/review.md#the-merger`): evaluates the grade's gates on the PR's current head and
     /// records the decision in the task's metadata. When they pass it moves a task in review to `approved`, unless the
     /// grade needs Lane, whose own approval is what passes that gate; a push after an approval sends the task back to
-    /// review. In shadow mode it says what it would do on the PR whenever that changes. It never merges.
+    /// review. In shadow mode it says what it would do on the PR whenever that changes. In `on` mode it also squash-merges
+    /// an approved task whose grade auto-merges, or that Lane approved, and closes it as done.
     pub async fn evaluate_gates(&self, key: &TaskKey) -> Result<()> {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let task = self.tracker.show(key).await?;
@@ -1013,7 +1016,10 @@ impl Factory {
                 self.tracker.report(key, RunUpdate { merge: Some(decision.clone()), ..RunUpdate::default() }).await?;
             }
             match self.tracker.approve(key).await {
-                Ok(()) => tracing::info!(task = %key.0, %head, "gates passed; approved"),
+                Ok(()) => {
+                    tracing::info!(task = %key.0, %head, "gates passed; approved");
+                    status = Status::Approved;
+                }
                 Err(Error::Forbidden(why)) => {
                     let problem = format!(
                         "the factory can't move the task to approved ({why}); a person has to list `{}` as a \
@@ -1028,17 +1034,65 @@ impl Factory {
                 Err(e) => return Err(e),
             }
         }
-        decision.message = decision_message(&grade, &decision, gate.auto_merge);
-        if prev.as_ref() == Some(&decision) {
+        // Without the right to approve, the merger can't act, so it only says what it would do, as in shadow mode.
+        let merging = self.config.merge.mode == MergeMode::On
+            && gates_pass
+            && decision.problem.is_none()
+            && status == Status::Approved
+            && (gate.auto_merge || decision.human_head.as_ref() == Some(&head));
+        decision.message = decision_message(&grade, &decision, gate.auto_merge, merging);
+        if prev.as_ref() != Some(&decision) {
+            if self.config.merge.mode != MergeMode::Off && prev.as_ref().is_none_or(|d| d.message != decision.message) {
+                codehost.comment(pr, &decision.message).await?;
+            }
+            if decision.problem.is_some() && prev.as_ref().is_none_or(|d| d.problem != decision.problem) {
+                self.tracker.note(key, decision.problem.as_deref().unwrap_or_default()).await?;
+            }
+            self.tracker.report(key, RunUpdate { merge: Some(decision.clone()), ..RunUpdate::default() }).await?;
+        }
+        if merging {
+            self.merge(&task, pr, &decision).await?;
+        }
+        Ok(())
+    }
+
+    /// Merges an approved PR whose decision says to: brings it up to date with the base branch first, and sends a
+    /// conflict, or a host that refuses the merge, to a rework instead of forcing it. A merge closes the task the way
+    /// a merge by Lane does.
+    async fn merge(&self, task: &Task, pr: &PrRef, decision: &MergeDecision) -> Result<()> {
+        let Some(codehost) = &self.codehost else { return Ok(()) };
+        let attempt = task.run.attempt.unwrap_or(1);
+        // Gates passed on this head; a push since then is looked at on the next pass.
+        if codehost.ci(pr).await?.head != decision.head {
             return Ok(());
         }
-        if self.config.merge.mode == MergeMode::Shadow && prev.as_ref().is_none_or(|d| d.message != decision.message) {
-            codehost.comment(pr, &decision.message).await?;
+        if codehost.behind(pr).await? {
+            match codehost.update_branch(pr).await? {
+                BranchUpdate::Conflict => self.rework_conflict(task, pr, attempt).await?,
+                // CI starts over on the new head; the next pass looks at it again.
+                BranchUpdate::Updated | BranchUpdate::UpToDate => {}
+            }
+            return Ok(());
         }
-        if decision.problem.is_some() && prev.as_ref().is_none_or(|d| d.problem != decision.problem) {
-            self.tracker.note(key, decision.problem.as_deref().unwrap_or_default()).await?;
+        match codehost.merge(pr, &decision.head).await? {
+            MergeOutcome::Merged => {
+                let commit = match codehost.pr_state(pr).await? {
+                    PrState::Merged { commit } => commit,
+                    _ => None,
+                };
+                self.close_merged(task, Merged { by: MergedBy::Merger, pr: pr.clone(), commit }).await
+            }
+            MergeOutcome::Conflict => self.rework_conflict(task, pr, attempt).await,
+            // Nothing to rework: the next pass looks at the new head, or tries again once the host allows it.
+            MergeOutcome::HeadMoved => {
+                tracing::info!(task = %task.key.0, pr = %pr.url, "the PR moved before the merge; looking again next pass");
+                Ok(())
+            }
+            MergeOutcome::Refused(why) => {
+                tracing::warn!(task = %task.key.0, pr = %pr.url, %why, "the code host refused the merge; trying again next pass");
+                Ok(())
+            }
         }
-        self.tracker.report(key, RunUpdate { merge: Some(decision), ..RunUpdate::default() }).await
     }
 
     /// The PR's grade (`docs/factory/review.md#grades`): the task's, raised by what its files match and its size.
@@ -1467,7 +1521,7 @@ impl Factory {
 
     /// Closes a task whose PR has merged: records who merged it, which PR and the commit in the task's metadata, then
     /// finishes it with a handoff naming them, which unblocks whatever is chained behind it. The one way a merge
-    /// finishes a task: reconcile uses it for merges made outside the factory, and the merger will use it right after
+    /// finishes a task: reconcile uses it for merges made outside the factory, and the merger uses it right after
     /// `CodeHost::merge` (`docs/factory/lifecycle.md`). Metadata first, so a handoff that failed to land is retried
     /// with the record already there.
     pub async fn close_merged(&self, task: &Task, merged: Merged) -> Result<()> {
@@ -1476,7 +1530,12 @@ impl Factory {
             MergedBy::Merger => "Merged by the factory's merger",
         };
         let commit = merged.commit.as_deref().map_or_else(String::new, |c| format!(", as commit {c}"));
-        let handoff = format!("{who}: {}{commit}.", merged.pr.url);
+        let mut handoff = format!("{who}: {}{commit}.", merged.pr.url);
+        if merged.by == MergedBy::Merger
+            && let Some(d) = self.tracker.show(&task.key).await?.run.merge
+        {
+            handoff.push_str(&format!(" Grade {}; gates passed: {}.", d.grade, d.passed.join(", ")));
+        }
         self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
         self.tracker.finish(&task.key, &handoff).await?;
         tracing::info!(task = %task.key.0, %handoff, "PR merged; task done");

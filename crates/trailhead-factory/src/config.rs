@@ -67,7 +67,8 @@ pub enum MergeMode {
     Off,
     /// Says on the PR what it would do, and doesn't merge.
     Shadow,
-    /// Merges the grades that allow it. Not built yet, so `FactoryConfig::parse` refuses it.
+    /// Squash-merges approved PRs: grades with `auto_merge`, and any a person approved. Falls back to `Shadow` when
+    /// the factory isn't a delegated reviewer. Read at startup, so switching it takes effect on the next restart.
     On,
 }
 
@@ -324,13 +325,6 @@ impl FactoryConfig {
                 return Err(Error::Config(format!("[grades] has `{grade}`; path rules are for grades 2, 3 and 4")));
             }
         }
-        if self.merge.mode == MergeMode::On {
-            return Err(Error::Config(
-                "[merge] mode = \"on\" isn't supported yet: the factory can't merge until the merger lands; use \
-                 \"shadow\" to see what it would merge"
-                    .into(),
-            ));
-        }
         let known = ["checks", "ci", "agent_review", "human", "quorum"];
         let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
         for (grade, gate) in &self.gates {
@@ -366,7 +360,7 @@ impl FactoryConfig {
             0 | 1 => (&["checks", "ci"], true),
             2 => (&["checks", "ci", "agent_review"], true),
             3 => (&["checks", "ci", "agent_review", "human"], false),
-            _ => (&["checks", "human"], false),
+            _ => (&["checks", "ci", "human"], false),
         };
         Gate { require: require.iter().map(|r| r.to_string()).collect(), auto_merge, quorum: None }
     }
@@ -508,7 +502,7 @@ require = ["checks", "agent_review", "human"]
         assert!(c.gate(2).auto_merge);
         assert_eq!(c.gate(3).require, ["checks", "ci", "agent_review", "human"]);
         assert!(!c.gate(3).auto_merge);
-        assert_eq!(c.gate(4).require, ["checks", "human"]);
+        assert_eq!(c.gate(4).require, ["checks", "ci", "human"]);
 
         let custom =
             format!("{SAMPLE}\n[gates.2]\nrequire = [\"ci\"]\nauto_merge = true\n[merge]\nmode = \"shadow\"\n");
@@ -519,10 +513,9 @@ require = ["checks", "agent_review", "human"]
     }
 
     #[test]
-    fn merge_mode_on_and_gates_for_unknown_grades_are_rejected() {
+    fn merge_mode_on_is_accepted_and_gates_for_unknown_grades_are_rejected() {
         let on = format!("{SAMPLE}\n[merge]\nmode = \"on\"\n");
-        let Err(Error::Config(why)) = FactoryConfig::parse(&on) else { panic!("on was accepted") };
-        assert!(why.contains("isn't supported yet"), "{why}");
+        assert_eq!(FactoryConfig::parse(&on).unwrap().merge.mode, MergeMode::On);
         for bad in ["[merge]\nmode = \"yes\"", "[gates.t1]\nrequire = []", "[gates.5]\nrequire = []"] {
             let err = FactoryConfig::parse(&format!("{SAMPLE}\n{bad}\n")).unwrap_err();
             assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
