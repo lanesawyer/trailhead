@@ -1536,6 +1536,7 @@ async fn failures_that_are_the_agents_or_the_tasks_still_use_up_attempts() {
     assert!(matches!(&ran, Outcome::Parked { .. }), "{ran:?}");
     let body = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap().body;
     assert!(body.contains("Gave up after 3 failed attempts"), "{body}");
+    assert!(body.contains(&format!("trailhead edit {} --meta factory.attempt_base=3", key.0)), "{body}");
 }
 
 #[tokio::test]

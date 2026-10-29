@@ -728,8 +728,10 @@ impl Factory {
                         &task.key,
                         &format!(
                             "Gave up after {failed} failed attempts (the limit is {max}). The last failure: \
-                             {reason}\n\n{last}\n\nFix the cause, then reopen the task; raise `max_attempts` to \
-                             allow more tries."
+                             {reason}\n\n{last}\n\nFix the cause, then reset the attempt count with `trailhead edit {key} \
+                             --meta factory.attempt_base={attempt}` and reopen the task; without the reset it \
+                             parks again on the next failure. Or raise `max_attempts` to allow more tries.",
+                            key = task.key.0
                         ),
                     )
                     .await?;
