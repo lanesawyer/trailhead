@@ -121,6 +121,9 @@ async fn spec_to_reviewed_pr_then_human_merge() {
     let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
     assert!(review.diff.unwrap().contains("src/greet.rs"), "reviewer sees the diff");
     assert_eq!(review.model.0, "fake-opus");
+    let names: Vec<_> = review.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["fmt", "lint", "test"], "the reviewer is told which checks the worker ran");
+    assert!(review.checks.iter().all(|c| c.passed));
 
     assert_eq!(busy(&r.compute), Vec::<String>::new(), "no sandbox stays busy after the run");
     let pooled = r.compute.get("trailhead-w1").expect("the worker's sandbox stays in the pool");

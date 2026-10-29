@@ -19,9 +19,9 @@ use tokio::time::Instant;
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
-    CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, HumanContext, IROH_DOMAINS, Labels, ModelProvider,
-    PrRef, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status,
-    Task, TaskKey, TaskSpec, Tracker, Usd, Verdict, label, review_name, run_name,
+    CheckResult, CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, HumanContext, IROH_DOMAINS, Labels,
+    ModelProvider, PrRef, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox,
+    SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -379,6 +379,7 @@ impl Factory {
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
             required_checks: self.config.required_checks(),
+            worker_checks: Vec::new(),
             blocked_hosts: self.blocked_hosts(),
             allowed_hosts: self.allowed_hosts(),
             credential,
@@ -419,7 +420,7 @@ impl Factory {
                 // MVP: no suspend during review; requested changes start a new run from the PR branch.
                 self.release_worker(&sandbox).await?;
                 self.tracker.revoke_sub_agent(&name).await?;
-                self.review(task, &pr, attempt).await
+                self.review(task, &pr, attempt, &report.checks).await
             }
             RunResult::NeedsInput(question) => Ok(Outcome::Parked { reason: question }),
             RunResult::Failed(reason) => {
@@ -494,7 +495,7 @@ impl Factory {
     }
 
     /// Runs the reviewer on an open PR in its own fresh sandbox.
-    pub async fn review(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<Outcome> {
+    pub async fn review(&self, task: &Task, pr: &PrRef, attempt: u32, checks: &[CheckResult]) -> Result<Outcome> {
         let round = self.tracker.show(&task.key).await?.run.review_rounds.unwrap_or(0) + 1;
         let name = review_name(&task.key, attempt, round);
         self.tracker.report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() }).await?;
@@ -516,6 +517,7 @@ impl Factory {
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
             required_checks: Vec::new(),
+            worker_checks: checks.to_vec(),
             blocked_hosts: self.blocked_hosts(),
             allowed_hosts: self.allowed_hosts(),
             credential,
@@ -786,7 +788,7 @@ impl Factory {
         if let Some(round) = task.run.review_rounds.filter(|r| *r > 0) {
             self.tracker.revoke_sub_agent(&review_name(&task.key, attempt, round)).await?;
         }
-        self.review(task, pr, attempt).await
+        self.review(task, pr, attempt, &[]).await
     }
 
     /// Puts one in-flight task right; true when its PR is due a review.

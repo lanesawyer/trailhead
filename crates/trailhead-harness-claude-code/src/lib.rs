@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use trailhead_factory::{
-    Commit, Error, EventSink, Feedback, FileChange, Harness, ModelId, Result, Role, RunContext, RunEvent, RunOutcome,
-    Usage, VerdictKind,
+    CheckResult, Commit, Error, EventSink, Feedback, FileChange, Harness, ModelId, Result, Role, RunContext, RunEvent,
+    RunOutcome, Usage, VerdictKind,
 };
 
 /// What `ANTHROPIC_API_KEY` is set to. The gateway replaces credentials, so this only has to be non-empty.
@@ -274,6 +274,37 @@ fn human_section(task: &trailhead_factory::TaskSpec) -> String {
     out
 }
 
+/// What a reviewer is told about the checks the worker already ran: they passed or failed in the worker's sandbox,
+/// and this sandbox can't build anyway, so the reviewer reads instead of rebuilding.
+fn checks_section(checks: &[CheckResult]) -> String {
+    if checks.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\nThe worker already ran these checks in its own sandbox, where the dependencies are installed. This \
+         sandbox has no network, so don't build or run tests: review the diff and read code instead.\n",
+    );
+    for c in checks {
+        out.push_str(&format!("- {}: {}\n", c.name, if c.passed { "passed" } else { "FAILED" }));
+        if !c.passed {
+            out.push_str(&format!("  Output (tail):\n```\n{}\n```\n", clip_tail(&c.output, 2000)));
+        }
+    }
+    out
+}
+
+/// The last `max` bytes of `s`, on a character boundary, marked when cut.
+fn clip_tail(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut start = s.len() - max;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("(cut) …{}", &s[start..])
+}
+
 /// `s` cut to at most `max` bytes on a character boundary, marked when cut.
 fn clip(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -292,7 +323,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
         Role::Reviewer => format!(
             "You are reviewing a pull request for task {key}: {title}.\n\n\
              Task:\n{desc}{human}\n\n\
-             The change under review:\n```diff\n{diff}\n```\n\n\
+             The change under review:\n```diff\n{diff}\n```{checks}\n\n\
              Check it against the task and the repo's conventions (AGENTS.md). Read code in the checkout as needed, \
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
              they belong. Your summary is posted on the PR as the review.",
@@ -301,6 +332,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
             desc = task.description,
             human = human_section(task),
             diff = ctx.diff.as_deref().unwrap_or("(no diff)"),
+            checks = checks_section(&ctx.checks),
         ),
         _ => format!(
             "Implement task {key}: {title}.\n\n\
