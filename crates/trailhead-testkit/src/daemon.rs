@@ -183,6 +183,14 @@ impl LocalDaemon {
         }
     }
 
+    /// Makes the next `times` runs end cancelled, as when the control plane is stopped on purpose.
+    pub fn cancel_runs(&self, times: usize) {
+        let mut errors = self.run_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push(trailhead_factory::Error::Cancelled);
+        }
+    }
+
     /// A run already going in a sandbox, as after a control plane restart: an attach to it replays `events`, then
     /// ends with `report`. Any other run is unknown to the daemon.
     pub fn ongoing(&self, run: &str, events: Vec<RunEvent>, report: RunReport) {
