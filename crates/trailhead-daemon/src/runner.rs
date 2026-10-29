@@ -203,8 +203,6 @@ impl Runner {
         }
     }
 
-    /// Runs each check, rerunning one that fails once in case it was a flake. Returns the final results and the
-    /// names of checks that passed on the rerun.
     /// Files each follow-up as a task in the reviewed task's project, unqueued, pointing back at the task and PR. A
     /// title already open is reused. One that can't be filed is logged and skipped: the review stands without it.
     async fn file_follow_ups(
@@ -249,6 +247,8 @@ impl Runner {
         filed
     }
 
+    /// Runs each check, rerunning one that fails once in case it was a flake. Returns the final results and the
+    /// names of checks that passed on the rerun.
     async fn checks(&self, checks: &[Check]) -> (Vec<CheckResult>, Vec<String>) {
         let mut out = Vec::with_capacity(checks.len());
         let mut retried = Vec::new();

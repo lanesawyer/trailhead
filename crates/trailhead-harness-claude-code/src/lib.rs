@@ -243,7 +243,7 @@ pub fn schema(role: Role) -> Value {
                     "properties": {
                         "title": { "type": "string" },
                         "description": { "type": "string" },
-                        "priority": { "type": "integer", "description": "1 (most urgent) to 4." },
+                        "priority": { "type": "integer", "minimum": 1, "maximum": 4, "description": "1 (most urgent) to 4." },
                     },
                     "required": ["title"],
                 },
@@ -437,12 +437,17 @@ fn answer(result: &Value) -> Option<Value> {
     serde_json::from_str(text.trim().trim_start_matches("```json").trim_matches('`').trim()).ok()
 }
 
-/// The reviewer's follow-ups, leaving out any without a title.
+/// The reviewer's follow-ups, leaving out any without a title. A priority outside 1 to 4 is dropped, so the task is
+/// filed at the project's default rather than rejected.
 fn follow_ups(answer: &Value) -> Vec<FollowUp> {
     let items = answer["follow_ups"].as_array().into_iter().flatten();
     items
         .filter_map(|v| serde_json::from_value::<FollowUp>(v.clone()).ok())
         .filter(|f| !f.title.trim().is_empty())
+        .map(|mut f| {
+            f.priority = f.priority.filter(|p| (1..=4).contains(p));
+            f
+        })
         .collect()
 }
 

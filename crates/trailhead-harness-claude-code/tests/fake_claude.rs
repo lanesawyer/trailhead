@@ -33,7 +33,7 @@ review)
   ;;
 approve)
   asst a1 '{"type":"text","text":"Reviewing."}'
-  echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"approve","summary":"Fine.","follow_ups":[{"title":"Cover the edge","description":"No test for empty input.","priority":2},{"title":"  "},{"title":"Rename it"}]}}'
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"approve","summary":"Fine.","follow_ups":[{"title":"Cover the edge","description":"No test for empty input.","priority":2},{"title":"  "},{"title":"Rename it","priority":0},{"title":"Split it","priority":5}]}}'
   ;;
 question)
   asst q1 '{"type":"text","text":"Hmm."}'
@@ -240,6 +240,7 @@ async fn approving_review_carries_follow_ups() {
     let follow_ups = vec![
         FollowUp { title: "Cover the edge".into(), description: "No test for empty input.".into(), priority: Some(2) },
         FollowUp { title: "Rename it".into(), description: String::new(), priority: None },
+        FollowUp { title: "Split it".into(), description: String::new(), priority: None },
     ];
     assert_eq!(out, RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Fine.".into(), follow_ups });
 }
