@@ -78,6 +78,25 @@ pub enum PrState {
     Closed,
 }
 
+/// How the repo's CI stands on one commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CiState {
+    /// Some check hasn't finished, or none has started yet.
+    Pending,
+    Passed,
+    /// The names of the checks that failed.
+    Failed {
+        checks: Vec<String>,
+    },
+}
+
+/// CI on a PR's current head commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ci {
+    pub head: String,
+    pub state: CiState,
+}
+
 #[async_trait]
 pub trait CodeHost: Send + Sync {
     /// Publishes commits made on top of `start`, the commit sha the checkout was at when the work began. A new
@@ -105,4 +124,9 @@ pub trait CodeHost: Send + Sync {
     async fn title(&self, pr: &PrRef) -> Result<String>;
     /// The files the PR changes, with how and by how many lines, for grading it.
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>>;
+    /// The commit the PR's branch is at now.
+    async fn head(&self, pr: &PrRef) -> Result<String>;
+    /// The repo's CI on the PR's current head: its check runs and commit statuses, which are pending until every one
+    /// has finished and at least one exists, and failed with the names of those that failed as soon as any has.
+    async fn ci(&self, pr: &PrRef) -> Result<Ci>;
 }
