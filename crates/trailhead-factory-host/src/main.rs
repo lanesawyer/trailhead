@@ -24,6 +24,7 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, SecretKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
+use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory};
 use trailhead_core::{Ctx, Store};
@@ -64,6 +65,10 @@ struct Opts {
     /// Needed when sandboxes run on Sprites.
     #[arg(long, env = "SPRITES_TOKEN", hide_env_values = true)]
     sprites_token: Option<String>,
+    /// Lets the control plane see when a task's PR is merged or closed, to finish or park the task. Read access to
+    /// the repo's pull requests is enough. Without it, merges are not noticed and `trailhead done` stays manual.
+    #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
+    github_token: Option<String>,
     /// How often to look for ready work.
     #[arg(long, default_value_t = 30)]
     poll_secs: u64,
@@ -196,8 +201,15 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
         Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, daemon.peers())).spawn();
     tracing::info!(endpoint = %endpoint.id(), project = %config.repo.project, repo = %config.repo.repo().slug(), "factory ready");
 
-    let factory =
+    let mut factory =
         Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon);
+    match &opts.github_token {
+        Some(token) => {
+            factory =
+                factory.with_codehost(Arc::new(GitHub::new(trailhead_codehost_github::API_URL, Some(token.clone()))))
+        }
+        None => tracing::warn!("no GITHUB_TOKEN: merged and closed PRs are not noticed; finish merged tasks by hand"),
+    }
     let wake = Wake { store, ctx, project: factory.config.repo.project.clone() };
     Ok((Arc::new(factory), tunnel, lock, wake))
 }

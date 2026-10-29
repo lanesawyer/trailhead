@@ -20,10 +20,10 @@ use tokio::time::Instant;
 use tokio::sync::mpsc;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::{
-    ChangesRequested, CheckResult, CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, Feedback, HumanContext,
-    IROH_DOMAINS, Labels, ModelProvider, PrRef, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult,
-    RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict, VerdictKind, label,
-    review_name, run_name,
+    ChangesRequested, CheckResult, CheckpointId, CodeHost, Compute, Daemon, Egress, Error, FactoryConfig, Feedback,
+    HumanContext, IROH_DOMAINS, Labels, Merged, MergedBy, ModelProvider, PrRef, PrState, Profile, Result, Role,
+    RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec,
+    Tracker, Usd, Verdict, VerdictKind, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -59,6 +59,9 @@ pub struct Factory {
     pub tracker: Arc<dyn Tracker>,
     pub provider: Arc<dyn ModelProvider>,
     pub daemon: Arc<dyn Daemon>,
+    /// Reads PRs from the control plane, which sandboxes' own code host access can't serve. Without one, reconcile
+    /// doesn't notice merges or closed PRs.
+    pub codehost: Option<Arc<dyn CodeHost>>,
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
@@ -107,6 +110,10 @@ pub struct Reconciled {
     pub reviewed: Vec<String>,
     /// Tasks whose review asked for changes but stayed in review, now reopened for a rework or parked.
     pub reworked: Vec<String>,
+    /// In-review tasks whose PR was merged, now done.
+    pub merged: Vec<String>,
+    /// In-review tasks whose PR was closed without merging, now parked for a human.
+    pub closed: Vec<String>,
     /// Pooled sandboxes that kept failing to release, now out of the pool.
     pub abandoned: Vec<String>,
 }
@@ -125,12 +132,19 @@ impl Factory {
             tracker,
             provider,
             daemon,
+            codehost: None,
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
             quota: Mutex::default(),
             pause_logged: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
         }
+    }
+
+    /// Lets reconcile check each in-review task's PR (`docs/factory/operating.md`).
+    pub fn with_codehost(mut self, codehost: Arc<dyn CodeHost>) -> Factory {
+        self.codehost = Some(codehost);
+        self
     }
 
     fn project(&self) -> &str {
@@ -953,6 +967,38 @@ impl Factory {
         self.review(task, pr, attempt, &[]).await
     }
 
+    /// Closes a task whose PR has merged: records who merged it, which PR and the commit in the task's metadata, then
+    /// finishes it with a handoff naming them, which unblocks whatever is chained behind it. The one way a merge
+    /// finishes a task: reconcile uses it for merges made outside the factory, and the merger will use it right after
+    /// `CodeHost::merge` (`docs/factory/lifecycle.md`). Metadata first, so a handoff that failed to land is retried
+    /// with the record already there.
+    pub async fn close_merged(&self, task: &Task, merged: Merged) -> Result<()> {
+        let who = match merged.by {
+            MergedBy::Human => "Merged by a person on the code host",
+            MergedBy::Merger => "Merged by the factory's merger",
+        };
+        let commit = merged.commit.as_deref().map_or_else(String::new, |c| format!(", as commit {c}"));
+        let handoff = format!("{who}: {}{commit}.", merged.pr.url);
+        self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
+        self.tracker.finish(&task.key, &handoff).await?;
+        tracing::info!(task = %task.key.0, %handoff, "PR merged; task done");
+        Ok(())
+    }
+
+    /// A PR closed without merging: the task is parked with a question for a human, rather than reopened, since a
+    /// rework would push to a PR nobody is going to merge. Reopening it after reopening the PR resumes as a rework.
+    async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
+        tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
+        self.tracker.reopen(&task.key).await?;
+        self.tracker.claim(&task.key).await?;
+        let question = format!(
+            "The PR {} was closed without being merged. If the work is abandoned, cancel this task. To carry on, \
+             reopen the PR on the code host and then reopen this task, and the next run continues on the PR's branch.",
+            pr.url
+        );
+        self.tracker.ask(&task.key, &question).await
+    }
+
     /// Puts one in-flight task right; true when its PR is due a review.
     async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
         let Some(name) = &task.run.sandbox else { return Ok(false) };
@@ -967,6 +1013,24 @@ impl Factory {
             }
             Status::Open => self.tracker.revoke_sub_agent(name).await?,
             Status::InReview => {
+                if let Some(pr) = &task.run.pr
+                    && let Some(codehost) = &self.codehost
+                {
+                    match codehost.pr_state(pr).await? {
+                        PrState::Merged { commit } => {
+                            // A merge the factory didn't make: whoever did it, a person did it outside the factory.
+                            self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
+                            done.merged.push(task.key.0.clone());
+                            return Ok(false);
+                        }
+                        PrState::Closed => {
+                            self.park_closed(task, pr).await?;
+                            done.closed.push(task.key.0.clone());
+                            return Ok(false);
+                        }
+                        PrState::Open => {}
+                    }
+                }
                 let attempt = task.run.attempt.unwrap_or(1);
                 // Changes were requested on this attempt but the task never left review: finish reopening it.
                 if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt) {

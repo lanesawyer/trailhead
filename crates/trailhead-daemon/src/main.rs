@@ -15,7 +15,9 @@ use trailhead_daemon::net::{
     ALPN, DaemonProtocol, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
 };
 use trailhead_daemon::{Connect, GitWorkspace, RENEW_EVERY, RestTracker, Runner};
-use trailhead_factory::{CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, Repo, Result, Tracker};
+use trailhead_factory::{
+    CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, PrState, Repo, Result, Tracker,
+};
 use trailhead_harness_claude_code::ClaudeCode;
 
 #[derive(Parser)]
@@ -60,6 +62,9 @@ impl CodeHost for NoCodeHost {
         Err(Error::Forbidden(self.0.clone()))
     }
     async fn merge(&self, _: &PrRef) -> Result<MergeOutcome> {
+        Err(Error::Forbidden(self.0.clone()))
+    }
+    async fn pr_state(&self, _: &PrRef) -> Result<PrState> {
         Err(Error::Forbidden(self.0.clone()))
     }
 }

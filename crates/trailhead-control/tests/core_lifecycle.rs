@@ -4,9 +4,10 @@
 use std::sync::Arc;
 
 use trailhead_control::{CoreTracker, Factory, Outcome};
-use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Store, TaskPatch};
+use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, ProjectPatch, Store, TaskPatch};
 use trailhead_factory::{
-    Commit, FactoryConfig, FileChange, Role, RunOutcome, RunUpdate, Status, TaskKey, Tracker, Usd, VerdictKind, label,
+    CodeHost, Commit, FactoryConfig, FileChange, Role, RunOutcome, RunUpdate, Status, TaskKey, Tracker, Usd,
+    VerdictKind, label,
 };
 use trailhead_testkit::{Connect, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon, Script, ScriptedHarness};
 
@@ -79,7 +80,8 @@ async fn rig_with(config: &str) -> Rig {
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
         daemon,
-    );
+    )
+    .with_codehost(Arc::new(codehost.clone()));
     Rig { store, human, factory, tracker, compute, codehost, harness }
 }
 
@@ -312,4 +314,68 @@ async fn requested_changes_past_the_cap_park_on_the_real_engine() {
     let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
     let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
     assert!(question.body.contains("after 1 review rounds") && question.body.contains("Still wrong."));
+}
+
+/// Runs a task to a reviewed PR, leaving it in review. Lane has added the factory to the project's reviewers, as the
+/// merger needs, so it can finish a task whose PR merged.
+async fn in_review(r: &Rig, title: &str) -> (TaskKey, trailhead_factory::PrRef) {
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let key = r.task(title).await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(
+        Role::Reviewer,
+        Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into(), follow_ups: vec![] }),
+    );
+    r.factory.tick().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview);
+    (key, task.run.pr.unwrap())
+}
+
+#[tokio::test]
+async fn a_merged_pr_finishes_its_task_and_unblocks_what_is_chained_behind_it() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    let before = r.factory.reconcile().await.unwrap();
+    assert!(before.merged.is_empty(), "an open PR leaves the task in review");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+
+    let next = r.task("Use the greeting").await;
+    r.store.add_dependency(&r.human, &key.0, &next.0).await.unwrap();
+    let blocked = r.store.blockers(&r.human, &next.0).await.unwrap();
+    assert_eq!(blocked.len(), 1);
+
+    r.codehost.merge(&pr).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.merged, std::slice::from_ref(&key.0));
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Done);
+    let merged = task.run.merged.expect("who merged is recorded");
+    assert_eq!(merged.by, trailhead_factory::MergedBy::Human);
+    assert_eq!(merged.commit.as_deref(), Some(FakeCodeHost::merge_commit(&pr).as_str()));
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let handoff = comments.iter().find(|c| c.kind == CommentKind::Handoff).expect("a handoff");
+    assert!(handoff.body.contains(&pr.url) && handoff.body.contains("merge-1"), "{}", handoff.body);
+    assert!(r.store.blockers(&r.human, &next.0).await.unwrap().is_empty(), "the chained task is unblocked");
+
+    assert!(r.factory.reconcile().await.unwrap().merged.is_empty(), "done tasks are left alone");
+}
+
+#[tokio::test]
+async fn a_pr_closed_without_merging_parks_its_task_for_lane() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.close(&pr);
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.closed, std::slice::from_ref(&key.0));
+    assert!(done.merged.is_empty());
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.merged, None);
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
+    assert!(question.body.contains(&pr.url) && question.body.contains("closed without being merged"));
+    assert!(!question.body.contains("  "), "no stray runs of spaces: {}", question.body);
+    assert!(r.factory.reconcile().await.unwrap().closed.is_empty(), "asked once");
 }

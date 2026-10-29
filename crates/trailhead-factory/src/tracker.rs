@@ -76,6 +76,27 @@ pub struct RunUpdate {
     /// the attempts of the task as a whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_base: Option<u32>,
+    /// How the task's PR was merged, once it has been.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged: Option<Merged>,
+}
+
+/// A merged PR: who merged it, which PR, and the commit it became.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Merged {
+    pub by: MergedBy,
+    pub pr: PrRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergedBy {
+    /// Someone merged it outside the factory, such as Lane on GitHub.
+    Human,
+    /// The control plane merged it, once the tier's gates passed.
+    Merger,
 }
 
 /// A review that asked for changes: who, what they said, and the attempt whose PR it reviewed.
@@ -103,6 +124,7 @@ impl RunUpdate {
             infra_failures,
             changes_requested,
             attempt_base,
+            merged,
         } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
@@ -117,6 +139,7 @@ impl RunUpdate {
         self.infra_failures = infra_failures.or(self.infra_failures.take());
         self.changes_requested = changes_requested.or(self.changes_requested.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
+        self.merged = merged.or(self.merged.take());
     }
 
     /// The review the next run has to address: the last one that asked for changes, unless a later review has

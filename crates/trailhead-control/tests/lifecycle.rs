@@ -349,6 +349,8 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
             requeued: vec![crashed.0.clone()],
             reviewed: vec![unreviewed.0.clone()],
             reworked: vec![],
+            merged: vec![],
+            closed: vec![],
             abandoned: vec![],
         }
     );

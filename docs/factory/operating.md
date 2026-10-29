@@ -6,6 +6,7 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 
 - `BWS_ACCESS_TOKEN` in your environment, for a Bitwarden Secrets Manager machine account with read access to the Trailhead project. `fnox.toml` maps `SPRITES_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` from it.
 - A `factory` agent: `trailhead --as-me agent add factory`. The control plane acts as it, and each run gets a sub-agent (`factory/trail-42-a1`).
+- To have merged PRs finish their tasks: `GITHUB_TOKEN` in the control plane's environment (read access to the repo's pull requests is enough), and the factory agent added to the project's reviewers, `trailhead --as-me project edit TRAIL --reviewers factory`, since only a reviewer can finish a task in review. Without the token the control plane logs a warning at start and merges aren't noticed.
 - `factory.toml` at the repo root: the repo, the queue task, checks, egress, profiles and budgets, and `max_sandboxes`.
 - The local Trailhead server running (`trailhead server status`); the CLI starts it on demand.
 
@@ -49,7 +50,9 @@ run finished task=TRAIL-105 outcome=…
 
 | Outcome | What you see | What you do |
 | --- | --- | --- |
-| PR opened | Task `in_review`, a PR on GitHub with the reviewer's comment, a typed verdict on the task | Check CI is green and the diff's size is believable, merge on GitHub, then `trailhead --as-me done TRAIL-n -m "merged"`, which also unblocks anything chained behind it |
+| PR opened | Task `in_review`, a PR on GitHub with the reviewer's comment, a typed verdict on the task | Check CI is green and the diff's size is believable, and merge on GitHub |
+| PR merged | Within a poll (`--poll-secs`, default 30 s) the task is `done`, with a handoff naming the PR and the merge commit, and `merged` (who, PR, commit) in its `factory` metadata. Tasks chained behind it unblock | Nothing. If `GITHUB_TOKEN` isn't set, or the factory isn't a project reviewer, finish it yourself: `trailhead --as-me done TRAIL-n -m "merged"` |
+| PR closed without merging | The task is `needs_input` with a question naming the PR | Abandoned: cancel the task. To carry on, reopen the PR on GitHub, then reopen the task; the next run continues on the PR's branch |
 | Reviewer approved with follow-ups | The PR comment ends with a "Follow-ups filed in Trailhead" list; each is a new open task in the project, not queued under TRAIL-102, whose description says which task and PR it came from. A title that's already an open task is listed as "(already open)" and not filed again. A request for changes files nothing | Triage them: queue the ones worth doing under TRAIL-102, cancel the rest |
 | Reviewer requested changes | The review is posted on the PR and kept in the task's metadata; the task is open again and the next run starts from the PR branch head with the review in its prompt | Usually nothing. After `max_review_rounds` (`[repo]`, default 3) rounds the task is parked with a question holding the last review; fix the PR or settle it, then reopen (the count starts again) |
 | Checks failed | A note on the task with the end of the failing check's output; the task is open again and retried | Usually nothing. The next attempt is told what failed; after `max_attempts` (`[repo]`, default 3) failures in a row the task is parked with a question summarizing the failure. On a rework, the count starts from the review that asked for changes |
