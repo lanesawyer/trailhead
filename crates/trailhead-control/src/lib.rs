@@ -793,6 +793,8 @@ impl Factory {
         if let Some(grade) = &grade {
             self.record_grade(&shown, grade).await?;
         }
+        // Read before anything is created, so a tracker that fails here holds no sub-agent or sandbox.
+        let context = self.tracker.human_context(&task.key).await?;
         let round = shown.run.review_rounds.unwrap_or(0) + 1;
         let retries = shown.run.retries.unwrap_or(0);
         let name = reviewer_name(&task.key, attempt, round, retries);
@@ -808,7 +810,6 @@ impl Factory {
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
-        let context = self.tracker.human_context(&task.key).await?;
         let req = RunRequest {
             run: name.clone(),
             role: Role::Reviewer,

@@ -29,6 +29,7 @@ struct State {
     next: HashMap<String, u32>,
     parents: HashMap<TaskKey, TaskKey>,
     priorities: HashMap<TaskKey, i64>,
+    context_fails: bool,
 }
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
@@ -84,6 +85,11 @@ impl FakeTracker {
             },
         );
         key
+    }
+
+    /// Makes reading a task's human context fail (or heals it), as a tracker outage would.
+    pub fn fail_human_context(&self, fails: bool) {
+        self.state.lock().unwrap().context_fails = fails;
     }
 
     /// A human grades a task, which is what makes it the factory's work.
@@ -226,6 +232,9 @@ impl Tracker for FakeTracker {
     async fn human_context(&self, task: &TaskKey) -> Result<HumanContext> {
         self.check_live()?;
         let s = self.state.lock().unwrap();
+        if s.context_fails {
+            return Err(Error::Other("tracker unavailable".into()));
+        }
         let mut out = HumanContext::default();
         // The fake dates everything the same; answers follow their question.
         let date = "2026-01-01".to_string();

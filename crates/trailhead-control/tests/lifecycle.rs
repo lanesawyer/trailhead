@@ -1026,6 +1026,23 @@ async fn a_review_that_cant_start_doesnt_stop_reconcile() {
 }
 
 #[tokio::test]
+async fn a_review_whose_context_cant_be_read_creates_no_sandbox() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Unreviewed", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let before = r.compute.sandboxes().len();
+
+    r.tracker.fail_human_context(true);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "{done:?}");
+    assert_eq!(r.compute.sandboxes().len(), before, "no sandbox is held for a review that couldn't start");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+}
+
+#[tokio::test]
 async fn a_review_left_from_before_a_restart_doesnt_hold_up_workers() {
     let r = rig();
     let unreviewed = r.tracker.add_task("TRAIL", "Unreviewed", "");
