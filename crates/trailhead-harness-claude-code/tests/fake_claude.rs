@@ -469,3 +469,26 @@ fn many_long_answers_keep_the_newest_and_leave_room_for_notes() {
     assert!(p.contains("a note that must survive"), "notes aren't crowded out");
     assert!(p.len() < 9000, "{}", p.len());
 }
+
+#[test]
+fn several_short_answers_are_kept_oldest_first_up_to_the_cap() {
+    use trailhead_factory::Answered;
+    let r = rig();
+    let mut c = ctx(&r, Role::Worker, 0);
+    for i in 0..10 {
+        c.task.context.answers.push(Answered {
+            question: format!("question {i}?"),
+            answer: format!("answer {i}: {}", "a".repeat(680)),
+            by: "lane".into(),
+            date: "2026-10-29".into(),
+        });
+    }
+    let p = prompt(&c, None);
+    // Each entry is about 735 bytes, so five fit under the 4000-byte cap and the sixth does not.
+    let at: Vec<_> = (5..10).map(|i| p.find(&format!("answer {i}:"))).collect();
+    assert!(at.iter().all(Option::is_some), "the newest five are kept: {at:?}");
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "they stay oldest first: {at:?}");
+    for i in 0..5 {
+        assert!(!p.contains(&format!("answer {i}:")), "answer {i} is past the cap, and so is everything older");
+    }
+}
