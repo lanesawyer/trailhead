@@ -443,7 +443,26 @@ impl Factory {
         for task in ungraded {
             self.report_ungraded(&task).await;
         }
+        for task in &graded {
+            self.clear_ungraded(task).await;
+        }
         Ok(graded.into_iter().take(room).collect())
+    }
+
+    /// A task that has been graded is no longer ungraded, so it's told again if its grade is ever cleared.
+    async fn clear_ungraded(&self, task: &Task) {
+        let was_reported = self.ungraded.lock().unwrap().remove(&task.key);
+        if task.run.ungraded != Some(true) {
+            return;
+        }
+        let update = RunUpdate { ungraded: Some(false), ..RunUpdate::default() };
+        if let Err(e) = self.tracker.report(&task.key, update).await {
+            // Keep the key out of the set only if nothing was cleared, so a failed write is retried next poll.
+            if was_reported {
+                self.ungraded.lock().unwrap().insert(task.key.clone());
+            }
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the task's ungraded flag");
+        }
     }
 
     async fn report_ungraded(&self, task: &Task) {
