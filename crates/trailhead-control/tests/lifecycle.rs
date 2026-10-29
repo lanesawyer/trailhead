@@ -193,6 +193,60 @@ async fn a_parked_sandbox_keeps_its_place_in_the_cap() {
 }
 
 #[tokio::test]
+async fn reopening_a_parked_task_frees_its_place_without_a_reconcile() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(busy(&r.compute), ["trailhead-w1"]);
+
+    // Still parked: the place stays taken.
+    r.tracker.add_task("TRAIL", "Next", "");
+    assert!(r.factory.tick().await.unwrap().is_empty());
+
+    r.tracker.answer(&key, "The core crate.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(!ran.is_empty(), "the reopened task started without a reconcile");
+    let answered =
+        r.harness.contexts().iter().any(|c| c.task.context.answers.iter().any(|a| a.answer == "The core crate."));
+    assert!(answered, "the next attempt has the answer in its prompt");
+}
+
+#[tokio::test]
+async fn the_run_loop_frees_a_parked_tasks_place_when_it_is_reopened() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    let next = r.tracker.add_task("TRAIL", "Next", "");
+
+    let factory = Arc::new(r.factory);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle =
+        tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), std::time::Duration::from_millis(5), async {
+            let _ = stopped.await;
+        }));
+    // Parked: the loop polls many times and the one place stays taken.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(r.tracker.task(&next).status, Status::Open, "the parked task still holds the place");
+
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.tracker.answer(&key, "The core crate.");
+    let tracker = r.tracker.clone();
+    until("the reopened task to run", || tracker.task(&key).status != Status::NeedsInput).await;
+    let harness = r.harness.clone();
+    until("the answer to reach a prompt", || {
+        harness.contexts().iter().any(|c| c.task.context.answers.iter().any(|a| a.answer == "The core crate."))
+    })
+    .await;
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn too_many_steps_is_a_breach() {
     let r = rig();
     r.tracker.add_task("TRAIL", "Chatty", "");
