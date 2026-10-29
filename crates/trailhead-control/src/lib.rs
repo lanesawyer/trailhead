@@ -743,7 +743,7 @@ impl Factory {
                 }
                 let max = self.config.repo.max_attempts;
                 // Counted from the last review that asked for changes, so reworks get attempts of their own.
-                let failed = attempt - task.run.attempt_base.unwrap_or(0);
+                let failed = attempt.saturating_sub(task.run.attempt_base.unwrap_or(0));
                 if failed >= max {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
                     let last = self
@@ -870,6 +870,8 @@ impl Factory {
         if let Some(grade) = &grade {
             self.record_grade(&shown, grade).await?;
         }
+        // Read before anything is created, so a tracker that fails here holds no sub-agent or sandbox.
+        let context = self.tracker.human_context(&task.key).await?;
         // The commit the review is of, so a verdict isn't counted for a head pushed after it.
         let head = match &self.codehost {
             Some(codehost) => Some(codehost.head(pr).await?),
@@ -885,12 +887,11 @@ impl Factory {
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
         let sub = self.tracker.sub_agent(&name);
-        let sandbox = match self.create_sandbox(&name, task, Role::Reviewer).await {
+        let sandbox = match self.create_sandbox(&name, task, Role::Reviewer, Some(Self::branch(task))).await {
             Ok(sandbox) => sandbox,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
-        let context = self.tracker.human_context(&task.key).await?;
         let req = RunRequest {
             run: name.clone(),
             role: Role::Reviewer,
@@ -918,7 +919,6 @@ impl Factory {
             Ok(run) => run,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
-        self.setbacks.lock().unwrap().remove(&task.key);
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
         let (spend, reviewed, reviewed_head) = match &run {
@@ -932,6 +932,7 @@ impl Factory {
         self.tracker.revoke_sub_agent(&name).await?;
         match run {
             Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
+                self.setbacks.lock().unwrap().remove(&task.key);
                 if let (Some(raise), Some(mut grade)) = (&verdict.raise_grade, grade)
                     && grade.raise(raise.grade, &raise.reason)
                 {
@@ -952,9 +953,14 @@ impl Factory {
             }
             Run::Report(report, _) => {
                 tracing::warn!(task = %task.key.0, result = ?report.result, "review didn't produce a verdict");
+                // No verdict, no round. The retry count moves the next try's names off this one's revoked sub-agent.
+                let give_back =
+                    RunUpdate { review_rounds: Some(round - 1), retries: Some(retries + 1), ..RunUpdate::default() };
+                self.tracker.report(&task.key, give_back).await?;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
             Run::Breach(reason, _) => {
+                self.setbacks.lock().unwrap().remove(&task.key);
                 tracing::warn!(task = %task.key.0, %reason, "reviewer breached its budget");
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
@@ -1251,14 +1257,15 @@ impl Factory {
         self.tracker.reopen(&task.key).await
     }
 
-    async fn create_sandbox(&self, name: &str, task: &Task, role: Role) -> Result<Sandbox> {
+    /// A sandbox for `task`, its checkout prepared on `branch` when given (a reviewer's is the PR's head).
+    async fn create_sandbox(&self, name: &str, task: &Task, role: Role, branch: Option<String>) -> Result<Sandbox> {
         let mut labels = self.base_labels();
         labels.insert(label::TASK.into(), task.key.0.clone());
         labels.insert(label::ROLE.into(), role.as_str().into());
         // Install egress only while the checkout is prepared, then narrowed before any agent runs.
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = self.compute.create(&spec).await?;
-        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, None)).await?;
+        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, branch)).await?;
         self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
         Ok(sandbox)
     }
@@ -1608,21 +1615,22 @@ impl Factory {
 
     /// Whether the task's PR was merged or closed, which is dealt with here: a merge, by whoever, finishes the task and
     /// a closed PR parks it.
-    async fn pr_settled(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
-        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return Ok(false) };
+    /// `None` when it did; when it's still open (or there's no PR to ask about), `Some` of whether it merges cleanly.
+    async fn pr_settled(&self, task: &Task, done: &mut Reconciled) -> Result<Option<Option<bool>>> {
+        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return Ok(Some(None)) };
         match codehost.pr_state(pr).await? {
             PrState::Merged { commit } => {
                 // A merge the factory didn't make: whoever did it, a person did it outside the factory.
                 self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
                 done.merged.push(task.key.0.clone());
-                Ok(true)
+                Ok(None)
             }
             PrState::Closed => {
                 self.park_closed(task, pr).await?;
                 done.closed.push(task.key.0.clone());
-                Ok(true)
+                Ok(None)
             }
-            PrState::Open => Ok(false),
+            PrState::Open { mergeable } => Ok(Some(mergeable)),
         }
     }
 
@@ -1640,15 +1648,13 @@ impl Factory {
             }
             Status::Open => self.tracker.revoke_sub_agent(name).await?,
             Status::Approved => {
-                if self.pr_settled(task, done).await? {
+                if self.pr_settled(task, done).await?.is_none() {
                     return Ok(false);
                 }
                 self.evaluate_gates(&task.key).await?;
             }
             Status::InReview => {
-                if self.pr_settled(task, done).await? {
-                    return Ok(false);
-                }
+                let Some(mergeable) = self.pr_settled(task, done).await? else { return Ok(false) };
                 let attempt = task.run.attempt.unwrap_or(1);
                 // Changes were requested on this attempt but the task never left review: finish reopening it.
                 if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt) {
@@ -1658,9 +1664,8 @@ impl Factory {
                     return Ok(false);
                 }
                 if let Some(pr) = &task.run.pr
-                    && let Some(codehost) = &self.codehost
-                    // Not yet worked out by the host: the next reconcile asks again.
-                    && codehost.mergeable(pr).await? == Some(false)
+                    // Not yet worked out by the host (`None`): the next reconcile asks again.
+                    && mergeable == Some(false)
                 {
                     self.rework_conflict(task, pr, attempt).await?;
                     done.conflicted.push(task.key.0.clone());

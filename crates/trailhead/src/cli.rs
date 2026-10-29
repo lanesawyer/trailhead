@@ -290,6 +290,9 @@ pub(crate) struct EditArgs {
     /// Move it under this task (e.g. the factory's queue), or "none" to make it top-level.
     #[arg(long)]
     pub(crate) parent: Option<String>,
+    /// Set a metadata key, `a.b=value` (JSON, else a string); `a.b=null` removes it. Repeatable.
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub(crate) meta: Vec<String>,
     /// Fail if the task changed since this version.
     #[arg(long)]
     pub(crate) version: Option<i64>,
