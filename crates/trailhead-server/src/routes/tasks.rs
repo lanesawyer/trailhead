@@ -5,7 +5,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use trailhead_core::{NewTask, SearchFilter, SearchHit, Status, Task, TaskDetail, TaskFilter, TaskPatch};
+use trailhead_core::{GradeFilter, NewTask, SearchFilter, SearchHit, Status, Task, TaskDetail, TaskFilter, TaskPatch};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::auth::Auth;
@@ -28,6 +28,8 @@ pub(crate) struct TaskListQuery {
     /// including anything planned earlier that's still unfinished.
     #[param(format = Date)]
     scheduled_through: Option<String>,
+    /// `1` to `4`, `graded` or `ungraded`.
+    grade: Option<String>,
     /// `key:value` pairs, comma-separated.
     metadata: Option<String>,
     /// `priority` (the default: priority, then due date, then oldest), `updated_at` or
@@ -70,6 +72,7 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
         parent: q.parent,
         due_before: parse_opt_time(q.due_before.as_deref())?,
         scheduled_through: parse_opt_date(q.scheduled_through.as_deref())?,
+        grade: parse_grade_filter(q.grade.as_deref())?,
         metadata,
         sort: q.sort.as_deref().map(str::parse).transpose()?.unwrap_or_default(),
         limit: q.limit,
@@ -127,6 +130,8 @@ pub(crate) struct CreateTask {
     /// IANA zone `scheduled_at` was planned in; decides its day. Without one, the UTC day.
     scheduled_tz: Option<String>,
     parent: Option<String>,
+    /// 1 to 4. Only a human can create a task with a grade.
+    grade: Option<i64>,
     metadata: Option<Value>,
     source: Option<String>,
     external_id: Option<String>,
@@ -152,6 +157,7 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
         title: b.title,
         description: b.description,
         priority: b.priority,
+        grade: b.grade,
         due_on: parse_opt_date(b.due_on.as_deref())?,
         due_at: parse_opt_at(b.due_at.as_deref())?,
         due_tz: b.due_tz,
@@ -193,6 +199,9 @@ pub(crate) struct UpdateTask {
     description: Option<String>,
     status: Option<Status>,
     priority: Option<i64>,
+    /// 1 to 4. A human can set, raise, lower or `null` it; an agent can only raise an existing grade.
+    #[serde(default, deserialize_with = "nullable")]
+    grade: Option<Option<i64>>,
     /// A new day without `due_at` drops the time; `null` removes the deadline.
     #[serde(default, deserialize_with = "nullable")]
     #[schema(format = Date)]
@@ -243,6 +252,7 @@ pub(crate) async fn update_task(
         description: b.description,
         status: b.status,
         priority: b.priority,
+        grade: b.grade,
         due_on: b.due_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
         due_at: b.due_at.map(|d| parse_opt_at(d.as_deref())).transpose()?,
         due_tz: b.due_tz,
@@ -281,6 +291,8 @@ pub(crate) async fn delete_task(
 pub(crate) struct ReadyQuery {
     project: Option<String>,
     limit: Option<i64>,
+    /// `1` to `4`, `graded` or `ungraded`.
+    grade: Option<String>,
     fields: Option<String>,
 }
 
@@ -289,7 +301,7 @@ pub(crate) struct ReadyQuery {
     responses((status = 200, description = "Open, unclaimed, unblocked tasks by priority then due date; trimmed to `fields` if set", body = Vec<Task>))
 )]
 pub(crate) async fn ready(State(s): S, Auth(ctx): Auth, Query(q): Query<ReadyQuery>) -> ApiResult<Json<Value>> {
-    let tasks = s.store.ready(&ctx, q.project.as_deref(), q.limit).await?;
+    let tasks = s.store.ready(&ctx, q.project.as_deref(), q.limit, parse_grade_filter(q.grade.as_deref())?).await?;
     Ok(Json(select_fields(&tasks, q.fields.as_deref())?))
 }
 
@@ -320,4 +332,8 @@ pub(crate) async fn search(State(s): S, Auth(ctx): Auth, Query(q): Query<SearchQ
         }
     }
     Ok(Json(out))
+}
+
+fn parse_grade_filter(s: Option<&str>) -> ApiResult<GradeFilter> {
+    Ok(s.map(GradeFilter::parse).transpose()?.unwrap_or_default())
 }
