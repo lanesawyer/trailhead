@@ -82,6 +82,10 @@ impl CoreTracker {
     }
 }
 
+fn same_title(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
 fn status(s: trailhead_core::Status) -> Status {
     use trailhead_core::Status as S;
     match s {
@@ -253,6 +257,10 @@ impl Tracker for CoreTracker {
         self.set_status(task, trailhead_core::Status::InReview).await
     }
 
+    async fn reopen(&self, task: &TaskKey) -> Result<()> {
+        self.set_status(task, trailhead_core::Status::Open).await
+    }
+
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()> {
         let ctx = self.ctx().await?;
         let kind = match verdict.kind {
@@ -278,6 +286,32 @@ impl Tracker for CoreTracker {
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
         self.comment(task, CommentKind::Handoff, handoff).await?;
         self.set_status(task, trailhead_core::Status::Done).await
+    }
+
+    async fn create_task(
+        &self,
+        project: &str,
+        title: &str,
+        description: &str,
+        priority: Option<i64>,
+    ) -> Result<TaskKey> {
+        let ctx = self.ctx().await?;
+        let new = trailhead_core::NewTask {
+            project: project.to_string(),
+            title: title.to_string(),
+            description: description.to_string(),
+            priority,
+            ..Default::default()
+        };
+        let task = self.store.create_task(&ctx, new).await.map_err(map_err)?;
+        Ok(TaskKey(task.key))
+    }
+
+    async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
+        let ctx = self.ctx().await?;
+        let filter = TaskFilter { project: Some(project.to_string()), limit: Some(1000), ..TaskFilter::default() };
+        let tasks = self.store.list_tasks(&ctx, filter).await.map_err(map_err)?;
+        Ok(tasks.into_iter().find(|t| same_title(&t.title, title)).map(|t| TaskKey(t.key)))
     }
 
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential> {

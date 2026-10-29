@@ -102,6 +102,13 @@ pub struct RepoConfig {
     /// Attempts a task gets before it's parked for a human instead of retried.
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
+    /// Infrastructure failures in a row (sandbox, daemon or API trouble, not the task) at which a task is parked for a
+    /// human instead of retried after a backoff.
+    #[serde(default = "default_max_infra_failures")]
+    pub max_infra_failures: u32,
+    /// Reviews of one task that may ask for changes before it's parked for a human instead of reworked again.
+    #[serde(default = "default_max_review_rounds")]
+    pub max_review_rounds: u32,
 }
 
 fn default_base_branch() -> String {
@@ -111,6 +118,12 @@ fn default_max_sandboxes() -> usize {
     1
 }
 fn default_max_attempts() -> u32 {
+    3
+}
+fn default_max_infra_failures() -> u32 {
+    10
+}
+fn default_max_review_rounds() -> u32 {
     3
 }
 fn default_worker() -> String {
@@ -285,13 +298,14 @@ impl FactoryConfig {
         all.filter(|c| everything || gate.require.contains(&c.name)).collect()
     }
 
-    /// Readies a checkout. Only workers build: a reviewer reads the diff, so it skips `setup`.
-    pub fn prepare_request(&self, role: Role) -> PrepareRequest {
+    /// Readies a checkout, on `branch` when given (a rework). Only workers build: a reviewer reads the diff, so it
+    /// skips `setup`.
+    pub fn prepare_request(&self, role: Role, branch: Option<String>) -> PrepareRequest {
         let setup = match role {
             Role::Worker => self.checks.setup.as_ref().map(|c| Check { name: "setup".into(), command: c.clone() }),
             _ => None,
         };
-        PrepareRequest { repo: self.repo.repo(), base_branch: self.repo.base_branch.clone(), setup }
+        PrepareRequest { repo: self.repo.repo(), base_branch: self.repo.base_branch.clone(), branch, setup }
     }
 }
 

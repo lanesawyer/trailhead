@@ -854,6 +854,52 @@ async fn approved_sits_between_review_and_done() {
 }
 
 #[tokio::test]
+async fn reviewers_cannot_approve_their_own_work() {
+    let env = Env::new().await;
+    let lead = env.agent("lead").await;
+    let other = env.agent("other").await;
+    let patch = ProjectPatch {
+        require_review: Some(true),
+        reviewers: Some(vec!["lead".into(), "other".into()]),
+        ..Default::default()
+    };
+    env.store.update_project(&env.human, "AUTH", patch, None).await.unwrap();
+
+    let t = env.task("mine").await;
+    env.store.claim(&lead, &t.key, None).await.unwrap();
+    // Holding it, it can't skip review.
+    assert!(matches!(
+        env.store.update_task(&lead, &t.key, status(Status::Approved), None).await,
+        Err(Error::InvalidTransition { .. })
+    ));
+    env.store.update_task(&lead, &t.key, status(Status::InReview), None).await.unwrap();
+    for to in [Status::Approved, Status::Done] {
+        assert!(matches!(env.store.update_task(&lead, &t.key, status(to), None).await, Err(Error::ReviewRequired)));
+    }
+    env.store.update_task(&other, &t.key, status(Status::Approved), None).await.unwrap();
+    // Nor can it finish what another reviewer approved.
+    assert!(matches!(
+        env.store.update_task(&lead, &t.key, status(Status::Done), None).await,
+        Err(Error::ReviewRequired)
+    ));
+    let done = env.store.update_task(&other, &t.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(done.status, Status::Done);
+
+    // A reviewer who only moved a task to review (no claim) can't approve it either.
+    let u = env.task("pushed").await;
+    env.store.update_task(&lead, &u.key, status(Status::InReview), None).await.unwrap();
+    assert!(matches!(
+        env.store.update_task(&lead, &u.key, status(Status::Approved), None).await,
+        Err(Error::ReviewRequired)
+    ));
+
+    // A reviewer holding in-progress work still finishes it where the plan allows.
+    let w = env.task("held").await;
+    env.store.claim(&lead, &w.key, None).await.unwrap();
+    assert!(env.store.update_task(&lead, &w.key, status(Status::Done), None).await.is_ok());
+}
+
+#[tokio::test]
 async fn held_work_cannot_skip_to_approved() {
     let env = Env::new().await;
     let lead = env.agent("lead").await;

@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use trailhead_factory::{
-    Commit, Error, EventSink, Feedback, FileChange, Harness, ModelId, Result, Role, RunContext, RunEvent, RunOutcome,
-    Usage, VerdictKind,
+    CheckResult, Commit, Error, EventSink, Feedback, FileChange, FollowUp, Harness, ModelId, Result, Role, RunContext,
+    RunEvent, RunOutcome, Usage, VerdictKind,
 };
 
 /// What `ANTHROPIC_API_KEY` is set to. The gateway replaces credentials, so this only has to be non-empty.
@@ -180,29 +180,8 @@ where you left off, then finish with the structured answer as before.";
 /// An error result from a failed or dropped API call, which resuming can get past: connection resets and timeouts,
 /// overload and server errors. Not auth, billing or invalid-request errors.
 fn is_transient_api_error(result: &Value) -> bool {
-    if result["is_error"] != true {
-        return false;
-    }
-    let text = result["result"].as_str().unwrap_or_default();
-    text.starts_with("API Error")
-        && [
-            "ECONNRESET",
-            "ETIMEDOUT",
-            "EPIPE",
-            "Connection",
-            "connection",
-            "socket",
-            "timed out",
-            "Overloaded",
-            "overloaded",
-            "529",
-            "500",
-            "502",
-            "503",
-            "504",
-        ]
-        .iter()
-        .any(|m| text.contains(m))
+    result["is_error"] == true
+        && trailhead_factory::harness::is_transient_api_error(result["result"].as_str().unwrap_or_default())
 }
 
 #[async_trait]
@@ -235,6 +214,19 @@ pub fn schema(role: Role) -> Value {
                 "description": "For done: the PR description. For a review: the review comment. Otherwise: why.",
             },
             "question": { "type": "string", "description": "For needs_input: the one question for a human." },
+            "follow_ups": {
+                "type": "array",
+                "description": "For an approving review: non-blocking suggestions, each filed as its own task. Leave out anything the change should fix first.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" },
+                        "description": { "type": "string" },
+                        "priority": { "type": "integer", "minimum": 1, "maximum": 4, "description": "1 (most urgent) to 4." },
+                    },
+                    "required": ["title"],
+                },
+            },
         },
         "required": ["outcome", "summary"],
     })
@@ -274,6 +266,37 @@ fn human_section(task: &trailhead_factory::TaskSpec) -> String {
     out
 }
 
+/// What a reviewer is told about building and the checks the worker already ran. The don't-build line goes in even
+/// with no results, as when reconcile starts the review after a restart: this sandbox can't build either way.
+fn checks_section(checks: &[CheckResult]) -> String {
+    let mut out = String::from(
+        "\n\nThis sandbox can't fetch dependencies, so don't build or run tests: review the diff and read code instead.",
+    );
+    if checks.is_empty() {
+        return out;
+    }
+    out.push_str(" The worker already ran these checks in its own sandbox, where the dependencies are installed:\n");
+    for c in checks {
+        out.push_str(&format!("- {}: {}\n", c.name, if c.passed { "passed" } else { "FAILED" }));
+        if !c.passed {
+            out.push_str(&format!("  Output (tail):\n```\n{}\n```\n", clip_tail(&c.output, 2000)));
+        }
+    }
+    out
+}
+
+/// The last `max` bytes of `s`, on a character boundary, marked when cut.
+fn clip_tail(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut start = s.len() - max;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("(cut) …{}", &s[start..])
+}
+
 /// `s` cut to at most `max` bytes on a character boundary, marked when cut.
 fn clip(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -292,15 +315,18 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
         Role::Reviewer => format!(
             "You are reviewing a pull request for task {key}: {title}.\n\n\
              Task:\n{desc}{human}\n\n\
-             The change under review:\n```diff\n{diff}\n```\n\n\
+             The change under review:\n```diff\n{diff}\n```{checks}\n\n\
              Check it against the task and the repo's conventions (AGENTS.md). Read code in the checkout as needed, \
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
-             they belong. Your summary is posted on the PR as the review.",
+             they belong. Your summary is posted on the PR as the review. When you approve, put anything worth doing \
+             later that shouldn't hold this change up in `follow_ups`, each with a title and description: the factory \
+             files them as tasks, so don't repeat them in the summary.",
             key = task.key.0,
             title = task.title,
             desc = task.description,
             human = human_section(task),
             diff = ctx.diff.as_deref().unwrap_or("(no diff)"),
+            checks = checks_section(&ctx.checks),
         ),
         _ => format!(
             "Implement task {key}: {title}.\n\n\
@@ -422,6 +448,20 @@ fn answer(result: &Value) -> Option<Value> {
     serde_json::from_str(text.trim().trim_start_matches("```json").trim_matches('`').trim()).ok()
 }
 
+/// The reviewer's follow-ups, leaving out any without a title. A priority outside 1 to 4 is dropped, so the task is
+/// filed at the project's default rather than rejected.
+fn follow_ups(answer: &Value) -> Vec<FollowUp> {
+    let items = answer["follow_ups"].as_array().into_iter().flatten();
+    items
+        .filter_map(|v| serde_json::from_value::<FollowUp>(v.clone()).ok())
+        .filter(|f| !f.title.trim().is_empty())
+        .map(|mut f| {
+            f.priority = f.priority.filter(|p| (1..=4).contains(p));
+            f
+        })
+        .collect()
+}
+
 async fn outcome(ctx: &RunContext, start: &str, result: &Value) -> Result<RunOutcome> {
     if result["is_error"] == true || result["subtype"].as_str().is_some_and(|s| s != "success") {
         let why = result["result"].as_str().or(result["subtype"].as_str()).unwrap_or("unknown error");
@@ -432,8 +472,10 @@ async fn outcome(ctx: &RunContext, start: &str, result: &Value) -> Result<RunOut
     };
     let summary = answer["summary"].as_str().unwrap_or_default().to_string();
     Ok(match answer["outcome"].as_str().unwrap_or_default() {
-        "approve" => RunOutcome::Verdict { kind: VerdictKind::Approve, body: summary },
-        "request_changes" => RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: summary },
+        "approve" => RunOutcome::Verdict { kind: VerdictKind::Approve, body: summary, follow_ups: follow_ups(&answer) },
+        "request_changes" => {
+            RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: summary, follow_ups: Vec::new() }
+        }
         "needs_input" => {
             let question = answer["question"].as_str().filter(|q| !q.is_empty()).unwrap_or(&summary).to_string();
             RunOutcome::NeedsInput { question }

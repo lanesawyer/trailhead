@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use trailhead_factory::{CodeHost, Commit, Error, MergeOutcome, NewPr, PrRef, Repo, Result};
+use trailhead_factory::{CodeHost, Commit, Error, MergeOutcome, NewPr, PrRef, PrState, Repo, Result};
 
 #[derive(Debug, Clone)]
 pub struct FakePr {
@@ -10,6 +10,8 @@ pub struct FakePr {
     pub spec: NewPr,
     pub comments: Vec<String>,
     pub merged: bool,
+    /// Closed without merging.
+    pub closed: bool,
 }
 
 #[derive(Default)]
@@ -44,6 +46,11 @@ impl FakeCodeHost {
         self.state.lock().unwrap().starts.get(&(repo.slug(), branch.to_string())).cloned()
     }
 
+    /// A branch's head: a made-up sha per publish, none before the first.
+    pub fn head(&self, repo: &Repo, branch: &str) -> Option<String> {
+        self.state.lock().unwrap().heads.get(&(repo.slug(), branch.to_string())).cloned()
+    }
+
     pub fn prs(&self) -> Vec<FakePr> {
         self.state.lock().unwrap().prs.clone()
     }
@@ -56,6 +63,16 @@ impl FakeCodeHost {
 
     pub fn set_conflicts(&self, on: bool) {
         self.state.lock().unwrap().conflicts = on;
+    }
+
+    /// Closes a PR without merging it, as a person would on GitHub.
+    pub fn close(&self, pr: &PrRef) {
+        self.find(pr, |p, _| p.closed = true).unwrap();
+    }
+
+    /// The commit a merged PR became: made up from its number.
+    pub fn merge_commit(pr: &PrRef) -> String {
+        format!("merge-{}", pr.number)
     }
 
     fn find<T>(&self, pr: &PrRef, f: impl FnOnce(&mut FakePr, &State) -> T) -> Result<T> {
@@ -94,7 +111,7 @@ impl CodeHost for FakeCodeHost {
         let number = s.prs.len() as u64 + 1;
         let r =
             PrRef { repo: repo.clone(), number, url: format!("https://example.invalid/{}/pull/{number}", repo.slug()) };
-        s.prs.push(FakePr { pr: r.clone(), spec: pr, comments: Vec::new(), merged: false });
+        s.prs.push(FakePr { pr: r.clone(), spec: pr, comments: Vec::new(), merged: false, closed: false });
         Ok(r)
     }
 
@@ -128,6 +145,14 @@ impl CodeHost for FakeCodeHost {
             }
             p.merged = true;
             MergeOutcome::Merged
+        })
+    }
+
+    async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
+        self.find(pr, |p, _| match (p.merged, p.closed) {
+            (true, _) => PrState::Merged { commit: Some(FakeCodeHost::merge_commit(&p.pr)) },
+            (false, true) => PrState::Closed,
+            _ => PrState::Open,
         })
     }
 }

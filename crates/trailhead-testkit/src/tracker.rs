@@ -28,6 +28,7 @@ struct State {
     agents: HashMap<String, Agent>,
     next: HashMap<String, u32>,
     parents: HashMap<TaskKey, TaskKey>,
+    priorities: HashMap<TaskKey, i64>,
 }
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
@@ -86,6 +87,19 @@ impl FakeTracker {
 
     pub fn task(&self, key: &TaskKey) -> Task {
         self.state.lock().unwrap().tasks[key].clone()
+    }
+
+    /// Every task in `project`, oldest first.
+    pub fn tasks_in(&self, project: &str) -> Vec<Task> {
+        let s = self.state.lock().unwrap();
+        let mut tasks: Vec<Task> = s.tasks.values().filter(|t| t.project == project).cloned().collect();
+        tasks.sort_by_key(|t| t.key.0.rsplit_once('-').and_then(|(_, n)| n.parse::<u32>().ok()));
+        tasks
+    }
+
+    /// The priority a task was filed with, if it was given one.
+    pub fn priority(&self, key: &TaskKey) -> Option<i64> {
+        self.state.lock().unwrap().priorities.get(key).copied()
     }
 
     pub fn comments(&self, key: &TaskKey) -> Vec<FakeComment> {
@@ -289,6 +303,17 @@ impl Tracker for FakeTracker {
         })
     }
 
+    async fn reopen(&self, task: &TaskKey) -> Result<()> {
+        self.write(task, |t, _| {
+            if t.status != Status::InReview {
+                return Err(Error::Conflict(format!("{} isn't in review", t.key.0)));
+            }
+            t.holder = None;
+            t.status = Status::Open;
+            Ok(())
+        })
+    }
+
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()> {
         self.write(task, |t, _| {
             if t.status != Status::InReview {
@@ -331,6 +356,34 @@ impl Tracker for FakeTracker {
         })?;
         self.comment(task, "handoff", handoff);
         Ok(())
+    }
+
+    async fn create_task(
+        &self,
+        project: &str,
+        title: &str,
+        description: &str,
+        priority: Option<i64>,
+    ) -> Result<TaskKey> {
+        self.check_live()?;
+        let key = self.add_task(project, title, description);
+        if let Some(p) = priority {
+            self.state.lock().unwrap().priorities.insert(key.clone(), p);
+        }
+        Ok(key)
+    }
+
+    async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
+        self.check_live()?;
+        let s = self.state.lock().unwrap();
+        Ok(s.tasks
+            .values()
+            .find(|t| {
+                t.project == project
+                    && !matches!(t.status, Status::Done | Status::Cancelled)
+                    && t.title.trim().eq_ignore_ascii_case(title.trim())
+            })
+            .map(|t| t.key.clone()))
     }
 
     async fn create_sub_agent(&self, name: &str, _project: &str, _ttl: Duration) -> Result<Credential> {

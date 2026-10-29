@@ -51,6 +51,7 @@ impl Script {
 pub struct ScriptedHarness {
     scripts: Mutex<HashMap<Role, Vec<Script>>>,
     contexts: Mutex<Vec<RunContext>>,
+    feedbacks: Mutex<Vec<Feedback>>,
 }
 
 impl ScriptedHarness {
@@ -61,6 +62,11 @@ impl ScriptedHarness {
     pub fn push(&self, role: Role, script: Script) -> &Self {
         self.scripts.lock().unwrap().entry(role).or_default().push(script);
         self
+    }
+
+    /// The feedback of every resumed run, oldest first.
+    pub fn feedbacks(&self) -> Vec<Feedback> {
+        self.feedbacks.lock().unwrap().clone()
     }
 
     /// Every context a run was started with.
@@ -99,7 +105,8 @@ impl Harness for ScriptedHarness {
         Ok(script.outcome)
     }
 
-    async fn resume(&self, ctx: RunContext, _feedback: Feedback, events: EventSink) -> Result<RunOutcome> {
+    async fn resume(&self, ctx: RunContext, feedback: Feedback, events: EventSink) -> Result<RunOutcome> {
+        self.feedbacks.lock().unwrap().push(feedback);
         self.run(ctx, events).await
     }
 }

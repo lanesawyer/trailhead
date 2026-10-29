@@ -194,6 +194,10 @@ impl Tracker for RestTracker {
         self.patch(key, json!({ "status": "in_review" })).await
     }
 
+    async fn reopen(&self, key: &TaskKey) -> Result<()> {
+        self.patch(key, json!({ "status": "open" })).await
+    }
+
     async fn record_verdict(&self, key: &TaskKey, verdict: &Verdict) -> Result<()> {
         let kind = match verdict.kind {
             VerdictKind::Approve => "approve",
@@ -214,6 +218,32 @@ impl Tracker for RestTracker {
     async fn finish(&self, key: &TaskKey, handoff: &str) -> Result<()> {
         self.comment(key, json!({ "kind": "handoff", "body": handoff })).await?;
         self.patch(key, json!({ "status": "done" })).await
+    }
+
+    async fn create_task(
+        &self,
+        project: &str,
+        title: &str,
+        description: &str,
+        priority: Option<i64>,
+    ) -> Result<TaskKey> {
+        let body = json!({ "project": project, "title": title, "description": description, "priority": priority });
+        let created = self.post("/tasks", body).await?;
+        let task = created.get("task").unwrap_or(&created);
+        let key = task["key"].as_str().ok_or_else(|| Error::Other(format!("created task without a key: {created}")))?;
+        Ok(TaskKey(key.to_string()))
+    }
+
+    async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
+        let query = [("project", project), ("limit", "1000")];
+        let tasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
+        let wanted = title.trim();
+        Ok(tasks
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| t["title"].as_str().is_some_and(|x| x.trim().eq_ignore_ascii_case(wanted)))
+            .and_then(|t| t["key"].as_str().map(|k| TaskKey(k.to_string()))))
     }
 
     async fn create_sub_agent(&self, _: &str, _: &str, _: Duration) -> Result<Credential> {

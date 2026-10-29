@@ -128,7 +128,7 @@ fn validate_priority(p: i64) -> Result<()> {
 }
 
 /// Agents may only finish work through review when the project requires it, and
-/// only a human (or a delegated reviewer who doesn't hold the task) can approve.
+/// only a human (or a delegated reviewer who didn't do the work) can approve.
 async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
     let finishes = to == Status::Done || to == Status::Approved;
     if !finishes || tx.ctx.is_human() {
@@ -137,12 +137,29 @@ async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
     let project = load_project(&tx.conn, tx.ctx.workspace_id, &task.project_id.to_string(), true).await?;
     let in_review = matches!(task.status, Status::InReview | Status::Approved);
     let gated = to == Status::Approved || in_review || project.require_review;
-    // A delegated reviewer approves like a human would, but not work it holds.
+    // A delegated reviewer approves like a human would, but not work it did: the
+    // claim is released on the way to review, so the event log says who did it.
     if tx.ctx.agent_id.is_some_and(|a| project.reviewers.contains(&a)) {
-        let holds = live_claim(&tx.conn, task.id, tx.now).await?.is_some_and(|c| c.holder_id == tx.ctx.actor_id());
-        return if gated && holds { Err(Error::ReviewRequired) } else { Ok(()) };
+        return if in_review && did_work(tx, task).await? { Err(Error::ReviewRequired) } else { Ok(()) };
     }
     if gated { Err(Error::ReviewRequired) } else { Ok(()) }
+}
+
+/// Whether the acting agent claimed the task or sent it to review.
+async fn did_work(tx: &Tx, task: &Task) -> Result<bool> {
+    let me = tx.ctx.actor_id().to_string();
+    let mut rows = tx
+        .conn
+        .query(
+            "SELECT 1 FROM events WHERE task_id = ?1 AND actor_id = ?2 AND undoes IS NULL AND (
+                 kind = 'claim.acquired'
+                 OR (entity = 'task' AND json_extract(after, '$.status') = 'in_review'
+                     AND COALESCE(json_extract(before, '$.status'), '') <> 'in_review'))
+             LIMIT 1",
+            libsql::params![task.id.to_string(), me],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 /// Agents can't touch a task another actor holds. Humans can, so they can always

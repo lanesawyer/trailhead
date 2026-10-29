@@ -1,6 +1,7 @@
 //! MCP at `/mcp` for agents without a shell. Tools mirror the CLI and answer in
 //! the same terse one-line-per-task text, because agents pay for every token.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -150,12 +151,34 @@ fn project_text(p: &Project) -> String {
     format!("{}\n\n{brief}", project_line(p))
 }
 
-fn comment_line(c: &Comment) -> String {
-    let mut tags = c.kind.to_string();
-    if c.kind == CommentKind::Question {
-        tags.push_str(if c.resolved_at.is_some() { ", resolved" } else { ", open" });
+/// `2026-10-29 14:03 UTC`, the server having no local zone.
+fn short_time(ts: Timestamp) -> String {
+    ts.strftime("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+/// Same shape as the CLI's comment line, with the time in UTC.
+fn comment_line(c: &Comment, names: &dyn Fn(Uuid) -> String) -> String {
+    let mut tags = vec![c.kind.to_string()];
+    if let Some(to) = c.addressed_to {
+        tags.push(format!("to {}", names(to)));
     }
-    format!("[{tags}] id {}: {}", c.id, c.body)
+    if c.kind == CommentKind::Question {
+        tags.push(if c.resolved_at.is_some() { "resolved".into() } else { "open".into() });
+    }
+    if let Some(v) = c.verdict {
+        tags.push(v.to_string().replace('_', " "));
+    }
+    if let Some(m) = &c.model {
+        tags.push(m.clone());
+    }
+    format!(
+        "[{}] {} {}: {}\n    id {}",
+        tags.join(", "),
+        short_time(c.created_at),
+        names(c.author_id),
+        c.body.replace('\n', "\n    "),
+        c.id
+    )
 }
 
 /// "until <time>", or "since <time>, no expiry" for a claim that never lapses.
@@ -166,11 +189,11 @@ fn lease(c: &Claim) -> String {
     }
 }
 
-fn detail_text(d: &TaskDetail) -> String {
+fn detail_text(d: &TaskDetail, names: &dyn Fn(Uuid) -> String) -> String {
     let t = &d.task;
     let mut out = vec![task_line(t)];
     if let Some(c) = &d.claim {
-        out.push(format!("claimed by {} {}", c.holder_id, lease(c)));
+        out.push(format!("claimed by {} {}", names(c.holder_id), lease(c)));
     }
     if !d.blocked_by.is_empty() {
         out.push(format!("blocked by {}", d.blocked_by.join(", ")));
@@ -187,7 +210,7 @@ fn detail_text(d: &TaskDetail) -> String {
     }
     if !d.comments.is_empty() {
         out.push(String::new());
-        out.extend(d.comments.iter().map(comment_line));
+        out.extend(d.comments.iter().map(|c| comment_line(c, names)));
     }
     out.join("\n")
 }
@@ -328,9 +351,8 @@ pub struct CommentArgs {
     verdict: Option<String>,
     /// For a review, optional: the model that reviewed.
     model: Option<String>,
-    /// User or agent id the comment is for.
-    #[schemars(with = "Option<String>")]
-    addressed_to: Option<Uuid>,
+    /// Who the comment is for: a user or agent name as `show` prints it (`lane`, `claude/openapi`), or an id.
+    addressed_to: Option<String>,
     /// Optional. Retrying with the same key and arguments returns the first call's
     /// result instead of doing it twice. Keys last 24 hours.
     #[serde(default, skip_serializing)]
@@ -417,6 +439,40 @@ impl TrailheadMcp {
         }
     }
 
+    /// The names `show` can print: the acting user and the workspace's agents. Only cosmetic, so a lookup that fails
+    /// leaves its names out rather than failing the call.
+    async fn known_names(&self, ctx: &Ctx) -> HashMap<Uuid, String> {
+        let mut known = HashMap::new();
+        match self.state.store.get_user(ctx, ctx.user_id).await {
+            Ok(u) => {
+                known.insert(u.id, u.name);
+            }
+            Err(e) => tracing::warn!(error = %e, "couldn't look up the user's name"),
+        }
+        match self.state.store.list_agents(ctx).await {
+            Ok(agents) => known.extend(agents.into_iter().map(|a| (a.id, a.name))),
+            Err(e) => tracing::warn!(error = %e, "couldn't look up agent names"),
+        }
+        known
+    }
+
+    /// An id, or the user or agent with a name `show` prints.
+    async fn resolve_name(&self, ctx: &Ctx, name: &str) -> trailhead_core::Result<Uuid> {
+        if let Ok(id) = name.parse::<Uuid>() {
+            return Ok(id);
+        }
+        let user = self.state.store.get_user(ctx, ctx.user_id).await?;
+        if user.name == name {
+            return Ok(user.id);
+        }
+        let agents = self.state.store.list_agents(ctx).await?;
+        agents
+            .into_iter()
+            .find(|a| a.name == name)
+            .map(|a| a.id)
+            .ok_or_else(|| Error::NotFound(format!("no user or agent {name}")))
+    }
+
     async fn do_create_task(&self, ctx: &Ctx, a: CreateArgs) -> Result<CallToolResult, ErrorData> {
         let due_at = attempt!(parse_opt_at(a.due_at.as_deref()));
         let scheduled_on = attempt!(parse_opt_date(a.scheduled_on.as_deref()));
@@ -449,7 +505,11 @@ impl TrailheadMcp {
     async fn do_comment(&self, ctx: &Ctx, a: CommentArgs) -> Result<CallToolResult, ErrorData> {
         let kind = attempt!(a.kind.as_deref().map(str::parse::<CommentKind>).transpose()).unwrap_or(CommentKind::Note);
         let verdict = attempt!(a.verdict.as_deref().map(str::parse::<Verdict>).transpose());
-        let new = NewComment { kind, body: a.body, addressed_to: a.addressed_to, verdict, model: a.model };
+        let addressed_to = match a.addressed_to.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            None => None,
+            Some(to) => Some(attempt!(self.resolve_name(ctx, to).await)),
+        };
+        let new = NewComment { kind, body: a.body, addressed_to, verdict, model: a.model };
         let c = attempt!(self.state.store.add_comment(ctx, &a.task, new).await);
         text(format!("{} {}", c.kind, c.id))
     }
@@ -560,7 +620,10 @@ impl TrailheadMcp {
         Parameters(a): Parameters<TaskArg>,
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
-        text(detail_text(&attempt!(self.state.store.task_detail(&ctx, &a.task).await)))
+        let detail = attempt!(self.state.store.task_detail(&ctx, &a.task).await);
+        let known = self.known_names(&ctx).await;
+        let names = |id: Uuid| known.get(&id).cloned().unwrap_or_else(|| id.to_string().chars().take(8).collect());
+        text(detail_text(&detail, &names))
     }
 
     #[tool(

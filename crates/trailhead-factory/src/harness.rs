@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{CheckpointId, Commit, Endpoint, HumanContext, ModelId, Result, Role, TaskKey, Usage};
+use crate::{CheckResult, CheckpointId, Commit, Endpoint, HumanContext, ModelId, Result, Role, TaskKey, Usage};
 
 /// What the agent is asked to do: the task's spec as Trailhead holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +30,9 @@ pub struct RunContext {
     pub max_steps: u32,
     /// For reviewers: the change under review. Never the author's transcript.
     pub diff: Option<String>,
+    /// For reviewers: the checks the worker already ran in its own sandbox, which the reviewer shouldn't rerun.
+    #[serde(default)]
+    pub checks: Vec<CheckResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +45,17 @@ pub struct Feedback {
 pub enum VerdictKind {
     Approve,
     RequestChanges,
+}
+
+/// Something a reviewer noticed that shouldn't hold up the change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUp {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    /// Trailhead's scale, 1 (most urgent) to 4; the project's default when absent.
+    #[serde(default)]
+    pub priority: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +77,9 @@ pub enum RunOutcome {
     Verdict {
         kind: VerdictKind,
         body: String,
+        /// Non-blocking suggestions, to be filed as tasks when the review approves.
+        #[serde(default)]
+        follow_ups: Vec<FollowUp>,
     },
     NeedsInput {
         question: String,
@@ -111,4 +128,67 @@ pub type EventSink = mpsc::UnboundedSender<RunEvent>;
 pub trait Harness: Send + Sync {
     async fn run(&self, ctx: RunContext, events: EventSink) -> Result<RunOutcome>;
     async fn resume(&self, ctx: RunContext, feedback: Feedback, events: EventSink) -> Result<RunOutcome>;
+}
+
+/// Whether Claude Code's error text is trouble with the API call (a dropped connection, a timeout or no response,
+/// overload, a server error) and not with the task: a resume can get past it, and it doesn't count as a failed
+/// attempt. Not auth, billing or invalid-request errors. One matcher, so resuming and attempt counting agree.
+pub fn is_transient_api_error(text: &str) -> bool {
+    // The label leads the text, as Claude Code writes it (maybe after `claude: `); a free-text reason that only
+    // mentions an API error somewhere isn't API trouble.
+    let Some(at) = text.find("API Error").filter(|at| matches!(text[..*at].trim(), "" | "claude:")) else {
+        return false;
+    };
+    const PHRASES: &[&str] = &[
+        "No response from API",
+        "ECONNRESET",
+        "ETIMEDOUT",
+        "EPIPE",
+        "Connection error",
+        "Connection reset",
+        "connection reset",
+        "Connection closed",
+        "connection closed",
+        "socket hang up",
+        "socket closed",
+        "timed out",
+        "Request timeout",
+        "Overloaded",
+        "overloaded",
+    ];
+    if PHRASES.iter().any(|p| text[at..].contains(p)) {
+        return true;
+    }
+    // The status right after the label, as in `API Error: 503 {...}` or `API Error (529 ...)`; as a whole number, so
+    // that `max_tokens: 5000` further along isn't taken for a 500.
+    let status = text[at + "API Error".len()..].trim_start_matches([':', '(', ' ']);
+    let digits = status.bytes().take_while(u8::is_ascii_digit).count();
+    digits == 3 && status.starts_with('5')
+}
+
+#[cfg(test)]
+mod api_error_tests {
+    use super::is_transient_api_error;
+
+    #[test]
+    fn matches_api_trouble_not_the_tasks() {
+        for yes in [
+            "claude: API Error: No response from API (waited 3m)",
+            "API Error: 503 {\"type\":\"error\"}",
+            "API Error (529 overloaded_error)",
+            "API Error: Request timed out",
+            "API Error: ECONNRESET",
+        ] {
+            assert!(is_transient_api_error(yes), "{yes}");
+        }
+        for no in [
+            "API Error: 400 invalid request, max_tokens: 5000",
+            "API Error: 401 authentication failed",
+            "I got a 503 from the test server",
+            "the build timed out",
+            "Couldn't fix the API Error handling; the test run timed out",
+        ] {
+            assert!(!is_transient_api_error(no), "{no}");
+        }
+    }
 }

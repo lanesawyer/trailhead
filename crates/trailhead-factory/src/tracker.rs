@@ -62,11 +62,71 @@ pub struct RunUpdate {
     /// Why the last attempt failed, which the next attempt is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// Runs that failed before their agent started (TRAIL-159). They don't count as attempts, but each revoked a
+    /// sub-agent, so a retry's name carries this count to stay unique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u32>,
+    /// Runs in a row that failed on the infrastructure, before or after the agent started (TRAIL-172). They don't
+    /// count as attempts; `max_infra_failures` caps them. Reset when an agent ends a run, or when the cap parks the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infra_failures: Option<u32>,
+    /// The review that last asked for changes, which the rework on the PR branch is told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_requested: Option<ChangesRequested>,
+    /// The attempt the last review asked to change. `max_attempts` counts the runs after it, so reworks don't use up
+    /// the attempts of the task as a whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_base: Option<u32>,
+    /// How the task's PR was merged, once it has been.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged: Option<Merged>,
+}
+
+/// A merged PR: who merged it, which PR, and the commit it became.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Merged {
+    pub by: MergedBy,
+    pub pr: PrRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergedBy {
+    /// Someone merged it outside the factory, such as Lane on GitHub.
+    Human,
+    /// The control plane merged it, once the tier's gates passed.
+    Merger,
+}
+
+/// A review that asked for changes: who, what they said, and the attempt whose PR it reviewed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangesRequested {
+    pub reviewer: String,
+    pub body: String,
+    #[serde(default)]
+    pub attempt: u32,
 }
 
 impl RunUpdate {
     pub fn merge(&mut self, update: RunUpdate) {
-        let RunUpdate { attempt, sandbox, host, profile, pr, review_rounds, reviewed, spend, failure } = update;
+        let RunUpdate {
+            attempt,
+            sandbox,
+            host,
+            profile,
+            pr,
+            review_rounds,
+            reviewed,
+            spend,
+            failure,
+            retries,
+            infra_failures,
+            changes_requested,
+            attempt_base,
+            merged,
+        } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
         self.host = host.or(self.host.take());
@@ -76,6 +136,17 @@ impl RunUpdate {
         self.reviewed = reviewed.or(self.reviewed.take());
         self.spend = spend.or(self.spend.take());
         self.failure = failure.or(self.failure.take());
+        self.retries = retries.or(self.retries.take());
+        self.infra_failures = infra_failures.or(self.infra_failures.take());
+        self.changes_requested = changes_requested.or(self.changes_requested.take());
+        self.attempt_base = attempt_base.or(self.attempt_base.take());
+        self.merged = merged.or(self.merged.take());
+    }
+
+    /// The review the next run has to address: the last one that asked for changes, unless a later review has
+    /// since finished on another attempt.
+    pub fn pending_changes(&self) -> Option<&ChangesRequested> {
+        self.changes_requested.as_ref().filter(|c| self.reviewed.is_none_or(|r| r == c.attempt))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -157,11 +228,23 @@ pub trait Tracker: Send + Sync {
     async fn release(&self, task: &TaskKey) -> Result<()>;
     async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()>;
     async fn request_review(&self, task: &TaskKey) -> Result<()>;
+    /// Sends a task in review back to the queue, unheld, for a rework run to pick up.
+    async fn reopen(&self, task: &TaskKey) -> Result<()>;
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()>;
     async fn ask(&self, task: &TaskKey, question: &str) -> Result<()>;
     /// A note on the task, such as why an attempt failed, without changing it.
     async fn note(&self, task: &TaskKey, body: &str) -> Result<()>;
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()>;
+    /// Files a new task in `project`, not under the factory's queue, and returns its key.
+    async fn create_task(
+        &self,
+        project: &str,
+        title: &str,
+        description: &str,
+        priority: Option<i64>,
+    ) -> Result<TaskKey>;
+    /// An unfinished task in `project` with this title (ignoring case and surrounding space), if there is one.
+    async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>>;
 
     /// Creates (or reuses) a project-scoped sub-agent and a fresh token for it that expires after `ttl`,
     /// in case revoking it is missed.

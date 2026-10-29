@@ -107,6 +107,7 @@ async fn daemon_in_a_sprite() {
             let prepare = PrepareRequest {
                 repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
                 base_branch: "main".into(),
+                branch: None,
                 setup: Some(Check { name: "setup".into(), command: "test -f Cargo.toml".into() }),
             };
             let t = Instant::now();
@@ -147,10 +148,12 @@ async fn daemon_in_a_sprite() {
                 base_branch: "main".into(),
                 branch: "factory/live-1".into(),
                 pr: None,
+                feedback: None,
                 model: ModelId("claude-sonnet-4-5".into()),
                 endpoint: ModelEndpoint { base_url: worker_model() },
                 max_steps: 1,
                 required_checks: Vec::new(),
+                worker_checks: Vec::new(),
                 blocked_hosts: vec!["github.com".into()],
                 allowed_hosts: vec!["api.anthropic.com".into()],
                 credential: cred,
@@ -204,10 +207,12 @@ async fn daemon_in_a_sprite() {
                 base_branch: "main".into(),
                 branch: "spike/m0-github-connector".into(),
                 pr: Some(pr),
+                feedback: None,
                 model: ModelId("claude-opus-4-5".into()),
                 endpoint: ModelEndpoint { base_url: DEAD_MODEL.into() },
                 max_steps: 1,
                 required_checks: Vec::new(),
+                worker_checks: Vec::new(),
                 blocked_hosts: Vec::new(),
                 allowed_hosts: Vec::new(),
                 credential: cred,

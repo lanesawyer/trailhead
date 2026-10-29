@@ -18,7 +18,7 @@ pub enum Error {
     BlockedBy(Vec<String>),
     #[error("cannot move from {from} to {to}")]
     InvalidTransition { from: Status, to: Status },
-    #[error("this needs human review before it can be done")]
+    #[error("this needs human review before it can be approved or done")]
     ReviewRequired,
     #[error("dependency would create a cycle")]
     DependencyCycle,

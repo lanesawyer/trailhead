@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Credential, Endpoint, Error, EventSink, ModelId, PrRef, Repo, Result, Role, RunEvent, SandboxId, TaskSpec, Usage,
-    Verdict,
+    Credential, Endpoint, Error, EventSink, Feedback, ModelId, PrRef, Repo, Result, Role, RunEvent, SandboxId,
+    TaskSpec, Usage, Verdict,
 };
 
 /// A named check and the shell command that runs it in the repo (`docs/factory/sandbox.md`).
@@ -24,6 +24,9 @@ pub struct Check {
 pub struct PrepareRequest {
     pub repo: Repo,
     pub base_branch: String,
+    /// A branch to check out at its remote head instead of staying on the base: a rework's PR branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub setup: Option<Check>,
 }
 
@@ -38,11 +41,17 @@ pub struct RunRequest {
     /// The branch a worker publishes to; a reviewer reads the PR instead.
     pub branch: String,
     pub pr: Option<PrRef>,
+    /// For a rework: the review that asked for changes, which the worker is told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<Feedback>,
     pub model: ModelId,
     pub endpoint: Endpoint,
     pub max_steps: u32,
     /// The checks that must pass before a worker opens a PR.
     pub required_checks: Vec<Check>,
+    /// For a reviewer: the worker's check results, passed on so it needn't build or test.
+    #[serde(default)]
+    pub worker_checks: Vec<CheckResult>,
     /// Hosts that egress was just narrowed to exclude. Policy changes take effect a moment after the call that makes
     /// them, so the daemon waits until these stop resolving before the agent starts.
     pub blocked_hosts: Vec<String>,

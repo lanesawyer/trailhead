@@ -24,6 +24,7 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, SecretKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
+use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory};
 use trailhead_core::{Ctx, Store};
@@ -31,6 +32,8 @@ use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
 use trailhead_factory::{Compute, ComputeConfig, FactoryConfig};
 use trailhead_provider_anthropic::Anthropic;
 use trailhead_server::creds::{Cred, CredStore};
+
+mod wake;
 
 /// The agent the control plane acts as; sandboxes get its sub-agents.
 const AGENT: &str = "factory";
@@ -62,6 +65,10 @@ struct Opts {
     /// Needed when sandboxes run on Sprites.
     #[arg(long, env = "SPRITES_TOKEN", hide_env_values = true)]
     sprites_token: Option<String>,
+    /// Lets the control plane see when a task's PR is merged or closed, to finish or park the task. Read access to
+    /// the repo's pull requests is enough. Without it, merges are not noticed and `trailhead done` stays manual.
+    #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
+    github_token: Option<String>,
     /// How often to look for ready work.
     #[arg(long, default_value_t = 30)]
     poll_secs: u64,
@@ -153,7 +160,14 @@ async fn factory_ctx(store: &Store, create: bool) -> Result<Ctx, String> {
     store.agent_ctx(ws.id, agent.id).await.map_err(|e| e.to_string())
 }
 
-async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File), String> {
+/// What the run loop's wake-up watcher reads the project's changes with.
+struct Wake {
+    store: Arc<Store>,
+    ctx: Ctx,
+    project: String,
+}
+
+async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String> {
     let config = std::fs::read_to_string(&opts.config).map_err(|e| format!("{}: {e}", opts.config.display()))?;
     let mut config = FactoryConfig::parse(&config).map_err(|e| e.to_string())?;
     if opts.claude_oauth_token.is_some() {
@@ -170,7 +184,8 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let store = Arc::new(Store::open_local(&db).await.map_err(|e| e.to_string())?);
-    let tracker = CoreTracker::new(store.clone(), factory_ctx(&store, opts.create_agent).await?, AGENT);
+    let ctx = factory_ctx(&store, opts.create_agent).await?;
+    let tracker = CoreTracker::new(store.clone(), ctx.clone(), AGENT);
     let (key, master) = load_or_create_keys(&paths.creds())?;
 
     let endpoint = Endpoint::builder(presets::N0)
@@ -186,9 +201,17 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File), String> {
         Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, daemon.peers())).spawn();
     tracing::info!(endpoint = %endpoint.id(), project = %config.repo.project, repo = %config.repo.repo().slug(), "factory ready");
 
-    let factory =
+    let mut factory =
         Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon);
-    Ok((Arc::new(factory), tunnel, lock))
+    match &opts.github_token {
+        Some(token) => {
+            factory =
+                factory.with_codehost(Arc::new(GitHub::new(trailhead_codehost_github::API_URL, Some(token.clone()))))
+        }
+        None => tracing::warn!("no GITHUB_TOKEN: merged and closed PRs are not noticed; finish merged tasks by hand"),
+    }
+    let wake = Wake { store, ctx, project: factory.config.repo.project.clone() };
+    Ok((Arc::new(factory), tunnel, lock, wake))
 }
 
 /// The sandboxes' `Compute`, and where the daemon lives in them.
@@ -244,7 +267,7 @@ fn check_result(failed: usize) -> Result<(), String> {
 async fn main_inner(cli: Cli) -> Result<(), String> {
     match cli.cmd {
         Cmd::Check(opts) => {
-            let (factory, tunnel, _lock) = setup(&opts).await?;
+            let (factory, tunnel, _lock, _) = setup(&opts).await?;
             let project = &factory.config.repo.project;
             let queue = factory.config.repo.queue.clone().map(trailhead_factory::TaskKey);
             let mut failed = 0;
@@ -278,12 +301,21 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
             check_result(failed)
         }
         Cmd::Run(opts) => {
-            let (factory, tunnel, _lock) = setup(&opts).await?;
+            let (factory, tunnel, _lock, source) = setup(&opts).await?;
+            let wake = Arc::new(Notify::new());
+            let watcher = tokio::spawn(wake::wake_on_changes(
+                source.store,
+                source.ctx,
+                source.project,
+                wake.clone(),
+                wake::INTERVAL,
+            ));
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!("stopping; runs in flight are requeued on the next start");
             };
-            let ran = factory.run(Arc::new(Notify::new()), Duration::from_secs(opts.poll_secs), shutdown).await;
+            let ran = factory.run(wake, Duration::from_secs(opts.poll_secs), shutdown).await;
+            watcher.abort();
             tunnel.shutdown().await.map_err(|e| e.to_string())?;
             ran.map_err(|e| e.to_string())
         }

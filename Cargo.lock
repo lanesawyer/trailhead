@@ -5136,6 +5136,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "trailhead-codehost-github",
  "trailhead-compute-docker",
  "trailhead-compute-sprites",
  "trailhead-control",

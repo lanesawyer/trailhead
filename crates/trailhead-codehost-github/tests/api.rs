@@ -12,7 +12,7 @@ use axum::{Json, Router};
 use base64::Engine;
 use serde_json::{Value, json};
 use trailhead_codehost_github::{GitHub, Identity};
-use trailhead_factory::{CodeHost, Commit, Error, FileChange, MergeOutcome, NewPr, Repo};
+use trailhead_factory::{CodeHost, Commit, Error, FileChange, MergeOutcome, NewPr, PrRef, PrState, Repo};
 
 #[derive(Default)]
 struct Git {
@@ -146,7 +146,7 @@ async fn pulls(State(g): State<Shared>, Json(b): Json<Value>) -> Response {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "message": msg }))).into_response();
     }
     let number = g.prs.len() as u64 + 1;
-    let pr = json!({ "number": number, "html_url": format!("https://github.test/pull/{number}"), "head": b["head"], "base": b["base"] });
+    let pr = json!({ "number": number, "html_url": format!("https://github.test/pull/{number}"), "head": b["head"], "base": b["base"], "state": "open", "merged": false });
     g.prs.push(pr.clone());
     (StatusCode::CREATED, Json(pr)).into_response()
 }
@@ -195,12 +195,28 @@ async fn comment(
     (StatusCode::CREATED, Json(json!({}))).into_response()
 }
 
-async fn merge(State(g): State<Shared>, Json(b): Json<Value>) -> Response {
+async fn get_pull(State(g): State<Shared>, Path((_, _, n)): Path<(String, String, u64)>) -> Response {
+    match g.lock().unwrap().prs.get(n as usize - 1) {
+        Some(pr) => Json(pr.clone()).into_response(),
+        None => not_found(),
+    }
+}
+
+async fn merge(
+    State(g): State<Shared>,
+    Path((_, _, n)): Path<(String, String, u64)>,
+    Json(b): Json<Value>,
+) -> Response {
     assert_eq!(b["merge_method"], "squash");
-    if g.lock().unwrap().unmergeable {
+    let mut g = g.lock().unwrap();
+    if g.unmergeable {
         return (StatusCode::METHOD_NOT_ALLOWED, Json(json!({ "message": "Pull Request is not mergeable" })))
             .into_response();
     }
+    let pr = &mut g.prs[n as usize - 1];
+    pr["state"] = json!("closed");
+    pr["merged"] = json!(true);
+    pr["merge_commit_sha"] = json!(format!("squash{n}"));
     Json(json!({ "merged": true })).into_response()
 }
 
@@ -215,6 +231,7 @@ async fn serve() -> (Shared, String) {
         .route("/repos/{o}/{r}/git/blobs", post(create_blob))
         .route("/repos/{o}/{r}/git/trees", post(create_tree))
         .route("/repos/{o}/{r}/pulls", post(pulls).get(list_pulls))
+        .route("/repos/{o}/{r}/pulls/{n}", get(get_pull))
         .route("/repos/{o}/{r}/pulls/{n}/files", get(pull_files))
         .route("/repos/{o}/{r}/pulls/{n}/merge", put(merge))
         .route("/repos/{o}/{r}/issues/{n}/comments", post(comment))
@@ -342,6 +359,32 @@ async fn prs_open_once_and_take_reviews_and_merges() {
     assert_eq!(gh.merge(&pr).await.unwrap(), MergeOutcome::Merged);
     git.lock().unwrap().unmergeable = true;
     assert_eq!(gh.merge(&pr).await.unwrap(), MergeOutcome::Conflict);
+}
+
+#[tokio::test]
+async fn pr_state_tells_open_from_merged_from_closed() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let main = head(&git, "main");
+    let mut prs = Vec::new();
+    for n in 1..=3 {
+        let branch = format!("factory/trail-{n}");
+        let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))] };
+        gh.publish(&repo(), &main, &branch, &[commit]).await.unwrap();
+        let new = NewPr { branch, base: "main".into(), title: "t".into(), body: "b".into() };
+        prs.push(gh.open_pr(&repo(), new).await.unwrap());
+    }
+    assert_eq!(gh.pr_state(&prs[0]).await.unwrap(), PrState::Open);
+
+    gh.merge(&prs[1]).await.unwrap();
+    assert_eq!(gh.pr_state(&prs[1]).await.unwrap(), PrState::Merged { commit: Some("squash2".into()) });
+
+    // Closed without merging: GitHub says `closed` and `merged: false`.
+    git.lock().unwrap().prs[2]["state"] = json!("closed");
+    assert_eq!(gh.pr_state(&prs[2]).await.unwrap(), PrState::Closed);
+
+    let gone = PrRef { number: 99, ..prs[0].clone() };
+    assert!(matches!(gh.pr_state(&gone).await, Err(Error::NotFound(_))));
 }
 
 #[tokio::test]
