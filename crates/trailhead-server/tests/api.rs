@@ -589,3 +589,72 @@ async fn review_comments_carry_a_typed_verdict() {
     assert_eq!(comments.len(), 1);
     assert_eq!(comments[0]["kind"], "review");
 }
+
+#[tokio::test]
+async fn grade_is_set_cleared_and_filtered_over_http() {
+    let api = Api::new().await;
+    api.seed().await;
+    let r = api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "graded", "grade": 3}))).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["grade"], 3);
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "plain"}))).await;
+    let r = api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "bad", "grade": 9}))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+
+    let r = api.as_human("PATCH", "/v1/tasks/AUTH-2", Some(json!({"grade": 2}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["grade"], 2);
+    // Omitting grade leaves it alone; null clears it.
+    let r = api.as_human("PATCH", "/v1/tasks/AUTH-2", Some(json!({"title": "renamed"}))).await;
+    assert_eq!(r.body["grade"], 2);
+    let r = api.as_human("PATCH", "/v1/tasks/AUTH-2", Some(json!({"grade": null}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body["grade"].is_null(), "{}", r.body);
+    let r = api.as_human("PATCH", "/v1/tasks/AUTH-2", Some(json!({"grade": 7}))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+
+    let keys = |r: &Res| -> Vec<String> {
+        r.body.as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap().to_string()).collect()
+    };
+    for path in ["/v1/tasks", "/v1/ready"] {
+        let r = api.as_human("GET", &format!("{path}?grade=3"), None).await;
+        assert_eq!(keys(&r), ["AUTH-1"], "{path}");
+        let r = api.as_human("GET", &format!("{path}?grade=graded"), None).await;
+        assert_eq!(keys(&r), ["AUTH-1"], "{path}");
+        let r = api.as_human("GET", &format!("{path}?grade=ungraded"), None).await;
+        assert_eq!(keys(&r), ["AUTH-2"], "{path}");
+        let r = api.as_human("GET", &format!("{path}?grade=nope"), None).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{path}: {}", r.body);
+        let r = api.as_human("GET", &format!("{path}?grade=5"), None).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{path}: {}", r.body);
+    }
+}
+
+#[tokio::test]
+async fn an_agent_cant_set_a_first_grade_or_lower_one() {
+    let api = Api::new().await;
+    api.seed().await;
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "ungraded"}))).await;
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "graded", "grade": 2}))).await;
+    let agent = api.as_human("POST", "/v1/agents", Some(json!({"name": "claude"}))).await;
+    let secret = agent.body["secret"].as_str().unwrap().to_string();
+    let patch = async |task: &str, body: Value| {
+        api.call(Some(&secret), "PATCH", &format!("/v1/tasks/{task}"), Some(body), &[]).await
+    };
+
+    let r = patch("AUTH-1", json!({"grade": 2})).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    assert_eq!(r.body["error"]["code"], "forbidden");
+    let r = api
+        .call(Some(&secret), "POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "x", "grade": 2})), &[])
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+
+    assert_eq!(patch("AUTH-2", json!({"grade": 1})).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(patch("AUTH-2", json!({"grade": null})).await.status, StatusCode::FORBIDDEN);
+    let r = patch("AUTH-2", json!({"grade": 4})).await;
+    assert_eq!(r.status, StatusCode::OK, "an agent may raise a grade: {}", r.body);
+    assert_eq!(r.body["grade"], 4);
+    let r = api.as_human("GET", "/v1/tasks/AUTH-1", None).await;
+    assert!(r.body["task"]["grade"].is_null() && r.body["grade"].is_null(), "{}", r.body);
+}
