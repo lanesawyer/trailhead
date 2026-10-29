@@ -888,7 +888,6 @@ impl Factory {
             Ok(run) => run,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
-        self.setbacks.lock().unwrap().remove(&task.key);
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
         let (spend, reviewed, reviewed_head) = match &run {
@@ -902,6 +901,7 @@ impl Factory {
         self.tracker.revoke_sub_agent(&name).await?;
         match run {
             Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
+                self.setbacks.lock().unwrap().remove(&task.key);
                 if let (Some(raise), Some(mut grade)) = (&verdict.raise_grade, grade)
                     && grade.raise(raise.grade, &raise.reason)
                 {
@@ -922,9 +922,14 @@ impl Factory {
             }
             Run::Report(report, _) => {
                 tracing::warn!(task = %task.key.0, result = ?report.result, "review didn't produce a verdict");
+                // No verdict, no round. The retry count moves the next try's names off this one's revoked sub-agent.
+                let give_back =
+                    RunUpdate { review_rounds: Some(round - 1), retries: Some(retries + 1), ..RunUpdate::default() };
+                self.tracker.report(&task.key, give_back).await?;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
             Run::Breach(reason, _) => {
+                self.setbacks.lock().unwrap().remove(&task.key);
                 tracing::warn!(task = %task.key.0, %reason, "reviewer breached its budget");
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
