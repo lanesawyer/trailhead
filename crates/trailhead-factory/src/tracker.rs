@@ -65,6 +65,10 @@ pub struct RunUpdate {
     /// sub-agent, so a retry's name carries this count to stay unique.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries: Option<u32>,
+    /// Runs in a row that failed on the infrastructure, before or after the agent started (TRAIL-172). They don't
+    /// count as attempts; `max_infra_failures` caps them. Reset when an agent ends a run, or when the cap parks the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infra_failures: Option<u32>,
     /// The review that last asked for changes, which the rework on the PR branch is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_requested: Option<ChangesRequested>,
@@ -96,6 +100,7 @@ impl RunUpdate {
             spend,
             failure,
             retries,
+            infra_failures,
             changes_requested,
             attempt_base,
         } = update;
@@ -109,6 +114,7 @@ impl RunUpdate {
         self.spend = spend.or(self.spend.take());
         self.failure = failure.or(self.failure.take());
         self.retries = retries.or(self.retries.take());
+        self.infra_failures = infra_failures.or(self.infra_failures.take());
         self.changes_requested = changes_requested.or(self.changes_requested.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
     }

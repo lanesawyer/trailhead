@@ -93,6 +93,8 @@ pub struct LocalDaemon {
     cancels: Mutex<HashMap<SandboxId, Arc<Notify>>>,
     prepared: Mutex<Vec<(SandboxId, PrepareRequest)>>,
     requests: Mutex<Vec<RunRequest>>,
+    /// Errors the next runs fail with before the agent does anything, like a lost daemon.
+    run_errors: Mutex<Vec<trailhead_factory::Error>>,
 }
 
 impl LocalDaemon {
@@ -115,6 +117,7 @@ impl LocalDaemon {
             cancels: Mutex::default(),
             prepared: Mutex::default(),
             requests: Mutex::default(),
+            run_errors: Mutex::default(),
         }
     }
 
@@ -141,6 +144,14 @@ impl LocalDaemon {
             failing.remove(name);
         } else {
             failing.insert(name.to_string(), (output.to_string(), Some(times)));
+        }
+    }
+
+    /// Makes the next `times` runs fail with this error, as a daemon the control plane lost would.
+    pub fn fail_runs(&self, times: usize, error: &str) {
+        let mut errors = self.run_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push(trailhead_factory::Error::Other(error.to_string()));
         }
     }
 
@@ -188,6 +199,9 @@ impl Daemon for LocalDaemon {
 
     async fn run(&self, sandbox: &SandboxId, req: RunRequest, events: EventSink) -> Result<RunReport> {
         self.requests.lock().unwrap().push(req.clone());
+        if let Some(error) = self.run_errors.lock().unwrap().pop() {
+            return Err(error);
+        }
         self.runner.run(req, events, self.cancel_handle(sandbox)).await
     }
 

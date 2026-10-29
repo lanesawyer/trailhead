@@ -180,29 +180,8 @@ where you left off, then finish with the structured answer as before.";
 /// An error result from a failed or dropped API call, which resuming can get past: connection resets and timeouts,
 /// overload and server errors. Not auth, billing or invalid-request errors.
 fn is_transient_api_error(result: &Value) -> bool {
-    if result["is_error"] != true {
-        return false;
-    }
-    let text = result["result"].as_str().unwrap_or_default();
-    text.starts_with("API Error")
-        && [
-            "ECONNRESET",
-            "ETIMEDOUT",
-            "EPIPE",
-            "Connection",
-            "connection",
-            "socket",
-            "timed out",
-            "Overloaded",
-            "overloaded",
-            "529",
-            "500",
-            "502",
-            "503",
-            "504",
-        ]
-        .iter()
-        .any(|m| text.contains(m))
+    result["is_error"] == true
+        && trailhead_factory::harness::is_transient_api_error(result["result"].as_str().unwrap_or_default())
 }
 
 #[async_trait]
