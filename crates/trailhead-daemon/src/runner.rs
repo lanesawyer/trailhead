@@ -109,9 +109,19 @@ impl Runner {
             tracker.claim(&req.task.key).await?;
             tracing::info!(task = %key, "claimed");
         }
-        let diff = match &req.pr {
-            Some(pr) if req.role == Role::Reviewer => Some(self.codehost.diff(pr).await?),
-            _ => None,
+        let (diff, title) = match &req.pr {
+            Some(pr) if req.role == Role::Reviewer => {
+                // Only so the reviewer can check it; a review goes ahead without it.
+                let title = match self.codehost.title(pr).await {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        tracing::warn!(task = %key, error = %e, "couldn't read the PR's title");
+                        None
+                    }
+                };
+                (Some(self.codehost.diff(pr).await?), title)
+            }
+            _ => (None, None),
         };
         let ctx = RunContext {
             role: req.role,
@@ -122,6 +132,7 @@ impl Runner {
             max_steps: req.max_steps,
             diff,
             checks: req.worker_checks.clone(),
+            title,
         };
         tracing::info!(task = %key, "agent starting");
         // Where the agent's work starts, which is what it's published on top of.
@@ -190,6 +201,14 @@ impl Runner {
         summary: String,
         retried: &[String],
     ) -> Result<PrRef> {
+        // Checked here as well as in the harness, so no harness can open a PR the changelog would drop.
+        let title = commits
+            .first()
+            .and_then(|c| c.message.lines().next())
+            .filter(|t| {
+                t.strip_suffix(&format!(" [{}]", req.task.key.0)).is_some_and(trailhead_factory::is_conventional)
+            })
+            .map(str::to_string);
         self.codehost.publish(&req.repo, start, &req.branch, &commits).await?;
         let flaky: String =
             retried.iter().map(|name| format!("\n\n⚠️ Check `{name}` failed, then passed when rerun.")).collect();
@@ -205,7 +224,9 @@ impl Runner {
                 let new = NewPr {
                     branch: req.branch.clone(),
                     base: req.base_branch.clone(),
-                    title: format!("{}: {}", req.task.key.0, req.task.title),
+                    title: title.unwrap_or_else(|| {
+                        trailhead_factory::conventional_title(None, &req.task.key, &req.task.title).0
+                    }),
                     body: format!("{summary}{flaky}{}", pr_footer(req, agent)),
                 };
                 self.codehost.open_pr(&req.repo, new).await

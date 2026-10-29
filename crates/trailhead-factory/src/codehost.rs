@@ -83,4 +83,6 @@ pub trait CodeHost: Send + Sync {
     /// Whether the open PR merges cleanly into its base: `Some(false)` when it conflicts, `None` while the host is
     /// still working it out.
     async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>>;
+    /// The PR's current title, which a squash merge takes as its commit subject.
+    async fn title(&self, pr: &PrRef) -> Result<String>;
 }

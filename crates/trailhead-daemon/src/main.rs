@@ -71,6 +71,10 @@ impl CodeHost for NoCodeHost {
     async fn pr_state(&self, _: &PrRef) -> Result<PrState> {
         Err(Error::Forbidden(self.0.clone()))
     }
+
+    async fn title(&self, _: &PrRef) -> Result<String> {
+        Err(Error::Forbidden(self.0.clone()))
+    }
 }
 
 /// GitHub through the Sprite's GitHub connector, found in the gateway's list.

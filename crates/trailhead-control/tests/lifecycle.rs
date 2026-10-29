@@ -6,7 +6,7 @@ use std::sync::Arc;
 use trailhead_control::{Factory, Outcome, Reconciled};
 use trailhead_factory::{
     CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, Role, RunOutcome, SandboxSpec,
-    Status, TaskKey, Tracker, Usd, VerdictKind, label, run_name,
+    Status, TaskKey, Tracker, Usd, VerdictKind, conventional_title, label, run_name,
 };
 use trailhead_testkit::{
     FAKE_BASE, FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness,
@@ -75,7 +75,7 @@ fn rig_with(config: &str) -> Rig {
 fn changes() -> RunOutcome {
     RunOutcome::Changes {
         commits: vec![Commit {
-            message: "feat: greet".into(),
+            message: conventional_title(Some("feat(core): greet"), &TaskKey("TRAIL-1".into()), "").0,
             changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
             merges: vec![],
         }],
@@ -109,6 +109,10 @@ async fn spec_to_reviewed_pr_then_human_merge() {
 
     let opened = &r.codehost.prs()[0];
     assert_eq!(opened.spec.branch, "factory/trail-1");
+    assert_eq!(
+        opened.spec.title, "feat(core): greet [TRAIL-1]",
+        "the PR is titled with the commit subject the repo squashes to"
+    );
     let start = r.codehost.start(&opened.pr.repo, "factory/trail-1");
     assert_eq!(start.as_deref(), Some(FAKE_BASE), "published on the commit the checkout started from");
     assert_eq!(
@@ -1482,4 +1486,23 @@ async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() 
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task") && questions[0].body.contains("connection lost"));
+}
+
+#[tokio::test]
+async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_conventional_pr_title() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    let outcome = RunOutcome::Changes {
+        commits: vec![Commit {
+            message: "added a greeting".into(),
+            changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            merges: vec![],
+        }],
+        summary: "Adds a greeting.".into(),
+    };
+    r.harness.push(Role::Worker, Script::new(outcome));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    let opened = r.codehost.prs().pop().expect("a PR");
+    assert_eq!(opened.spec.title, "chore: Add a greeting [TRAIL-1]");
 }

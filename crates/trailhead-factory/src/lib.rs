@@ -21,6 +21,7 @@ pub use daemon::{
 };
 pub use harness::{
     EventSink, Feedback, FollowUp, Harness, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict, VerdictKind,
+    conventional_title, is_conventional,
 };
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
