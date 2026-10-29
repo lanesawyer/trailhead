@@ -160,11 +160,35 @@ pub(crate) async fn edit(cx: &Ctx, a: EditArgs) -> Result<()> {
     if let Some(p) = a.parent {
         body["parent"] = if p == "none" { Value::Null } else { json!(p) };
     }
+    if !a.meta.is_empty() {
+        body["metadata"] = meta_patch(&a.meta)?;
+    }
     if let Some(v) = a.version {
         body["version"] = json!(v);
     }
     cx.show(&cx.c.patch(&format!("tasks/{}", a.task), body).await?, task_line);
     Ok(())
+}
+
+/// Builds a JSON merge patch from `a.b=value` pairs; a value that isn't JSON is a string.
+fn meta_patch(pairs: &[String]) -> Result<Value> {
+    let mut patch = json!({});
+    for pair in pairs {
+        let (path, raw) = pair
+            .split_once('=')
+            .filter(|(p, _)| !p.is_empty() && p.split('.').all(|k| !k.is_empty()))
+            .ok_or_else(|| anyhow::anyhow!("--meta takes key=value (dots nest), not {pair:?}"))?;
+        let value = serde_json::from_str(raw).unwrap_or_else(|_| json!(raw));
+        let mut at = &mut patch;
+        for key in path.split('.') {
+            if !at.is_object() {
+                *at = json!({});
+            }
+            at = at.as_object_mut().unwrap().entry(key).or_insert(Value::Null);
+        }
+        *at = value;
+    }
+    Ok(patch)
 }
 
 /// A grade is 1 to 4; "none" clears it. The rules live in core.
