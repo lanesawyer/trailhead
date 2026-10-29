@@ -51,6 +51,7 @@ run finished task=TRAIL-105 outcome=…
 | --- | --- | --- |
 | PR opened | Task `in_review`, a PR on GitHub with the reviewer's comment, a typed verdict on the task | Check CI is green and the diff's size is believable, merge on GitHub, then `trailhead --as-me done TRAIL-n -m "merged"`, which also unblocks anything chained behind it |
 | Checks failed | A note on the task with the end of the failing check's output; the task is open again and retried | Usually nothing. The next attempt is told what failed; after `max_attempts` (`[repo]`, default 3) the task is parked with a question summarizing the failure |
+| Sandbox couldn't be prepared (compute API error, wake failure) | The run stops before the agent starts; the task goes back to the queue and the attempt does not count toward `max_attempts`. The control plane waits 30 s, doubling up to 5 min, before retrying it | Fix the host; nothing to do on the task. A deliberate stop of the control plane does not count an attempt either |
 | Question | Task `needs_input` with a question comment; its Sprite stays busy | Answer it, set the task open, restart the factory (TRAIL-108 removes the restart) |
 | Budget or time breach | As a question, saying which limit it hit | Raise the budget in `factory.toml` or cancel the task |
 | Usage window nearly full | `subscription usage window nearly full; starting no new runs until it resets`, with how long until the reset | Nothing; runs start again at the reset. Change `[usage] pause_at` in `factory.toml` to leave more or less room |
