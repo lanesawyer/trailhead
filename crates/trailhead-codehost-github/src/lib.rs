@@ -10,7 +10,7 @@ use base64::Engine;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
-    ChangedFile, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
+    BranchUpdate, ChangedFile, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
 };
 
 pub const API_URL: &str = "https://api.github.com";
@@ -314,6 +314,28 @@ impl CodeHost for GitHub {
         let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
         // Null while GitHub is still working it out; asking again later gets the answer.
         Ok(self.call(self.request(Method::GET, &path)).await?["mergeable"].as_bool())
+    }
+
+    async fn behind(&self, pr: &PrRef) -> Result<bool> {
+        let r = Self::repo_path(&pr.repo);
+        let p = self.call(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
+        let (Some(base), Some(head)) = (p["base"]["ref"].as_str(), p["head"]["sha"].as_str()) else {
+            return Err(Error::Other(format!("github: PR {} has no base or head", pr.number)));
+        };
+        let cmp = self.call(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
+        Ok(cmp["behind_by"].as_u64().unwrap_or(0) > 0)
+    }
+
+    async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate> {
+        let path = format!("{}/pulls/{}/update-branch", Self::repo_path(&pr.repo), pr.number);
+        let (status, body, _) = self.send(self.request(Method::PUT, &path)).await?;
+        match status {
+            // GitHub queues the merge and answers 202.
+            s if s.is_success() => Ok(BranchUpdate::Updated),
+            // Merge conflicts, or nothing to merge in.
+            StatusCode::UNPROCESSABLE_ENTITY => Ok(BranchUpdate::Conflict),
+            s => Err(Error::Other(format!("github {s}: {}", body["message"].as_str().unwrap_or_default()))),
+        }
     }
 
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {

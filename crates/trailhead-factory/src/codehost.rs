@@ -55,6 +55,14 @@ pub enum MergeOutcome {
     Conflict,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BranchUpdate {
+    /// The base branch is merged into the PR branch; its head is now a new commit, and CI starts over on it.
+    Updated,
+    /// The base branch doesn't merge into the PR branch cleanly. Sends the task back to running.
+    Conflict,
+}
+
 /// Where a PR stands on the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrState {
@@ -83,6 +91,12 @@ pub trait CodeHost: Send + Sync {
     /// Whether the open PR merges cleanly into its base: `Some(false)` when it conflicts, `None` while the host is
     /// still working it out.
     async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>>;
+    /// Whether the PR's branch lacks commits that are on its base branch, which a repo requiring branches to be up to
+    /// date refuses to merge (TRAIL-212).
+    async fn behind(&self, pr: &PrRef) -> Result<bool>;
+    /// Merges the base branch into the PR's branch as a merge commit, never a rebase and force-push, so a reviewer's
+    /// verdict on the old head still describes the work.
+    async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate>;
     /// The PR's current title, which a squash merge takes as its commit subject.
     async fn title(&self, pr: &PrRef) -> Result<String>;
     /// The files the PR changes, with how and by how many lines, for grading it.
