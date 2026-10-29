@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{CheckpointId, Commit, Endpoint, HumanContext, ModelId, Result, Role, TaskKey, Usage};
+use crate::{CheckResult, CheckpointId, Commit, Endpoint, HumanContext, ModelId, Result, Role, TaskKey, Usage};
 
 /// What the agent is asked to do: the task's spec as Trailhead holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +30,9 @@ pub struct RunContext {
     pub max_steps: u32,
     /// For reviewers: the change under review. Never the author's transcript.
     pub diff: Option<String>,
+    /// For reviewers: the checks the worker already ran in its own sandbox, which the reviewer shouldn't rerun.
+    #[serde(default)]
+    pub checks: Vec<CheckResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +45,17 @@ pub struct Feedback {
 pub enum VerdictKind {
     Approve,
     RequestChanges,
+}
+
+/// Something a reviewer noticed that shouldn't hold up the change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUp {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    /// Trailhead's scale, 1 (most urgent) to 4; the project's default when absent.
+    #[serde(default)]
+    pub priority: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +77,9 @@ pub enum RunOutcome {
     Verdict {
         kind: VerdictKind,
         body: String,
+        /// Non-blocking suggestions, to be filed as tasks when the review approves.
+        #[serde(default)]
+        follow_ups: Vec<FollowUp>,
     },
     NeedsInput {
         question: String,

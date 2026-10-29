@@ -20,7 +20,7 @@ use tokio::time::Instant;
 use tokio::sync::mpsc;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::{
-    ChangesRequested, CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, Feedback, HumanContext,
+    ChangesRequested, CheckResult, CheckpointId, Compute, Daemon, Egress, Error, FactoryConfig, Feedback, HumanContext,
     IROH_DOMAINS, Labels, ModelProvider, PrRef, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult,
     RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict, VerdictKind, label,
     review_name, run_name,
@@ -66,6 +66,9 @@ pub struct Factory {
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// The reset a pause was last logged for, so a pause is logged once rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
+    /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
+    /// starting together never take the same sandbox.
+    pool_pick: tokio::sync::Mutex<()>,
 }
 
 /// A pooled sandbox that keeps failing to release. Kept in memory only, so a restart counts again from zero.
@@ -126,6 +129,7 @@ impl Factory {
             setbacks: Mutex::default(),
             quota: Mutex::default(),
             pause_logged: Mutex::default(),
+            pool_pick: tokio::sync::Mutex::default(),
         }
     }
 
@@ -402,6 +406,7 @@ impl Factory {
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
             required_checks: self.config.required_checks(),
+            worker_checks: Vec::new(),
             blocked_hosts: self.blocked_hosts(),
             allowed_hosts: self.allowed_hosts(),
             credential,
@@ -463,7 +468,7 @@ impl Factory {
                     return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
                 }
                 self.tracker.revoke_sub_agent(&name).await?;
-                self.review(task, &pr, attempt).await
+                self.review(task, &pr, attempt, &report.checks).await
             }
             RunResult::NeedsInput(question) => Ok(Outcome::Parked { reason: question }),
             RunResult::Failed(reason) => {
@@ -596,7 +601,7 @@ impl Factory {
     }
 
     /// Runs the reviewer on an open PR in its own fresh sandbox.
-    pub async fn review(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<Outcome> {
+    pub async fn review(&self, task: &Task, pr: &PrRef, attempt: u32, checks: &[CheckResult]) -> Result<Outcome> {
         let round = self.tracker.show(&task.key).await?.run.review_rounds.unwrap_or(0) + 1;
         let name = review_name(&task.key, attempt, round);
         self.tracker.report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() }).await?;
@@ -619,6 +624,7 @@ impl Factory {
             endpoint: self.provider.endpoint(),
             max_steps: profile.budget.steps,
             required_checks: Vec::new(),
+            worker_checks: checks.to_vec(),
             blocked_hosts: self.blocked_hosts(),
             allowed_hosts: self.allowed_hosts(),
             credential,
@@ -728,6 +734,7 @@ impl Factory {
     /// checkpoint, or a new one when none is idle. The tick's room check keeps the pool within `max_sandboxes`.
     /// The prepared checkout becomes the new warm checkpoint, so the next task starts from it.
     async fn acquire_worker(&self, task: &Task, branch: Option<String>) -> Result<Sandbox> {
+        let pick = self.pool_pick.lock().await;
         let idle = self.compute.list(&self.pooled(label::IDLE, None, None)).await?;
         let (sandbox, warm) = match idle.into_iter().find(|s| !self.abandoned(&s.name)) {
             Some(s) => {
@@ -745,6 +752,7 @@ impl Factory {
             }
         };
         self.compute.set_labels(&sandbox.id, &self.pooled(label::BUSY, warm.as_deref(), Some(task))).await?;
+        drop(pick);
         self.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
         if let Some(cp) = &warm {
             self.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
@@ -934,7 +942,7 @@ impl Factory {
         if let Some(round) = task.run.review_rounds.filter(|r| *r > 0) {
             self.tracker.revoke_sub_agent(&review_name(&task.key, attempt, round)).await?;
         }
-        self.review(task, pr, attempt).await
+        self.review(task, pr, attempt, &[]).await
     }
 
     /// Puts one in-flight task right; true when its PR is due a review.

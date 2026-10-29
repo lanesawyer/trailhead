@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use trailhead_control::{Factory, Outcome, Reconciled};
 use trailhead_factory::{
-    CodeHost, Commit, Compute, FactoryConfig, FileChange, MergeOutcome, Role, RunOutcome, SandboxSpec, Status, TaskKey,
-    Tracker, Usd, VerdictKind, label, run_name,
+    CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, Role, RunOutcome, SandboxSpec,
+    Status, TaskKey, Tracker, Usd, VerdictKind, label, run_name,
 };
 use trailhead_testkit::{
     FAKE_BASE, FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness,
@@ -83,7 +83,7 @@ fn changes() -> RunOutcome {
 }
 
 fn approve() -> RunOutcome {
-    RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Looks right; tests cover it.".into() }
+    RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Looks right; tests cover it.".into(), follow_ups: vec![] }
 }
 
 #[tokio::test]
@@ -125,6 +125,9 @@ async fn spec_to_reviewed_pr_then_human_merge() {
     let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
     assert!(review.diff.unwrap().contains("src/greet.rs"), "reviewer sees the diff");
     assert_eq!(review.model.0, "fake-opus");
+    let names: Vec<_> = review.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["fmt", "lint", "test"], "the reviewer is told which checks the worker ran");
+    assert!(review.checks.iter().all(|c| c.passed));
 
     assert_eq!(busy(&r.compute), Vec::<String>::new(), "no sandbox stays busy after the run");
     let pooled = r.compute.get("trailhead-w1").expect("the worker's sandbox stays in the pool");
@@ -909,8 +912,89 @@ async fn a_review_left_from_before_a_restart_doesnt_hold_up_workers() {
     handle.await.unwrap().unwrap();
 }
 
+fn approve_with(follow_ups: Vec<FollowUp>) -> RunOutcome {
+    RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Fine.".into(), follow_ups }
+}
+
+fn follow_up(title: &str, priority: Option<i64>) -> FollowUp {
+    FollowUp { title: title.into(), description: format!("Details of {title}."), priority }
+}
+
+#[tokio::test]
+async fn an_approval_files_its_follow_ups_as_unqueued_tasks_linked_to_the_source() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let two = vec![follow_up("Cover the edge", Some(2)), follow_up("Rename it", None)];
+    r.harness.push(Role::Reviewer, Script::new(approve_with(two)));
+
+    let ran = r.factory.tick().await.unwrap();
+    let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+
+    let filed: Vec<_> = r.tracker.tasks_in("TRAIL").into_iter().filter(|t| t.key != key).collect();
+    assert_eq!(filed.len(), 2);
+    assert_eq!(filed[0].title, "Cover the edge");
+    assert_eq!(r.tracker.priority(&filed[0].key), Some(2));
+    assert_eq!(filed[1].title, "Rename it");
+    for t in &filed {
+        assert_eq!(t.status, Status::Open);
+        assert!(t.description.contains(&key.0) && t.description.contains(&pr.url), "{}", t.description);
+        assert!(
+            r.tracker
+                .ready("TRAIL", Some(&TaskKey("TRAIL-102".into())), 10)
+                .await
+                .unwrap()
+                .iter()
+                .all(|q| q.key != t.key)
+        );
+    }
+    let comment = r.codehost.prs()[0].comments.last().unwrap().clone();
+    for t in &filed {
+        assert!(comment.contains(&format!("`{}` {}", t.key.0, t.title)), "{comment}");
+    }
+}
+
+#[tokio::test]
+async fn follow_ups_reuse_an_open_task_with_the_same_title() {
+    let r = rig();
+    r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    let existing = r.tracker.add_task("TRAIL", "Cover the edge", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let list = vec![follow_up("cover the edge ", None), follow_up("Rename it", None), follow_up("RENAME IT", None)];
+    r.harness.push(Role::Reviewer, Script::new(approve_with(list)));
+
+    r.factory.tick().await.unwrap();
+
+    assert_eq!(r.tracker.tasks_in("TRAIL").len(), 3, "one new task: the duplicate and the repeat aren't filed");
+    let comment = r.codehost.prs()[0].comments.last().unwrap().clone();
+    assert!(comment.contains(&format!("`{}` cover the edge (already open)", existing.0)), "{comment}");
+}
+
+#[tokio::test]
+async fn no_tasks_are_filed_for_an_empty_list_or_a_request_for_changes() {
+    let r = rig();
+    r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve_with(vec![])));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.tasks_in("TRAIL").len(), 1);
+    assert!(!r.codehost.prs()[0].comments.last().unwrap().contains("Follow-ups"));
+
+    let r = rig();
+    r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let outcome = RunOutcome::Verdict {
+        kind: VerdictKind::RequestChanges,
+        body: "Add a test.".into(),
+        follow_ups: vec![follow_up("Rename it", None)],
+    };
+    r.harness.push(Role::Reviewer, Script::new(outcome));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.tasks_in("TRAIL").len(), 1);
+}
+
 fn request_changes(body: &str) -> RunOutcome {
-    RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into() }
+    RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into(), follow_ups: vec![] }
 }
 
 #[tokio::test]
@@ -1254,4 +1338,40 @@ async fn failures_that_are_the_agents_or_the_tasks_still_use_up_attempts() {
     assert!(matches!(&ran, Outcome::Parked { .. }), "{ran:?}");
     let body = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap().body;
     assert!(body.contains("Gave up after 3 failed attempts"), "{body}");
+}
+
+#[tokio::test]
+async fn two_runs_starting_together_never_take_the_same_idle_sandbox() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_sandboxes = 4"));
+    let first = r.tracker.add_task("TRAIL", "First", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&first).status, Status::InReview);
+
+    let a = r.tracker.add_task("TRAIL", "A", "");
+    let b = r.tracker.add_task("TRAIL", "B", "");
+    // Both workers wait on a gate, so the two runs are in flight together.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    for _ in 0..2 {
+        r.harness.push(Role::Worker, Script::new(changes()).wait_for(gate.clone()));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+    }
+    let (ta, tb) = (r.tracker.task(&a), r.tracker.task(&b));
+    let release = async {
+        until("both workers to start", || r.harness.contexts().len() >= 3).await;
+        gate.notify_one();
+        gate.notify_one();
+    };
+    let (ra, rb, ()) = tokio::join!(r.factory.run_task(&ta), r.factory.run_task(&tb), release);
+    ra.unwrap();
+    rb.unwrap();
+    assert_eq!(r.tracker.task(&a).status, Status::InReview);
+    assert_eq!(r.tracker.task(&b).status, Status::InReview);
+
+    let hosts = [r.tracker.task(&a).run.host.clone().unwrap(), r.tracker.task(&b).run.host.clone().unwrap()];
+    assert_ne!(hosts[0], hosts[1], "each run gets its own sandbox");
+    let mut names: Vec<_> = r.compute.sandboxes().into_iter().map(|s| s.name).filter(|n| n.contains("-w")).collect();
+    names.sort();
+    assert_eq!(names, ["trailhead-w1", "trailhead-w2"], "one reused the idle sandbox, the other got a new one");
 }

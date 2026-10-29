@@ -211,6 +211,16 @@ pub trait Tracker: Send + Sync {
     /// A note on the task, such as why an attempt failed, without changing it.
     async fn note(&self, task: &TaskKey, body: &str) -> Result<()>;
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()>;
+    /// Files a new task in `project`, not under the factory's queue, and returns its key.
+    async fn create_task(
+        &self,
+        project: &str,
+        title: &str,
+        description: &str,
+        priority: Option<i64>,
+    ) -> Result<TaskKey>;
+    /// An unfinished task in `project` with this title (ignoring case and surrounding space), if there is one.
+    async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>>;
 
     /// Creates (or reuses) a project-scoped sub-agent and a fresh token for it that expires after `ttl`,
     /// in case revoking it is missed.
