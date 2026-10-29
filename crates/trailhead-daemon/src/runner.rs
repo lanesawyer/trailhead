@@ -137,9 +137,11 @@ impl Runner {
         tracing::info!(task = %key, "agent starting");
         // Where the agent's work starts, which is what it's published on top of.
         let start = self.workspace.head().await?;
-        let merging = self.workspace.merge_head().await?;
+        let merging_before = self.workspace.merge_head().await?;
         let (mut outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events).await?;
-        // The agent finished a merge of the base branch: publish it as one, or the PR would still conflict.
+        // A merge of the base branch is published as one, or the PR would still conflict. It may be one prepare
+        // started or one the agent did itself, so read it again now, preferring that.
+        let merging = self.workspace.merge_head().await?.or(merging_before);
         if let (Some(merging), RunOutcome::Changes { commits, .. }) = (merging, &mut outcome)
             && let Some(last) = commits.last_mut()
         {

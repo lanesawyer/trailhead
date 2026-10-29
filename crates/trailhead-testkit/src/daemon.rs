@@ -34,6 +34,9 @@ pub struct FakeWorkspace {
     heads: Mutex<Option<Heads>>,
     /// Whether the latest prepare left a merge of the base branch under way.
     merging: Mutex<bool>,
+    /// Whether the agent starts a merge itself, which prepare then doesn't: `merge_head` sees one from its second call on.
+    agent_merges: AtomicBool,
+    merge_head_calls: AtomicUsize,
     prepares_started: AtomicUsize,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
@@ -51,7 +54,8 @@ impl Workspace for FakeWorkspace {
             gate.notified().await;
         }
         *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
-        *self.merging.lock().unwrap() = req.merge_base;
+        *self.merging.lock().unwrap() = req.merge_base && !self.agent_merges.load(Ordering::SeqCst);
+        self.merge_head_calls.store(0, Ordering::SeqCst);
         self.prepared.lock().unwrap().push(req.clone());
         Ok(())
     }
@@ -61,7 +65,9 @@ impl Workspace for FakeWorkspace {
     }
 
     async fn merge_head(&self) -> Result<Option<String>> {
-        Ok(self.merging.lock().unwrap().then(|| FAKE_BASE_MERGE.to_string()))
+        let call = self.merge_head_calls.fetch_add(1, Ordering::SeqCst);
+        let merging = *self.merging.lock().unwrap() || (self.agent_merges.load(Ordering::SeqCst) && call > 0);
+        Ok(merging.then(|| FAKE_BASE_MERGE.to_string()))
     }
 
     async fn head(&self) -> Result<String> {
@@ -128,6 +134,11 @@ impl LocalDaemon {
             requests: Mutex::default(),
             run_errors: Mutex::default(),
         }
+    }
+
+    /// Has the agent start the merge of the base branch itself, as when prepare didn't.
+    pub fn agent_merges(&self) {
+        self.workspace.agent_merges.store(true, Ordering::SeqCst);
     }
 
     /// Lets fake checkouts of a branch start at its head on the code host, as a rework's does.
