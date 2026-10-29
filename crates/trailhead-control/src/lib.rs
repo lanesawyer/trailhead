@@ -98,6 +98,21 @@ pub enum Outcome {
     Failed { reason: String },
 }
 
+/// How a metered run gets going: a new one, or one the daemon already has under way.
+enum Begin {
+    Start(Box<RunRequest>),
+    Attach(String),
+}
+
+/// What reconcile found to carry on with, for the caller to run beside whatever else it does.
+#[derive(Default)]
+struct Due {
+    /// Tasks whose PR is due a review.
+    reviews: Vec<Task>,
+    /// Worker runs still going in their sandboxes, to follow again.
+    runs: Vec<(Task, Sandbox)>,
+}
+
 /// What one sandbox run came to, before the lifecycle acts on it.
 enum Run {
     Report(RunReport, Usd),
@@ -109,6 +124,8 @@ pub struct Reconciled {
     pub destroyed: Vec<String>,
     /// Pooled sandboxes an interrupted run left busy, returned to idle.
     pub released: Vec<String>,
+    /// Tasks whose run was still going in its sandbox, followed again instead of requeued (TRAIL-137).
+    pub reattached: Vec<String>,
     pub requeued: Vec<String>,
     pub reviewed: Vec<String>,
     /// Tasks whose review asked for changes but stayed in review, now reopened for a rework or parked.
@@ -163,6 +180,14 @@ fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool) -> Str
         (None, true, _) => format!("{head}: {passed} passed; would merge (shadow)."),
         (None, false, true) => format!("{head}: {passed} passed; Lane merges."),
         (None, false, false) => format!("{head}: {passed} passed; not auto-merged at this grade, so Lane merges."),
+    }
+}
+
+/// A worker run's name: the attempt's, with the count of retries that gave their attempt back.
+fn worker_name(task: &TaskKey, attempt: u32, retries: u32) -> String {
+    match retries {
+        0 => run_name(task, attempt),
+        n => format!("{}-{n}", run_name(task, attempt)),
     }
 }
 
@@ -273,11 +298,17 @@ impl Factory {
                 dirty = false;
                 match self.reconcile_deferring(&keys.values().cloned().collect()).await {
                     Ok((done, due)) => {
-                        if done != Reconciled::default() || !due.is_empty() {
-                            let reviewing: Vec<&str> = due.iter().map(|t| t.key.0.as_str()).collect();
+                        if done != Reconciled::default() || !due.reviews.is_empty() {
+                            let reviewing: Vec<&str> = due.reviews.iter().map(|t| t.key.0.as_str()).collect();
                             tracing::info!(?done, ?reviewing, "reconciled");
                         }
-                        for task in due {
+                        for (task, sandbox) in due.runs {
+                            let key = task.key.clone();
+                            let factory = self.clone();
+                            let handle = running.spawn(async move { factory.resume_run(&task, &sandbox).await });
+                            keys.insert(handle.id(), key);
+                        }
+                        for task in due.reviews {
                             let key = task.key.clone();
                             let factory = self.clone();
                             let handle = running.spawn(async move { factory.resume_review(&task).await });
@@ -346,7 +377,7 @@ impl Factory {
         }
         let busy: HashSet<TaskKey> = keys.values().cloned().collect();
         let others = self
-            .occupied()
+            .occupied_after_release(&busy)
             .await?
             .into_iter()
             .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !busy.contains(&TaskKey(t.clone()))))
@@ -412,12 +443,53 @@ impl Factory {
         Ok(out)
     }
 
+    /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened are released. A parked task keeps
+    /// its sandbox, so without this the place stays taken until the next reconcile (TRAIL-108). The next attempt
+    /// starts from a fresh checkout with the answer in its prompt, as after any reopening.
+    async fn occupied_after_release(&self, running: &HashSet<TaskKey>) -> Result<Vec<Sandbox>> {
+        let held = self.occupied().await?;
+        let candidates: Vec<&Sandbox> = held
+            .iter()
+            .filter(|s| s.labels.contains_key(label::POOL))
+            .filter(|s| s.labels.get(label::TASK).is_some_and(|t| !running.contains(&TaskKey(t.clone()))))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(held);
+        }
+        let mut released = Vec::new();
+        for sandbox in candidates {
+            let Some(key) = sandbox.labels.get(label::TASK) else { continue };
+            let task = match self.tracker.show(&TaskKey(key.clone())).await {
+                Ok(task) if task.status == Status::Open => task,
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!(task = %key, error = %e, "couldn't look up a parked task's status");
+                    continue;
+                }
+            };
+            let mut done = Reconciled::default();
+            self.reconcile_pooled(sandbox, &mut done).await;
+            if !done.released.is_empty() || !done.abandoned.is_empty() || !done.destroyed.is_empty() {
+                tracing::info!(task = %task.key.0, sandbox = %sandbox.name, "released the sandbox of a reopened task");
+                if let Err(e) = self.reconcile_task(&task, &mut done).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't clean up a reopened task; reconcile will");
+                }
+                released.push(sandbox.name.clone());
+            }
+        }
+        if released.is_empty() {
+            return Ok(held);
+        }
+        Ok(held.into_iter().filter(|s| !released.contains(&s.name)).collect())
+    }
+
     /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
     pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
         if self.usage_paused() {
             return Ok(Vec::new());
         }
-        let room = self.config.repo.max_sandboxes.saturating_sub(self.occupied().await?.len());
+        let room =
+            self.config.repo.max_sandboxes.saturating_sub(self.occupied_after_release(&HashSet::new()).await?.len());
         if room == 0 {
             return Ok(Vec::new());
         }
@@ -437,10 +509,7 @@ impl Factory {
         // A run that failed before its agent started gave its attempt back but revoked its sub-agent, which can't be
         // undone, so a retry's name carries the count of those to stay unique.
         let retries = task.run.retries.unwrap_or(0);
-        let name = match retries {
-            0 => run_name(&task.key, attempt),
-            n => format!("{}-{n}", run_name(&task.key, attempt)),
-        };
+        let name = worker_name(&task.key, attempt, retries);
         let credential = match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
             Ok(credential) => credential,
             // The name was used by a run whose give-back didn't land; skip past it rather than retry it forever.
@@ -472,6 +541,7 @@ impl Factory {
             attempt: Some(attempt),
             sandbox: Some(name.clone()),
             profile: Some(self.config.repo.worker.clone()),
+            started: Some(unix_now()),
             ..RunUpdate::default()
         };
         if let Err(e) = sub.report(&task.key, started).await {
@@ -525,16 +595,55 @@ impl Factory {
             credential,
         };
         let prior = task.run.spend.unwrap_or_default();
-        let run = match self.run_metered(&sandbox, req, &profile, prior).await {
+        let run =
+            self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
+        self.conclude(task, &sub, &sandbox, &name, attempt, run).await
+    }
+
+    /// Follows a worker run that was going when the last control plane stopped (TRAIL-137): the daemon replays the
+    /// run's events, which are priced again on top of the spend of the runs before it, and the deadline counts from
+    /// when the run started. What the run comes to is handled as if this process had started it.
+    pub async fn resume_run(&self, task: &Task, sandbox: &Sandbox) -> Result<Outcome> {
+        let name =
+            task.run.sandbox.clone().ok_or_else(|| Error::Other(format!("{} has no run to resume", task.key.0)))?;
+        let attempt = task.run.attempt.unwrap_or(1);
+        let sub = self.tracker.sub_agent(&name);
+        // The attempt this run took was already counted; if it's given back, it goes back to the number before it.
+        let mut before = task.clone();
+        before.run.attempt = Some(attempt.saturating_sub(1));
+        let task = &before;
+        let profile = self.config.worker().clone();
+        let prior = task.run.spend.unwrap_or_default();
+        let elapsed = task
+            .run
+            .started
+            .map_or(Duration::ZERO, |t| Duration::from_secs(u64::try_from(unix_now() - t).unwrap_or(0)));
+        tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, ?elapsed, "reattaching to a run in flight");
+        let run = self.run_metered(sandbox, Begin::Attach(name.clone()), &task.key, &profile, prior, elapsed).await;
+        self.conclude(task, &sub, sandbox, &name, attempt, run).await
+    }
+
+    /// What a worker's run came to: the report acted on, or the failure given back to the queue.
+    async fn conclude(
+        &self,
+        task: &Task,
+        sub: &Arc<dyn Tracker>,
+        sandbox: &Sandbox,
+        name: &str,
+        attempt: u32,
+        run: Result<Run>,
+    ) -> Result<Outcome> {
+        let infra_prior = task.run.infra_failures;
+        let run = match run {
             Ok(run) => run,
             Err(Error::Cancelled) => {
                 // A stop on purpose cancelled the run; the next boot's reconcile requeues it without a strike.
-                self.give_back_attempt(task, &sub).await;
+                self.give_back_attempt(task, sub).await;
                 return Err(Error::Cancelled);
             }
             // The daemon was lost without reattaching, or the like: the agent didn't give up, so the attempt is
             // given back (TRAIL-172).
-            Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await),
+            Err(e) => return Err(self.infra_failed(task, sub, name, e, infra_prior, None).await),
         };
 
         // From here the agent has ended the run, so its attempt counts. Errors go to reconcile as before, except after
@@ -543,7 +652,7 @@ impl Factory {
             Run::Breach(reason, spend) => {
                 tracing::warn!(task = %task.key.0, %reason, "budget breached; parking");
                 self.compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await?;
-                self.cut_off(&sandbox).await?;
+                self.cut_off(sandbox).await?;
                 sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await?;
                 sub.ask(
                     &task.key,
@@ -566,7 +675,7 @@ impl Factory {
         let infra_failures = if api_trouble { None } else { task.run.infra_failures.filter(|n| *n > 0).map(|_| 0) };
         let update = RunUpdate { spend: Some(spend), infra_failures, ..RunUpdate::default() };
         match sub.report(&task.key, update).await {
-            Err(e) if api_trouble => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await),
+            Err(e) if api_trouble => return Err(self.infra_failed(task, sub, name, e, infra_prior, None).await),
             reported => reported?,
         }
 
@@ -574,16 +683,16 @@ impl Factory {
             RunResult::PrOpened(pr) => {
                 // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
                 // starts from the PR branch.
-                self.release_worker(&sandbox).await?;
-                self.tracker.revoke_sub_agent(&name).await?;
+                self.release_worker(sandbox).await?;
+                self.tracker.revoke_sub_agent(name).await?;
                 self.review(task, &pr, attempt, &report.checks).await
             }
             RunResult::NeedsInput(question) => Ok(Outcome::Parked { reason: question }),
             RunResult::Failed(reason) => {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
-                match self.release_worker(&sandbox).await {
+                match self.release_worker(sandbox).await {
                     Err(e) if api_trouble => {
-                        return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
+                        return Err(self.infra_failed(task, sub, name, e, infra_prior, None).await);
                     }
                     released => released?,
                 }
@@ -596,7 +705,7 @@ impl Factory {
                         Err(e) => e,
                     };
                     let restore = Some(task.run.failure.clone().unwrap_or_default());
-                    self.infra_failed(task, &sub, &name, error, infra_prior, restore).await;
+                    self.infra_failed(task, sub, name, error, infra_prior, restore).await;
                     return Ok(Outcome::Failed { reason });
                 }
                 let max = self.config.repo.max_attempts;
@@ -622,10 +731,10 @@ impl Factory {
                         ),
                     )
                     .await?;
-                    self.tracker.revoke_sub_agent(&name).await?;
+                    self.tracker.revoke_sub_agent(name).await?;
                     return Ok(Outcome::Parked { reason });
                 }
-                self.tracker.revoke_sub_agent(&name).await?;
+                self.tracker.revoke_sub_agent(name).await?;
                 Ok(Outcome::Failed { reason })
             }
             RunResult::Reviewed(_) => Err(Error::Other("a worker returned a review".into())),
@@ -769,7 +878,8 @@ impl Factory {
             credential,
         };
         let prior = self.tracker.show(&task.key).await?.run.spend.unwrap_or_default();
-        let run = self.run_metered(&sandbox, req, &profile, prior).await;
+        let run =
+            self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
         self.compute.destroy(&sandbox.id).await?;
         let run = match run {
             Ok(run) => run,
@@ -1158,14 +1268,29 @@ impl Factory {
     }
 
     /// Runs one step in a sandbox, pricing usage as it streams in and cancelling on a breach.
-    async fn run_metered(&self, sandbox: &Sandbox, req: RunRequest, profile: &Profile, prior: Usd) -> Result<Run> {
+    /// `elapsed` is how long the run has already gone on, for one picked up again after a restart.
+    async fn run_metered(
+        &self,
+        sandbox: &Sandbox,
+        begin: Begin,
+        task: &TaskKey,
+        profile: &Profile,
+        prior: Usd,
+        elapsed: Duration,
+    ) -> Result<Run> {
         let limit = profile.budget.usd();
         let max_steps = profile.budget.steps;
-        let deadline = tokio::time::sleep(Duration::from_secs(u64::from(profile.budget.minutes) * 60));
+        let deadline =
+            tokio::time::sleep(Duration::from_secs(u64::from(profile.budget.minutes) * 60).saturating_sub(elapsed));
         tokio::pin!(deadline);
-        let key = req.task.key.0.clone();
+        let key = task.0.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let run = self.daemon.run(&sandbox.id, req, tx);
+        let run = async {
+            match begin {
+                Begin::Start(req) => self.daemon.run(&sandbox.id, *req, tx).await,
+                Begin::Attach(run) => self.daemon.attach(&sandbox.id, &run, tx).await,
+            }
+        };
         tokio::pin!(run);
 
         let mut spent = Usd::ZERO;
@@ -1240,7 +1365,12 @@ impl Factory {
     /// [`Factory::reconcile`], leaving alone the tasks this process is running right now.
     pub async fn reconcile_except(&self, running: &HashSet<TaskKey>) -> Result<Reconciled> {
         let (mut done, due) = self.reconcile_deferring(running).await?;
-        for task in due {
+        for (task, sandbox) in due.runs {
+            if let Err(e) = self.resume_run(&task, &sandbox).await {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't finish a run picked up again");
+            }
+        }
+        for task in due.reviews {
             match self.resume_review(&task).await {
                 Ok(_) => done.reviewed.push(task.key.0.clone()),
                 Err(e) => tracing::warn!(task = %task.key.0, error = %e, "couldn't review; the next reconcile retries"),
@@ -1251,15 +1381,22 @@ impl Factory {
 
     /// [`Factory::reconcile_except`] without running the reviews it finds due: they're returned for the caller to run,
     /// so the run loop can start workers alongside them instead of waiting (TRAIL-196).
-    async fn reconcile_deferring(&self, running: &HashSet<TaskKey>) -> Result<(Reconciled, Vec<Task>)> {
+    async fn reconcile_deferring(&self, running: &HashSet<TaskKey>) -> Result<(Reconciled, Due)> {
         let mut done = Reconciled::default();
-        let mut due = Vec::new();
+        let mut due = Due::default();
         let live = self.compute.list(&self.base_labels()).await?;
         let tasks: Vec<Task> =
             self.tracker.in_flight(self.project()).await?.into_iter().filter(|t| !running.contains(&t.key)).collect();
 
+        // Runs the daemon may still be working on, which are followed again rather than requeued (TRAIL-137).
+        let live_runs: Vec<(&Task, &Sandbox)> =
+            tasks.iter().filter_map(|t| Some((t, self.live_run(t, &live)?))).collect();
+
         for sandbox in &live {
             if sandbox.labels.get(label::TASK).is_some_and(|t| running.contains(&TaskKey(t.clone()))) {
+                continue;
+            }
+            if live_runs.iter().any(|(_, s)| s.name == sandbox.name) {
                 continue;
             }
             let parked = tasks.iter().any(|t| {
@@ -1281,9 +1418,13 @@ impl Factory {
         }
 
         // Likewise one task's failure, a review that can't start for instance, mustn't stop the others or the boot.
-        for task in &tasks {
+        for (task, sandbox) in &live_runs {
+            done.reattached.push(task.key.0.clone());
+            due.runs.push(((*task).clone(), (*sandbox).clone()));
+        }
+        for task in tasks.iter().filter(|t| !live_runs.iter().any(|(r, _)| r.key == t.key)) {
             match self.reconcile_task(task, &mut done).await {
-                Ok(true) => due.push(task.clone()),
+                Ok(true) => due.reviews.push(task.clone()),
                 Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't reconcile a task; the next reconcile retries")
@@ -1291,6 +1432,26 @@ impl Factory {
             }
         }
         Ok((done, due))
+    }
+
+    /// The pooled sandbox a task's worker run is on, if the run may still be going there: the task is in progress
+    /// under its run's sub-agent and the sandbox is busy with it.
+    fn live_run<'a>(&self, task: &Task, live: &'a [Sandbox]) -> Option<&'a Sandbox> {
+        let name = task.run.sandbox.as_ref()?;
+        let host = task.run.host.as_ref()?;
+        // A run that gave its attempt back (a stop on purpose, a lost daemon) is over, whatever the daemon still has.
+        let current = worker_name(&task.key, task.run.attempt?, task.run.retries.unwrap_or(0));
+        if *name != current
+            || task.status != Status::InProgress
+            || task.holder.as_deref() != Some(self.tracker.sub_agent(name).agent())
+        {
+            return None;
+        }
+        live.iter().find(|s| {
+            s.name == *host
+                && s.labels.get(label::STATE).map(String::as_str) == Some(label::BUSY)
+                && s.labels.get(label::TASK).map(String::as_str) == Some(task.key.0.as_str())
+        })
     }
 
     /// Reviews a task whose PR was left unreviewed, retiring the sub-agent of the round that didn't finish.

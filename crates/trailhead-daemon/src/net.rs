@@ -736,12 +736,11 @@ impl RemoteDaemon {
     async fn follow(
         &self,
         sandbox: &SandboxId,
-        req: RunRequest,
+        run: String,
+        mut hello: ToDaemon,
         events: &EventSink,
         cancels: &mut mpsc::UnboundedReceiver<()>,
     ) -> Result<RunReport> {
-        let run = req.run.clone();
-        let mut hello = ToDaemon::Run(Box::new(req));
         let mut seen = 0u64;
         let mut cancelled = false;
         let mut reattached = 0;
@@ -839,7 +838,16 @@ impl Daemon for RemoteDaemon {
         // Registered before connecting, so a cancel that arrives while dialing is kept and sent once the run starts.
         let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
         self.cancels.lock().unwrap().insert(sandbox.clone(), cancel_tx);
-        let result = self.follow(sandbox, req, &events, &mut cancel_rx).await;
+        let result = self.follow(sandbox, req.run.clone(), ToDaemon::Run(Box::new(req)), &events, &mut cancel_rx).await;
+        self.cancels.lock().unwrap().remove(sandbox);
+        result
+    }
+
+    async fn attach(&self, sandbox: &SandboxId, run: &str, events: EventSink) -> Result<RunReport> {
+        let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
+        self.cancels.lock().unwrap().insert(sandbox.clone(), cancel_tx);
+        let hello = ToDaemon::Attach { run: run.to_string(), seen: 0 };
+        let result = self.follow(sandbox, run.to_string(), hello, &events, &mut cancel_rx).await;
         self.cancels.lock().unwrap().remove(sandbox);
         result
     }
