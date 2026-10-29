@@ -244,6 +244,36 @@ async fn a_run_survives_a_dropped_connection() {
 }
 
 #[tokio::test]
+async fn a_run_survives_the_compute_api_failing_while_reattaching() {
+    let mut r = Rig::new().await;
+    r.serve("blip").await;
+    let sandbox = r.sandbox("blip").await;
+    let key = r.tracker.add_task("TRAIL", "Blip", "");
+    let gate = Arc::new(Notify::new());
+    r.harness.push(Role::Worker, Script::new(changes()).steps(2, 100).wait_for(gate.clone()));
+    let cred = r.tracker.create_sub_agent("blip-a1", "TRAIL", Duration::from_secs(600)).await.unwrap();
+    let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let remote = r.remote.clone();
+    let run = tokio::spawn({
+        let sandbox = sandbox.clone();
+        let req = request("blip-a1", key.clone(), cred);
+        async move { remote.run(&sandbox, req, events).await }
+    });
+    for _ in 0..4 {
+        tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+    }
+
+    r.compute.fail_wakes("blip", 2);
+    r.remote.forget(&sandbox).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    gate.notify_one();
+
+    let report = tokio::time::timeout(Duration::from_secs(20), run).await.unwrap().unwrap().unwrap();
+    assert!(matches!(report.result, RunResult::PrOpened(_)), "{:?}", report.result);
+    assert_eq!(r.harness.contexts().len(), 1, "the run went on rather than starting again");
+}
+
+#[tokio::test]
 async fn a_prepare_survives_a_dropped_connection() {
     let mut r = Rig::new().await;
     r.serve("cold").await;

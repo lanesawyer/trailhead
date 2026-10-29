@@ -65,7 +65,7 @@ impl SpritesCompute {
     pub async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
         let mut url = self.url(&[&id.0, "services", program, "logs"]);
         url.query_pairs_mut().append_pair("lines", "3000");
-        let body = ok(send(self.request(Method::GET, url)).await?).await?.text().await.map_err(http_err)?;
+        let body = ok(send_idempotent(self.request(Method::GET, url)).await?).await?.text().await.map_err(http_err)?;
         let mut out = String::new();
         for line in body.lines().filter(|l| !l.trim().is_empty()) {
             match serde_json::from_str::<Value>(line) {
@@ -91,7 +91,7 @@ impl SpritesCompute {
     }
 
     async fn get_sprite(&self, name: &str) -> Result<Option<Sandbox>> {
-        let res = send(self.request(Method::GET, self.url(&[name]))).await?;
+        let res = send_idempotent(self.request(Method::GET, self.url(&[name]))).await?;
         if res.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -157,7 +157,7 @@ impl Compute for SpritesCompute {
                     q.append_pair("continuation_token", token);
                 }
             }
-            let page: SpriteList = json_body(ok(send(self.request(Method::GET, url)).await?).await?).await?;
+            let page: SpriteList = json_body(ok(send_idempotent(self.request(Method::GET, url)).await?).await?).await?;
             out.extend(
                 page.sprites
                     .into_iter()
@@ -242,7 +242,7 @@ impl Compute for SpritesCompute {
             .append_pair("cmd", "-d")
             .append_pair("cmd", WAKE_HOLD)
             .append_pair("cmd", "http://sprite/v1/tasks/trailhead-wake");
-        ok(send(self.request(Method::POST, url)).await?).await.map(drop)
+        ok(send_idempotent(self.request(Method::POST, url)).await?).await.map(drop)
     }
 
     async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()> {
@@ -364,6 +364,33 @@ fn http_err(e: reqwest::Error) -> Error {
 
 async fn send(req: RequestBuilder) -> Result<Response> {
     req.send().await.map_err(http_err)
+}
+
+/// Extra tries `send_idempotent` makes after a transient failure.
+const RETRIES: u32 = 3;
+
+/// Whether the API's answer is worth asking again for: a server error, or told to slow down.
+fn transient(status: StatusCode) -> bool {
+    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
+}
+
+/// `send` for calls that are safe to repeat: a transport error, 5xx or 429 is retried with backoff, and anything else
+/// (4xx especially) comes straight back. After the last try the final answer is returned as is.
+async fn send_idempotent(req: RequestBuilder) -> Result<Response> {
+    let mut wait = Duration::from_millis(500);
+    for tries in 1..=RETRIES {
+        let Some(again) = req.try_clone() else { break };
+        let failure = match send(again).await {
+            Ok(res) if transient(res.status()) => format!("sprites api {}", res.status()),
+            Ok(res) => return Ok(res),
+            Err(Error::Other(msg)) if msg.starts_with(TRANSPORT) => msg,
+            Err(e) => return Err(e),
+        };
+        tracing::warn!(error = %failure, tries, "sprites api call failed; retrying");
+        tokio::time::sleep(wait).await;
+        wait *= 2;
+    }
+    send(req).await
 }
 
 async fn ok(res: Response) -> Result<Response> {

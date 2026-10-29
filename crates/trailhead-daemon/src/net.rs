@@ -634,12 +634,24 @@ impl RemoteDaemon {
         if let Some(conn) = self.conns.lock().unwrap().get(sandbox).filter(|c| c.close_reason().is_none()) {
             return Ok(conn.clone());
         }
-        // The sandbox may have paused since the last request, and a dial won't wake it.
-        self.compute.wake(sandbox).await?;
-        let id = self.daemon_id(sandbox);
-        self.peers.lock().unwrap().insert(id);
         let deadline = tokio::time::Instant::now() + patience;
         let mut wait = Duration::from_millis(250);
+        // The sandbox may have paused since the last request, and a dial won't wake it. The compute API can blip
+        // as well, so a failed wake is retried like a failed dial, unless retrying can't help.
+        loop {
+            match self.compute.wake(sandbox).await {
+                Ok(()) => break,
+                Err(e @ Error::Other(_)) if tokio::time::Instant::now() < deadline => {
+                    tracing::warn!(sandbox = %sandbox.0, error = %e, "couldn't wake the sandbox yet");
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(Duration::from_secs(5));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let id = self.daemon_id(sandbox);
+        self.peers.lock().unwrap().insert(id);
+        wait = Duration::from_millis(250);
         let conn = loop {
             match self.endpoint.connect(id, ALPN).await {
                 Ok(conn) => break conn,
