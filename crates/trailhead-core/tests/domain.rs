@@ -337,6 +337,23 @@ async fn parent_cycles_are_rejected() {
 }
 
 #[tokio::test]
+async fn parent_walk_stops_at_a_cycle_already_in_the_data() {
+    let env = Env::new().await;
+    let a = env.task("a").await;
+    let b = env.task("b").await;
+    let d = env.task("d").await;
+    let under = |p: Option<&str>| TaskPatch { parent: Some(p.map(str::to_string)), ..Default::default() };
+    env.store.update_task(&env.human, &a.key, under(Some(&b.key)), None).await.unwrap();
+    let unparent = env.human.next_batch();
+    env.store.update_task(&unparent, &a.key, under(None), None).await.unwrap();
+    env.store.update_task(&env.human, &b.key, under(Some(&a.key)), None).await.unwrap();
+    // Undoing the unparenting puts a back under b while b is under a: a cycle.
+    env.store.undo_batch(&env.human, unparent.batch_id).await.unwrap();
+    let err = env.store.update_task(&env.human, &d.key, under(Some(&a.key)), None).await.unwrap_err();
+    assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+}
+
+#[tokio::test]
 async fn dependency_cycles_are_rejected() {
     let env = Env::new().await;
     let a = env.task("a").await;

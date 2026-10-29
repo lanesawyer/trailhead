@@ -603,8 +603,16 @@ impl Store {
                             return Err(Error::Invalid("a task can't be its own parent".into()));
                         }
                         // Walk up from the new parent; the task being moved must not be an ancestor.
+                        // An existing cycle (from before this check, or via undo) must not loop forever.
+                        let mut seen = std::collections::HashSet::new();
                         let mut up = p.parent_id;
                         while let Some(id) = up {
+                            if !seen.insert(id) {
+                                return Err(Error::Invalid(format!(
+                                    "{} is under a parent cycle that already exists; fix it before moving tasks under it",
+                                    p.key
+                                )));
+                            }
                             if id == before.id {
                                 return Err(Error::Invalid(format!(
                                     "{} is under {}, so it can't become its parent",
