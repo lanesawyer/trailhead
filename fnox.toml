@@ -10,3 +10,6 @@ project_id = "a96f8061-409e-4eaa-b76b-b4f0002a6733" # Trailhead
 SPRITES_TOKEN = { provider = "bws", value = "SPRITES_TOKEN" }
 # Subscription mode (docs/factory/sandbox.md): `claude setup-token`, for trailhead-factory.
 CLAUDE_CODE_OAUTH_TOKEN = { provider = "bws", value = "CLAUDE_CODE_OAUTH_TOKEN" }
+# Lets trailhead-factory see merged and closed PRs (docs/factory/operating.md): a fine-grained token for
+# lanesawyer/trailhead with Pull requests: Read-only.
+GITHUB_TOKEN = { provider = "bws", value = "GITHUB_TOKEN" }

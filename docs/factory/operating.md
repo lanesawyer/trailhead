@@ -4,7 +4,7 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 
 ## One-time setup
 
-- `BWS_ACCESS_TOKEN` in your environment, for a Bitwarden Secrets Manager machine account with read access to the Trailhead project. `fnox.toml` maps `SPRITES_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` from it.
+- `BWS_ACCESS_TOKEN` in your environment, for a Bitwarden Secrets Manager machine account with read access to the Trailhead project. `fnox.toml` maps `SPRITES_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and `GITHUB_TOKEN` from it.
 - A `factory` agent: `trailhead --as-me agent add factory`. The control plane acts as it, and each run gets a sub-agent (`factory/trail-42-a1`).
 - To have merged PRs finish their tasks: `GITHUB_TOKEN` in the control plane's environment (read access to the repo's pull requests is enough), and the factory agent added to the project's reviewers, `trailhead --as-me project edit TRAIL --reviewers factory`, since only a reviewer can finish a task in review. Without the token the control plane logs a warning at start and merges aren't noticed.
 - `factory.toml` at the repo root: the repo, the queue task, checks, egress, profiles and budgets, and `max_sandboxes`.
