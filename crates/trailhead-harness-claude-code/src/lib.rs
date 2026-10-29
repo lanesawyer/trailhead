@@ -527,7 +527,7 @@ async fn outcome(ctx: &RunContext, start: &str, result: &Value) -> Result<RunOut
                 RunOutcome::Failed { reason: "claude reported done but changed nothing".into() }
             } else {
                 let message = format!("{}: {}", ctx.task.key.0, ctx.task.title);
-                RunOutcome::Changes { commits: vec![Commit { message, changes }], summary }
+                RunOutcome::Changes { commits: vec![Commit { message, changes, merges: Vec::new() }], summary }
             }
         }
         other => RunOutcome::Failed { reason: format!("claude gave up ({other}): {summary}") },

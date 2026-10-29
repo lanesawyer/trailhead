@@ -107,6 +107,7 @@ async fn daemon_in_a_sprite() {
             let prepare = PrepareRequest {
                 repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
                 base_branch: "main".into(),
+                merge_base: false,
                 branch: None,
                 setup: Some(Check { name: "setup".into(), command: "test -f Cargo.toml".into() }),
             };

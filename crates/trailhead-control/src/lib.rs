@@ -21,9 +21,9 @@ use tokio::sync::mpsc;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::{
     ChangesRequested, CheckResult, CheckpointId, CodeHost, Compute, Daemon, Egress, Error, FactoryConfig, Feedback,
-    HumanContext, IROH_DOMAINS, Labels, Merged, MergedBy, ModelProvider, PrRef, PrState, Profile, Result, Role,
-    RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec,
-    Tracker, Usd, Verdict, VerdictKind, label, review_name, run_name,
+    HumanContext, IROH_DOMAINS, Labels, Merged, MergedBy, ModelProvider, PrRef, PrState, PrepareRequest, Profile,
+    Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey,
+    TaskSpec, Tracker, Usd, Verdict, VerdictKind, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -110,6 +110,8 @@ pub struct Reconciled {
     pub reviewed: Vec<String>,
     /// Tasks whose review asked for changes but stayed in review, now reopened for a rework or parked.
     pub reworked: Vec<String>,
+    /// In-review tasks whose PR no longer merges cleanly, now reopened to merge the base branch in or parked.
+    pub conflicted: Vec<String>,
     /// In-review tasks whose PR was merged, now done.
     pub merged: Vec<String>,
     /// In-review tasks whose PR was closed without merging, now parked for a human.
@@ -415,7 +417,8 @@ impl Factory {
                 },
                 None => None,
             };
-            let sandbox = self.acquire_worker(task, rework.then(|| Self::branch(task))).await?;
+            let merge_base = task.run.pending_changes().is_some_and(|c| c.conflict);
+            let sandbox = self.acquire_worker(task, rework.then(|| Self::branch(task)), merge_base).await?;
             sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
             Ok::<_, Error>((sandbox, context, feedback))
         };
@@ -696,8 +699,12 @@ impl Factory {
         match run {
             Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
                 if verdict.kind == VerdictKind::RequestChanges {
-                    let requested =
-                        ChangesRequested { reviewer: verdict.reviewer.clone(), body: verdict.body.clone(), attempt };
+                    let requested = ChangesRequested {
+                        reviewer: verdict.reviewer.clone(),
+                        body: verdict.body.clone(),
+                        attempt,
+                        conflict: false,
+                    };
                     self.request_rework(task, requested, round).await?;
                 }
                 Ok(Outcome::Reviewed { pr: pr.clone(), verdict })
@@ -760,7 +767,7 @@ impl Factory {
     /// reviews have asked for changes, which is when a human should look. Reconcile finishes this if it's cut short.
     async fn request_rework(&self, task: &Task, requested: ChangesRequested, round: u32) -> Result<()> {
         let max = self.config.repo.max_review_rounds;
-        let (reviewer, body) = (requested.reviewer.clone(), requested.body.clone());
+        let (reviewer, body, conflict) = (requested.reviewer.clone(), requested.body.clone(), requested.conflict);
         // Recorded before the task is reopened, so the run that picks it up can't miss the review.
         let update = RunUpdate {
             reviewed: Some(requested.attempt),
@@ -773,11 +780,19 @@ impl Factory {
             tracing::warn!(task = %task.key.0, round, "the reviewer still wants changes; parking");
             self.tracker.reopen(&task.key).await?;
             self.tracker.claim(&task.key).await?;
-            let question = format!(
-                "The reviewer still wants changes after {round} review rounds (the limit is {max}). The last review, \
-                 by {reviewer}:\n\n{body}\n\nFix the PR or settle the disagreement, then reopen the task; raise \
-                 `max_review_rounds` to allow more rounds."
-            );
+            let question = if conflict {
+                format!(
+                    "The PR keeps conflicting with the base branch: {round} rounds of review and conflict reworks \
+                     (the limit is {max}). Merge the base branch into the PR yourself or settle what's landing, then \
+                     reopen the task; raise `max_review_rounds` to allow more rounds."
+                )
+            } else {
+                format!(
+                    "The reviewer still wants changes after {round} review rounds (the limit is {max}). The last \
+                     review, by {reviewer}:\n\n{body}\n\nFix the PR or settle the disagreement, then reopen the \
+                     task; raise `max_review_rounds` to allow more rounds."
+                )
+            };
             self.tracker.ask(&task.key, &question).await?;
             // A fresh count for when a human reopens the task after sorting it out. Last, so a reconcile that finishes
             // a park cut short still sees the round that hit the limit.
@@ -825,7 +840,7 @@ impl Factory {
     /// A worker sandbox for `task` from the repo's pool (`docs/factory/sandbox.md`): an idle one restored to its warm
     /// checkpoint, or a new one when none is idle. The tick's room check keeps the pool within `max_sandboxes`.
     /// The prepared checkout becomes the new warm checkpoint, so the next task starts from it.
-    async fn acquire_worker(&self, task: &Task, branch: Option<String>) -> Result<Sandbox> {
+    async fn acquire_worker(&self, task: &Task, branch: Option<String>, merge_base: bool) -> Result<Sandbox> {
         let pick = self.pool_pick.lock().await;
         let idle = self.compute.list(&self.pooled(label::IDLE, None, None)).await?;
         let (sandbox, warm) = match idle.into_iter().find(|s| !self.abandoned(&s.name)) {
@@ -850,7 +865,8 @@ impl Factory {
             self.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
             self.daemon.forget(&sandbox.id).await;
         }
-        self.daemon.prepare(&sandbox.id, self.config.prepare_request(Role::Worker, branch)).await?;
+        let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
+        self.daemon.prepare(&sandbox.id, prepare).await?;
         let cp = self.compute.checkpoint(&sandbox.id, "warm").await?;
         let labels = self.pooled(label::BUSY, Some(&cp.0), Some(task));
         self.compute.set_labels(&sandbox.id, &labels).await?;
@@ -1070,6 +1086,25 @@ impl Factory {
         self.tracker.ask(&task.key, &question).await
     }
 
+    /// A PR that no longer merges cleanly with the base branch: a rework merges the base branch in and resolves the
+    /// conflicts, then goes through the checks and review again. It counts as a review round, so a PR that keeps
+    /// conflicting is parked for a human (TRAIL-199).
+    async fn rework_conflict(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<()> {
+        let round = task.run.review_rounds.unwrap_or(0) + 1;
+        self.tracker.report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() }).await?;
+        let base = &self.config.repo.base_branch;
+        let body = format!(
+            "{} no longer merges cleanly with `{base}`, which has moved on since the branch was cut. The base \
+             branch is already being merged into your checkout, uncommitted and with conflict markers where it \
+             clashes. Resolve every conflict, keeping what both sides intended; don't discard either side's changes \
+             or rebase. Then run the checks and finish.",
+            pr.url
+        );
+        tracing::warn!(task = %task.key.0, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
+        let requested = ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true };
+        self.request_rework(task, requested, round).await
+    }
+
     /// Puts one in-flight task right; true when its PR is due a review.
     async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
         let Some(name) = &task.run.sandbox else { return Ok(false) };
@@ -1108,6 +1143,15 @@ impl Factory {
                     let round = task.run.review_rounds.unwrap_or(1);
                     self.request_rework(task, requested.clone(), round).await?;
                     done.reworked.push(task.key.0.clone());
+                    return Ok(false);
+                }
+                if let Some(pr) = &task.run.pr
+                    && let Some(codehost) = &self.codehost
+                    // Not yet worked out by the host: the next reconcile asks again.
+                    && codehost.mergeable(pr).await? == Some(false)
+                {
+                    self.rework_conflict(task, pr, attempt).await?;
+                    done.conflicted.push(task.key.0.clone());
                     return Ok(false);
                 }
                 return Ok(task.run.pr.is_some() && task.run.reviewed != Some(attempt) && self.setback_over(&task.key));

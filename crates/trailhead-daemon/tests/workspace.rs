@@ -46,6 +46,7 @@ async fn prepare_clones_runs_setup_and_resets() {
         repo: Repo { owner: "acme".into(), name: "widget".into() },
         base_branch: "main".into(),
         branch: None,
+        merge_base: false,
         setup: Some(check("setup", "touch .setup-ran")),
     };
 
@@ -91,6 +92,7 @@ async fn prepare_can_check_out_a_branchs_remote_head() {
         repo: Repo { owner: "acme".into(), name: "widget".into() },
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
+        merge_base: false,
         setup: None,
     };
     ws.prepare(&req).await.unwrap();
@@ -158,4 +160,46 @@ async fn sprite_holds_heartbeat_then_linger() {
             r#"PUT /v1/tasks/trailhead-daemon-1 HTTP/1.1 {"expire":"90s"}"#,
         ]
     );
+}
+
+#[tokio::test]
+async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflicts() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    let bare = root.path().join("remote/acme/widget.git");
+    git(&src, &["checkout", "--quiet", "-b", "factory/w-1"]);
+    std::fs::write(src.join("README.md"), "branch\n").unwrap();
+    git(&src, &["commit", "--quiet", "-am", "branch edit"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "factory/w-1"]);
+    git(&src, &["checkout", "--quiet", "main"]);
+    std::fs::write(src.join("README.md"), "main\n").unwrap();
+    git(&src, &["commit", "--quiet", "-am", "main edit"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "main"]);
+
+    let remote = format!("file://{}", root.path().join("remote").display());
+    // No global git identity, as on a CI runner: the merge must not depend on the machine's config.
+    let home = root.path().join("empty-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote)
+        .with_git_env("HOME", home.to_str().unwrap())
+        .with_git_env("XDG_CONFIG_HOME", home.to_str().unwrap())
+        .with_git_env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .with_git_env("GIT_CONFIG_NOSYSTEM", "1");
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: Some("factory/w-1".into()),
+        merge_base: true,
+        setup: None,
+    };
+    ws.prepare(&req).await.unwrap();
+    assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "still at the PR head, merge uncommitted");
+    assert_eq!(ws.merge_head().await.unwrap().unwrap(), rev(&src, "main"));
+    let readme = std::fs::read_to_string(ws.dir().join("README.md")).unwrap();
+    assert!(readme.contains("<<<<<<<") && readme.contains("main") && readme.contains("branch"), "{readme}");
+
+    // A later prepare, as from a warm checkpoint taken mid-merge, drops the merge.
+    ws.prepare(&PrepareRequest { branch: None, merge_base: false, ..req }).await.unwrap();
+    assert_eq!(ws.merge_head().await.unwrap(), None);
+    assert_eq!(ws.head().await.unwrap(), rev(&src, "main"));
 }
