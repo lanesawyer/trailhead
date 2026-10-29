@@ -55,6 +55,8 @@ pub struct Factory {
     pub provider: Arc<dyn ModelProvider>,
     pub daemon: Arc<dyn Daemon>,
     troubled: Mutex<HashMap<String, Trouble>>,
+    /// Tasks whose last runs failed before the agent started: how many in a row, and when to try again.
+    setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// The reset a pause was last logged for, so a pause is logged once rather than on every poll.
@@ -114,6 +116,7 @@ impl Factory {
             provider,
             daemon,
             troubled: Mutex::default(),
+            setbacks: Mutex::default(),
             quota: Mutex::default(),
             pause_logged: Mutex::default(),
         }
@@ -271,7 +274,7 @@ impl Factory {
             return Ok(());
         }
         let ready = self.tracker.ready(self.project(), self.queue().as_ref(), room).await?;
-        for task in ready.into_iter().filter(|t| !busy.contains(&t.key)) {
+        for task in ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)) {
             let key = task.key.clone();
             let factory = self.clone();
             let handle = running.spawn(async move { factory.run_task(&task).await });
@@ -306,7 +309,8 @@ impl Factory {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for task in self.tracker.ready(self.project(), self.queue().as_ref(), room).await? {
+        let ready = self.tracker.ready(self.project(), self.queue().as_ref(), room).await?;
+        for task in ready.into_iter().filter(|t| self.setback_over(&t.key)) {
             let outcome = self.run_task(&task).await?;
             out.push((task, outcome));
         }
@@ -316,9 +320,27 @@ impl Factory {
     /// One attempt at a task: a fresh sandbox, the worker, then the reviewer.
     pub async fn run_task(&self, task: &Task) -> Result<Outcome> {
         let attempt = task.run.attempt.unwrap_or(0) + 1;
-        let name = run_name(&task.key, attempt);
         let profile = self.config.worker().clone();
-        let credential = self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await?;
+        // A run that failed before its agent started gave its attempt back but revoked its sub-agent, which can't be
+        // undone, so a retry's name carries the count of those to stay unique.
+        let retries = task.run.retries.unwrap_or(0);
+        let name = match retries {
+            0 => run_name(&task.key, attempt),
+            n => format!("{}-{n}", run_name(&task.key, attempt)),
+        };
+        let credential = match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
+            Ok(credential) => credential,
+            // The name was used by a run whose give-back didn't land; skip past it rather than retry it forever.
+            Err(e @ Error::Forbidden(_)) => {
+                self.set_back(&task.key);
+                let update = RunUpdate { retries: Some(retries + 1), ..RunUpdate::default() };
+                if let Err(e) = self.tracker.report(&task.key, update).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't skip a used run name");
+                }
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         let sub = self.tracker.sub_agent(&name);
         // Claiming as the sub-agent before creating the sandbox keeps two control planes from racing for one task.
         sub.claim(&task.key).await?;
@@ -336,10 +358,18 @@ impl Factory {
         // A task with a PR is a rework: the checkout starts from the PR branch's head, and the worker is told what the
         // review asked for.
         let rework = task.run.pr.is_some();
-        let sandbox = self.acquire_worker(task, rework.then(|| Self::branch(task))).await?;
-        sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
+        let prepared = async {
+            let context = self.tracker.human_context(&task.key).await?;
+            let sandbox = self.acquire_worker(task, rework.then(|| Self::branch(task))).await?;
+            sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
+            Ok::<_, Error>((sandbox, context))
+        };
+        let (sandbox, context) = match prepared.await {
+            Ok(prepared) => prepared,
+            Err(e) => return Err(self.not_started(task, &sub, &name, e).await),
+        };
+        self.setbacks.lock().unwrap().remove(&task.key);
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
-        let context = self.tracker.human_context(&task.key).await?;
         let req = RunRequest {
             run: name.clone(),
             role: Role::Worker,
@@ -363,7 +393,15 @@ impl Factory {
             credential,
         };
         let prior = task.run.spend.unwrap_or_default();
-        let run = self.run_metered(&sandbox, req, &profile, prior).await?;
+        let run = match self.run_metered(&sandbox, req, &profile, prior).await {
+            Ok(run) => run,
+            Err(Error::Cancelled) => {
+                // A stop on purpose cancelled the run; the next boot's reconcile requeues it without a strike.
+                self.give_back_attempt(task, &sub).await;
+                return Err(Error::Cancelled);
+            }
+            Err(e) => return Err(e),
+        };
 
         let (report, spend) = match run {
             Run::Breach(reason, spend) => {
@@ -418,6 +456,50 @@ impl Factory {
             }
             RunResult::Reviewed(_) => Err(Error::Other("a worker returned a review".into())),
         }
+    }
+
+    /// A run that failed before its agent started (TRAIL-159): the task goes back to the queue without the attempt
+    /// counting toward `max_attempts`, and waits out a backoff that grows with each failure in a row. Returns the
+    /// error to surface.
+    async fn not_started(&self, task: &Task, sub: &Arc<dyn Tracker>, name: &str, error: Error) -> Error {
+        tracing::warn!(task = %task.key.0, %error, "run failed before the agent started; the attempt doesn't count");
+        self.set_back(&task.key);
+        // Before the release: the run's sub-agent holds the claim, so only it can report.
+        self.give_back_attempt(task, sub).await;
+        if let Err(e) = sub.release(&task.key).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't release the task; reconcile will");
+        }
+        if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the run's sub-agent; reconcile will");
+        }
+        error
+    }
+
+    /// Restores the attempt count the task had before this run took the next number, reporting as the run's
+    /// sub-agent, which holds the claim.
+    async fn give_back_attempt(&self, task: &Task, sub: &Arc<dyn Tracker>) {
+        let update = RunUpdate {
+            attempt: Some(task.run.attempt.unwrap_or(0)),
+            retries: Some(task.run.retries.unwrap_or(0) + 1),
+            ..RunUpdate::default()
+        };
+        if let Err(e) = sub.report(&task.key, update).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
+        }
+    }
+
+    /// Holds a task back for a backoff that grows with each failure before its agent started, in a row.
+    fn set_back(&self, key: &TaskKey) {
+        let now = Instant::now();
+        let mut setbacks = self.setbacks.lock().unwrap();
+        let entry = setbacks.entry(key.clone()).or_insert((0, now));
+        entry.0 += 1;
+        entry.1 = now + backoff(entry.0);
+    }
+
+    /// Whether a task that failed before its agent started has waited out its backoff.
+    fn setback_over(&self, key: &TaskKey) -> bool {
+        self.setbacks.lock().unwrap().get(key).is_none_or(|(_, next_try)| Instant::now() >= *next_try)
     }
 
     /// Runs the reviewer on an open PR in its own fresh sandbox.
@@ -895,9 +977,14 @@ impl Factory {
             abandoned: false,
         });
         t.failures += 1;
-        t.next_try = now + FIRST_BACKOFF.saturating_mul(1 << (t.failures - 1).min(8)).min(MAX_BACKOFF);
+        t.next_try = now + backoff(t.failures);
         !t.abandoned && (t.failures >= RELEASE_ATTEMPTS || now - t.since >= RELEASE_PATIENCE)
     }
+}
+
+/// The wait after the `failures`th failure in a row: [`FIRST_BACKOFF`], doubling up to [`MAX_BACKOFF`].
+fn backoff(failures: u32) -> Duration {
+    FIRST_BACKOFF.saturating_mul(1 << (failures - 1).min(8)).min(MAX_BACKOFF)
 }
 
 fn unix_now() -> i64 {

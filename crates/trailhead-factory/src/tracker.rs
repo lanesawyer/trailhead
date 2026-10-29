@@ -61,6 +61,10 @@ pub struct RunUpdate {
     /// Why the last attempt failed, which the next attempt is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// Runs that failed before their agent started (TRAIL-159). They don't count as attempts, but each revoked a
+    /// sub-agent, so a retry's name carries this count to stay unique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u32>,
     /// The review that last asked for changes, which the rework on the PR branch is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_requested: Option<ChangesRequested>,
@@ -85,6 +89,7 @@ impl RunUpdate {
             reviewed,
             spend,
             failure,
+            retries,
             changes_requested,
         } = update;
         self.attempt = attempt.or(self.attempt.take());
@@ -96,6 +101,7 @@ impl RunUpdate {
         self.reviewed = reviewed.or(self.reviewed.take());
         self.spend = spend.or(self.spend.take());
         self.failure = failure.or(self.failure.take());
+        self.retries = retries.or(self.retries.take());
         self.changes_requested = changes_requested.or(self.changes_requested.take());
     }
 

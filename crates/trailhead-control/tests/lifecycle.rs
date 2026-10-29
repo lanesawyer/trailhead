@@ -457,6 +457,29 @@ async fn run_loop_reconciles_then_works_the_queue_and_stops() {
     handle.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn a_wake_starts_new_work_without_waiting_for_a_long_poll() {
+    let r = rig();
+    let factory = Arc::new(r.factory);
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let poll = std::time::Duration::from_secs(600);
+    let handle = tokio::spawn(factory.run(wake.clone(), poll, async {
+        let _ = stopped.await;
+    }));
+
+    // The loop is idle on its ten-minute poll; only the wake can start the new task.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let key = r.tracker.add_task("TRAIL", "late", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "?".into() }));
+    wake.notify_one();
+    let tracker = r.tracker.clone();
+    until("the task to park", || tracker.task(&key).status == Status::NeedsInput).await;
+
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
 /// Starts the run loop on one hanging task, stops it once the task is running, and returns how long the stop took.
 async fn stop_mid_run(r: Rig) -> std::time::Duration {
     let key = r.tracker.add_task("TRAIL", "Hangs", "");
@@ -976,4 +999,89 @@ async fn a_rework_posts_a_flaky_check_as_a_pr_comment() {
         pr.comments
     );
     assert!(!pr.spec.body.contains("when rerun"), "the body is only written when the PR opens");
+}
+
+#[tokio::test]
+async fn failures_before_the_agent_starts_dont_use_up_attempts() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Broken host", "");
+    for n in 1..=3 {
+        r.compute.fail(&format!("trailhead-w{n}"), "set_labels");
+    }
+    for _ in 0..3 {
+        let task = r.tracker.task(&key);
+        assert!(r.factory.run_task(&task).await.is_err());
+        let task = r.tracker.task(&key);
+        assert_eq!(task.status, Status::Open, "not parked");
+        assert_eq!(task.holder, None);
+        assert_eq!(task.run.attempt.unwrap_or(0), 0);
+    }
+    assert!(r.tracker.comments(&key).iter().all(|c| c.kind != "question"));
+
+    assert!(r.factory.tick().await.unwrap().is_empty(), "not retried before its backoff is over");
+    assert!(r.harness.contexts().is_empty());
+
+    // Fixed: the next attempt is attempt 1, under a name none of the failed runs used.
+    for n in 1..=3 {
+        r.compute.heal(&format!("trailhead-w{n}"));
+    }
+    r.factory.reconcile().await.unwrap();
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::Reviewed { .. }), "{ran:?}");
+    assert_eq!(r.tracker.task(&key).run.attempt, Some(1));
+    assert!(r.tracker.agents().contains(&"factory/trail-1-a1-3".to_string()), "{:?}", r.tracker.agents());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_before_the_agent_starts_is_retried_after_a_backoff() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Flaky host", "");
+    for n in 1..=3 {
+        r.compute.fail(&format!("trailhead-w{n}"), "set_labels");
+    }
+    assert!(r.factory.run_task(&r.tracker.task(&key)).await.is_err());
+    for n in 1..=3 {
+        r.compute.heal(&format!("trailhead-w{n}"));
+    }
+    r.factory.reconcile().await.unwrap();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert!(r.factory.tick().await.unwrap().is_empty(), "still backing off");
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.len(), 1, "retried once the backoff is over");
+    assert_eq!(r.tracker.task(&key).run.attempt, Some(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deliberate_stop_gives_the_attempt_back() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Hangs", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100).hang());
+    let factory = Arc::new(r.factory);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(factory.clone().run(
+        Arc::new(tokio::sync::Notify::new()),
+        std::time::Duration::from_secs(60),
+        async {
+            let _ = stopped.await;
+        },
+    ));
+    let tracker = r.tracker.clone();
+    until("the task to start", || tracker.task(&key).status == Status::InProgress && !r.daemon.requests().is_empty())
+        .await;
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+    assert_eq!(r.tracker.task(&key).run.attempt, Some(0), "the stopped run doesn't count");
+
+    // The next boot requeues it, and its retry runs as attempt 1 under a fresh name.
+    factory.reconcile().await.unwrap();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::Reviewed { .. }), "{ran:?}");
+    assert_eq!(r.tracker.task(&key).run.attempt, Some(1));
+    assert!(r.tracker.agents().contains(&"factory/trail-1-a1-1".to_string()), "{:?}", r.tracker.agents());
 }

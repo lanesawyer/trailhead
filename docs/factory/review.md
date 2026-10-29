@@ -1,10 +1,10 @@
 # Verification and review
 
-Three layers, cheapest first. Each change gets a risk **grade**, and the repo's gate policy says which layers that grade must pass before it can merge.
+Three layers, cheapest first. Each task carries a risk **grade**, and the repo's gate policy says which layers work at that grade must pass before it can merge.
 
 1. **Mechanical checks.** The repo's standard checks ([sandbox.md](sandbox.md)), run in the author's sandbox, and the repo's own CI on the PR. A failure goes back to the author agent, not to review.
 2. **Agent review.** A separate agent in a fresh sandbox sees the task, the diff and the check results, never the author's transcript. Different prompt, and where possible a different model.
-3. **Human review.** Lane merges the PR himself.
+3. **Human review.** Lane approves the task (`approved`), or merges the PR himself.
 
 ## Grades
 
@@ -17,12 +17,13 @@ Named after the climbing classes of the Yosemite Decimal System: the higher the 
 | 3 | Scrambling, above Treeline | New or upgraded dependencies, schema or migrations, public API changes, large diffs | Checks + CI + agent review + human |
 | 4 | Exposed | Auth, secrets handling, sandbox egress, CI workflows, the factory's own policy (`factory.toml`) and profiles | Human required; agent review advisory |
 
-How a PR gets its grade:
+How grades are set:
 
-- **The control plane computes it from the diff, never the author.** Each changed file matches the repo's path rules; the PR takes the highest grade of any file. A file no rule matches is grade 2. Deleting a test or a check is never grade 1.
-- **Size raises it.** A diff over the repo's line limit is at least grade 3.
-- **Reviewers can raise it, nobody can lower it.** The reviewer's verdict can name a higher grade with a reason; the PR keeps the highest grade anyone gave it.
-- **The grade is recorded** in the task's `factory` metadata and stated in the reviewer's PR comment.
+- **On the task, by a human, when it's triaged.** The grade is a field on the task ([PLAN.md](../PLAN.md), engine change #6). Grading a task is what makes it the factory's work: the factory only picks up graded tasks under its queue task, and skips an ungraded one, saying so. A task that should never be worked by the factory, like an item on a shopping list, simply has no grade.
+- **Only raised after that.** Agents can raise a task's grade but never set the first one, lower it or clear it. The PR is graded the task's grade or higher:
+  - **By the diff.** The control plane matches each changed file against the repo's path rules, and a diff over the repo's line limit is at least grade 3. If that comes out higher than the task's grade, the PR and the task are raised, with the file or rule that did it. Deleting a test or a check is never grade 1.
+  - **By the reviewer.** Its verdict can name a higher grade with a reason.
+- **The grade and anything that raised it** are recorded on the task and stated in the reviewer's PR comment, e.g. "Grade 3 (task was 1; Cargo.lock changed)".
 
 ## Gate policy
 
@@ -30,8 +31,8 @@ Decided: gates per grade are configurable per repo, in `factory.toml`. The table
 
 ```toml
 [grades]
-# Path globs per grade; a PR takes the highest grade of its files, and unmatched files are grade 2.
-1 = ["docs/**", "**/*.md", "**/tests/**"]
+# Path globs that raise a PR to at least this grade; unmatched files don't raise it.
+2 = ["crates/**"]
 3 = ["**/Cargo.toml", "Cargo.lock", "**/migrations/**"]
 4 = [".github/**", "factory.toml", "fnox.toml", "mise.toml"]
 max_lines = 600          # bigger diffs are at least grade 3
@@ -52,7 +53,7 @@ quorum = { reviewers = 3, agree = 3, distinct_models = true }
 mode = "shadow"          # off | shadow | on
 ```
 
-Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. Lane triages the queue by grade once grades exist and widens it from there.
+Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. Lane grades the queue once grades exist and widens auto-merge from there. With the rules above, code in `crates/` raises a grade-1 task to 2, so only docs and similar work merges on its own.
 
 Decided: quorum reviewers must be independent. Quorums are built after the merger, once a repo wants a grade with no human gate (TRAIL-204).
 
@@ -62,23 +63,24 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 
 ## The merger
 
-The control plane acts as the merger. It is the factory project's only delegated reviewer ([lifecycle.md](lifecycle.md)), and the only agent that moves a factory task to `done`.
+The control plane acts as the merger. It is the factory project's only delegated reviewer ([lifecycle.md](lifecycle.md)), and the only agent that moves a factory task to `approved` or `done`.
 
-1. After each pass that could change the answer (a verdict, a rework, CI finishing, a reconcile), it evaluates the PR's gates against its **current head**: the sandbox checks passed, the repo's CI is green on that commit, the latest verdict on that head approves, and the grade allows merging without a human.
-2. It records the decision in the task's `factory` metadata (`merge`: the grade, which gates passed, and what it's waiting on) and says it once on the PR: "Grade 1 (docs only); checks, CI and review passed; merging." or "Grade 3 (Cargo.lock changed): waiting for Lane."
-3. What it does next depends on `[merge] mode`:
+1. After each pass that could change the answer (a verdict, a rework, CI finishing, Lane approving, a reconcile), it evaluates the PR's gates against its **current head**: the sandbox checks passed, the repo's CI is green on that commit, the latest verdict on that head approves, and, for grades whose gates require a human, Lane has approved.
+2. When they pass, it moves the task to `approved`. A push after that sends it back to `in_review`.
+3. It records the decision in the task's `factory` metadata (`merge`: the grade, which gates passed, and what it's waiting on) and says it once on the PR when it changes: "Grade 1: checks, CI and review passed; merging." or "Grade 3 (Cargo.lock changed): waiting for Lane."
+4. What it does with an `approved` task depends on `[merge] mode` and the grade's `auto_merge`:
    - **`off`:** nothing; Lane merges every PR.
    - **`shadow`:** it posts what it *would* do and doesn't merge. Lane merges as today, and compares. The default until Lane switches it.
-   - **`on`:** it squash-merges the PR and closes the task as `done` with a handoff naming the PR, the merge commit and the gates. A merge conflict sends the task back to running, to rework the PR on top of `main`.
-4. However a PR is merged, by the merger or by Lane on GitHub, the task is closed the same way, so `done` always means merged (TRAIL-198).
+   - **`on`:** for a grade with `auto_merge`, it squash-merges the PR. A merge conflict sends the task back to running, to rework the PR on top of `main`. For other grades, Lane's approval is the human gate and the merger merges after it.
+5. However a PR is merged, by the merger or by Lane on GitHub, the task is closed as `done` the same way, with a handoff naming the PR and the merge commit (TRAIL-198). `done` always means merged.
 
 ## The ratchet
 
-Decided: agents may tighten the policy under the repo's normal gates, but any change that loosens it always needs a human, even in a fully autonomous repo. Loosening includes dropping a gate, lowering a quorum, raising a budget, moving work to a cheaper profile, moving Treeline up, or lowering a path's grade. Until the policy lives somewhere the control plane can diff, every change to `factory.toml` is grade 4, so a human sees it. Trailhead already applies the same rule to `require_review` and project reviewers.
+Decided: agents may tighten the policy under the repo's normal gates, but any change that loosens it always needs a human, even in a fully autonomous repo. Loosening includes dropping a gate, lowering a quorum, raising a budget, moving work to a cheaper profile, moving Treeline up, lowering a path's grade, or lowering a task's grade. Until the policy lives somewhere the control plane can diff, every change to `factory.toml` is grade 4, so a human sees it. Trailhead already applies the same rule to `require_review` and project reviewers.
 
 ## Rules that keep the gate honest
 
-- The grade is computed by the control plane from the diff (paths, dependency files, size), never self-declared by the author.
+- The grade is set on the task by a human, and only raised after that: by the diff (paths, dependency files, size) or a reviewer. The author never grades its own work.
 - A change touching the policy or profile files is top grade.
 - Any reviewer can raise a grade through its verdict; nobody can lower one.
 - Author and reviewer disagree past the repo's review-round cap → park for a human (TRAIL-180).
