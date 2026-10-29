@@ -156,6 +156,10 @@ impl Tracker for RestTracker {
         Err(unsupported("read a task's comments"))
     }
 
+    async fn last_review(&self, _: &TaskKey) -> Result<Option<Verdict>> {
+        Err(unsupported("read a task's comments"))
+    }
+
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
         let query = [
             ("project", project),
