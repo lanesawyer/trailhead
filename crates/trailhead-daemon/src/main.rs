@@ -65,10 +65,6 @@ impl CodeHost for NoCodeHost {
     async fn merge(&self, _: &PrRef, _: &str) -> Result<MergeOutcome> {
         Err(Error::Forbidden(self.0.clone()))
     }
-    async fn mergeable(&self, _: &PrRef) -> Result<Option<bool>> {
-        Err(Error::Other("the daemon has no code host access".into()))
-    }
-
     async fn behind(&self, _: &PrRef) -> Result<bool> {
         Err(Error::Forbidden(self.0.clone()))
     }
