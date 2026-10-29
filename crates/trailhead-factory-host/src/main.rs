@@ -310,11 +310,28 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
                 wake.clone(),
                 wake::INTERVAL,
             ));
-            let shutdown = async {
+            // The first Ctrl-C drains; the second cancels what is left.
+            let (drain_tx, drain) = tokio::sync::oneshot::channel::<()>();
+            let (cancel_tx, cancel) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                let _ = drain_tx.send(());
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!("stopping; runs in flight are requeued on the next start");
-            };
-            let ran = factory.run(wake, Duration::from_secs(opts.poll_secs), shutdown).await;
+                let _ = cancel_tx.send(());
+            });
+            let ran = factory
+                .run_draining(
+                    wake,
+                    Duration::from_secs(opts.poll_secs),
+                    async {
+                        let _ = drain.await;
+                    },
+                    async {
+                        let _ = cancel.await;
+                    },
+                )
+                .await;
             watcher.abort();
             tunnel.shutdown().await.map_err(|e| e.to_string())?;
             ran.map_err(|e| e.to_string())
