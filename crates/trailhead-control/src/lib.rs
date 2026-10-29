@@ -1715,8 +1715,11 @@ impl Factory {
         if state == Some(label::IDLE) {
             return;
         }
+        tracing::info!(sandbox = %name, "releasing a pooled sandbox back to idle");
+        let started = Instant::now();
         match self.release_worker(sandbox).await {
             Ok(()) => {
+                tracing::info!(sandbox = %name, took = ?started.elapsed(), "released a pooled sandbox");
                 self.troubled.lock().unwrap().remove(name);
                 done.released.push(name.clone());
             }
