@@ -177,18 +177,27 @@ async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
     if gated { Err(Error::ReviewRequired) } else { Ok(()) }
 }
 
-/// Whether the acting agent claimed the task or sent it to review. An undone send to review
+/// Whether the acting agent did the work now in review: it made the latest move into review,
+/// or took the last claim before that move. Claims from earlier rounds don't count, so the
+/// factory can still approve a task it once claimed only to park it. An undone send to review
 /// still counts: the agent did the work either way.
 async fn did_work(tx: &Tx, task: &Task) -> Result<bool> {
     let me = tx.ctx.actor_id().to_string();
     let mut rows = tx
         .conn
         .query(
-            "SELECT 1 FROM events WHERE task_id = ?1 AND actor_id = ?2 AND undoes IS NULL AND (
-                 kind = 'claim.acquired'
-                 OR (entity = 'task' AND json_extract(after, '$.status') = 'in_review'
-                     AND COALESCE(json_extract(before, '$.status'), '') <> 'in_review'))
-             LIMIT 1",
+            "WITH sent AS (
+                 SELECT id, actor_id FROM events
+                 WHERE task_id = ?1 AND undoes IS NULL AND entity = 'task'
+                   AND json_extract(after, '$.status') = 'in_review'
+                   AND COALESCE(json_extract(before, '$.status'), '') <> 'in_review'
+                 ORDER BY id DESC LIMIT 1
+             )
+             SELECT 1 FROM sent WHERE sent.actor_id = ?2 OR (
+                 SELECT actor_id FROM events
+                 WHERE task_id = ?1 AND undoes IS NULL AND kind = 'claim.acquired' AND id < sent.id
+                 ORDER BY id DESC LIMIT 1
+             ) = ?2",
             libsql::params![task.id.to_string(), me],
         )
         .await?;

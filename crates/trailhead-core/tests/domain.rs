@@ -901,6 +901,34 @@ async fn reviewers_cannot_approve_their_own_work() {
 }
 
 #[tokio::test]
+async fn a_reviewer_approves_work_it_only_parked_in_an_earlier_round() {
+    let env = Env::new().await;
+    let factory = env.agent("factory").await;
+    let worker = env.agent("worker").await;
+    let patch = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    env.store.update_project(&env.human, "AUTH", patch, None).await.unwrap();
+
+    // The factory claims a task only to park it; a worker later does the work.
+    let t = env.task("parked once").await;
+    env.store.claim(&factory, &t.key, None).await.unwrap();
+    env.store.update_task(&factory, &t.key, status(Status::Open), None).await.unwrap();
+    env.store.claim(&worker, &t.key, None).await.unwrap();
+    env.store.update_task(&worker, &t.key, status(Status::InReview), None).await.unwrap();
+    env.store.update_task(&factory, &t.key, status(Status::Approved), None).await.unwrap();
+    let done = env.store.update_task(&factory, &t.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(done.status, Status::Done);
+
+    // The last claim before the move into review still counts when someone else makes the move.
+    let u = env.task("sent by another").await;
+    env.store.claim(&factory, &u.key, None).await.unwrap();
+    env.store.update_task(&env.human, &u.key, status(Status::InReview), None).await.unwrap();
+    assert!(matches!(
+        env.store.update_task(&factory, &u.key, status(Status::Done), None).await,
+        Err(Error::ReviewRequired)
+    ));
+}
+
+#[tokio::test]
 async fn held_work_cannot_skip_to_approved() {
     let env = Env::new().await;
     let lead = env.agent("lead").await;

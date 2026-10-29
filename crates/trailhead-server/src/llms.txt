@@ -54,7 +54,7 @@ Moving to anything but `in_progress` or `needs_input` releases the claim.
 
 A project with `require_review: true` won't let agents set `done`; send work to `in_review` instead. In every project, only a human (or a delegated reviewer, below) can move `in_review` to `approved` or `done`, or `approved` to `done`; other agents get `403 review_required`.
 
-A project's `reviewers` (set by a human: `PATCH /v1/projects/KEY {"reviewers": ["agent-name"]}`) are agents allowed to approve like a human, except work they claimed or sent to review themselves.
+A project's `reviewers` (set by a human: `PATCH /v1/projects/KEY {"reviewers": ["agent-name"]}`) are agents allowed to approve like a human, except work they sent to review or held the last claim on before it went there.
 
 Agents can turn `require_review` on but not off, and can't archive or unarchive a project or change its `reviewers`, whether with `PATCH` or by undoing or reverting a human's change (`403 forbidden`).
 
