@@ -12,7 +12,9 @@ pub mod money;
 pub mod provider;
 pub mod tracker;
 
-pub use codehost::{Ci, CiState, CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, PrState, Repo};
+pub use codehost::{
+    BranchUpdate, Ci, CiState, CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, PrState, Repo,
+};
 pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };

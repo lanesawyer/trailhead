@@ -10,7 +10,8 @@ use base64::Engine;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
-    ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
+    BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
+    Repo, Result,
 };
 
 pub const API_URL: &str = "https://api.github.com";
@@ -352,6 +353,51 @@ impl CodeHost for GitHub {
         let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
         // Null while GitHub is still working it out; asking again later gets the answer.
         Ok(self.call(self.request(Method::GET, &path)).await?["mergeable"].as_bool())
+    }
+
+    async fn behind(&self, pr: &PrRef) -> Result<bool> {
+        let r = Self::repo_path(&pr.repo);
+        let p = self.call(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
+        let (Some(base), Some(head)) = (p["base"]["ref"].as_str(), p["head"]["sha"].as_str()) else {
+            return Err(Error::Other(format!("github: PR {} has no base or head", pr.number)));
+        };
+        let cmp = self.call(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
+        // `behind` gates merging, so a response without the count is an error, not "up to date".
+        let behind_by = cmp["behind_by"]
+            .as_u64()
+            .ok_or_else(|| Error::Other(format!("github: comparing PR {} with {base} has no behind_by", pr.number)))?;
+        Ok(behind_by > 0)
+    }
+
+    async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate> {
+        let r = Self::repo_path(&pr.repo);
+        let p = self.call(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
+        let Some(head) = p["head"]["sha"].as_str() else {
+            return Err(Error::Other(format!("github: PR {} has no head", pr.number)));
+        };
+        // Naming the head we read makes a push that raced us fail instead of getting merged over.
+        let request = self
+            .request(Method::PUT, &format!("{r}/pulls/{}/update-branch", pr.number))
+            .json(&json!({ "expected_head_sha": head }));
+        let (status, body, _) = self.send(request).await?;
+        let message = body["message"].as_str().unwrap_or_default();
+        match status {
+            // GitHub queues the merge and answers 202.
+            s if s.is_success() => Ok(BranchUpdate::Updated),
+            // 422 is also nothing to merge in (a queued update landed already) and a head that moved; only a real
+            // merge conflict sends the task back to running.
+            StatusCode::UNPROCESSABLE_ENTITY => {
+                let lower = message.to_lowercase();
+                if lower.contains("merge conflict") {
+                    Ok(BranchUpdate::Conflict)
+                } else if lower.contains("no new commits") {
+                    Ok(BranchUpdate::UpToDate)
+                } else {
+                    Err(Error::Other(format!("github {status}: {message}")))
+                }
+            }
+            s => Err(Error::Other(format!("github {s}: {message}"))),
+        }
     }
 
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {

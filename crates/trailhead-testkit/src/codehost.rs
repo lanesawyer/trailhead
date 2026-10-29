@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
+    BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
+    Repo, Result,
 };
 
 #[derive(Debug, Clone)]
@@ -16,6 +17,8 @@ pub struct FakePr {
     pub closed: bool,
     /// What the host says of whether it merges cleanly: `None` while it is still working it out.
     pub mergeable: Option<bool>,
+    /// The base branch has commits the PR's branch lacks.
+    pub behind: bool,
     /// What the host lists as changed, when a test sets it; otherwise it follows the published commits.
     pub files: Option<Vec<ChangedFile>>,
     /// CI on the PR's head: pending until a test says otherwise.
@@ -81,6 +84,11 @@ impl FakeCodeHost {
     /// Sets whether the host says the PR merges cleanly (`None`: not worked out yet).
     pub fn set_mergeable(&self, pr: &PrRef, mergeable: Option<bool>) {
         self.find(pr, |p, _| p.mergeable = mergeable).unwrap();
+    }
+
+    /// Sets whether the PR's branch is behind its base.
+    pub fn set_behind(&self, pr: &PrRef, behind: bool) {
+        self.find(pr, |p, _| p.behind = behind).unwrap();
     }
 
     /// Sets the files the host lists for a PR, such as a lockfile the fake agent never wrote.
@@ -154,6 +162,7 @@ impl CodeHost for FakeCodeHost {
             merged: false,
             closed: false,
             mergeable: Some(true),
+            behind: false,
             files: None,
             ci: CiState::Pending,
         });
@@ -195,6 +204,36 @@ impl CodeHost for FakeCodeHost {
 
     async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>> {
         self.find(pr, |p, _| p.mergeable)
+    }
+
+    async fn behind(&self, pr: &PrRef) -> Result<bool> {
+        self.find(pr, |p, _| p.behind)
+    }
+
+    async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate> {
+        let conflicts = self.state.lock().unwrap().conflicts;
+        if conflicts {
+            return Ok(BranchUpdate::Conflict);
+        }
+        if !self.find(pr, |p, _| p.behind)? {
+            return Ok(BranchUpdate::UpToDate);
+        }
+        let branch = self.find(pr, |p, _| {
+            p.behind = false;
+            p.spec.branch.clone()
+        })?;
+        // A merge commit on top of the branch, like the host makes.
+        let mut s = self.state.lock().unwrap();
+        let key = (pr.repo.slug(), branch.clone());
+        let commits = s.branches.entry(key.clone()).or_default();
+        commits.push(Commit {
+            message: format!("Merge {} into {branch}", pr.repo.slug()),
+            changes: vec![],
+            merges: vec!["base".into()],
+        });
+        let n = commits.len();
+        s.heads.insert(key, format!("{branch}@{n}"));
+        Ok(BranchUpdate::Updated)
     }
 
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {

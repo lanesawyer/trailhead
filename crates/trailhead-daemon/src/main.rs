@@ -16,7 +16,8 @@ use trailhead_daemon::net::{
 };
 use trailhead_daemon::{Connect, GitWorkspace, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{
-    ChangedFile, Ci, CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, PrState, Repo, Result, Tracker,
+    BranchUpdate, ChangedFile, Ci, CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, PrState, Repo,
+    Result, Tracker,
 };
 use trailhead_harness_claude_code::ClaudeCode;
 
@@ -66,6 +67,14 @@ impl CodeHost for NoCodeHost {
     }
     async fn mergeable(&self, _: &PrRef) -> Result<Option<bool>> {
         Err(Error::Other("the daemon has no code host access".into()))
+    }
+
+    async fn behind(&self, _: &PrRef) -> Result<bool> {
+        Err(Error::Forbidden(self.0.clone()))
+    }
+
+    async fn update_branch(&self, _: &PrRef) -> Result<BranchUpdate> {
+        Err(Error::Forbidden(self.0.clone()))
     }
 
     async fn pr_state(&self, _: &PrRef) -> Result<PrState> {
