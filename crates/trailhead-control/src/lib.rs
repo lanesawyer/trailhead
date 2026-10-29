@@ -839,6 +839,8 @@ impl Factory {
         if let Some(grade) = &grade {
             self.record_grade(&shown, grade).await?;
         }
+        // Read before anything is created, so a tracker that fails here holds no sub-agent or sandbox.
+        let context = self.tracker.human_context(&task.key).await?;
         // The commit the review is of, so a verdict isn't counted for a head pushed after it.
         let head = match &self.codehost {
             Some(codehost) => Some(codehost.head(pr).await?),
@@ -859,7 +861,6 @@ impl Factory {
             Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
         };
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
-        let context = self.tracker.human_context(&task.key).await?;
         let req = RunRequest {
             run: name.clone(),
             role: Role::Reviewer,
