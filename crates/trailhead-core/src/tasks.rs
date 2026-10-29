@@ -190,7 +190,7 @@ async fn did_work(tx: &Tx, task: &Task) -> Result<bool> {
                  SELECT id, actor_id FROM events
                  WHERE task_id = ?1 AND undoes IS NULL AND entity = 'task'
                    AND json_extract(after, '$.status') = 'in_review'
-                   AND COALESCE(json_extract(before, '$.status'), '') <> 'in_review'
+                   AND COALESCE(json_extract(before, '$.status'), '') NOT IN ('in_review', 'approved')
                  ORDER BY id DESC LIMIT 1
              )
              SELECT 1 FROM sent WHERE sent.actor_id = ?2 OR (
@@ -601,6 +601,17 @@ impl Store {
                         let p = find_task(&tx.conn, ctx, p, false).await?;
                         if p.id == before.id {
                             return Err(Error::Invalid("a task can't be its own parent".into()));
+                        }
+                        // Walk up from the new parent; the task being moved must not be an ancestor.
+                        let mut up = p.parent_id;
+                        while let Some(id) = up {
+                            if id == before.id {
+                                return Err(Error::Invalid(format!(
+                                    "{} is under {}, so it can't become its parent",
+                                    p.key, before.key
+                                )));
+                            }
+                            up = load_task(&tx.conn, ctx.workspace_id, &id.to_string(), true).await?.parent_id;
                         }
                         Some(p.id)
                     }

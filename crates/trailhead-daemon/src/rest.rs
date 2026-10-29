@@ -199,6 +199,14 @@ impl Tracker for RestTracker {
         self.patch(key, json!({ "status": "in_review" })).await
     }
 
+    async fn approve(&self, key: &TaskKey) -> Result<()> {
+        self.patch(key, json!({ "status": "approved" })).await
+    }
+
+    async fn unapprove(&self, key: &TaskKey) -> Result<()> {
+        self.patch(key, json!({ "status": "in_review" })).await
+    }
+
     async fn reopen(&self, key: &TaskKey) -> Result<()> {
         self.patch(key, json!({ "status": "open" })).await
     }

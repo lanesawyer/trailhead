@@ -22,4 +22,5 @@ tokio = { workspace = true, features = ["time"] }
 [dev-dependencies]
 axum.workspace = true
 futures-util.workspace = true
+http.workspace = true
 tokio.workspace = true

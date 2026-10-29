@@ -134,6 +134,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
         diff: (role == Role::Reviewer).then(|| "+pub fn hi() {}".into()),
         checks: Vec::new(),
         title: None,
+        base_branch: (role == Role::Reviewer).then(|| "main".into()),
     }
 }
 
@@ -276,7 +277,7 @@ async fn reviewers_get_a_capped_diff() {
     play(&r, "review", c).await;
     let log = std::fs::read_to_string(&r.log).unwrap();
     assert!(log.contains("diff --git a/f0 b/f0") && !log.contains("diff --git a/f9 b/f9"), "cut");
-    assert!(log.contains("git diff origin/<base>...HEAD"), "tells the reviewer how to read the rest");
+    assert!(log.contains("git diff origin/main...HEAD"), "tells the reviewer how to read the rest");
     let at = log.find("[The diff is").unwrap();
     assert!(log[..at].trim_end().ends_with("+line of code"), "cut on a file boundary");
 }
@@ -468,4 +469,27 @@ fn many_long_answers_keep_the_newest_and_leave_room_for_notes() {
     assert!(p.contains("answer 19:") && !p.contains("answer 0:"), "the oldest answers go first");
     assert!(p.contains("a note that must survive"), "notes aren't crowded out");
     assert!(p.len() < 9000, "{}", p.len());
+}
+
+#[test]
+fn several_short_answers_are_kept_oldest_first_up_to_the_cap() {
+    use trailhead_factory::Answered;
+    let r = rig();
+    let mut c = ctx(&r, Role::Worker, 0);
+    for i in 0..10 {
+        c.task.context.answers.push(Answered {
+            question: format!("question {i}?"),
+            answer: format!("answer {i}: {}", "a".repeat(680)),
+            by: "lane".into(),
+            date: "2026-10-29".into(),
+        });
+    }
+    let p = prompt(&c, None);
+    // Each entry is about 735 bytes, so five fit under the 4000-byte cap and the sixth does not.
+    let at: Vec<_> = (5..10).map(|i| p.find(&format!("answer {i}:"))).collect();
+    assert!(at.iter().all(Option::is_some), "the newest five are kept: {at:?}");
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "they stay oldest first: {at:?}");
+    for i in 0..5 {
+        assert!(!p.contains(&format!("answer {i}:")), "answer {i} is past the cap, and so is everything older");
+    }
 }
