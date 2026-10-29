@@ -351,9 +351,8 @@ pub struct CommentArgs {
     verdict: Option<String>,
     /// For a review, optional: the model that reviewed.
     model: Option<String>,
-    /// User or agent id the comment is for.
-    #[schemars(with = "Option<String>")]
-    addressed_to: Option<Uuid>,
+    /// Who the comment is for: a user or agent name as `show` prints it (`lane`, `claude/openapi`), or an id.
+    addressed_to: Option<String>,
     /// Optional. Retrying with the same key and arguments returns the first call's
     /// result instead of doing it twice. Keys last 24 hours.
     #[serde(default, skip_serializing)]
@@ -440,6 +439,40 @@ impl TrailheadMcp {
         }
     }
 
+    /// The names `show` can print: the acting user and the workspace's agents. Only cosmetic, so a lookup that fails
+    /// leaves its names out rather than failing the call.
+    async fn known_names(&self, ctx: &Ctx) -> HashMap<Uuid, String> {
+        let mut known = HashMap::new();
+        match self.state.store.get_user(ctx, ctx.user_id).await {
+            Ok(u) => {
+                known.insert(u.id, u.name);
+            }
+            Err(e) => tracing::warn!(error = %e, "couldn't look up the user's name"),
+        }
+        match self.state.store.list_agents(ctx).await {
+            Ok(agents) => known.extend(agents.into_iter().map(|a| (a.id, a.name))),
+            Err(e) => tracing::warn!(error = %e, "couldn't look up agent names"),
+        }
+        known
+    }
+
+    /// An id, or the user or agent with a name `show` prints.
+    async fn resolve_name(&self, ctx: &Ctx, name: &str) -> trailhead_core::Result<Uuid> {
+        if let Ok(id) = name.parse::<Uuid>() {
+            return Ok(id);
+        }
+        let user = self.state.store.get_user(ctx, ctx.user_id).await?;
+        if user.name == name {
+            return Ok(user.id);
+        }
+        let agents = self.state.store.list_agents(ctx).await?;
+        agents
+            .into_iter()
+            .find(|a| a.name == name)
+            .map(|a| a.id)
+            .ok_or_else(|| Error::NotFound(format!("no user or agent {name}")))
+    }
+
     async fn do_create_task(&self, ctx: &Ctx, a: CreateArgs) -> Result<CallToolResult, ErrorData> {
         let due_at = attempt!(parse_opt_at(a.due_at.as_deref()));
         let scheduled_on = attempt!(parse_opt_date(a.scheduled_on.as_deref()));
@@ -472,7 +505,11 @@ impl TrailheadMcp {
     async fn do_comment(&self, ctx: &Ctx, a: CommentArgs) -> Result<CallToolResult, ErrorData> {
         let kind = attempt!(a.kind.as_deref().map(str::parse::<CommentKind>).transpose()).unwrap_or(CommentKind::Note);
         let verdict = attempt!(a.verdict.as_deref().map(str::parse::<Verdict>).transpose());
-        let new = NewComment { kind, body: a.body, addressed_to: a.addressed_to, verdict, model: a.model };
+        let addressed_to = match a.addressed_to.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            None => None,
+            Some(to) => Some(attempt!(self.resolve_name(ctx, to).await)),
+        };
+        let new = NewComment { kind, body: a.body, addressed_to, verdict, model: a.model };
         let c = attempt!(self.state.store.add_comment(ctx, &a.task, new).await);
         text(format!("{} {}", c.kind, c.id))
     }
@@ -584,13 +621,7 @@ impl TrailheadMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let detail = attempt!(self.state.store.task_detail(&ctx, &a.task).await);
-        let mut known: HashMap<Uuid, String> = HashMap::new();
-        if let Ok(u) = self.state.store.get_user(&ctx, ctx.user_id).await {
-            known.insert(u.id, u.name);
-        }
-        for ag in attempt!(self.state.store.list_agents(&ctx).await) {
-            known.insert(ag.id, ag.name);
-        }
+        let known = self.known_names(&ctx).await;
         let names = |id: Uuid| known.get(&id).cloned().unwrap_or_else(|| id.to_string().chars().take(8).collect());
         text(detail_text(&detail, &names))
     }

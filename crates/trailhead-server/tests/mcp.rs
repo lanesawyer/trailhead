@@ -117,6 +117,27 @@ async fn agent_works_a_task_over_mcp() {
     let (_, out) = call(&client, "show", json!({"task": "AUTH-2"})).await;
     assert!(out.contains("[review, request changes, m-1] ") && out.contains(" claude: not yet"), "{out}");
 
+    // `addressed_to` takes a name as `show` prints it.
+    let (err, out) =
+        call(&client, "comment", json!({"task": "AUTH-1", "body": "?", "kind": "question", "addressed_to": "nobody"}))
+            .await;
+    assert!(err && out.contains("nobody"), "{out}");
+    let (err, out) = call(
+        &client,
+        "comment",
+        json!({"task": "AUTH-1", "body": "ship it?", "kind": "question", "addressed_to": "lane"}),
+    )
+    .await;
+    assert!(!err, "{out}");
+    let question = out.split_whitespace().last().unwrap().to_string();
+    let (_, out) = call(&client, "show", json!({"task": "AUTH-1"})).await;
+    assert!(out.contains("[question, to lane, open] ") && out.contains(" claude: ship it?"), "{out}");
+    let (err, out) = call(&client, "resolve_question", json!({"comment_id": question, "answer": "yes"})).await;
+    assert!(!err, "{out}");
+    let (_, out) = call(&client, "show", json!({"task": "AUTH-1"})).await;
+    assert!(out.contains("[question, to lane, resolved] "), "{out}");
+    assert!(out.contains("[note, to claude] "), "the answer goes back to the asker: {out}");
+
     let (err, out) = call(&client, "create_task", json!({"project": "AUTH", "title": "oops"})).await;
     assert!(!err, "{out}");
     let (err, out) = call(&client, "undo_last", json!({})).await;
