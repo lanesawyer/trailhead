@@ -247,7 +247,8 @@ async fn reviewer_verdict_from_result_text() {
         RunOutcome::Verdict {
             kind: VerdictKind::RequestChanges,
             body: "Missing a test for hi().".into(),
-            follow_ups: vec![]
+            follow_ups: vec![],
+            raise_grade: None,
         }
     );
     let log = std::fs::read_to_string(&r.log).unwrap();
@@ -288,7 +289,10 @@ async fn approving_review_carries_follow_ups() {
         FollowUp { title: "Rename it".into(), description: String::new(), priority: None },
         FollowUp { title: "Split it".into(), description: String::new(), priority: None },
     ];
-    assert_eq!(out, RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Fine.".into(), follow_ups });
+    assert_eq!(
+        out,
+        RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Fine.".into(), follow_ups, raise_grade: None }
+    );
 }
 
 async fn questions_park_the_task() {

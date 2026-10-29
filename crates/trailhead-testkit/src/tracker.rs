@@ -78,11 +78,17 @@ impl FakeTracker {
                 title: title.to_string(),
                 description: description.to_string(),
                 status: Status::Open,
+                grade: None,
                 holder: None,
                 run: RunUpdate::default(),
             },
         );
         key
+    }
+
+    /// A human grades a task, which is what makes it the factory's work.
+    pub fn set_grade(&self, key: &TaskKey, grade: u8) {
+        self.state.lock().unwrap().tasks.get_mut(key).unwrap().grade = Some(grade);
     }
 
     pub fn task(&self, key: &TaskKey) -> Task {
@@ -258,7 +264,7 @@ impl Tracker for FakeTracker {
                 "request_changes" => VerdictKind::RequestChanges,
                 _ => return None,
             };
-            Some(Verdict { kind, body: body.to_string(), reviewer: c.author.clone(), model: None })
+            Some(Verdict { kind, body: body.to_string(), reviewer: c.author.clone(), model: None, raise_grade: None })
         }))
     }
 
@@ -326,6 +332,17 @@ impl Tracker for FakeTracker {
             t.holder = None;
             t.status = Status::Open;
             Ok(())
+        })
+    }
+
+    async fn raise_grade(&self, task: &TaskKey, grade: u8) -> Result<()> {
+        self.write(task, |t, _| match t.grade {
+            None => Err(Error::Forbidden("only a human can set a task's first grade".into())),
+            Some(g) if grade < g => Err(Error::Forbidden("only a human can lower or clear a task's grade".into())),
+            Some(_) => {
+                t.grade = Some(grade);
+                Ok(())
+            }
         })
     }
 

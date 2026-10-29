@@ -24,6 +24,13 @@ test = "cargo test"
 # crates.io and rustup while installing dependencies; nothing extra while the agent works.
 install = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang.org"]
 
+[grades]
+# Path globs that raise a PR to at least this grade (docs/factory/review.md#grades); the task's own grade is the floor.
+2 = ["crates/**"]
+3 = ["**/Cargo.toml", "Cargo.lock", "**/migrations/**"]
+4 = [".github/**", "factory.toml", "fnox.toml", "mise.toml"]
+max_lines = 600          # bigger diffs are at least grade 3
+
 [daemon]
 # Chasing TRAIL-187 (run not found on the daemon after a reattach).
 log = "info,iroh=debug"

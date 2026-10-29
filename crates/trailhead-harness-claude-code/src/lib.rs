@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use trailhead_factory::{
-    CheckResult, Commit, Error, EventSink, Feedback, FileChange, FollowUp, Harness, ModelId, Result, Role, RunContext,
-    RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
+    CheckResult, Commit, Error, EventSink, Feedback, FileChange, FollowUp, Harness, ModelId, RaiseGrade, Result, Role,
+    RunContext, RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
 };
 
 /// What `ANTHROPIC_API_KEY` is set to. The gateway replaces credentials, so this only has to be non-empty.
@@ -238,6 +238,15 @@ pub fn schema(role: Role) -> Value {
                     "required": ["title"],
                 },
             },
+            "raise_grade": {
+                "type": "object",
+                "description": "For a review: only if the change is riskier than its grade (1 walk, 2 ordinary code, 3 dependencies, schema or public API, 4 auth, secrets, egress, CI or the factory's policy), the grade it deserves and why. Never to lower one.",
+                "properties": {
+                    "grade": { "type": "integer", "minimum": 2, "maximum": 4 },
+                    "reason": { "type": "string" },
+                },
+                "required": ["grade", "reason"],
+            },
         },
         "required": ["outcome", "summary"],
     })
@@ -378,7 +387,9 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
              they belong. Your summary is posted on the PR as the review. When you approve, put anything worth doing \
              later that shouldn't hold this change up in `follow_ups`, each with a title and description: the factory \
-             files them as tasks, so don't repeat them in the summary.{pr_title}",
+             files them as tasks, so don't repeat them in the summary. If the change is riskier than its grade \
+             says (a dependency, schema or public API change is grade 3; auth, secrets, sandbox egress, CI or the \
+             factory's own policy is grade 4), say so in `raise_grade` with the reason; never to lower it.{pr_title}",
             key = task.key.0,
             title = task.title,
             desc = task.description,
@@ -510,6 +521,12 @@ fn answer(result: &Value) -> Option<Value> {
     serde_json::from_str(text.trim().trim_start_matches("```json").trim_matches('`').trim()).ok()
 }
 
+/// The reviewer's call for a higher grade, if it made a well-formed one.
+fn raise_grade(answer: &Value) -> Option<RaiseGrade> {
+    let raise = serde_json::from_value::<RaiseGrade>(answer["raise_grade"].clone()).ok()?;
+    ((1..=4).contains(&raise.grade) && !raise.reason.trim().is_empty()).then_some(raise)
+}
+
 /// The reviewer's follow-ups, leaving out any without a title. A priority outside 1 to 4 is dropped, so the task is
 /// filed at the project's default rather than rejected.
 fn follow_ups(answer: &Value) -> Vec<FollowUp> {
@@ -534,10 +551,18 @@ async fn outcome(ctx: &RunContext, start: &str, result: &Value) -> Result<RunOut
     };
     let summary = answer["summary"].as_str().unwrap_or_default().to_string();
     Ok(match answer["outcome"].as_str().unwrap_or_default() {
-        "approve" => RunOutcome::Verdict { kind: VerdictKind::Approve, body: summary, follow_ups: follow_ups(&answer) },
-        "request_changes" => {
-            RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: summary, follow_ups: Vec::new() }
-        }
+        "approve" => RunOutcome::Verdict {
+            kind: VerdictKind::Approve,
+            body: summary,
+            follow_ups: follow_ups(&answer),
+            raise_grade: raise_grade(&answer),
+        },
+        "request_changes" => RunOutcome::Verdict {
+            kind: VerdictKind::RequestChanges,
+            body: summary,
+            follow_ups: Vec::new(),
+            raise_grade: raise_grade(&answer),
+        },
         "needs_input" => {
             let question = answer["question"].as_str().filter(|q| !q.is_empty()).unwrap_or(&summary).to_string();
             RunOutcome::NeedsInput { question }

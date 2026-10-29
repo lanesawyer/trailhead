@@ -139,6 +139,7 @@ impl Rig {
 
 fn request(run: &str, key: TaskKey, credential: Credential) -> RunRequest {
     RunRequest {
+        grade: None,
         run: run.into(),
         role: Role::Worker,
         task: trailhead_factory::TaskSpec {
@@ -188,6 +189,7 @@ async fn lifecycle_over_iroh() {
             kind: VerdictKind::Approve,
             body: "Looks right.".into(),
             follow_ups: vec![],
+            raise_grade: None,
         })
         .steps(1, 50_000),
     );

@@ -64,6 +64,7 @@ impl CoreTracker {
             title: t.title,
             description: t.description,
             status: status(t.status),
+            grade: t.grade.and_then(|g| u8::try_from(g).ok()),
             holder: claims.get(&t.id).map(|c| c.holder.clone()),
             run,
         })
@@ -237,7 +238,13 @@ impl Tracker for CoreTracker {
             trailhead_core::Verdict::Approve => VerdictKind::Approve,
             trailhead_core::Verdict::RequestChanges => VerdictKind::RequestChanges,
         };
-        Ok(Some(Verdict { kind, body: c.body.clone(), reviewer, model: c.model.clone().map(ModelId) }))
+        Ok(Some(Verdict {
+            kind,
+            body: c.body.clone(),
+            reviewer,
+            model: c.model.clone().map(ModelId),
+            raise_grade: None,
+        }))
     }
 
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
@@ -283,6 +290,13 @@ impl Tracker for CoreTracker {
 
     async fn reopen(&self, task: &TaskKey) -> Result<()> {
         self.set_status(task, trailhead_core::Status::Open).await
+    }
+
+    async fn raise_grade(&self, task: &TaskKey, grade: u8) -> Result<()> {
+        let ctx = self.ctx().await?;
+        let patch = TaskPatch { grade: Some(Some(i64::from(grade))), ..TaskPatch::default() };
+        self.store.update_task(&ctx, &task.0, patch, None).await.map_err(map_err)?;
+        Ok(())
     }
 
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()> {

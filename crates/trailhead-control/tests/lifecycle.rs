@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use trailhead_control::{Factory, Outcome, Reconciled};
 use trailhead_factory::{
-    CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, Role, RunOutcome, SandboxSpec,
-    Status, TaskKey, Tracker, Usd, VerdictKind, conventional_title, label, run_name,
+    CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, RaiseGrade, Role, RunOutcome,
+    SandboxSpec, Status, TaskKey, Tracker, Usd, VerdictKind, conventional_title, label, run_name,
 };
 use trailhead_testkit::{
     FAKE_BASE, FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness,
@@ -84,7 +84,12 @@ fn changes() -> RunOutcome {
 }
 
 fn approve() -> RunOutcome {
-    RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Looks right; tests cover it.".into(), follow_ups: vec![] }
+    RunOutcome::Verdict {
+        kind: VerdictKind::Approve,
+        body: "Looks right; tests cover it.".into(),
+        follow_ups: vec![],
+        raise_grade: None,
+    }
 }
 
 #[tokio::test]
@@ -921,7 +926,7 @@ async fn a_review_left_from_before_a_restart_doesnt_hold_up_workers() {
 }
 
 fn approve_with(follow_ups: Vec<FollowUp>) -> RunOutcome {
-    RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Fine.".into(), follow_ups }
+    RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Fine.".into(), follow_ups, raise_grade: None }
 }
 
 fn follow_up(title: &str, priority: Option<i64>) -> FollowUp {
@@ -995,6 +1000,7 @@ async fn no_tasks_are_filed_for_an_empty_list_or_a_request_for_changes() {
         kind: VerdictKind::RequestChanges,
         body: "Add a test.".into(),
         follow_ups: vec![follow_up("Rename it", None)],
+        raise_grade: None,
     };
     r.harness.push(Role::Reviewer, Script::new(outcome));
     r.factory.tick().await.unwrap();
@@ -1002,7 +1008,7 @@ async fn no_tasks_are_filed_for_an_empty_list_or_a_request_for_changes() {
 }
 
 fn request_changes(body: &str) -> RunOutcome {
-    RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into(), follow_ups: vec![] }
+    RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into(), follow_ups: vec![], raise_grade: None }
 }
 
 #[tokio::test]
@@ -1064,6 +1070,7 @@ async fn a_rework_started_by_hand_gets_the_prs_last_review_as_feedback() {
         body: "Add a test for `hi()`.".into(),
         reviewer: "factory/trail-1-a1-r1".into(),
         model: None,
+        raise_grade: None,
     };
     r.tracker.record_verdict(&key, &verdict).await.unwrap();
     assert_eq!(r.tracker.task(&key).run.changes_requested, None);
@@ -1505,4 +1512,151 @@ async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_convent
     r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
     let opened = r.codehost.prs().pop().expect("a PR");
     assert_eq!(opened.spec.title, "chore: Add a greeting [TRAIL-1]");
+}
+
+/// A rig whose factory works only the subtasks of TRAIL-1 and reads PRs through the code host, which grading needs.
+fn queued_rig() -> (Rig, TaskKey) {
+    let mut r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nqueue = \"TRAIL-1\""));
+    let queue = r.tracker.add_task("TRAIL", "Factory queue", "");
+    let codehost = Arc::new(r.codehost.clone());
+    r.factory = r.factory.with_codehost(codehost);
+    (r, queue)
+}
+
+fn changes_to(path: &str) -> RunOutcome {
+    RunOutcome::Changes {
+        commits: vec![Commit {
+            message: "docs(docs): note it [TRAIL-2]".into(),
+            changes: vec![FileChange { path: path.into(), contents: Some(b"x".to_vec()) }],
+            merges: vec![],
+        }],
+        summary: "Done.".into(),
+    }
+}
+
+fn notes(r: &Rig, key: &TaskKey) -> Vec<String> {
+    r.tracker.comments(key).into_iter().filter(|c| c.kind == "note").map(|c| c.body).collect()
+}
+
+#[tokio::test]
+async fn an_ungraded_task_is_skipped_and_reported_once_until_a_human_grades_it() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Document it", "");
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+
+    for _ in 0..3 {
+        assert!(r.factory.tick().await.unwrap().is_empty());
+    }
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    assert_eq!(notes(&r, &key), ["no grade; set one to queue it"], "said once, not on every poll");
+    assert_eq!(r.tracker.task(&key).run.ungraded, Some(true), "recorded, so a restart doesn't say it again");
+
+    r.tracker.set_grade(&key, 1);
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+}
+
+#[tokio::test]
+async fn ungraded_tasks_dont_crowd_graded_ones_out_of_the_cap() {
+    let (r, queue) = queued_rig();
+    let first = r.tracker.add_subtask(&queue, "Ungraded", "");
+    let second = r.tracker.add_subtask(&queue, "Graded", "");
+    r.tracker.set_grade(&second, 1);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(ran[0].0.key, second);
+    assert_eq!(r.tracker.task(&first).status, Status::Open);
+}
+
+#[tokio::test]
+async fn a_grade_one_task_that_changes_cargo_lock_is_raised_to_three() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Bump a dependency", "");
+    r.tracker.set_grade(&key, 1);
+    r.harness.push(Role::Worker, Script::new(changes_to("Cargo.lock")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let task = r.tracker.task(&key);
+    assert_eq!(task.grade, Some(3), "the task is raised to match the PR");
+    let grade = task.run.grade.expect("recorded in the factory metadata");
+    assert_eq!((grade.grade, grade.task), (3, Some(1)));
+    assert_eq!(grade.reasons, ["Cargo.lock changed"]);
+    assert_eq!(notes(&r, &key), ["Raised to grade 3 (task was 1): Cargo.lock changed"]);
+    let comment = r.codehost.prs()[0].comments[0].clone();
+    assert!(comment.ends_with("\n\nGrade 3 (task was 1; Cargo.lock changed)"), "{comment}");
+
+    // A rework's review sees the same PR and neither raises nor notes again.
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let shown = r.tracker.task(&key);
+    r.factory.review(&shown, shown.run.pr.as_ref().unwrap(), 1, &[]).await.unwrap();
+    assert_eq!(notes(&r, &key).len(), 1);
+    let comment = r.codehost.prs()[0].comments[1].clone();
+    assert!(comment.ends_with("\n\nGrade 3 (task was 1; Cargo.lock changed)"), "{comment}");
+}
+
+#[tokio::test]
+async fn a_docs_only_change_keeps_the_tasks_grade() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Document it", "");
+    r.tracker.set_grade(&key, 1);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).grade, Some(1));
+    assert!(notes(&r, &key).is_empty());
+    assert!(r.codehost.prs()[0].comments[0].ends_with("\n\nGrade 1"));
+}
+
+#[tokio::test]
+async fn a_reviewer_can_raise_the_grade() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Document it", "");
+    r.tracker.set_grade(&key, 1);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    let raise = RaiseGrade { grade: 4, reason: "the docs change the token policy".into() };
+    let verdict = RunOutcome::Verdict {
+        kind: VerdictKind::Approve,
+        body: "Fine.".into(),
+        follow_ups: vec![],
+        raise_grade: Some(raise),
+    };
+    r.harness.push(Role::Reviewer, Script::new(verdict));
+    r.factory.tick().await.unwrap();
+
+    let task = r.tracker.task(&key);
+    assert_eq!(task.grade, Some(4));
+    assert_eq!(task.run.grade.map(|g| (g.grade, g.task)), Some((4, Some(1))));
+    assert_eq!(
+        notes(&r, &key),
+        ["Raised to grade 4 (task was 1): the reviewer raised it: the docs change the token policy"]
+    );
+    let comment = r.codehost.prs()[0].comments[0].clone();
+    assert!(
+        comment.ends_with("\n\nGrade 4 (task was 1; the reviewer raised it: the docs change the token policy)"),
+        "{comment}"
+    );
+}
+
+#[tokio::test]
+async fn a_reviewer_cant_lower_the_grade() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Bump a dependency", "");
+    r.tracker.set_grade(&key, 3);
+    r.harness.push(Role::Worker, Script::new(changes_to("Cargo.lock")));
+    let lower = RaiseGrade { grade: 1, reason: "trivial".into() };
+    let verdict = RunOutcome::Verdict {
+        kind: VerdictKind::Approve,
+        body: "Fine.".into(),
+        follow_ups: vec![],
+        raise_grade: Some(lower),
+    };
+    r.harness.push(Role::Reviewer, Script::new(verdict));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).grade, Some(3));
+    assert!(r.codehost.prs()[0].comments[0].ends_with("\n\nGrade 3"));
 }

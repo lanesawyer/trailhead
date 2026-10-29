@@ -67,6 +67,16 @@ pub struct Verdict {
     pub body: String,
     pub reviewer: String,
     pub model: Option<ModelId>,
+    /// The reviewer found the change riskier than its grade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raise_grade: Option<RaiseGrade>,
+}
+
+/// A reviewer's call that a PR deserves a higher grade, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaiseGrade {
+    pub grade: u8,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +93,9 @@ pub enum RunOutcome {
         /// Non-blocking suggestions, to be filed as tasks when the review approves.
         #[serde(default)]
         follow_ups: Vec<FollowUp>,
+        /// A higher grade for the PR than the one it was given, with the reason.
+        #[serde(default)]
+        raise_grade: Option<RaiseGrade>,
     },
     NeedsInput {
         question: String,

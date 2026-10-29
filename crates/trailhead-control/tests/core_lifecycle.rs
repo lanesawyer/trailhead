@@ -122,7 +122,12 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
     r.harness.push(Role::Worker, Script::new(changes()).steps(2, 100_000));
     r.harness.push(
         Role::Reviewer,
-        Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into(), follow_ups: vec![] }),
+        Script::new(RunOutcome::Verdict {
+            kind: VerdictKind::Approve,
+            body: "LGTM".into(),
+            follow_ups: vec![],
+            raise_grade: None,
+        }),
     );
 
     let ran = r.factory.tick().await.unwrap();
@@ -236,6 +241,7 @@ async fn with_a_queue_only_its_subtasks_run() {
         project: "TRAIL".into(),
         title: "Add a greeting".into(),
         parent: Some(queue.0.clone()),
+        grade: Some(1),
         ..Default::default()
     };
     let handed = TaskKey(r.store.create_task(&r.human, sub).await.unwrap().key);
@@ -249,6 +255,19 @@ async fn with_a_queue_only_its_subtasks_run() {
     assert_eq!(ran.iter().map(|(t, _)| &t.key).collect::<Vec<_>>(), [&handed]);
     assert_eq!(r.show(&epic).await.status, Status::Open, "the epic is left alone");
     assert_eq!(r.show(&queue).await.status, Status::Open, "and so is the queue itself");
+}
+
+#[tokio::test]
+async fn the_factory_can_raise_a_grade_a_human_set_but_not_lower_it() {
+    let r = rig().await;
+    let new = NewTask { project: "TRAIL".into(), title: "Graded".into(), grade: Some(2), ..Default::default() };
+    let key = TaskKey(r.store.create_task(&r.human, new).await.unwrap().key);
+    assert_eq!(r.show(&key).await.grade, Some(2));
+    r.tracker.raise_grade(&key, 3).await.unwrap();
+    assert_eq!(r.show(&key).await.grade, Some(3));
+    assert!(r.tracker.raise_grade(&key, 1).await.is_err());
+    let ungraded = r.task("Ungraded").await;
+    assert!(r.tracker.raise_grade(&ungraded, 2).await.is_err(), "the first grade is a human's");
 }
 
 #[tokio::test]
@@ -274,7 +293,7 @@ async fn human_context_pairs_answers_and_skips_the_factorys_own_notes() {
 }
 
 fn request_changes(body: &str) -> RunOutcome {
-    RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into(), follow_ups: vec![] }
+    RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into(), follow_ups: vec![], raise_grade: None }
 }
 
 #[tokio::test]
@@ -291,7 +310,12 @@ async fn requested_changes_reopen_then_rework_on_the_real_engine() {
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(
         Role::Reviewer,
-        Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into(), follow_ups: vec![] }),
+        Script::new(RunOutcome::Verdict {
+            kind: VerdictKind::Approve,
+            body: "LGTM".into(),
+            follow_ups: vec![],
+            raise_grade: None,
+        }),
     );
     let ran = r.factory.tick().await.unwrap();
     assert!(
@@ -329,7 +353,12 @@ async fn in_review(r: &Rig, title: &str) -> (TaskKey, trailhead_factory::PrRef) 
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(
         Role::Reviewer,
-        Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into(), follow_ups: vec![] }),
+        Script::new(RunOutcome::Verdict {
+            kind: VerdictKind::Approve,
+            body: "LGTM".into(),
+            follow_ups: vec![],
+            raise_grade: None,
+        }),
     );
     r.factory.tick().await.unwrap();
     let task = r.show(&key).await;
@@ -385,7 +414,7 @@ async fn a_pr_closed_without_merging_parks_its_task_for_lane() {
 }
 
 fn approve() -> RunOutcome {
-    RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into(), follow_ups: vec![] }
+    RunOutcome::Verdict { kind: VerdictKind::Approve, body: "LGTM".into(), follow_ups: vec![], raise_grade: None }
 }
 
 #[tokio::test]
