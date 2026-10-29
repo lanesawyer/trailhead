@@ -309,6 +309,17 @@ async fn human_context_pairs_answers_and_skips_the_factorys_own_notes() {
     assert_eq!((ctx.notes[0].author.as_str(), ctx.notes[0].body.as_str()), ("Lane", "Use a flock."));
 }
 
+#[tokio::test]
+async fn last_review_names_its_reviewer_like_human_context_does() {
+    let r = rig().await;
+    let key = r.task("Reviewed by hand").await;
+    assert!(r.tracker.last_review(&key).await.unwrap().is_none());
+    let review = trailhead_core::NewComment::review(trailhead_core::Verdict::RequestChanges, "Add a test.");
+    r.store.add_comment(&r.human, &key.0, review).await.unwrap();
+    let verdict = r.tracker.last_review(&key).await.unwrap().unwrap();
+    assert_eq!((verdict.reviewer.as_str(), verdict.body.as_str()), ("Lane", "Add a test."));
+}
+
 fn request_changes(body: &str) -> RunOutcome {
     RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: body.into(), follow_ups: vec![], raise_grade: None }
 }
