@@ -26,6 +26,8 @@ pub trait Workspace: Send + Sync {
     async fn confirm_blocked(&self, hosts: &[String]) -> Result<()>;
     /// The commit sha the checkout is at.
     async fn head(&self) -> Result<String>;
+    /// The commit being merged into the checkout, while a merge is under way (`PrepareRequest::merge_base`).
+    async fn merge_head(&self) -> Result<Option<String>>;
 }
 
 /// How often a worker renews its claim while the agent runs. Leases default to 30 minutes.
@@ -107,9 +109,19 @@ impl Runner {
             tracker.claim(&req.task.key).await?;
             tracing::info!(task = %key, "claimed");
         }
-        let diff = match &req.pr {
-            Some(pr) if req.role == Role::Reviewer => Some(self.codehost.diff(pr).await?),
-            _ => None,
+        let (diff, title) = match &req.pr {
+            Some(pr) if req.role == Role::Reviewer => {
+                // Only so the reviewer can check it; a review goes ahead without it.
+                let title = match self.codehost.title(pr).await {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        tracing::warn!(task = %key, error = %e, "couldn't read the PR's title");
+                        None
+                    }
+                };
+                (Some(self.codehost.diff(pr).await?), title)
+            }
+            _ => (None, None),
         };
         let ctx = RunContext {
             role: req.role,
@@ -120,11 +132,19 @@ impl Runner {
             max_steps: req.max_steps,
             diff,
             checks: req.worker_checks.clone(),
+            title,
         };
         tracing::info!(task = %key, "agent starting");
         // Where the agent's work starts, which is what it's published on top of.
         let start = self.workspace.head().await?;
-        let (outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events).await?;
+        let merging = self.workspace.merge_head().await?;
+        let (mut outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events).await?;
+        // The agent finished a merge of the base branch: publish it as one, or the PR would still conflict.
+        if let (Some(merging), RunOutcome::Changes { commits, .. }) = (merging, &mut outcome)
+            && let Some(last) = commits.last_mut()
+        {
+            last.merges.push(merging);
+        }
         tracing::info!(task = %key, "agent finished");
         let (result, checks) = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start).await?;
         Ok(RunReport { result, checks, usage })
@@ -181,6 +201,14 @@ impl Runner {
         summary: String,
         retried: &[String],
     ) -> Result<PrRef> {
+        // Checked here as well as in the harness, so no harness can open a PR the changelog would drop.
+        let title = commits
+            .first()
+            .and_then(|c| c.message.lines().next())
+            .filter(|t| {
+                t.strip_suffix(&format!(" [{}]", req.task.key.0)).is_some_and(trailhead_factory::is_conventional)
+            })
+            .map(str::to_string);
         self.codehost.publish(&req.repo, start, &req.branch, &commits).await?;
         let flaky: String =
             retried.iter().map(|name| format!("\n\n⚠️ Check `{name}` failed, then passed when rerun.")).collect();
@@ -196,7 +224,9 @@ impl Runner {
                 let new = NewPr {
                     branch: req.branch.clone(),
                     base: req.base_branch.clone(),
-                    title: format!("{}: {}", req.task.key.0, req.task.title),
+                    title: title.unwrap_or_else(|| {
+                        trailhead_factory::conventional_title(None, &req.task.key, &req.task.title).0
+                    }),
                     body: format!("{summary}{flaky}{}", pr_footer(req, agent)),
                 };
                 self.codehost.open_pr(&req.repo, new).await

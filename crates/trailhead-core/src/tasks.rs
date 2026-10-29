@@ -19,7 +19,7 @@ use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 use crate::when;
 
-pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on";
+pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on, grade";
 
 fn prefixed_cols(prefix: &str) -> String {
     TASK_COLS.split(", ").map(|c| format!("{prefix}.{c}")).collect::<Vec<_>>().join(", ")
@@ -50,6 +50,7 @@ pub(crate) fn task_from_row(row: &Row) -> Result<Task> {
         scheduled_at: get_opt_ts(row, 20)?,
         scheduled_tz: row.get(21)?,
         due_on: get_opt_date(row, 22)?,
+        grade: row.get(23)?,
     })
 }
 
@@ -72,6 +73,7 @@ pub(crate) async fn find_task(conn: &Connection, ctx: &Ctx, r: &str, include_del
 
 /// Compare-and-swap on `version`. Used by updates and undo alike.
 pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result<Task> {
+    check_grade(&tx.ctx, before.grade, after.grade)?;
     // Snapshots from before due days had only a time.
     if after.due_on.is_none()
         && let Some(at) = after.due_at
@@ -85,7 +87,7 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result
             &format!(
                 "UPDATE tasks SET title = ?1, description = ?2, status = ?3, priority = ?4, due_at = ?5, due_tz = ?6,
                  parent_id = ?7, metadata = ?8, deleted_at = ?9, version = version + 1, updated_at = ?10,
-                 scheduled_on = ?13, scheduled_at = ?14, scheduled_tz = ?15, due_on = ?16, due_by = ?17 WHERE id = ?11 AND version = ?12 RETURNING {TASK_COLS}"
+                 scheduled_on = ?13, scheduled_at = ?14, scheduled_tz = ?15, due_on = ?16, due_by = ?17, grade = ?18 WHERE id = ?11 AND version = ?12 RETURNING {TASK_COLS}"
             ),
             libsql::params![
                 after.title,
@@ -105,6 +107,7 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result
                 after.scheduled_tz,
                 opt_date_value(after.due_on),
                 opt_ts_value(due_by),
+                after.grade,
             ],
         )
         .await?;
@@ -121,6 +124,35 @@ pub(crate) async fn update_status(tx: &Tx, before: &Task, status: Status, kind: 
     let after = save_task(tx, before, Task { status, ..before.clone() }).await?;
     tx.emit_change(Entity::Task, after.id.to_string(), Some(after.id), kind, Some(before), Some(&after)).await?;
     Ok(after)
+}
+
+fn validate_grade(g: i64) -> Result<()> {
+    if (1..=4).contains(&g) { Ok(()) } else { Err(Error::Invalid("grade must be 1 to 4".into())) }
+}
+
+/// Parses a grade for an update: `1` to `4`, or `none` to clear it.
+pub fn parse_grade(s: &str) -> Result<Option<i64>> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    let g = s.parse::<i64>().map_err(|_| Error::Invalid("grade must be 1 to 4, or none".into()))?;
+    validate_grade(g)?;
+    Ok(Some(g))
+}
+
+/// A task's grade is a human's call: an agent can only raise an existing grade,
+/// not set the first one, lower it or clear it, whether by an update or by
+/// undoing or reverting someone else's.
+pub(crate) fn check_grade(ctx: &Ctx, before: Option<i64>, after: Option<i64>) -> Result<()> {
+    if ctx.is_human() || before == after {
+        return Ok(());
+    }
+    match (before, after) {
+        (Some(b), Some(a)) if a > b => Ok(()),
+        (None, Some(_)) => Err(Error::Forbidden("only a human can set a task's first grade".into())),
+        _ => Err(Error::Forbidden("only a human can lower or clear a task's grade".into())),
+    }
 }
 
 fn validate_priority(p: i64) -> Result<()> {
@@ -182,6 +214,8 @@ pub struct NewTask {
     pub title: String,
     pub description: String,
     pub priority: Option<i64>,
+    /// 1 to 4. Only a human can create a task with a grade.
+    pub grade: Option<i64>,
     /// The day it's due. Optional when `due_at` is set: it's that time's day.
     pub due_on: Option<Date>,
     /// Times keep the offset they were written with ([`parse_at`](crate::parse_at)): without a
@@ -205,6 +239,8 @@ pub struct TaskPatch {
     pub description: Option<String>,
     pub status: Option<Status>,
     pub priority: Option<i64>,
+    /// `Some(None)` clears the grade. Agents can only raise an existing one.
+    pub grade: Option<Option<i64>>,
     /// A new day drops any due time unless `due_at` comes with it; clearing it
     /// removes the deadline.
     pub due_on: Option<Option<Date>>,
@@ -229,6 +265,8 @@ pub struct TaskFilter {
     pub statuses: Vec<Status>,
     pub parent: Option<String>,
     pub due_before: Option<Timestamp>,
+    /// Only tasks with exactly this grade, or only graded / ungraded ones.
+    pub grade: GradeFilter,
     /// Tasks scheduled on or before this day, so overdue plans still show up "today".
     pub scheduled_through: Option<Date>,
     /// `(path, value)` pairs matched against `metadata` as text, e.g. `("team", "web")`.
@@ -236,6 +274,45 @@ pub struct TaskFilter {
     pub sort: TaskSort,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// Which grades [`Store::list_tasks`] and [`Store::ready`] return.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GradeFilter {
+    #[default]
+    Any,
+    /// Has any grade.
+    Graded,
+    /// Has no grade.
+    Ungraded,
+    /// Has exactly this grade.
+    Is(i64),
+}
+
+impl GradeFilter {
+    /// Parses `graded`, `ungraded` or `1` to `4`.
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "graded" => Ok(Self::Graded),
+            "ungraded" | "none" => Ok(Self::Ungraded),
+            n => match n.parse::<i64>() {
+                Ok(g) => {
+                    validate_grade(g)?;
+                    Ok(Self::Is(g))
+                }
+                Err(_) => Err(Error::Invalid("grade filter must be 1 to 4, graded or ungraded".into())),
+            },
+        }
+    }
+
+    fn sql(self, col: &str) -> Option<String> {
+        match self {
+            Self::Any => None,
+            Self::Graded => Some(format!(" AND {col} IS NOT NULL")),
+            Self::Ungraded => Some(format!(" AND {col} IS NULL")),
+            Self::Is(g) => Some(format!(" AND {col} = {g}")),
+        }
+    }
 }
 
 /// Order for [`Store::list_tasks`]. Parses from `priority`, `updated_at`,
@@ -343,6 +420,9 @@ impl Store {
         }
         let priority = new.priority.unwrap_or(3);
         validate_priority(priority)?;
+        if let Some(g) = new.grade {
+            validate_grade(g)?;
+        }
         let mut due_on = new.due_on;
         when::settle("due", &mut due_on, new.due_at.as_ref(), &new.due_tz, false)?;
         let due_at = new.due_at.as_ref().map(Zoned::timestamp);
@@ -361,6 +441,7 @@ impl Store {
             let ws = ctx.workspace_id;
             let project = load_project(&tx.conn, ws, &new.project, false).await?;
             check_project_write(ctx, &project)?;
+            check_grade(ctx, None, new.grade)?;
             if let (Some(source), Some(ext)) = (&new.source, &new.external_id) {
                 let mut rows = tx
                     .conn
@@ -391,8 +472,8 @@ impl Store {
                 .query(
                     &format!(
                         "INSERT INTO tasks (id, workspace_id, project_id, key, title, description, priority, due_at, due_tz,
-                         parent_id, metadata, source, external_id, created_by, created_at, updated_at, scheduled_on, scheduled_at, scheduled_tz, due_on, due_by)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?16, ?17, ?18, ?19, ?20) RETURNING {TASK_COLS}"
+                         parent_id, metadata, source, external_id, created_by, created_at, updated_at, scheduled_on, scheduled_at, scheduled_tz, due_on, due_by, grade)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?16, ?17, ?18, ?19, ?20, ?21) RETURNING {TASK_COLS}"
                     ),
                     libsql::params![
                         id.to_string(),
@@ -415,6 +496,7 @@ impl Store {
                         new.scheduled_tz.clone(),
                         opt_date_value(due_on),
                         opt_ts_value(due_by),
+                        new.grade,
                     ],
                 )
                 .await?;
@@ -454,6 +536,12 @@ impl Store {
             if let Some(p) = patch.priority {
                 validate_priority(p)?;
                 after.priority = p;
+            }
+            if let Some(g) = patch.grade {
+                if let Some(g) = g {
+                    validate_grade(g)?;
+                }
+                after.grade = g;
             }
             if let Some(d) = patch.due_on {
                 after.due_on = d;
@@ -617,6 +705,9 @@ impl Store {
         if let Some(d) = filter.scheduled_through {
             push(&mut sql, " AND scheduled_on IS NOT NULL AND scheduled_on <= ?", d.to_string().into());
         }
+        if let Some(c) = filter.grade.sql("grade") {
+            sql.push_str(&c);
+        }
         for (path, value) in &filter.metadata {
             validate_path(path)?;
             push(&mut sql, &format!(" AND CAST(json_extract(metadata, '$.{path}') AS TEXT) = ?"), value.clone().into());
@@ -635,7 +726,13 @@ impl Store {
 
     /// Open, unclaimed tasks with no unfinished blockers, by priority then due date.
     /// Expired claims are reaped first so their tasks come back.
-    pub async fn ready(&self, ctx: &Ctx, project: Option<&str>, limit: Option<i64>) -> Result<Vec<Task>> {
+    pub async fn ready(
+        &self,
+        ctx: &Ctx,
+        project: Option<&str>,
+        limit: Option<i64>,
+        grade: GradeFilter,
+    ) -> Result<Vec<Task>> {
         let conn = self.reader()?;
         self.write(ctx, async |tx| reap_expired(tx, None).await).await?;
         let project_id = match project {
@@ -646,7 +743,7 @@ impl Store {
             "SELECT {} FROM tasks t JOIN projects p ON p.id = t.project_id
              WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL AND t.status = 'open'
                AND p.deleted_at IS NULL AND p.status = 'active'
-               AND (?2 IS NULL OR t.project_id = ?2) AND {}
+               AND (?2 IS NULL OR t.project_id = ?2) AND {}{}
                AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.task_id = t.id AND (c.expires_at IS NULL OR c.expires_at > ?3))
                AND NOT EXISTS (
                    SELECT 1 FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
@@ -654,7 +751,8 @@ impl Store {
              ORDER BY t.priority, t.due_by IS NULL, t.due_by, t.created_at
              LIMIT ?4",
             prefixed_cols("t"),
-            ctx.scope_sql("t.project_id")
+            ctx.scope_sql("t.project_id"),
+            grade.sql("t.grade").unwrap_or_default()
         );
         let rows = conn
             .query(

@@ -27,6 +27,10 @@ pub struct FileChange {
 pub struct Commit {
     pub message: String,
     pub changes: Vec<FileChange>,
+    /// Further parents besides the one it's laid on, making it a merge commit: a rework that merged the base branch
+    /// into the PR branch (TRAIL-199).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merges: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,4 +80,9 @@ pub trait CodeHost: Send + Sync {
     async fn merge(&self, pr: &PrRef) -> Result<MergeOutcome>;
     /// Whether the PR is still open, was merged (by anyone), or was closed without merging.
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState>;
+    /// Whether the open PR merges cleanly into its base: `Some(false)` when it conflicts, `None` while the host is
+    /// still working it out.
+    async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>>;
+    /// The PR's current title, which a squash merge takes as its commit subject.
+    async fn title(&self, pr: &PrRef) -> Result<String>;
 }

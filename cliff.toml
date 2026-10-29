@@ -33,6 +33,35 @@ filter_commits = false
 tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
 topo_order = false
 sort_commits = "oldest"
+# Factory PRs merged before TRAIL-238 weren't conventional commits, so filter_unconventional dropped them. These
+# give each its conventional subject. Delete this list once a release has prepended them to CHANGELOG.md.
+commit_preprocessors = [
+  { pattern = "(?s)^TRAIL-218: .*", replace = "fix(factory): a rework started by hand gets the PR's last review as feedback [TRAIL-218] (#30)" },
+  { pattern = "(?s)^TRAIL-226: .*", replace = "fix(factory): send the prompt to claude on stdin, so prompts over 128 KiB can start [TRAIL-226] (#31)" },
+  { pattern = "(?s)^TRAIL-201: .*", replace = "feat(core): an optional grade (1-4) on tasks that agents can only raise [TRAIL-201] (#29)" },
+  { pattern = "(?s)^TRAIL-213: .*", replace = "feat(factory): reviewer runs that fail on infrastructure back off and have a cap [TRAIL-213] (#28)" },
+  { pattern = "(?s)^TRAIL-198: .*", replace = "feat(factory): close a task when its PR merges, and park it when the PR is closed unmerged [TRAIL-198] (#25)" },
+  { pattern = "(?s)^TRAIL-172: .*", replace = "feat(factory): agent-side infrastructure failures don't use up attempts, and infrastructure retries back off and have a cap [TRAIL-172] (#23)" },
+  { pattern = "(?s)^TRAIL-197: .*", replace = "feat(factory): the reviewer's non-blocking follow-ups become tasks [TRAIL-197] (#22)" },
+  { pattern = "(?s)^TRAIL-190: .*", replace = "fix(factory): bound wake by the reconnect deadline, with shorter timeouts for Sprites wake and list [TRAIL-190] (#21)" },
+  { pattern = "(?s)^TRAIL-136: .*", replace = "fix(factory): reviewers read the worker's check results instead of building offline [TRAIL-136] (#20)" },
+  { pattern = "(?s)^TRAIL-188: .*", replace = "fix(factory): two runs starting together no longer take the same idle Sprite [TRAIL-188] (#24)" },
+  { pattern = "(?s)^TRAIL-180: .*", replace = "feat(factory): a request for changes starts a rework on the PR branch with the review as feedback [TRAIL-180] (#18)" },
+  { pattern = "(?s)^TRAIL-145: .*", replace = "fix(server): MCP show includes comment authors, timestamps, addressees and review verdicts [TRAIL-145] (#17)" },
+  { pattern = "(?s)^TRAIL-158: .*", replace = "feat(factory): wake the run loop on Trailhead events, not only on the poll [TRAIL-158] (#16)" },
+  { pattern = "(?s)^TRAIL-159: .*", replace = "fix(factory): infrastructure failures before the agent starts don't count as attempts [TRAIL-159] (#15)" },
+  { pattern = "(?s)^TRAIL-182: .*", replace = "fix(factory): the next worker sees Lane's answers and other task comments [TRAIL-182] (#14)" },
+  { pattern = "(?s)^TRAIL-134: .*", replace = "feat(factory): a daemon log filter in factory.toml [TRAIL-134] (#12)" },
+  { pattern = "(?s)^TRAIL-183: .*", replace = "fix(factory): retry transient Sprites API errors when reconnecting to a daemon [TRAIL-183] (#13)" },
+  { pattern = "(?s)^TRAIL-162: .*", replace = "feat(factory): rerun a failed check once before failing the attempt [TRAIL-162] (#11)" },
+  { pattern = "(?s)^TRAIL-110: .*", replace = "feat(cli): trailhead edit --parent moves tasks into or out of the factory queue [TRAIL-110] (#10)" },
+  { pattern = "(?s)^TRAIL-113: .*", replace = "fix(factory): refuse to start a second control plane for the same repo [TRAIL-113] (#9)" },
+  { pattern = "(?s)^TRAIL-166: .*", replace = "docs: build the docs into an mdBook [TRAIL-166] (#8)" },
+  { pattern = "(?s)^TRAIL-107: .*", replace = "feat(factory): cap attempts per task and feed the last failure into the next attempt [TRAIL-107]" },
+  { pattern = "(?s)^TRAIL-120: .*", replace = "build: faster dev builds with line-tables-only debug info [TRAIL-120] (#6)" },
+  { pattern = "(?s)^TRAIL-103: .*", replace = "fix(factory): trailhead-factory check exits non-zero when a check fails [TRAIL-103] (#5)" },
+  { pattern = "(?s)^Merge pull request #4 from lanesawyer/factory/trail-105.*", replace = "ci: fix the package job after the factory push [TRAIL-105] (#4)" },
+]
 commit_parsers = [
   { message = "^chore\\(release\\)", skip = true },
   { message = "^feat", group = "<!-- 0 -->Features" },

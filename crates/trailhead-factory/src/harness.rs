@@ -33,6 +33,9 @@ pub struct RunContext {
     /// For reviewers: the checks the worker already ran in its own sandbox, which the reviewer shouldn't rerun.
     #[serde(default)]
     pub checks: Vec<CheckResult>,
+    /// For reviewers: the PR's title, which becomes the squash commit's subject, so the reviewer can check it.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,5 +193,67 @@ mod api_error_tests {
         ] {
             assert!(!is_transient_api_error(no), "{no}");
         }
+    }
+}
+
+/// The types `cliff.toml` groups, so a title with one reaches the changelog.
+const COMMIT_TYPES: [&str; 9] = ["feat", "fix", "perf", "refactor", "docs", "test", "chore", "ci", "build"];
+
+/// Whether `title` is `type(scope)!: subject` with a type from `cliff.toml`, a lowercase scope that is optional, and a
+/// subject, matching `^(feat|fix|...)(\([a-z0-9-]+\))?!?: .+`.
+pub fn is_conventional(title: &str) -> bool {
+    let Some((head, subject)) = title.split_once(": ") else { return false };
+    if subject.trim().is_empty() || title.contains('\n') {
+        return false;
+    }
+    let head = head.strip_suffix('!').unwrap_or(head);
+    let (kind, scope) = match head.split_once('(') {
+        Some((kind, rest)) => match rest.strip_suffix(')') {
+            Some(scope) => (kind, Some(scope)),
+            None => return false,
+        },
+        None => (head, None),
+    };
+    COMMIT_TYPES.contains(&kind)
+        && scope.is_none_or(|s| {
+            !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+}
+
+/// The commit subject and PR title for a task: the agent's conventional `title` with the task key appended, or, when
+/// it's missing or not conventional, `chore: {task title} [{key}]`. The flag is false for the fallback.
+pub fn conventional_title(agent_title: Option<&str>, key: &TaskKey, task_title: &str) -> (String, bool) {
+    match agent_title.map(str::trim).filter(|t| is_conventional(t)) {
+        Some(t) => (format!("{t} [{}]", key.0), true),
+        None => (format!("chore: {} [{}]", task_title.trim(), key.0), false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conventional_titles() {
+        for ok in ["fix(factory): send it", "feat: x", "refactor(core)!: y", "ci(a-b1): z"] {
+            assert!(is_conventional(ok), "{ok}");
+        }
+        for bad in [
+            "TRAIL-1: x",
+            "fix:x",
+            "fix(): x",
+            "Fix(core): x",
+            "fix(Core): x",
+            "wip: x",
+            "fix(a: x",
+            "feat: ",
+            "fix: a\nb",
+        ] {
+            assert!(!is_conventional(bad), "{bad}");
+        }
+        let key = TaskKey("TRAIL-9".into());
+        assert_eq!(conventional_title(Some(" fix(core): a "), &key, "T"), ("fix(core): a [TRAIL-9]".into(), true));
+        assert_eq!(conventional_title(Some("nope"), &key, "T"), ("chore: T [TRAIL-9]".into(), false));
+        assert_eq!(conventional_title(None, &key, "T"), ("chore: T [TRAIL-9]".into(), false));
     }
 }

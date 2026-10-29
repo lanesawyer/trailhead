@@ -150,6 +150,7 @@ fn changes() -> RunOutcome {
         commits: vec![Commit {
             message: "feat: greet".into(),
             changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            merges: vec![],
         }],
         summary: "Adds a greeting.".into(),
     }
@@ -279,6 +280,8 @@ async fn a_run_survives_the_compute_api_failing_while_reattaching() {
     let report = tokio::time::timeout(Duration::from_secs(20), run).await.unwrap().unwrap().unwrap();
     assert!(matches!(report.result, RunResult::PrOpened(_)), "{:?}", report.result);
     assert_eq!(r.harness.contexts().len(), 1, "the run went on rather than starting again");
+    assert_eq!(r.compute.wake_attempts("blip"), 4, "two failed wakes, then the first and the redial's");
+    assert_eq!(r.compute.wakes("blip"), 2);
 }
 
 #[tokio::test]
@@ -405,4 +408,19 @@ async fn a_hanging_wake_gives_up_at_the_deadline() {
     let res = tokio::time::timeout(Duration::from_secs(300), r.remote.prepare(&sandbox, req)).await;
     assert!(res.expect("wake is bounded by the connect deadline").is_err());
     assert!(started.elapsed() < Duration::from_secs(120), "{:?}", started.elapsed());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_permanent_wake_failure_fails_at_once() {
+    let mut r = Rig::new().await;
+    r.serve("refused").await;
+    let sandbox = r.sandbox("refused").await;
+    r.compute.reject_wakes("refused");
+    let req = r.factory().config.prepare_request(Role::Worker, None);
+
+    let started = tokio::time::Instant::now();
+    let err = r.remote.prepare(&sandbox, req).await.unwrap_err();
+    assert!(matches!(err, Error::Rejected(_)), "{err:?}");
+    assert_eq!(r.compute.wake_attempts("refused"), 1, "not retried");
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
 }

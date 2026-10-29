@@ -12,7 +12,7 @@ use trailhead_harness_claude_code::{ClaudeCode, PLACEHOLDER_KEY, prompt};
 
 /// Writes its arguments and environment to `$FAKE_LOG`, then plays the scenario in `$FAKE_SCENARIO`.
 const FAKE: &str = r#"#!/bin/sh
-{ printf '%s\n' "$@"; echo "BASE=$ANTHROPIC_BASE_URL"; echo "KEY=$ANTHROPIC_API_KEY"; echo "OAUTH=$CLAUDE_CODE_OAUTH_TOKEN"; echo "FACTORY_TASK=$TRAILHEAD_FACTORY_TASK"; } > "$FAKE_LOG"
+{ printf '%s\n' "$@"; cat; echo "BASE=$ANTHROPIC_BASE_URL"; echo "KEY=$ANTHROPIC_API_KEY"; echo "OAUTH=$CLAUDE_CODE_OAUTH_TOKEN"; echo "FACTORY_TASK=$TRAILHEAD_FACTORY_TASK"; } > "$FAKE_LOG"
 asst() { echo "{\"type\":\"assistant\",\"message\":{\"id\":\"$1\",\"model\":\"claude-sonnet-x\",\"content\":[$2],\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":1}}}"; }
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 case "$FAKE_SCENARIO" in
@@ -25,7 +25,7 @@ worker)
   echo 'v2' > README.md
   rm old.txt
   asst m2 '{"type":"tool_use","id":"t2","name":"Edit","input":{}}'
-  echo '{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"outcome":"done","summary":"Adds hi()."}}'
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"outcome":"done","summary":"Adds hi().","title":"feat(core): add a greeting"}}'
   ;;
 review)
   asst r1 '{"type":"text","text":"Reviewing."}'
@@ -42,6 +42,16 @@ question)
 nothing)
   asst n1 '{"type":"text","text":"Done."}'
   echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"done","summary":"Nothing to do."}}'
+  ;;
+badtitle)
+  asst b1 '{"type":"text","text":"Done."}'
+  echo 'v3' > README.md
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"done","summary":"x","title":"TRAIL-1: Add a greeting"}}'
+  ;;
+rework)
+  asst w1 '{"type":"text","text":"Fixed."}'
+  echo 'v4' > README.md
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"done","summary":"x","title":"fix(cli): use a doc comment"}}'
   ;;
 loop)
   for i in 1 2 3 4 5 6; do asst "l$i" '{"type":"tool_use","id":"x","name":"Bash","input":{}}'; done
@@ -123,6 +133,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
         max_steps,
         diff: (role == Role::Reviewer).then(|| "+pub fn hi() {}".into()),
         checks: Vec::new(),
+        title: None,
     }
 }
 
@@ -146,9 +157,13 @@ async fn play(r: &Rig, scenario: &str, ctx: RunContext) -> (RunOutcome, Vec<RunE
 async fn claude_code_sessions() {
     worker_changes_are_collected().await;
     reviewer_verdict_from_result_text().await;
+    oversized_prompts_go_on_stdin().await;
+    reviewers_get_a_capped_diff().await;
     approving_review_carries_follow_ups().await;
     questions_park_the_task().await;
     no_changes_is_a_failure().await;
+    invalid_titles_fall_back().await;
+    rework_commits_are_conventional().await;
     step_limit_kills_the_agent().await;
     cli_errors_fail_the_run().await;
     resume_carries_feedback().await;
@@ -163,7 +178,7 @@ async fn worker_changes_are_collected() {
     let RunOutcome::Changes { commits, summary } = out else { panic!("{out:?}") };
     assert_eq!(summary, "Adds hi().");
     assert_eq!(commits.len(), 1);
-    assert_eq!(commits[0].message, "TRAIL-1: Add a greeting");
+    assert_eq!(commits[0].message, "feat(core): add a greeting [TRAIL-1]");
     let mut changes: Vec<_> =
         commits[0].changes.iter().map(|c| (c.path.as_str(), c.contents.as_deref().map(|b| b.to_vec()))).collect();
     changes.sort();
@@ -242,6 +257,29 @@ async fn reviewer_verdict_from_result_text() {
     assert!(log.contains("request_changes"), "the reviewer's schema offers verdicts");
 }
 
+async fn oversized_prompts_go_on_stdin() {
+    let r = rig();
+    let mut c = ctx(&r, Role::Worker, 10);
+    c.task.description = "y".repeat(300 * 1024);
+    let (out, _) = play(&r, "worker", c).await;
+    assert!(matches!(out, RunOutcome::Changes { .. }), "{out:?}");
+    let log = std::fs::read_to_string(&r.log).unwrap();
+    assert!(log.contains(&"y".repeat(300 * 1024)), "the whole prompt arrived");
+}
+
+async fn reviewers_get_a_capped_diff() {
+    let r = rig();
+    let mut c = ctx(&r, Role::Reviewer, 0);
+    let file = |n: usize| format!("diff --git a/f{n} b/f{n}\n{}\n", "+line of code\n".repeat(2000));
+    c.diff = Some((0..10).map(file).collect());
+    play(&r, "review", c).await;
+    let log = std::fs::read_to_string(&r.log).unwrap();
+    assert!(log.contains("diff --git a/f0 b/f0") && !log.contains("diff --git a/f9 b/f9"), "cut");
+    assert!(log.contains("git diff origin/<base>...HEAD"), "tells the reviewer how to read the rest");
+    let at = log.find("[The diff is").unwrap();
+    assert!(log[..at].trim_end().ends_with("+line of code"), "cut on a file boundary");
+}
+
 async fn approving_review_carries_follow_ups() {
     let r = rig();
     let (out, _) = play(&r, "approve", ctx(&r, Role::Reviewer, 10)).await;
@@ -263,6 +301,27 @@ async fn no_changes_is_a_failure() {
     let r = rig();
     let (out, _) = play(&r, "nothing", ctx(&r, Role::Worker, 10)).await;
     assert!(matches!(out, RunOutcome::Failed { ref reason } if reason.contains("changed nothing")), "{out:?}");
+}
+
+async fn invalid_titles_fall_back() {
+    let r = rig();
+    let (out, _) = play(&r, "badtitle", ctx(&r, Role::Worker, 10)).await;
+    let RunOutcome::Changes { commits, .. } = out else { panic!("{out:?}") };
+    assert_eq!(commits[0].message, "chore: Add a greeting [TRAIL-1]");
+}
+
+async fn rework_commits_are_conventional() {
+    let r = rig();
+    // SAFETY: as in `play`.
+    unsafe {
+        std::env::set_var("FAKE_SCENARIO", "rework");
+        std::env::set_var("FAKE_LOG", &r.log);
+    }
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let feedback = Feedback { body: "Use a doc comment.".into() };
+    let out = r.harness.resume(ctx(&r, Role::Worker, 10), feedback, tx).await.unwrap();
+    let RunOutcome::Changes { commits, .. } = out else { panic!("{out:?}") };
+    assert_eq!(commits[0].message, "fix(cli): use a doc comment [TRAIL-1]");
 }
 
 async fn step_limit_kills_the_agent() {
@@ -334,6 +393,18 @@ async fn dropped_api_calls_resume_the_session() {
 }
 
 #[test]
+fn a_reviewer_sees_the_pr_title_it_must_check() {
+    let r = rig();
+    let mut c = ctx(&r, Role::Reviewer, 0);
+    c.title = Some("feat(cli): add a greeting [TRAIL-1]".into());
+    let p = prompt(&c, None);
+    assert!(p.contains("The PR's title is `feat(cli): add a greeting [TRAIL-1]`"), "{p}");
+    assert!(p.contains("`... [TRAIL-1]`"), "{p}");
+    let p = prompt(&ctx(&r, Role::Reviewer, 0), None);
+    assert!(p.contains("couldn't be read"), "{p}");
+}
+
+#[test]
 fn a_reviewer_with_no_check_results_is_still_told_not_to_build() {
     let r = rig();
     let p = prompt(&ctx(&r, Role::Reviewer, 0), None);
@@ -368,5 +439,29 @@ fn prompt_carries_answers_and_notes_and_stays_bounded() {
     );
     assert!(p.contains("Decisions and notes on this task"));
     assert!(p.contains("note 99:") && !p.contains("note 0:"), "the oldest notes go first");
+    assert!(p.len() < 9000, "{}", p.len());
+}
+
+#[test]
+fn many_long_answers_keep_the_newest_and_leave_room_for_notes() {
+    use trailhead_factory::{Answered, TaskNote};
+    let r = rig();
+    let mut c = ctx(&r, Role::Worker, 0);
+    for i in 0..20 {
+        c.task.context.answers.push(Answered {
+            question: format!("question {i}? {}", "q".repeat(2000)),
+            answer: format!("answer {i}: {}", "a".repeat(3000)),
+            by: "lane".into(),
+            date: "2026-10-29".into(),
+        });
+    }
+    c.task.context.notes.push(TaskNote {
+        author: "lane".into(),
+        date: "2026-10-29".into(),
+        body: "a note that must survive".into(),
+    });
+    let p = prompt(&c, None);
+    assert!(p.contains("answer 19:") && !p.contains("answer 0:"), "the oldest answers go first");
+    assert!(p.contains("a note that must survive"), "notes aren't crowded out");
     assert!(p.len() < 9000, "{}", p.len());
 }

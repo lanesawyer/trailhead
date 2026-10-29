@@ -275,6 +275,7 @@ async fn publish_builds_commits_on_a_new_branch_then_on_top_of_it() {
             change("old.txt", None),
             change("logo.bin", Some(&[0, 159, 146, 150])),
         ],
+        merges: vec![],
     };
     let main = head(&git, "main");
     gh.publish(&repo(), &main, "factory/trail-1", std::slice::from_ref(&first)).await.unwrap();
@@ -294,6 +295,7 @@ async fn publish_builds_commits_on_a_new_branch_then_on_top_of_it() {
     let second = Commit {
         message: "TRAIL-1: test".into(),
         changes: vec![change("tests/greet.rs", Some(b"#[test] fn t() {}\n"))],
+        merges: vec![],
     };
     let branch = head(&git, "factory/trail-1");
     gh.publish(&repo(), &branch, "factory/trail-1", std::slice::from_ref(&second)).await.unwrap();
@@ -318,13 +320,20 @@ async fn a_new_branch_starts_where_the_work_did_not_at_mains_new_head() {
     let (git, url) = serve().await;
     let gh = GitHub::gateway(&url);
     let started = head(&git, "main");
-    let landed = Commit { message: "meanwhile on main".into(), changes: vec![change("README.md", Some(b"newer\n"))] };
+    let landed = Commit {
+        message: "meanwhile on main".into(),
+        changes: vec![change("README.md", Some(b"newer\n"))],
+        merges: vec![],
+    };
     gh.publish(&repo(), &started, "main", &[landed]).await.unwrap();
     let main_now = head(&git, "main");
     assert_ne!(main_now, started);
 
-    let work =
-        Commit { message: "TRAIL-1: greet".into(), changes: vec![change("src/greet.rs", Some(b"pub fn hi() {}\n"))] };
+    let work = Commit {
+        message: "TRAIL-1: greet".into(),
+        changes: vec![change("src/greet.rs", Some(b"pub fn hi() {}\n"))],
+        merges: vec![],
+    };
     gh.publish(&repo(), &started, "factory/trail-1", &[work]).await.unwrap();
     let g = git.lock().unwrap();
     assert_eq!(g.commits[&g.refs["factory/trail-1"]]["parents"], json!([started]), "parented where the work started");
@@ -334,7 +343,11 @@ async fn a_new_branch_starts_where_the_work_did_not_at_mains_new_head() {
 async fn prs_open_once_and_take_reviews_and_merges() {
     let (git, url) = serve().await;
     let gh = GitHub::new(&url, Some("ghp_test".into()));
-    let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a")), change("old.txt", None)] };
+    let commit = Commit {
+        message: "x".into(),
+        changes: vec![change("a.txt", Some(b"a")), change("old.txt", None)],
+        merges: vec![],
+    };
     let main = head(&git, "main");
     gh.publish(&repo(), &main, "factory/trail-1", &[commit]).await.unwrap();
     let new = NewPr {
@@ -369,7 +382,7 @@ async fn pr_state_tells_open_from_merged_from_closed() {
     let mut prs = Vec::new();
     for n in 1..=3 {
         let branch = format!("factory/trail-{n}");
-        let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))] };
+        let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))], merges: vec![] };
         gh.publish(&repo(), &main, &branch, &[commit]).await.unwrap();
         let new = NewPr { branch, base: "main".into(), title: "t".into(), body: "b".into() };
         prs.push(gh.open_pr(&repo(), new).await.unwrap());
@@ -388,12 +401,46 @@ async fn pr_state_tells_open_from_merged_from_closed() {
 }
 
 #[tokio::test]
+async fn mergeable_reads_githubs_verdict_and_publish_can_make_a_merge_commit() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let main = head(&git, "main");
+    let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))], merges: vec![] };
+    gh.publish(&repo(), &main, "factory/trail-1", &[commit]).await.unwrap();
+    let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };
+    let pr = gh.open_pr(&repo(), new).await.unwrap();
+
+    // GitHub says nothing while it works the answer out.
+    git.lock().unwrap().prs[0]["mergeable"] = Value::Null;
+    assert_eq!(gh.mergeable(&pr).await.unwrap(), None);
+    git.lock().unwrap().prs[0]["mergeable"] = json!(false);
+    assert_eq!(gh.mergeable(&pr).await.unwrap(), Some(false));
+    git.lock().unwrap().prs[0]["mergeable"] = json!(true);
+    assert_eq!(gh.mergeable(&pr).await.unwrap(), Some(true));
+
+    // A commit that merges main in has both parents.
+    let branch = head(&git, "factory/trail-1");
+    let merge = Commit {
+        message: "Merge main".into(),
+        changes: vec![change("a.txt", Some(b"resolved"))],
+        merges: vec!["main-tip".into()],
+    };
+    git.lock().unwrap().commits.insert("main-tip".into(), json!({ "tree": { "sha": "t0" } }));
+    gh.publish(&repo(), &branch, "factory/trail-1", &[merge]).await.unwrap();
+    let g = git.lock().unwrap();
+    assert_eq!(g.commits[&g.refs["factory/trail-1"]]["parents"], json!([branch, "main-tip"]));
+}
+
+#[tokio::test]
 async fn a_refused_workflow_change_names_the_call_and_the_scope() {
     let (git, url) = serve().await;
     git.lock().unwrap().workflow_scope = false;
     let gh = GitHub::gateway(&url);
-    let commit =
-        Commit { message: "ci".into(), changes: vec![change(".github/workflows/ci.yml", Some(b"on: push\n"))] };
+    let commit = Commit {
+        message: "ci".into(),
+        changes: vec![change(".github/workflows/ci.yml", Some(b"on: push\n"))],
+        merges: vec![],
+    };
     let main = head(&git, "main");
     let err = gh.publish(&repo(), &main, "factory/trail-105", &[commit]).await.unwrap_err().to_string();
     assert!(err.contains("POST /repos/lanesawyer/trailhead/git/refs"), "{err}");
@@ -404,7 +451,7 @@ async fn a_refused_workflow_change_names_the_call_and_the_scope() {
 async fn reads_are_retried_through_a_flaky_gateway() {
     let (git, url) = serve().await;
     let gh = GitHub::gateway(&url);
-    let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))] };
+    let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))], merges: vec![] };
     let main = head(&git, "main");
     gh.publish(&repo(), &main, "factory/trail-1", &[commit]).await.unwrap();
     let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };

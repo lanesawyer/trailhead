@@ -6,8 +6,12 @@ use crate::cli::{AddArgs, EditArgs};
 use crate::dates::{Field, local_today, parse_day_time};
 use crate::output::{self, comment_line, s, short_time, task_line, task_list};
 
-pub(crate) async fn ready(cx: &Ctx, project: Option<String>, limit: Option<i64>) -> Result<()> {
-    let q = params([("project", project.or(cx.project.clone())), ("limit", limit.map(|n| n.to_string()))]);
+pub(crate) async fn ready(cx: &Ctx, project: Option<String>, grade: Option<String>, limit: Option<i64>) -> Result<()> {
+    let q = params([
+        ("project", project.or(cx.project.clone())),
+        ("grade", grade),
+        ("limit", limit.map(|n| n.to_string())),
+    ]);
     let v = cx.c.get("ready", &q).await?;
     if cx.json {
         print_json(&v)
@@ -22,6 +26,7 @@ pub(crate) async fn ready(cx: &Ctx, project: Option<String>, limit: Option<i64>)
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn ls(
     cx: &Ctx,
     project: Option<String>,
@@ -29,6 +34,7 @@ pub(crate) async fn ls(
     parent: Option<String>,
     all: bool,
     today: bool,
+    grade: Option<String>,
     limit: Option<i64>,
 ) -> Result<()> {
     let status = status.or(all.then(|| "open,in_progress,needs_input,in_review,approved,done,cancelled".into()));
@@ -37,6 +43,7 @@ pub(crate) async fn ls(
         ("status", status),
         ("parent", parent),
         ("scheduled_through", today.then(|| local_today().to_string())),
+        ("grade", grade),
         ("sort", today.then(|| "scheduled".to_string())),
         ("limit", limit.map(|n| n.to_string())),
     ]);
@@ -60,6 +67,9 @@ pub(crate) async fn show(cx: &Ctx, task: &str) -> Result<()> {
     let t = &v["task"];
     println!("{}  {}", s(t, "key"), s(t, "title"));
     let mut meta = vec![s(t, "status").to_string(), format!("p{}", t["priority"]), format!("v{}", t["version"])];
+    if let Some(g) = t["grade"].as_i64() {
+        meta.insert(2, format!("grade {g}"));
+    }
     if let Some(w) = output::when(t, "scheduled", short_time) {
         meta.push(format!("scheduled {w}"));
     }
@@ -101,6 +111,7 @@ pub(crate) async fn add(cx: &Ctx, a: AddArgs) -> Result<()> {
         "title": a.title,
         "description": a.description.unwrap_or_default(),
         "priority": a.priority,
+        "grade": a.grade.as_deref().map(parse_grade).transpose()?.flatten(),
         "parent": a.parent,
         "blocked_by": a.after,
         "blocks": a.blocks,
@@ -125,6 +136,9 @@ pub(crate) async fn edit(cx: &Ctx, a: EditArgs) -> Result<()> {
     }
     if let Some(p) = a.priority {
         body["priority"] = json!(p);
+    }
+    if let Some(g) = a.grade {
+        body["grade"] = json!(parse_grade(&g)?);
     }
     if let Some(d) = a.due {
         if d == ["none"] {
@@ -151,6 +165,17 @@ pub(crate) async fn edit(cx: &Ctx, a: EditArgs) -> Result<()> {
     }
     cx.show(&cx.c.patch(&format!("tasks/{}", a.task), body).await?, task_line);
     Ok(())
+}
+
+/// A grade is 1 to 4; "none" clears it.
+fn parse_grade(g: &str) -> Result<Option<i64>> {
+    if g.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    match g.parse::<i64>() {
+        Ok(n) if (1..=4).contains(&n) => Ok(Some(n)),
+        _ => anyhow::bail!("--grade must be 1 to 4, or none to clear it"),
+    }
 }
 
 fn merge(body: &mut Value, fields: Value) {

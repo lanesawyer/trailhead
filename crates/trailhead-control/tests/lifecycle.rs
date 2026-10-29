@@ -6,7 +6,7 @@ use std::sync::Arc;
 use trailhead_control::{Factory, Outcome, Reconciled};
 use trailhead_factory::{
     CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, Role, RunOutcome, SandboxSpec,
-    Status, TaskKey, Tracker, Usd, VerdictKind, label, run_name,
+    Status, TaskKey, Tracker, Usd, VerdictKind, conventional_title, label, run_name,
 };
 use trailhead_testkit::{
     FAKE_BASE, FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness,
@@ -75,8 +75,9 @@ fn rig_with(config: &str) -> Rig {
 fn changes() -> RunOutcome {
     RunOutcome::Changes {
         commits: vec![Commit {
-            message: "feat: greet".into(),
+            message: conventional_title(Some("feat(core): greet"), &TaskKey("TRAIL-1".into()), "").0,
             changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            merges: vec![],
         }],
         summary: "Adds a greeting.".into(),
     }
@@ -108,6 +109,10 @@ async fn spec_to_reviewed_pr_then_human_merge() {
 
     let opened = &r.codehost.prs()[0];
     assert_eq!(opened.spec.branch, "factory/trail-1");
+    assert_eq!(
+        opened.spec.title, "feat(core): greet [TRAIL-1]",
+        "the PR is titled with the commit subject the repo squashes to"
+    );
     let start = r.codehost.start(&opened.pr.repo, "factory/trail-1");
     assert_eq!(start.as_deref(), Some(FAKE_BASE), "published on the commit the checkout started from");
     assert_eq!(
@@ -349,6 +354,7 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
             requeued: vec![crashed.0.clone()],
             reviewed: vec![unreviewed.0.clone()],
             reworked: vec![],
+            conflicted: vec![],
             merged: vec![],
             closed: vec![],
             abandoned: vec![],
@@ -1044,6 +1050,35 @@ async fn requested_changes_start_a_rework_on_the_pr_branch_with_the_review() {
 }
 
 #[tokio::test]
+async fn a_rework_started_by_hand_gets_the_prs_last_review_as_feedback() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+
+    // A review that never went through request_rework, then a person reopens the task.
+    let verdict = trailhead_factory::Verdict {
+        kind: VerdictKind::RequestChanges,
+        body: "Add a test for `hi()`.".into(),
+        reviewer: "factory/trail-1-a1-r1".into(),
+        model: None,
+    };
+    r.tracker.record_verdict(&key, &verdict).await.unwrap();
+    assert_eq!(r.tracker.task(&key).run.changes_requested, None);
+    r.tracker.set_status(&key, Status::Open);
+
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let feedback = r.harness.feedbacks();
+    assert_eq!(feedback.len(), 1);
+    assert!(feedback[0].body.contains("Add a test for `hi()`."), "{}", feedback[0].body);
+}
+
+#[tokio::test]
 async fn requested_changes_past_the_cap_park_the_task_with_the_last_review() {
     let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 2"));
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
@@ -1418,4 +1453,56 @@ async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_re
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let ran = r.factory.tick().await.unwrap();
     assert_eq!(ran.len(), 1, "no backoff left over from before the park");
+}
+
+#[tokio::test(start_paused = true)]
+async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 3"));
+    let key = r.tracker.add_task("TRAIL", "Unreviewable", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let rounds = r.tracker.task(&key).run.review_rounds;
+
+    r.daemon.fail_runs(3, "connection lost");
+    let secs = std::time::Duration::from_secs;
+    for (n, wait) in [60, 120].into_iter().enumerate() {
+        let done = r.factory.reconcile().await.unwrap();
+        assert!(done.reviewed.is_empty(), "failure {} isn't a review", n + 1);
+        assert_eq!(r.tracker.task(&key).status, Status::InReview, "failure {} is retried", n + 1);
+        assert_eq!(r.tracker.task(&key).run.review_rounds, rounds, "the failed round is given back");
+        // Backing off: the reviewer isn't started again, so the failure queued for it stays unused.
+        r.factory.reconcile().await.unwrap();
+        tokio::time::advance(secs(wait - 1)).await;
+        r.factory.reconcile().await.unwrap();
+        assert_eq!(r.tracker.task(&key).status, Status::InReview, "still a second short of {wait}s");
+        tokio::time::advance(secs(2)).await;
+    }
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.review_rounds, rounds);
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("it's not the task") && questions[0].body.contains("connection lost"));
+}
+
+#[tokio::test]
+async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_conventional_pr_title() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    let outcome = RunOutcome::Changes {
+        commits: vec![Commit {
+            message: "added a greeting".into(),
+            changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            merges: vec![],
+        }],
+        summary: "Adds a greeting.".into(),
+    };
+    r.harness.push(Role::Worker, Script::new(outcome));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    let opened = r.codehost.prs().pop().expect("a PR");
+    assert_eq!(opened.spec.title, "chore: Add a greeting [TRAIL-1]");
 }

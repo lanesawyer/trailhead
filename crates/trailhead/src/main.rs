@@ -73,9 +73,9 @@ async fn run(cli: Cli) -> Result<()> {
 
     match cli.cmd {
         Cmd::Serve { .. } | Cmd::Server(_) | Cmd::Login => unreachable!(),
-        Cmd::Ready { project, limit } => tasks::ready(&cx, project, limit).await,
-        Cmd::Ls { project, status, parent, all, today, limit } => {
-            tasks::ls(&cx, project, status, parent, all, today, limit).await
+        Cmd::Ready { project, grade, limit } => tasks::ready(&cx, project, grade, limit).await,
+        Cmd::Ls { project, status, parent, all, today, grade, limit } => {
+            tasks::ls(&cx, project, status, parent, all, today, grade, limit).await
         }
         Cmd::Show { task } => tasks::show(&cx, &task).await,
         Cmd::Add(a) => tasks::add(&cx, a).await,

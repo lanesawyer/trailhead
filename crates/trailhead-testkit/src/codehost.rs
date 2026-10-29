@@ -12,6 +12,8 @@ pub struct FakePr {
     pub merged: bool,
     /// Closed without merging.
     pub closed: bool,
+    /// What the host says of whether it merges cleanly: `None` while it is still working it out.
+    pub mergeable: Option<bool>,
 }
 
 #[derive(Default)]
@@ -70,6 +72,11 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.closed = true).unwrap();
     }
 
+    /// Sets whether the host says the PR merges cleanly (`None`: not worked out yet).
+    pub fn set_mergeable(&self, pr: &PrRef, mergeable: Option<bool>) {
+        self.find(pr, |p, _| p.mergeable = mergeable).unwrap();
+    }
+
     /// The commit a merged PR became: made up from its number.
     pub fn merge_commit(pr: &PrRef) -> String {
         format!("merge-{}", pr.number)
@@ -111,7 +118,14 @@ impl CodeHost for FakeCodeHost {
         let number = s.prs.len() as u64 + 1;
         let r =
             PrRef { repo: repo.clone(), number, url: format!("https://example.invalid/{}/pull/{number}", repo.slug()) };
-        s.prs.push(FakePr { pr: r.clone(), spec: pr, comments: Vec::new(), merged: false, closed: false });
+        s.prs.push(FakePr {
+            pr: r.clone(),
+            spec: pr,
+            comments: Vec::new(),
+            merged: false,
+            closed: false,
+            mergeable: Some(true),
+        });
         Ok(r)
     }
 
@@ -148,11 +162,19 @@ impl CodeHost for FakeCodeHost {
         })
     }
 
+    async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>> {
+        self.find(pr, |p, _| p.mergeable)
+    }
+
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
         self.find(pr, |p, _| match (p.merged, p.closed) {
             (true, _) => PrState::Merged { commit: Some(FakeCodeHost::merge_commit(&p.pr)) },
             (false, true) => PrState::Closed,
             _ => PrState::Open,
         })
+    }
+
+    async fn title(&self, pr: &PrRef) -> Result<String> {
+        self.find(pr, |p, _| p.spec.title.clone())
     }
 }

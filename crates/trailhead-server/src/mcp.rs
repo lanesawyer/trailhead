@@ -24,9 +24,9 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use trailhead_core::{
-    Claim, Comment, CommentKind, Ctx, Error, EventFilter, NewComment, NewProject, NewTask, Project, ProjectPatch,
-    ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch, TaskSort, Verdict,
-    idempotency_fingerprint,
+    Claim, Comment, CommentKind, Ctx, Error, EventFilter, GradeFilter, NewComment, NewProject, NewTask, Project,
+    ProjectPatch, ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch, TaskSort, Verdict,
+    idempotency_fingerprint, parse_grade,
 };
 use uuid::Uuid;
 
@@ -120,8 +120,15 @@ fn clearable<T>(
     s.map(str::trim).map(|s| (!s.is_empty()).then(|| parse(s)).transpose()).transpose()
 }
 
+fn parse_grade_filter(s: Option<&str>) -> trailhead_core::Result<GradeFilter> {
+    Ok(s.map(GradeFilter::parse).transpose()?.unwrap_or_default())
+}
+
 fn task_line(t: &Task) -> String {
     let mut line = format!("{} {} p{} v{} {}", t.key, t.status, t.priority, t.version, t.title);
+    if let Some(g) = t.grade {
+        line.push_str(&format!(" (grade {g})"));
+    }
     if let Some(w) = when(t.scheduled_on, t.scheduled_at, t.scheduled_tz.as_deref()) {
         line.push_str(&format!(" (scheduled {w})"));
     }
@@ -233,6 +240,8 @@ pub struct ReadyArgs {
     project: Option<String>,
     /// Defaults to 20.
     limit: Option<i64>,
+    /// Only tasks with this grade: 1 to 4, `graded` or `ungraded`.
+    grade: Option<String>,
     /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
     as_agent: Option<String>,
 }
@@ -247,6 +256,8 @@ pub struct ListArgs {
     parent: Option<String>,
     /// YYYY-MM-DD. Only tasks scheduled on or before this day; pass today's date for today's plan.
     scheduled_through: Option<String>,
+    /// Only tasks with this grade: 1 to 4, `graded` or `ungraded`.
+    grade: Option<String>,
     limit: Option<i64>,
     /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
     as_agent: Option<String>,
@@ -268,6 +279,8 @@ pub struct CreateArgs {
     description: Option<String>,
     /// 1 (urgent) to 4 (low). Defaults to 3.
     priority: Option<i64>,
+    /// Risk grade, 1 to 4. Only a human can create a task with a grade.
+    grade: Option<i64>,
     /// Parent task key, for subtasks.
     parent: Option<String>,
     /// Task keys that must finish before this one.
@@ -307,6 +320,8 @@ pub struct UpdateArgs {
     /// open, in_progress, needs_input, in_review, approved, done or cancelled.
     status: Option<String>,
     priority: Option<i64>,
+    /// Risk grade: 1 to 4, or `none` to clear it. Agents can only raise an existing grade.
+    grade: Option<String>,
     /// YYYY-MM-DD: the day it's due, without a time. An empty string removes the deadline.
     due_on: Option<String>,
     /// RFC 3339 timestamp with the local offset: a time it's due by, moving the day to
@@ -482,6 +497,7 @@ impl TrailheadMcp {
             title: a.title,
             description: a.description.unwrap_or_default(),
             priority: a.priority,
+            grade: a.grade,
             due_on: attempt!(parse_opt_date(a.due_on.as_deref())),
             due_at,
             due_tz: a.due_tz,
@@ -567,7 +583,12 @@ impl TrailheadMcp {
         Parameters(a): Parameters<ReadyArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
-        let tasks = attempt!(self.state.store.ready(&ctx, a.project.as_deref(), a.limit).await);
+        let tasks = attempt!(
+            self.state
+                .store
+                .ready(&ctx, a.project.as_deref(), a.limit, attempt!(parse_grade_filter(a.grade.as_deref())))
+                .await
+        );
         text(task_list(&tasks, "nothing ready"))
     }
 
@@ -589,6 +610,7 @@ impl TrailheadMcp {
             parent: a.parent,
             sort: if scheduled_through.is_some() { TaskSort::Scheduled } else { TaskSort::Priority },
             scheduled_through,
+            grade: attempt!(parse_grade_filter(a.grade.as_deref())),
             limit: a.limit,
             ..Default::default()
         };
@@ -657,6 +679,7 @@ impl TrailheadMcp {
             description: a.description,
             status,
             priority: a.priority,
+            grade: attempt!(a.grade.as_deref().map(parse_grade).transpose()),
             due_on: attempt!(clearable(a.due_on.as_deref(), parse_date)),
             due_at: attempt!(clearable(a.due_at.as_deref(), trailhead_core::parse_at)),
             due_tz: a.due_tz.map(Some),

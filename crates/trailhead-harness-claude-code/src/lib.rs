@@ -13,11 +13,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use trailhead_factory::{
     CheckResult, Commit, Error, EventSink, Feedback, FileChange, FollowUp, Harness, ModelId, Result, Role, RunContext,
-    RunEvent, RunOutcome, Usage, VerdictKind,
+    RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
 };
 
 /// What `ANTHROPIC_API_KEY` is set to. The gateway replaces credentials, so this only has to be non-empty.
@@ -115,20 +115,27 @@ impl ClaudeCode {
         if let Some(id) = resume {
             cmd.arg("--resume").arg(id);
         }
+        // The prompt goes on stdin: one argv argument is capped at 128 KiB on Linux, and a reviewer's diff can exceed it.
         let mut child = cmd
-            .arg(prompt)
             .current_dir(&ctx.workdir)
             .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
             .env("DISABLE_AUTOUPDATER", "1")
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Cancelling the run drops this future; the agent must not outlive it.
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| Error::Other(format!("can't start {}: {e}", self.binary.display())))?;
+        let mut stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
+        // Written from its own task so a prompt bigger than the pipe can't deadlock against output we haven't read.
+        // A write error (the agent exited early) shows up as its missing result.
+        let input = prompt.as_bytes().to_vec();
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&input).await;
+        });
         let stderr = tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             let mut tail = Vec::new();
@@ -213,6 +220,10 @@ pub fn schema(role: Role) -> Value {
                 "type": "string",
                 "description": "For done: the PR description. For a review: the review comment. Otherwise: why.",
             },
+            "title": {
+                "type": "string",
+                "description": "For done: a conventional commit title for the change, `type(scope): message`, with type one of feat, fix, perf, refactor, docs, test, chore, ci, build and scope the crate or area (factory, core, server, cli, daemon, docs). The task key is appended for you. E.g. `fix(factory): send the prompt on stdin so big PRs can be reviewed`.",
+            },
             "question": { "type": "string", "description": "For needs_input: the one question for a human." },
             "follow_ups": {
                 "type": "array",
@@ -235,20 +246,31 @@ pub fn schema(role: Role) -> Value {
 /// The most the human-context section of a prompt may take, in bytes.
 const HUMAN_CONTEXT_CAP: usize = 6000;
 
+/// The most the answers may take of the human-context section, so notes keep the rest.
+const ANSWERS_CAP: usize = 4000;
+
 /// Lane's answers and the task's decisions and notes, for after the description. Empty when there are none. Past
-/// the cap the oldest notes are dropped; answers are kept first, each cut short if very long.
+/// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
+/// is always kept.
 fn human_section(task: &trailhead_factory::TaskSpec) -> String {
     let ctx = &task.context;
     let mut budget = HUMAN_CONTEXT_CAP;
     let mut out = String::new();
-    if !ctx.answers.is_empty() {
-        out.push_str("\n\nQuestions you asked earlier and Lane's answers:");
-        for a in &ctx.answers {
-            let entry =
-                format!("\n- Q: {}\n  A ({}, {}): {}", clip(&a.question, 1000), a.by, a.date, clip(&a.answer, 2000));
-            budget = budget.saturating_sub(entry.len());
-            out.push_str(&entry);
+    let mut answers = Vec::new();
+    let mut answers_budget = ANSWERS_CAP;
+    for a in ctx.answers.iter().rev() {
+        let entry =
+            format!("\n- Q: {}\n  A ({}, {}): {}", clip(&a.question, 1000), a.by, a.date, clip(&a.answer, 2000));
+        if entry.len() > answers_budget && !answers.is_empty() {
+            break;
         }
+        answers_budget = answers_budget.saturating_sub(entry.len());
+        budget = budget.saturating_sub(entry.len());
+        answers.push(entry);
+    }
+    if !answers.is_empty() {
+        out.push_str("\n\nQuestions you asked earlier and Lane's answers:");
+        answers.iter().rev().for_each(|e| out.push_str(e));
     }
     let mut kept = Vec::new();
     for n in ctx.notes.iter().rev() {
@@ -309,6 +331,42 @@ fn clip(s: &str, max: usize) -> String {
     format!("{}… (cut)", &s[..end])
 }
 
+/// The most of the diff a reviewer's prompt embeds, in bytes. The rest it reads from the checkout.
+pub const DIFF_CAP: usize = 100 * 1024;
+
+/// The diff cut to `cap` bytes at a file boundary (a `diff --git` line), with a note saying how to read the rest.
+fn capped_diff(diff: &str, cap: usize) -> String {
+    if diff.len() <= cap {
+        return diff.to_string();
+    }
+    let mut end = cap;
+    while !diff.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Back up to the start of the file whose diff straddles the cap; one huge first file is cut mid-file.
+    let at = diff[..end].rfind("\ndiff --git ").map(|i| i + 1).unwrap_or(end);
+    format!(
+        "{}\n[The diff is {} bytes and was cut here at {} bytes. Read the rest with `git diff origin/<base>...HEAD` \
+         in the checkout, where <base> is the PR's base branch.]",
+        diff[..at].trim_end(),
+        diff.len(),
+        at
+    )
+}
+
+/// What a reviewer is told about the PR's title, which a squash merge makes the commit subject on main.
+fn pr_title_section(title: Option<&str>, key: &str) -> String {
+    let shown = match title {
+        Some(t) => format!("The PR's title is `{t}`."),
+        None => "The PR's title couldn't be read, so don't judge it.".into(),
+    };
+    format!(
+        "\n\n{shown} It must be a conventional commit (`type(scope): message`, which the repo's changelog \
+         requires) that fits the change: a fix titled feat, or a wrong scope, is a reason to request changes. The \
+         task key comes last in square brackets (`... [{key}]`), not parentheses."
+    )
+}
+
 pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
     let task = &ctx.task;
     let mut p = match ctx.role {
@@ -320,13 +378,14 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
              they belong. Your summary is posted on the PR as the review. When you approve, put anything worth doing \
              later that shouldn't hold this change up in `follow_ups`, each with a title and description: the factory \
-             files them as tasks, so don't repeat them in the summary.",
+             files them as tasks, so don't repeat them in the summary.{pr_title}",
             key = task.key.0,
             title = task.title,
             desc = task.description,
             human = human_section(task),
-            diff = ctx.diff.as_deref().unwrap_or("(no diff)"),
+            diff = ctx.diff.as_deref().map_or("(no diff)".into(), |d| capped_diff(d, DIFF_CAP)),
             checks = checks_section(&ctx.checks),
+            pr_title = pr_title_section(ctx.title.as_deref(), &task.key.0),
         ),
         _ => format!(
             "Implement task {key}: {title}.\n\n\
@@ -335,8 +394,11 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              tests, and run the repo's formatter, linter and tests. You don't need to commit or push; everything \
              you change in the checkout is published as one commit and a PR. If only a human can answer something \
              you need, stop and give needs_input with the question. If the task can't be done, give failed and \
-             say why. The factory tracks this task in Trailhead for you, so skip AGENTS.md's \
-             \"Tracking work\" steps: don't claim, comment on or close tasks. Put follow-ups in your summary.",
+             say why. When you finish, give `title`: a conventional commit title for the change, like \
+             `fix(factory): send the prompt on stdin so big PRs can be reviewed`, with the type (feat, fix, \
+             perf, refactor, docs, test, chore, ci or build) that fits what you did and the crate or area as \
+             scope; the factory appends the task key. The factory tracks this task in Trailhead for you, so skip \
+             AGENTS.md's \"Tracking work\" steps: don't claim, comment on or close tasks. Put follow-ups in your summary.",
             key = task.key.0,
             title = task.title,
             desc = task.description,
@@ -485,8 +547,11 @@ async fn outcome(ctx: &RunContext, start: &str, result: &Value) -> Result<RunOut
             if changes.is_empty() {
                 RunOutcome::Failed { reason: "claude reported done but changed nothing".into() }
             } else {
-                let message = format!("{}: {}", ctx.task.key.0, ctx.task.title);
-                RunOutcome::Changes { commits: vec![Commit { message, changes }], summary }
+                let (message, valid) = conventional_title(answer["title"].as_str(), &ctx.task.key, &ctx.task.title);
+                if !valid {
+                    tracing::warn!(task = %ctx.task.key.0, title = ?answer["title"], "no conventional title from the agent; using chore");
+                }
+                RunOutcome::Changes { commits: vec![Commit { message, changes, merges: Vec::new() }], summary }
             }
         }
         other => RunOutcome::Failed { reason: format!("claude gave up ({other}): {summary}") },

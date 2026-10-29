@@ -107,6 +107,9 @@ pub struct ChangesRequested {
     pub body: String,
     #[serde(default)]
     pub attempt: u32,
+    /// Not a review: the PR no longer merges cleanly with the base branch, and the rework merges it in (TRAIL-199).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflict: bool,
 }
 
 impl RunUpdate {
@@ -220,6 +223,8 @@ pub trait Tracker: Send + Sync {
     /// The task's resolved questions with their answers, and its `decision` and `note` comments, oldest first,
     /// without the factory's own bookkeeping.
     async fn human_context(&self, task: &TaskKey) -> Result<HumanContext>;
+    /// The task's latest `review` comment, whoever left it, if it has one.
+    async fn last_review(&self, task: &TaskKey) -> Result<Option<Verdict>>;
     /// Open, in-progress, parked or in-review tasks that carry factory metadata.
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>>;
 

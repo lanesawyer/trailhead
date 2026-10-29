@@ -21,6 +21,7 @@ pub use daemon::{
 };
 pub use harness::{
     EventSink, Feedback, FollowUp, Harness, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict, VerdictKind,
+    conventional_title, is_conventional,
 };
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
@@ -39,6 +40,10 @@ pub enum Error {
     Forbidden(String),
     #[error("invalid config: {0}")]
     Config(String),
+    /// The remote refused the request and repeating it won't change that (a 400 or 422, say), unlike
+    /// [`Error::Other`], which may be a blip worth retrying.
+    #[error("rejected: {0}")]
+    Rejected(String),
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]

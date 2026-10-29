@@ -22,6 +22,8 @@ pub struct FakeCompute {
     failing: Arc<Mutex<BTreeSet<(String, &'static str)>>>,
     wake_failures: Arc<Mutex<BTreeMap<String, usize>>>,
     hung_wakes: Arc<Mutex<BTreeSet<String>>>,
+    rejected_wakes: Arc<Mutex<BTreeSet<String>>>,
+    wake_attempts: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl FakeCompute {
@@ -68,6 +70,16 @@ impl FakeCompute {
     /// Makes every wake of a sandbox hang, as a stalled compute API would.
     pub fn hang_wakes(&self, name: &str) {
         self.hung_wakes.lock().unwrap().insert(name.to_string());
+    }
+
+    /// Makes every wake of a sandbox fail with a permanent 4xx, as a request the API will never accept.
+    pub fn reject_wakes(&self, name: &str) {
+        self.rejected_wakes.lock().unwrap().insert(name.to_string());
+    }
+
+    /// Wakes tried on a sandbox, failed ones included.
+    pub fn wake_attempts(&self, name: &str) -> usize {
+        self.wake_attempts.lock().unwrap().get(name).copied().unwrap_or(0)
     }
 
     pub fn wakes(&self, name: &str) -> usize {
@@ -156,6 +168,10 @@ impl Compute for FakeCompute {
     }
 
     async fn wake(&self, id: &SandboxId) -> Result<()> {
+        *self.wake_attempts.lock().unwrap().entry(id.0.clone()).or_default() += 1;
+        if self.rejected_wakes.lock().unwrap().contains(&id.0) {
+            return Err(Error::Rejected("sprites api 400 Bad Request: ".into()));
+        }
         if self.hung_wakes.lock().unwrap().contains(&id.0) {
             std::future::pending::<()>().await;
         }

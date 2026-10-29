@@ -43,6 +43,9 @@ pub(crate) enum Cmd {
     Ready {
         #[arg(short, long, env = "TRAILHEAD_PROJECT")]
         project: Option<String>,
+        /// Only tasks with this grade: 1 to 4, graded or ungraded.
+        #[arg(long)]
+        grade: Option<String>,
         #[arg(short = 'n', long)]
         limit: Option<i64>,
     },
@@ -61,6 +64,9 @@ pub(crate) enum Cmd {
         /// Only tasks scheduled for today or earlier: today's plan.
         #[arg(long)]
         today: bool,
+        /// Only tasks with this grade: 1 to 4, graded or ungraded.
+        #[arg(long)]
+        grade: Option<String>,
         #[arg(short = 'n', long)]
         limit: Option<i64>,
     },
@@ -240,6 +246,9 @@ pub(crate) struct AddArgs {
     /// 1 (urgent) to 4 (low).
     #[arg(short = 'P', long)]
     pub(crate) priority: Option<i64>,
+    /// Risk grade, 1 to 4. Only a human can create a task with one.
+    #[arg(long)]
+    pub(crate) grade: Option<String>,
     #[arg(long)]
     pub(crate) parent: Option<String>,
     /// The deadline: a day (YYYY-MM-DD, today, tomorrow, fri), optionally with a time
@@ -267,6 +276,9 @@ pub(crate) struct EditArgs {
     pub(crate) description: Option<String>,
     #[arg(short = 'P', long)]
     pub(crate) priority: Option<i64>,
+    /// Risk grade, 1 to 4, or "none" to clear it. Agents can only raise an existing grade.
+    #[arg(long)]
+    pub(crate) grade: Option<String>,
     /// The deadline, as for `add --due`, or "none".
     #[arg(long, num_args = 1..=3)]
     pub(crate) due: Option<Vec<String>>,

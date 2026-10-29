@@ -7,10 +7,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
-use trailhead_core::{CommentKind, Ctx, NewComment, Principal, Store, TaskFilter, TaskPatch, TokenOptions};
+use trailhead_core::{
+    CommentKind, Ctx, GradeFilter, NewComment, Principal, Store, TaskFilter, TaskPatch, TokenOptions,
+};
 use trailhead_factory::{
-    Answered, Credential, Error, HumanContext, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, Verdict,
-    VerdictKind, is_factory_agent,
+    Answered, Credential, Error, HumanContext, ModelId, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker,
+    Verdict, VerdictKind, is_factory_agent,
 };
 use uuid::Uuid;
 
@@ -136,7 +138,9 @@ impl Tracker for CoreTracker {
     async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
         let tasks = match queue {
-            None => self.store.ready(&ctx, Some(project), Some(limit as i64)).await.map_err(map_err)?,
+            None => {
+                self.store.ready(&ctx, Some(project), Some(limit as i64), GradeFilter::Any).await.map_err(map_err)?
+            }
             Some(queue) => {
                 let filter = TaskFilter {
                     project: Some(project.to_string()),
@@ -146,7 +150,8 @@ impl Tracker for CoreTracker {
                 };
                 let queued: std::collections::HashSet<_> =
                     self.store.list_tasks(&ctx, filter).await.map_err(map_err)?.into_iter().map(|t| t.id).collect();
-                let ready = self.store.ready(&ctx, Some(project), Some(1000)).await.map_err(map_err)?;
+                let ready =
+                    self.store.ready(&ctx, Some(project), Some(1000), GradeFilter::Any).await.map_err(map_err)?;
                 ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
             }
         };
@@ -214,6 +219,26 @@ impl Tracker for CoreTracker {
             out.notes.push(TaskNote { author: author.clone(), date: date(c), body: c.body.clone() });
         }
         Ok(out)
+    }
+
+    async fn last_review(&self, task: &TaskKey) -> Result<Option<Verdict>> {
+        let ctx = self.ctx().await?;
+        let comments = self.store.list_comments(&ctx, &task.0).await.map_err(map_err)?;
+        let Some(c) = comments.iter().rev().find(|c| c.kind == CommentKind::Review) else { return Ok(None) };
+        let Some(verdict) = c.verdict else { return Ok(None) };
+        let reviewer =
+            match self.store.list_agents(&ctx).await.map_err(map_err)?.into_iter().find(|a| a.id == c.author_id) {
+                Some(a) => a.name,
+                None => match self.store.get_user(&ctx, c.author_id).await {
+                    Ok(u) => u.name,
+                    Err(_) => c.author_id.to_string(),
+                },
+            };
+        let kind = match verdict {
+            trailhead_core::Verdict::Approve => VerdictKind::Approve,
+            trailhead_core::Verdict::RequestChanges => VerdictKind::RequestChanges,
+        };
+        Ok(Some(Verdict { kind, body: c.body.clone(), reviewer, model: c.model.clone().map(ModelId) }))
     }
 
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
