@@ -2,8 +2,8 @@ mod common;
 
 use common::Env;
 use trailhead_core::{
-    CommentKind, Ctx, Error, EventFilter, NewComment, NewProject, NewTask, Principal, ProjectPatch, TaskFilter,
-    TaskPatch, TokenOptions, TokenPatch,
+    CommentKind, Ctx, Error, EventFilter, GradeFilter, NewComment, NewProject, NewTask, Principal, ProjectPatch,
+    TaskFilter, TaskPatch, TokenOptions, TokenPatch,
 };
 
 struct Scoped {
@@ -53,11 +53,11 @@ async fn reads_outside_scope_look_missing() {
     hidden(s.get_project(&bot, "WEB").await);
     hidden(s.list_events(&bot, EventFilter { task: Some(web.clone()), ..Default::default() }).await);
     hidden(s.list_tasks(&bot, TaskFilter { project: Some("WEB".into()), ..Default::default() }).await);
-    hidden(s.ready(&bot, Some("WEB"), None).await);
+    hidden(s.ready(&bot, Some("WEB"), None, GradeFilter::Any).await);
 
     let keys = |ts: Vec<trailhead_core::Task>| ts.into_iter().map(|t| t.key).collect::<Vec<_>>();
     assert_eq!(keys(s.list_tasks(&bot, TaskFilter::default()).await.unwrap()), vec![auth.key.clone()]);
-    assert_eq!(keys(s.ready(&bot, None, None).await.unwrap()), vec![auth.key.clone()]);
+    assert_eq!(keys(s.ready(&bot, None, None, GradeFilter::Any).await.unwrap()), vec![auth.key.clone()]);
     assert_eq!(keys(s.search(&bot, "thing", None).await.unwrap()), vec![auth.key.clone()]);
     assert_eq!(keys(s.search(&env.human, "thing", None).await.unwrap()).len(), 2);
     let projects: Vec<_> = s.list_projects(&bot, false).await.unwrap().into_iter().map(|p| p.key).collect();
@@ -112,7 +112,7 @@ async fn out_of_scope_blockers_are_redacted() {
     let Scoped { env, bot, web } = setup().await;
     let auth = env.task("auth thing").await;
     env.store.add_dependency(&env.human, &web, &auth.key).await.unwrap();
-    assert!(env.store.ready(&bot, None, None).await.unwrap().is_empty());
+    assert!(env.store.ready(&bot, None, None, GradeFilter::Any).await.unwrap().is_empty());
     let detail = env.store.task_detail(&bot, &auth.key).await.unwrap();
     assert_eq!(detail.blocked_by, vec!["(out of scope)"]);
     assert!(env.store.blockers(&bot, &auth.key).await.unwrap().is_empty());

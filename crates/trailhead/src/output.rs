@@ -71,6 +71,9 @@ fn local_minute(ts: &str) -> String {
 
 pub fn task_line(t: &Value) -> String {
     let mut line = format!("{:<10} {:<11} p{}  {}", s(t, "key"), s(t, "status"), t["priority"], s(t, "title"));
+    if let Some(g) = t["grade"].as_i64() {
+        line.push_str(&format!("  (grade {g})"));
+    }
     if let Some(w) = when(t, "scheduled", local_minute) {
         line.push_str(&format!("  (on {w})"));
     }

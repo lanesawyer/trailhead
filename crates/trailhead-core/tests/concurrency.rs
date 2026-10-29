@@ -1,7 +1,7 @@
 mod common;
 
 use common::Env;
-use trailhead_core::{Error, NewTask, Status, TaskPatch};
+use trailhead_core::{Error, GradeFilter, NewTask, Status, TaskPatch};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn racing_agents_never_share_a_claim() {
@@ -127,7 +127,7 @@ async fn claim_then_finish_round_trip_under_load() {
         handles.push(tokio::spawn(async move {
             let mut done = 0;
             loop {
-                let ready = store.ready(&ctx, None, Some(5)).await.unwrap();
+                let ready = store.ready(&ctx, None, Some(5), GradeFilter::Any).await.unwrap();
                 if ready.is_empty() {
                     return done;
                 }
