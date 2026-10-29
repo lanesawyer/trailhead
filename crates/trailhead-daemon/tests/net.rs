@@ -138,6 +138,7 @@ fn request(run: &str, key: TaskKey, credential: Credential) -> RunRequest {
         endpoint: trailhead_factory::Endpoint { base_url: "http://gateway.invalid".into() },
         max_steps: 5,
         required_checks: Vec::new(),
+        worker_checks: Vec::new(),
         blocked_hosts: Vec::new(),
         allowed_hosts: Vec::new(),
         credential,

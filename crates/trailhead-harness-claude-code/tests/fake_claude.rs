@@ -5,7 +5,8 @@ use std::process::Command;
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
-    Endpoint, Feedback, Harness, ModelId, Role, RunContext, RunEvent, RunOutcome, TaskKey, TaskSpec, VerdictKind,
+    CheckResult, Endpoint, Feedback, Harness, ModelId, Role, RunContext, RunEvent, RunOutcome, TaskKey, TaskSpec,
+    VerdictKind,
 };
 use trailhead_harness_claude_code::{ClaudeCode, PLACEHOLDER_KEY, prompt};
 
@@ -117,6 +118,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
         endpoint: Endpoint { base_url: "https://api.sprites.dev/v1/gateway/anthropic/c1".into() },
         max_steps,
         diff: (role == Role::Reviewer).then(|| "+pub fn hi() {}".into()),
+        checks: Vec::new(),
     }
 }
 
@@ -214,10 +216,17 @@ async fn worker_changes_are_collected() {
 
 async fn reviewer_verdict_from_result_text() {
     let r = rig();
-    let (out, _) = play(&r, "review", ctx(&r, Role::Reviewer, 10)).await;
+    let mut c = ctx(&r, Role::Reviewer, 10);
+    c.checks = vec![
+        CheckResult { name: "test".into(), passed: true, output: String::new() },
+        CheckResult { name: "lint".into(), passed: false, output: "warning: unused import".into() },
+    ];
+    let (out, _) = play(&r, "review", c).await;
     assert_eq!(out, RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: "Missing a test for hi().".into() });
     let log = std::fs::read_to_string(&r.log).unwrap();
     assert!(log.contains("+pub fn hi() {}"), "the diff is in the reviewer's prompt");
+    assert!(log.contains("- test: passed") && log.contains("- lint: FAILED"), "check results: {log}");
+    assert!(log.contains("warning: unused import") && log.contains("don't build or run tests"), "{log}");
     assert!(log.contains("request_changes"), "the reviewer's schema offers verdicts");
 }
 
@@ -299,6 +308,13 @@ async fn dropped_api_calls_resume_the_session() {
     let (out, _) = play(&r, "error", ctx(&r, Role::Worker, 10)).await;
     assert!(matches!(out, RunOutcome::Failed { ref reason } if reason.contains("403")), "{out:?}");
     assert!(!std::fs::read_to_string(&r.log).unwrap().contains("--resume"));
+}
+
+#[test]
+fn a_reviewer_with_no_check_results_is_still_told_not_to_build() {
+    let r = rig();
+    let p = prompt(&ctx(&r, Role::Reviewer, 0), None);
+    assert!(p.contains("don't build or run tests") && !p.contains("already ran these checks"), "{p}");
 }
 
 #[test]

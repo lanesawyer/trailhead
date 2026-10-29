@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{CheckpointId, Commit, Endpoint, HumanContext, ModelId, Result, Role, TaskKey, Usage};
+use crate::{CheckResult, CheckpointId, Commit, Endpoint, HumanContext, ModelId, Result, Role, TaskKey, Usage};
 
 /// What the agent is asked to do: the task's spec as Trailhead holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +30,9 @@ pub struct RunContext {
     pub max_steps: u32,
     /// For reviewers: the change under review. Never the author's transcript.
     pub diff: Option<String>,
+    /// For reviewers: the checks the worker already ran in its own sandbox, which the reviewer shouldn't rerun.
+    #[serde(default)]
+    pub checks: Vec<CheckResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
