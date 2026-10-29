@@ -44,9 +44,6 @@ pub const RELEASE_PATIENCE: Duration = Duration::from_secs(10 * 60);
 const FIRST_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
-/// How many revoked variants of an attempt's name a run skips before giving up.
-const MAX_NAME_TRIES: u32 = 100;
-
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
@@ -311,7 +308,8 @@ impl Factory {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for task in self.tracker.ready(self.project(), self.queue().as_ref(), room).await? {
+        let ready = self.tracker.ready(self.project(), self.queue().as_ref(), room).await?;
+        for task in ready.into_iter().filter(|t| self.setback_over(&t.key)) {
             let outcome = self.run_task(&task).await?;
             out.push((task, outcome));
         }
@@ -322,19 +320,25 @@ impl Factory {
     pub async fn run_task(&self, task: &Task) -> Result<Outcome> {
         let attempt = task.run.attempt.unwrap_or(0) + 1;
         let profile = self.config.worker().clone();
-        // An attempt that failed before its agent started was given back and its sub-agent revoked, which can't be
-        // undone, so the retry's run takes the next free variant of the attempt's name.
-        let mut tries = 0;
-        let (name, credential) = loop {
-            let name = match tries {
-                0 => run_name(&task.key, attempt),
-                n => format!("{}-{n}", run_name(&task.key, attempt)),
-            };
-            match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
-                Ok(credential) => break (name, credential),
-                Err(Error::Forbidden(_)) if tries < MAX_NAME_TRIES => tries += 1,
-                Err(e) => return Err(e),
+        // A run that failed before its agent started gave its attempt back but revoked its sub-agent, which can't be
+        // undone, so a retry's name carries the count of those to stay unique.
+        let retries = task.run.retries.unwrap_or(0);
+        let name = match retries {
+            0 => run_name(&task.key, attempt),
+            n => format!("{}-{n}", run_name(&task.key, attempt)),
+        };
+        let credential = match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
+            Ok(credential) => credential,
+            // The name was used by a run whose give-back didn't land; skip past it rather than retry it forever.
+            Err(e @ Error::Forbidden(_)) => {
+                self.set_back(&task.key);
+                let update = RunUpdate { retries: Some(retries + 1), ..RunUpdate::default() };
+                if let Err(e) = self.tracker.report(&task.key, update).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't skip a used run name");
+                }
+                return Err(e);
             }
+            Err(e) => return Err(e),
         };
         let sub = self.tracker.sub_agent(&name);
         // Claiming as the sub-agent before creating the sandbox keeps two control planes from racing for one task.
@@ -352,17 +356,17 @@ impl Factory {
         .await?;
         tracing::info!(task = %task.key.0, run = %name, "preparing a worker sandbox");
         let prepared = async {
+            let context = self.tracker.human_context(&task.key).await?;
             let sandbox = self.acquire_worker(task).await?;
             sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
-            Ok::<_, Error>(sandbox)
+            Ok::<_, Error>((sandbox, context))
         };
-        let sandbox = match prepared.await {
-            Ok(sandbox) => sandbox,
+        let (sandbox, context) = match prepared.await {
+            Ok(prepared) => prepared,
             Err(e) => return Err(self.not_started(task, &sub, &name, e).await),
         };
         self.setbacks.lock().unwrap().remove(&task.key);
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
-        let context = self.tracker.human_context(&task.key).await?;
         let req = RunRequest {
             run: name.clone(),
             role: Role::Worker,
@@ -384,7 +388,7 @@ impl Factory {
             Ok(run) => run,
             Err(Error::Cancelled) => {
                 // A stop on purpose cancelled the run; the next boot's reconcile requeues it without a strike.
-                self.give_back_attempt(task).await;
+                self.give_back_attempt(task, &sub).await;
                 return Err(Error::Cancelled);
             }
             Err(e) => return Err(e),
@@ -450,29 +454,38 @@ impl Factory {
     /// error to surface.
     async fn not_started(&self, task: &Task, sub: &Arc<dyn Tracker>, name: &str, error: Error) -> Error {
         tracing::warn!(task = %task.key.0, %error, "run failed before the agent started; the attempt doesn't count");
-        {
-            let now = Instant::now();
-            let mut setbacks = self.setbacks.lock().unwrap();
-            let entry = setbacks.entry(task.key.clone()).or_insert((0, now));
-            entry.0 += 1;
-            entry.1 = now + backoff(entry.0);
-        }
+        self.set_back(&task.key);
+        // Before the release: the run's sub-agent holds the claim, so only it can report.
+        self.give_back_attempt(task, sub).await;
         if let Err(e) = sub.release(&task.key).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't release the task; reconcile will");
         }
-        self.give_back_attempt(task).await;
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the run's sub-agent; reconcile will");
         }
         error
     }
 
-    /// Restores the attempt count the task had before this run took the next number.
-    async fn give_back_attempt(&self, task: &Task) {
-        let update = RunUpdate { attempt: Some(task.run.attempt.unwrap_or(0)), ..RunUpdate::default() };
-        if let Err(e) = self.tracker.report(&task.key, update).await {
+    /// Restores the attempt count the task had before this run took the next number, reporting as the run's
+    /// sub-agent, which holds the claim.
+    async fn give_back_attempt(&self, task: &Task, sub: &Arc<dyn Tracker>) {
+        let update = RunUpdate {
+            attempt: Some(task.run.attempt.unwrap_or(0)),
+            retries: Some(task.run.retries.unwrap_or(0) + 1),
+            ..RunUpdate::default()
+        };
+        if let Err(e) = sub.report(&task.key, update).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
         }
+    }
+
+    /// Holds a task back for a backoff that grows with each failure before its agent started, in a row.
+    fn set_back(&self, key: &TaskKey) {
+        let now = Instant::now();
+        let mut setbacks = self.setbacks.lock().unwrap();
+        let entry = setbacks.entry(key.clone()).or_insert((0, now));
+        entry.0 += 1;
+        entry.1 = now + backoff(entry.0);
     }
 
     /// Whether a task that failed before its agent started has waited out its backoff.

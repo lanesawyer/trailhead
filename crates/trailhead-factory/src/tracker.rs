@@ -61,11 +61,16 @@ pub struct RunUpdate {
     /// Why the last attempt failed, which the next attempt is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// Runs that failed before their agent started (TRAIL-159). They don't count as attempts, but each revoked a
+    /// sub-agent, so a retry's name carries this count to stay unique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u32>,
 }
 
 impl RunUpdate {
     pub fn merge(&mut self, update: RunUpdate) {
-        let RunUpdate { attempt, sandbox, host, profile, pr, review_rounds, reviewed, spend, failure } = update;
+        let RunUpdate { attempt, sandbox, host, profile, pr, review_rounds, reviewed, spend, failure, retries } =
+            update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
         self.host = host.or(self.host.take());
@@ -75,6 +80,7 @@ impl RunUpdate {
         self.reviewed = reviewed.or(self.reviewed.take());
         self.spend = spend.or(self.spend.take());
         self.failure = failure.or(self.failure.take());
+        self.retries = retries.or(self.retries.take());
     }
 
     pub fn is_empty(&self) -> bool {
