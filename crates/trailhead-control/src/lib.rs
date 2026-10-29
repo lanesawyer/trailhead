@@ -20,10 +20,11 @@ use tokio::time::Instant;
 use tokio::sync::mpsc;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::{
-    ChangesRequested, CheckResult, CheckpointId, CodeHost, Compute, Daemon, Egress, Error, FactoryConfig, Feedback,
-    HumanContext, IROH_DOMAINS, Labels, Merged, MergedBy, ModelProvider, PrGrade, PrRef, PrState, PrepareRequest,
-    Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task,
-    TaskKey, TaskSpec, Tracker, Usd, Verdict, VerdictKind, label, review_name, run_name,
+    ChangesRequested, CheckResult, CheckpointId, CiState, CodeHost, Compute, Daemon, Egress, Error, FactoryConfig,
+    Feedback, HumanContext, IROH_DOMAINS, Labels, MergeDecision, MergeMode, Merged, MergedBy, ModelProvider, PrGrade,
+    PrRef, PrState, PrepareRequest, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult, RunUpdate,
+    Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict, VerdictKind, label, review_name,
+    run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -137,6 +138,49 @@ pub struct Reconciled {
     pub closed: Vec<String>,
     /// Pooled sandboxes that kept failing to release, now out of the pool.
     pub abandoned: Vec<String>,
+}
+
+/// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
+/// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for Lane.`
+fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool) -> String {
+    fn join(items: Vec<String>) -> String {
+        match items.as_slice() {
+            [] => String::new(),
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        }
+    }
+    let head = grade.describe();
+    if !d.waiting.is_empty() {
+        let mut parts = Vec::new();
+        let mut waiting = Vec::new();
+        for gate in &d.waiting {
+            match gate.as_str() {
+                "ci" if !d.failing.is_empty() => parts.push(format!("CI failed ({})", d.failing.join(", "))),
+                "ci" => waiting.push("CI".to_string()),
+                "agent_review" => waiting.push("review".into()),
+                "human" => waiting.push("Lane".into()),
+                other => waiting.push(other.to_string()),
+            }
+        }
+        if !waiting.is_empty() {
+            parts.push(format!("waiting for {}", join(waiting)));
+        }
+        return format!("{head}: {}.", parts.join("; "));
+    }
+    let passed = d.passed.iter().map(|g| match g.as_str() {
+        "ci" => "CI".to_string(),
+        "agent_review" => "review".into(),
+        "human" => "Lane's approval".into(),
+        other => other.to_string(),
+    });
+    let passed = join(passed.collect());
+    match (&d.problem, d.would_merge, auto_merge) {
+        (Some(problem), ..) => format!("{head}: {passed} passed, but {problem}."),
+        (None, true, _) => format!("{head}: {passed} passed; would merge (shadow)."),
+        (None, false, true) => format!("{head}: {passed} passed; Lane merges."),
+        (None, false, false) => format!("{head}: {passed} passed; not auto-merged at this grade, so Lane merges."),
+    }
 }
 
 /// A worker run's name: the attempt's, with the count of retries that gave their attempt back.
@@ -793,6 +837,11 @@ impl Factory {
         if let Some(grade) = &grade {
             self.record_grade(&shown, grade).await?;
         }
+        // The commit the review is of, so a verdict isn't counted for a head pushed after it.
+        let head = match &self.codehost {
+            Some(codehost) => Some(codehost.head(pr).await?),
+            None => None,
+        };
         let round = shown.run.review_rounds.unwrap_or(0) + 1;
         let retries = shown.run.retries.unwrap_or(0);
         let name = reviewer_name(&task.key, attempt, round, retries);
@@ -839,13 +888,14 @@ impl Factory {
         self.setbacks.lock().unwrap().remove(&task.key);
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
-        let (spend, reviewed) = match &run {
+        let (spend, reviewed, reviewed_head) = match &run {
             Run::Report(RunReport { result: RunResult::Reviewed(v), .. }, s) => {
-                (*s, (v.kind != VerdictKind::RequestChanges).then_some(attempt))
+                (*s, (v.kind != VerdictKind::RequestChanges).then_some(attempt), head)
             }
-            Run::Report(_, s) | Run::Breach(_, s) => (*s, None),
+            Run::Report(_, s) | Run::Breach(_, s) => (*s, None, None),
         };
-        sub.report(&task.key, RunUpdate { spend: Some(spend), reviewed, ..RunUpdate::default() }).await?;
+        sub.report(&task.key, RunUpdate { spend: Some(spend), reviewed, reviewed_head, ..RunUpdate::default() })
+            .await?;
         self.tracker.revoke_sub_agent(&name).await?;
         match run {
             Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
@@ -862,6 +912,8 @@ impl Factory {
                         conflict: false,
                     };
                     self.request_rework(task, requested, round).await?;
+                } else if let Err(e) = self.evaluate_gates(&task.key).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
                 }
                 Ok(Outcome::Reviewed { pr: pr.clone(), verdict })
             }
@@ -874,6 +926,119 @@ impl Factory {
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
         }
+    }
+
+    /// The merger (`docs/factory/review.md#the-merger`): evaluates the grade's gates on the PR's current head and
+    /// records the decision in the task's metadata. When they pass it moves a task in review to `approved`, unless the
+    /// grade needs Lane, whose own approval is what passes that gate; a push after an approval sends the task back to
+    /// review. In shadow mode it says what it would do on the PR whenever that changes. It never merges.
+    pub async fn evaluate_gates(&self, key: &TaskKey) -> Result<()> {
+        let Some(codehost) = &self.codehost else { return Ok(()) };
+        let task = self.tracker.show(key).await?;
+        let Some(pr) = &task.run.pr else { return Ok(()) };
+        if !matches!(task.status, Status::InReview | Status::Approved) {
+            return Ok(());
+        }
+        let Some(grade) = self.grade_pr(&task, pr).await? else { return Ok(()) };
+        self.record_grade(&task, &grade).await?;
+        let ci = codehost.ci(pr).await?;
+        let head = ci.head.clone();
+        let prev = task.run.merge.clone();
+        let mut status = task.status;
+        // The head each approval was given on: the control plane's own is marked before it moves the task, so an
+        // approval without a mark is Lane's.
+        let mut approved_head = prev.as_ref().and_then(|d| d.approved_head.clone());
+        let mut human_head = prev.as_ref().and_then(|d| d.human_head.clone());
+        if status == Status::InReview {
+            // However it got back to review (a push, Lane, a rework), no earlier approval applies.
+            (approved_head, human_head) = (None, None);
+        } else {
+            if approved_head.is_none() && human_head.is_none() {
+                human_head = Some(head.clone());
+            }
+            if approved_head.as_ref().or(human_head.as_ref()) != Some(&head) {
+                tracing::info!(task = %key.0, %head, "the PR has a new head; sending the task back to review");
+                self.tracker.unapprove(key).await?;
+                (status, approved_head, human_head) = (Status::InReview, None, None);
+            }
+        }
+        let gate = self.config.gate(grade.grade);
+        let verdict_approves = match &task.run.reviewed_head {
+            Some(reviewed) if *reviewed == head => {
+                self.tracker.last_review(key).await?.is_some_and(|v| v.kind == VerdictKind::Approve)
+            }
+            _ => false,
+        };
+        let (mut passed, mut waiting, mut failing) = (Vec::new(), Vec::new(), Vec::new());
+        for required in &gate.require {
+            let (name, ok) = match required.as_str() {
+                "ci" => match &ci.state {
+                    CiState::Passed => ("ci", true),
+                    CiState::Pending => ("ci", false),
+                    CiState::Failed { checks } => {
+                        failing = checks.clone();
+                        ("ci", false)
+                    }
+                },
+                "agent_review" => ("agent_review", verdict_approves),
+                "human" => ("human", status == Status::Approved && human_head.as_ref() == Some(&head)),
+                "quorum" => ("quorum", false),
+                // The PR exists because the worker's checks passed before it was opened.
+                _ => ("checks", true),
+            };
+            let list = if ok { &mut passed } else { &mut waiting };
+            if !list.iter().any(|n: &String| n == name) {
+                list.push(name.to_string());
+            }
+        }
+        let gates_pass = waiting.is_empty();
+        let mut decision = MergeDecision {
+            grade: grade.grade,
+            head: head.clone(),
+            passed,
+            waiting,
+            failing,
+            would_merge: gates_pass && gate.auto_merge && self.config.merge.mode == MergeMode::Shadow,
+            approved_head,
+            human_head,
+            problem: None,
+            message: String::new(),
+        };
+        // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
+        if gates_pass && status == Status::InReview {
+            decision.approved_head = Some(head.clone());
+            // The mark goes down before the approval so it can't pass for Lane's. Not again while approving is known
+            // to fail, which would write the task every pass.
+            if prev.as_ref().is_none_or(|d| d.problem.is_none()) {
+                self.tracker.report(key, RunUpdate { merge: Some(decision.clone()), ..RunUpdate::default() }).await?;
+            }
+            match self.tracker.approve(key).await {
+                Ok(()) => tracing::info!(task = %key.0, %head, "gates passed; approved"),
+                Err(Error::Forbidden(why)) => {
+                    let problem = format!(
+                        "the factory can't move the task to approved ({why}); a person has to list `{}` as a \
+                         reviewer of project {}",
+                        self.tracker.agent(),
+                        self.project()
+                    );
+                    tracing::warn!(task = %key.0, %problem, "gates passed");
+                    decision.approved_head = None;
+                    decision.problem = Some(problem);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        decision.message = decision_message(&grade, &decision, gate.auto_merge);
+        if prev.as_ref() == Some(&decision) {
+            return Ok(());
+        }
+        if self.config.merge.mode == MergeMode::Shadow && prev.as_ref().is_none_or(|d| d.message != decision.message) {
+            codehost.comment(pr, &decision.message).await?;
+        }
+        if decision.problem.is_some() && prev.as_ref().is_none_or(|d| d.problem != decision.problem) {
+            self.tracker.note(key, decision.problem.as_deref().unwrap_or_default()).await?;
+        }
+        self.tracker.report(key, RunUpdate { merge: Some(decision), ..RunUpdate::default() }).await
     }
 
     /// The PR's grade (`docs/factory/review.md#grades`): the task's, raised by what its files match and its size.
@@ -1351,6 +1516,26 @@ impl Factory {
         self.request_rework(task, requested, round).await
     }
 
+    /// Whether the task's PR was merged or closed, which is dealt with here: a merge, by whoever, finishes the task and
+    /// a closed PR parks it.
+    async fn pr_settled(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
+        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return Ok(false) };
+        match codehost.pr_state(pr).await? {
+            PrState::Merged { commit } => {
+                // A merge the factory didn't make: whoever did it, a person did it outside the factory.
+                self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
+                done.merged.push(task.key.0.clone());
+                Ok(true)
+            }
+            PrState::Closed => {
+                self.park_closed(task, pr).await?;
+                done.closed.push(task.key.0.clone());
+                Ok(true)
+            }
+            PrState::Open => Ok(false),
+        }
+    }
+
     /// Puts one in-flight task right; true when its PR is due a review.
     async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
         let Some(name) = &task.run.sandbox else { return Ok(false) };
@@ -1364,24 +1549,15 @@ impl Factory {
                 done.requeued.push(task.key.0.clone());
             }
             Status::Open => self.tracker.revoke_sub_agent(name).await?,
+            Status::Approved => {
+                if self.pr_settled(task, done).await? {
+                    return Ok(false);
+                }
+                self.evaluate_gates(&task.key).await?;
+            }
             Status::InReview => {
-                if let Some(pr) = &task.run.pr
-                    && let Some(codehost) = &self.codehost
-                {
-                    match codehost.pr_state(pr).await? {
-                        PrState::Merged { commit } => {
-                            // A merge the factory didn't make: whoever did it, a person did it outside the factory.
-                            self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
-                            done.merged.push(task.key.0.clone());
-                            return Ok(false);
-                        }
-                        PrState::Closed => {
-                            self.park_closed(task, pr).await?;
-                            done.closed.push(task.key.0.clone());
-                            return Ok(false);
-                        }
-                        PrState::Open => {}
-                    }
+                if self.pr_settled(task, done).await? {
+                    return Ok(false);
                 }
                 let attempt = task.run.attempt.unwrap_or(1);
                 // Changes were requested on this attempt but the task never left review: finish reopening it.
@@ -1400,7 +1576,12 @@ impl Factory {
                     done.conflicted.push(task.key.0.clone());
                     return Ok(false);
                 }
-                return Ok(task.run.pr.is_some() && task.run.reviewed != Some(attempt) && self.setback_over(&task.key));
+                let due = task.run.pr.is_some() && task.run.reviewed != Some(attempt) && self.setback_over(&task.key);
+                if !due {
+                    // CI may have finished, or Lane approved, since the gates were last looked at.
+                    self.evaluate_gates(&task.key).await?;
+                }
+                return Ok(due);
             }
             _ => {}
         }
