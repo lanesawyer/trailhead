@@ -55,6 +55,17 @@ pub enum MergeOutcome {
     Conflict,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BranchUpdate {
+    /// The base branch is merged into the PR branch; its head is now a new commit, and CI starts over on it.
+    Updated,
+    /// The PR branch already has everything on the base branch, say because an update queued earlier has landed.
+    /// Nothing changed; look at the head again.
+    UpToDate,
+    /// The base branch doesn't merge into the PR branch cleanly. Sends the task back to running.
+    Conflict,
+}
+
 /// Where a PR stands on the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrState {
@@ -65,6 +76,25 @@ pub enum PrState {
     },
     /// Closed without merging.
     Closed,
+}
+
+/// How the repo's CI stands on one commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CiState {
+    /// Some check hasn't finished, or none has started yet.
+    Pending,
+    Passed,
+    /// The names of the checks that failed.
+    Failed {
+        checks: Vec<String>,
+    },
+}
+
+/// CI on a PR's current head commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ci {
+    pub head: String,
+    pub state: CiState,
 }
 
 #[async_trait]
@@ -83,8 +113,20 @@ pub trait CodeHost: Send + Sync {
     /// Whether the open PR merges cleanly into its base: `Some(false)` when it conflicts, `None` while the host is
     /// still working it out.
     async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>>;
+    /// Whether the PR's branch lacks commits that are on its base branch, which a repo requiring branches to be up to
+    /// date refuses to merge (TRAIL-212).
+    async fn behind(&self, pr: &PrRef) -> Result<bool>;
+    /// Merges the base branch into the PR's branch as a merge commit, never a rebase and force-push, so a reviewer's
+    /// verdict on the old head still describes the work. A failure that isn't a merge conflict (the head moved under
+    /// the update, say) is an error, not `Conflict`, which costs a rework.
+    async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate>;
     /// The PR's current title, which a squash merge takes as its commit subject.
     async fn title(&self, pr: &PrRef) -> Result<String>;
     /// The files the PR changes, with how and by how many lines, for grading it.
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>>;
+    /// The commit the PR's branch is at now.
+    async fn head(&self, pr: &PrRef) -> Result<String>;
+    /// The repo's CI on the PR's current head: its check runs and commit statuses, which are pending until every one
+    /// has finished and at least one exists, and failed with the names of those that failed as soon as any has.
+    async fn ci(&self, pr: &PrRef) -> Result<Ci>;
 }
