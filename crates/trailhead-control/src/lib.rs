@@ -284,7 +284,22 @@ impl Factory {
         poll: Duration,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
+        self.run_draining(wake, poll, std::future::pending(), shutdown).await
+    }
+
+    /// [`Factory::run`] with a first, gentler stop: once `drain` fires no run or review is started (reconcile keeps
+    /// putting things right), the runs in flight finish as usual, and the loop returns when none are left. `shutdown`
+    /// still cancels them, drain or not.
+    pub async fn run_draining(
+        self: Arc<Self>,
+        wake: Arc<Notify>,
+        poll: Duration,
+        drain: impl Future<Output = ()>,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<()> {
         tokio::pin!(shutdown);
+        tokio::pin!(drain);
+        let mut draining = false;
         let mut running: JoinSet<Result<Outcome>> = JoinSet::new();
         let mut keys: HashMap<task::Id, TaskKey> = HashMap::new();
         // Reviews reconcile found due, running beside the worker runs without taking a worker's place in the cap.
@@ -296,6 +311,10 @@ impl Factory {
             if (&mut shutdown).now_or_never().is_some() {
                 break;
             }
+            if draining && running.is_empty() {
+                tracing::info!("drained; no runs left");
+                break;
+            }
             if dirty {
                 dirty = false;
                 match self.reconcile_deferring(&keys.values().cloned().collect()).await {
@@ -304,6 +323,8 @@ impl Factory {
                             let reviewing: Vec<&str> = due.reviews.iter().map(|t| t.key.0.as_str()).collect();
                             tracing::info!(?done, ?reviewing, "reconciled");
                         }
+                        // What reconcile found due is picked up again by the next start.
+                        let due = if draining { Due::default() } else { due };
                         for (task, sandbox) in due.runs {
                             let key = task.key.clone();
                             let factory = self.clone();
@@ -324,12 +345,22 @@ impl Factory {
                     break;
                 }
             }
-            if let Err(e) = self.start_ready(&mut running, &mut keys, reviews.len()).await {
+            if !draining && let Err(e) = self.start_ready(&mut running, &mut keys, reviews.len()).await {
                 tracing::warn!(error = %e, "couldn't start ready tasks");
             }
             let resume = self.paused_until().map(|(_, _, resets_at)| until(resets_at));
             tokio::select! {
                 _ = &mut shutdown => break,
+                _ = &mut drain, if !draining => {
+                    draining = true;
+                    let mut flying: Vec<&str> = keys.values().map(|k| k.0.as_str()).collect();
+                    flying.sort();
+                    tracing::info!(
+                        "draining: {} runs in flight ({}); Ctrl-C again to cancel them",
+                        flying.len(),
+                        flying.join(", ")
+                    );
+                }
                 _ = wake.notified() => {}
                 _ = tokio::time::sleep(resume.unwrap_or_default()), if resume.is_some() => {}
                 _ = tokio::time::sleep(poll) => dirty = true,
