@@ -61,6 +61,9 @@ pub struct Factory {
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// The reset a pause was last logged for, so a pause is logged once rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
+    /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
+    /// starting together never take the same sandbox.
+    pool_pick: tokio::sync::Mutex<()>,
 }
 
 /// A pooled sandbox that keeps failing to release. Kept in memory only, so a restart counts again from zero.
@@ -121,6 +124,7 @@ impl Factory {
             setbacks: Mutex::default(),
             quota: Mutex::default(),
             pause_logged: Mutex::default(),
+            pool_pick: tokio::sync::Mutex::default(),
         }
     }
 
@@ -639,6 +643,7 @@ impl Factory {
     /// checkpoint, or a new one when none is idle. The tick's room check keeps the pool within `max_sandboxes`.
     /// The prepared checkout becomes the new warm checkpoint, so the next task starts from it.
     async fn acquire_worker(&self, task: &Task, branch: Option<String>) -> Result<Sandbox> {
+        let pick = self.pool_pick.lock().await;
         let idle = self.compute.list(&self.pooled(label::IDLE, None, None)).await?;
         let (sandbox, warm) = match idle.into_iter().find(|s| !self.abandoned(&s.name)) {
             Some(s) => {
@@ -656,6 +661,7 @@ impl Factory {
             }
         };
         self.compute.set_labels(&sandbox.id, &self.pooled(label::BUSY, warm.as_deref(), Some(task))).await?;
+        drop(pick);
         self.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
         if let Some(cp) = &warm {
             self.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
