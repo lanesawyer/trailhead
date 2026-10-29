@@ -51,6 +51,18 @@ pub enum MergeOutcome {
     Conflict,
 }
 
+/// Where a PR stands on the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrState {
+    Open,
+    /// Merged, into the base branch as `commit` when the host says which.
+    Merged {
+        commit: Option<String>,
+    },
+    /// Closed without merging.
+    Closed,
+}
+
 #[async_trait]
 pub trait CodeHost: Send + Sync {
     /// Publishes commits made on top of `start`, the commit sha the checkout was at when the work began. A new
@@ -62,4 +74,6 @@ pub trait CodeHost: Send + Sync {
     async fn diff(&self, pr: &PrRef) -> Result<String>;
     async fn comment(&self, pr: &PrRef, body: &str) -> Result<()>;
     async fn merge(&self, pr: &PrRef) -> Result<MergeOutcome>;
+    /// Whether the PR is still open, was merged (by anyone), or was closed without merging.
+    async fn pr_state(&self, pr: &PrRef) -> Result<PrState>;
 }

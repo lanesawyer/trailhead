@@ -11,7 +11,7 @@ pub mod money;
 pub mod provider;
 pub mod tracker;
 
-pub use codehost::{CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, Repo};
+pub use codehost::{CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, PrState, Repo};
 pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };
@@ -23,8 +23,8 @@ pub use harness::{EventSink, Feedback, Harness, RunContext, RunEvent, RunOutcome
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use tracker::{
-    Answered, ChangesRequested, Credential, HumanContext, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker,
-    is_factory_agent,
+    Answered, ChangesRequested, Credential, HumanContext, Merged, MergedBy, RunUpdate, Status, Task, TaskKey, TaskNote,
+    Tracker, is_factory_agent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]

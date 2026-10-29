@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
-use trailhead_factory::{CodeHost, Commit, Error, MergeOutcome, NewPr, PrRef, Repo, Result};
+use trailhead_factory::{CodeHost, Commit, Error, MergeOutcome, NewPr, PrRef, PrState, Repo, Result};
 
 pub const API_URL: &str = "https://api.github.com";
 
@@ -287,5 +287,17 @@ impl CodeHost for GitHub {
             StatusCode::METHOD_NOT_ALLOWED | StatusCode::CONFLICT => Ok(MergeOutcome::Conflict),
             s => Err(Error::Other(format!("github {s}: {}", body["message"].as_str().unwrap_or_default()))),
         }
+    }
+
+    async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
+        let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
+        let p = self.call(self.request(Method::GET, &path)).await?;
+        Ok(if p["merged"].as_bool().unwrap_or(false) {
+            PrState::Merged { commit: p["merge_commit_sha"].as_str().map(str::to_string) }
+        } else if p["state"].as_str() == Some("closed") {
+            PrState::Closed
+        } else {
+            PrState::Open
+        })
     }
 }
