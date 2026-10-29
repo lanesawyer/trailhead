@@ -1714,6 +1714,27 @@ async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_review_cancelled_on_purpose_isnt_an_infrastructure_failure() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 1"));
+    let key = r.tracker.add_task("TRAIL", "Stopped mid-review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let rounds = r.tracker.task(&key).run.review_rounds.unwrap_or(0);
+
+    r.daemon.cancel_runs(1);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "not parked, though the cap is one failure");
+    assert_eq!(task.run.review_rounds.unwrap_or(0), rounds, "the round is given back");
+
+    // No backoff either: the next pass reviews it at once.
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed.len(), 1, "{done:?}");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_reviewer_that_never_starts_doesnt_use_up_a_review_round() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Slow to review", "");
