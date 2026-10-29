@@ -18,15 +18,9 @@ Done: a `review` comment kind carries a `verdict` (`approve` or `request_changes
 trailhead add "Typed review verdicts: review comment kind with approve/request_changes" -p TRAIL -P 2
 ```
 
-## 3. Approved vs merged (TRAIL-86, decided)
+## 3. Approved vs merged (TRAIL-86)
 
-Decided (2026-10-29): no `approved` status. Approval is the typed `review` verdict (#2), the task stays `in_review`, and `done` means merged. The factory's identity is the project's only delegated reviewer and acts as the merger ([review.md](review.md#the-merger)). The original note follows.
-
-Today approval and finishing are one step. Document the convention that a project's only delegated reviewer is a merger agent that moves the task to `done` after merging, or add an `approved` status. Depends on 2.
-
-```sh
-trailhead add "Separate approval from finishing: document merger-reviewer convention or add approved status" -p TRAIL -P 3
-```
+Decided (2026-10-29): add an `approved` status between `in_review` and `done`. `approved` means a reviewer cleared the work and it is waiting to be finished; for the factory, waiting to merge. Only humans and delegated reviewers move a task to `approved`; whoever finishes it moves it to `done`. `in_review` → `done` stays allowed for work with nothing left after approval. A new push or requested change sends an `approved` task back to `in_review` or `open`. It releases the claim like `in_review`. Depends on 2.
 
 ## 4. Token expiry (TRAIL-85, done)
 
@@ -45,6 +39,10 @@ Mostly done: Trailhead is one server reachable over an iroh tunnel (`dumbpipe`),
 ```sh
 trailhead add "Unattended tunnel access: sandboxes open the dumbpipe tunnel and use a token passed in at start" -p TRAIL -P 2
 ```
+
+## 6. Grades (TRAIL-201)
+
+Decided (2026-10-29): tasks get an optional `grade`, 1 to 4 ([review.md](review.md#grades)). A human sets the first grade, lowers it or clears it; an agent can only raise it, checked in core on updates and on undo and revert, like `require_review`. In the event log, the CLI (`--grade`), REST, MCP, and as a filter on `ready` and `list`.
 
 ## Later, not blocking
 
