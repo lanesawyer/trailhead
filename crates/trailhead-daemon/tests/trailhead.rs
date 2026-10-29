@@ -210,13 +210,17 @@ async fn work_flows_from_trailhead_over_the_tunnel() {
     assert_eq!(review.model.as_deref(), Some("fake-opus"));
 
     // The reviewer's project-scoped token created the follow-up through POST /tasks, and the lookup by title found it.
-    let filed = r.tracker.find_open_by_title("TRAIL", "cover the edge ").await.unwrap().expect("a filed follow-up");
-    assert_ne!(filed, key);
-    let filed = r.store.task_detail(&r.human, &filed.0).await.unwrap().task;
+    let filed_key = r.tracker.find_open_by_title("TRAIL", "cover the edge ").await.unwrap().expect("a filed follow-up");
+    assert_ne!(filed_key, key);
+    // The reviewer's comment lists the key only if create_task read it from the POST /tasks response.
+    let comment = r.codehost.prs()[0].comments.last().unwrap().clone();
+    assert!(comment.contains(&format!("`{}` Cover the edge", filed_key.0)), "{comment}");
+    assert!(!comment.contains("(already open)"), "{comment}");
+    let filed = r.store.task_detail(&r.human, &filed_key.0).await.unwrap().task;
     assert_eq!(filed.title, "Cover the edge");
     assert_eq!(filed.priority, 2);
     assert_eq!(filed.status, trailhead_core::Status::Open);
-    assert!(filed.description.contains("No test for empty input."), "{}", filed.description);
+    assert!(filed.description.starts_with("No test for empty input."), "{}", filed.description);
     assert!(filed.description.contains(&key.0), "{}", filed.description);
 
     // Both sandboxes' sub-agents are revoked, so their tokens no longer work, even through the tunnel.
