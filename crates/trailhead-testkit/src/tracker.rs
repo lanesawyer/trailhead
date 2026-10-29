@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,6 +29,8 @@ struct State {
     next: HashMap<String, u32>,
     parents: HashMap<TaskKey, TaskKey>,
     priorities: HashMap<TaskKey, i64>,
+    /// Agents refused when they approve, as ones a human hasn't listed as the project's reviewers would be.
+    undelegated: HashSet<String>,
 }
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
@@ -89,6 +91,23 @@ impl FakeTracker {
     /// A human grades a task, which is what makes it the factory's work.
     pub fn set_grade(&self, key: &TaskKey, grade: u8) {
         self.state.lock().unwrap().tasks.get_mut(key).unwrap().grade = Some(grade);
+    }
+
+    /// Whether this agent may approve tasks, as a delegated reviewer can; every agent may until told otherwise.
+    pub fn set_delegated(&self, agent: &str, delegated: bool) {
+        let mut s = self.state.lock().unwrap();
+        match delegated {
+            true => s.undelegated.remove(agent),
+            false => s.undelegated.insert(agent.to_string()),
+        };
+    }
+
+    /// A person approves a task in review, as with `trailhead approve`.
+    pub fn approve_as_human(&self, key: &TaskKey) {
+        let mut s = self.state.lock().unwrap();
+        let t = s.tasks.get_mut(key).unwrap();
+        assert_eq!(t.status, Status::InReview, "{} isn't in review", key.0);
+        t.status = Status::Approved;
     }
 
     pub fn task(&self, key: &TaskKey) -> Task {
@@ -324,9 +343,33 @@ impl Tracker for FakeTracker {
         })
     }
 
+    async fn approve(&self, task: &TaskKey) -> Result<()> {
+        let delegated = !self.state.lock().unwrap().undelegated.contains(&self.agent);
+        self.write(task, |t, me| {
+            if !delegated {
+                return Err(Error::Forbidden(format!("{me} can't approve {}: it isn't a delegated reviewer", t.key.0)));
+            }
+            if t.status != Status::InReview {
+                return Err(Error::Conflict(format!("{} isn't in review", t.key.0)));
+            }
+            t.status = Status::Approved;
+            Ok(())
+        })
+    }
+
+    async fn unapprove(&self, task: &TaskKey) -> Result<()> {
+        self.write(task, |t, _| {
+            if t.status != Status::Approved {
+                return Err(Error::Conflict(format!("{} isn't approved", t.key.0)));
+            }
+            t.status = Status::InReview;
+            Ok(())
+        })
+    }
+
     async fn reopen(&self, task: &TaskKey) -> Result<()> {
         self.write(task, |t, _| {
-            if t.status != Status::InReview {
+            if !matches!(t.status, Status::InReview | Status::Approved) {
                 return Err(Error::Conflict(format!("{} isn't in review", t.key.0)));
             }
             t.holder = None;
@@ -379,7 +422,7 @@ impl Tracker for FakeTracker {
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
         self.write(task, |t, me| {
-            if t.status != Status::InReview {
+            if !matches!(t.status, Status::InReview | Status::Approved) {
                 held_by_me(t, me)?;
             }
             t.holder = None;
