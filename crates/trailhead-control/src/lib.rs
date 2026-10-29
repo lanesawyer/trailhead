@@ -712,7 +712,7 @@ impl Factory {
                 }
                 let max = self.config.repo.max_attempts;
                 // Counted from the last review that asked for changes, so reworks get attempts of their own.
-                let failed = attempt - task.run.attempt_base.unwrap_or(0);
+                let failed = attempt.saturating_sub(task.run.attempt_base.unwrap_or(0));
                 if failed >= max {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
                     let last = self
