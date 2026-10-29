@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    ChangedFile, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState, Repo, Result,
+    BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
+    Repo, Result,
 };
 
 #[derive(Debug, Clone)]
@@ -16,8 +17,12 @@ pub struct FakePr {
     pub closed: bool,
     /// What the host says of whether it merges cleanly: `None` while it is still working it out.
     pub mergeable: Option<bool>,
+    /// The base branch has commits the PR's branch lacks.
+    pub behind: bool,
     /// What the host lists as changed, when a test sets it; otherwise it follows the published commits.
     pub files: Option<Vec<ChangedFile>>,
+    /// CI on the PR's head: pending until a test says otherwise.
+    pub ci: CiState,
 }
 
 #[derive(Default)]
@@ -30,6 +35,7 @@ struct State {
     prs: Vec<FakePr>,
     conflicts: bool,
     refuse_publish: Option<String>,
+    refuse_merge: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -61,12 +67,18 @@ impl FakeCodeHost {
         self.state.lock().unwrap().prs.clone()
     }
 
-    /// Makes every later merge report a conflict.
     /// Makes every later publish fail with this message, like GitHub refusing a push.
     pub fn refuse_publish(&self, why: &str) {
         self.state.lock().unwrap().refuse_publish = Some(why.to_string());
     }
 
+    /// Makes every later merge refused with this message, like a required check GitHub is still waiting on, until
+    /// called with `None`.
+    pub fn refuse_merge(&self, why: Option<&str>) {
+        self.state.lock().unwrap().refuse_merge = why.map(str::to_string);
+    }
+
+    /// Makes every later merge report a conflict.
     pub fn set_conflicts(&self, on: bool) {
         self.state.lock().unwrap().conflicts = on;
     }
@@ -81,9 +93,32 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.mergeable = mergeable).unwrap();
     }
 
+    /// Sets whether the PR's branch is behind its base.
+    pub fn set_behind(&self, pr: &PrRef, behind: bool) {
+        self.find(pr, |p, _| p.behind = behind).unwrap();
+    }
+
     /// Sets the files the host lists for a PR, such as a lockfile the fake agent never wrote.
     pub fn set_files(&self, pr: &PrRef, files: Vec<ChangedFile>) {
         self.find(pr, |p, _| p.files = Some(files)).unwrap();
+    }
+
+    /// Sets how CI stands on the PR's head. A new head starts over at pending.
+    pub fn set_ci(&self, pr: &PrRef, ci: CiState) {
+        self.find(pr, |p, _| p.ci = ci).unwrap();
+    }
+
+    /// Someone pushes to the PR's branch, moving its head and restarting CI.
+    pub fn push_to(&self, pr: &PrRef) {
+        let (key, head) = self
+            .find(pr, |p, s| {
+                let key = (pr.repo.slug(), p.spec.branch.clone());
+                let head = format!("{}+", s.heads[&key]);
+                p.ci = CiState::Pending;
+                (key, head)
+            })
+            .unwrap();
+        self.state.lock().unwrap().heads.insert(key, head);
     }
 
     /// The commit a merged PR became: made up from its number.
@@ -134,7 +169,9 @@ impl CodeHost for FakeCodeHost {
             merged: false,
             closed: false,
             mergeable: Some(true),
+            behind: false,
             files: None,
+            ci: CiState::Pending,
         });
         Ok(r)
     }
@@ -161,11 +198,20 @@ impl CodeHost for FakeCodeHost {
         self.find(pr, |p, _| p.comments.push(body.to_string()))
     }
 
-    async fn merge(&self, pr: &PrRef) -> Result<MergeOutcome> {
-        let conflicts = self.state.lock().unwrap().conflicts;
-        self.find(pr, |p, _| {
+    async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome> {
+        let (conflicts, refused) = {
+            let s = self.state.lock().unwrap();
+            (s.conflicts, s.refuse_merge.clone())
+        };
+        self.find(pr, |p, s| {
+            if s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).map(String::as_str) != Some(head) {
+                return MergeOutcome::HeadMoved;
+            }
             if conflicts {
                 return MergeOutcome::Conflict;
+            }
+            if let Some(why) = refused {
+                return MergeOutcome::Refused(why);
             }
             p.merged = true;
             MergeOutcome::Merged
@@ -174,6 +220,36 @@ impl CodeHost for FakeCodeHost {
 
     async fn mergeable(&self, pr: &PrRef) -> Result<Option<bool>> {
         self.find(pr, |p, _| p.mergeable)
+    }
+
+    async fn behind(&self, pr: &PrRef) -> Result<bool> {
+        self.find(pr, |p, _| p.behind)
+    }
+
+    async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate> {
+        let conflicts = self.state.lock().unwrap().conflicts;
+        if conflicts {
+            return Ok(BranchUpdate::Conflict);
+        }
+        if !self.find(pr, |p, _| p.behind)? {
+            return Ok(BranchUpdate::UpToDate);
+        }
+        let branch = self.find(pr, |p, _| {
+            p.behind = false;
+            p.spec.branch.clone()
+        })?;
+        // A merge commit on top of the branch, like the host makes.
+        let mut s = self.state.lock().unwrap();
+        let key = (pr.repo.slug(), branch.clone());
+        let commits = s.branches.entry(key.clone()).or_default();
+        commits.push(Commit {
+            message: format!("Merge {} into {branch}", pr.repo.slug()),
+            changes: vec![],
+            merges: vec!["base".into()],
+        });
+        let n = commits.len();
+        s.heads.insert(key, format!("{branch}@{n}"));
+        Ok(BranchUpdate::Updated)
     }
 
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
@@ -186,6 +262,15 @@ impl CodeHost for FakeCodeHost {
 
     async fn title(&self, pr: &PrRef) -> Result<String> {
         self.find(pr, |p, _| p.spec.title.clone())
+    }
+
+    async fn head(&self, pr: &PrRef) -> Result<String> {
+        self.find(pr, |p, s| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default())
+    }
+
+    async fn ci(&self, pr: &PrRef) -> Result<Ci> {
+        let head = CodeHost::head(self, pr).await?;
+        self.find(pr, |p, _| Ci { head, state: p.ci.clone() })
     }
 
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
