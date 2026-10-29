@@ -61,7 +61,7 @@ jobs:
           cargo update --workspace
 
       - name: Update changelog
-        run: git cliff --tag "${{ steps.version.outputs.tag }}" -o CHANGELOG.md
+        run: git cliff --unreleased --tag "${{ steps.version.outputs.tag }}" --prepend CHANGELOG.md
 
       - name: Commit, tag and push
         env:

@@ -27,6 +27,10 @@ pub struct PrepareRequest {
     /// A branch to check out at its remote head instead of staying on the base: a rework's PR branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Merge the base branch into `branch` after setup, leaving the merge uncommitted for the agent to finish: a
+    /// rework of a PR that conflicts with it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub merge_base: bool,
     pub setup: Option<Check>,
 }
 

@@ -17,6 +17,8 @@ use crate::FakeTracker;
 
 /// The commit every fake checkout is at.
 pub const FAKE_BASE: &str = "base0000";
+/// The base branch's head, as a fake checkout sees it while merging it into a PR branch.
+pub const FAKE_BASE_MERGE: &str = "main0000";
 
 /// Where a branch's head is on the code host, for a fake checkout of that branch to start from.
 pub type Heads = Arc<dyn Fn(&Repo, &str) -> Option<String> + Send + Sync>;
@@ -30,6 +32,8 @@ pub struct FakeWorkspace {
     /// The branch the checkout is on after the latest prepare, when it isn't the base.
     branch: Mutex<Option<(Repo, String)>>,
     heads: Mutex<Option<Heads>>,
+    /// Whether the latest prepare left a merge of the base branch under way.
+    merging: Mutex<bool>,
     prepares_started: AtomicUsize,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
@@ -47,12 +51,17 @@ impl Workspace for FakeWorkspace {
             gate.notified().await;
         }
         *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
+        *self.merging.lock().unwrap() = req.merge_base;
         self.prepared.lock().unwrap().push(req.clone());
         Ok(())
     }
 
     async fn confirm_blocked(&self, _hosts: &[String]) -> Result<()> {
         Ok(())
+    }
+
+    async fn merge_head(&self) -> Result<Option<String>> {
+        Ok(self.merging.lock().unwrap().then(|| FAKE_BASE_MERGE.to_string()))
     }
 
     async fn head(&self) -> Result<String> {

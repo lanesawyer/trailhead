@@ -428,3 +428,27 @@ fn prompt_carries_answers_and_notes_and_stays_bounded() {
     assert!(p.contains("note 99:") && !p.contains("note 0:"), "the oldest notes go first");
     assert!(p.len() < 9000, "{}", p.len());
 }
+
+#[test]
+fn many_long_answers_keep_the_newest_and_leave_room_for_notes() {
+    use trailhead_factory::{Answered, TaskNote};
+    let r = rig();
+    let mut c = ctx(&r, Role::Worker, 0);
+    for i in 0..20 {
+        c.task.context.answers.push(Answered {
+            question: format!("question {i}? {}", "q".repeat(2000)),
+            answer: format!("answer {i}: {}", "a".repeat(3000)),
+            by: "lane".into(),
+            date: "2026-10-29".into(),
+        });
+    }
+    c.task.context.notes.push(TaskNote {
+        author: "lane".into(),
+        date: "2026-10-29".into(),
+        body: "a note that must survive".into(),
+    });
+    let p = prompt(&c, None);
+    assert!(p.contains("answer 19:") && !p.contains("answer 0:"), "the oldest answers go first");
+    assert!(p.contains("a note that must survive"), "notes aren't crowded out");
+    assert!(p.len() < 9000, "{}", p.len());
+}
