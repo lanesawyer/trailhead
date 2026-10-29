@@ -171,12 +171,20 @@ impl Factory {
         poll: Duration,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
-        let done = self.reconcile().await?;
-        tracing::info!(?done, "reconciled");
         tokio::pin!(shutdown);
         let mut running: JoinSet<Result<Outcome>> = JoinSet::new();
         let mut keys: HashMap<task::Id, TaskKey> = HashMap::new();
-        let mut dirty = false;
+        // A failed boot reconcile (the compute API down, say) is retried in the loop rather than ending the process.
+        let mut dirty = match self.reconcile().await {
+            Ok(done) => {
+                tracing::info!(?done, "reconciled");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reconcile failed");
+                true
+            }
+        };
         loop {
             // Shutdown is otherwise only noticed while idle; a stop during a long reconcile mustn't start new work.
             if (&mut shutdown).now_or_never().is_some() {
@@ -652,34 +660,42 @@ impl Factory {
             }
         }
 
+        // Likewise one task's failure, a review that can't start for instance, mustn't stop the others or the boot.
         for task in &tasks {
-            let Some(name) = &task.run.sandbox else { continue };
-            match task.status {
-                Status::InProgress => {
-                    let sub = self.tracker.sub_agent(name);
-                    if task.holder.as_deref() == Some(sub.agent()) {
-                        sub.release(&task.key).await?;
-                    }
-                    self.tracker.revoke_sub_agent(name).await?;
-                    done.requeued.push(task.key.0.clone());
-                }
-                Status::Open => self.tracker.revoke_sub_agent(name).await?,
-                Status::InReview => {
-                    let attempt = task.run.attempt.unwrap_or(1);
-                    if let Some(pr) = &task.run.pr
-                        && task.run.reviewed != Some(attempt)
-                    {
-                        if let Some(round) = task.run.review_rounds.filter(|r| *r > 0) {
-                            self.tracker.revoke_sub_agent(&review_name(&task.key, attempt, round)).await?;
-                        }
-                        self.review(task, pr, attempt).await?;
-                        done.reviewed.push(task.key.0.clone());
-                    }
-                }
-                _ => {}
+            if let Err(e) = self.reconcile_task(task, &mut done).await {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't reconcile a task; the next reconcile retries");
             }
         }
         Ok(done)
+    }
+
+    async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<()> {
+        let Some(name) = &task.run.sandbox else { return Ok(()) };
+        match task.status {
+            Status::InProgress => {
+                let sub = self.tracker.sub_agent(name);
+                if task.holder.as_deref() == Some(sub.agent()) {
+                    sub.release(&task.key).await?;
+                }
+                self.tracker.revoke_sub_agent(name).await?;
+                done.requeued.push(task.key.0.clone());
+            }
+            Status::Open => self.tracker.revoke_sub_agent(name).await?,
+            Status::InReview => {
+                let attempt = task.run.attempt.unwrap_or(1);
+                if let Some(pr) = &task.run.pr
+                    && task.run.reviewed != Some(attempt)
+                {
+                    if let Some(round) = task.run.review_rounds.filter(|r| *r > 0) {
+                        self.tracker.revoke_sub_agent(&review_name(&task.key, attempt, round)).await?;
+                    }
+                    self.review(task, pr, attempt).await?;
+                    done.reviewed.push(task.key.0.clone());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 

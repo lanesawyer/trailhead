@@ -823,3 +823,30 @@ async fn a_task_that_keeps_failing_is_parked_after_max_attempts_and_retries_see_
         assert!(note.contains("`lint` failed") && note.contains("warning: unused variable"), "{note}");
     }
 }
+
+#[tokio::test]
+async fn a_review_that_cant_start_doesnt_stop_reconcile() {
+    let r = rig();
+    let tracker: Arc<dyn Tracker> = Arc::new(r.tracker.clone());
+
+    // TRAIL-1: its PR is open but unreviewed, and the reviewer's sandbox can't be set up.
+    let unreviewed = r.tracker.add_task("TRAIL", "Unreviewed", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&unreviewed)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    r.compute.fail(&trailhead_factory::review_name(&unreviewed, 1, 2), "set_egress");
+
+    // TRAIL-2: crashed mid-run, after it in the list.
+    let crashed = r.tracker.add_task("TRAIL", "Crashed", "");
+    let name = run_name(&crashed, 1);
+    tracker.create_sub_agent(&name, "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
+    let sub = tracker.sub_agent(&name);
+    sub.claim(&crashed).await.unwrap();
+    sub.report(&crashed, update(1, &name)).await.unwrap();
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "{done:?}");
+    assert_eq!(done.requeued, [crashed.0], "the rest is still reconciled");
+    assert_eq!(r.tracker.task(&unreviewed).status, Status::InReview, "left for the next reconcile");
+}
