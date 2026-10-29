@@ -5,8 +5,8 @@ use std::process::Command;
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
-    CheckResult, Endpoint, Feedback, Harness, ModelId, Role, RunContext, RunEvent, RunOutcome, TaskKey, TaskSpec,
-    VerdictKind,
+    CheckResult, Endpoint, Feedback, FollowUp, Harness, ModelId, Role, RunContext, RunEvent, RunOutcome, TaskKey,
+    TaskSpec, VerdictKind,
 };
 use trailhead_harness_claude_code::{ClaudeCode, PLACEHOLDER_KEY, prompt};
 
@@ -30,6 +30,10 @@ worker)
 review)
   asst r1 '{"type":"text","text":"Reviewing."}'
   echo '{"type":"result","subtype":"success","is_error":false,"result":"{\"outcome\":\"request_changes\",\"summary\":\"Missing a test for hi().\"}"}'
+  ;;
+approve)
+  asst a1 '{"type":"text","text":"Reviewing."}'
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"approve","summary":"Fine.","follow_ups":[{"title":"Cover the edge","description":"No test for empty input.","priority":2},{"title":"  "},{"title":"Rename it","priority":0},{"title":"Split it","priority":5}]}}'
   ;;
 question)
   asst q1 '{"type":"text","text":"Hmm."}'
@@ -142,6 +146,7 @@ async fn play(r: &Rig, scenario: &str, ctx: RunContext) -> (RunOutcome, Vec<RunE
 async fn claude_code_sessions() {
     worker_changes_are_collected().await;
     reviewer_verdict_from_result_text().await;
+    approving_review_carries_follow_ups().await;
     questions_park_the_task().await;
     no_changes_is_a_failure().await;
     step_limit_kills_the_agent().await;
@@ -222,12 +227,30 @@ async fn reviewer_verdict_from_result_text() {
         CheckResult { name: "lint".into(), passed: false, output: "warning: unused import".into() },
     ];
     let (out, _) = play(&r, "review", c).await;
-    assert_eq!(out, RunOutcome::Verdict { kind: VerdictKind::RequestChanges, body: "Missing a test for hi().".into() });
+    assert_eq!(
+        out,
+        RunOutcome::Verdict {
+            kind: VerdictKind::RequestChanges,
+            body: "Missing a test for hi().".into(),
+            follow_ups: vec![]
+        }
+    );
     let log = std::fs::read_to_string(&r.log).unwrap();
     assert!(log.contains("+pub fn hi() {}"), "the diff is in the reviewer's prompt");
     assert!(log.contains("- test: passed") && log.contains("- lint: FAILED"), "check results: {log}");
     assert!(log.contains("warning: unused import") && log.contains("don't build or run tests"), "{log}");
     assert!(log.contains("request_changes"), "the reviewer's schema offers verdicts");
+}
+
+async fn approving_review_carries_follow_ups() {
+    let r = rig();
+    let (out, _) = play(&r, "approve", ctx(&r, Role::Reviewer, 10)).await;
+    let follow_ups = vec![
+        FollowUp { title: "Cover the edge".into(), description: "No test for empty input.".into(), priority: Some(2) },
+        FollowUp { title: "Rename it".into(), description: String::new(), priority: None },
+        FollowUp { title: "Split it".into(), description: String::new(), priority: None },
+    ];
+    assert_eq!(out, RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Fine.".into(), follow_ups });
 }
 
 async fn questions_park_the_task() {

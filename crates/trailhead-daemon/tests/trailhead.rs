@@ -182,7 +182,12 @@ async fn work_flows_from_trailhead_over_the_tunnel() {
     r.harness.push(Role::Worker, Script::new(changes()).steps(2, 100_000));
     r.harness.push(
         Role::Reviewer,
-        Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Looks right.".into() }).steps(1, 10_000),
+        Script::new(RunOutcome::Verdict {
+            kind: VerdictKind::Approve,
+            body: "Looks right.".into(),
+            follow_ups: vec![],
+        })
+        .steps(1, 10_000),
     );
 
     let ran = r.factory().tick().await.unwrap();

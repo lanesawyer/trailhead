@@ -164,7 +164,12 @@ async fn lifecycle_over_iroh() {
     r.harness.push(Role::Worker, Script::new(changes()).steps(3, 100_000));
     r.harness.push(
         Role::Reviewer,
-        Script::new(RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Looks right.".into() }).steps(1, 50_000),
+        Script::new(RunOutcome::Verdict {
+            kind: VerdictKind::Approve,
+            body: "Looks right.".into(),
+            follow_ups: vec![],
+        })
+        .steps(1, 50_000),
     );
 
     let ran = r.factory().tick().await.unwrap();
@@ -394,7 +399,7 @@ async fn a_hanging_wake_gives_up_at_the_deadline() {
     r.serve("stuck").await;
     let sandbox = r.sandbox("stuck").await;
     r.compute.hang_wakes("stuck");
-    let req = r.factory().config.prepare_request(Role::Worker);
+    let req = r.factory().config.prepare_request(Role::Worker, None);
 
     let started = tokio::time::Instant::now();
     let res = tokio::time::timeout(Duration::from_secs(300), r.remote.prepare(&sandbox, req)).await;
