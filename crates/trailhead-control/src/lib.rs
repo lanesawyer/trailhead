@@ -1614,6 +1614,19 @@ impl Factory {
                 if self.pr_settled(task, done).await? {
                     return Ok(false);
                 }
+                // Main may have moved since the approval: a PR that now conflicts goes back for a rework, which
+                // would otherwise wait for a merge attempt (and never come, in shadow mode or at a grade that
+                // doesn't auto-merge).
+                if let Some(pr) = &task.run.pr
+                    && let Some(codehost) = &self.codehost
+                    && codehost.mergeable(pr).await? == Some(false)
+                {
+                    self.tracker.unapprove(&task.key).await?;
+                    let attempt = task.run.attempt.unwrap_or(1);
+                    self.rework_conflict(task, pr, attempt).await?;
+                    done.conflicted.push(task.key.0.clone());
+                    return Ok(false);
+                }
                 self.evaluate_gates(&task.key).await?;
             }
             Status::InReview => {
