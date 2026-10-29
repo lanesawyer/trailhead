@@ -190,7 +190,7 @@ async fn did_work(tx: &Tx, task: &Task) -> Result<bool> {
                  SELECT id, actor_id FROM events
                  WHERE task_id = ?1 AND undoes IS NULL AND entity = 'task'
                    AND json_extract(after, '$.status') = 'in_review'
-                   AND COALESCE(json_extract(before, '$.status'), '') <> 'in_review'
+                   AND COALESCE(json_extract(before, '$.status'), '') NOT IN ('in_review', 'approved')
                  ORDER BY id DESC LIMIT 1
              )
              SELECT 1 FROM sent WHERE sent.actor_id = ?2 OR (
