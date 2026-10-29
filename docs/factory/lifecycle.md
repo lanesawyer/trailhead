@@ -4,7 +4,7 @@ Proposal: the factory's lifecycle is Trailhead's existing one plus conventions, 
 
 ## Trailhead today
 
-Statuses: `open`, `in_progress`, `needs_input`, `in_review`, `done`, `cancelled`, and `approved` between `in_review` and `done` once TRAIL-86 lands. Claims are leases (agents 30 minutes by default, renewed by heartbeat; human claims don't expire). Moving a task to `in_review`, `done` or `cancelled` releases its claim; `in_progress` and `needs_input` keep it. Delegated reviewers, agents a human lists on a project, can approve `in_review` → `done`.
+Statuses: `open`, `in_progress`, `needs_input`, `in_review`, `approved`, `done`, `cancelled`, with `approved` between `in_review` and `done`. Claims are leases (agents 30 minutes by default, renewed by heartbeat; human claims don't expire). Moving a task to `in_review`, `approved`, `done` or `cancelled` releases its claim; `in_progress` and `needs_input` keep it. Delegated reviewers, agents a human lists on a project, can approve `in_review` → `approved` or `done`.
 
 ## Mapping
 
@@ -18,7 +18,7 @@ Statuses: `open`, `in_progress`, `needs_input`, `in_review`, `done`, `cancelled`
 | PR open / Review | `in_review`; PR URL, grade, profile in `metadata` | Fits, but the claim is released |
 | Agent review verdict | One delegated reviewer approves straight to `done` | Gap: no verdict record, no quorum |
 | Changes requested | `in_review` → `open` (reopened by the control plane, review kept in `metadata`) | Fits; the rework starts a fresh sandbox, not the original one |
-| Approved | `approved`: the grade's gates passed, waiting to merge | Gap until TRAIL-86 adds the status |
+| Approved | `approved`: the grade's gates passed, waiting to merge | `approved` exists (TRAIL-86) |
 | Merging | The merger or Lane merges; `done` means merged | Fits |
 | Parked | `ask` → `needs_input` | Fits, but the agent lease expires while parked and an answer sends it back to `open` |
 | Done / Cancelled | `done`, `cancelled` | Fits |

@@ -82,7 +82,7 @@ pub(crate) struct UpdateProject {
     brief: Option<String>,
     status: Option<ProjectStatus>,
     require_review: Option<bool>,
-    /// Agent names or ids that may approve review work in this project (`in_review` → `done`).
+    /// Agent names or ids that may approve review work in this project (`in_review` → `approved` or `done`).
     /// Replaces the list; `[]` clears it. Humans only.
     reviewers: Option<Vec<String>>,
     #[serde(default, deserialize_with = "nullable")]

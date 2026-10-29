@@ -17,6 +17,7 @@ pub enum Status {
     InProgress,
     NeedsInput,
     InReview,
+    Approved,
     Done,
     Cancelled,
 }

@@ -96,6 +96,7 @@ fn status(s: trailhead_core::Status) -> Status {
         S::InProgress => Status::InProgress,
         S::NeedsInput => Status::NeedsInput,
         S::InReview => Status::InReview,
+        S::Approved => Status::Approved,
         S::Done => Status::Done,
         S::Cancelled => Status::Cancelled,
     }

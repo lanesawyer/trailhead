@@ -160,17 +160,48 @@ fn validate_priority(p: i64) -> Result<()> {
 }
 
 /// Agents may only finish work through review when the project requires it, and
-/// only a human can approve.
+/// only a human (or a delegated reviewer who didn't do the work) can approve.
 async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
-    if to != Status::Done || tx.ctx.is_human() {
+    let finishes = to == Status::Done || to == Status::Approved;
+    if !finishes || tx.ctx.is_human() {
         return Ok(());
     }
     let project = load_project(&tx.conn, tx.ctx.workspace_id, &task.project_id.to_string(), true).await?;
-    // A delegated reviewer approves like a human would.
+    let in_review = matches!(task.status, Status::InReview | Status::Approved);
+    let gated = to == Status::Approved || in_review || project.require_review;
+    // A delegated reviewer approves like a human would, but not work it did: the
+    // claim is released on the way to review, so the event log says who did it.
     if tx.ctx.agent_id.is_some_and(|a| project.reviewers.contains(&a)) {
-        return Ok(());
+        return if in_review && did_work(tx, task).await? { Err(Error::ReviewRequired) } else { Ok(()) };
     }
-    if task.status == Status::InReview || project.require_review { Err(Error::ReviewRequired) } else { Ok(()) }
+    if gated { Err(Error::ReviewRequired) } else { Ok(()) }
+}
+
+/// Whether the acting agent did the work now in review: it made the latest move into review,
+/// or took the last claim before that move. Claims from earlier rounds don't count, so the
+/// factory can still approve a task it once claimed only to park it. An undone send to review
+/// still counts: the agent did the work either way.
+async fn did_work(tx: &Tx, task: &Task) -> Result<bool> {
+    let me = tx.ctx.actor_id().to_string();
+    let mut rows = tx
+        .conn
+        .query(
+            "WITH sent AS (
+                 SELECT id, actor_id FROM events
+                 WHERE task_id = ?1 AND undoes IS NULL AND entity = 'task'
+                   AND json_extract(after, '$.status') = 'in_review'
+                   AND COALESCE(json_extract(before, '$.status'), '') <> 'in_review'
+                 ORDER BY id DESC LIMIT 1
+             )
+             SELECT 1 FROM sent WHERE sent.actor_id = ?2 OR (
+                 SELECT actor_id FROM events
+                 WHERE task_id = ?1 AND undoes IS NULL AND kind = 'claim.acquired' AND id < sent.id
+                 ORDER BY id DESC LIMIT 1
+             ) = ?2",
+            libsql::params![task.id.to_string(), me],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 /// Agents can't touch a task another actor holds. Humans can, so they can always

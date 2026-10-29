@@ -18,7 +18,7 @@ Done: a `review` comment kind carries a `verdict` (`approve` or `request_changes
 trailhead add "Typed review verdicts: review comment kind with approve/request_changes" -p TRAIL -P 2
 ```
 
-## 3. Approved vs merged (TRAIL-86)
+## 3. Approved vs merged (TRAIL-86, done)
 
 Decided (2026-10-29): add an `approved` status between `in_review` and `done`. `approved` means a reviewer cleared the work and it is waiting to be finished; for the factory, waiting to merge. Only humans and delegated reviewers move a task to `approved`; whoever finishes it moves it to `done`. `in_review` → `done` stays allowed for work with nothing left after approval. A new push or requested change sends an `approved` task back to `in_review` or `open`. It releases the claim like `in_review`. Depends on 2.
 
