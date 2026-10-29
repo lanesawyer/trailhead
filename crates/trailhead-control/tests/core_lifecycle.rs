@@ -234,3 +234,25 @@ async fn with_a_queue_only_its_subtasks_run() {
     assert_eq!(r.show(&epic).await.status, Status::Open, "the epic is left alone");
     assert_eq!(r.show(&queue).await.status, Status::Open, "and so is the queue itself");
 }
+
+#[tokio::test]
+async fn human_context_pairs_answers_and_skips_the_factorys_own_notes() {
+    let r = rig().await;
+    let key = r.task("Ambiguous").await;
+    let decision = trailhead_core::NewComment::new(CommentKind::Decision, "Use a flock.");
+    r.store.add_comment(&r.human, &key.0, decision).await.unwrap();
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    r.tracker.note(&key, "bookkeeping").await.unwrap();
+
+    let question = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let question = question.iter().find(|c| c.kind == CommentKind::Question).unwrap();
+    r.store.resolve_comment(&r.human, question.id, Some("The core crate.".into())).await.unwrap();
+
+    let ctx = r.tracker.human_context(&key).await.unwrap();
+    assert_eq!(ctx.answers.len(), 1);
+    assert_eq!((ctx.answers[0].question.as_str(), ctx.answers[0].answer.as_str()), ("Which crate?", "The core crate."));
+    assert_eq!(ctx.answers[0].by, "Lane");
+    assert_eq!(ctx.notes.len(), 1, "{:?}", ctx.notes);
+    assert_eq!((ctx.notes[0].author.as_str(), ctx.notes[0].body.as_str()), ("Lane", "Use a flock."));
+}

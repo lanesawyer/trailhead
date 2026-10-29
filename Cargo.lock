@@ -5061,6 +5061,7 @@ dependencies = [
  "trailhead-core",
  "trailhead-factory",
  "trailhead-testkit",
+ "uuid",
 ]
 
 [[package]]

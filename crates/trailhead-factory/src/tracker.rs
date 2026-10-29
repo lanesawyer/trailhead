@@ -82,6 +82,44 @@ impl RunUpdate {
     }
 }
 
+/// A resolved question the factory's agent asked and the answer it got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Answered {
+    pub question: String,
+    pub answer: String,
+    /// Who answered.
+    pub by: String,
+    /// When it was answered, as `YYYY-MM-DD`.
+    pub date: String,
+}
+
+/// A `decision` or `note` comment on a task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskNote {
+    pub author: String,
+    /// `YYYY-MM-DD`.
+    pub date: String,
+    pub body: String,
+}
+
+/// What people have said on a task that the agent should know: answers and notes, oldest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanContext {
+    pub answers: Vec<Answered>,
+    pub notes: Vec<TaskNote>,
+}
+
+impl HumanContext {
+    pub fn is_empty(&self) -> bool {
+        self.answers.is_empty() && self.notes.is_empty()
+    }
+}
+
+/// Whether an author is the factory itself or one of its run sub-agents.
+pub fn is_factory_agent(name: &str) -> bool {
+    name == "factory" || name.starts_with("factory/")
+}
+
 /// A Trailhead sub-agent and its bearer token, handed to a sandbox at start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
@@ -107,6 +145,9 @@ pub trait Tracker: Send + Sync {
     /// factory.
     async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>>;
     async fn show(&self, task: &TaskKey) -> Result<Task>;
+    /// The task's resolved questions with their answers, and its `decision` and `note` comments, oldest first,
+    /// without the factory's own bookkeeping.
+    async fn human_context(&self, task: &TaskKey) -> Result<HumanContext>;
     /// Open, in-progress, parked or in-review tasks that carry factory metadata.
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>>;
 

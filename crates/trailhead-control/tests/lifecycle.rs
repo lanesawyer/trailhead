@@ -255,6 +255,39 @@ async fn agent_question_parks_the_task() {
 }
 
 #[tokio::test]
+async fn the_next_worker_sees_the_answer_to_its_question() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    r.tracker.answer(&key, "The core crate.");
+    r.factory.reconcile().await.unwrap();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let ctxs = r.harness.contexts();
+    assert!(ctxs[0].task.context.is_empty());
+    let answers = &ctxs[1].task.context.answers;
+    assert_eq!(answers.len(), 1);
+    assert_eq!((answers[0].question.as_str(), answers[0].answer.as_str()), ("Which crate?", "The core crate."));
+    assert!(ctxs[1].task.context.notes.is_empty(), "the factory's own comments aren't passed on");
+}
+
+#[tokio::test]
+async fn a_decision_on_a_queued_task_reaches_the_first_run() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Lock", "");
+    r.tracker.decide(&key, "Use a per-machine flock.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let notes = &r.harness.contexts()[0].task.context.notes;
+    assert_eq!(notes.len(), 1);
+    assert_eq!((notes[0].author.as_str(), notes[0].body.as_str()), ("lane", "Use a per-machine flock."));
+}
+
+#[tokio::test]
 async fn sandbox_cap_limits_concurrent_runs() {
     let r = rig();
     r.tracker.add_task("TRAIL", "One", "");
