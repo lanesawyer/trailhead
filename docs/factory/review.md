@@ -32,9 +32,9 @@ Decided: gates per grade are configurable per repo, in `factory.toml`. The table
 ```toml
 [grades]
 # Path globs that raise a PR to at least this grade; unmatched files don't raise it.
-2 = ["crates/**"]
+2 = ["crates/*/src/**", "crates/*/build.rs", "crates/*/benches/**", "crates/*/examples/**", "cliff.toml", "rustfmt.toml"]
 3 = ["**/Cargo.toml", "Cargo.lock", "**/migrations/**"]
-4 = [".github/**", "factory.toml", "fnox.toml", "mise.toml"]
+4 = [".github/**", "factory.toml", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE"]
 max_lines = 600          # bigger diffs are at least grade 3
 
 [gates.1]
@@ -55,7 +55,7 @@ mode = "shadow"          # off | shadow | on
 
 Gates are keyed by grade (`[gates.1]` to `[gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[merge] mode = "on"` (TRAIL-205).
 
-Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. Lane grades the queue once grades exist and widens auto-merge from there. With the rules above, code in `crates/` raises a grade-1 task to 2, so only docs and similar work merges on its own.
+Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. Lane grades the queue once grades exist and widens auto-merge from there. With the rules above, code in `crates/*/src` raises a grade-1 task to 2, so docs and test-only PRs merge on their own (deleting or renaming a test is still at least grade 2). Files that steer the agents (`AGENTS.md`, `.claude/`, `.mcp.json`, `skills/`, `.trailhead.toml`) are grade 4 with CI and the factory's policy. Decided (2026-10-29): test-only PRs are grade 1; grade 2 auto-merge waits on TRAIL-260, TRAIL-298 and TRAIL-295 and a run of grade 2 shadow decisions Lane agrees with.
 
 Decided: quorum reviewers must be independent. Quorums are built after the merger, once a repo wants a grade with no human gate (TRAIL-204).
 

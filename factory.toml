@@ -26,9 +26,9 @@ install = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang
 
 [grades]
 # Path globs that raise a PR to at least this grade (docs/factory/review.md#grades); the task's own grade is the floor.
-2 = ["crates/**"]
+2 = ["crates/*/src/**", "crates/*/build.rs", "crates/*/benches/**", "crates/*/examples/**", "cliff.toml", "rustfmt.toml"]
 3 = ["**/Cargo.toml", "Cargo.lock", "**/migrations/**"]
-4 = [".github/**", "factory.toml", "fnox.toml", "mise.toml"]
+4 = [".github/**", "factory.toml", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE"]
 max_lines = 600          # bigger diffs are at least grade 3
 
 [gates]

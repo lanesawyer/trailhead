@@ -93,9 +93,35 @@ impl Default for GradesConfig {
         GradesConfig {
             max_lines: default_max_lines(),
             rules: BTreeMap::from([
-                ("2".to_string(), globs(&["crates/**"])),
+                // Code, not its tests: a PR that only adds or changes tests stays at grade 1.
+                (
+                    "2".to_string(),
+                    globs(&[
+                        "crates/*/src/**",
+                        "crates/*/build.rs",
+                        "crates/*/benches/**",
+                        "crates/*/examples/**",
+                        "cliff.toml",
+                        "rustfmt.toml",
+                    ]),
+                ),
                 ("3".to_string(), globs(&["**/Cargo.toml", "Cargo.lock", "**/migrations/**"])),
-                ("4".to_string(), globs(&[".github/**", "factory.toml", "fnox.toml", "mise.toml"])),
+                // What steers the agents themselves, as well as CI and the factory's own policy.
+                (
+                    "4".to_string(),
+                    globs(&[
+                        ".github/**",
+                        "factory.toml",
+                        "fnox.toml",
+                        "mise.toml",
+                        "AGENTS.md",
+                        ".claude/**",
+                        ".mcp.json",
+                        "skills/**",
+                        ".trailhead.toml",
+                        "LICENSE",
+                    ]),
+                ),
             ]),
         }
     }
@@ -409,6 +435,19 @@ mod tests {
         assert!(config.gate(1).auto_merge);
         assert!(!config.gate(2).auto_merge, "only grade 1 auto-merges, to start");
         assert_eq!(config.gate(3).require, ["checks", "ci", "agent_review", "human"]);
+        let raised = |path: &str| {
+            config
+                .grades
+                .rules
+                .iter()
+                .filter(|(_, g)| g.iter().any(|g| crate::grade::glob_match(g, path)))
+                .map(|(n, _)| n.as_str())
+                .max()
+        };
+        assert_eq!(raised("crates/trailhead-core/tests/domain.rs"), None, "test-only changes stay at the task's grade");
+        assert_eq!(raised("crates/trailhead-core/src/tasks.rs"), Some("2"));
+        assert_eq!(raised("AGENTS.md"), Some("4"));
+        assert_eq!(raised(".claude/settings.json"), Some("4"));
     }
 
     #[test]
