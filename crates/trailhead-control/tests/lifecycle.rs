@@ -1375,3 +1375,45 @@ async fn two_runs_starting_together_never_take_the_same_idle_sandbox() {
     names.sort();
     assert_eq!(names, ["trailhead-w1", "trailhead-w2"], "one reused the idle sandbox, the other got a new one");
 }
+
+#[tokio::test]
+async fn a_sandbox_that_wont_release_after_the_agent_ends_the_run_doesnt_give_the_attempt_back() {
+    for (outcome, status) in [
+        (changes(), Status::InReview),
+        (RunOutcome::Failed { reason: "I couldn't make the build pass".into() }, Status::Open),
+    ] {
+        let r = rig();
+        let key = r.tracker.add_task("TRAIL", "Ends the run", "");
+        r.harness.push(Role::Worker, Script::new(outcome));
+        // Restoring and destroying are all releasing does after the run; preparing a new sandbox does neither.
+        r.compute.fail("trailhead-w1", "restore");
+        r.compute.fail("trailhead-w1", "destroy");
+        let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+        assert!(err.to_string().contains("Storage not ready"), "{err}");
+        let task = r.tracker.task(&key);
+        assert_eq!(task.status, status);
+        assert_eq!(task.run.attempt, Some(1), "the agent ended the run, so the attempt counts");
+        assert_eq!(task.run.infra_failures.unwrap_or(0), 0);
+        assert_eq!(task.run.retries.unwrap_or(0), 0);
+    }
+}
+
+#[tokio::test]
+async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_reopened() {
+    let r = rig_with(
+        &CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 2\nmax_sandboxes = 2"),
+    );
+    let key = r.tracker.add_task("TRAIL", "Lost daemon", "");
+    r.daemon.fail_runs(2, "connection lost");
+    for _ in 0..2 {
+        r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+        r.factory.reconcile().await.unwrap();
+    }
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+
+    r.tracker.set_status(&key, Status::Open);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.len(), 1, "no backoff left over from before the park");
+}

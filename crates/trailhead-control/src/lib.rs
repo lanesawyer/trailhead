@@ -350,7 +350,8 @@ impl Factory {
                 }
                 return Err(e);
             }
-            // No sub-agent, so nothing holds the claim: back off and count it, as the factory's own identity.
+            // No sub-agent, so nothing holds the claim: back off and count it, as the factory's own identity. Revoking
+            // the sub-agent that was never created fails, and that warning is expected.
             Err(e) => {
                 // Parking and releasing need the claim, so take it as the factory's own identity first.
                 if let Err(claim) = self.tracker.claim(&task.key).await {
@@ -424,16 +425,13 @@ impl Factory {
             Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await),
         };
 
+        // From here the agent has ended the run, so its attempt counts. Errors go to reconcile as before, except after
+        // the agent's own API trouble, which gives the attempt back (TRAIL-172). A breach is the agent's doing too.
         let (report, spend) = match run {
             Run::Breach(reason, spend) => {
                 tracing::warn!(task = %task.key.0, %reason, "budget breached; parking");
-                let parked = async {
-                    self.compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await?;
-                    self.cut_off(&sandbox).await
-                };
-                if let Err(e) = parked.await {
-                    return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
-                }
+                self.compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await?;
+                self.cut_off(&sandbox).await?;
                 sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await?;
                 sub.ask(
                     &task.key,
@@ -450,31 +448,32 @@ impl Factory {
         // An agent that ends the run itself shows the infrastructure working again, unless what it ended with is its
         // API trouble.
         let api_trouble = matches!(&report.result, RunResult::Failed(reason) if is_transient_api_error(reason));
-        let infra_prior = if api_trouble { infra_prior } else { Some(0) };
         if !api_trouble {
             self.setbacks.lock().unwrap().remove(&task.key);
         }
         let infra_failures = if api_trouble { None } else { task.run.infra_failures.filter(|n| *n > 0).map(|_| 0) };
         let update = RunUpdate { spend: Some(spend), infra_failures, ..RunUpdate::default() };
-        if let Err(e) = sub.report(&task.key, update).await {
-            return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
+        match sub.report(&task.key, update).await {
+            Err(e) if api_trouble => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await),
+            reported => reported?,
         }
 
         match report.result {
             RunResult::PrOpened(pr) => {
                 // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
                 // starts from the PR branch.
-                if let Err(e) = self.release_worker(&sandbox).await {
-                    return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
-                }
+                self.release_worker(&sandbox).await?;
                 self.tracker.revoke_sub_agent(&name).await?;
                 self.review(task, &pr, attempt, &report.checks).await
             }
             RunResult::NeedsInput(question) => Ok(Outcome::Parked { reason: question }),
             RunResult::Failed(reason) => {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
-                if let Err(e) = self.release_worker(&sandbox).await {
-                    return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
+                match self.release_worker(&sandbox).await {
+                    Err(e) if api_trouble => {
+                        return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
+                    }
+                    released => released?,
                 }
                 if api_trouble {
                     // The agent's own API trouble says nothing about the task. The daemon released the task before
@@ -534,7 +533,10 @@ impl Factory {
         prior: Option<u32>,
         failure: Option<String>,
     ) -> Error {
-        let failures = prior.unwrap_or(0) + 1;
+        // The in-memory count too, so the backoff still grows when the tracker is what's failing and the persisted
+        // count didn't get written.
+        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _)| *n);
+        let failures = prior.unwrap_or(0).max(held) + 1;
         let max = self.config.repo.max_infra_failures.max(1);
         let park = failures >= max;
         tracing::warn!(task = %task.key.0, %error, failures, max, "infrastructure failure; the attempt doesn't count");
@@ -559,12 +561,18 @@ impl Factory {
                  last error: {error}\n\nFix the cause, then reopen the task; raise `max_infra_failures` to allow \
                  more tries."
             );
-            if let Err(e) = sub.ask(&task.key, &question).await {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; reconcile will requeue it");
-                // Not parked, so the count mustn't start again: the next failure tries to park once more.
-                let keep = RunUpdate { infra_failures: Some(failures), ..RunUpdate::default() };
-                if let Err(e) = sub.report(&task.key, keep).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't keep the infrastructure failure count");
+            match sub.ask(&task.key, &question).await {
+                // Reopened by Lane, it starts again with no wait, as its count does.
+                Ok(()) => {
+                    self.setbacks.lock().unwrap().remove(&task.key);
+                }
+                Err(e) => {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; reconcile will requeue it");
+                    // Not parked, so the count mustn't start again: the next failure tries to park once more.
+                    let keep = RunUpdate { infra_failures: Some(failures), ..RunUpdate::default() };
+                    if let Err(e) = sub.report(&task.key, keep).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't keep the infrastructure failure count");
+                    }
                 }
             }
         } else if let Err(e) = sub.release(&task.key).await {
