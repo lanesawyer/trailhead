@@ -37,6 +37,8 @@ pub struct FakeWorkspace {
     /// Whether the agent starts a merge itself, which prepare then doesn't: `merge_head` sees one from its second call on.
     agent_merges: AtomicBool,
     merge_head_calls: AtomicUsize,
+    /// Files the agent leaves conflict markers in.
+    markers: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
@@ -68,6 +70,10 @@ impl Workspace for FakeWorkspace {
         let call = self.merge_head_calls.fetch_add(1, Ordering::SeqCst);
         let merging = *self.merging.lock().unwrap() || (self.agent_merges.load(Ordering::SeqCst) && call > 0);
         Ok(merging.then(|| FAKE_BASE_MERGE.to_string()))
+    }
+
+    async fn conflict_markers(&self, _start: &str) -> Result<Vec<String>> {
+        Ok(self.markers.lock().unwrap().clone())
     }
 
     async fn head(&self) -> Result<String> {
@@ -139,6 +145,11 @@ impl LocalDaemon {
             ongoing: Mutex::default(),
             attached: Mutex::default(),
         }
+    }
+
+    /// Has the agent leave conflict markers in these files.
+    pub fn leave_conflict_markers(&self, files: &[&str]) {
+        *self.workspace.markers.lock().unwrap() = files.iter().map(|f| f.to_string()).collect();
     }
 
     /// Has the agent start the merge of the base branch itself, as when prepare didn't.
