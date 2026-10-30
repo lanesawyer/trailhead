@@ -1759,7 +1759,16 @@ impl Factory {
                     done.conflicted.push(task.key.0.clone());
                     return Ok(false);
                 }
-                let due = task.run.pr.is_some() && task.run.reviewed != Some(attempt) && self.setback_over(&task.key);
+                // A push from outside the factory leaves the head differing from the one last reviewed; that wants a
+                // review like a rework does, or the merger's agent_review gate would wait on it forever (TRAIL-298).
+                let mut stale = task.run.reviewed != Some(attempt);
+                if let (Some(pr), Some(codehost), Some(reviewed)) =
+                    (&task.run.pr, &self.codehost, &task.run.reviewed_head)
+                    && !stale
+                {
+                    stale = codehost.head(pr).await? != *reviewed;
+                }
+                let due = task.run.pr.is_some() && stale && self.setback_over(&task.key);
                 if !due {
                     // CI may have finished, or Lane approved, since the gates were last looked at.
                     self.evaluate_gates(&task.key).await?;
