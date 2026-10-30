@@ -375,3 +375,17 @@ async fn agents_patch_metadata_over_mcp() {
     assert!(out.contains(r#"metadata {"b":2}"#), "{out}");
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn create_task_lists_possible_duplicates() {
+    let s = start().await;
+    let client = connect(&s.url, &s.agent).await;
+
+    let (err, out) = call(&client, "create_task", json!({"project": "AUTH", "title": "Rotate signing keys"})).await;
+    assert!(!err, "{out}");
+    assert!(!out.contains("possible duplicates"), "{out}");
+
+    let (err, out) = call(&client, "create_task", json!({"project": "AUTH", "title": "Rotate the signing keys"})).await;
+    assert!(!err, "{out}");
+    assert!(out.ends_with("\npossible duplicates: AUTH-3"), "{out}");
+}

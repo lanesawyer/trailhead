@@ -14,7 +14,7 @@ use trailhead_daemon::awake::{SPRITE_API_SOCKET, SpriteHolds};
 use trailhead_daemon::net::{
     ALPN, DaemonProtocol, build_id, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
 };
-use trailhead_daemon::{Connect, GitWorkspace, RENEW_EVERY, RestTracker, Runner};
+use trailhead_daemon::{Connect, GitWorkspace, HEARTBEAT_EVERY, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{
     BranchUpdate, ChangedFile, Ci, CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, PrState, Repo,
     Result, Tracker,
@@ -161,6 +161,7 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
         workspace: Arc::new(GitWorkspace::new(args.workdir)),
         connect,
         renew_every: RENEW_EVERY,
+        heartbeat_every: HEARTBEAT_EVERY,
     };
     tracing::info!(id = %endpoint.id(), %control_plane, "trailhead-daemon listening");
     watch_network(endpoint.clone());
