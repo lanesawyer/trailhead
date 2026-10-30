@@ -244,6 +244,24 @@ async fn reconcile_requeues_an_interrupted_run() {
 }
 
 #[tokio::test]
+async fn a_task_with_malformed_factory_metadata_is_skipped_not_fatal() {
+    let r = rig().await;
+    let good = r.task("Good").await;
+    let bad = r.task("Bad").await;
+    let patch = TaskPatch {
+        metadata: Some(serde_json::json!({ "factory": { "attempt_base": "3x" } })),
+        ..TaskPatch::default()
+    };
+    r.store.update_task(&r.human, &bad.0, patch, None).await.unwrap();
+
+    let ready = r.tracker.ready("TRAIL", None, 10).await.unwrap();
+    assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&good]);
+    assert!(r.tracker.in_flight("TRAIL").await.unwrap().is_empty());
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.show(&bad).await.is_err());
+}
+
+#[tokio::test]
 async fn with_a_queue_only_its_subtasks_run() {
     let mut r = rig().await;
     let urgent = NewTask {
