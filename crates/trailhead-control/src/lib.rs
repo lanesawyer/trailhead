@@ -1658,6 +1658,11 @@ impl Factory {
             handoff.push_str(&format!(" Grade {}; gates passed: {}.", d.grade, d.passed.join(", ")));
         }
         self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
+        // A parked task can't be finished from where it is: it goes back to open and is claimed first.
+        if task.status == Status::NeedsInput {
+            self.tracker.reopen(&task.key).await?;
+            self.tracker.claim(&task.key).await?;
+        }
         self.tracker.finish(&task.key, &handoff).await?;
         tracing::info!(task = %task.key.0, %handoff, "PR merged; task done");
         Ok(())
@@ -1732,7 +1737,23 @@ impl Factory {
                 self.tracker.revoke_sub_agent(name).await?;
                 done.requeued.push(task.key.0.clone());
             }
-            Status::Open => self.tracker.revoke_sub_agent(name).await?,
+            Status::Open => {
+                // A PR merged or closed while the task waited for its rework: settle it rather than rework a dead branch.
+                if self.pr_settled(task, done).await?.is_none() {
+                    return Ok(false);
+                }
+                self.tracker.revoke_sub_agent(name).await?;
+            }
+            // Parked for a human, so a PR still open or closed stays as it is (a closed one was the question). A merge
+            // by anyone finishes the task all the same.
+            Status::NeedsInput => {
+                if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost)
+                    && let PrState::Merged { commit } = codehost.pr_state(pr).await?
+                {
+                    self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
+                    done.merged.push(task.key.0.clone());
+                }
+            }
             Status::Approved => {
                 let Some(mergeable) = self.pr_settled(task, done).await? else { return Ok(false) };
                 // Main may have moved since the approval: a PR that now conflicts goes back for a rework, which
