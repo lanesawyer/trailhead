@@ -2263,6 +2263,35 @@ async fn a_host_made_update_keeps_the_verdict_and_a_push_after_it_does_not() {
     assert_eq!(r.tracker.task(&key).status, Status::Done);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_conflict_resolving_rework_doesnt_inherit_the_verdict() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "back to running for a rework");
+
+    // The rework pushes a single commit that merges the base: a merge the host didn't make, holding the resolution.
+    r.codehost.set_conflicts(false);
+    let resolution = Commit { message: "fix: resolve".into(), changes: vec![], merges: vec!["base".into()] };
+    r.harness
+        .push(Role::Worker, Script::new(RunOutcome::Changes { commits: vec![resolution], summary: "Done.".into() }));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.factory.tick().await.unwrap();
+    r.codehost.set_ci(&pr, CiState::Passed);
+
+    // Reviews of the resolution then fail on the infrastructure, so the passes wait out a backoff and evaluate the
+    // gates meanwhile.
+    r.daemon.fail_runs(3, "connection lost");
+    for _ in 0..3 {
+        let done = r.factory.reconcile().await.unwrap();
+        assert!(done.reviewed.is_empty() && done.merged.is_empty(), "{done:?}");
+    }
+    assert!(!r.codehost.prs()[0].merged, "the old approval doesn't cover the resolution");
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+}
+
 #[tokio::test]
 async fn a_push_on_top_of_a_host_made_update_needs_a_new_review() {
     let (r, queue) = queued_rig_with(&merging());
