@@ -186,16 +186,24 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     // The environment wins, then fnox if it's installed, then what `trailhead factory login` saved.
     let creds = paths.creds();
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    // fnox is only asked when something is missing from the environment, so a broken fnox can't block a full env.
+    let blank = |v: &Option<String>| v.as_deref().is_none_or(|v| v.trim().is_empty());
+    let fnox = if blank(&opts.sprites_token) || blank(&opts.github_token) || blank(&opts.claude_oauth_token) {
+        fnox::Fnox::load("fnox", &cwd, fnox::global_config().as_deref())?
+    } else {
+        fnox::Fnox::none()
+    };
     let opts = &Opts {
-        sprites_token: login::resolve("SPRITES_TOKEN", opts.sprites_token.clone(), "fnox", &creds, login::SPRITES)?,
-        github_token: login::resolve("GITHUB_TOKEN", opts.github_token.clone(), "fnox", &creds, login::GITHUB)?,
+        sprites_token: login::resolve("SPRITES_TOKEN", opts.sprites_token.clone(), &fnox, &creds, login::SPRITES),
+        github_token: login::resolve("GITHUB_TOKEN", opts.github_token.clone(), &fnox, &creds, login::GITHUB),
         claude_oauth_token: login::resolve(
             "CLAUDE_CODE_OAUTH_TOKEN",
             opts.claude_oauth_token.clone(),
-            "fnox",
+            &fnox,
             &creds,
             login::CLAUDE,
-        )?,
+        ),
         ..opts.clone()
     };
     let config_path = match &opts.config {

@@ -65,4 +65,4 @@ Reach the server through a tunnel to its loopback port, and give each machine's 
 
 ## Factory secrets
 
-If you run the factory, it needs `SPRITES_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and `GITHUB_TOKEN`. It takes each from the first of three places that has it: the environment variable; [fnox](https://fnox.jdx.dev), if it's installed and its config names the secret (never required); then the OS keyring, where `trailhead factory login sprites|claude|github` saves them. At start it logs which source each came from, never the values. See [Operating the factory](factory/operating.md).
+If you run the factory, it needs `SPRITES_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and `GITHUB_TOKEN`. It takes each from the first of three places that has it: the environment variable; [fnox](https://fnox.jdx.dev), if it's installed and its config names the secret (read with one `fnox export --format json`; never required); then the OS keyring, where `trailhead factory login sprites|claude|github` saves them. At start it logs which source each came from, never the values. See [Operating the factory](factory/operating.md).
