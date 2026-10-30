@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,12 +27,14 @@ pub struct CoreTracker {
     /// Set when acting as one of `ctx`'s sub-agents, by the part after its name.
     sub: Option<String>,
     agent: String,
+    /// The bad factory metadata already noted on each task (key to note), so each is said once.
+    flagged: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl CoreTracker {
     /// A tracker acting as the agent behind `ctx`, whose full name is `agent`.
     pub fn new(store: Arc<Store>, ctx: Ctx, agent: &str) -> CoreTracker {
-        CoreTracker { store, ctx, sub: None, agent: agent.to_string() }
+        CoreTracker { store, ctx, sub: None, agent: agent.to_string(), flagged: Arc::default() }
     }
 
     /// A tracker for whoever holds this credential's token, as a daemon would connect.
@@ -85,18 +87,42 @@ impl CoreTracker {
         })
     }
 
-    /// Converts the listed tasks, skipping (with a warning) any whose factory metadata won't parse, so one
-    /// bad value doesn't stop the factory for the whole project.
+    /// Converts the listed tasks, skipping any whose factory metadata won't parse, so one bad value doesn't
+    /// stop the factory for the whole project. A skipped task gets a note naming the problem, once.
     async fn tasks(&self, ctx: &Ctx, tasks: impl IntoIterator<Item = trailhead_core::Task>) -> Result<Vec<Task>> {
         let mut out = Vec::new();
         for t in tasks {
             if let Err(e) = run_update(&t) {
-                tracing::warn!(task = %t.key, error = %e, "skipping a task with bad factory metadata");
+                self.flag_bad_metadata(ctx, &t, &e.to_string()).await;
                 continue;
             }
             out.push(self.task(ctx, t).await?);
         }
         Ok(out)
+    }
+
+    /// Notes on the task, and logs, that its factory metadata is skipped, unless this note is already there.
+    async fn flag_bad_metadata(&self, ctx: &Ctx, t: &trailhead_core::Task, error: &str) {
+        let fields = bad_fields(t);
+        let fields = if fields.is_empty() { String::new() } else { format!(" in {}", fields.join(", ")) };
+        let body = format!(
+            "The factory is skipping this task: its `{METADATA_KEY}` metadata is malformed{fields} ({error}). \
+             Fix or remove that field and the factory will pick the task up again."
+        );
+        if self.flagged.lock().unwrap().get(&t.key) == Some(&body) {
+            return;
+        }
+        tracing::warn!(task = %t.key, error, "skipping a task with bad factory metadata");
+        // A note from before a restart counts, so a restart doesn't repeat it.
+        let posted = match self.store.list_comments(ctx, &t.key).await {
+            Ok(cs) if cs.iter().any(|c| c.kind == CommentKind::Note && c.body == body) => true,
+            _ => self.comment(&TaskKey(t.key.clone()), CommentKind::Note, &body).await.is_ok(),
+        };
+        if posted {
+            self.flagged.lock().unwrap().insert(t.key.clone(), body);
+        } else {
+            tracing::warn!(task = %t.key, "couldn't note the bad factory metadata on the task");
+        }
     }
 
     async fn set_status(&self, task: &TaskKey, to: trailhead_core::Status) -> Result<()> {
@@ -121,6 +147,14 @@ fn run_update(t: &trailhead_core::Task) -> Result<RunUpdate> {
         }
         None => Ok(RunUpdate::default()),
     }
+}
+
+/// The fields of the task's factory metadata that don't parse on their own.
+fn bad_fields(t: &trailhead_core::Task) -> Vec<String> {
+    let Some(serde_json::Value::Object(map)) = t.metadata.get(METADATA_KEY) else { return Vec::new() };
+    let bad =
+        |(k, v): &(&String, &serde_json::Value)| serde_json::from_value::<RunUpdate>(json!({ k.as_str(): v })).is_err();
+    map.iter().filter(bad).map(|(k, _)| format!("`{k}`")).collect()
 }
 
 fn same_title(a: &str, b: &str) -> bool {
