@@ -5,6 +5,7 @@ use super::{Ctx, names, params, print_json};
 use crate::cli::{AddArgs, EditArgs};
 use crate::dates::{Field, local_today, parse_day_time};
 use crate::output::{self, comment_line, s, short_time, task_line, task_list};
+use trailhead_factory::RunUpdate;
 
 pub(crate) async fn ready(cx: &Ctx, project: Option<String>, grade: Option<String>, limit: Option<i64>) -> Result<()> {
     let q = params([
@@ -192,6 +193,7 @@ fn meta_patch(pairs: &[String]) -> Result<Value> {
             .filter(|(p, _)| !p.is_empty() && p.split('.').all(|k| !k.is_empty()))
             .ok_or_else(|| anyhow::anyhow!("--meta takes key=value (dots nest), not {pair:?}"))?;
         let value = serde_json::from_str(raw).unwrap_or_else(|_| json!(raw));
+        check_factory_field(path, &value)?;
         let mut at = &mut patch;
         for key in path.split('.') {
             if !at.is_object() {
@@ -202,6 +204,20 @@ fn meta_patch(pairs: &[String]) -> Result<Value> {
         *at = value;
     }
     Ok(patch)
+}
+
+/// Rejects a value for a `factory.<field>` key the factory couldn't read back as a `RunUpdate` field, such as
+/// `factory.attempt_base=3x`. `null` removes a field, so it always passes; deeper paths and unknown keys are left alone.
+fn check_factory_field(path: &str, value: &Value) -> Result<()> {
+    let Some(("factory", field)) = path.split_once('.') else {
+        return Ok(());
+    };
+    if field.contains('.') || value.is_null() {
+        return Ok(());
+    }
+    serde_json::from_value::<RunUpdate>(json!({ field: value }))
+        .map(drop)
+        .map_err(|e| anyhow::anyhow!("--meta {path}: {e}"))
 }
 
 /// A grade is 1 to 4; "none" clears it. The rules live in core.

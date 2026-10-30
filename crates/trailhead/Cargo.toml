@@ -19,6 +19,7 @@ pkg-fmt = "tgz"
 [dependencies]
 trailhead-core.workspace = true
 trailhead-server.workspace = true
+trailhead-factory.workspace = true
 tokio = { workspace = true, features = ["process", "io-std", "io-util"] }
 clap.workspace = true
 reqwest.workspace = true
