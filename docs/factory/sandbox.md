@@ -105,9 +105,14 @@ Proposed (2026-10-29, TRAIL-404; for review): one small proxy, the **gateway**, 
 
 **Egress (TRAIL-174).** The gateway is an HTTP forward proxy (CONNECT for HTTPS, plain forwarding for HTTP). Sandboxes get `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` in their environment, which git, cargo, rustup, mise, npm, curl and Claude Code all honor. Each sandbox has a domain allowlist with the same rules as a Sprite's: exact names and `*.` wildcards, and nothing means nothing. `set_egress` returns once the gateway has the new list, and narrowing closes the sandbox's open tunnels to hosts that are no longer allowed. So the daemon doesn't need the wait-until-it-stops-resolving step that Sprites need. Each refused CONNECT is logged with the sandbox's name. Non-HTTP traffic (git over ssh, raw UDP) has no way out, which is the intent.
 
-**Iroh.** iroh 1.4 sends relay traffic and pkarr publishing through an HTTP proxy (`Endpoint::builder().proxy_url`, or `proxy_from_env`). So the daemon reaches the control plane through n0's relays over the gateway, with the relay and pkarr hosts in every phase's allowlist, as on Sprites. That revises TRAIL-174's plan, written when we thought iroh couldn't use a proxy, to dial the control plane directly on the local network. Two details to confirm in the spike:
-- **Looking up the control plane.** The daemon can't use DNS to find it (no external DNS on an internal network). Either the secrets file gives the control plane's relay URL, or the daemon resolves it through pkarr over HTTPS.
-- **No direct paths.** Holepunching is impossible, so every byte goes through a relay. The daemon's traffic is small, so that's acceptable.
+**Iroh.** iroh 1.4 sends relay traffic and pkarr publishing and lookups through an HTTP proxy (`Endpoint::builder().proxy_url`, or `proxy_from_env`). So the daemon reaches the control plane through n0's relays over the gateway, as on Sprites. That revises TRAIL-174's plan, written when we thought iroh couldn't use a proxy, to dial the control plane directly on the local network.
+
+Tested 2026-10-30 (TRAIL-412). A container on an `--internal` network in the lima VM, whose only way out was a small CONNECT proxy, talked to a control plane on the host. It used the `N0` preset unchanged plus `proxy_from_env`.
+- **Lookup works as is.** The daemon found the control plane by endpoint id alone. The preset's pkarr resolver goes over HTTPS, so through the proxy. The control plane also dialed a sandbox it had never heard from by id alone, found through the sandbox's pkarr publishing via the proxy, in about 0.3 s. So `DaemonSecrets` doesn't need the control plane's relay URL.
+- **The allowlist is two names:** `dns.iroh.link` and `*.relay.n0.iroh.link`. Relay names arrive with a trailing dot (`usw1-1.relay.n0.iroh.link.`), so matching must strip it. iroh also tries DNS-over-HTTPS to `1.1.1.1`, `8.8.8.8` and `9.9.9.9` because the container has no DNS. Refusing those is harmless, but they come back about once a second each, so the gateway should log refusals once per host, or the daemon should set a DNS resolver that doesn't fall back to them.
+- **All traffic goes through the relay.** Every connection was relay-only, as expected. It came online in 3 s, connected in 0.3 to 0.65 s, and had about 10 ms median round trips through the US-West relay.
+- **It survives the proxy restarting.** With the proxy down for 10 s, the sandbox's relay connection came back on its own, and the control plane then dialed it fresh by id.
+- **Watch for:** the VM's Ubuntu ships AppArmor profiles that attach to binaries by path even inside rootless containers. Its `tinyproxy` profile blocked that proxy from reading its filter file and from being stopped. The gateway being our own binary avoids this.
 
 **Credentials (TRAIL-175).** The gateway speaks the part of Fly's gateway API the daemon already uses, so the daemon and harness barely change:
 - **Connector list.** `GET /v1/gateway/list` lists the connections this sandbox may use, each with a `gateway_base_url` of `http://trailhead-gateway:<port>/v1/gateway/<provider>/<id>`. The daemon's list URL moves from a constant to `DaemonSecrets` (`gateway_list`), with Fly's URL as the default.
@@ -137,7 +142,7 @@ The principle the design follows instead, the same as on Sprites: sandboxes reac
 - **Podman and bare-metal hosts.** On a bare-metal host the gateway sits beside the control plane, so TRAIL-177's runtime defaults apply to it as well as to the sandboxes.
 
 **Order of work.**
-1. **Spike:** iroh from a container on an internal network, through a CONNECT proxy, to a control plane on the host via the lima VM. This decides how the daemon looks up the control plane.
+1. **Spike (done, TRAIL-412):** iroh through the proxy works with the stock preset; see above.
 2. **Gateway egress:** the proxy, per-sandbox networks, the control socket and `set_egress` (TRAIL-174).
 3. **Gateway credentials:** the list and forwarding API, the role policy, `gateway_list` in `DaemonSecrets`, the endpoint override, and the API-key and write-token logins (TRAIL-175).
 4. **A live run:** a Trailhead task end to end on Docker (`mise run test-live-docker-factory`), worker and reviewer.
