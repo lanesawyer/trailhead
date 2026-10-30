@@ -334,7 +334,10 @@ impl Factory {
                             let handle = running.spawn(async move { factory.resume_run(&task, &sandbox).await });
                             keys.insert(handle.id(), key);
                         }
-                        for task in due.reviews {
+                        // A review is a session on the same subscription window, so a pause holds them back too; the
+                        // next reconcile finds them due again (the resume below triggers one).
+                        let reviews_due = if self.usage_paused() { Vec::new() } else { due.reviews };
+                        for task in reviews_due {
                             let key = task.key.clone();
                             let factory = self.clone();
                             let handle = running.spawn(async move { factory.resume_review(&task).await });
@@ -365,7 +368,7 @@ impl Factory {
                     );
                 }
                 _ = wake.notified() => {}
-                _ = tokio::time::sleep(resume.unwrap_or_default()), if resume.is_some() => {}
+                _ = tokio::time::sleep(resume.unwrap_or_default()), if resume.is_some() => dirty = true,
                 _ = tokio::time::sleep(poll) => dirty = true,
                 Some(joined) = running.join_next_with_id() => match joined {
                     Ok((id, Ok(outcome))) => {
