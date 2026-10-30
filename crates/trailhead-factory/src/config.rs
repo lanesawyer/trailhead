@@ -494,7 +494,8 @@ mod tests {
         assert_eq!(config.grades, GradesConfig::default(), "this repo's rules are the documented example");
         assert_eq!(config.merge.mode, MergeMode::On);
         assert!(config.gate(1).auto_merge);
-        assert!(!config.gate(2).auto_merge, "only grade 1 auto-merges, to start");
+        assert!(config.gate(2).auto_merge);
+        assert!(!config.gate(3).auto_merge);
         assert_eq!(config.gate(3).require, ["checks", "ci", "agent_review", "human"]);
         let raised = |path: &str| {
             config
