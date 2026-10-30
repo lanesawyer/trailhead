@@ -32,7 +32,7 @@ The control plane enforces budgets. Token and dollar counts come from the daemon
 
 ## Subscription usage windows
 
-Decided 2026-10-28 (TRAIL-160). In subscription mode, the factory shares Lane's Claude plan with everything else on it (OpenClaw), so it mustn't use a window up. Claude Code starts every `stream-json` session with a `rate_limit_event` that reports each window's utilization and reset time (`five_hour`, `seven_day`). This was observed, not documented, so a missing or changed event means no reading and no pause.
+Decided 2026-10-28 (TRAIL-160). In subscription mode, the factory shares the maintainer's Claude plan with everything else on it (OpenClaw), so it mustn't use a window up. Claude Code starts every `stream-json` session with a `rate_limit_event` that reports each window's utilization and reset time (`five_hour`, `seven_day`). This was observed, not documented, so a missing or changed event means no reading and no pause.
 
 - The harness reports each window as `RunEvent::Quota { window, used_percent, resets_at }`, and the control plane keeps the latest reading in memory.
 - `[factory.usage] pause_at` in `.trailhead.toml` sets a threshold per window, in percent. At or past it, no new runs start; runs already going finish. The control plane logs the pause once, then sets a timer for the reset and starts runs again when it fires.

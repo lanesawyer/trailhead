@@ -124,7 +124,7 @@ impl GitHub {
             StatusCode::NOT_FOUND => Error::NotFound(msg),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Forbidden(msg),
             StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY => Error::Conflict(msg),
-            _ => Error::Other(msg),
+            s => Error::from_status(s.as_u16(), msg),
         })
     }
 
@@ -371,7 +371,7 @@ impl CodeHost for GitHub {
                 PrState::Open { mergeable: Some(false) } => Ok(MergeOutcome::Conflict),
                 _ => Ok(MergeOutcome::Refused(message)),
             },
-            s => Err(Error::Other(format!("github {s}: {message}"))),
+            s => Err(Error::from_status(s.as_u16(), format!("github {s}: {message}"))),
         }
     }
 
@@ -416,7 +416,7 @@ impl CodeHost for GitHub {
                     Err(Error::Other(format!("github {status}: {message}")))
                 }
             }
-            s => Err(Error::Other(format!("github {s}: {message}"))),
+            s => Err(Error::from_status(s.as_u16(), format!("github {s}: {message}"))),
         }
     }
 
