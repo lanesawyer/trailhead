@@ -692,6 +692,34 @@ async fn last_review_reads_the_reviewers_verdict_and_the_latest_wins() {
 }
 
 #[tokio::test]
+async fn last_review_names_a_sibling_reviewer_when_read_from_a_sub_agent() {
+    let r = rig().await;
+    let key = r.task("Add a greeting").await;
+    let ttl = std::time::Duration::from_secs(3600);
+    let reviewer_cred = r.tracker.create_sub_agent("trail-1-a1-r1", "TRAIL", ttl).await.unwrap();
+    let reviewer = CoreTracker::authenticate(r.store.clone(), &reviewer_cred).await.unwrap();
+    let verdict = Verdict {
+        kind: VerdictKind::RequestChanges,
+        body: "Add a test.".into(),
+        reviewer: String::new(),
+        model: None,
+        raise_grade: None,
+    };
+    reviewer.record_verdict(&key, &verdict).await.unwrap();
+
+    // The worker's sandbox reads the review under its own sub-agent ctx, as a rework run does.
+    let worker_cred = r.tracker.create_sub_agent("trail-1-a2", "TRAIL", ttl).await.unwrap();
+    let worker = CoreTracker::authenticate(r.store.clone(), &worker_cred).await.unwrap();
+    let last = worker.last_review(&key).await.unwrap().expect("a review");
+    assert_eq!(last.reviewer, "factory/trail-1-a1-r1");
+    assert_eq!(last.body, "Add a test.");
+
+    // So does the parent's `sub_agent` handle.
+    let last = r.tracker.sub_agent("trail-1-a2").last_review(&key).await.unwrap().expect("a review");
+    assert_eq!(last.reviewer, "factory/trail-1-a1-r1");
+}
+
+#[tokio::test]
 async fn the_factory_approves_again_after_it_sent_the_task_back_for_a_new_head() {
     let config = format!(
         "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
