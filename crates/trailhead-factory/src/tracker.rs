@@ -101,6 +101,10 @@ pub struct RunUpdate {
     /// The merger's last decision on the PR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeDecision>,
+    /// The head the merger is about to merge, written before `CodeHost::merge` so that a merge whose close failed is
+    /// still attributed to the merger. Empty once the host said the merge didn't happen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merging: Option<String>,
 }
 
 /// The merger's decision on a PR's current head (`docs/factory/review.md#the-merger`). Written whole, and its
@@ -184,6 +188,7 @@ impl RunUpdate {
             ungraded,
             reviewed_head,
             merge,
+            merging,
         } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
@@ -205,6 +210,7 @@ impl RunUpdate {
         self.ungraded = ungraded.or(self.ungraded.take());
         self.reviewed_head = reviewed_head.or(self.reviewed_head.take());
         self.merge = merge.or(self.merge.take());
+        self.merging = merging.or(self.merging.take());
     }
 
     /// The review the next run has to address: the last one that asked for changes, unless a later review has

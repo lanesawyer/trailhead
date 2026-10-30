@@ -150,9 +150,14 @@ pub struct Reconciled {
     pub abandoned: Vec<String>,
 }
 
+/// Who merged a PR that is found merged: the merger when it recorded the intent before merging (TRAIL-289), else a person.
+fn merged_by(task: &Task) -> MergedBy {
+    if task.run.merging.as_deref().is_some_and(|h| !h.is_empty()) { MergedBy::Merger } else { MergedBy::Human }
+}
+
 /// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
 /// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for a person.` `merging` is whether the merger is on and will
-/// merge now.
+/// try to merge now; the message then says the merge happened, so it is only posted once it has.
 fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool) -> String {
     fn join(items: Vec<String>) -> String {
         match items.as_slice() {
@@ -188,7 +193,7 @@ fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, mergin
     let passed = join(passed.collect());
     match (&d.problem, d.would_merge, auto_merge) {
         (Some(problem), ..) => format!("{head}: {passed} passed, but {problem}."),
-        _ if merging => format!("{head}: {passed} passed; merging."),
+        _ if merging => format!("{head}: {passed} passed; merged."),
         (None, true, _) => format!("{head}: {passed} passed; would merge (shadow)."),
         (None, false, true) => format!("{head}: {passed} passed; a person merges."),
         (None, false, false) => format!("{head}: {passed} passed; not auto-merged at this grade, so a person merges."),
@@ -602,7 +607,8 @@ impl Factory {
             match codehost.pr_state(pr).await? {
                 PrState::Merged { commit } => {
                     self.tracker.claim(&task.key).await?;
-                    self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
+                    let by = merged_by(task);
+                    self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
                     return Ok(Outcome::Settled { reason: format!("{} was merged", pr.url) });
                 }
                 PrState::Closed => {
@@ -1203,8 +1209,14 @@ impl Factory {
         if merging {
             decision.refused = prev.as_ref().filter(|d| d.head == head).and_then(|d| d.refused.clone());
         }
+        // A merge that may not happen (the PR is behind, its head moved, the host refuses) isn't announced until it
+        // has: the PR keeps saying what it said, and the next pass decides again.
+        let merged_message = merging.then(|| {
+            let said = prev.as_ref().map(|d| d.message.clone()).unwrap_or_default();
+            std::mem::replace(&mut decision.message, said)
+        });
         if prev.as_ref() != Some(&decision) {
-            if merge_mode != MergeMode::Off && prev.as_ref().is_none_or(|d| d.message != decision.message) {
+            if !merging && merge_mode != MergeMode::Off && prev.as_ref().is_none_or(|d| d.message != decision.message) {
                 codehost.comment(pr, &decision.message).await?;
             }
             if decision.problem.is_some() && prev.as_ref().is_none_or(|d| d.problem != decision.problem) {
@@ -1212,16 +1224,16 @@ impl Factory {
             }
             self.tracker.report(key, RunUpdate { merge: Some(decision.clone()), ..RunUpdate::default() }).await?;
         }
-        if merging {
-            self.merge(&task, pr, &decision).await?;
+        if let Some(message) = merged_message {
+            self.merge(&task, pr, &decision, &message).await?;
         }
         Ok(())
     }
 
     /// Merges an approved PR whose decision says to: brings it up to date with the base branch first, and sends a
     /// conflict, or a host that refuses the merge, to a rework instead of forcing it. A merge closes the task the way
-    /// a merge by Lane does.
-    async fn merge(&self, task: &Task, pr: &PrRef, decision: &MergeDecision) -> Result<()> {
+    /// a merge by Lane does. `merged_message` goes on the PR once the host has merged it.
+    async fn merge(&self, task: &Task, pr: &PrRef, decision: &MergeDecision, merged_message: &str) -> Result<()> {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let attempt = task.run.attempt.unwrap_or(1);
         // Gates passed on this head; a push since then is looked at on the next pass.
@@ -1236,8 +1248,20 @@ impl Factory {
             }
             return Ok(());
         }
-        match codehost.merge(pr, &decision.head).await? {
+        // Recorded first: if closing the task fails after the merge, reconcile still knows the merger did it.
+        self.tracker
+            .report(&task.key, RunUpdate { merging: Some(decision.head.clone()), ..RunUpdate::default() })
+            .await?;
+        let outcome = codehost.merge(pr, &decision.head).await;
+        // An error may follow a merge the host accepted, so it keeps the intent and reconcile's `pr_state` decides.
+        if matches!(outcome, Ok(MergeOutcome::Conflict | MergeOutcome::HeadMoved | MergeOutcome::Refused(_))) {
+            self.tracker.report(&task.key, RunUpdate { merging: Some(String::new()), ..RunUpdate::default() }).await?;
+        }
+        match outcome? {
             MergeOutcome::Merged => {
+                if let Err(e) = codehost.comment(pr, merged_message).await {
+                    tracing::warn!(task = %task.key.0, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
+                }
                 let commit = match codehost.pr_state(pr).await? {
                     PrState::Merged { commit } => commit,
                     _ => None,
@@ -1794,8 +1818,10 @@ impl Factory {
         let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return Ok(Some(None)) };
         match codehost.pr_state(pr).await? {
             PrState::Merged { commit } => {
-                // A merge the factory didn't make: whoever did it, a person did it outside the factory.
-                self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
+                // A merge the factory didn't make is a person's, outside the factory; one the merger started but
+                // didn't get to close (TRAIL-289) is still the merger's.
+                let by = merged_by(task);
+                self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
                 done.merged.push(task.key.0.clone());
                 Ok(None)
             }
