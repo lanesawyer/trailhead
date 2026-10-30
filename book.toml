@@ -8,10 +8,7 @@ language = "en"
 build-dir = "book"
 create-missing = false
 
-[preprocessor.mermaid]
-command = "mdbook-mermaid"
-
 [output.html]
-additional-js = ["mermaid.min.js", "mermaid-init.js"]
+additional-js = ["mermaid.min.js", "mermaid-render.js"]
 git-repository-url = "https://github.com/lanesawyer/trailhead"
 edit-url-template = "https://github.com/lanesawyer/trailhead/edit/main/{path}"

@@ -71,9 +71,10 @@ fi
 
 [tasks.docs]
 description = "Build the docs (docs/) into a book with mdBook; `mdbook serve` previews it"
-# mdbook-mermaid bundles mermaid.min.js and mermaid-init.js (git-ignored); `install` writes them next to book.toml, so the
-# diagrams render offline. Run this task once before `mdbook serve`.
+# mermaid.min.js is bundled in the mdbook-mermaid binary (git-ignored); `install` unpacks it. It runs in a scratch directory
+# because mdbook-mermaid 0.16 can't read mdBook 0.5's preprocessor input, so book.toml must not register it as a
+# preprocessor. mermaid-render.js turns the ```mermaid blocks into diagrams in the browser, so they render offline.
 run = [
-  "mdbook-mermaid install .",
+  "d=$(mktemp -d) && printf '[book]\\ntitle = \"x\"\\n' > \"$d/book.toml\" && mdbook-mermaid install \"$d\" && cp \"$d/mermaid.min.js\" . && rm -r \"$d\"",
   "mdbook build",
 ]
