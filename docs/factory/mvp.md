@@ -11,18 +11,18 @@ Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with 
 - One repo, one worker profile (Sonnet) and one reviewer profile.
 - `Compute`: Sprites through the factory's own thin API wrapper; bootstrap from the stock image; per-step checkpoints; install-phase egress.
 - `Harness`: Claude Code through the Anthropic connector. In practice the MVP ran in subscription mode, on a Claude OAuth token ([sandbox.md](sandbox.md)).
-- `Tracker`: Trailhead on Lane's machine, reached from sandboxes through its iroh tunnel.
+- `Tracker`: Trailhead on the maintainer's machine, reached from sandboxes through its iroh tunnel.
 - `CodeHost`: GitHub through the connector, publishing with the Git Data API.
 - Standard checks, one agent review posted as a PR comment, a human merges.
 - Per-task budget and wall-clock limit from daemon usage counts; parking through `ask`.
-- Stateless control plane on Lane's machine, with reconcile on boot: `trailhead-factory run` (or `mise run factory`), a process beside the local server that shares its database and forwards the API tunnel to it. Moving it into the server process is later work.
+- Stateless control plane on the maintainer's machine, with reconcile on boot: `trailhead-factory run` (or `mise run factory`), a process beside the local server that shares its database and forwards the API tunnel to it. Moving it into the server process is later work.
 - `tracing` logs only.
 
 ## Out of scope
 
 - Suspend during review: requested changes reopen the task and a new run starts a fresh sandbox from the PR branch, with the review in its prompt, so resume affinity isn't needed yet. Reworks are capped by `max_review_rounds` (`[repo]`, default 3); past it the task is parked with a question.
 - Grades (risk tiers), quorums, auto-merge, the merger. (Typed verdicts shipped anyway, as TRAIL-84; grades, gates and the merger were built after the MVP, see [review.md](review.md). Quorums weren't.)
-- Planner agent and spec collaboration: Lane writes the task spec by hand.
+- Planner agent and spec collaboration: a person writes the task spec by hand.
 - Provider usage API, daily cap, workspace spend limit.
 - Multiple repos, profile escalation, previews, outcome tracking, onboarding agent, OTLP export.
 

@@ -15,11 +15,11 @@ This is the same shape as model access today. A sandbox never calls Anthropic di
 | Compute | Gateway | Models |
 | --- | --- | --- |
 | Sprites | Fly's connector gateway | Hosted APIs (Anthropic, OpenRouter, ...) |
-| Docker (TRAIL-119) | The control plane's credential proxy on the host | Hosted APIs, or a model server on the same host |
+| Docker (TRAIL-119) | The gateway container on the Docker engine ([sandbox.md](sandbox.md#the-gateway-credentials-and-egress-for-docker-sandboxes)) | Hosted APIs, or a model server on the same host |
 
-On Docker the model server is one more upstream behind the proxy TRAIL-119 already plans, so sandboxes keep a single egress destination and model traffic never leaves the host. When the control plane, the Docker sandboxes and the model server share one machine, nothing "phones home" anywhere.
+On Docker the model server is one more upstream behind the gateway (TRAIL-175), so sandboxes keep a single egress destination and model traffic never leaves the host. When the control plane, the Docker sandboxes and the model server share one machine, nothing "phones home" anywhere.
 
-Leaning: Sprites stay on hosted models. Sprites block private IPs, so a Sprite can't reach a model server on Lane's network. Tunnelling model calls through the daemon's iroh connection was considered and dropped: it makes the control plane relay model traffic. If a self-hosted model is ever wanted from a Sprite, the route is a `custom_api` connector to a public endpoint.
+Leaning: Sprites stay on hosted models. Sprites block private IPs, so a Sprite can't reach a model server on a private network. Tunnelling model calls through the daemon's iroh connection was considered and dropped: it makes the control plane relay model traffic. If a self-hosted model is ever wanted from a Sprite, the route is a `custom_api` connector to a public endpoint.
 
 ## Seam changes
 
@@ -45,4 +45,4 @@ Through profiles and escalation ([agents.md](agents.md)):
 
 ## Hardware
 
-Lane's machine today: 30 GB RAM, 12 cores, an AMD RX 7700 XT/7800 XT (12–16 GB VRAM; llama.cpp via Vulkan or ROCm). Enough to prove the plumbing and run utility work with a small model. Not enough for worker agents: prefill on 20–60k-token agent contexts is slow, and the model competes for RAM with containers running builds. Worker-grade local models wait for a bigger server.
+The maintainer's machine today: 30 GB RAM, 12 cores, an AMD RX 7700 XT/7800 XT (12–16 GB VRAM; llama.cpp via Vulkan or ROCm). Enough to prove the plumbing and run utility work with a small model. Not enough for worker agents: prefill on 20–60k-token agent contexts is slow, and the model competes for RAM with containers running builds. Worker-grade local models wait for a bigger server.
