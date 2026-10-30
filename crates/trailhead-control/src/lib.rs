@@ -55,6 +55,9 @@ const MAX_INFRA_BACKOFF: Duration = Duration::from_secs(15 * 60);
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
+/// Who a rework asked for by failing CI is attributed to, in the worker's feedback and the park question.
+const CI_REVIEWER: &str = "CI";
+
 /// Reads the current `[merge] mode`, or says why it can't.
 pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String> + Send + Sync>;
 
@@ -1082,6 +1085,9 @@ impl Factory {
         self.record_grade(&task, &grade).await?;
         let ci = codehost.ci(pr).await?;
         let head = ci.head.clone();
+        if let CiState::Failed { checks } = &ci.state {
+            return self.rework_ci_failure(&task, pr, &head, checks).await;
+        }
         let prev = task.run.merge.clone();
         let mut status = task.status;
         // The head each approval was given on: the control plane's own is marked before it moves the task, so an
@@ -1354,7 +1360,13 @@ impl Factory {
             tracing::warn!(task = %task.key.0, round, "the reviewer still wants changes; parking");
             self.tracker.reopen(&task.key).await?;
             self.tracker.claim(&task.key).await?;
-            let question = if conflict {
+            let question = if conflict && reviewer == CI_REVIEWER {
+                format!(
+                    "CI keeps failing on the PR: {round} conflict reworks so far (the limit is {max}). The last \
+                     failure:\n\n{body}\n\nFix the PR or settle what's landing, then reopen the task; raise \
+                     `max_conflict_reworks` to allow more."
+                )
+            } else if conflict {
                 format!(
                     "The PR keeps conflicting with the base branch: {round} conflict reworks so far \
                      (the limit is {max}). Merge the base branch into the PR yourself or settle what's landing, then \
@@ -1744,6 +1756,46 @@ impl Factory {
         );
         tracing::warn!(task = %task.key.0, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
         let requested = ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true };
+        self.request_rework(task, requested, round).await
+    }
+
+    /// CI finished and failed on the PR's current head, whether the worker's own commit or a merge of the base branch
+    /// (a clean update keeps the verdict, so nothing else would look at it; TRAIL-390): the task, unapproved if it was,
+    /// goes back for a rework told which checks failed and the end of their logs. It counts toward
+    /// `max_conflict_reworks`, not review rounds, since CI breaking as main moves isn't a review finding.
+    async fn rework_ci_failure(&self, task: &Task, pr: &PrRef, head: &str, checks: &[String]) -> Result<()> {
+        let Some(codehost) = &self.codehost else { return Ok(()) };
+        let attempt = task.run.attempt.unwrap_or(1);
+        // Already asked for on this attempt: reconcile finishes reopening it, and the head isn't reworked twice.
+        if task.run.pending_changes().is_some_and(|c| c.attempt == attempt) {
+            return Ok(());
+        }
+        let after_update = match &task.run.reviewed_head {
+            Some(reviewed) => reviewed != head && codehost.carries_verdict(pr, reviewed).await?,
+            None => false,
+        };
+        let logs = codehost.ci_logs(pr, checks).await.unwrap_or_else(|e| {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't read the logs of the failed checks");
+            Vec::new()
+        });
+        let mut body = format!("CI failed on {} at {head}: {}.", pr.url, checks.join(", "));
+        if after_update {
+            body.push_str(
+                " It passed before the base branch was merged into the PR, so the failure came in with that merge: \
+                 something that landed on the base branch clashes with this change.",
+            );
+        }
+        for (check, log) in &logs {
+            body.push_str(&format!("\n\nEnd of the log of {check}:\n\n```\n{}\n```", log.trim_end()));
+        }
+        body.push_str("\n\nReproduce the failure, fix it, run the checks and finish.");
+        if task.status == Status::Approved {
+            self.tracker.unapprove(&task.key).await?;
+        }
+        let round = task.run.conflict_reworks.unwrap_or(0) + 1;
+        self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
+        tracing::warn!(task = %task.key.0, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
+        let requested = ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true };
         self.request_rework(task, requested, round).await
     }
 
