@@ -258,6 +258,13 @@ async fn a_task_with_malformed_factory_metadata_is_skipped_not_fatal() {
     assert!(r.tracker.in_flight("TRAIL").await.unwrap().is_empty());
     r.factory.reconcile().await.unwrap();
     assert!(r.tracker.show(&bad).await.is_err());
+
+    // The task says why it was skipped, once however many passes see it.
+    r.tracker.ready("TRAIL", None, 10).await.unwrap();
+    r.tracker.in_flight("TRAIL").await.unwrap();
+    let notes: Vec<_> = r.store.list_comments(&r.human, &bad.0).await.unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].body.contains("attempt_base"), "{}", notes[0].body);
 }
 
 #[tokio::test]

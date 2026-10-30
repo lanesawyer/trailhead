@@ -474,7 +474,8 @@ fn docker_err(e: DockerError) -> Error {
         Some(404) => Error::NotFound(msg),
         Some(409) => Error::Conflict(msg),
         Some(401 | 403) => Error::Forbidden(msg),
-        _ => Error::Other(msg),
+        Some(s) => Error::from_status(s, msg),
+        None => Error::Other(msg),
     }
 }
 
@@ -493,6 +494,15 @@ mod tests {
             run_script("/home/trailhead/.trailhead/trailhead-daemon", &args),
             "#!/bin/sh\nexec '/home/trailhead/.trailhead/trailhead-daemon' '--secrets' '/home/trailhead/it'\\''s.json'\n"
         );
+    }
+
+    #[test]
+    fn docker_client_errors_that_repeat_are_rejected() {
+        let err = |status_code| DockerError::DockerResponseServerError { status_code, message: "no".into() };
+        assert!(matches!(docker_err(err(400)), Error::Rejected(_)));
+        assert!(matches!(docker_err(err(404)), Error::NotFound(_)));
+        assert!(matches!(docker_err(err(429)), Error::Other(_)));
+        assert!(matches!(docker_err(err(500)), Error::Other(_)));
     }
 
     #[test]

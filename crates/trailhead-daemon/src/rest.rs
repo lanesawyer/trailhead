@@ -50,7 +50,7 @@ impl RestTracker {
             StatusCode::NOT_FOUND => Error::NotFound(msg),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Forbidden(msg),
             StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => Error::Conflict(msg),
-            _ => Error::Other(msg),
+            s => Error::from_status(s.as_u16(), msg),
         })
     }
 
