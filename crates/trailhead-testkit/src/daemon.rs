@@ -39,6 +39,8 @@ pub struct FakeWorkspace {
     merge_head_calls: AtomicUsize,
     /// Whether the agent aborts the merge: `merge_head` sees none after prepare, and HEAD lacks the base.
     abandons_merge: AtomicBool,
+    /// Whether the agent commits the merge itself: `merge_head` sees none after prepare, but HEAD has the base.
+    commits_merge: AtomicBool,
     /// Files the agent leaves conflict markers in.
     markers: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
@@ -70,7 +72,7 @@ impl Workspace for FakeWorkspace {
 
     async fn merge_head(&self) -> Result<Option<String>> {
         let call = self.merge_head_calls.fetch_add(1, Ordering::SeqCst);
-        if self.abandons_merge.load(Ordering::SeqCst) && call > 0 {
+        if (self.abandons_merge.load(Ordering::SeqCst) || self.commits_merge.load(Ordering::SeqCst)) && call > 0 {
             return Ok(None);
         }
         let merging = *self.merging.lock().unwrap() || (self.agent_merges.load(Ordering::SeqCst) && call > 0);
@@ -172,6 +174,11 @@ impl LocalDaemon {
     /// Has the agent abort the merge of the base branch that prepare started.
     pub fn agent_aborts_merge(&self) {
         self.workspace.abandons_merge.store(true, Ordering::SeqCst);
+    }
+
+    /// Has the agent run `git commit` to finish the merge of the base branch that prepare started.
+    pub fn agent_commits_merge(&self) {
+        self.workspace.commits_merge.store(true, Ordering::SeqCst);
     }
 
     /// Lets fake checkouts of a branch start at its head on the code host, as a rework's does.
