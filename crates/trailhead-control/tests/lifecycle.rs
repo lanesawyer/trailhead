@@ -1909,6 +1909,24 @@ async fn a_review_cancelled_on_purpose_isnt_an_infrastructure_failure() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_reviewer_sandbox_that_wont_destroy_keeps_the_verdict() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Stubborn sandbox", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
+
+    r.compute.fail(&format!("{}-1", trailhead_factory::review_name(&key, 1, 1)), "destroy");
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed.len(), 1, "the finished verdict isn't thrown away: {done:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(1), "the round counts");
+    assert_eq!(task.run.reviewed, task.run.attempt);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_reviewer_that_never_starts_doesnt_use_up_a_review_round() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Slow to review", "");
