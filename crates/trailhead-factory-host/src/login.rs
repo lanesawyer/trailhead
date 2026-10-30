@@ -1,5 +1,5 @@
 //! `trailhead factory login sprites|claude|github`: saves the factory's secrets in the credential store (the OS
-//! keyring, else a `0600` file), so `run` needs no environment variables or fnox. The environment still wins when set.
+//! keyring, else a `0600` file), so `run` needs no environment variables or fnox. The environment wins when set, then fnox, then these.
 //! Secrets are read from stdin and never printed.
 
 use std::io::{BufRead, IsTerminal};
@@ -28,11 +28,47 @@ pub enum Login {
     },
 }
 
-/// A secret from the environment if it's set and not blank, else the one saved by `login`.
-pub fn resolve(env: Option<String>, creds: &CredStore, cred: Cred) -> Option<String> {
-    env.map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .or_else(|| creds.read(cred).map(|(v, _)| v).filter(|v| !v.is_empty()))
+/// Where a secret came from, for the startup log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Env,
+    Fnox,
+    Keyring,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Env => "env",
+            Source::Fnox => "fnox",
+            Source::Keyring => "keyring",
+        }
+    }
+}
+
+/// A secret from the environment if it's set and not blank, else `fnox get name` (run as `fnox`), else the one saved
+/// by `login`. Logs which source it came from, never the value. An error is fnox failing for a name it defines.
+pub fn resolve(
+    name: &str,
+    env: Option<String>,
+    fnox: &str,
+    creds: &CredStore,
+    cred: Cred,
+) -> Result<Option<String>, String> {
+    let found = match env.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+        Some(v) => Some((v, Source::Env)),
+        None => match crate::fnox::get(fnox, name)? {
+            Some(v) => Some((v, Source::Fnox)),
+            None => creds.read(cred).map(|(v, _)| v).filter(|v| !v.is_empty()).map(|v| (v, Source::Keyring)),
+        },
+    };
+    match found {
+        Some((v, source)) => {
+            tracing::info!("{name} from {}", source.label());
+            Ok(Some(v))
+        }
+        None => Ok(None),
+    }
 }
 
 /// The first line of `input`, trimmed; prompts on stderr first when stdin is a terminal.
@@ -151,15 +187,58 @@ mod tests {
         h.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {token}"))
     }
 
+    /// A script standing in for `fnox`: answers `get SPRITES_TOKEN`, says GITHUB_TOKEN isn't defined, and fails
+    /// for CLAUDE_CODE_OAUTH_TOKEN as a refused provider login would.
+    fn fake_fnox(dir: &tempfile::TempDir) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.path().join("fnox");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\ncase \"$2\" in\n SPRITES_TOKEN) echo from-fnox;;\n CLAUDE_CODE_OAUTH_TOKEN) echo 'provider auth failed' >&2; exit 1;;\n *) echo \"Secret '$2' not found in configuration\" >&2; exit 1;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.display().to_string()
+    }
+
     #[test]
-    fn the_environment_wins_over_the_saved_secret() {
+    fn the_environment_wins_over_fnox_and_the_saved_secret() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let creds = store(&dir);
-        assert_eq!(resolve(None, &creds, SPRITES), None);
+        let fnox = fake_fnox(&dir);
         creds.save(SPRITES, "saved").unwrap();
-        assert_eq!(resolve(None, &creds, SPRITES).as_deref(), Some("saved"));
-        assert_eq!(resolve(Some("  ".into()), &creds, SPRITES).as_deref(), Some("saved"));
-        assert_eq!(resolve(Some("env".into()), &creds, SPRITES).as_deref(), Some("env"));
+        let got = |env: Option<&str>| resolve("SPRITES_TOKEN", env.map(Into::into), &fnox, &creds, SPRITES).unwrap();
+        assert_eq!(got(Some("env")).as_deref(), Some("env"));
+        assert_eq!(got(Some("  ")).as_deref(), Some("from-fnox"));
+        assert_eq!(got(None).as_deref(), Some("from-fnox"));
+    }
+
+    #[test]
+    fn fnox_losing_the_name_or_missing_falls_back_to_the_saved_secret() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        let fnox = fake_fnox(&dir);
+        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB).unwrap(), None);
+        creds.save(GITHUB, "saved").unwrap();
+        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB).unwrap().as_deref(), Some("saved"));
+        let missing = dir.path().join("no-such-fnox").display().to_string();
+        assert_eq!(resolve("GITHUB_TOKEN", None, &missing, &creds, GITHUB).unwrap().as_deref(), Some("saved"));
+        assert_eq!(resolve("SPRITES_TOKEN", None, &missing, &creds, SPRITES).unwrap(), None);
+    }
+
+    #[test]
+    fn fnox_failing_for_a_defined_name_is_an_error_naming_fnox() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        creds.save(CLAUDE, "saved").unwrap();
+        let fnox = fake_fnox(&dir);
+        let err = resolve("CLAUDE_CODE_OAUTH_TOKEN", None, &fnox, &creds, CLAUDE).unwrap_err();
+        assert!(err.contains("fnox") && err.contains("provider auth failed"), "{err}");
+        // The environment still wins without asking fnox.
+        assert!(resolve("CLAUDE_CODE_OAUTH_TOKEN", Some("env".into()), &fnox, &creds, CLAUDE).is_ok());
     }
 
     #[test]

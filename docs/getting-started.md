@@ -62,3 +62,7 @@ Agents can learn the API from `GET /llms.txt` on any server, and the workflow fr
 ## Other machines
 
 Reach the server through a tunnel to its loopback port, and give each machine's agent its own token. The README's "Other machines" section has the commands.
+
+## Factory secrets
+
+If you run the factory, it needs `SPRITES_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and `GITHUB_TOKEN`. It takes each from the first of three places that has it: the environment variable; [fnox](https://fnox.jdx.dev), if it's installed and its config names the secret (never required); then the OS keyring, where `trailhead factory login sprites|claude|github` saves them. At start it logs which source each came from, never the values. See [Operating the factory](factory/operating.md).

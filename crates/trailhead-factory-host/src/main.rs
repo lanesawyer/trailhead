@@ -41,6 +41,7 @@ use trailhead_provider_anthropic::Anthropic;
 use trailhead_server::creds::{Cred, CredStore};
 
 mod find;
+mod fnox;
 mod login;
 mod wake;
 
@@ -183,12 +184,18 @@ struct Wake {
 
 async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    // The environment wins; `trailhead factory login` saved the rest.
+    // The environment wins, then fnox if it's installed, then what `trailhead factory login` saved.
     let creds = paths.creds();
     let opts = &Opts {
-        sprites_token: login::resolve(opts.sprites_token.clone(), &creds, login::SPRITES),
-        github_token: login::resolve(opts.github_token.clone(), &creds, login::GITHUB),
-        claude_oauth_token: login::resolve(opts.claude_oauth_token.clone(), &creds, login::CLAUDE),
+        sprites_token: login::resolve("SPRITES_TOKEN", opts.sprites_token.clone(), "fnox", &creds, login::SPRITES)?,
+        github_token: login::resolve("GITHUB_TOKEN", opts.github_token.clone(), "fnox", &creds, login::GITHUB)?,
+        claude_oauth_token: login::resolve(
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            opts.claude_oauth_token.clone(),
+            "fnox",
+            &creds,
+            login::CLAUDE,
+        )?,
         ..opts.clone()
     };
     let config_path = match &opts.config {
@@ -419,6 +426,7 @@ mod tests {
 
     #[test]
     fn second_control_plane_is_refused_naming_the_holder() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let held = lock_control_plane(dir.path(), "acme/app").unwrap();
         let err = lock_control_plane(dir.path(), "acme/other").unwrap_err();
