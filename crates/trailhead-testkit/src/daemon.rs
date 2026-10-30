@@ -37,6 +37,10 @@ pub struct FakeWorkspace {
     /// Whether the agent starts a merge itself, which prepare then doesn't: `merge_head` sees one from its second call on.
     agent_merges: AtomicBool,
     merge_head_calls: AtomicUsize,
+    /// Whether the agent aborts the merge: `merge_head` sees none after prepare, and HEAD lacks the base.
+    abandons_merge: AtomicBool,
+    /// Files the agent leaves conflict markers in.
+    markers: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
@@ -66,8 +70,19 @@ impl Workspace for FakeWorkspace {
 
     async fn merge_head(&self) -> Result<Option<String>> {
         let call = self.merge_head_calls.fetch_add(1, Ordering::SeqCst);
+        if self.abandons_merge.load(Ordering::SeqCst) && call > 0 {
+            return Ok(None);
+        }
         let merging = *self.merging.lock().unwrap() || (self.agent_merges.load(Ordering::SeqCst) && call > 0);
         Ok(merging.then(|| FAKE_BASE_MERGE.to_string()))
+    }
+
+    async fn contains(&self, _commit: &str) -> Result<bool> {
+        Ok(!self.abandons_merge.load(Ordering::SeqCst))
+    }
+
+    async fn conflict_markers(&self, _start: &str) -> Result<Vec<String>> {
+        Ok(self.markers.lock().unwrap().clone())
     }
 
     async fn head(&self) -> Result<String> {
@@ -141,9 +156,19 @@ impl LocalDaemon {
         }
     }
 
+    /// Has the agent leave conflict markers in these files.
+    pub fn leave_conflict_markers(&self, files: &[&str]) {
+        *self.workspace.markers.lock().unwrap() = files.iter().map(|f| f.to_string()).collect();
+    }
+
     /// Has the agent start the merge of the base branch itself, as when prepare didn't.
     pub fn agent_merges(&self) {
         self.workspace.agent_merges.store(true, Ordering::SeqCst);
+    }
+
+    /// Has the agent abort the merge of the base branch that prepare started.
+    pub fn agent_aborts_merge(&self) {
+        self.workspace.abandons_merge.store(true, Ordering::SeqCst);
     }
 
     /// Lets fake checkouts of a branch start at its head on the code host, as a rework's does.

@@ -1,5 +1,7 @@
 # Local models
 
+> **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
+
 Where planning on 2026-10-27 landed. Not scheduled soon; this records the direction so the model seams don't close it off.
 
 Tasks: TRAIL-125 (generalize `ModelProvider`), TRAIL-119 (Docker `Compute`), TRAIL-126 (local provider).

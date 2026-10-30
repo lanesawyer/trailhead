@@ -174,9 +174,21 @@ async fn finishing_drops_the_claim() {
         Ok(Status::NeedsInput)
     ));
     assert!(matches!(
-        env.store.update_task(&env.human, &t.key, status(Status::InReview), None).await,
-        Err(Error::InvalidTransition { .. })
+        env.store.update_task(&env.human, &t.key, status(Status::InReview), None).await.map(|t| t.status),
+        Ok(Status::InReview)
     ));
+}
+
+#[tokio::test]
+async fn claim_takes_parked_and_reviewed_work_directly() {
+    let env = Env::new().await;
+    let a = env.agent("a").await;
+    for to in [Status::NeedsInput, Status::InReview] {
+        let t = env.task("take over").await;
+        env.store.update_task(&env.human, &t.key, status(to), None).await.unwrap();
+        let claimed = env.store.claim(&a, &t.key, None).await.unwrap();
+        assert_eq!(claimed.task.status, Status::InProgress);
+    }
 }
 
 #[tokio::test]
@@ -739,6 +751,7 @@ fn snapshots_from_before_scheduling_still_load() {
         status: Status::Open,
         priority: 3,
         grade: None,
+        duplicate_of: None,
         due_on: None,
         due_at: None,
         due_tz: None,
@@ -1268,4 +1281,65 @@ async fn ready_and_list_filter_by_grade() {
     assert_eq!(list(GradeFilter::Is(1)).await, ["one"]);
     assert!(GradeFilter::parse("9").is_err());
     assert_eq!(GradeFilter::parse("graded").unwrap(), GradeFilter::Graded);
+}
+
+#[tokio::test]
+async fn a_cancelled_task_records_what_it_duplicates() {
+    let env = Env::new().await;
+    let orig = env.task("CI is red on main").await;
+    let dup = env.task("main CI broken").await;
+    let dup_of = |key: Option<&str>, status| TaskPatch {
+        status,
+        duplicate_of: Some(key.map(String::from)),
+        ..Default::default()
+    };
+
+    // Only a cancelled task can be a duplicate, and not of itself.
+    let open = dup_of(Some(&orig.key), None);
+    assert!(matches!(env.store.update_task(&env.human, &dup.key, open, None).await, Err(Error::Invalid(_))));
+    let itself = dup_of(Some(&dup.key), Some(Status::Cancelled));
+    assert!(matches!(env.store.update_task(&env.human, &dup.key, itself, None).await, Err(Error::Invalid(_))));
+
+    let done = dup_of(Some(&orig.key), Some(Status::Cancelled));
+    let cancelled = env.store.update_task(&env.human, &dup.key, done, None).await.unwrap();
+    assert_eq!(cancelled.duplicate_of, Some(orig.id));
+    let d = env.store.task_detail(&env.human, &dup.key).await.unwrap();
+    assert_eq!(d.duplicate_of.as_deref(), Some(orig.key.as_str()));
+    let d = env.store.task_detail(&env.human, &orig.key).await.unwrap();
+    assert_eq!(d.duplicates, vec![dup.key.clone()]);
+
+    // Reopening clears it.
+    let reopened = env.store.update_task(&env.human, &dup.key, status(Status::Open), None).await.unwrap();
+    assert_eq!(reopened.duplicate_of, None);
+    assert!(env.store.task_detail(&env.human, &orig.key).await.unwrap().duplicates.is_empty());
+}
+
+#[tokio::test]
+async fn undoing_a_duplicate_cancel_restores_the_task() {
+    let env = Env::new().await;
+    let orig = env.task("CI is red on main").await;
+    let dup = env.task("main CI broken").await;
+    let patch =
+        TaskPatch { status: Some(Status::Cancelled), duplicate_of: Some(Some(orig.key.clone())), ..Default::default() };
+    let batch = env.human.next_batch();
+    env.store.update_task(&batch, &dup.key, patch, None).await.unwrap();
+    env.store.undo_batch(&env.human, batch.batch_id).await.unwrap();
+    let back = env.store.get_task(&env.human, &dup.key).await.unwrap();
+    assert_eq!((back.status, back.duplicate_of), (Status::Open, None));
+}
+
+#[tokio::test]
+async fn similar_tasks_finds_unfinished_titles_that_share_most_words() {
+    let env = Env::new().await;
+    let ci = env.task("CI is failing on the main branch").await;
+    env.task("Write the release notes").await;
+    let finished = env.task("main branch CI failing again").await;
+    env.store.update_task(&env.human, &finished.key, status(Status::Cancelled), None).await.unwrap();
+    let new = env.task("Fix failing CI on main").await;
+
+    let keys = |ts: Vec<trailhead_core::Task>| ts.into_iter().map(|t| t.key).collect::<Vec<_>>();
+    let similar = env.store.similar_tasks(&env.human, "AUTH", &new.title, Some(new.id)).await.unwrap();
+    assert_eq!(keys(similar), vec![ci.key.clone()]);
+    // One shared word isn't enough.
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "Notes on main", None).await.unwrap().is_empty());
 }
