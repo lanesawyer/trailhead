@@ -197,7 +197,8 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
     };
     let config = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
     let repo_dir = config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
-    let mut config = FactoryConfig::from_repo_file(&config, find::remote(&repo_dir))
+    let remote = find::remote(&repo_dir);
+    let mut config = FactoryConfig::from_repo_file(&config, remote.clone())
         .map_err(|e| format!("{}: {e}", config_path.display()))?;
     if opts.claude_oauth_token.is_some() {
         tracing::warn!("subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
@@ -245,7 +246,14 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
     tracing::info!(endpoint = %endpoint.id(), project = %config.repo.project, repo = %config.repo.repo().slug(), "factory ready");
 
     let mut factory =
-        Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon);
+        Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon)
+            .with_merge_mode_source(Box::new(move || {
+                let src =
+                    std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+                FactoryConfig::from_repo_file(&src, remote.clone())
+                    .map(|c| c.merge.mode)
+                    .map_err(|e| format!("{}: {e}", config_path.display()))
+            }));
     match &opts.github_token {
         Some(token) => {
             factory =

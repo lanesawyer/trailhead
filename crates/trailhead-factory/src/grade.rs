@@ -142,7 +142,7 @@ const TEST_OR_CHECK_GRADE: u8 = 2;
 /// Reasons shown in full before the rest are counted.
 const SHOWN_REASONS: usize = 3;
 
-/// Path globs per grade and the line limit, from `[grades]` in `factory.toml`.
+/// Path globs per grade and the line limit, from `[factory.grades]` in `.trailhead.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grader<'a> {
     /// (grade, globs), any order.

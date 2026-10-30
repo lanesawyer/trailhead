@@ -442,6 +442,61 @@ async fn a_merged_pr_finishes_its_task_and_unblocks_what_is_chained_behind_it() 
 }
 
 #[tokio::test]
+async fn a_parked_task_whose_pr_is_merged_is_finished_and_unblocks_what_is_chained_behind_it() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_conflict_reworks = 1")).await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::NeedsInput);
+    let next = r.task("Use the greeting").await;
+    r.store.add_dependency(&r.human, &key.0, &next.0).await.unwrap();
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.merged.is_empty() && done.closed.is_empty(), "an open PR leaves the task parked");
+    assert_eq!(r.show(&key).await.status, Status::NeedsInput);
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.merged, std::slice::from_ref(&key.0));
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Done);
+    assert_eq!(task.run.merged.expect("merge recorded").by, trailhead_factory::MergedBy::Human);
+    assert!(r.store.blockers(&r.human, &next.0).await.unwrap().is_empty(), "the chained task is unblocked");
+}
+
+#[tokio::test]
+async fn a_parked_task_whose_pr_was_closed_is_not_asked_about_again() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.close(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::NeedsInput);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.closed.is_empty() && done.merged.is_empty());
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    assert_eq!(comments.iter().filter(|c| c.kind == CommentKind::Question).count(), 1);
+}
+
+#[tokio::test]
+async fn an_open_task_waiting_for_a_rework_whose_pr_is_merged_is_finished() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::Open);
+    let next = r.task("Use the greeting").await;
+    r.store.add_dependency(&r.human, &key.0, &next.0).await.unwrap();
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.merged, std::slice::from_ref(&key.0));
+    assert_eq!(r.show(&key).await.status, Status::Done);
+    assert!(r.store.blockers(&r.human, &next.0).await.unwrap().is_empty(), "the chained task is unblocked");
+}
+
+#[tokio::test]
 async fn a_pr_closed_without_merging_parks_its_task_for_lane() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
