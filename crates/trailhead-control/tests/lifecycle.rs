@@ -2,6 +2,7 @@
 //! budget breaches, failed checks, and reconcile after a crash.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use trailhead_control::{Factory, Outcome, Reconciled};
 use trailhead_factory::{
@@ -579,9 +580,19 @@ async fn live(compute: &FakeCompute, name: &str, task: &TaskKey, role: &str) {
     compute.create(&SandboxSpec { name: name.into(), labels, egress: Default::default() }).await.unwrap();
 }
 
+/// The config with a stall timeout past the wall clock, for tests of the wall clock.
+fn no_stall() -> String {
+    CONFIG.replacen(
+        "budget = { usd = 5",
+        "stall_timeout = 600
+budget = { usd = 5",
+        1,
+    )
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_daemon_that_ignores_cancel_is_cut_off_and_parked() {
-    let r = rig();
+    let r = rig_with(&no_stall());
     let key = r.tracker.add_task("TRAIL", "Wedged", "");
     r.daemon.ignore_cancel();
     r.harness.push(Role::Worker, Script::new(changes()).steps(3, 2_000_000).hang());
@@ -595,8 +606,8 @@ async fn a_daemon_that_ignores_cancel_is_cut_off_and_parked() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_silent_hung_agent_hits_the_wall_clock() {
-    let r = rig();
+async fn a_hung_agent_that_keeps_working_hits_the_wall_clock() {
+    let r = rig_with(&no_stall());
     let key = r.tracker.add_task("TRAIL", "Stuck", "");
     r.harness.push(Role::Worker, Script::new(changes()).hang());
     let ran = r.factory.tick().await.unwrap();
@@ -1626,6 +1637,33 @@ async fn a_deliberate_stop_gives_the_attempt_back() {
 
 fn api_timeout() -> RunOutcome {
     RunOutcome::Failed { reason: "claude: API Error: No response from API (waited 3m)".into() }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_agent_is_failed_as_a_stall_without_using_an_attempt() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Silent", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000).hang());
+    let started = tokio::time::Instant::now();
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("stalled"), "{err}");
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_secs(5 * 60) && waited < Duration::from_secs(6 * 60), "{waited:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open, "not parked");
+    assert_eq!(task.run.attempt, Some(0));
+    assert_eq!(task.run.infra_failures, Some(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_tool_isnt_a_stall() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Long build", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000).slow_tool(Duration::from_secs(20 * 60)));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::Reviewed { .. }), "{ran:?}");
+    assert_eq!(r.tracker.task(&key).run.infra_failures.unwrap_or(0), 0);
 }
 
 #[tokio::test]

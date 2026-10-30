@@ -476,6 +476,14 @@ impl Stream {
                     }
                 }
             }
+            // A tool's result going back to the model: the call is over.
+            Some("user") => {
+                for block in msg["message"]["content"].as_array().into_iter().flatten() {
+                    if block["type"] == "tool_result" {
+                        out.push(RunEvent::ToolResult);
+                    }
+                }
+            }
             Some("result") => self.result = Some(msg.clone()),
             Some("rate_limit_event") => out.extend(quota(&msg["rate_limit_info"])),
             _ => {}

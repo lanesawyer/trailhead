@@ -47,10 +47,35 @@ enum Merge {
 /// How often a worker renews its claim while the agent runs. Leases default to 30 minutes.
 pub const RENEW_EVERY: Duration = Duration::from_secs(10 * 60);
 
+/// How often the daemon tells the control plane how quiet the agent has been, while a run is going.
+pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
+
 /// Everything the factory posts goes out under the connector's account (Lane's, until TRAIL-95), so posts say which
 /// agent and model wrote them.
 fn pr_footer(req: &RunRequest, agent: &str) -> String {
     format!("\n\n---\n🤖 Opened by the Trailhead factory · worker `{agent}` · `{}` · {}", req.model.0, req.task.key.0)
+}
+
+/// How long an agent has been quiet.
+struct Quiet {
+    since: tokio::time::Instant,
+    tools: u32,
+}
+
+impl Quiet {
+    fn note(&mut self, ev: &RunEvent) {
+        match ev {
+            RunEvent::ToolCall { .. } => self.tools += 1,
+            RunEvent::ToolResult => self.tools = self.tools.saturating_sub(1),
+            _ => {}
+        }
+        self.since = tokio::time::Instant::now();
+    }
+
+    /// Whole seconds of quiet, not counting a tool call's running time.
+    fn secs(&self) -> u64 {
+        if self.tools > 0 { 0 } else { self.since.elapsed().as_secs() }
+    }
 }
 
 /// A follow-up that is now a task: newly filed, or already open under that title.
@@ -108,6 +133,7 @@ pub struct Runner {
     pub workspace: Arc<dyn Workspace>,
     pub connect: Connect,
     pub renew_every: Duration,
+    pub heartbeat_every: Duration,
 }
 
 impl Runner {
@@ -181,7 +207,17 @@ impl Runner {
             last.merges.push(merging);
         }
         tracing::info!(task = %key, "agent finished");
-        let (result, checks) = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge).await?;
+        // The checks can go quiet for minutes (a build, the tests), which isn't the agent stalling.
+        let beating = async {
+            loop {
+                tokio::time::sleep(self.heartbeat_every).await;
+                let _ = events.send(RunEvent::Heartbeat { quiet_secs: 0 });
+            }
+        };
+        let (result, checks) = tokio::select! {
+            done = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge) => done?,
+            () = beating => unreachable!("heartbeats don't end"),
+        };
         Ok(RunReport { result, checks, usage })
     }
 
@@ -201,18 +237,27 @@ impl Runner {
         };
         tokio::pin!(run);
         let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + self.renew_every, self.renew_every);
+        let mut beat =
+            tokio::time::interval_at(tokio::time::Instant::now() + self.heartbeat_every, self.heartbeat_every);
         let mut usage = Usage::default();
-        let mut forward = |ev: RunEvent| {
+        // When the agent last did anything, and how many tool calls are running: time spent in a tool isn't quiet.
+        let mut quiet = Quiet { since: tokio::time::Instant::now(), tools: 0 };
+        let mut forward = |ev: RunEvent, quiet: &mut Quiet| {
             if let RunEvent::Usage { usage: u, .. } = &ev {
                 usage += *u;
             }
+            quiet.note(&ev);
             let _ = events.send(ev);
         };
         let outcome = loop {
             tokio::select! {
                 biased;
                 _ = cancel.notified() => return Err(Error::Cancelled),
-                Some(ev) = rx.recv() => forward(ev),
+                Some(ev) = rx.recv() => forward(ev, &mut quiet),
+                _ = beat.tick() => {
+                    let quiet_secs = quiet.secs();
+                    let _ = events.send(RunEvent::Heartbeat { quiet_secs });
+                }
                 _ = renew.tick(), if req.role == Role::Worker => {
                     if let Err(e) = tracker.renew(&req.task.key).await {
                         tracing::warn!(task = %req.task.key.0, error = %e, "renewing the claim failed");
@@ -222,7 +267,7 @@ impl Runner {
             }
         };
         while let Ok(ev) = rx.try_recv() {
-            forward(ev);
+            forward(ev, &mut quiet);
         }
         Ok((outcome, usage))
     }
