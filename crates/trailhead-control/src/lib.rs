@@ -1037,10 +1037,10 @@ impl Factory {
             }
             Run::Report(report, _) => {
                 tracing::warn!(task = %task.key.0, result = ?report.result, "review didn't produce a verdict");
-                // No verdict, no round. The retry count moves the next try's names off this one's revoked sub-agent.
-                let give_back =
-                    RunUpdate { review_rounds: Some(before), retries: Some(retries + 1), ..RunUpdate::default() };
-                self.tracker.report(&task.key, give_back).await?;
+                // No verdict, no round: handled like an infrastructure failure, so it backs off and is capped
+                // rather than being reviewed again on every pass (TRAIL-267).
+                let error = Error::Other(format!("the reviewer ended without a verdict: {:?}", report.result));
+                self.review_infra_failed(task, &name, error, before, retries).await;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
             Run::Breach(reason, _) => {
