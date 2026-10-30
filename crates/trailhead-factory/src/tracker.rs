@@ -79,6 +79,9 @@ pub struct RunUpdate {
     /// The review that last asked for changes, which the rework on the PR branch is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_requested: Option<ChangesRequested>,
+    /// Conflict reworks of the task's PR (TRAIL-221). They don't count as review rounds; `max_conflict_reworks` caps them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_reworks: Option<u32>,
     /// The attempt the last review asked to change. `max_attempts` counts the runs after it, so reworks don't use up
     /// the attempts of the task as a whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,6 +168,7 @@ impl RunUpdate {
             profile,
             pr,
             review_rounds,
+            conflict_reworks,
             reviewed,
             spend,
             failure,
@@ -185,6 +189,7 @@ impl RunUpdate {
         self.profile = profile.or(self.profile.take());
         self.pr = pr.or(self.pr.take());
         self.review_rounds = review_rounds.or(self.review_rounds.take());
+        self.conflict_reworks = conflict_reworks.or(self.conflict_reworks.take());
         self.reviewed = reviewed.or(self.reviewed.take());
         self.spend = spend.or(self.spend.take());
         self.failure = failure.or(self.failure.take());

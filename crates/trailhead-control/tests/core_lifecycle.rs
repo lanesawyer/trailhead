@@ -460,7 +460,8 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     assert_eq!(done.conflicted, std::slice::from_ref(&key.0));
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::Open, "back in the queue for a rework");
-    assert_eq!(task.run.review_rounds, Some(2), "a conflict uses up a review round");
+    assert_eq!(task.run.review_rounds, Some(1), "a conflict leaves the review rounds alone");
+    assert_eq!(task.run.conflict_reworks, Some(1));
     let wanted = task.run.changes_requested.expect("the rework is told why");
     assert!(wanted.conflict && wanted.body.contains(&pr.url), "{wanted:?}");
 
@@ -481,13 +482,13 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     assert_eq!(commits.last().unwrap().merges, [FAKE_BASE_MERGE], "published as a merge commit");
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview, "reviewed again");
-    assert_eq!(task.run.review_rounds, Some(3));
+    assert_eq!(task.run.review_rounds, Some(1), "the re-review after a conflict rework uses no round");
     assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
 }
 
 #[tokio::test]
-async fn a_pr_that_keeps_conflicting_parks_for_lane_at_the_review_round_cap() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 2")).await;
+async fn a_pr_that_keeps_conflicting_parks_for_lane_at_the_conflict_rework_cap() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_conflict_reworks = 1")).await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
     r.codehost.set_mergeable(&pr, Some(false));
     let done = r.factory.reconcile().await.unwrap();
@@ -496,8 +497,75 @@ async fn a_pr_that_keeps_conflicting_parks_for_lane_at_the_review_round_cap() {
     assert_eq!(task.status, Status::NeedsInput);
     let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
     let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
-    assert!(question.body.contains("keeps conflicting") && question.body.contains("2"), "{}", question.body);
+    assert!(
+        question.body.contains("keeps conflicting") && question.body.contains("max_conflict_reworks"),
+        "{}",
+        question.body
+    );
     assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty(), "parked once");
+}
+
+/// Conflicts the PR, reworks it and gets it approved again, `times` times in a row.
+async fn conflict_and_rework(r: &Rig, key: &TaskKey, pr: &trailhead_factory::PrRef, times: u32) {
+    for _ in 0..times {
+        r.codehost.set_mergeable(pr, Some(false));
+        assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
+        assert_eq!(r.show(key).await.status, Status::Open);
+        r.codehost.set_mergeable(pr, Some(true));
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+        r.factory.tick().await.unwrap();
+        assert_eq!(r.show(key).await.status, Status::InReview);
+    }
+}
+
+#[tokio::test]
+async fn conflicts_never_park_a_pr_on_review_rounds() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    conflict_and_rework(&r, &key, &pr, 4).await;
+    let task = r.show(&key).await;
+    assert_eq!(task.run.review_rounds, Some(1));
+    assert_eq!(task.run.conflict_reworks, Some(4));
+}
+
+#[tokio::test]
+async fn conflict_reworks_up_to_the_cap_park_the_task() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    conflict_and_rework(&r, &key, &pr, 4).await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.conflict_reworks, Some(0), "a fresh count once a human reopens it");
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
+    assert!(question.body.contains("max_conflict_reworks") && question.body.contains('5'), "{}", question.body);
+}
+
+#[tokio::test]
+async fn a_request_for_changes_after_conflicts_counts_as_one_round() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(
+        Role::Reviewer,
+        Script::new(RunOutcome::Verdict {
+            kind: VerdictKind::RequestChanges,
+            body: "Add a test.".into(),
+            follow_ups: vec![],
+            raise_grade: None,
+        }),
+    );
+    r.factory.tick().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Open, "reworked, not parked");
+    assert_eq!(task.run.review_rounds, Some(2), "the first review and this one");
+    assert_eq!(task.run.conflict_reworks, Some(1), "a review doesn't reset the conflict count");
 }
 
 #[tokio::test]
