@@ -781,7 +781,8 @@ impl Factory {
             self.setbacks.lock().unwrap().remove(&task.key);
         }
         let infra_failures = if api_trouble { None } else { task.run.infra_failures.filter(|n| *n > 0).map(|_| 0) };
-        let update = RunUpdate { spend: Some(spend), infra_failures, ..RunUpdate::default() };
+        let update =
+            RunUpdate { spend: Some(spend), concluded: Some(name.to_string()), infra_failures, ..RunUpdate::default() };
         match sub.report(&task.key, update).await {
             Err(e) if api_trouble => return Err(self.infra_failed(task, sub, name, e, infra_prior, None).await),
             reported => reported?,
@@ -1674,13 +1675,14 @@ impl Factory {
     }
 
     /// The pooled sandbox a task's worker run is on, if the run may still be going there: the task is in progress
-    /// under its run's sub-agent and the sandbox is busy with it.
+    /// under its run's sub-agent, its report hasn't been handled, and the sandbox is busy with it.
     fn live_run<'a>(&self, task: &Task, live: &'a [Sandbox]) -> Option<&'a Sandbox> {
         let name = task.run.sandbox.as_ref()?;
         let host = task.run.host.as_ref()?;
         // A run that gave its attempt back (a stop on purpose, a lost daemon) is over, whatever the daemon still has.
         let current = worker_name(&task.key, task.run.attempt?, task.run.retries.unwrap_or(0));
         if *name != current
+            || task.run.concluded.as_ref() == Some(name)
             || task.status != Status::InProgress
             || task.holder.as_deref() != Some(self.tracker.sub_agent(name).agent())
         {

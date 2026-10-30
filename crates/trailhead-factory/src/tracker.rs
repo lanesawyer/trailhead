@@ -65,6 +65,10 @@ pub struct RunUpdate {
     /// Total spend across attempts and reviews.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend: Option<Usd>,
+    /// The run whose report was handled and its spend counted, so a control plane that restarts before the run's
+    /// sandbox is released doesn't reattach and count it again (TRAIL-255).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concluded: Option<String>,
     /// Why the last attempt failed, which the next attempt is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
@@ -171,6 +175,7 @@ impl RunUpdate {
             conflict_reworks,
             reviewed,
             spend,
+            concluded,
             failure,
             retries,
             infra_failures,
@@ -192,6 +197,7 @@ impl RunUpdate {
         self.conflict_reworks = conflict_reworks.or(self.conflict_reworks.take());
         self.reviewed = reviewed.or(self.reviewed.take());
         self.spend = spend.or(self.spend.take());
+        self.concluded = concluded.or(self.concluded.take());
         self.failure = failure.or(self.failure.take());
         self.retries = retries.or(self.retries.take());
         self.infra_failures = infra_failures.or(self.infra_failures.take());
