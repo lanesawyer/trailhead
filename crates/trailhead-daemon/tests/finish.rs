@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tokio::sync::{Notify, mpsc};
-use trailhead_daemon::{Connect, RENEW_EVERY, Runner};
+use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner};
 use trailhead_factory::{
     Credential, Endpoint, ModelId, Repo, Role, RunOutcome, RunRequest, RunResult, TaskKey, TaskSpec, Tracker,
     VerdictKind,
@@ -38,6 +38,7 @@ async fn an_error_finishing_a_run_is_reported_as_its_outcome() {
         workspace: Arc::new(FakeWorkspace::default()),
         connect,
         renew_every: RENEW_EVERY,
+        heartbeat_every: HEARTBEAT_EVERY,
     };
     let (tx, _rx) = mpsc::unbounded_channel();
 

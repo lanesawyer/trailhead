@@ -192,6 +192,20 @@ struct LiveRun {
     cancel: Arc<Notify>,
     /// Counts the streams that have followed the run, so a detached stream's watchdog can tell if another came.
     followers: AtomicU64,
+    /// The latest heartbeat's quiet seconds. Heartbeats stay out of the replay log: one replayed after a reattach would
+    /// be stale, so the connected follower gets them live and a new follower waits for the next.
+    beat: watch::Sender<u64>,
+}
+
+impl LiveRun {
+    fn record(&self, ev: RunEvent) {
+        match ev {
+            RunEvent::Heartbeat { quiet_secs } => {
+                self.beat.send_replace(quiet_secs);
+            }
+            ev => self.log.send_modify(|l| l.events.push(ev)),
+        }
+    }
 }
 
 /// Everything a run has produced, kept so a control plane that reattaches can pick up where it lost the stream.
@@ -361,6 +375,7 @@ impl DaemonProtocol {
             log: watch::Sender::new(RunLog::default()),
             cancel: Arc::default(),
             followers: AtomicU64::new(0),
+            beat: watch::Sender::new(0),
         });
         {
             let mut runs = self.runs.lock().unwrap();
@@ -381,13 +396,15 @@ impl DaemonProtocol {
                 let _hold = hold;
                 let result = loop {
                     tokio::select! {
-                        Some(ev) = rx.recv() => live.log.send_modify(|l| l.events.push(ev)),
+                        Some(ev) = rx.recv() => live.record(ev),
                         done = &mut run => break done.unwrap_or_else(|e| Err(Error::Other(format!("run panicked: {e}")))),
                     }
                 };
                 live.log.send_modify(|l| {
                     while let Ok(ev) = rx.try_recv() {
-                        l.events.push(ev);
+                        if !matches!(ev, RunEvent::Heartbeat { .. }) {
+                            l.events.push(ev);
+                        }
                     }
                     l.result = Some(result);
                 });
@@ -407,6 +424,7 @@ impl DaemonProtocol {
     ) -> Result<Result<RunReport>> {
         let mut seen = usize::try_from(seen).unwrap_or(usize::MAX);
         let mut log = live.log.subscribe();
+        let mut beat = live.beat.subscribe();
         let mut incoming = frames::<ToDaemon>(recv);
         loop {
             let (new, result) = {
@@ -422,6 +440,10 @@ impl DaemonProtocol {
             }
             tokio::select! {
                 _ = log.changed() => {}
+                Ok(()) = beat.changed() => {
+                    let quiet_secs = *beat.borrow_and_update();
+                    write_frame(send, &FromDaemon::Event(RunEvent::Heartbeat { quiet_secs })).await?;
+                }
                 msg = incoming.recv() => match msg {
                     Some(Ok(ToDaemon::Cancel)) => live.cancel.notify_one(),
                     Some(Ok(other)) => tracing::warn!(?other, "unexpected message during a run"),
@@ -771,7 +793,10 @@ impl RemoteDaemon {
                             }
                             msg = incoming.recv() => match msg {
                                 Some(Ok(FromDaemon::Event(ev))) => {
-                                    seen += 1;
+                                    // Heartbeats aren't in the daemon's log, so they don't count towards `seen`.
+                                    if !matches!(ev, RunEvent::Heartbeat { .. }) {
+                                        seen += 1;
+                                    }
                                     let _ = events.send(ev);
                                 }
                                 Some(Ok(FromDaemon::Report(report))) => return Ok(report),
