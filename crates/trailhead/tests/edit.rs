@@ -27,6 +27,11 @@ fn edit_sets_and_removes_metadata() {
     let shown = th.stdout(&["show", "QA-1"]);
     assert!(!shown.contains("attempt") && shown.contains(r#""note":"hi""#), "{shown}");
     assert!(!th.run(&["edit", "QA-1", "--meta", "nonsense"]).status.success());
+    let bad = th.run(&["edit", "QA-1", "--meta", "factory.attempt_base=3x"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("factory.attempt_base"));
+    th.stdout(&["edit", "QA-1", "--meta", "factory.attempt_base=3", "--meta", "factory.sandbox=trail-1-a1"]);
+    th.stdout(&["edit", "QA-1", "--meta", "factory.attempt_base=null"]);
 }
 
 #[test]
