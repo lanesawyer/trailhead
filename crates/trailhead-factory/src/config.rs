@@ -343,6 +343,7 @@ impl FactoryConfig {
     /// falls back to.
     pub fn from_repo_file(toml_src: &str, remote: Option<Repo>) -> Result<FactoryConfig> {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct File {
             project: Option<String>,
             #[allow(dead_code)]
@@ -651,15 +652,19 @@ require = ["checks", "agent_review", "human"]
         let file = file.replace("owner = \"lanesawyer\"\nname = \"trailhead\"\n", "");
         let remote = Repo { owner: "o".into(), name: "n".into() };
         let c = FactoryConfig::from_repo_file(&file, Some(remote.clone())).unwrap();
-        assert_eq!((c.repo.project.as_str(), c.repo.repo()), ("TRAIL", remote));
+        assert_eq!((c.repo.project.as_str(), c.repo.repo()), ("TRAIL", remote.clone()));
         assert!(matches!(FactoryConfig::from_repo_file(&file, None), Err(Error::Config(_))));
 
+        let err = |src: &str| match FactoryConfig::from_repo_file(src, Some(remote.clone())) {
+            Err(Error::Config(m)) => m,
+            other => panic!("expected a config error, got {other:?}"),
+        };
         let no_project = file.replace("project = \"TRAIL\"\n", "");
-        assert!(matches!(FactoryConfig::from_repo_file(&no_project, None), Err(Error::Config(_))));
+        assert!(err(&no_project).contains("project"), "{}", err(&no_project));
         let repeated = file.replace("[factory.repo]\n", "[factory.repo]\nproject = \"TRAIL\"\n");
-        assert!(matches!(FactoryConfig::from_repo_file(&repeated, None), Err(Error::Config(_))));
+        assert!(err(&repeated).contains("project"), "{}", err(&repeated));
         let typo = file.replace("agent =", "agnt =");
-        assert!(matches!(FactoryConfig::from_repo_file(&typo, None), Err(Error::Config(_))));
+        assert!(err(&typo).contains("agnt"), "{}", err(&typo));
     }
 
     /// `src` (a bare factory table) with every table header under `[factory.`.
