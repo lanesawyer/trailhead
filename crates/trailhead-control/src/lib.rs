@@ -1235,7 +1235,7 @@ impl Factory {
                 "agent_review" => ("agent_review", verdict_approves),
                 "human" => ("human", status == Status::Approved && human_head.as_ref() == Some(&head)),
                 "quorum" => ("quorum", false),
-                // The PR exists because the worker's checks passed before it was opened.
+                // The PR exists because the worker ran every verifying check, and they passed, before opening it.
                 _ => ("checks", true),
             };
             let list = if ok { &mut passed } else { &mut waiting };
