@@ -443,7 +443,7 @@ async fn a_merged_pr_finishes_its_task_and_unblocks_what_is_chained_behind_it() 
 
 #[tokio::test]
 async fn a_parked_task_whose_pr_is_merged_is_finished_and_unblocks_what_is_chained_behind_it() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_conflict_reworks = 1")).await;
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_conflict_reworks = 1")).await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
