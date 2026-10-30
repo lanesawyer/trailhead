@@ -55,6 +55,9 @@ const MAX_INFRA_BACKOFF: Duration = Duration::from_secs(15 * 60);
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
+/// Who a rework asked for by failing CI is attributed to, in the worker's feedback and the park question.
+const CI_REVIEWER: &str = "CI";
+
 /// Reads the current `[merge] mode`, or says why it can't.
 pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String> + Send + Sync>;
 
@@ -74,6 +77,9 @@ pub struct Factory {
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
+    /// Tasks whose PR a run just pushed to: the host's next `mergeable = false` for each may be a verdict on the head
+    /// before the push, so it is read as not yet worked out, once (TRAIL-241).
+    fresh_pushes: Mutex<HashSet<TaskKey>>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// Tasks already reported as ungraded, so a poll doesn't say it again.
@@ -236,6 +242,7 @@ impl Factory {
             merge_mode,
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
+            fresh_pushes: Mutex::default(),
             quota: Mutex::default(),
             ungraded: Mutex::default(),
             pause_logged: Mutex::default(),
@@ -365,8 +372,9 @@ impl Factory {
                             let reviewing: Vec<&str> = due.reviews.iter().map(|t| t.key.0.as_str()).collect();
                             tracing::info!(?done, ?reviewing, "reconciled");
                         }
-                        // What reconcile found due is picked up again by the next start.
-                        let due = if draining { Due::default() } else { due };
+                        // Due reviews are new work, picked up again by the next start. Due runs are runs the daemon is
+                        // still working on, so a drain keeps following them and waits for them too.
+                        let due = if draining { Due { reviews: Vec::new(), ..due } } else { due };
                         for (task, sandbox) in due.runs {
                             let key = task.key.clone();
                             let factory = self.clone();
@@ -789,7 +797,8 @@ impl Factory {
             self.setbacks.lock().unwrap().remove(&task.key);
         }
         let infra_failures = if api_trouble { None } else { task.run.infra_failures.filter(|n| *n > 0).map(|_| 0) };
-        let update = RunUpdate { spend: Some(spend), infra_failures, ..RunUpdate::default() };
+        let update =
+            RunUpdate { spend: Some(spend), concluded: Some(name.to_string()), infra_failures, ..RunUpdate::default() };
         match sub.report(&task.key, update).await {
             Err(e) if api_trouble => return Err(self.infra_failed(task, sub, name, e, infra_prior, None).await),
             reported => reported?,
@@ -797,6 +806,9 @@ impl Factory {
 
         match report.result {
             RunResult::PrOpened(pr) => {
+                if task.run.pending_changes().is_some_and(|c| c.conflict) {
+                    self.fresh_pushes.lock().unwrap().insert(task.key.clone());
+                }
                 // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
                 // starts from the PR branch.
                 self.release_worker(sandbox).await?;
@@ -1105,6 +1117,9 @@ impl Factory {
         self.record_grade(&task, &grade).await?;
         let ci = codehost.ci(pr).await?;
         let head = ci.head.clone();
+        if let CiState::Failed { checks } = &ci.state {
+            return self.rework_ci_failure(&task, pr, &head, checks).await;
+        }
         let prev = task.run.merge.clone();
         let mut status = task.status;
         // The head each approval was given on: the control plane's own is marked before it moves the task, so an
@@ -1423,7 +1438,13 @@ impl Factory {
             tracing::warn!(task = %task.key.0, round, "the reviewer still wants changes; parking");
             self.tracker.reopen(&task.key).await?;
             self.tracker.claim(&task.key).await?;
-            let question = if conflict {
+            let question = if conflict && reviewer == CI_REVIEWER {
+                format!(
+                    "CI keeps failing on the PR: {round} conflict reworks so far (the limit is {max}). The last \
+                     failure:\n\n{body}\n\nFix the PR or settle what's landing, then reopen the task; raise \
+                     `max_conflict_reworks` to allow more."
+                )
+            } else if conflict {
                 format!(
                     "The PR keeps conflicting with the base branch: {round} conflict reworks so far \
                      (the limit is {max}). Merge the base branch into the PR yourself or settle what's landing, then \
@@ -1719,13 +1740,14 @@ impl Factory {
     }
 
     /// The pooled sandbox a task's worker run is on, if the run may still be going there: the task is in progress
-    /// under its run's sub-agent and the sandbox is busy with it.
+    /// under its run's sub-agent, its report hasn't been handled, and the sandbox is busy with it.
     fn live_run<'a>(&self, task: &Task, live: &'a [Sandbox]) -> Option<&'a Sandbox> {
         let name = task.run.sandbox.as_ref()?;
         let host = task.run.host.as_ref()?;
         // A run that gave its attempt back (a stop on purpose, a lost daemon) is over, whatever the daemon still has.
         let current = worker_name(&task.key, task.run.attempt?, task.run.retries.unwrap_or(0));
         if *name != current
+            || task.run.concluded.as_ref() == Some(name)
             || task.status != Status::InProgress
             || task.holder.as_deref() != Some(self.tracker.sub_agent(name).agent())
         {
@@ -1820,6 +1842,47 @@ impl Factory {
         self.request_rework(task, requested, round).await
     }
 
+    /// CI finished and failed on the PR's current head, whether the worker's own commit or a merge of the base branch
+    /// (a clean update keeps the verdict, so nothing else would look at it; TRAIL-390): the task, unapproved if it was,
+    /// goes back for a rework told which checks failed and the end of their logs. It counts toward
+    /// `max_conflict_reworks`, not review rounds, since CI breaking as main moves isn't a review finding.
+    async fn rework_ci_failure(&self, task: &Task, pr: &PrRef, head: &str, checks: &[String]) -> Result<()> {
+        let Some(codehost) = &self.codehost else { return Ok(()) };
+        let attempt = task.run.attempt.unwrap_or(1);
+        // Already asked for on this attempt: reconcile finishes reopening it, and the head isn't reworked twice.
+        if task.run.pending_changes().is_some_and(|c| c.attempt == attempt) {
+            return Ok(());
+        }
+        let after_update = match &task.run.reviewed_head {
+            Some(reviewed) => reviewed != head && codehost.carries_verdict(pr, reviewed).await?,
+            None => false,
+        };
+        let logs = codehost.ci_logs(pr, checks).await.unwrap_or_else(|e| {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't read the logs of the failed checks");
+            Vec::new()
+        });
+        let mut body = format!("CI failed on {} at {head}: {}.", pr.url, checks.join(", "));
+        if after_update {
+            body.push_str(
+                " It passed before the base branch was merged into the PR, so the failure came in with that merge: \
+                 something that landed on the base branch clashes with this change.",
+            );
+        }
+        for (check, log) in &logs {
+            body.push_str(&format!("\n\nEnd of the log of {check}:\n\n```\n{}\n```", log.trim_end()));
+        }
+        body.push_str("\n\nReproduce the failure, fix it, run the checks and finish.");
+        if task.status == Status::Approved {
+            self.tracker.unapprove(&task.key).await?;
+        }
+        let round = task.run.conflict_reworks.unwrap_or(0) + 1;
+        self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
+        tracing::warn!(task = %task.key.0, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
+        let head = Some(head.to_string());
+        let requested = ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head };
+        self.request_rework(task, requested, round).await
+    }
+
     /// Whether the task's PR was merged or closed, which is dealt with here: a merge, by whoever, finishes the task and
     /// a closed PR parks it.
     /// `None` when it did; when it's still open (or there's no PR to ask about), `Some` of whether it merges cleanly.
@@ -1839,7 +1902,12 @@ impl Factory {
                 done.closed.push(task.key.0.clone());
                 Ok(None)
             }
-            PrState::Open { mergeable } => Ok(Some(mergeable)),
+            PrState::Open { mergeable } => {
+                // GitHub works `mergeable` out after a push, so right after one a `false` may be the old head's. Read
+                // it as unknown this once; the next reconcile asks again and gets the settled answer.
+                let fresh = self.fresh_pushes.lock().unwrap().remove(&task.key);
+                Ok(Some(if fresh && mergeable == Some(false) { None } else { mergeable }))
+            }
         }
     }
 

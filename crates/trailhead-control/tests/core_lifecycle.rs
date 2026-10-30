@@ -258,6 +258,13 @@ async fn a_task_with_malformed_factory_metadata_is_skipped_not_fatal() {
     assert!(r.tracker.in_flight("TRAIL").await.unwrap().is_empty());
     r.factory.reconcile().await.unwrap();
     assert!(r.tracker.show(&bad).await.is_err());
+
+    // The task says why it was skipped, once however many passes see it.
+    r.tracker.ready("TRAIL", None, 10).await.unwrap();
+    r.tracker.in_flight("TRAIL").await.unwrap();
+    let notes: Vec<_> = r.store.list_comments(&r.human, &bad.0).await.unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].body.contains("attempt_base"), "{}", notes[0].body);
 }
 
 #[tokio::test]
@@ -588,7 +595,27 @@ async fn conflict_and_rework(r: &Rig, key: &TaskKey, pr: &trailhead_factory::PrR
         r.harness.push(Role::Reviewer, Script::new(approve()));
         r.factory.tick().await.unwrap();
         assert_eq!(r.show(key).await.status, Status::InReview);
+        // The host's answer for the pushed head is in: the one poll after a push is spent on it.
+        assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
     }
+}
+
+#[tokio::test]
+async fn a_stale_conflict_right_after_a_conflict_rework_is_read_once_as_unknown() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    // The host still says `false`, which is the head from before the push.
+    r.factory.tick().await.unwrap();
+    assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty(), "no second rework on the stale answer");
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.conflict_reworks, Some(1));
+    // Still `false` on the next poll, so it's real.
+    assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
 }
 
 #[tokio::test]
@@ -694,6 +721,24 @@ async fn a_merge_the_agent_aborted_is_not_published() {
     assert_eq!(r.codehost.commits(&pr.repo, "factory/trail-1").len(), before, "nothing published");
     let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
     assert!(comments.iter().any(|c| c.body.contains("abandoned")), "{comments:?}");
+}
+
+#[tokio::test]
+async fn a_branch_the_agent_rebased_is_not_published() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.daemon.agent_rebases();
+    let before = r.codehost.commits(&pr.repo, "factory/trail-1").len();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.codehost.commits(&pr.repo, "factory/trail-1").len(), before, "nothing published");
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    assert!(comments.iter().any(|c| c.body.contains("rewritten")), "{comments:?}");
 }
 
 #[tokio::test]
