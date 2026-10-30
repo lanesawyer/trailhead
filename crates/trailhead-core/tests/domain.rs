@@ -364,6 +364,28 @@ async fn undo_refuses_to_restore_a_parent_cycle() {
 }
 
 #[tokio::test]
+async fn moving_under_an_existing_parent_cycle_is_rejected_without_hanging() {
+    let env = Env::new().await;
+    let a = env.task("a").await;
+    let b = env.task("b").await;
+    let c = env.task("c").await;
+    // The API can't build a cycle, so write one straight into the table.
+    let conn = env.raw_conn().await;
+    for (task, parent) in [(&a, &b), (&b, &a)] {
+        conn.execute(
+            "UPDATE tasks SET parent_id = ?1 WHERE id = ?2",
+            libsql::params![parent.id.to_string(), task.id.to_string()],
+        )
+        .await
+        .unwrap();
+    }
+    let under_a = TaskPatch { parent: Some(Some(a.key.clone())), ..Default::default() };
+    let moved = env.store.update_task(&env.human, &c.key, under_a, None);
+    let err = tokio::time::timeout(std::time::Duration::from_secs(10), moved).await.expect("walk must terminate");
+    assert!(matches!(err, Err(Error::Invalid(_))), "{err:?}");
+}
+
+#[tokio::test]
 async fn dependency_cycles_are_rejected() {
     let env = Env::new().await;
     let a = env.task("a").await;
