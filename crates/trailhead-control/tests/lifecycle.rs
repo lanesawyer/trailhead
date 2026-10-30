@@ -1750,7 +1750,17 @@ async fn failures_that_are_the_agents_or_the_tasks_still_use_up_attempts() {
     assert!(matches!(&ran, Outcome::Parked { .. }), "{ran:?}");
     let body = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap().body;
     assert!(body.contains("Gave up after 3 failed attempts"), "{body}");
-    assert!(body.contains(&format!("trailhead edit {} --meta factory.attempt_base=3", key.0)), "{body}");
+    assert!(!body.contains("attempt_base"), "reopening is all it asks: {body}");
+    assert_eq!(task.run.gave_up, None);
+    assert_eq!(r.tracker.task(&key).run.gave_up, Some(3), "the marker records where it gave up");
+
+    // Reopened by a human: the count starts again, so one more failure doesn't park it.
+    r.tracker.set_status(&key, Status::Open);
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "still broken".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::Failed { .. }), "{ran:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!((task.run.attempt, task.run.attempt_base), (Some(4), Some(3)));
 }
 
 #[tokio::test]
