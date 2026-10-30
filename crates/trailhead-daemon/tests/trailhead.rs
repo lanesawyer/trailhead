@@ -9,7 +9,7 @@ use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use trailhead_control::{CoreTracker, Factory, Outcome};
-use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Store};
+use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Store, TaskFilter};
 use trailhead_daemon::net::{
     ALPN, API_ALPN, ApiTunnel, DaemonProtocol, Launch, RemoteDaemon, build_id, open_api_tunnel, parse_endpoint_id,
     parse_secret_key,
@@ -209,7 +209,7 @@ async fn work_flows_from_trailhead_over_the_tunnel() {
     assert_eq!(review.body, "Looks right.");
     assert_eq!(review.model.as_deref(), Some("fake-opus"));
 
-    // The reviewer's project-scoped token created the follow-up through POST /tasks, and the lookup by title found it.
+    // The reviewer's project-scoped token created the follow-up through POST /tasks, and the control plane's CoreTracker finds it by title.
     let filed_key = r.tracker.find_open_by_title("TRAIL", "cover the edge ").await.unwrap().expect("a filed follow-up");
     assert_ne!(filed_key, key);
     // The reviewer's comment lists the key only if create_task read it from the POST /tasks response.
@@ -226,6 +226,44 @@ async fn work_flows_from_trailhead_over_the_tunnel() {
     // Both sandboxes' sub-agents are revoked, so their tokens no longer work, even through the tunnel.
     let agents = r.store.list_agents(&r.human).await.unwrap();
     assert!(agents.iter().filter(|a| a.name.starts_with("factory/trail-1")).all(|a| a.revoked_at.is_some()));
+}
+
+#[tokio::test]
+async fn a_follow_up_already_open_is_found_through_the_tunnel() {
+    let mut r = Rig::new().await;
+    r.serve("trailhead-w1").await;
+    r.serve("trail-1-a1-r1").await;
+    let key = r.task("Add a greeting").await;
+    // Differs from the follow-up's title in case and surrounding whitespace, so only the daemon's RestTracker lookup can match it.
+    let existing = r.task("  COVER the edge ").await;
+    r.harness.push(Role::Worker, Script::new(changes()).steps(2, 100_000));
+    r.harness.push(
+        Role::Reviewer,
+        Script::new(RunOutcome::Verdict {
+            kind: VerdictKind::Approve,
+            body: "Looks right.".into(),
+            follow_ups: vec![FollowUp {
+                title: "Cover the edge".into(),
+                description: "No test for empty input.".into(),
+                priority: Some(2),
+            }],
+            raise_grade: None,
+        })
+        .steps(1, 10_000),
+    );
+
+    let ran = r.factory().tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+
+    // GET /tasks through the project-scoped token found the existing task, so the review points at it.
+    let comment = r.codehost.prs()[0].comments.last().unwrap().clone();
+    assert!(comment.contains(&format!("`{}`", existing.0)), "{comment}");
+    assert!(comment.contains("(already open)"), "{comment}");
+    let filter = TaskFilter { project: Some("TRAIL".into()), ..Default::default() };
+    let tasks = r.store.list_tasks(&r.human, filter).await.unwrap();
+    let keys: Vec<_> = tasks.iter().map(|t| t.key.as_str()).collect();
+    assert_eq!(tasks.len(), 2, "no duplicate was filed: {keys:?}");
+    assert!(keys.contains(&key.0.as_str()) && keys.contains(&existing.0.as_str()), "{keys:?}");
 }
 
 #[tokio::test]

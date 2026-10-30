@@ -99,6 +99,11 @@ impl FakeTracker {
         self.state.lock().unwrap().tasks.get_mut(key).unwrap().grade = Some(grade);
     }
 
+    /// A human takes a task's grade away again.
+    pub fn clear_grade(&self, key: &TaskKey) {
+        self.state.lock().unwrap().tasks.get_mut(key).unwrap().grade = None;
+    }
+
     /// Whether this agent may approve tasks, as a delegated reviewer can; every agent may until told otherwise.
     pub fn set_delegated(&self, agent: &str, delegated: bool) {
         let mut s = self.state.lock().unwrap();

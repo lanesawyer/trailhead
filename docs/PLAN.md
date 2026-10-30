@@ -1,5 +1,7 @@
 # Trailhead — Project Plan
 
+> **Design document.** This is the project's source of truth for architecture, the data model and the phase order. New to Trailhead? Start with the [Introduction](introduction.md) and [Getting started](getting-started.md).
+
 ## Vision
 
 Trailhead is a software factory built on a task engine. It turns tasks into agent runs inside locked-down sandboxes, gates every change through agent or human review, and records the work in Trailhead itself. The factory's design lives in `docs/factory/`, starting at `docs/factory/README.md`; this plan covers the whole and the task engine in detail.
@@ -98,7 +100,7 @@ Every record carries a `workspace_id`, and every write records the actor and the
 | Agent | Acts for exactly one user; may be a sub-agent of another agent | `id`, `owner_user_id` (required), `parent_agent_id`, `name`, `revoked_at` |
 | Token | Credential for a user or agent, hashed at rest | `id`, `principal` (user or agent), `scopes` (can be limited to projects), `revoked_at`, `rate_limit` |
 | Project | Groups tasks; holds the context agents read before working | `id`, `key` (e.g. `AUTH`), `name`, `brief`, `status`, `metadata` (JSON) |
-| Task | The unit of work | `id` (UUIDv7), `key` (e.g. `AUTH-42`), `project_id`, `title`, `description`, `status`, `priority`, `grade`, `due_on` + `due_at` + `due_tz`, `scheduled_on` + `scheduled_at` + `scheduled_tz`, `parent_id`, `metadata` (JSON), `version`, `source`, `external_id`, `deleted_at` |
+| Task | The unit of work | `id` (UUIDv7), `key` (e.g. `AUTH-42`), `project_id`, `title`, `description`, `status`, `priority`, `grade`, `duplicate_of`, `due_on` + `due_at` + `due_tz`, `scheduled_on` + `scheduled_at` + `scheduled_tz`, `parent_id`, `metadata` (JSON), `version`, `source`, `external_id`, `deleted_at` |
 | Dependency | Task A blocks task B, across projects too | `blocker_id`, `blocked_id` |
 | Claim | A lease on a task | `task_id`, `agent_id`, `expires_at` |
 | Comment | Typed discussion, handoffs and questions on a task | `id`, `task_id`, `author_id`, `on_behalf_of`, `kind`, `addressed_to`, `body`, `resolved_at`, `created_at` |
@@ -135,7 +137,9 @@ Every task belongs to exactly one project, and projects don't nest.
 
 **Agents helping agents.** For real work, an agent creates a subtask that blocks its own task; the original becomes ready again once the subtask is done. For a quick question, it uses a `question` comment addressed to the other agent.
 
-**Statuses.** `open`, `in_progress`, `needs_input`, `in_review`, `approved`, `done`, `cancelled`, with transitions enforced in core. `in_review` means an agent finished and someone must approve it. `approved` means a reviewer cleared it and it is waiting to be finished, for the factory a merge; whoever finishes it moves it to `done`. A reviewer can still go straight from `in_review` to `done` when there's nothing left to do after approval, as with a shopping list. Review can be required per project. "Blocked" is computed from dependencies, never stored.
+**Statuses.** `open`, `in_progress`, `needs_input`, `in_review`, `approved`, `done`, `cancelled`, with transitions enforced in core. `in_review` means an agent finished and someone must approve it. `approved` means a reviewer cleared it and it is waiting to be finished, for the factory a merge; whoever finishes it moves it to `done`. `needs_input` and `in_review` work can be claimed directly, and a parked task can go straight back to `in_review`, so taking it over never passes through `open`. A reviewer can still go straight from `in_review` to `done` when there's nothing left to do after approval, as with a shopping list. Review can be required per project. "Blocked" is computed from dependencies, never stored.
+
+**Duplicates.** `cancel --duplicate-of OTHER` (REST/MCP: `duplicate_of` with `status` `cancelled`) stores the original's id in the task's `duplicate_of` column, so `show` prints "duplicate of KEY" and the original lists its duplicates. It is part of the task snapshot, so undo restores it, and leaving `cancelled` clears it. Unlike a dependency it doesn't make anything ready or blocked. On create (CLI `add`, REST `POST /v1/tasks`, MCP `create_task`) the engine searches unfinished tasks in the project for titles sharing most of their words and answers with `possible_duplicates`: a warning, never a block.
 
 **Grades.** A task can carry a `grade`, 1 to 4, for how much risk its work carries (named after climbing classes; [factory/review.md](factory/review.md#grades)). It is optional and most tasks never have one. Only a human sets the first grade, lowers it or clears it; an agent can only raise it, the same rule as `require_review`, and undo respects it. The factory only works graded tasks, so grading a task is how it's triaged for the factory, and a task without one, like an item on a shopping list, is never picked up.
 

@@ -24,6 +24,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (15, "review_verdicts", include_str!("../migrations/0015_review_verdicts.sql")),
     (16, "token_expiry", include_str!("../migrations/0016_token_expiry.sql")),
     (17, "task_grade", include_str!("../migrations/0017_task_grade.sql")),
+    (18, "duplicate_of", include_str!("../migrations/0018_duplicate_of.sql")),
 ];
 
 pub(crate) async fn migrate(conn: &Connection) -> Result<()> {

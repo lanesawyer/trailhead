@@ -495,6 +495,27 @@ async fn reconcile_reattaches_to_a_run_still_going_and_counts_all_its_spend() {
 }
 
 #[tokio::test]
+async fn a_reattached_run_counts_its_wall_clock_from_when_it_started() {
+    let r = rig();
+    // Started 61 minutes back against a 60 minute worker budget: nothing is left of it.
+    let key = going(&r, Usd::ZERO, 61 * 60).await;
+    r.daemon.ongoing_hung("trail-1-a1", vec![spent(1_000)]);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reattached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked, not given another full budget");
+    assert!(
+        r.tracker.comments(&key).iter().any(|c| c.kind == "question" && c.body.contains("60 minutes")),
+        "{:?}",
+        r.tracker.comments(&key)
+    );
+    let sandbox = r.compute.get("trailhead-w1").expect("sandbox kept for resuming");
+    assert!(!sandbox.labels.contains_key(label::ROLE), "connector access cut");
+    assert!(r.compute.checkpoints("trailhead-w1").last().unwrap().starts_with("parked:"));
+}
+
+#[tokio::test]
 async fn a_run_the_daemon_has_lost_goes_back_to_the_queue_without_using_an_attempt() {
     let r = rig();
     let key = going(&r, Usd::ZERO, 60).await;
@@ -1355,6 +1376,62 @@ async fn a_rework_that_fails_its_check_is_retried_not_parked() {
 }
 
 #[tokio::test]
+async fn a_parked_request_a_person_settled_is_not_reworked_by_reconcile() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 1"));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+
+    // A person fixes the PR by hand and moves the task back to review.
+    r.tracker.set_status(&key, Status::InReview);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reworked.is_empty(), "{done:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+}
+
+#[tokio::test]
+async fn no_worker_starts_on_a_task_whose_pr_merged_meanwhile() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open);
+    let pr = task.run.pr.clone().expect("a PR");
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let workers = |r: &Rig| r.daemon.requests().iter().filter(|q| q.role == Role::Worker).count();
+    let before = workers(&r);
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    assert_eq!(workers(&r), before, "no worker run started");
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn no_worker_starts_on_a_task_whose_pr_closed_meanwhile() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+
+    r.codehost.close(&pr);
+    let workers = |r: &Rig| r.daemon.requests().iter().filter(|q| q.role == Role::Worker).count();
+    let before = workers(&r);
+    r.factory.tick().await.unwrap();
+    assert_eq!(workers(&r), before, "no worker run started");
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test]
 async fn a_rework_request_cut_short_is_finished_by_reconcile() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
@@ -1600,6 +1677,7 @@ async fn failures_that_are_the_agents_or_the_tasks_still_use_up_attempts() {
     assert!(matches!(&ran, Outcome::Parked { .. }), "{ran:?}");
     let body = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap().body;
     assert!(body.contains("Gave up after 3 failed attempts"), "{body}");
+    assert!(body.contains(&format!("trailhead edit {} --meta factory.attempt_base=3", key.0)), "{body}");
 }
 
 #[tokio::test]
@@ -1820,6 +1898,29 @@ async fn an_ungraded_task_is_skipped_and_reported_once_until_a_human_grades_it()
     let ran = r.factory.tick().await.unwrap();
     assert_eq!(ran.len(), 1);
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
+    assert_ne!(r.tracker.task(&key).run.ungraded, Some(true), "graded, so the flag is cleared");
+}
+
+#[tokio::test]
+async fn a_task_whose_grade_is_cleared_is_reported_ungraded_again() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Document it", "");
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    assert_eq!(r.tracker.task(&key).run.ungraded, Some(true));
+
+    // Graded and picked up, the flag is cleared.
+    r.tracker.set_grade(&key, 1);
+    assert_eq!(r.factory.tick().await.unwrap().len(), 1);
+    assert_ne!(r.tracker.task(&key).run.ungraded, Some(true));
+
+    // Reopened with its grade taken away, it's said again.
+    r.tracker.set_status(&key, Status::Open);
+    r.tracker.clear_grade(&key);
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    assert_eq!(notes(&r, &key), ["no grade; set one to queue it", "no grade; set one to queue it"]);
+    assert_eq!(r.tracker.task(&key).run.ungraded, Some(true));
 }
 
 #[tokio::test]

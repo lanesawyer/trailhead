@@ -1,27 +1,36 @@
 # Summary
 
-- [Plan](PLAN.md)
+[Introduction](introduction.md)
 
-# Factory
+# Using Trailhead
 
-- [Overview of the docs](factory/README.md)
-  - [Overview](factory/overview.md)
+- [Getting started](getting-started.md)
+- [Concepts](concepts.md)
+- [OpenClaw](integrations/openclaw.md)
+
+# The factory
+
+- [Overview](factory/overview.md)
+- [Task lifecycle](factory/lifecycle.md)
+- [Operating the factory](factory/operating.md)
+- [Review, grades and the merger](factory/review.md)
+
+# Design notes
+
+- [Project plan](PLAN.md)
+- [Index of the factory design](factory/README.md)
   - [Seams](factory/seams.md)
   - [Sandbox](factory/sandbox.md)
   - [Agents](factory/agents.md)
-  - [Lifecycle](factory/lifecycle.md)
-  - [Engine changes](factory/engine-changes.md)
-  - [Review](factory/review.md)
   - [State](factory/state.md)
-  - [Local models](factory/local-models.md)
   - [Budgets](factory/budgets.md)
   - [Observability](factory/observability.md)
-  - [MVP](factory/mvp.md)
-  - [Operating](factory/operating.md)
+  - [Local models](factory/local-models.md)
   - [UI](factory/ui.md)
-  - [Open questions](factory/open-questions.md)
-  - [Naming](factory/naming.md)
+  - [Engine changes](factory/engine-changes.md)
 
-# Integrations
+# History and undecided
 
-- [OpenClaw](integrations/openclaw.md)
+- [MVP plan](factory/mvp.md)
+- [Open questions](factory/open-questions.md)
+- [Naming ideas](factory/naming.md)
