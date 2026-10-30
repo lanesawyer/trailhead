@@ -5,7 +5,6 @@ use super::{Ctx, names, params, print_json};
 use crate::cli::{AddArgs, EditArgs};
 use crate::dates::{Field, local_today, parse_day_time};
 use crate::output::{self, comment_line, s, short_time, task_line, task_list};
-use trailhead_factory::RunUpdate;
 
 pub(crate) async fn ready(cx: &Ctx, project: Option<String>, grade: Option<String>, limit: Option<i64>) -> Result<()> {
     let q = params([
@@ -206,18 +205,69 @@ fn meta_patch(pairs: &[String]) -> Result<Value> {
     Ok(patch)
 }
 
-/// Rejects a value for a `factory.<field>` key the factory couldn't read back as a `RunUpdate` field, such as
-/// `factory.attempt_base=3x`. `null` removes a field, so it always passes; deeper paths and unknown keys are left alone.
+/// The JSON kind a scalar `factory.<field>` takes. The CLI can't depend on `trailhead-factory` (it isn't published),
+/// so a test checks this table against `RunUpdate`.
+const FACTORY_FIELDS: &[(&str, Kind)] = &[
+    ("attempt", Kind::Unsigned),
+    ("attempt_base", Kind::Unsigned),
+    ("gave_up", Kind::Unsigned),
+    ("review_rounds", Kind::Unsigned),
+    ("reviewed", Kind::Unsigned),
+    ("retries", Kind::Unsigned),
+    ("infra_failures", Kind::Unsigned),
+    ("conflict_reworks", Kind::Unsigned),
+    ("started", Kind::Integer),
+    ("sandbox", Kind::String),
+    ("host", Kind::String),
+    ("profile", Kind::String),
+    ("failure", Kind::String),
+    ("reviewed_head", Kind::String),
+    ("merging", Kind::String),
+    ("ungraded", Kind::Bool),
+];
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Unsigned,
+    Integer,
+    String,
+    Bool,
+}
+
+impl Kind {
+    fn accepts(self, v: &Value) -> bool {
+        match self {
+            Kind::Unsigned => v.as_u64().is_some_and(|n| u32::try_from(n).is_ok()),
+            Kind::Integer => v.as_i64().is_some(),
+            Kind::String => v.is_string(),
+            Kind::Bool => v.is_boolean(),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Unsigned => "a non-negative integer",
+            Kind::Integer => "an integer",
+            Kind::String => "a string",
+            Kind::Bool => "true or false",
+        }
+    }
+}
+
+/// Rejects a value for a scalar `factory.<field>` key of the wrong kind, such as `factory.attempt_base=3x`, which
+/// the factory couldn't read back. `null` removes a field, so it always passes; nested paths, structured fields and
+/// unknown keys are left alone.
 fn check_factory_field(path: &str, value: &Value) -> Result<()> {
     let Some(("factory", field)) = path.split_once('.') else {
         return Ok(());
     };
-    if field.contains('.') || value.is_null() {
+    let Some((_, kind)) = FACTORY_FIELDS.iter().find(|(f, _)| *f == field) else {
+        return Ok(());
+    };
+    if value.is_null() || kind.accepts(value) {
         return Ok(());
     }
-    serde_json::from_value::<RunUpdate>(json!({ field: value }))
-        .map(drop)
-        .map_err(|e| anyhow::anyhow!("--meta {path}: {e}"))
+    anyhow::bail!("--meta {path} must be {}, not {value}", kind.name())
 }
 
 /// A grade is 1 to 4; "none" clears it. The rules live in core.
@@ -277,4 +327,25 @@ pub(crate) async fn search(cx: &Ctx, query: &[String], limit: Option<i64>) -> Re
         task_list(&v, "no matches")
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keeps `FACTORY_FIELDS` in step with `RunUpdate`: a sample of each kind must set that field.
+    #[test]
+    fn factory_fields_match_run_update() {
+        for (field, kind) in FACTORY_FIELDS {
+            let sample = match kind {
+                Kind::Unsigned | Kind::Integer => json!(3),
+                Kind::String => json!("x"),
+                Kind::Bool => json!(true),
+            };
+            assert!(kind.accepts(&sample), "{field}");
+            let run: trailhead_factory::RunUpdate = serde_json::from_value(json!({ *field: sample.clone() })).unwrap();
+            let back = serde_json::to_value(&run).unwrap();
+            assert_eq!(back, json!({ *field: sample }), "{field} isn't a {} on RunUpdate", kind.name());
+        }
+    }
 }
