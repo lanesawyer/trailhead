@@ -1015,6 +1015,7 @@ impl Factory {
         };
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
+        let reviewed_head_at_request = head.clone();
         let (spend, reviewed, reviewed_head) = match &run {
             Run::Report(RunReport { result: RunResult::Reviewed(v), .. }, s) => {
                 (*s, (v.kind != VerdictKind::RequestChanges).then_some(attempt), head)
@@ -1045,6 +1046,7 @@ impl Factory {
                         body: verdict.body.clone(),
                         attempt,
                         conflict: false,
+                        head: reviewed_head_at_request,
                     };
                     let round = before + 1;
                     self.tracker
@@ -1810,7 +1812,11 @@ impl Factory {
             pr.url
         );
         tracing::warn!(task = %task.key.0, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
-        let requested = ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true };
+        let head = match &self.codehost {
+            Some(codehost) => codehost.head(pr).await.ok(),
+            None => None,
+        };
+        let requested = ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true, head };
         self.request_rework(task, requested, round).await
     }
 
@@ -1892,7 +1898,16 @@ impl Factory {
                     let count = if c.conflict { task.run.conflict_reworks } else { task.run.review_rounds };
                     count == Some(0)
                 };
-                if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c)) {
+                // The head recorded with the request is sturdier than the counts, whose reset can be lost: a PR that
+                // has moved since was pushed to by a person (TRAIL-338).
+                let moved =
+                    match (&task.run.pr, &self.codehost, task.run.pending_changes().and_then(|c| c.head.as_ref())) {
+                        (Some(pr), Some(codehost), Some(recorded)) => codehost.head(pr).await? != *recorded,
+                        _ => false,
+                    };
+                if let Some(requested) =
+                    task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c) && !moved)
+                {
                     let round = if requested.conflict {
                         task.run.conflict_reworks.unwrap_or(1)
                     } else {
