@@ -1,5 +1,7 @@
 # Observability
 
+> **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
+
 Proposal: instrument everything with `tracing` and export through OpenTelemetry, so the backend is a later, swappable choice. Trailhead already logs with `tracing`, carrying request and batch IDs.
 
 - **OpenTelemetry** is a vendor-neutral CNCF standard for traces, metrics and logs. Instrument once, send over its wire protocol (OTLP), and point it at any backend that speaks OTLP. In Rust: `tracing` + `tracing-opentelemetry` + `opentelemetry-otlp`. Conventions for LLM calls (model, tokens, latency) exist but are still evolving.

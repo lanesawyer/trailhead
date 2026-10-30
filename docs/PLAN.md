@@ -1,5 +1,7 @@
 # Trailhead — Project Plan
 
+> **Design document.** This is the project's source of truth for architecture, the data model and the phase order. New to Trailhead? Start with the [Introduction](introduction.md) and [Getting started](getting-started.md).
+
 ## Vision
 
 Trailhead is a software factory built on a task engine. It turns tasks into agent runs inside locked-down sandboxes, gates every change through agent or human review, and records the work in Trailhead itself. The factory's design lives in `docs/factory/`, starting at `docs/factory/README.md`; this plan covers the whole and the task engine in detail.

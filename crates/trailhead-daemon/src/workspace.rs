@@ -137,6 +137,23 @@ impl Workspace for GitWorkspace {
         Ok(self.git_output(&self.dir, &["rev-parse", "--quiet", "--verify", "MERGE_HEAD"]).await.ok())
     }
 
+    async fn contains(&self, commit: &str) -> Result<bool> {
+        let status = Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit, "HEAD"])
+            .envs(self.git_env.clone())
+            .current_dir(&self.dir)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .map_err(|e| Error::Other(format!("git merge-base: {e}")))?
+            .status;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(Error::Other(format!("git merge-base --is-ancestor {commit} HEAD failed"))),
+        }
+    }
+
     async fn conflict_markers(&self, start: &str) -> Result<Vec<String>> {
         // Tracked files only, but a merge's result is all tracked once added; the agent's new files are added too.
         let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
