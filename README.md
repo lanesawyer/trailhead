@@ -76,7 +76,7 @@ Releases are cut from GitHub Actions; there's nothing to do locally.
 
 1. Run the **Release** workflow on `main` (Actions → Release → Run workflow). Leave the version empty to take the next version [git-cliff](https://git-cliff.org) calculates from the conventional commits since the last tag (`feat` and breaking changes bump the minor version while we're pre-1.0, everything else the patch), or enter one to override it.
 2. It sets every crate to that version, regenerates [CHANGELOG.md](CHANGELOG.md) from `cliff.toml`, commits `chore(release): vX.Y.Z` to `main`, and pushes the tag.
-3. It then builds `trailhead` Linux binaries (x86_64 and arm64), publishes `trailhead-core`, `trailhead-server` and `trailhead` to crates.io, and creates a GitHub release with that version's changelog and the binaries.
+3. It then builds `trailhead` Linux binaries (x86_64 and arm64) and a static `trailhead-daemon` (`trailhead-daemon-vX.Y.Z-x86_64-unknown-linux-musl`, with a `.sha256` beside it, which the factory's control plane downloads and verifies), publishes `trailhead-core`, `trailhead-server` and `trailhead` to crates.io, and creates a GitHub release with that version's changelog and the binaries.
 
 Publishing needs a crates.io API token in the `CARGO_REGISTRY_TOKEN` repository secret, and the Release workflow needs to be able to push to `main`.
 

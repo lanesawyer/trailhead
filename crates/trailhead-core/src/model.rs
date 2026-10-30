@@ -60,7 +60,7 @@ impl Status {
         match self {
             Open => matches!(to, InProgress | NeedsInput | InReview | Done | Cancelled),
             InProgress => matches!(to, Open | NeedsInput | InReview | Done | Cancelled),
-            NeedsInput => matches!(to, Open | InProgress | Cancelled),
+            NeedsInput => matches!(to, Open | InProgress | InReview | Cancelled),
             InReview => matches!(to, Open | InProgress | NeedsInput | Approved | Done | Cancelled),
             Approved => matches!(to, Open | InReview | Done | Cancelled),
             Done | Cancelled => matches!(to, Open),
@@ -161,6 +161,9 @@ pub struct Task {
     /// Optional risk grade, 1 (lowest) to 4. A human sets, lowers or clears it; an agent can only raise it.
     #[serde(default)]
     pub grade: Option<i64>,
+    /// Set on a cancelled task that duplicates another: the one to look at instead.
+    #[serde(default)]
+    pub duplicate_of: Option<Uuid>,
     /// The day the task is due (`YYYY-MM-DD`). Without `due_at`, it's due by the end of
     /// that day in `due_tz`.
     #[serde(default)]

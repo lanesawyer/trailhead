@@ -146,7 +146,7 @@ pub(crate) struct CreateTask {
 #[utoipa::path(
     post, path = "/v1/tasks", tag = "tasks", request_body = CreateTask,
     responses(
-        (status = 201, description = "Created", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 201, description = "Created. `possible_duplicates` lists keys of open tasks with a close title, when there are any; it's a warning, not an error.", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
         (status = 404, description = "`not_found`: project, parent or dependency", body = ErrorBody),
         (status = 409, description = "`dependency_cycle` from `blocked_by`/`blocks`. Repeating a `source` + `external_id` returns the existing task instead of an error.", body = ErrorBody),
     )
@@ -169,14 +169,21 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
         source: b.source,
         external_id: b.external_id,
     };
+    let project = new.project.clone();
     let task = s.store.create_task(&ctx, new).await?;
+    let similar = s.store.similar_tasks(&ctx, &project, &task.title, Some(task.id)).await.unwrap_or_default();
     for blocker in &b.blocked_by {
         s.store.add_dependency(&ctx, blocker, &task.key).await?;
     }
     for blocked in &b.blocks {
         s.store.add_dependency(&ctx, &task.key, blocked).await?;
     }
-    let mut res = with_etag(task.version, &task);
+    let version = task.version;
+    let mut body = serde_json::to_value(task).expect("tasks serialize");
+    if !similar.is_empty() {
+        body["possible_duplicates"] = json!(similar.iter().map(|t| &t.key).collect::<Vec<_>>());
+    }
+    let mut res = with_etag(version, body);
     *res.status_mut() = StatusCode::CREATED;
     Ok(res)
 }
@@ -202,6 +209,10 @@ pub(crate) struct UpdateTask {
     /// 1 to 4. A human can set, raise, lower or `null` it; an agent can only raise an existing grade.
     #[serde(default, deserialize_with = "nullable")]
     grade: Option<Option<i64>>,
+    /// Key of the task this one duplicates. Needs `status` `cancelled` (in this request or already);
+    /// `null` clears it, and so does leaving `cancelled`.
+    #[serde(default, deserialize_with = "nullable")]
+    duplicate_of: Option<Option<String>>,
     /// A new day without `due_at` drops the time; `null` removes the deadline.
     #[serde(default, deserialize_with = "nullable")]
     #[schema(format = Date)]
@@ -253,6 +264,7 @@ pub(crate) async fn update_task(
         status: b.status,
         priority: b.priority,
         grade: b.grade,
+        duplicate_of: b.duplicate_of,
         due_on: b.due_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
         due_at: b.due_at.map(|d| parse_opt_at(d.as_deref())).transpose()?,
         due_tz: b.due_tz,

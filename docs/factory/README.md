@@ -1,5 +1,7 @@
 # Trailhead factory
 
+> **Design index.** This lists the factory's design pages. To understand the factory, read the [overview](overview.md), the [lifecycle](lifecycle.md) and [operating](operating.md) first.
+
 Trailhead is a software factory built on a task engine: it turns tasks into agent runs inside locked-down sandboxes, gates every change through agent or human review, and records the work in Trailhead itself. These docs are the factory's design; its MVP was finished on 2026-10-28 ([mvp.md](mvp.md)), and [operating.md](operating.md) is how to run it today. `docs/PLAN.md` covers the whole project and the task engine in detail, and points here for the factory.
 
 Read this index first, then open only the file the work in front of you needs.
