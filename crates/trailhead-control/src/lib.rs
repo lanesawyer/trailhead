@@ -574,9 +574,9 @@ impl Factory {
         Ok(out)
     }
 
-    /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened are released. A parked task keeps
-    /// its sandbox, so without this the place stays taken until the next reconcile (TRAIL-108). The next attempt
-    /// starts from a fresh checkout with the answer in its prompt, as after any reopening.
+    /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened, cancelled or finished are
+    /// released. A parked task keeps its sandbox, so without this the place stays taken until the next reconcile
+    /// (TRAIL-108, TRAIL-257). A reopened task's next attempt starts from a fresh checkout with the answer in its prompt.
     async fn occupied_after_release(&self, running: &HashSet<TaskKey>) -> Result<Vec<Sandbox>> {
         let held = self.occupied().await?;
         let candidates: Vec<&Sandbox> = held
@@ -591,7 +591,7 @@ impl Factory {
         for sandbox in candidates {
             let Some(key) = sandbox.labels.get(label::TASK) else { continue };
             let task = match self.tracker.show(&TaskKey(key.clone())).await {
-                Ok(task) if task.status == Status::Open => task,
+                Ok(task) if matches!(task.status, Status::Open | Status::Cancelled | Status::Done) => task,
                 Ok(_) => continue,
                 Err(e) => {
                     tracing::warn!(task = %key, error = %e, "couldn't look up a parked task's status");
@@ -601,9 +601,9 @@ impl Factory {
             let mut done = Reconciled::default();
             self.reconcile_pooled(sandbox, &mut done).await;
             if !done.released.is_empty() || !done.abandoned.is_empty() || !done.destroyed.is_empty() {
-                tracing::info!(task = %task.key.0, sandbox = %sandbox.name, "released the sandbox of a reopened task");
+                tracing::info!(task = %task.key.0, sandbox = %sandbox.name, "released the sandbox of a task no longer parked");
                 if let Err(e) = self.reconcile_task(&task, &mut done).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't clean up a reopened task; reconcile will");
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't clean up a released task; reconcile will");
                 }
                 released.push(sandbox.name.clone());
             }
@@ -1076,10 +1076,10 @@ impl Factory {
             }
             Run::Report(report, _) => {
                 tracing::warn!(task = %task.key.0, result = ?report.result, "review didn't produce a verdict");
-                // No verdict, no round. The retry count moves the next try's names off this one's revoked sub-agent.
-                let give_back =
-                    RunUpdate { review_rounds: Some(before), retries: Some(retries + 1), ..RunUpdate::default() };
-                self.tracker.report(&task.key, give_back).await?;
+                // No verdict, no round: handled like an infrastructure failure, so it backs off and is capped
+                // rather than being reviewed again on every pass (TRAIL-267).
+                let error = Error::Other(format!("the reviewer ended without a verdict: {:?}", report.result));
+                self.review_infra_failed(task, &name, error, before, retries).await;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
             Run::Breach(reason, _) => {
