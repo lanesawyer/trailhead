@@ -2393,6 +2393,25 @@ async fn a_merge_the_host_refuses_is_tried_again_not_reworked() {
 }
 
 #[tokio::test]
+async fn a_merge_the_host_refused_is_not_the_mergers_when_a_person_merges_it_later() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.refuse_merge(Some("Required status check \"test\" is expected."));
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).run.merging.as_deref(), Some(""), "the intent is cleared");
+
+    r.codehost.refuse_merge(None);
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Done);
+    assert_eq!(task.run.merged.expect("recorded").by, MergedBy::Human);
+}
+
+#[tokio::test]
 async fn a_pr_behind_its_base_is_updated_before_it_is_merged() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;

@@ -150,14 +150,14 @@ pub struct Reconciled {
     pub abandoned: Vec<String>,
 }
 
-/// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
-/// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for a person.` `merging` is whether the merger is on and will
-/// merge now.
 /// Who merged a PR that is found merged: the merger when it recorded the intent before merging (TRAIL-289), else a person.
 fn merged_by(task: &Task) -> MergedBy {
     if task.run.merging.as_deref().is_some_and(|h| !h.is_empty()) { MergedBy::Merger } else { MergedBy::Human }
 }
 
+/// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
+/// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for a person.` `merging` is whether the merger is on and will
+/// merge now.
 fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool) -> String {
     fn join(items: Vec<String>) -> String {
         match items.as_slice() {
@@ -1242,7 +1242,8 @@ impl Factory {
             .report(&task.key, RunUpdate { merging: Some(decision.head.clone()), ..RunUpdate::default() })
             .await?;
         let outcome = codehost.merge(pr, &decision.head).await;
-        if !matches!(outcome, Ok(MergeOutcome::Merged)) {
+        // An error may follow a merge the host accepted, so it keeps the intent and reconcile's `pr_state` decides.
+        if matches!(outcome, Ok(MergeOutcome::Conflict | MergeOutcome::HeadMoved | MergeOutcome::Refused(_))) {
             self.tracker.report(&task.key, RunUpdate { merging: Some(String::new()), ..RunUpdate::default() }).await?;
         }
         match outcome? {
