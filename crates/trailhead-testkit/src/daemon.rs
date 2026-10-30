@@ -42,6 +42,8 @@ pub struct FakeWorkspace {
     abandons_merge: AtomicBool,
     /// Whether the agent commits the merge itself: `merge_head` sees none after prepare, but HEAD has the base.
     commits_merge: AtomicBool,
+    /// Whether the agent rebases: the run's starting commit is no longer in HEAD's history.
+    rebases: AtomicBool,
     /// Files the agent leaves conflict markers in.
     markers: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
@@ -80,7 +82,10 @@ impl Workspace for FakeWorkspace {
         Ok(merging.then(|| FAKE_BASE_MERGE.to_string()))
     }
 
-    async fn contains(&self, _commit: &str) -> Result<bool> {
+    async fn contains(&self, commit: &str) -> Result<bool> {
+        if self.rebases.load(Ordering::SeqCst) && commit != FAKE_BASE_MERGE {
+            return Ok(false);
+        }
         Ok(!self.abandons_merge.load(Ordering::SeqCst))
     }
 
@@ -188,6 +193,11 @@ impl LocalDaemon {
     /// Has the agent abort the merge of the base branch that prepare started.
     pub fn agent_aborts_merge(&self) {
         self.workspace.abandons_merge.store(true, Ordering::SeqCst);
+    }
+
+    /// Has the agent rebase its commits, so the commit the run started at is no longer an ancestor of HEAD.
+    pub fn agent_rebases(&self) {
+        self.workspace.rebases.store(true, Ordering::SeqCst);
     }
 
     /// Has the agent run `git commit` to finish the merge of the base branch that prepare started.

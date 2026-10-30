@@ -247,6 +247,7 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
 
     let mut factory =
         Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon)
+            .with_server_check(server_check(opts.server))
             .with_merge_mode_source(Box::new(move || {
                 let src =
                     std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
@@ -265,6 +266,19 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
     }
     let wake = Wake { store, ctx, project: factory.config.repo.project.clone() };
     Ok((Arc::new(factory), tunnel, lock, wake))
+}
+
+/// Whether something accepts connections at the server's address, which the daemons' API tunnel forwards to.
+fn server_check(server: SocketAddr) -> trailhead_control::ServerCheck {
+    Box::new(move || {
+        Box::pin(async move {
+            match tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(server)).await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(e)) => Err(format!("can't connect to {server}: {e}")),
+                Err(_) => Err(format!("connecting to {server} timed out")),
+            }
+        })
+    })
 }
 
 /// The sandboxes' `Compute`, and where the daemon lives in them.
@@ -415,7 +429,16 @@ async fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_result, lock_control_plane};
+    use super::{check_result, lock_control_plane, server_check};
+
+    #[tokio::test]
+    async fn server_check_sees_whether_something_listens() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert_eq!(server_check(addr)().await, Ok(()));
+        drop(listener);
+        assert!(server_check(addr)().await.unwrap_err().contains("can't connect"));
+    }
 
     #[test]
     fn second_control_plane_is_refused_naming_the_holder() {

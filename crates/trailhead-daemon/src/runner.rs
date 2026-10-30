@@ -415,6 +415,19 @@ impl Runner {
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), vec![]));
                 }
+                // A rebase rewrites the agent's commits, so the checkout no longer builds on `start`, which is what
+                // the commits are published on top of. Publishing would drop or duplicate what the branch had.
+                if !self.workspace.contains(start).await? {
+                    let reason = format!("the branch was rewritten ({start} is no longer in its history)");
+                    let note = format!(
+                        "The branch was rewritten (rebased or reset), so it no longer builds on {start}, where the run \
+                         started. Nothing was published; merge the base branch instead of rebasing.\n"
+                    );
+                    tracker.note(key, &note).await?;
+                    tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
+                    tracker.release(key).await?;
+                    return Ok((RunResult::Failed(reason), vec![]));
+                }
                 // The checks only catch markers in files they compile, so look for them in everything changed.
                 if merge == Merge::Merged {
                     let files = self.workspace.conflict_markers(start).await?;
