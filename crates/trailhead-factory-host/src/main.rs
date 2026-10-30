@@ -238,15 +238,20 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
         .await
         .map_err(|e| format!("binding the iroh endpoint: {e}"))?;
     let (compute, launch) = compute(&config.compute, opts, &paths, Launch::new(binary))?;
-    let launch =
-        Launch { claude_oauth_token: opts.claude_oauth_token.clone(), log: config.daemon.log.clone(), ..launch };
+    let launch = Launch {
+        claude_oauth_token: opts.claude_oauth_token.clone(),
+        log: config.daemon.log.clone(),
+        gateway_list: config.compute.gateway_list(),
+        ..launch
+    };
     let daemon = Arc::new(RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch));
     let tunnel =
         Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, daemon.peers())).spawn();
     tracing::info!(endpoint = %endpoint.id(), project = %config.repo.project, repo = %config.repo.repo().slug(), "factory ready");
 
+    let model_endpoint = config.compute.model_endpoint(&opts.model_endpoint);
     let mut factory =
-        Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon)
+        Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(model_endpoint)), daemon)
             .with_merge_mode_source(Box::new(move || {
                 let src =
                     std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;

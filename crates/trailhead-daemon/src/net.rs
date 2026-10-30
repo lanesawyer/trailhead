@@ -25,7 +25,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, watch};
 use trailhead_factory::{
     Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, PrepareRequest, Program, Result,
-    RunEvent, RunReport, RunRequest, SandboxFile, SandboxId, ToDaemon,
+    RunEvent, RunReport, RunRequest, SPRITES_GATEWAY_LIST, SandboxFile, SandboxId, ToDaemon,
 };
 
 use crate::Runner;
@@ -566,6 +566,8 @@ pub struct Launch {
     pub log: Option<String>,
     /// Subscription mode: the Claude Code OAuth token handed to each daemon in its secrets file.
     pub claude_oauth_token: Option<String>,
+    /// The connector list URL for each daemon's secrets; `None` is Fly's.
+    pub gateway_list: Option<String>,
 }
 
 impl Launch {
@@ -576,6 +578,7 @@ impl Launch {
             workdir: "/home/sprite/work".into(),
             log: None,
             claude_oauth_token: None,
+            gateway_list: None,
         }
     }
 }
@@ -623,6 +626,7 @@ impl RemoteDaemon {
             secret_key: hex::encode(sandbox_key(&self.master, sandbox).to_bytes()),
             control_plane: self.endpoint.id().to_string(),
             claude_oauth_token: self.launch.claude_oauth_token.clone(),
+            gateway_list: self.launch.gateway_list.clone().unwrap_or_else(|| SPRITES_GATEWAY_LIST.into()),
         };
         let dir = &self.launch.dir;
         let bin = format!("{dir}/trailhead-daemon");

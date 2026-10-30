@@ -42,9 +42,6 @@ struct Args {
     log: String,
 }
 
-/// Where connectors are listed from inside a Sprite.
-const GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
-
 /// Stands in for a code host when the sandbox has no GitHub connector, so runs fail with the reason.
 struct NoCodeHost(String);
 
@@ -99,9 +96,9 @@ impl CodeHost for NoCodeHost {
 }
 
 /// GitHub through the Sprite's GitHub connector, found in the gateway's list.
-async fn codehost(author: Identity) -> Arc<dyn CodeHost> {
+async fn codehost(author: Identity, gateway_list: &str) -> Arc<dyn CodeHost> {
     let found = async {
-        let list: serde_json::Value = reqwest::get(GATEWAY_LIST).await?.error_for_status()?.json().await?;
+        let list: serde_json::Value = reqwest::get(gateway_list).await?.error_for_status()?.json().await?;
         let conns = list["connections"].as_array().cloned().unwrap_or_default();
         Ok::<_, reqwest::Error>(
             conns
@@ -145,6 +142,7 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     let control_plane = parse_endpoint_id(&secrets.control_plane).map_err(|e| e.to_string())?;
 
     let endpoint = Endpoint::builder(presets::N0)
+        .proxy_from_env()
         .secret_key(key)
         .alpns(vec![ALPN.to_vec()])
         .bind()
@@ -159,7 +157,7 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
             Some(token) => ClaudeCode::new(args.claude).with_oauth_token(token),
             None => ClaudeCode::new(args.claude),
         }),
-        codehost: codehost(Identity { name: args.author_name, email: args.author_email }).await,
+        codehost: codehost(Identity { name: args.author_name, email: args.author_email }, &secrets.gateway_list).await,
         workspace: Arc::new(GitWorkspace::new(args.workdir)),
         connect,
         renew_every: RENEW_EVERY,
