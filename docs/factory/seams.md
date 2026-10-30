@@ -1,5 +1,7 @@
 # Plugin seams
 
+> **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
+
 Decided: the factory core is agnostic to compute, agent harness, model provider, task tracker and code host. Each is a trait with one implementation per vendor. Iroh and the standard checks stay fixed; they're the factory's own machinery, not vendor choices.
 
 | Seam | Runs in | Implementation today | Later |
@@ -20,7 +22,7 @@ The code in `crates/trailhead-factory` is authoritative; this is what each trait
 - **`Tracker`** (`tracker.rs`): handles bound to one identity. `sub_agent(name)` acts as a sandbox's sub-agent, which is how the control plane parks or requeues a task the sandbox holds. Besides the claim loop (`ready`, `claim`, `renew`, `release`, `request_review`, `record_verdict`, `ask`, `note`, `finish`), it has `show` and `in_flight` for reconcile and `create_sub_agent`/`revoke_sub_agent` for sandbox identities.
 - **`CodeHost`** (`codehost.rs`): `publish` commits on top of the commit the work started from (never the base branch's current head: TRAIL-161), `open_pr`, `diff` for the reviewer, `comment` and `merge`.
 - **`Daemon`** (`daemon.rs`), the control plane's side of the daemon contract: `prepare`, `run` with an event stream, `cancel`, and `shutdown`, which cancels every run in flight. `RemoteDaemon` speaks it over iroh ([agents.md](agents.md)); the testkit's `LocalDaemon` runs the same `Runner` in-process.
-- **Run metadata** (`RunUpdate`, stored under `factory` in the task's metadata): `attempt`, `sandbox`, `host`, `profile`, `pr`, `review_rounds`, `reviewed`, `spend` and `failure` (why the last attempt failed, passed to the next as `TaskSpec.previous_failure`). Reviewer sandboxes and sub-agents are named per round (`trail-42-a1-r1`), so a review interrupted by a crash can be retried under a fresh identity.
+- **Run metadata** (`RunUpdate`, stored under `factory` in the task's metadata): `attempt`, `sandbox`, `host`, `profile`, `pr`, `review_rounds`, `conflict_reworks`, `reviewed`, `spend` and `failure` (why the last attempt failed, passed to the next as `TaskSpec.previous_failure`). Reviewer sandboxes and sub-agents are named per round (`trail-42-a1-r1`), so a review interrupted by a crash can be retried under a fresh identity.
 
 ## Rules
 

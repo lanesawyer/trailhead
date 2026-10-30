@@ -1,5 +1,7 @@
 # Verification and review
 
+> How the factory decides whether a change may merge: verification layers, risk grades, gate policy and the merger. [Operating](operating.md) has the setup.
+
 Three layers, cheapest first. Each task carries a risk **grade**, and the repo's gate policy says which layers work at that grade must pass before it can merge.
 
 1. **Mechanical checks.** The repo's standard checks ([sandbox.md](sandbox.md)), run in the author's sandbox, and the repo's own CI on the PR. A failure goes back to the author agent, not to review.
