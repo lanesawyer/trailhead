@@ -28,6 +28,8 @@ pub trait Workspace: Send + Sync {
     async fn head(&self) -> Result<String>;
     /// The commit being merged into the checkout, while a merge is under way (`PrepareRequest::merge_base`).
     async fn merge_head(&self) -> Result<Option<String>>;
+    /// The files that have `<<<<<<<` or `>>>>>>>` lines added since `start`, committed or not.
+    async fn conflict_markers(&self, start: &str) -> Result<Vec<String>>;
 }
 
 /// How often a worker renews its claim while the agent runs. Leases default to 30 minutes.
@@ -146,13 +148,14 @@ impl Runner {
         // A merge of the base branch is published as one, or the PR would still conflict. It may be one prepare
         // started or one the agent did itself, so read it again now, preferring that.
         let merging = self.workspace.merge_head().await?.or(merging_before);
+        let merged = merging.is_some();
         if let (Some(merging), RunOutcome::Changes { commits, .. }) = (merging, &mut outcome)
             && let Some(last) = commits.last_mut()
         {
             last.merges.push(merging);
         }
         tracing::info!(task = %key, "agent finished");
-        let (result, checks) = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start).await?;
+        let (result, checks) = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merged).await?;
         Ok(RunReport { result, checks, usage })
     }
 
@@ -310,10 +313,27 @@ impl Runner {
         outcome: RunOutcome,
         cancel: &Notify,
         start: &str,
+        merged: bool,
     ) -> Result<(RunResult, Vec<CheckResult>)> {
         let key = &req.task.key;
         match outcome {
             RunOutcome::Changes { commits, summary } => {
+                // The checks only catch markers in files they compile, so look for them in everything changed.
+                if merged {
+                    let files = self.workspace.conflict_markers(start).await?;
+                    if !files.is_empty() {
+                        let reason = format!("conflict markers left in {}", files.join(", "));
+                        let note = format!(
+                            "The merge of the base branch still has conflict markers (`<<<<<<<`/`>>>>>>>` lines) in: {}. \
+                             Nothing was published.\n",
+                            files.join(", ")
+                        );
+                        tracker.note(key, &note).await?;
+                        tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
+                        tracker.release(key).await?;
+                        return Ok((RunResult::Failed(reason), vec![]));
+                    }
+                }
                 let (checks, retried) = tokio::select! {
                     biased;
                     _ = cancel.notified() => return Err(Error::Cancelled),
