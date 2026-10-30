@@ -20,7 +20,12 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 futures-util.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "net"] }
+axum.workspace = true
+tempfile.workspace = true
 trailhead-testkit.workspace = true

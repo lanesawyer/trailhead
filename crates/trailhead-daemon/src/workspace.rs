@@ -137,6 +137,30 @@ impl Workspace for GitWorkspace {
         Ok(self.git_output(&self.dir, &["rev-parse", "--quiet", "--verify", "MERGE_HEAD"]).await.ok())
     }
 
+    async fn contains(&self, commit: &str) -> Result<bool> {
+        let status = Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit, "HEAD"])
+            .envs(self.git_env.clone())
+            .current_dir(&self.dir)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .map_err(|e| Error::Other(format!("git merge-base: {e}")))?
+            .status;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(Error::Other(format!("git merge-base --is-ancestor {commit} HEAD failed"))),
+        }
+    }
+
+    async fn conflict_markers(&self, start: &str) -> Result<Vec<String>> {
+        // Tracked files only, but a merge's result is all tracked once added; the agent's new files are added too.
+        let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
+        let diff = self.git_output(&self.dir, &["diff", "--unified=0", "--no-color", "--no-ext-diff", start]).await?;
+        Ok(marker_files(&diff))
+    }
+
     async fn head(&self) -> Result<String> {
         self.git_output(&self.dir, &["rev-parse", "HEAD"]).await
     }
@@ -169,6 +193,24 @@ impl Workspace for GitWorkspace {
         };
         CheckResult { name: check.name.clone(), passed, output: tail(output) }
     }
+}
+
+/// The files a unified diff adds a `<<<<<<<` or `>>>>>>>` line to.
+fn marker_files(diff: &str) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    let mut file = None;
+    for line in diff.lines() {
+        if let Some(name) = line.strip_prefix("+++ ") {
+            file = Some(name.strip_prefix("b/").unwrap_or(name).to_string());
+        } else if let Some(added) = line.strip_prefix('+')
+            && (added.starts_with("<<<<<<<") || added.starts_with(">>>>>>>"))
+            && let Some(file) = &file
+            && !files.contains(file)
+        {
+            files.push(file.clone());
+        }
+    }
+    files
 }
 
 fn tail(mut s: String) -> String {

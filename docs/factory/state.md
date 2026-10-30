@@ -1,5 +1,7 @@
 # Run state and Trailhead access
 
+> **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
+
 Decided: the control plane keeps no database of its own. Run state lives in Trailhead and the Sprites API, and on restart the control plane rebuilds its view from those plus reconnecting daemons. This replaced an earlier plan for a SQLite event log in the control plane.
 
 ## Where state lives

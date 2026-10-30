@@ -87,6 +87,12 @@ pub(crate) async fn show(cx: &Ctx, task: &str) -> Result<()> {
     if let Some(b) = keys("blocks").filter(|b| !b.is_empty()) {
         println!("blocks {b}");
     }
+    if let Some(d) = v["duplicate_of"].as_str() {
+        println!("duplicate of {d}");
+    }
+    if let Some(d) = keys("duplicates").filter(|d| !d.is_empty()) {
+        println!("duplicates {d}");
+    }
     if t["metadata"].as_object().is_some_and(|m| !m.is_empty()) {
         println!("metadata {}", t["metadata"]);
     }
@@ -122,7 +128,14 @@ pub(crate) async fn add(cx: &Ctx, a: AddArgs) -> Result<()> {
     if let Some(on) = a.on {
         merge(&mut body, parse_day_time(Field::Scheduled, &on)?);
     }
-    cx.show(&cx.c.post("tasks", body).await?, task_line);
+    let created = cx.c.post("tasks", body).await?;
+    cx.show(&created, task_line);
+    if !cx.json
+        && let Some(keys) = created["possible_duplicates"].as_array()
+    {
+        let keys: Vec<_> = keys.iter().filter_map(Value::as_str).collect();
+        println!("possible duplicates: {}", keys.join(", "));
+    }
     Ok(())
 }
 
@@ -208,6 +221,15 @@ pub(crate) async fn finish(cx: &Ctx, task: &str, status: &str, handoff: Option<S
         cx.c.post(&format!("tasks/{task}/comments"), json!({ "kind": "handoff", "body": m })).await?;
     }
     cx.show(&cx.c.patch(&format!("tasks/{task}"), json!({ "status": status })).await?, task_line);
+    Ok(())
+}
+
+pub(crate) async fn cancel(cx: &Ctx, task: &str, duplicate_of: Option<String>) -> Result<()> {
+    let mut body = json!({ "status": "cancelled" });
+    if let Some(d) = duplicate_of {
+        body["duplicate_of"] = json!(d);
+    }
+    cx.show(&cx.c.patch(&format!("tasks/{task}"), body).await?, task_line);
     Ok(())
 }
 

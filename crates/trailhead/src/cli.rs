@@ -115,8 +115,12 @@ pub(crate) enum Cmd {
         #[arg(short, long)]
         message: Option<String>,
     },
+    /// Cancel a task, optionally recording that it duplicates another.
     Cancel {
         task: String,
+        /// The task this one duplicates. Shown by `show` on both.
+        #[arg(long)]
+        duplicate_of: Option<String>,
     },
     Reopen {
         task: String,
