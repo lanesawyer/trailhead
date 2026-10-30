@@ -258,6 +258,29 @@ async fn too_many_steps_is_a_breach() {
 }
 
 #[tokio::test]
+async fn a_reviewer_that_breaches_parks_the_task_and_isnt_run_again() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Big diff", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+
+    // Every reviewer would breach on steps; only the first should ever run.
+    for _ in 0..3 {
+        r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
+    }
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("steps"), "{}", questions[0].body);
+    assert_eq!(task.run.review_rounds, Some(0), "a fresh count once a human reopens it");
+}
+
+#[tokio::test]
 async fn failed_check_requeues_and_next_attempt_gets_a_fresh_sandbox() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Lint me", "");
@@ -1016,6 +1039,31 @@ async fn the_run_loop_wakes_itself_when_the_window_resets() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(tracker.task(&key).status, Status::InReview, "started once the window reset");
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn the_run_loop_holds_due_reviews_while_the_window_is_paused() {
+    let r = pausing_rig();
+    let key = r.tracker.add_task("TRAIL", "Unreviewed", "");
+    let script = Script::new(changes()).quota("five_hour", 90, unix_now() + 2);
+    r.harness.push(Role::Worker, script);
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+
+    let factory = Arc::new(r.factory);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle =
+        tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), std::time::Duration::from_millis(5), async {
+            let _ = stopped.await;
+        }));
+    let tracker = r.tracker.clone();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(tracker.task(&key).run.reviewed, None, "no reviewer starts while the window is paused");
+    until("the review to land once the window resets", || tracker.task(&key).run.reviewed == Some(1)).await;
     stop.send(()).unwrap();
     handle.await.unwrap().unwrap();
 }
@@ -2242,6 +2290,69 @@ async fn a_pr_behind_its_base_is_updated_before_it_is_merged() {
     r.factory.reconcile().await.unwrap();
     assert!(!r.codehost.prs()[0].merged, "not merged while behind");
     assert_ne!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_host_made_update_keeps_the_verdict_and_a_push_after_it_does_not() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "updated, not merged, while CI starts over");
+
+    // CI passes on the merge commit: merged on the verdict for the head before it, with no new review.
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "{:?}", done.reviewed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_resolving_rework_doesnt_inherit_the_verdict() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "back to running for a rework");
+
+    // The rework pushes a single commit that merges the base: a merge the host didn't make, holding the resolution.
+    r.codehost.set_conflicts(false);
+    let resolution = Commit { message: "fix: resolve".into(), changes: vec![], merges: vec!["base".into()] };
+    r.harness
+        .push(Role::Worker, Script::new(RunOutcome::Changes { commits: vec![resolution], summary: "Done.".into() }));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.factory.tick().await.unwrap();
+    r.codehost.set_ci(&pr, CiState::Passed);
+
+    // Reviews of the resolution then fail on the infrastructure, so the passes wait out a backoff and evaluate the
+    // gates meanwhile.
+    r.daemon.fail_runs(3, "connection lost");
+    for _ in 0..3 {
+        let done = r.factory.reconcile().await.unwrap();
+        assert!(done.reviewed.is_empty() && done.merged.is_empty(), "{done:?}");
+    }
+    assert!(!r.codehost.prs()[0].merged, "the old approval doesn't cover the resolution");
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_push_on_top_of_a_host_made_update_needs_a_new_review() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    r.codehost.push_to(&pr);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    // The first pass withdraws the approval of the old head; the next sees a head nobody reviewed.
+    r.factory.reconcile().await.unwrap();
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
 }
 
 #[tokio::test]

@@ -65,6 +65,19 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 - **Fresh sandboxes and contexts**, no access to the author's transcript.
 - **Blind first pass.** Each reviewer records a verdict before seeing the others; disagreement escalates.
 
+## What counts as a review round
+
+`max_review_rounds` (`[repo]`, default 3) caps how many reviews may ask for changes. A reviewer run counts as a round unless it was not the PR's fault:
+
+| Reviewer outcome | Round |
+|---|---|
+| Approves, or asks for changes | Counts. At the cap, a review that still asks for changes parks the task. |
+| Breaches its budget | Counts, and the task is parked at once with a question naming the breach (TRAIL-268, TRAIL-319). Rerunning a reviewer that already overspent would only overspend again, so there is no retry to cap. Reopening the task starts the count again. |
+| Ends with no verdict | Given back; the reviewer is run again. |
+| Infrastructure failure | Given back; the task waits out the infra backoff, and parks at `max_infra_failures`. |
+| Cancellation | Given back, as for an infrastructure failure, but with no failure count, backoff or parking: a deliberate control-plane stop isn't a failure. |
+| Conflict rework | Not a round (it has `max_conflict_reworks`). The review after one doesn't use a round either, unless it asks for changes; then it counts as one. |
+
 ## The merger
 
 The control plane acts as the merger. It is the factory project's only delegated reviewer ([lifecycle.md](lifecycle.md)), and the only agent that moves a factory task to `approved` or `done`.
@@ -79,7 +92,7 @@ The control plane acts as the merger. It is the factory project's only delegated
 
    **Updating the branch (TRAIL-212).** `main` requires its checks to pass on a branch that's up to date with it (strict status checks), so a green run against an old base isn't enough: PR #21 merged on one while `main` had since changed a signature, and `main` stopped compiling. Before merging, the merger asks the host whether the PR is behind its base (`CodeHost::behind`). If it is, it merges the base branch into the PR branch (`CodeHost::update_branch`: a merge commit, never a rebase and force-push) and goes back to waiting for CI on the new head. It merges only when CI is green on a head that isn't behind. Another PR landing meanwhile just repeats this.
    - **Conflicts.** If the base branch doesn't merge cleanly, the task goes back to running for a rework on top of `main`, as for any merge conflict ([lifecycle.md](lifecycle.md)). Only a real merge conflict does: the host also refuses an update when there's nothing to merge in (an update it queued earlier has landed, so the merger looks at the head again) or when the head moved since the merger read it (the update names the head it read, so a push that raced it isn't merged over). Those are not conflicts, since a conflict costs a review round (TRAIL-199); the first is `UpToDate` and the second an error the merger retries on its next tick.
-   - **The verdict survives a clean update.** Decided: a merge of `main` with no conflicts keeps the reviewer's approval, and CI on the new head is the gate. The merge commit adds no work of the PR's own, and the reviewer saw the PR's diff against `main`, which the merge doesn't change; re-reviewing every PR each time something else lands would never converge. So step 1's "the latest verdict on that head approves" is evaluated against the head before the update, as long as the only commits since are merges of the base branch the host made. Any other push, including a conflict-resolving rework, is a new head and needs a new verdict. The sandbox checks are not re-run; CI is.
+   - **The verdict survives a clean update.** Decided: a merge of `main` with no conflicts keeps the reviewer's approval, and CI on the new head is the gate. The merge commit adds no work of the PR's own, and the reviewer saw the PR's diff against `main`, which the merge doesn't change; re-reviewing every PR each time something else lands would never converge. So step 1's "the latest verdict on that head approves" is evaluated against the head before the update, as long as the only commits since are merges of the base branch the host made. The merger checks that with `CodeHost::carries_verdict`: the head the verdict is for must lead to the current head, and every commit since that the PR has and its base lacks must be a two-parent merge commit whose second parent is on the base branch (TRAIL-260). A listing the host cut short can't be vouched for, so it counts as a new head. That is a check of shape, not content: a merge whose second parent is on the base passes even if it changes the tree beyond a clean merge, and a conflict-resolving rework pushes exactly such a merge. So the merger carries only a verdict given on the task's current attempt; a rework takes a new attempt, so its merge commit can't inherit the old approval, and it needs a new verdict like any other push. A person's hand-edited merge of the base (an "evil merge") is a known gap the check can't see. The sandbox checks are not re-run; CI is.
 5. However a PR is merged, by the merger or by Lane on GitHub, the task is closed as `done` the same way, with a handoff naming the PR and the merge commit (TRAIL-198). `done` always means merged.
 
 ## The ratchet

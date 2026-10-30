@@ -7,9 +7,11 @@ The control plane enforces budgets. Token and dollar counts come from the daemon
 | Scope | Limits | On breach |
 | --- | --- | --- |
 | Step | Tokens, wall-clock | Fail the step; restore checkpoint; retry or escalate |
-| Task | Dollars, wall-clock, step count, review rounds | Checkpoint, suspend the sandbox, park the task for a human |
+| Run | Dollars, wall-clock, step count (the profile's budget, per run) | Checkpoint, suspend the sandbox, park the task for a human |
+| Task | `max_attempts`, `max_review_rounds` | Park the task for a human |
 | Global | Dollars per day, concurrent sandboxes | Stop starting new runs; running ones finish their step |
 
+- **Per run, not per task.** Dollar, wall-clock and step budgets are checked against one run's own spend, not the task's running total across attempts, reworks and reviews. A task's total is bounded by `max_attempts` and `max_review_rounds` times the per-run budgets. A task-level dollar cap (say `[repo] max_task_usd`, checked against prior plus current spend) is not built; adding one is a policy decision for a human.
 - **Stall detection.** No progress event for a set window counts as a breach.
 - **Suspend, don't destroy.** A breached run keeps its sandbox and checkpoint so a human can resume it.
 - **Numbers TBD.** Start conservative and record real spend per task type before loosening. Raising a budget is a policy loosening and needs a human ([review.md](review.md)).
@@ -18,7 +20,7 @@ The control plane enforces budgets. Token and dollar counts come from the daemon
 
 | Layer | Source | Freshness | Used for |
 | --- | --- | --- | --- |
-| Per task | `usage` on each Messages response, counted by the daemon | Immediate | Task and step budgets |
+| Per task | `usage` on each Messages response, counted by the daemon | Immediate | Run budgets |
 | Global | Provider usage API, polled at most once a minute | About 5 minutes behind | Daily cap; reconciling daemon counts |
 | Backstop | Spend limit on a dedicated factory workspace at the provider | Enforced by the provider | Hard ceiling if the factory's accounting fails |
 | Subscription | The harness's usage-window readings (Claude Code's `rate_limit_event`) | Once per agent session | Pausing new runs before a shared subscription runs out |
