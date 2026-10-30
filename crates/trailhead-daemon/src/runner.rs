@@ -181,7 +181,21 @@ impl Runner {
             last.merges.push(merging);
         }
         tracing::info!(task = %key, "agent finished");
-        let (result, checks) = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge).await?;
+        let (result, checks) = match self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge).await {
+            Ok(done) => done,
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            // The agent's run is over, so the control plane is told how it came out rather than an error, which it
+            // takes for an infrastructure failure and hands the attempt back (TRAIL-214).
+            Err(e) => {
+                tracing::warn!(task = %key, error = %e, "finishing the run failed");
+                if req.role == Role::Worker
+                    && let Err(e) = tracker.release(&req.task.key).await
+                {
+                    tracing::warn!(task = %key, error = %e, "couldn't release the task");
+                }
+                (RunResult::Failed(format!("finishing the run failed: {e}")), vec![])
+            }
+        };
         Ok(RunReport { result, checks, usage })
     }
 

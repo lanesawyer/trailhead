@@ -1865,6 +1865,28 @@ async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_reviewers_infrastructure_failures_are_persisted_and_reset_by_a_finished_review() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Flaky review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    assert_eq!(r.tracker.task(&key).run.infra_failures, Some(1), "kept in the metadata, not only in memory");
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.daemon.fail_runs(1, "connection lost");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).run.infra_failures, Some(2));
+
+    tokio::time::advance(std::time::Duration::from_secs(121)).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed.len(), 1, "{done:?}");
+    assert_eq!(r.tracker.task(&key).run.infra_failures.unwrap_or(0), 0, "a finished review ends the streak");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_review_cancelled_on_purpose_isnt_an_infrastructure_failure() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
     let key = r.tracker.add_task("TRAIL", "Stopped mid-review", "");
@@ -1884,6 +1906,24 @@ async fn a_review_cancelled_on_purpose_isnt_an_infrastructure_failure() {
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.reviewed.len(), 1, "{done:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_sandbox_that_wont_destroy_keeps_the_verdict() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Stubborn sandbox", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
+
+    r.compute.fail(&format!("{}-1", trailhead_factory::review_name(&key, 1, 1)), "destroy");
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed.len(), 1, "the finished verdict isn't thrown away: {done:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(1), "the round counts");
+    assert_eq!(task.run.reviewed, task.run.attempt);
 }
 
 #[tokio::test(start_paused = true)]
