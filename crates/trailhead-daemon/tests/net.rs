@@ -25,7 +25,6 @@ const CONFIG: &str = r#"
 [repo]
 owner = "lanesawyer"
 name = "trailhead"
-project = "TRAIL"
 
 [checks]
 fmt = "cargo fmt --check"
@@ -128,7 +127,7 @@ impl Rig {
 
     fn factory(&self) -> Factory {
         Factory::new(
-            FactoryConfig::parse(CONFIG).unwrap(),
+            FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap(),
             Arc::new(self.compute.clone()),
             Arc::new(self.tracker.clone()),
             Arc::new(FakeProvider::new(1)),

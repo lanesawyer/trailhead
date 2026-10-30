@@ -17,7 +17,6 @@ const CONFIG: &str = r#"
 [repo]
 owner = "lanesawyer"
 name = "trailhead"
-project = "TRAIL"
 
 [checks]
 test = "cargo test"
@@ -78,7 +77,7 @@ async fn rig_with(config: &str) -> Rig {
             .with_heads(move |repo, branch| heads.head(repo, branch)),
     );
     let factory = Factory::new(
-        FactoryConfig::parse(config).unwrap(),
+        FactoryConfig::parse_table(config, "TRAIL", None).unwrap(),
         Arc::new(compute.clone()),
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
@@ -375,7 +374,7 @@ async fn requested_changes_reopen_then_rework_on_the_real_engine() {
 
 #[tokio::test]
 async fn requested_changes_past_the_cap_park_on_the_real_engine() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 1")).await;
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 1")).await;
     let key = r.task("Add a greeting").await;
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Still wrong.")));
@@ -506,7 +505,7 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
 
 #[tokio::test]
 async fn a_pr_that_keeps_conflicting_parks_for_lane_at_the_conflict_rework_cap() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_conflict_reworks = 1")).await;
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_conflict_reworks = 1")).await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
     r.codehost.set_mergeable(&pr, Some(false));
     let done = r.factory.reconcile().await.unwrap();

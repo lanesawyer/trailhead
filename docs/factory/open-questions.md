@@ -11,7 +11,7 @@
 - [ ] Observability backend: self-hosted or hosted.
 - [ ] When to move off n0 public relays, and what triggers it.
 - [ ] Prompt injection: which inputs count as untrusted (issues, PR comments, dependency docs, the web), and whether reviewers flag instructions found in data.
-- [ ] Test services and secrets: how repos declare databases or queues next to `[checks]`, and where test credentials live.
+- [ ] Test services and secrets: how repos declare databases or queues next to `[factory.checks]`, and where test credentials live.
 - [ ] Previews: Sprite URLs for running web changes during review.
 - [ ] Outcome tracking: success rate, escalations, review rounds and spend per profile and task type.
 - [ ] Repo onboarding: an agent proposes stack, checks, profiles and policy for a human to confirm.
