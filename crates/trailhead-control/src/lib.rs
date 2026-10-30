@@ -1171,6 +1171,7 @@ impl Factory {
             approved_head,
             human_head,
             problem: None,
+            refused: None,
             message: String::new(),
         };
         // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
@@ -1207,6 +1208,10 @@ impl Factory {
             && status == Status::Approved
             && (gate.auto_merge || decision.human_head.as_ref() == Some(&head));
         decision.message = decision_message(&grade, &decision, gate.auto_merge, merging);
+        // A refusal stands for the head it was given on, until a merge succeeds or the head moves.
+        if merging {
+            decision.refused = prev.as_ref().filter(|d| d.head == head).and_then(|d| d.refused.clone());
+        }
         // A merge that may not happen (the PR is behind, its head moved, the host refuses) isn't announced until it
         // has: the PR keeps saying what it said, and the next pass decides again.
         let merged_message = merging.then(|| {
@@ -1273,8 +1278,19 @@ impl Factory {
                 Ok(())
             }
             MergeOutcome::Refused(why) => {
-                tracing::warn!(task = %task.key.0, pr = %pr.url, %why, "the code host refused the merge; trying again next pass");
-                Ok(())
+                // Said once per reason, on the PR and the task; the merge is still tried on each pass, quietly, since
+                // the host lifts a refusal (a check that passes) without anything else changing.
+                if decision.refused.as_ref() == Some(&why) {
+                    tracing::debug!(task = %task.key.0, pr = %pr.url, %why, "the code host still refuses the merge");
+                    return Ok(());
+                }
+                tracing::warn!(task = %task.key.0, pr = %pr.url, %why, "the code host refused the merge; trying again each pass");
+                let note = format!("The code host refused to merge: {why}. The merger tries again each pass.");
+                let codehost = self.codehost.as_ref().expect("checked above");
+                codehost.comment(pr, &note).await?;
+                self.tracker.note(&task.key, &note).await?;
+                let decision = MergeDecision { refused: Some(why), ..decision.clone() };
+                self.tracker.report(&task.key, RunUpdate { merge: Some(decision), ..RunUpdate::default() }).await
             }
         }
     }
