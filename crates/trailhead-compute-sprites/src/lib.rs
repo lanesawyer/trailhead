@@ -224,9 +224,21 @@ impl Compute for SpritesCompute {
         }
         // A service that is already running (a Sprite restored from a checkpoint) keeps its old process through a
         // redefine and a start, so stop it first. A service that isn't running or doesn't exist yet is fine.
+        // The stop may stream its progress, so its body is read to the end: the redefine must not race the old process.
         let stop = self.request(Method::POST, self.url(&[&id.0, "services", &program.name, "stop"]));
-        if let Err(e) = send(stop).await {
-            tracing::debug!(sandbox = %id.0, program = %program.name, error = %e, "stopping the old service");
+        match send(stop).await {
+            Ok(res) => {
+                let status = res.status();
+                let body = res.text().await;
+                if !status.is_success() && status != StatusCode::NOT_FOUND {
+                    tracing::warn!(sandbox = %id.0, program = %program.name, %status, "stopping the old service failed");
+                } else if let Err(e) = body {
+                    tracing::warn!(sandbox = %id.0, program = %program.name, error = %e, "stopping the old service: reading the answer failed");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(sandbox = %id.0, program = %program.name, error = %e, "stopping the old service");
+            }
         }
         let service = json!({ "cmd": program.cmd, "args": program.args, "needs": [] });
         let url = self.url(&[&id.0, "services", &program.name]);
