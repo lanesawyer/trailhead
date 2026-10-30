@@ -90,6 +90,10 @@ pub struct RunUpdate {
     /// the attempts of the task as a whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_base: Option<u32>,
+    /// The attempt at which the control plane parked the task for hitting `max_attempts`. A run that starts on the
+    /// reopened task counts from it (see `attempt_floor`), so a human only has to reopen it (TRAIL-308).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gave_up: Option<u32>,
     /// How the task's PR was merged, once it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
@@ -105,6 +109,10 @@ pub struct RunUpdate {
     /// The merger's last decision on the PR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeDecision>,
+    /// The head the merger is about to merge, written before `CodeHost::merge` so that a merge whose close failed is
+    /// still attributed to the merger. Empty once the host said the merge didn't happen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merging: Option<String>,
 }
 
 /// The merger's decision on a PR's current head (`docs/factory/review.md#the-merger`). Written whole, and its
@@ -128,6 +136,9 @@ pub struct MergeDecision {
     pub human_head: Option<String>,
     /// Why the control plane couldn't act on the decision, such as not being a delegated reviewer.
     pub problem: Option<String>,
+    /// Why the code host last refused to merge this head, which is said once per reason and tried again each pass.
+    #[serde(default)]
+    pub refused: Option<String>,
     /// What was last said on the PR about this, so it's said once per change.
     pub message: String,
 }
@@ -160,6 +171,11 @@ pub struct ChangesRequested {
     /// Not a review: the PR no longer merges cleanly with the base branch, and the rework merges it in (TRAIL-199).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub conflict: bool,
+    /// The PR's head when this was requested. A head that has moved since means someone pushed to the PR, so the
+    /// request is stale: a person settled it (TRAIL-338). Unknown for requests recorded before this, or when the
+    /// host couldn't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
 }
 
 impl RunUpdate {
@@ -181,11 +197,13 @@ impl RunUpdate {
             infra_failures,
             changes_requested,
             attempt_base,
+            gave_up,
             merged,
             grade,
             ungraded,
             reviewed_head,
             merge,
+            merging,
         } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
@@ -203,17 +221,25 @@ impl RunUpdate {
         self.infra_failures = infra_failures.or(self.infra_failures.take());
         self.changes_requested = changes_requested.or(self.changes_requested.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
+        self.gave_up = gave_up.or(self.gave_up.take());
         self.merged = merged.or(self.merged.take());
         self.grade = grade.or(self.grade.take());
         self.ungraded = ungraded.or(self.ungraded.take());
         self.reviewed_head = reviewed_head.or(self.reviewed_head.take());
         self.merge = merge.or(self.merge.take());
+        self.merging = merging.or(self.merging.take());
     }
 
     /// The review the next run has to address: the last one that asked for changes, unless a later review has
     /// since finished on another attempt.
     pub fn pending_changes(&self) -> Option<&ChangesRequested> {
         self.changes_requested.as_ref().filter(|c| self.reviewed.is_none_or(|r| r == c.attempt))
+    }
+
+    /// The attempt `max_attempts` counts from: the last review that asked for changes, or the attempt the control
+    /// plane gave up at, whichever is later.
+    pub fn attempt_floor(&self) -> u32 {
+        self.attempt_base.unwrap_or(0).max(self.gave_up.unwrap_or(0))
     }
 
     pub fn is_empty(&self) -> bool {
