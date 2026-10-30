@@ -23,8 +23,8 @@ pub use config::{
     UsageConfig,
 };
 pub use daemon::{
-    Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
-    RunResult, ToDaemon,
+    Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, InstallHost, PrepareRequest, RunReport,
+    RunRequest, RunResult, ToDaemon,
 };
 pub use grade::{ChangedFile, FileStatus, Grader, PrGrade, glob_match};
 pub use harness::{

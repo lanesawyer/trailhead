@@ -19,6 +19,6 @@ mod rest;
 #[cfg(feature = "net")]
 pub use rest::RestTracker;
 
-pub use mise::Mise;
+pub use mise::{Mise, hosts_for, install_hosts_for};
 pub use runner::{Connect, RENEW_EVERY, Runner, Workspace};
 pub use workspace::GitWorkspace;

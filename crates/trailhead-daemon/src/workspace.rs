@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::process::Command;
-use trailhead_factory::{Check, CheckResult, Error, PrepareRequest, Result};
+use trailhead_factory::{Check, CheckResult, Error, InstallHost, PrepareRequest, Result};
 
 use crate::{Mise, Workspace};
 
@@ -77,15 +77,10 @@ impl GitWorkspace {
     }
 }
 
-#[async_trait]
-impl Workspace for GitWorkspace {
-    fn dir(&self) -> PathBuf {
-        self.dir.clone()
-    }
-
+impl GitWorkspace {
     /// Clones the base branch, or resets an existing checkout to it, then moves to the request's branch if it has one.
     /// Ignored files such as build output stay, so a sandbox reused for another round keeps its caches.
-    async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
+    async fn checkout(&self, req: &PrepareRequest) -> Result<()> {
         let base = &req.base_branch;
         if self.dir.join(".git").exists() {
             // A merge left under way (a warm checkpoint taken mid-rework) would block the checkout.
@@ -105,6 +100,24 @@ impl Workspace for GitWorkspace {
             self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await?;
             self.git(&self.dir, &["checkout", "--quiet", "-B", branch, &format!("origin/{branch}")]).await?;
         }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Workspace for GitWorkspace {
+    fn dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
+
+    async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        // The repo's own mise config is in the checkout, so the hosts can't be known before the clone.
+        self.checkout(req).await?;
+        self.mise.install_hosts(&self.dir, &req.tools).await
+    }
+
+    async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
+        self.checkout(req).await?;
         // Before setup, so the repo's own build runs with the pinned tools.
         self.mise.bootstrap(&self.dir, &req.tools).await?;
         if let Some(setup) = &req.setup {
@@ -151,6 +164,13 @@ impl Workspace for GitWorkspace {
         Ok(self.git_output(&self.dir, &["rev-parse", "--quiet", "--verify", "MERGE_HEAD"]).await.ok())
     }
 
+    async fn conflict_markers(&self, start: &str) -> Result<Vec<String>> {
+        // Tracked files only, but a merge's result is all tracked once added; the agent's new files are added too.
+        let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
+        let diff = self.git_output(&self.dir, &["diff", "--unified=0", "--no-color", "--no-ext-diff", start]).await?;
+        Ok(marker_files(&diff))
+    }
+
     async fn head(&self) -> Result<String> {
         self.git_output(&self.dir, &["rev-parse", "HEAD"]).await
     }
@@ -184,6 +204,24 @@ impl Workspace for GitWorkspace {
         };
         CheckResult { name: check.name.clone(), passed, output: tail(output) }
     }
+}
+
+/// The files a unified diff adds a `<<<<<<<` or `>>>>>>>` line to.
+fn marker_files(diff: &str) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    let mut file = None;
+    for line in diff.lines() {
+        if let Some(name) = line.strip_prefix("+++ ") {
+            file = Some(name.strip_prefix("b/").unwrap_or(name).to_string());
+        } else if let Some(added) = line.strip_prefix('+')
+            && (added.starts_with("<<<<<<<") || added.starts_with(">>>>>>>"))
+            && let Some(file) = &file
+            && !files.contains(file)
+        {
+            files.push(file.clone());
+        }
+    }
+    files
 }
 
 fn tail(mut s: String) -> String {

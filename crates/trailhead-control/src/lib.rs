@@ -23,8 +23,8 @@ use trailhead_factory::{
     BranchUpdate, ChangesRequested, CheckResult, CheckpointId, CiState, CodeHost, Compute, Daemon, Egress, Error,
     FactoryConfig, Feedback, HumanContext, IROH_DOMAINS, Labels, MergeDecision, MergeMode, MergeOutcome, Merged,
     MergedBy, ModelProvider, PrGrade, PrRef, PrState, PrepareRequest, Profile, Result, Role, RunEvent, RunReport,
-    RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict,
-    VerdictKind, label, review_name, run_name,
+    RunRequest, RunResult, RunUpdate, Sandbox, SandboxId, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd,
+    Verdict, VerdictKind, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -54,24 +54,6 @@ const MAX_INFRA_BACKOFF: Duration = Duration::from_secs(15 * 60);
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
-/// Where mise and the tools a `[stack]` asks for come from during prepare (`docs/factory/sandbox.md`): mise's
-/// installer, registry and version lists, GitHub's release assets, and the toolchains' own download hosts.
-pub const MISE_DOMAINS: &[&str] = &[
-    "mise.run",
-    "api.github.com",
-    "mise.jdx.dev",
-    "mise-versions.jdx.dev",
-    "objects.githubusercontent.com",
-    "release-assets.githubusercontent.com",
-    "static.rust-lang.org",
-    "nodejs.org",
-    "registry.npmjs.org",
-    "go.dev",
-    "dl.google.com",
-    "pypi.org",
-    "files.pythonhosted.org",
-];
-
 pub struct Factory {
     pub config: FactoryConfig,
     pub compute: Arc<dyn Compute>,
@@ -93,6 +75,9 @@ pub struct Factory {
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
     /// starting together never take the same sandbox.
     pool_pick: tokio::sync::Mutex<()>,
+    /// Hosts opened for a sandbox's install on top of the install set, until its run asks the daemon to confirm
+    /// they're blocked again.
+    install_opened: Mutex<HashMap<SandboxId, Vec<String>>>,
 }
 
 /// A pooled sandbox that keeps failing to release. Kept in memory only, so a restart counts again from zero.
@@ -240,6 +225,7 @@ impl Factory {
             ungraded: Mutex::default(),
             pause_logged: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
+            install_opened: Mutex::default(),
         }
     }
 
@@ -271,10 +257,18 @@ impl Factory {
 
     /// Install-phase hosts the agent phase drops, which the daemon confirms are unreachable before the agent starts.
     /// Wildcards can't be looked up, so they're left out.
-    fn blocked_hosts(&self) -> Vec<String> {
+    /// That includes the hosts opened for this sandbox's install.
+    fn blocked_hosts(&self, sandbox: &Sandbox) -> Vec<String> {
         let agent = self.agent_egress().domains;
-        let install = self.install_egress().domains;
-        install.into_iter().filter(|d| !d.contains('*') && !agent.contains(d)).collect()
+        let opened = self.install_opened.lock().unwrap().remove(&sandbox.id).unwrap_or_default();
+        let install = self.install_egress().domains.into_iter().chain(opened);
+        let mut blocked: Vec<String> = Vec::new();
+        for d in install.filter(|d| !d.contains('*') && !agent.contains(d)) {
+            if !blocked.contains(&d) {
+                blocked.push(d);
+            }
+        }
+        blocked
     }
 
     /// The agent phase's named hosts (wildcards can't be looked up), which the daemon keeps resolved.
@@ -286,10 +280,29 @@ impl Factory {
         let mut egress = self.agent_egress();
         let extra = self.config.egress.install.iter().cloned().chain(CLONE_DOMAINS.iter().map(|d| d.to_string()));
         egress.domains.extend(extra);
-        // Always: the control plane can't see whether the checkout has its own `mise.toml`, and bootstrap needs mise's
-        // installer and registry either way. A repo's own tools from other hosts go in `[egress] install`.
-        egress.domains.extend(MISE_DOMAINS.iter().map(|d| d.to_string()));
         egress
+    }
+
+    /// Prepares `sandbox`'s checkout under install egress. The control plane can't see the checkout, so the daemon
+    /// first says which hosts the tools it will install need (the `[stack]` and the repo's own mise config); exactly
+    /// those are opened on top of the install set for the prepare, each logged with the tool that asked, and
+    /// confirmed closed again before any agent runs.
+    async fn prepare_sandbox(&self, sandbox: &Sandbox, req: PrepareRequest) -> Result<()> {
+        let needs = self.daemon.install_hosts(&sandbox.id, &req).await?;
+        if !needs.is_empty() {
+            let mut egress = self.install_egress();
+            let mut opened = Vec::new();
+            for need in &needs {
+                tracing::info!(sandbox = %sandbox.name, host = %need.host, tool = %need.tool, "opening install egress");
+                if !egress.domains.contains(&need.host) {
+                    egress.domains.push(need.host.clone());
+                }
+                opened.push(need.host.clone());
+            }
+            self.compute.set_egress(&sandbox.id, &egress).await?;
+            self.install_opened.lock().unwrap().insert(sandbox.id.clone(), opened);
+        }
+        self.daemon.prepare(&sandbox.id, req).await
     }
 
     fn branch(task: &Task) -> String {
@@ -663,7 +676,7 @@ impl Factory {
             max_steps: profile.budget.steps,
             required_checks: self.config.required_checks(),
             worker_checks: Vec::new(),
-            blocked_hosts: self.blocked_hosts(),
+            blocked_hosts: self.blocked_hosts(&sandbox),
             allowed_hosts: self.allowed_hosts(),
             credential,
         };
@@ -919,19 +932,22 @@ impl Factory {
             Some(codehost) => Some(codehost.head(pr).await?),
             None => None,
         };
-        let round = shown.run.review_rounds.unwrap_or(0) + 1;
+        let before = shown.run.review_rounds.unwrap_or(0);
+        // The re-review after a conflict rework doesn't use a round (TRAIL-221); it does if it asks for changes.
+        let after_conflict = shown.run.pending_changes().is_some_and(|c| c.conflict);
+        let round = if after_conflict { before } else { before + 1 };
         let retries = shown.run.retries.unwrap_or(0);
-        let name = reviewer_name(&task.key, attempt, round, retries);
+        let name = reviewer_name(&task.key, attempt, before + 1, retries);
         self.tracker.report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() }).await?;
         let profile = self.config.reviewer().clone();
         let credential = match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
             Ok(credential) => credential,
-            Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries).await),
         };
         let sub = self.tracker.sub_agent(&name);
         let sandbox = match self.create_sandbox(&name, task, Role::Reviewer, Some(Self::branch(task))).await {
             Ok(sandbox) => sandbox,
-            Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries).await),
         };
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
         let req = RunRequest {
@@ -949,7 +965,7 @@ impl Factory {
             max_steps: profile.budget.steps,
             required_checks: Vec::new(),
             worker_checks: checks.to_vec(),
-            blocked_hosts: self.blocked_hosts(),
+            blocked_hosts: self.blocked_hosts(&sandbox),
             allowed_hosts: self.allowed_hosts(),
             credential,
         };
@@ -959,7 +975,7 @@ impl Factory {
         self.compute.destroy(&sandbox.id).await?;
         let run = match run {
             Ok(run) => run,
-            Err(e) => return Err(self.review_infra_failed(task, &name, e, round, retries).await),
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries).await),
         };
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
@@ -987,6 +1003,10 @@ impl Factory {
                         attempt,
                         conflict: false,
                     };
+                    let round = before + 1;
+                    self.tracker
+                        .report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() })
+                        .await?;
                     self.request_rework(task, requested, round).await?;
                 } else if let Err(e) = self.evaluate_gates(&task.key).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
@@ -997,7 +1017,7 @@ impl Factory {
                 tracing::warn!(task = %task.key.0, result = ?report.result, "review didn't produce a verdict");
                 // No verdict, no round. The retry count moves the next try's names off this one's revoked sub-agent.
                 let give_back =
-                    RunUpdate { review_rounds: Some(round - 1), retries: Some(retries + 1), ..RunUpdate::default() };
+                    RunUpdate { review_rounds: Some(before), retries: Some(retries + 1), ..RunUpdate::default() };
                 self.tracker.report(&task.key, give_back).await?;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
@@ -1217,7 +1237,14 @@ impl Factory {
     /// and the task waits out the same growing backoff as a worker's infrastructure failures before reconcile
     /// reviews it again. At `max_infra_failures` in a row the task is parked instead, saying so. Returns the error to
     /// surface.
-    async fn review_infra_failed(&self, task: &Task, name: &str, error: Error, round: u32, retries: u32) -> Error {
+    async fn review_infra_failed(
+        &self,
+        task: &Task,
+        name: &str,
+        error: Error,
+        rounds_before: u32,
+        retries: u32,
+    ) -> Error {
         // A deliberate stop gives the round back like a failure, but isn't one: no count, no backoff, no parking.
         let cancelled = matches!(error, Error::Cancelled);
         let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _)| *n);
@@ -1231,7 +1258,7 @@ impl Factory {
         }
         // The retry's sub-agent and sandbox names carry the retry count: this one's sub-agent is revoked for good.
         let give_back =
-            RunUpdate { review_rounds: Some(round - 1), retries: Some(retries + 1), ..RunUpdate::default() };
+            RunUpdate { review_rounds: Some(rounds_before), retries: Some(retries + 1), ..RunUpdate::default() };
         if let Err(e) = self.tracker.report(&task.key, give_back).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't give the review round back");
         }
@@ -1265,7 +1292,9 @@ impl Factory {
     /// starts a fresh sandbox from the PR branch and is told what to fix. The task is parked instead once `round`
     /// reviews have asked for changes, which is when a human should look. Reconcile finishes this if it's cut short.
     async fn request_rework(&self, task: &Task, requested: ChangesRequested, round: u32) -> Result<()> {
-        let max = self.config.repo.max_review_rounds;
+        // `round` counts what the request is: review rounds, or conflict reworks for a conflict (TRAIL-221).
+        let max =
+            if requested.conflict { self.config.repo.max_conflict_reworks } else { self.config.repo.max_review_rounds };
         let (reviewer, body, conflict) = (requested.reviewer.clone(), requested.body.clone(), requested.conflict);
         // Recorded before the task is reopened, so the run that picks it up can't miss the review.
         let update = RunUpdate {
@@ -1281,9 +1310,9 @@ impl Factory {
             self.tracker.claim(&task.key).await?;
             let question = if conflict {
                 format!(
-                    "The PR keeps conflicting with the base branch: {round} rounds of review and conflict reworks \
+                    "The PR keeps conflicting with the base branch: {round} conflict reworks so far \
                      (the limit is {max}). Merge the base branch into the PR yourself or settle what's landing, then \
-                     reopen the task; raise `max_review_rounds` to allow more rounds."
+                     reopen the task; raise `max_conflict_reworks` to allow more."
                 )
             } else {
                 format!(
@@ -1295,9 +1324,9 @@ impl Factory {
             self.tracker.ask(&task.key, &question).await?;
             // A fresh count for when a human reopens the task after sorting it out. Last, so a reconcile that finishes
             // a park cut short still sees the round that hit the limit.
-            let fresh = RunUpdate { review_rounds: Some(0), ..RunUpdate::default() };
+            let fresh = RunUpdate { review_rounds: Some(0), conflict_reworks: Some(0), ..RunUpdate::default() };
             if let Err(e) = self.tracker.report(&task.key, fresh).await {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't reset the review rounds");
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't reset the review and conflict counts");
             }
             return Ok(());
         }
@@ -1313,7 +1342,7 @@ impl Factory {
         // Install egress only while the checkout is prepared, then narrowed before any agent runs.
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = self.compute.create(&spec).await?;
-        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, branch)).await?;
+        self.prepare_sandbox(&sandbox, self.config.prepare_request(role, branch)).await?;
         self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
         Ok(sandbox)
     }
@@ -1383,7 +1412,7 @@ impl Factory {
             self.daemon.forget(&sandbox.id).await;
         }
         let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
-        self.daemon.prepare(&sandbox.id, prepare).await?;
+        self.prepare_sandbox(&sandbox, prepare).await?;
         let cp = self.compute.checkpoint(&sandbox.id, "warm").await?;
         let labels = self.pooled(label::BUSY, Some(&cp.0), Some(task));
         self.compute.set_labels(&sandbox.id, &labels).await?;
@@ -1615,7 +1644,10 @@ impl Factory {
     async fn resume_review(&self, task: &Task) -> Result<Outcome> {
         let attempt = task.run.attempt.unwrap_or(1);
         let pr = task.run.pr.as_ref().ok_or_else(|| Error::Other(format!("{} has no PR to review", task.key.0)))?;
-        if let Some(round) = task.run.review_rounds.filter(|r| *r > 0) {
+        // The round the interrupted review was named for: one past the rounds counted before it, whether or not it counted.
+        let after_conflict = task.run.pending_changes().is_some_and(|c| c.conflict);
+        let rounds = task.run.review_rounds.unwrap_or(0);
+        if let Some(round) = Some(rounds + u32::from(after_conflict)).filter(|r| *r > 0) {
             let retries = task.run.retries.unwrap_or(0);
             self.tracker.revoke_sub_agent(&reviewer_name(&task.key, attempt, round, retries)).await?;
         }
@@ -1660,11 +1692,11 @@ impl Factory {
     }
 
     /// A PR that no longer merges cleanly with the base branch: a rework merges the base branch in and resolves the
-    /// conflicts, then goes through the checks and review again. It counts as a review round, so a PR that keeps
-    /// conflicting is parked for a human (TRAIL-199).
+    /// conflicts, then goes through the checks and review again. It counts toward `max_conflict_reworks`, not review
+    /// rounds, so a PR that keeps conflicting is parked for a human without using up its reviews (TRAIL-199, TRAIL-221).
     async fn rework_conflict(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<()> {
-        let round = task.run.review_rounds.unwrap_or(0) + 1;
-        self.tracker.report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() }).await?;
+        let round = task.run.conflict_reworks.unwrap_or(0) + 1;
+        self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
         let base = &self.config.repo.base_branch;
         let body = format!(
             "{} no longer merges cleanly with `{base}`, which has moved on since the branch was cut. The base \
@@ -1733,7 +1765,11 @@ impl Factory {
                 let attempt = task.run.attempt.unwrap_or(1);
                 // Changes were requested on this attempt but the task never left review: finish reopening it.
                 if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt) {
-                    let round = task.run.review_rounds.unwrap_or(1);
+                    let round = if requested.conflict {
+                        task.run.conflict_reworks.unwrap_or(1)
+                    } else {
+                        task.run.review_rounds.unwrap_or(1)
+                    };
                     self.request_rework(task, requested.clone(), round).await?;
                     done.reworked.push(task.key.0.clone());
                     return Ok(false);

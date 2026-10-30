@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::process::Command;
-use trailhead_factory::{Error, Result};
+use trailhead_factory::{Error, InstallHost, Result};
 
 /// The only parts of `mise bootstrap` the factory runs. An allowlist, so a part a later mise adds isn't picked up by
 /// surprise. The rest (firewall, accounts, user, systemd units, services, dotfiles, remote) fight the sandbox: the
@@ -40,6 +40,90 @@ pub fn overridden(tools: &BTreeMap<String, String>, repo_config: &str) -> Vec<St
     let Ok(parsed) = repo_config.parse::<toml::Table>() else { return Vec::new() };
     let Some(pinned) = parsed.get("tools").and_then(|t| t.as_table()) else { return Vec::new() };
     tools.keys().filter(|k| pinned.contains_key(*k)).cloned().collect()
+}
+
+const GITHUB: &[&str] =
+    &["github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
+const PYPI: &[&str] = &["pypi.org", "files.pythonhosted.org"];
+const MISE_VERSIONS: &[&str] = &["mise.jdx.dev", "mise-versions.jdx.dev"];
+
+/// The hosts installing a mise tool needs, by tool or backend (`docs/factory/sandbox.md`): the one table, so what a
+/// sandbox opens for an install is reviewable in one place. `None` for a tool it doesn't know, which is never guessed.
+/// `tool` is a mise tool key: a name (`node`) or `backend:name` (`npm:prettier`, `core:node`).
+pub fn hosts_for(tool: &str) -> Option<Vec<&'static str>> {
+    let (backend, name) = match tool.split_once(':') {
+        Some(("core", name)) => ("", name),
+        Some((backend, _)) => (backend, ""),
+        None => ("", tool),
+    };
+    let hosts: &[&[&str]] = match (backend, name) {
+        ("npm", _) => &[&["registry.npmjs.org"]],
+        ("pipx" | "pypi", _) => &[PYPI],
+        ("github" | "aqua" | "ubi", _) => &[GITHUB],
+        ("", "node") => &[&["nodejs.org"]],
+        ("", "rust") => &[&["static.rust-lang.org"]],
+        ("", "go") => &[&["go.dev", "dl.google.com"]],
+        // Prebuilt interpreters are GitHub release assets; pip comes from PyPI.
+        ("", "python") => &[GITHUB, PYPI],
+        // aqua's registry fetches pnpm from its GitHub releases.
+        ("", "pnpm") => &[GITHUB],
+        _ => return None,
+    };
+    Some(hosts.concat())
+}
+
+/// The tools in the repo's own mise configs, which `mise bootstrap` installs from the checkout at `dir`.
+fn repo_tools(dir: &Path) -> Vec<String> {
+    let mut tools = Vec::new();
+    for path in REPO_CONFIGS.iter().map(|c| dir.join(c)).filter(|p| p.exists()) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(parsed) = text.parse::<toml::Table>() else { continue };
+        if let Some(table) = parsed.get("tools").and_then(|t| t.as_table()) {
+            tools.extend(table.keys().cloned());
+        }
+    }
+    tools
+}
+
+/// Which hosts installing `stack` and `repo` tools needs. `mise_missing` adds mise's own installer. A `[stack]` tool
+/// with no known hosts is an error; a repo tool with none is skipped with a warning, since its install is best effort.
+pub fn install_hosts_for(stack: &[String], repo: &[String], mise_missing: bool) -> Result<Vec<InstallHost>> {
+    let mut asks: Vec<(String, Vec<&'static str>)> = Vec::new();
+    for tool in stack {
+        let hosts = hosts_for(tool).ok_or_else(|| {
+            Error::Other(format!(
+                "[stack] tool `{tool}` has no known download hosts; add them to `[egress] install` in factory.toml"
+            ))
+        })?;
+        asks.push((tool.clone(), hosts));
+    }
+    for tool in repo.iter().filter(|t| !stack.contains(t)) {
+        match hosts_for(tool) {
+            Some(hosts) => asks.push((tool.clone(), hosts)),
+            None => tracing::warn!(
+                %tool,
+                "the repo's mise.toml asks for a tool with no known download hosts; skipping it unless `[egress] install` covers it"
+            ),
+        }
+    }
+    if asks.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Versions like `22` or `stable` are resolved over the network.
+    asks.insert(0, ("mise".into(), MISE_VERSIONS.to_vec()));
+    if mise_missing {
+        asks.insert(0, ("mise".into(), ["mise.run"].into_iter().chain(GITHUB.iter().copied()).collect()));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for (tool, hosts) in asks {
+        for host in hosts {
+            if seen.insert(host) {
+                out.push(InstallHost { host: host.to_string(), tool: tool.clone() });
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub struct Mise {
@@ -132,6 +216,12 @@ impl Mise {
             return Ok(text);
         }
         Err(Error::Other(format!("mise {} failed: {}", args.join(" "), text.trim())))
+    }
+
+    /// The hosts installing the factory's `tools` and the checkout's own mise tools at `dir` needs, worked out offline.
+    pub async fn install_hosts(&self, dir: &Path, tools: &BTreeMap<String, String>) -> Result<Vec<InstallHost>> {
+        let stack: Vec<String> = tools.keys().cloned().collect();
+        install_hosts_for(&stack, &repo_tools(dir), self.find().is_none())
     }
 
     /// Installs what the factory's `tools` and the repo's own mise config ask for, in the checkout at `dir`. The repo's
@@ -249,5 +339,60 @@ mod tests {
         assert_eq!(overridden(&stack, repo), vec!["node".to_string()]);
         assert!(overridden(&stack, "").is_empty());
         assert!(overridden(&stack, "not toml [").is_empty());
+    }
+
+    fn names(hosts: &[InstallHost]) -> Vec<&str> {
+        hosts.iter().map(|h| h.host.as_str()).collect()
+    }
+
+    #[test]
+    fn a_node_stack_needs_only_nodejs_and_mises_version_lists() {
+        let hosts = install_hosts_for(&["node".to_string()], &[], false).unwrap();
+        assert_eq!(names(&hosts), ["mise.jdx.dev", "mise-versions.jdx.dev", "nodejs.org"]);
+        assert_eq!(hosts.last().unwrap().tool, "node");
+    }
+
+    #[test]
+    fn mises_installer_hosts_are_opened_only_when_mise_is_missing() {
+        let node = ["node".to_string()];
+        assert!(!names(&install_hosts_for(&node, &[], false).unwrap()).contains(&"mise.run"));
+        let hosts = install_hosts_for(&node, &[], true).unwrap();
+        assert!(names(&hosts).contains(&"mise.run"), "{hosts:?}");
+        assert!(hosts.iter().any(|h| h.host == "github.com" && h.tool == "mise"));
+    }
+
+    #[test]
+    fn nothing_to_install_opens_nothing() {
+        assert!(install_hosts_for(&[], &[], true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn backends_map_to_their_registries() {
+        assert_eq!(hosts_for("npm:prettier").unwrap(), ["registry.npmjs.org"]);
+        assert_eq!(hosts_for("core:node").unwrap(), ["nodejs.org"]);
+        assert_eq!(hosts_for("pipx:black").unwrap(), ["pypi.org", "files.pythonhosted.org"]);
+        assert!(hosts_for("aqua:BurntSushi/ripgrep").unwrap().contains(&"github.com"));
+        assert!(hosts_for("python").unwrap().contains(&"pypi.org"));
+        assert!(hosts_for("zig").is_none());
+        assert!(hosts_for("cargo:ripgrep").is_none());
+    }
+
+    #[test]
+    fn an_unknown_stack_tool_fails_naming_it_and_an_unknown_repo_tool_is_skipped() {
+        let err = install_hosts_for(&["zig".to_string()], &[], false).unwrap_err().to_string();
+        assert!(err.contains("`zig`") && err.contains("[egress] install"), "{err}");
+        let hosts =
+            install_hosts_for(&["node".to_string()], &["zig".to_string(), "python".to_string()], false).unwrap();
+        assert!(names(&hosts).contains(&"pypi.org") && !names(&hosts).contains(&"zig"));
+    }
+
+    #[test]
+    fn a_repos_mise_toml_tools_are_read_from_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mise.toml"), "[tools]\npython = \"3.12\"\n\"npm:prettier\" = \"latest\"\n")
+            .unwrap();
+        let mut tools = repo_tools(dir.path());
+        tools.sort();
+        assert_eq!(tools, ["npm:prettier", "python"]);
     }
 }

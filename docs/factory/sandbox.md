@@ -72,9 +72,23 @@ Sprites egress is a DNS-based allowlist set from outside through the API. Change
 
 | Phase | Allowed domains |
 | --- | --- |
-| Install | Iroh relay and discovery, connector gateway, the repo's package registries; `github.com` and `codeload.github.com` at bootstrap for public repos; and, mise's tool sources, always, since the control plane can't see the checkout's files: `mise.run`, `api.github.com` (version lookups for github, aqua and ubi tools), `mise.jdx.dev`, `mise-versions.jdx.dev`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` (GitHub release assets), `static.rust-lang.org`, `nodejs.org`, `registry.npmjs.org`, `go.dev`, `dl.google.com`, `pypi.org`, `files.pythonhosted.org`. A tool from elsewhere, or a repo's own `mise.toml` tools, need their hosts in `[egress] install` |
+| Install | Iroh relay and discovery, connector gateway, the repo's package registries (`[egress] install`); `github.com` and `codeload.github.com` at bootstrap for public repos; and exactly the hosts of the tools being installed (below) |
 | Agent work | Iroh relay and discovery, connector gateway |
-| Install requested mid-task | Install set, opened by the control plane on the daemon's request and closed after; each request logged |
+| Install requested mid-task | Hosts the daemon asks for, opened by the control plane on top of the install set and closed after. Built for the tool installs: after the clone the daemon works out the tool list offline and the control plane opens those hosts, logging each with the tool that asked (`opening install egress host=nodejs.org tool=node`) |
+
+**Tool hosts.** The control plane can't see the checkout, so it doesn't guess. Before `prepare`, it asks the daemon which hosts the install needs (`install_hosts`). The daemon refreshes the checkout, collects the tools (the `[stack]` and the `[tools]` of the checkout's own mise config), maps them to hosts with one table (`hosts_for` in `crates/trailhead-daemon/src/mise.rs`, keyed by mise tool or backend) and replies with each host and the tool that needs it. The control plane opens those on top of the install set, logs them, runs `prepare`, and confirms them blocked again before the agent starts. mise's installer (`mise.run` and its GitHub release) is included only when mise is missing; its version lists (`mise.jdx.dev`, `mise-versions.jdx.dev`) whenever there is a tool to install. No tools, no extra hosts.
+
+| Tool or backend | Hosts |
+| --- | --- |
+| `node` | `nodejs.org` |
+| `rust` | `static.rust-lang.org` |
+| `go` | `go.dev`, `dl.google.com` |
+| `python` | GitHub, PyPI |
+| `pnpm`, `github:`, `aqua:`, `ubi:` | GitHub: `github.com`, `api.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` |
+| `npm:` | `registry.npmjs.org` |
+| `pipx:`, `pypi:` | `pypi.org`, `files.pythonhosted.org` |
+
+A `[stack]` tool not in the table fails the prepare, naming the tool and saying to add its hosts to `[egress] install`. A tool from the repo's own `mise.toml` that isn't in it is skipped with a warning, the same best-effort rule as its install. The hosts of `[bootstrap.packages]` (apt and the like) aren't mapped; they go in `[egress] install` too.
 
 Decided: registry egress only during install phases. The risk isn't secrets, since the sandbox holds none; it's a malicious or typosquatted package whose install script acts with the sandbox's connector identity. Mitigations:
 

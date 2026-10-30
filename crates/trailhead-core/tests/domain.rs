@@ -174,9 +174,21 @@ async fn finishing_drops_the_claim() {
         Ok(Status::NeedsInput)
     ));
     assert!(matches!(
-        env.store.update_task(&env.human, &t.key, status(Status::InReview), None).await,
-        Err(Error::InvalidTransition { .. })
+        env.store.update_task(&env.human, &t.key, status(Status::InReview), None).await.map(|t| t.status),
+        Ok(Status::InReview)
     ));
+}
+
+#[tokio::test]
+async fn claim_takes_parked_and_reviewed_work_directly() {
+    let env = Env::new().await;
+    let a = env.agent("a").await;
+    for to in [Status::NeedsInput, Status::InReview] {
+        let t = env.task("take over").await;
+        env.store.update_task(&env.human, &t.key, status(to), None).await.unwrap();
+        let claimed = env.store.claim(&a, &t.key, None).await.unwrap();
+        assert_eq!(claimed.task.status, Status::InProgress);
+    }
 }
 
 #[tokio::test]

@@ -40,6 +40,15 @@ pub struct PrepareRequest {
     pub tools: BTreeMap<String, String>,
 }
 
+/// A host the install step needs open, and the tool that needs it (`docs/factory/sandbox.md`). The daemon works these
+/// out from the `[stack]` and the checkout's own mise config; the control plane opens each and logs who asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallHost {
+    pub host: String,
+    /// The mise tool that needs the host (`node`, `npm:prettier`), or `mise` for its own installer and version lists.
+    pub tool: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRequest {
     /// Names the run, so a control plane that loses its connection can reattach to it (`ToDaemon::Attach`).
@@ -106,6 +115,9 @@ pub struct RunReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToDaemon {
     Prepare(PrepareRequest),
+    /// Asks which hosts installing the request's tools needs (`FromDaemon::InstallHosts`). The daemon refreshes the
+    /// checkout first, since the repo's own mise config lives in it, and installs nothing.
+    InstallHosts(PrepareRequest),
     Run(Box<RunRequest>),
     /// Resumes following a run after a dropped connection: the daemon sends the events after the first `seen`,
     /// then the rest of the run as usual. A run the daemon doesn't know ends with `Failed(NotFound)`.
@@ -133,6 +145,7 @@ pub struct DaemonVersion {
 pub enum FromDaemon {
     Event(RunEvent),
     Prepared,
+    InstallHosts(Vec<InstallHost>),
     Version(DaemonVersion),
     Report(RunReport),
     Failed(Error),
@@ -165,6 +178,12 @@ impl std::fmt::Debug for DaemonSecrets {
 
 #[async_trait]
 pub trait Daemon: Send + Sync {
+    /// Starts the sandbox's daemon if needed, refreshes its checkout, and says which hosts `prepare` needs open to
+    /// install the request's tools, each with the tool that asked. Fails if a `[stack]` tool has no known hosts. The
+    /// control plane opens them before `prepare` and closes them after.
+    async fn install_hosts(&self, _sandbox: &SandboxId, _req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        Ok(Vec::new())
+    }
     /// Starts the sandbox's daemon if needed and readies its checkout.
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()>;
     /// Drops any connection to the sandbox's daemon, after something (a restore) restarted it.

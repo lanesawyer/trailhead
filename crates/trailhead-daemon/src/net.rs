@@ -24,8 +24,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, watch};
 use trailhead_factory::{
-    Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, PrepareRequest, Program, Result,
-    RunEvent, RunReport, RunRequest, SandboxFile, SandboxId, ToDaemon,
+    Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, InstallHost, PrepareRequest, Program,
+    Result, RunEvent, RunReport, RunRequest, SandboxFile, SandboxId, ToDaemon,
 };
 
 use crate::Runner;
@@ -272,6 +272,13 @@ impl DaemonProtocol {
             ToDaemon::Prepare(req) => {
                 let reply = match self.prepare(req).await {
                     Ok(()) => FromDaemon::Prepared,
+                    Err(e) => FromDaemon::Failed(e),
+                };
+                return reply_with(&mut send, &reply).await;
+            }
+            ToDaemon::InstallHosts(req) => {
+                let reply = match self.runner.install_hosts(&req).await {
+                    Ok(hosts) => FromDaemon::InstallHosts(hosts),
                     Err(e) => FromDaemon::Failed(e),
                 };
                 return reply_with(&mut send, &reply).await;
@@ -699,6 +706,16 @@ impl RemoteDaemon {
         })
     }
 
+    /// Starts the daemon unless this control plane already has a live connection to it, and makes sure it's the
+    /// current build.
+    async fn start_current(&self, sandbox: &SandboxId) -> Result<()> {
+        let connected = self.conns.lock().unwrap().get(sandbox).is_some_and(|c| c.close_reason().is_none());
+        if !connected {
+            self.compute.start(sandbox, &self.program(sandbox)).await?;
+        }
+        self.ensure_current(sandbox).await
+    }
+
     /// Makes sure the daemon that runs is the binary this control plane uploads. A sandbox restored from a
     /// checkpoint can come back with the previous build's process still running, which would silently drop
     /// the fields of any newer request. A stale daemon is restarted onto the current binary; one still stale
@@ -776,7 +793,7 @@ impl RemoteDaemon {
                                 }
                                 Some(Ok(FromDaemon::Report(report))) => return Ok(report),
                                 Some(Ok(FromDaemon::Failed(e))) => return Err(e),
-                                Some(Ok(FromDaemon::Prepared | FromDaemon::Version(_))) => {
+                                Some(Ok(FromDaemon::Prepared | FromDaemon::InstallHosts(_) | FromDaemon::Version(_))) => {
                                     return Err(io_err("unexpected reply during a run"));
                                 }
                                 Some(Err(e)) => break e,
@@ -805,14 +822,38 @@ impl RemoteDaemon {
 
 #[async_trait]
 impl Daemon for RemoteDaemon {
-    /// Starts the daemon unless this control plane already has a live connection to it. A connection that drops
-    /// while the daemon prepares is redialed and the request sent again; the daemon joins the prepare in flight.
-    async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
-        let connected = self.conns.lock().unwrap().get(sandbox).is_some_and(|c| c.close_reason().is_none());
-        if !connected {
-            self.compute.start(sandbox, &self.program(sandbox)).await?;
+    /// Asks the daemon which hosts the install needs, starting it first as `prepare` does.
+    async fn install_hosts(&self, sandbox: &SandboxId, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        self.start_current(sandbox).await?;
+        let mut patience = CONNECT_PATIENCE;
+        let mut lost = 0;
+        loop {
+            let (mut send, mut recv) = self.open(sandbox, patience).await?;
+            let reply = match write_frame(&mut send, &ToDaemon::InstallHosts(req.clone())).await {
+                Ok(()) => read_frame::<FromDaemon>(&mut recv).await,
+                Err(e) => Err(e),
+            };
+            let error = match reply {
+                Ok(Some(FromDaemon::InstallHosts(hosts))) => return Ok(hosts),
+                Ok(Some(FromDaemon::Failed(e))) => return Err(e),
+                Ok(Some(other)) => return Err(io_err(format!("unexpected reply to install_hosts: {other:?}"))),
+                Ok(None) => io_err(format!("the daemon in {} went away", sandbox.0)),
+                Err(e) => e,
+            };
+            lost += 1;
+            if lost > MAX_REATTACH {
+                return Err(io_err(format!("lost the daemon in {} {MAX_REATTACH} times: {error}", sandbox.0)));
+            }
+            tracing::warn!(sandbox = %sandbox.0, %error, "lost the daemon while it listed install hosts; asking again");
+            self.disconnect(sandbox);
+            patience = RECONNECT_PATIENCE;
         }
-        self.ensure_current(sandbox).await?;
+    }
+
+    /// A connection that drops while the daemon prepares is redialed and the request sent again; the daemon joins the
+    /// prepare in flight.
+    async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
+        self.start_current(sandbox).await?;
         let mut patience = CONNECT_PATIENCE;
         let mut lost = 0;
         loop {

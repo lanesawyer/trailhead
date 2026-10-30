@@ -198,6 +198,10 @@ pub struct RepoConfig {
     /// Reviews of one task that may ask for changes before it's parked for a human instead of reworked again.
     #[serde(default = "default_max_review_rounds")]
     pub max_review_rounds: u32,
+    /// Reworks for a PR that conflicts with the base branch before the task is parked for a human. They don't use up
+    /// review rounds.
+    #[serde(default = "default_max_conflict_reworks")]
+    pub max_conflict_reworks: u32,
 }
 
 fn default_base_branch() -> String {
@@ -214,6 +218,9 @@ fn default_max_infra_failures() -> u32 {
 }
 fn default_max_review_rounds() -> u32 {
     3
+}
+fn default_max_conflict_reworks() -> u32 {
+    5
 }
 fn default_worker() -> String {
     "worker".into()

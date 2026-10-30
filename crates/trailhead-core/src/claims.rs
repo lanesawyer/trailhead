@@ -234,7 +234,10 @@ impl Store {
             {
                 return Err(claim_held(&tx.conn, c).await);
             }
-            let claimable = task.status == Status::Open || (mine && task.status == Status::InProgress);
+            // Parked and in-review work is claimable as it stands, so taking it over by hand
+            // never has to pass through `open`, where the factory could grab it.
+            let claimable = matches!(task.status, Status::Open | Status::NeedsInput | Status::InReview)
+                || (mine && task.status == Status::InProgress);
             if !claimable {
                 return Err(Error::InvalidTransition { from: task.status, to: Status::InProgress });
             }

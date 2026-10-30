@@ -332,3 +332,25 @@ async fn a_failing_repo_config_does_not_fail_the_stack() {
     let log = std::fs::read_to_string(tools.join("mise.log")).unwrap();
     assert!(log.contains("conf.d: bootstrap --only tools"), "{log}");
 }
+
+#[tokio::test]
+async fn conflict_markers_added_since_the_start_are_found_in_any_file() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "--quiet", "-b", "main"]);
+    git(&dir, &["config", "user.email", "a@b.c"]);
+    git(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("a.md"), "a\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "one"]);
+    let ws = GitWorkspace::new(&dir);
+    let start = ws.head().await.unwrap();
+    assert!(ws.conflict_markers(&start).await.unwrap().is_empty());
+
+    std::fs::write(dir.join("a.md"), "a\n=======\n").unwrap();
+    assert!(ws.conflict_markers(&start).await.unwrap().is_empty(), "a rule alone isn't a marker");
+    std::fs::write(dir.join("a.md"), "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> main\n").unwrap();
+    std::fs::write(dir.join("new.toml"), ">>>>>>> main\n").unwrap();
+    assert_eq!(ws.conflict_markers(&start).await.unwrap(), ["a.md", "new.toml"]);
+}

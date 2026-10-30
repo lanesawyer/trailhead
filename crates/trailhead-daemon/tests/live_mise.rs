@@ -9,7 +9,6 @@ use std::sync::Arc;
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use trailhead_compute_sprites::SpritesCompute;
-use trailhead_control::MISE_DOMAINS;
 use trailhead_daemon::net::{Launch, RemoteDaemon};
 use trailhead_factory::{Check, Compute, Daemon, Egress, IROH_DOMAINS, Labels, PrepareRequest, Repo, SandboxSpec};
 
@@ -19,7 +18,7 @@ async fn a_stack_asking_for_node_22_gets_node_22() {
     let token = std::env::var("SPRITES_TOKEN").expect("SPRITES_TOKEN");
     let binary = std::fs::read(std::env::var("TRAILHEAD_DAEMON_BIN").expect("TRAILHEAD_DAEMON_BIN")).unwrap();
     let compute = Arc::new(SpritesCompute::new(token).unwrap().with_prefix("th-live-"));
-    let domains = IROH_DOMAINS.iter().chain(MISE_DOMAINS).chain(&["github.com", "codeload.github.com"]);
+    let domains = IROH_DOMAINS.iter().chain(&["github.com", "codeload.github.com"]);
     let spec = SandboxSpec {
         name: format!("th-live-mise-{}", std::process::id()),
         labels: Labels::from([("factory".into(), "trailhead-live".into())]),
@@ -41,6 +40,12 @@ async fn a_stack_asking_for_node_22_gets_node_22() {
         }),
         tools: [("node".to_string(), "22".to_string())].into(),
     };
+    // As the control plane does: the daemon names the hosts the install needs, and exactly those are opened.
+    let hosts = remote.install_hosts(&sandbox.id, &prepare).await.expect("the daemon names the install hosts");
+    assert!(hosts.iter().any(|h| h.host == "nodejs.org" && h.tool == "node"), "{hosts:?}");
+    let mut egress = spec.egress.clone();
+    egress.domains.extend(hosts.into_iter().map(|h| h.host));
+    compute.set_egress(&sandbox.id, &egress).await.unwrap();
     let result = remote.prepare(&sandbox.id, prepare).await;
     let _ = compute.destroy(&sandbox.id).await;
     result.expect("prepare installs node 22 and setup sees it");

@@ -768,9 +768,10 @@ async fn sandboxes_are_prepared_under_install_egress_then_narrowed() {
     assert!(egress.iter().any(|d| d == "*.iroh.link"), "{egress:?}");
     assert!(!egress.iter().any(|d| d == "github.com"), "clone egress is closed before the agent runs: {egress:?}");
     let blocked = r.daemon.requests().into_iter().next().unwrap().blocked_hosts;
-    for host in ["github.com", "codeload.github.com", "mise.run", "api.github.com"] {
-        assert!(blocked.iter().any(|d| d == host), "{host} is confirmed blocked, stack or not: {blocked:?}");
+    for host in ["github.com", "codeload.github.com"] {
+        assert!(blocked.iter().any(|d| d == host), "{host} is confirmed blocked: {blocked:?}");
     }
+    assert!(!blocked.iter().any(|d| d == "mise.run"), "no tools, no mise hosts: {blocked:?}");
     let allowed = r.daemon.requests().into_iter().next().unwrap().allowed_hosts;
     assert_eq!(allowed, ["iroh.link"], "named agent hosts are kept resolved; wildcards can't be");
 }
@@ -2202,24 +2203,67 @@ fn with_stack(tools: &str) -> String {
     CONFIG.replace("[checks]", &format!("[stack]\ntools = {{ {tools} }}\n\n[checks]"))
 }
 
+/// Every host any install egress of `name` opened, and what the agent phase has.
+fn install_and_agent_egress(r: &Rig, name: &str) -> (Vec<String>, Vec<String>) {
+    let log = r.compute.egress_log(name);
+    let all = log.iter().flat_map(|e| e.domains.clone()).collect();
+    (all, log.last().unwrap().domains.clone())
+}
+
 #[tokio::test]
-async fn the_stack_reaches_prepare_and_opens_tool_egress_only_for_install() {
-    let r = rig_with(&with_stack(r#"node = "22", pnpm = "9""#));
+async fn a_node_only_stack_opens_node_hosts_and_no_others_for_install() {
+    let r = rig_with(&with_stack(r#"node = "22""#));
     r.tracker.add_task("TRAIL", "Add a greeting", "");
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
     r.factory.tick().await.unwrap();
 
     let prepared = r.daemon.prepared();
     let tools: Vec<_> = prepared[0].1.tools.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    assert_eq!(tools, ["node=22", "pnpm=9"]);
-    let egress = r.compute.egress("trailhead-w1").unwrap().domains;
-    assert!(!egress.iter().any(|d| d == "nodejs.org"), "tool sources are closed before the agent runs: {egress:?}");
-    let blocked = r.daemon.requests().into_iter().next().unwrap().blocked_hosts;
-    for host in ["mise.run", "nodejs.org", "static.rust-lang.org", "github.com"] {
-        assert!(blocked.iter().any(|d| d == host), "{host} is confirmed blocked: {blocked:?}");
+    assert_eq!(tools, ["node=22"]);
+    let (opened, agent) = install_and_agent_egress(&r, "trailhead-w1");
+    assert!(opened.iter().any(|d| d == "nodejs.org"), "{opened:?}");
+    for host in
+        ["pypi.org", "files.pythonhosted.org", "go.dev", "dl.google.com", "registry.npmjs.org", "static.rust-lang.org"]
+    {
+        assert!(!opened.iter().any(|d| d == host), "{host} was opened for a node-only stack: {opened:?}");
     }
+    assert!(!agent.iter().any(|d| d == "nodejs.org"), "tool sources are closed before the agent runs: {agent:?}");
+    let blocked = r.daemon.requests().into_iter().next().unwrap().blocked_hosts;
+    assert!(blocked.iter().any(|d| d == "nodejs.org"), "confirmed blocked before the agent starts: {blocked:?}");
     let labels = r.compute.get("trailhead-w1").unwrap().labels;
     assert!(labels.contains_key(label::STACK), "the warm checkpoint is keyed on the stack");
+}
+
+#[tokio::test]
+async fn a_repo_mise_config_asking_for_python_opens_the_python_hosts() {
+    let r = rig();
+    r.daemon.repo_mise_tools(&["python", "npm:prettier"]);
+    r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
+    r.factory.tick().await.unwrap();
+
+    let (opened, agent) = install_and_agent_egress(&r, "trailhead-w1");
+    for host in ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org"] {
+        assert!(opened.iter().any(|d| d == host), "{host} is opened for the repo's tools: {opened:?}");
+        assert!(!agent.iter().any(|d| d == host), "{host} is closed for the agent: {agent:?}");
+    }
+    assert!(!opened.iter().any(|d| d == "nodejs.org"), "{opened:?}");
+}
+
+#[tokio::test]
+async fn an_unknown_repo_tool_is_skipped_and_an_unknown_stack_tool_fails_the_prepare() {
+    let r = rig();
+    r.daemon.repo_mise_tools(&["cargo:ripgrep"]);
+    r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.daemon.prepared().len(), 1, "the repo's own unknown tool doesn't stop the prepare");
+
+    let r = rig_with(&with_stack(r#"zig = "0.13""#));
+    r.tracker.add_task("TRAIL", "Add a greeting", "");
+    let err = r.factory.tick().await.unwrap_err().to_string();
+    assert!(err.contains("`zig`") && err.contains("[egress] install"), "{err}");
+    assert!(r.daemon.prepared().is_empty(), "the prepare failed before any checkout was prepared");
 }
 
 #[tokio::test]
