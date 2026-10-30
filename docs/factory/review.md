@@ -65,6 +65,18 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 - **Fresh sandboxes and contexts**, no access to the author's transcript.
 - **Blind first pass.** Each reviewer records a verdict before seeing the others; disagreement escalates.
 
+## What counts as a review round
+
+`max_review_rounds` (`[repo]`, default 3) caps how many reviews may ask for changes. A reviewer run counts as a round unless it was not the PR's fault:
+
+| Reviewer outcome | Round |
+|---|---|
+| Approves, or asks for changes | Counts. At the cap, a review that still asks for changes parks the task. |
+| Breaches its budget | Counts, and the task is parked at once with a question naming the breach (TRAIL-268, TRAIL-319). Rerunning a reviewer that already overspent would only overspend again, so there is no retry to cap. Reopening the task starts the count again. |
+| Ends with no verdict | Given back; the reviewer is run again. |
+| Infrastructure failure | Given back; the task waits out the infra backoff, and parks at `max_infra_failures`. |
+| Conflict rework | Not a round (it has `max_conflict_reworks`), nor is the review after one. |
+
 ## The merger
 
 The control plane acts as the merger. It is the factory project's only delegated reviewer ([lifecycle.md](lifecycle.md)), and the only agent that moves a factory task to `approved` or `done`.
