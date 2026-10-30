@@ -18,5 +18,5 @@ mod rest;
 #[cfg(feature = "net")]
 pub use rest::RestTracker;
 
-pub use runner::{Connect, RENEW_EVERY, Runner, Workspace};
+pub use runner::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 pub use workspace::GitWorkspace;

@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
-use trailhead_daemon::{RENEW_EVERY, Runner, Workspace};
+use trailhead_daemon::{HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
     Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, PrepareRequest, Repo, Result, RunEvent, RunReport,
     RunRequest, SandboxId, Tracker,
@@ -152,7 +153,14 @@ impl LocalDaemon {
 
     pub fn connecting(harness: Arc<dyn Harness>, codehost: Arc<dyn CodeHost>, connect: Connect) -> LocalDaemon {
         let workspace = Arc::new(FakeWorkspace::default());
-        let runner = Runner { harness, codehost, workspace: workspace.clone(), connect, renew_every: RENEW_EVERY };
+        let runner = Runner {
+            harness,
+            codehost,
+            workspace: workspace.clone(),
+            connect,
+            renew_every: RENEW_EVERY,
+            heartbeat_every: HEARTBEAT_EVERY,
+        };
         LocalDaemon {
             runner: Arc::new(runner),
             workspace,
@@ -164,6 +172,12 @@ impl LocalDaemon {
             ongoing: Mutex::default(),
             attached: Mutex::default(),
         }
+    }
+
+    /// Has the daemon send a heartbeat this often instead of every 30 seconds.
+    pub fn heartbeat_every(mut self, every: Duration) -> LocalDaemon {
+        Arc::get_mut(&mut self.runner).expect("the runner isn't shared yet").heartbeat_every = every;
+        self
     }
 
     /// Has the agent leave conflict markers in these files.

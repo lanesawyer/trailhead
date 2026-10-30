@@ -1640,6 +1640,9 @@ impl Factory {
         let mut spent = Usd::ZERO;
         let mut steps = 0;
         let mut breach: Option<String> = None;
+        let stall_after = profile.stall_timeout();
+        let mut stalled = false;
+        let mut grace_fired = false;
         let mut on_event = |ev: RunEvent, spent: &mut Usd| -> Option<String> {
             match ev {
                 RunEvent::Usage { model, usage } => *spent += self.provider.price(&model, &usage),
@@ -1671,11 +1674,21 @@ impl Factory {
         let result = loop {
             let new_breach = tokio::select! {
                 biased;
-                Some(ev) = rx.recv() => if breach.is_none() { on_event(ev, &mut spent) } else { None },
+                Some(ev) = rx.recv() => match ev {
+                    // The daemon says how long the agent has been quiet, so a reattach doesn't restart the clock and
+                    // time spent disconnected isn't counted (no heartbeat arrives then).
+                    RunEvent::Heartbeat { quiet_secs } if breach.is_none() && Duration::from_secs(quiet_secs) >= stall_after => {
+                        stalled = true;
+                        Some(format!("stalled: no activity from the agent for {quiet_secs} s"))
+                    }
+                    ev if breach.is_none() => on_event(ev, &mut spent),
+                    _ => None,
+                },
                 r = &mut run => break r,
                 _ = &mut deadline, if breach.is_none() => Some(format!("ran past {} minutes", profile.budget.minutes)),
                 _ = &mut grace, if breach.is_some() => {
                     tracing::warn!(sandbox = %sandbox.name, "daemon ignored cancel; cutting it off");
+                    grace_fired = true;
                     break Err(Error::Cancelled);
                 }
             };
@@ -1692,6 +1705,15 @@ impl Factory {
         }
         let total = prior + spent;
         match (result, breach) {
+            // The agent's silence says nothing about the task (TRAIL-173), so it's handled as an infrastructure
+            // failure: the attempt is given back.
+            (Err(Error::Cancelled), Some(reason)) if stalled => {
+                // A daemon that ignored the cancel keeps running the agent, so it loses its access as a breach would.
+                if grace_fired && let Err(e) = self.cut_off(sandbox).await {
+                    tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't cut off a stalled sandbox");
+                }
+                Err(Error::Other(reason))
+            }
             (Err(Error::Cancelled), Some(reason)) => Ok(Run::Breach(reason, total)),
             // The step finished before the cancel landed; its result stands.
             (Ok(report), _) => Ok(Run::Report(report, total)),

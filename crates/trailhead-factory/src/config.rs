@@ -293,6 +293,20 @@ pub struct Profile {
     pub model: ModelAlias,
     pub budget: Budget,
     pub escalate_to: Option<String>,
+    /// Minutes of silence from the agent (no steps, tool calls or output, not counting a tool call that's still
+    /// running) after which a run is stopped and fails as a stall.
+    #[serde(default = "default_stall_timeout")]
+    pub stall_timeout: u32,
+}
+
+fn default_stall_timeout() -> u32 {
+    5
+}
+
+impl Profile {
+    pub fn stall_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.stall_timeout) * 60)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
