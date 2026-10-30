@@ -495,6 +495,27 @@ async fn reconcile_reattaches_to_a_run_still_going_and_counts_all_its_spend() {
 }
 
 #[tokio::test]
+async fn a_reattached_run_counts_its_wall_clock_from_when_it_started() {
+    let r = rig();
+    // Started 61 minutes back against a 60 minute worker budget: nothing is left of it.
+    let key = going(&r, Usd::ZERO, 61 * 60).await;
+    r.daemon.ongoing_hung("trail-1-a1", vec![spent(1_000)]);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reattached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked, not given another full budget");
+    assert!(
+        r.tracker.comments(&key).iter().any(|c| c.kind == "question" && c.body.contains("60 minutes")),
+        "{:?}",
+        r.tracker.comments(&key)
+    );
+    let sandbox = r.compute.get("trailhead-w1").expect("sandbox kept for resuming");
+    assert!(!sandbox.labels.contains_key(label::ROLE), "connector access cut");
+    assert!(r.compute.checkpoints("trailhead-w1").last().unwrap().starts_with("parked:"));
+}
+
+#[tokio::test]
 async fn a_run_the_daemon_has_lost_goes_back_to_the_queue_without_using_an_attempt() {
     let r = rig();
     let key = going(&r, Usd::ZERO, 60).await;

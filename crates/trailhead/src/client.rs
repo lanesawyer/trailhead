@@ -455,6 +455,13 @@ fn current_exe() -> Result<std::path::PathBuf> {
     Ok(exe)
 }
 
+/// Whether `systemd-run --user` can plausibly work here.
+fn systemd_scope_available() -> bool {
+    std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|d| !d.is_empty())
+        && std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|d| d.join("systemd-run").is_file()))
+}
+
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
 /// after this command exits.
 pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()> {
@@ -463,14 +470,40 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.server_log())?;
     let bind = format!("{}:{}", base.host_str().unwrap_or("127.0.0.1"), base.port_or_known_default().unwrap_or(7241));
     let exe = current_exe()?;
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(["serve", "--bind", &bind]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    cmd.spawn().context("couldn't start the local server")?;
+    let spawn = |scoped: bool| -> Result<std::process::Child> {
+        let mut cmd = if scoped {
+            let mut cmd = std::process::Command::new("systemd-run");
+            cmd.args([
+                "--user",
+                "--scope",
+                "--quiet",
+                "--collect",
+                "--unit",
+                &format!("trailhead-server-{}", std::process::id()),
+            ]);
+            cmd.arg(&exe);
+            cmd
+        } else {
+            std::process::Command::new(&exe)
+        };
+        cmd.args(["serve", "--bind", &bind]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log.try_clone()?);
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        Ok(cmd.spawn()?)
+    };
+    // Under systemd the server would otherwise stay in the launching app's cgroup scope, and
+    // systemd-oomd killing that app (an editor, say) would take the server with it. Its own
+    // scope keeps it alive; `systemd-run --scope` execs the server, so the pid is unchanged.
+    let mut scoped = systemd_scope_available();
+    let mut child = spawn(scoped).context("couldn't start the local server")?;
     // Generous, since a busy machine (a full `cargo test` in a factory sandbox) can take well over 10 s to start it.
     for _ in 0..300 {
         if health(http, base, None).await.is_some() {
             return remember_tunnel(&paths, base, false);
+        }
+        if scoped && child.try_wait()?.is_some() {
+            // No usable user manager (a container, a bare ssh session): run it unscoped.
+            scoped = false;
+            child = spawn(false).context("couldn't start the local server")?;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
