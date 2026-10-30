@@ -55,6 +55,9 @@ const MAX_INFRA_BACKOFF: Duration = Duration::from_secs(15 * 60);
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
+/// Who a rework asked for by failing CI is attributed to, in the worker's feedback and the park question.
+const CI_REVIEWER: &str = "CI";
+
 /// Reads the current `[merge] mode`, or says why it can't.
 pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String> + Send + Sync>;
 
@@ -74,6 +77,9 @@ pub struct Factory {
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
+    /// Tasks whose PR a run just pushed to: the host's next `mergeable = false` for each may be a verdict on the head
+    /// before the push, so it is read as not yet worked out, once (TRAIL-241).
+    fresh_pushes: Mutex<HashSet<TaskKey>>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// Tasks already reported as ungraded, so a poll doesn't say it again.
@@ -148,6 +154,11 @@ pub struct Reconciled {
     pub closed: Vec<String>,
     /// Pooled sandboxes that kept failing to release, now out of the pool.
     pub abandoned: Vec<String>,
+}
+
+/// Who merged a PR that is found merged: the merger when it recorded the intent before merging (TRAIL-289), else a person.
+fn merged_by(task: &Task) -> MergedBy {
+    if task.run.merging.as_deref().is_some_and(|h| !h.is_empty()) { MergedBy::Merger } else { MergedBy::Human }
 }
 
 /// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
@@ -231,6 +242,7 @@ impl Factory {
             merge_mode,
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
+            fresh_pushes: Mutex::default(),
             quota: Mutex::default(),
             ungraded: Mutex::default(),
             pause_logged: Mutex::default(),
@@ -603,7 +615,8 @@ impl Factory {
             match codehost.pr_state(pr).await? {
                 PrState::Merged { commit } => {
                     self.tracker.claim(&task.key).await?;
-                    self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
+                    let by = merged_by(task);
+                    self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
                     return Ok(Outcome::Settled { reason: format!("{} was merged", pr.url) });
                 }
                 PrState::Closed => {
@@ -648,6 +661,8 @@ impl Factory {
         }
         let started = RunUpdate {
             attempt: Some(attempt),
+            // A task parked for giving up and reopened starts its count again.
+            attempt_base: task.run.gave_up.filter(|g| *g > task.run.attempt_base.unwrap_or(0)),
             sandbox: Some(name.clone()),
             profile: Some(self.config.repo.worker.clone()),
             started: Some(unix_now()),
@@ -790,6 +805,9 @@ impl Factory {
 
         match report.result {
             RunResult::PrOpened(pr) => {
+                if task.run.pending_changes().is_some_and(|c| c.conflict) {
+                    self.fresh_pushes.lock().unwrap().insert(task.key.clone());
+                }
                 // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
                 // starts from the PR branch.
                 self.release_worker(sandbox).await?;
@@ -819,7 +837,7 @@ impl Factory {
                 }
                 let max = self.config.repo.max_attempts;
                 // Counted from the last review that asked for changes, so reworks get attempts of their own.
-                let failed = attempt.saturating_sub(task.run.attempt_base.unwrap_or(0));
+                let failed = attempt.saturating_sub(task.run.attempt_floor());
                 if failed >= max {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
                     let last = self
@@ -831,14 +849,15 @@ impl Factory {
                         .filter(|f| !f.is_empty())
                         .unwrap_or_else(|| reason.clone());
                     sub.claim(&task.key).await?;
+                    // Recorded before the question, so a task that is parked has the marker; reopening it is all a
+                    // human has to do.
+                    sub.report(&task.key, RunUpdate { gave_up: Some(attempt), ..RunUpdate::default() }).await?;
                     sub.ask(
                         &task.key,
                         &format!(
                             "Gave up after {failed} failed attempts (the limit is {max}). The last failure: \
-                             {reason}\n\n{last}\n\nFix the cause, then reset the attempt count with `trailhead edit {key} \
-                             --meta factory.attempt_base={attempt}` and reopen the task; without the reset it \
-                             parks again on the next failure. Or raise `max_attempts` to allow more tries.",
-                            key = task.key.0
+                             {reason}\n\n{last}\n\nFix the cause, then reopen the task; the attempt count starts again from \
+                             here. Or raise `max_attempts` to allow more tries."
                         ),
                     )
                     .await?;
@@ -1007,6 +1026,7 @@ impl Factory {
         };
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
+        let reviewed_head_at_request = head.clone();
         let (spend, reviewed, reviewed_head) = match &run {
             Run::Report(RunReport { result: RunResult::Reviewed(v), .. }, s) => {
                 (*s, (v.kind != VerdictKind::RequestChanges).then_some(attempt), head)
@@ -1037,6 +1057,7 @@ impl Factory {
                         body: verdict.body.clone(),
                         attempt,
                         conflict: false,
+                        head: reviewed_head_at_request,
                     };
                     let round = before + 1;
                     self.tracker
@@ -1095,6 +1116,9 @@ impl Factory {
         self.record_grade(&task, &grade).await?;
         let ci = codehost.ci(pr).await?;
         let head = ci.head.clone();
+        if let CiState::Failed { checks } = &ci.state {
+            return self.rework_ci_failure(&task, pr, &head, checks).await;
+        }
         let prev = task.run.merge.clone();
         let mut status = task.status;
         // The head each approval was given on: the control plane's own is marked before it moves the task, so an
@@ -1163,6 +1187,7 @@ impl Factory {
             approved_head,
             human_head,
             problem: None,
+            refused: None,
             message: String::new(),
         };
         // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
@@ -1199,6 +1224,10 @@ impl Factory {
             && status == Status::Approved
             && (gate.auto_merge || decision.human_head.as_ref() == Some(&head));
         decision.message = decision_message(&grade, &decision, gate.auto_merge, merging);
+        // A refusal stands for the head it was given on, until a merge succeeds or the head moves.
+        if merging {
+            decision.refused = prev.as_ref().filter(|d| d.head == head).and_then(|d| d.refused.clone());
+        }
         // A merge that may not happen (the PR is behind, its head moved, the host refuses) isn't announced until it
         // has: the PR keeps saying what it said, and the next pass decides again.
         let merged_message = merging.then(|| {
@@ -1238,7 +1267,16 @@ impl Factory {
             }
             return Ok(());
         }
-        match codehost.merge(pr, &decision.head).await? {
+        // Recorded first: if closing the task fails after the merge, reconcile still knows the merger did it.
+        self.tracker
+            .report(&task.key, RunUpdate { merging: Some(decision.head.clone()), ..RunUpdate::default() })
+            .await?;
+        let outcome = codehost.merge(pr, &decision.head).await;
+        // An error may follow a merge the host accepted, so it keeps the intent and reconcile's `pr_state` decides.
+        if matches!(outcome, Ok(MergeOutcome::Conflict | MergeOutcome::HeadMoved | MergeOutcome::Refused(_))) {
+            self.tracker.report(&task.key, RunUpdate { merging: Some(String::new()), ..RunUpdate::default() }).await?;
+        }
+        match outcome? {
             MergeOutcome::Merged => {
                 if let Err(e) = codehost.comment(pr, merged_message).await {
                     tracing::warn!(task = %task.key.0, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
@@ -1256,8 +1294,19 @@ impl Factory {
                 Ok(())
             }
             MergeOutcome::Refused(why) => {
-                tracing::warn!(task = %task.key.0, pr = %pr.url, %why, "the code host refused the merge; trying again next pass");
-                Ok(())
+                // Said once per reason, on the PR and the task; the merge is still tried on each pass, quietly, since
+                // the host lifts a refusal (a check that passes) without anything else changing.
+                if decision.refused.as_ref() == Some(&why) {
+                    tracing::debug!(task = %task.key.0, pr = %pr.url, %why, "the code host still refuses the merge");
+                    return Ok(());
+                }
+                tracing::warn!(task = %task.key.0, pr = %pr.url, %why, "the code host refused the merge; trying again each pass");
+                let note = format!("The code host refused to merge: {why}. The merger tries again each pass.");
+                let codehost = self.codehost.as_ref().expect("checked above");
+                codehost.comment(pr, &note).await?;
+                self.tracker.note(&task.key, &note).await?;
+                let decision = MergeDecision { refused: Some(why), ..decision.clone() };
+                self.tracker.report(&task.key, RunUpdate { merge: Some(decision), ..RunUpdate::default() }).await
             }
         }
     }
@@ -1388,7 +1437,13 @@ impl Factory {
             tracing::warn!(task = %task.key.0, round, "the reviewer still wants changes; parking");
             self.tracker.reopen(&task.key).await?;
             self.tracker.claim(&task.key).await?;
-            let question = if conflict {
+            let question = if conflict && reviewer == CI_REVIEWER {
+                format!(
+                    "CI keeps failing on the PR: {round} conflict reworks so far (the limit is {max}). The last \
+                     failure:\n\n{body}\n\nFix the PR or settle what's landing, then reopen the task; raise \
+                     `max_conflict_reworks` to allow more."
+                )
+            } else if conflict {
                 format!(
                     "The PR keeps conflicting with the base branch: {round} conflict reworks so far \
                      (the limit is {max}). Merge the base branch into the PR yourself or settle what's landing, then \
@@ -1777,7 +1832,52 @@ impl Factory {
             pr.url
         );
         tracing::warn!(task = %task.key.0, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
-        let requested = ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true };
+        let head = match &self.codehost {
+            Some(codehost) => codehost.head(pr).await.ok(),
+            None => None,
+        };
+        let requested = ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true, head };
+        self.request_rework(task, requested, round).await
+    }
+
+    /// CI finished and failed on the PR's current head, whether the worker's own commit or a merge of the base branch
+    /// (a clean update keeps the verdict, so nothing else would look at it; TRAIL-390): the task, unapproved if it was,
+    /// goes back for a rework told which checks failed and the end of their logs. It counts toward
+    /// `max_conflict_reworks`, not review rounds, since CI breaking as main moves isn't a review finding.
+    async fn rework_ci_failure(&self, task: &Task, pr: &PrRef, head: &str, checks: &[String]) -> Result<()> {
+        let Some(codehost) = &self.codehost else { return Ok(()) };
+        let attempt = task.run.attempt.unwrap_or(1);
+        // Already asked for on this attempt: reconcile finishes reopening it, and the head isn't reworked twice.
+        if task.run.pending_changes().is_some_and(|c| c.attempt == attempt) {
+            return Ok(());
+        }
+        let after_update = match &task.run.reviewed_head {
+            Some(reviewed) => reviewed != head && codehost.carries_verdict(pr, reviewed).await?,
+            None => false,
+        };
+        let logs = codehost.ci_logs(pr, checks).await.unwrap_or_else(|e| {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't read the logs of the failed checks");
+            Vec::new()
+        });
+        let mut body = format!("CI failed on {} at {head}: {}.", pr.url, checks.join(", "));
+        if after_update {
+            body.push_str(
+                " It passed before the base branch was merged into the PR, so the failure came in with that merge: \
+                 something that landed on the base branch clashes with this change.",
+            );
+        }
+        for (check, log) in &logs {
+            body.push_str(&format!("\n\nEnd of the log of {check}:\n\n```\n{}\n```", log.trim_end()));
+        }
+        body.push_str("\n\nReproduce the failure, fix it, run the checks and finish.");
+        if task.status == Status::Approved {
+            self.tracker.unapprove(&task.key).await?;
+        }
+        let round = task.run.conflict_reworks.unwrap_or(0) + 1;
+        self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
+        tracing::warn!(task = %task.key.0, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
+        let head = Some(head.to_string());
+        let requested = ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head };
         self.request_rework(task, requested, round).await
     }
 
@@ -1788,8 +1888,10 @@ impl Factory {
         let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return Ok(Some(None)) };
         match codehost.pr_state(pr).await? {
             PrState::Merged { commit } => {
-                // A merge the factory didn't make: whoever did it, a person did it outside the factory.
-                self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
+                // A merge the factory didn't make is a person's, outside the factory; one the merger started but
+                // didn't get to close (TRAIL-289) is still the merger's.
+                let by = merged_by(task);
+                self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
                 done.merged.push(task.key.0.clone());
                 Ok(None)
             }
@@ -1798,7 +1900,12 @@ impl Factory {
                 done.closed.push(task.key.0.clone());
                 Ok(None)
             }
-            PrState::Open { mergeable } => Ok(Some(mergeable)),
+            PrState::Open { mergeable } => {
+                // GitHub works `mergeable` out after a push, so right after one a `false` may be the old head's. Read
+                // it as unknown this once; the next reconcile asks again and gets the settled answer.
+                let fresh = self.fresh_pushes.lock().unwrap().remove(&task.key);
+                Ok(Some(if fresh && mergeable == Some(false) { None } else { mergeable }))
+            }
         }
     }
 
@@ -1857,7 +1964,16 @@ impl Factory {
                     let count = if c.conflict { task.run.conflict_reworks } else { task.run.review_rounds };
                     count == Some(0)
                 };
-                if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c)) {
+                // The head recorded with the request is sturdier than the counts, whose reset can be lost: a PR that
+                // has moved since was pushed to by a person (TRAIL-338).
+                let moved =
+                    match (&task.run.pr, &self.codehost, task.run.pending_changes().and_then(|c| c.head.as_ref())) {
+                        (Some(pr), Some(codehost), Some(recorded)) => codehost.head(pr).await? != *recorded,
+                        _ => false,
+                    };
+                if let Some(requested) =
+                    task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c) && !moved)
+                {
                     let round = if requested.conflict {
                         task.run.conflict_reworks.unwrap_or(1)
                     } else {
