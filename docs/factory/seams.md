@@ -1,5 +1,7 @@
 # Plugin seams
 
+> **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
+
 Decided: the factory core is agnostic to compute, agent harness, model provider, task tracker and code host. Each is a trait with one implementation per vendor. Iroh and the standard checks stay fixed; they're the factory's own machinery, not vendor choices.
 
 | Seam | Runs in | Implementation today | Later |

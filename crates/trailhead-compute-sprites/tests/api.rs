@@ -28,6 +28,7 @@ struct Sprite {
     files: BTreeMap<String, (Vec<u8>, String)>,
     services: BTreeMap<String, Value>,
     started: Vec<String>,
+    stopped: Vec<String>,
     /// Statuses the next execs answer with, in order, before they start succeeding.
     exec_failures: Vec<u16>,
     exec_calls: usize,
@@ -191,6 +192,17 @@ async fn put_service(
     Json(json!({ "name": svc, "cmd": body["cmd"] })).into_response()
 }
 
+/// Streams a stop's progress, as the API does; a service that doesn't exist is a 404.
+async fn stop_service(State(api): State<Shared>, Path((name, svc)): Path<(String, String)>) -> Response {
+    let mut api = api.lock().unwrap();
+    let Some(s) = api.sprites.get_mut(&name) else { return StatusCode::NOT_FOUND.into_response() };
+    if !s.services.contains_key(&svc) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    s.stopped.push(svc);
+    ndjson(&[json!({ "type": "stopping", "timestamp": 1 }), json!({ "type": "complete", "timestamp": 2 })])
+}
+
 /// A service whose command is `false` exits straight away, like a daemon that can't start.
 async fn start_service(State(api): State<Shared>, Path((name, svc)): Path<(String, String)>) -> Response {
     let mut api = api.lock().unwrap();
@@ -264,6 +276,7 @@ async fn serve() -> (Shared, String) {
         .route("/v1/sprites/{name}/exec", post(exec))
         .route("/v1/sprites/{name}/fs/rename", post(rename_file))
         .route("/v1/sprites/{name}/services/{svc}", put(put_service))
+        .route("/v1/sprites/{name}/services/{svc}/stop", post(stop_service))
         .route("/v1/sprites/{name}/services/{svc}/start", post(start_service))
         .with_state(api.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -401,6 +414,16 @@ async fn start_uploads_files_and_starts_a_service() {
             json!(["--secrets", "/home/sprite/.trailhead/secrets.json"])
         );
         assert_eq!(s.started, ["trailhead-daemon"]);
+        assert!(s.stopped.is_empty(), "nothing to stop on a first start");
+    }
+
+    // A second start finds the service defined and stops it first.
+    compute.start(&id, &program).await.unwrap();
+    {
+        let api = api.lock().unwrap();
+        let s = &api.sprites["s"];
+        assert_eq!(s.stopped, ["trailhead-daemon"]);
+        assert_eq!(s.started, ["trailhead-daemon", "trailhead-daemon"]);
     }
 
     let broken = Program { name: "broken".into(), files: vec![], cmd: "false".into(), args: vec![] };

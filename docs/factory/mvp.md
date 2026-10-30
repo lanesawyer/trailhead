@@ -1,5 +1,7 @@
 # MVP
 
+> **History.** This is the plan for the first slice, which was finished on 2026-10-28. It is kept as a record. For how the factory works now, see the [overview](overview.md) and [operating](operating.md).
+
 Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with two human touches: approving the spec and merging.
 
 **Done 2026-10-28 (TRAIL-75).** TRAIL-103 went from spec to merged PR #5 with its spend recorded, and TRAIL-120 followed (PR #6). Stopping and restarting the control plane mid-run requeued cleanly, several times. A budget breach (TRAIL-141) parked its task and suspended its Sprite. The evidence is on TRAIL-75. What followed is phase 5 in `docs/PLAN.md`: making the factory run unattended.
@@ -19,7 +21,7 @@ Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with 
 ## Out of scope
 
 - Suspend during review: requested changes reopen the task and a new run starts a fresh sandbox from the PR branch, with the review in its prompt, so resume affinity isn't needed yet. Reworks are capped by `max_review_rounds` (`[repo]`, default 3); past it the task is parked with a question.
-- Grades (risk tiers), quorums, auto-merge, the merger. (Typed verdicts shipped anyway, as TRAIL-84.)
+- Grades (risk tiers), quorums, auto-merge, the merger. (Typed verdicts shipped anyway, as TRAIL-84; grades, gates and the merger were built after the MVP, see [review.md](review.md). Quorums weren't.)
 - Planner agent and spec collaboration: Lane writes the task spec by hand.
 - Provider usage API, daily cap, workspace spend limit.
 - Multiple repos, profile escalation, previews, outcome tracking, onboarding agent, OTLP export.

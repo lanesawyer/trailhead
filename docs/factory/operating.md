@@ -1,5 +1,7 @@
 # Operating the factory
 
+> Running the factory today. For what it is and how a task flows through it, read the [overview](overview.md) and [lifecycle](lifecycle.md) first.
+
 How to run the factory day to day, as it works today. It assumes this repo and its dev setup; the path to running it without the repo is TRAIL-114.
 
 ## One-time setup
@@ -12,6 +14,7 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 
 ## Starting and stopping
 
+- **The daemon.** The control plane uploads a `trailhead-daemon` to each sandbox. It downloads the release asset matching its own version (`trailhead-daemon-vX.Y.Z-x86_64-unknown-linux-musl`, a static build the release workflow attaches with a `.sha256`) once, checks the checksum, and caches both in `<data dir>/factory/daemon/`; later starts re-check the cache against the checksum and download nothing. A checksum mismatch or a failed download stops the start; a mismatched binary is never cached or uploaded. Only the control plane reaches GitHub for this, so sandboxes need no extra egress. `--daemon <path>` overrides it with a local build. A version with no release asset (a dev build, or a release made before this existed) falls back to `target/release/trailhead-daemon`, and fails with a message naming `--daemon` if that isn't there either.
 - `mise run factory` builds the daemon and the control plane in release mode and runs it in the foreground. Its output is the log.
 - `trailhead-factory check --config factory.toml` (under `fnox exec --`) reports what it can see without running anything: queued tasks, Sprites, its iroh endpoint. Stop `run` first; they share the lock below.
 - **To restart without losing work, Ctrl-C once and wait.** The first Ctrl-C drains: it starts no new runs, reworks or reviews, lets the runs in flight finish as usual (including the review a finished worker run starts), logs `draining: N runs in flight (TRAIL-n, ...); Ctrl-C again to cancel them`, and exits 0 when none are left. Reconcile keeps running during a drain, but anything it finds due waits for the next start. Then start the new build. Only SIGINT drains for now; SIGTERM and a `stop` command come with the service (TRAIL-112).

@@ -15,7 +15,7 @@ use crate::model::{Claim, Comment, Dependency, Entity, Event, Project, Task};
 use crate::projects::{check_review_settings, load_project, save_project};
 use crate::reminders::{NOT_NOTIFICATION_SQL, is_notification};
 use crate::store::{Ctx, EventIn, Store, Tx};
-use crate::tasks::{load_task, save_task};
+use crate::tasks::{check_no_parent_cycle, load_task, save_task};
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -71,6 +71,13 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
             };
             if same_task(&cur, &want) {
                 return Ok(None);
+            }
+            if want.parent_id != cur.parent_id
+                && want.deleted_at.is_none()
+                && let Some(pid) = want.parent_id
+            {
+                let parent = load_task(&tx.conn, ws, &pid.to_string(), true).await?;
+                check_no_parent_cycle(&tx.conn, ws, &want, &parent).await?;
             }
             let saved = save_task(tx, &cur, want).await?;
             (Some(cur.id), Some(serde_json::to_value(&cur)?), Some(serde_json::to_value(&saved)?))

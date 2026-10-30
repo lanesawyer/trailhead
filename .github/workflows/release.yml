@@ -108,8 +108,38 @@ jobs:
           path: dist/*.tar.gz*
           if-no-files-found: error
 
+  # The daemon the control plane uploads to sandboxes (Sprites run musl-friendly static binaries).
+  daemon:
+    needs: release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked -p trailhead-daemon --bin trailhead-daemon --target x86_64-unknown-linux-musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+      # The control plane fetches this by name (crates/trailhead-control/src/daemon_binary.rs).
+      - name: Package
+        env:
+          NAME: trailhead-daemon-${{ needs.release.outputs.tag }}-x86_64-unknown-linux-musl
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/trailhead-daemon "dist/$NAME"
+          cd dist
+          sha256sum "$NAME" > "$NAME.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: daemon
+          path: dist/trailhead-daemon-*
+          if-no-files-found: error
+
   crates-io:
-    needs: [release, binaries]
+    needs: [release, binaries, daemon]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -122,7 +152,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   github-release:
-    needs: [release, crates-io]
+    needs: [release, crates-io, daemon]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

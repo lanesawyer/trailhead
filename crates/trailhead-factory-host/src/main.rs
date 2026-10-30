@@ -1,8 +1,10 @@
 //! The factory's control plane, run next to a local Trailhead server (`docs/factory/state.md`):
 //!
 //! ```sh
-//! SPRITES_TOKEN=... trailhead-factory run --config factory.toml --daemon target/release/trailhead-daemon
+//! SPRITES_TOKEN=... trailhead-factory run --config factory.toml
 //! ```
+//!
+//! The daemon uploaded to sandboxes is the release asset matching this binary's version, or `--daemon <path>`.
 //!
 //! Sandboxes run on Sprites unless the factory file sets `[compute] kind = "docker"`, which needs this binary built
 //! with the `docker` feature.
@@ -26,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
-use trailhead_control::{CoreTracker, Factory};
+use trailhead_control::{CoreTracker, Factory, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
 use trailhead_factory::{Compute, ComputeConfig, FactoryConfig};
@@ -53,9 +55,10 @@ struct Opts {
     /// The repo's factory file (`docs/factory/sandbox.md`, `agents.md`, `review.md`).
     #[arg(long)]
     config: PathBuf,
-    /// The daemon binary started in each sandbox, built for Linux x86_64.
-    #[arg(long, default_value = "target/release/trailhead-daemon")]
-    daemon: PathBuf,
+    /// A daemon binary to start in each sandbox, built for Linux x86_64, instead of the release asset for this
+    /// version. Without it a dev build with no matching release uses `target/release/trailhead-daemon`.
+    #[arg(long)]
+    daemon: Option<PathBuf>,
     /// The local Trailhead server the API tunnel forwards to.
     #[arg(long, default_value = trailhead_server::DEFAULT_BIND)]
     server: SocketAddr,
@@ -174,9 +177,20 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
         tracing::warn!("subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
         config.egress.always.push(ANTHROPIC_API_HOST.into());
     }
-    let binary = std::fs::read(&opts.daemon).map_err(|e| format!("daemon binary {}: {e}", opts.daemon.display()))?;
 
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+    let release = daemon_binary::Release {
+        base_url: daemon_binary::GITHUB.into(),
+        repo: env!("CARGO_PKG_REPOSITORY").trim_start_matches("https://github.com/").into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+    let binary = daemon_binary::resolve(
+        opts.daemon.as_deref(),
+        Path::new(daemon_binary::LOCAL_BUILD),
+        &release,
+        &daemon_binary::cache_dir(&paths.data_dir),
+    )
+    .await?;
     // Before the store opens or the endpoint binds, so a refused start changes nothing.
     let lock = lock_control_plane(&paths.data_dir, &config.repo.repo().slug())?;
     let db = paths.db();

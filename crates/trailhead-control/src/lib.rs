@@ -4,6 +4,7 @@
 //! (`docs/factory/state.md`).
 
 mod core_tracker;
+pub mod daemon_binary;
 
 pub use core_tracker::{CoreTracker, METADATA_KEY};
 
@@ -96,6 +97,8 @@ pub enum Outcome {
     Parked { reason: String },
     /// The attempt failed and the task went back to the queue.
     Failed { reason: String },
+    /// The task's PR had already merged or closed, so no run started: a merge finished the task, a close parked it.
+    Settled { reason: String },
 }
 
 /// How a metered run gets going: a new one, or one the daemon already has under way.
@@ -556,6 +559,22 @@ impl Factory {
 
     /// One attempt at a task: a fresh sandbox, the worker, then the reviewer.
     pub async fn run_task(&self, task: &Task) -> Result<Outcome> {
+        // A rework on a PR that has merged or closed since the task was queued would push to a branch nobody wants
+        // (TRAIL-304). The sub-agent isn't made yet, so the factory's own identity holds the task while it's settled.
+        if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) {
+            match codehost.pr_state(pr).await? {
+                PrState::Merged { commit } => {
+                    self.tracker.claim(&task.key).await?;
+                    self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
+                    return Ok(Outcome::Settled { reason: format!("{} was merged", pr.url) });
+                }
+                PrState::Closed => {
+                    self.park_closed(task, pr).await?;
+                    return Ok(Outcome::Settled { reason: format!("{} was closed", pr.url) });
+                }
+                PrState::Open { .. } => {}
+            }
+        }
         let attempt = task.run.attempt.unwrap_or(0) + 1;
         let profile = self.config.worker().clone();
         // A run that failed before its agent started gave its attempt back but revoked its sub-agent, which can't be
@@ -1630,7 +1649,10 @@ impl Factory {
     /// rework would push to a PR nobody is going to merge. Reopening it after reopening the PR resumes as a rework.
     async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
         tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
-        self.tracker.reopen(&task.key).await?;
+        // Already open when it's found before a run starts (TRAIL-304); there's nothing in review to reopen.
+        if task.status != Status::Open {
+            self.tracker.reopen(&task.key).await?;
+        }
         self.tracker.claim(&task.key).await?;
         let question = format!(
             "The PR {} was closed without being merged. If the work is abandoned, cancel this task. To carry on, \
@@ -1713,7 +1735,13 @@ impl Factory {
                 let Some(mergeable) = self.pr_settled(task, done).await? else { return Ok(false) };
                 let attempt = task.run.attempt.unwrap_or(1);
                 // Changes were requested on this attempt but the task never left review: finish reopening it.
-                if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt) {
+                // A park resets the counts to zero, so a request still recorded beside zero counts was parked on and
+                // then settled by a person: it's stale, and the PR is looked at as it is now (TRAIL-304).
+                let parked = |c: &ChangesRequested| {
+                    let count = if c.conflict { task.run.conflict_reworks } else { task.run.review_rounds };
+                    count == Some(0)
+                };
+                if let Some(requested) = task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c)) {
                     let round = if requested.conflict {
                         task.run.conflict_reworks.unwrap_or(1)
                     } else {
