@@ -181,7 +181,21 @@ impl Runner {
             last.merges.push(merging);
         }
         tracing::info!(task = %key, "agent finished");
-        let (result, checks) = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge).await?;
+        let (result, checks) = match self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge).await {
+            Ok(done) => done,
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            // The agent's run is over, so the control plane is told how it came out rather than an error, which it
+            // takes for an infrastructure failure and hands the attempt back (TRAIL-214).
+            Err(e) => {
+                tracing::warn!(task = %key, error = %e, "finishing the run failed");
+                if req.role == Role::Worker
+                    && let Err(e) = tracker.release(&req.task.key).await
+                {
+                    tracing::warn!(task = %key, error = %e, "couldn't release the task");
+                }
+                (RunResult::Failed(format!("finishing the run failed: {e}")), vec![])
+            }
+        };
         Ok(RunReport { result, checks, usage })
     }
 
@@ -349,6 +363,19 @@ impl Runner {
                     let note = format!(
                         "The merge of the base branch ({base}) was abandoned (aborted or rebased away), so the changes \
                          don't include what landed there. Nothing was published; finish the merge and commit it.\n"
+                    );
+                    tracker.note(key, &note).await?;
+                    tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
+                    tracker.release(key).await?;
+                    return Ok((RunResult::Failed(reason), vec![]));
+                }
+                // A rebase rewrites the agent's commits, so the checkout no longer builds on `start`, which is what
+                // the commits are published on top of. Publishing would drop or duplicate what the branch had.
+                if !self.workspace.contains(start).await? {
+                    let reason = format!("the branch was rewritten ({start} is no longer in its history)");
+                    let note = format!(
+                        "The branch was rewritten (rebased or reset), so it no longer builds on {start}, where the run \
+                         started. Nothing was published; merge the base branch instead of rebasing.\n"
                     );
                     tracker.note(key, &note).await?;
                     tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;

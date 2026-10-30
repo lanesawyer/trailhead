@@ -20,7 +20,7 @@ Comments have a kind: `handoff`, `progress`, `question`, `decision`, `review` an
 
 ## Questions
 
-A `question` comment addressed to a human or an agent moves the task to `needs_input` until someone answers it. The factory parks a task this way when it needs Lane.
+A `question` comment addressed to a human or an agent moves the task to `needs_input` until someone answers it. The factory parks a task this way when it needs a person.
 
 ## Review and delegated reviewers
 
