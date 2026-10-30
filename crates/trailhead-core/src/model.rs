@@ -60,7 +60,7 @@ impl Status {
         match self {
             Open => matches!(to, InProgress | NeedsInput | InReview | Done | Cancelled),
             InProgress => matches!(to, Open | NeedsInput | InReview | Done | Cancelled),
-            NeedsInput => matches!(to, Open | InProgress | Cancelled),
+            NeedsInput => matches!(to, Open | InProgress | InReview | Cancelled),
             InReview => matches!(to, Open | InProgress | NeedsInput | Approved | Done | Cancelled),
             Approved => matches!(to, Open | InReview | Done | Cancelled),
             Done | Cancelled => matches!(to, Open),
