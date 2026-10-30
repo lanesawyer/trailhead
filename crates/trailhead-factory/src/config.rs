@@ -69,7 +69,8 @@ pub enum MergeMode {
     /// Says on the PR what it would do, and doesn't merge.
     Shadow,
     /// Squash-merges approved PRs: grades with `auto_merge`, and any a person approved. Falls back to `Shadow` when
-    /// the factory isn't a delegated reviewer. Read at startup, so switching it takes effect on the next restart.
+    /// the factory isn't a delegated reviewer. Re-read from the file before each merge decision, so
+    /// switching it takes effect on the next pass.
     On,
 }
 
@@ -493,7 +494,8 @@ mod tests {
         assert_eq!(config.grades, GradesConfig::default(), "this repo's rules are the documented example");
         assert_eq!(config.merge.mode, MergeMode::On);
         assert!(config.gate(1).auto_merge);
-        assert!(!config.gate(2).auto_merge, "only grade 1 auto-merges, to start");
+        assert!(config.gate(2).auto_merge);
+        assert!(!config.gate(3).auto_merge);
         assert_eq!(config.gate(3).require, ["checks", "ci", "agent_review", "human"]);
         let raised = |path: &str| {
             config

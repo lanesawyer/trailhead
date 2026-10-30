@@ -34,15 +34,15 @@ install = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang
 max_lines = 600          # bigger diffs are at least grade 3
 
 [factory.gates]
-# What each grade needs before the merger approves it (docs/factory/review.md#gate-policy). Only grade 1 auto-merges, to start.
+# What each grade needs before the merger approves it (docs/factory/review.md#gate-policy). Grades 1 and 2 auto-merge.
 1 = { require = ["checks", "ci"], auto_merge = true }
-2 = { require = ["checks", "ci", "agent_review"], auto_merge = false }
+2 = { require = ["checks", "ci", "agent_review"], auto_merge = true }
 3 = { require = ["checks", "ci", "agent_review", "human"], auto_merge = false }
 4 = { require = ["checks", "ci", "human"], auto_merge = false }
 
 [factory.merge]
-# On: squash-merges an approved PR whose grade has auto_merge (grade 1 here), or that Lane approved. To stop it, set
-# "shadow" (says what it would do, merges nothing) and restart the factory; Ctrl-C drains (docs/factory/operating.md).
+# On: squash-merges an approved PR whose grade has auto_merge (grades 1 and 2 here), or that a person approved. To stop
+# it, set "shadow" (says what it would do, merges nothing); it's re-read each pass (docs/factory/operating.md).
 mode = "on"
 
 [factory.daemon]

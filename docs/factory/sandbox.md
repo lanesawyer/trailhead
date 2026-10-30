@@ -89,11 +89,63 @@ Decided 2026-10-28 (TRAIL-119): `trailhead-compute-docker` runs sandboxes as con
 - **Checkpoints.** A `docker commit` (paused) to `trailhead-checkpoint:<name>-<millis>`, labelled `dev.trailhead.checkpoint-of=<name>`. Restoring removes the container and recreates it from that image with the same name, labels and egress. Unlike a Sprite checkpoint, an image could seed other containers (TRAIL-93). Images are removed when the sandbox is destroyed; cleaning up earlier and the ~125-layer limit on chained commits are TRAIL-176.
 - **Programs.** A small shell supervisor (`supervise.sh`) is uploaded at create and is the container's main process, under Docker's init, with `restart: unless-stopped`. `start` writes the files as the container's user (each beside its target, then renamed over it), writes a run script, and has the supervisor (re)start the program, restarting it whenever it exits. After a restart or restore, the supervisor starts every program again. A program that exits within 3 seconds fails `start` with its output, as on Sprites.
 - **Wake** starts a stopped container; containers don't pause.
-- **Egress, for now, is all or nothing.** No egress disconnects the container from every network. Any allowlist connects it to the sandbox network (`trailhead-sandboxes`) unfiltered, and logs a warning. The filtering proxy and a direct iroh path to the control plane are TRAIL-174.
-- **Credentials.** There are no connectors, so the daemon finds no GitHub connector and can't publish, and Claude Code only works in subscription mode. The credential proxy that keeps "sandboxes hold no keys" is TRAIL-175.
+- **Egress, for now, is all or nothing.** No egress disconnects the container from every network. Any allowlist connects it to the sandbox network (`trailhead-sandboxes`) unfiltered, and logs a warning. The gateway below replaces this (TRAIL-174).
+- **Credentials.** There are no connectors, so the daemon finds no GitHub connector and can't publish, and Claude Code only works in subscription mode. The gateway below fixes this too (TRAIL-175).
 - **The image.** `mise run docker-image` builds `trailhead-sandbox:latest` from `crates/trailhead-compute-docker/image`: Ubuntu 26.04 with git, a C toolchain, rustup and Claude Code, as the user `trailhead`. The daemon lives in `/home/trailhead/.trailhead` and checks out into `/home/trailhead/work`. It's the same Ubuntu as the stock Sprite, so a daemon built on Lane's machine runs in both.
 - **Isolation.** Containers share the engine's kernel. On a dev machine that's the lima VM's; on a bare Docker host, prefer gVisor (`runtime = "runsc"`) or rootless Docker (TRAIL-177).
 - **Tests.** `mise run test-live-docker` runs the lifecycle against the engine with a small `alpine` container.
+
+### The gateway: credentials and egress for Docker sandboxes
+
+Proposed (2026-10-29, TRAIL-404; for review): one small proxy, the **gateway**, does for Docker sandboxes what Fly's connector gateway and DNS allowlist do for Sprites. It covers both TRAIL-175 (credentials) and TRAIL-174 (egress), because they're one problem: a sandbox's only way out is the gateway, and the gateway decides what goes through and adds the keys.
+
+**Where it runs.** In its own container on the same Docker engine, `trailhead-gateway`, started and kept up by `DockerCompute`. Not in the control plane process: on a dev machine the engine is in the lima VM, and a container on an internal network can't reach the host. It's the one container with a route out. It holds the keys in memory only. A sandbox escape lands in the VM beside it, which is no worse than today's subscription mode, where the sandbox holds the token itself.
+
+**Networks.** Each sandbox gets its own `--internal` network, `trailhead-sb-<name>`, with only the sandbox and the gateway on it. An internal network has no route out and no external DNS, so anything that doesn't go through the gateway fails closed. Separate networks also keep sandboxes from reaching each other, and they tell the gateway which sandbox a request came from by the network it arrived on, not by a source IP. Sandboxes run without `NET_RAW` or `NET_ADMIN`. The gateway is also on a normal bridge network to get out. The shared `trailhead-sandboxes` network goes away.
+
+**Egress (TRAIL-174).** The gateway is an HTTP forward proxy (CONNECT for HTTPS, plain forwarding for HTTP). Sandboxes get `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` in their environment, which git, cargo, rustup, mise, npm, curl and Claude Code all honor. Each sandbox has a domain allowlist with the same rules as a Sprite's: exact names and `*.` wildcards, and nothing means nothing. `set_egress` returns once the gateway has the new list, and narrowing closes the sandbox's open tunnels to hosts that are no longer allowed. So the daemon doesn't need the wait-until-it-stops-resolving step that Sprites need. Each refused CONNECT is logged with the sandbox's name. Non-HTTP traffic (git over ssh, raw UDP) has no way out, which is the intent.
+
+**Iroh.** iroh 1.4 sends relay traffic and pkarr publishing and lookups through an HTTP proxy (`Endpoint::builder().proxy_url`, or `proxy_from_env`). So the daemon reaches the control plane through n0's relays over the gateway, as on Sprites. That revises TRAIL-174's plan, written when we thought iroh couldn't use a proxy, to dial the control plane directly on the local network.
+
+Tested 2026-10-30 (TRAIL-412). A container on an `--internal` network in the lima VM, whose only way out was a small CONNECT proxy, talked to a control plane on the host. It used the `N0` preset unchanged plus `proxy_from_env`.
+- **Lookup works as is.** The daemon found the control plane by endpoint id alone. The preset's pkarr resolver goes over HTTPS, so through the proxy. The control plane also dialed a sandbox it had never heard from by id alone, found through the sandbox's pkarr publishing via the proxy, in about 0.3 s. So `DaemonSecrets` doesn't need the control plane's relay URL.
+- **The allowlist is two names:** `dns.iroh.link` and `*.relay.n0.iroh.link`. Relay names arrive with a trailing dot (`usw1-1.relay.n0.iroh.link.`), so matching must strip it. iroh also tries DNS-over-HTTPS to `1.1.1.1`, `8.8.8.8` and `9.9.9.9` because the container has no DNS. Refusing those is harmless, but they come back about once a second each, so the gateway should log refusals once per host, or the daemon should set a DNS resolver that doesn't fall back to them.
+- **All traffic goes through the relay.** Every connection was relay-only, as expected. It came online in 3 s, connected in 0.3 to 0.65 s, and had about 10 ms median round trips through the US-West relay.
+- **It survives the proxy restarting.** With the proxy down for 10 s, the sandbox's relay connection came back on its own, and the control plane then dialed it fresh by id.
+- **Watch for:** the VM's Ubuntu ships AppArmor profiles that attach to binaries by path even inside rootless containers. Its `tinyproxy` profile blocked that proxy from reading its filter file and from being stopped. The gateway being our own binary avoids this.
+
+**Credentials (TRAIL-175).** The gateway speaks the part of Fly's gateway API the daemon already uses, so the daemon and harness barely change:
+- **Connector list.** `GET /v1/gateway/list` lists the connections this sandbox may use, each with a `gateway_base_url` of `http://trailhead-gateway:<port>/v1/gateway/<provider>/<id>`. The daemon's list URL moves from a constant to `DaemonSecrets` (`gateway_list`), with Fly's URL as the default.
+- **Forwarding.** `/v1/gateway/<provider>/<id>/...` forwards to the upstream with the credential added, and strips any credential the sandbox sent. The upstreams are GitHub (`api.github.com`, `Authorization: Bearer`) and Anthropic (`api.anthropic.com`, `x-api-key`). A model server on the host (TRAIL-126, [local-models.md](local-models.md)) is a third.
+- **Model endpoint.** With Docker compute, the control plane sets each run's endpoint to the gateway's Anthropic URL instead of `--model-endpoint`. The harness already sends a placeholder key to whatever base URL it's given.
+- **Per-role policy.** The kill switch and per-role scopes work as on Sprites. The gateway knows each sandbox's labels, and a sandbox with no `role` gets no connections. Policy per role is a list of allowed method and path prefixes. A worker gets the repo's Git Data, pulls and issue-comments endpoints. A reviewer gets reads plus PR comments and reviews. An idle pooled sandbox gets nothing.
+- **Where the keys come from.** The same places the control plane already reads them: the environment, else the credential store that `trailhead factory login` writes (TRAIL-117). GitHub needs a token that can push and open PRs, which is more than the read token `login github` checks for today. The Anthropic API key would be a new login. Subscription mode stays as it is (token in the sandbox) until the gateway can carry the OAuth token too, which is an open question below.
+
+**How the control plane drives it.** `DockerCompute` owns the gateway like any other container. It creates the gateway on first use, recreates it if it's gone, and updates it through `docker exec` into a control socket inside the container, so nothing new listens on a network. It pushes three kinds of update: sandbox registration (name, network, labels), egress lists, and credentials (sent on the exec's stdin). After a restart of the gateway or the control plane, `DockerCompute` pushes the full state again from its per-sandbox state files and the credential store. The gateway is a `gateway` mode of the `trailhead-daemon` binary, which is already built for Linux and uploaded, so it adds no second artifact.
+
+**Considered: everything over iroh.** Sandboxes would get no network except iroh, and the control plane would proxy GitHub, the model API and package registries itself, as the API tunnel already does for Trailhead. The upsides:
+- Keys never leave the host.
+- One path works for every compute.
+- There's no gateway container to run.
+
+Dropped, for the same reason [local-models.md](local-models.md) dropped it for model calls on Sprites: it makes the control plane relay everything.
+- **All of it goes through relays.** A sandbox on an internal network can't holepunch, so every byte goes through n0's public relays, which are rate-limited and not meant for bulk traffic. A cold setup alone is hundreds of MB of toolchain, crates and clone.
+- **Model calls take a detour.** Every streamed response goes upstream, then the control plane, then a relay, then the sandbox. That adds latency to each agent step and makes the control plane a bottleneck.
+- **Installs need a path out anyway.** The control plane would end up as a general proxy, just a farther one.
+
+The principle the design follows instead, the same as on Sprites: sandboxes reach what they need and is trusted directly, and credentials are added at the nearest trusted hop. On Sprites that hop is Fly's gateway; on Docker it's a gateway container next to the sandboxes. Iroh stays the small control channel between the daemon and the control plane. If a remote Docker host ever makes keys in its VM unacceptable, there's a middle way: the gateway holds no keys and asks the control plane over iroh to sign each credentialed request, while bulk egress still goes out directly.
+
+**Open questions.**
+- **Subscription mode through the gateway.** Can Claude Code use a placeholder `ANTHROPIC_AUTH_TOKEN` against the gateway, with the gateway putting in the real OAuth bearer and the `oauth` beta header? If so, Docker keeps "sandboxes hold no keys" even on a subscription.
+- **Private repos.** The gateway could forward git's smart-HTTP to `github.com/<owner>/<repo>.git` with the token, so `git clone` works for private repos, which Sprites can't do yet (TRAIL-96). Later, not now.
+- **Streaming and timeouts.** The gateway forwards streamed responses as they arrive and sets no total timeout, unlike Fly's 120 s (TRAIL-97).
+- **Podman and bare-metal hosts.** On a bare-metal host the gateway sits beside the control plane, so TRAIL-177's runtime defaults apply to it as well as to the sandboxes.
+
+**Order of work.**
+1. **Spike (done, TRAIL-412):** iroh through the proxy works with the stock preset; see above.
+2. **Gateway egress:** the proxy, per-sandbox networks, the control socket and `set_egress` (TRAIL-174).
+3. **Gateway credentials:** the list and forwarding API, the role policy, `gateway_list` in `DaemonSecrets`, the endpoint override, and the API-key and write-token logins (TRAIL-175).
+4. **A live run:** a Trailhead task end to end on Docker (`mise run test-live-docker-factory`), worker and reviewer.
 
 ## Keeping a sandbox awake
 

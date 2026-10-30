@@ -1,7 +1,8 @@
 //! The factory's control plane, run next to a local Trailhead server (`docs/factory/state.md`):
 //!
 //! ```sh
-//! SPRITES_TOKEN=... trailhead-factory run   # or `trailhead factory run`
+//! trailhead-factory login sprites   # also `claude` and `github`; or set SPRITES_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, GITHUB_TOKEN
+//! trailhead-factory run             # or `trailhead factory run`
 //! ```
 //!
 //! The factory's settings are the `[factory]` table of the nearest `.trailhead.toml` at or above the working directory,
@@ -40,6 +41,7 @@ use trailhead_provider_anthropic::Anthropic;
 use trailhead_server::creds::{Cred, CredStore};
 
 mod find;
+mod login;
 mod wake;
 
 /// The agent the control plane acts as; sandboxes get its sub-agents.
@@ -55,7 +57,7 @@ struct Cli {
     cmd: Cmd,
 }
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 struct Opts {
     /// The repo file with the `[factory]` table (`docs/factory/sandbox.md`, `agents.md`, `review.md`). Default: the
     /// nearest `.trailhead.toml` at or above the working directory.
@@ -97,6 +99,9 @@ enum Cmd {
     Check(Opts),
     /// Run the control plane until Ctrl-C.
     Run(Opts),
+    /// Save a secret in the OS keyring (read from stdin), so `run` needs no environment variables.
+    #[command(subcommand)]
+    Login(login::Login),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -177,20 +182,29 @@ struct Wake {
 }
 
 async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String> {
+    let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+    // The environment wins; `trailhead factory login` saved the rest.
+    let creds = paths.creds();
+    let opts = &Opts {
+        sprites_token: login::resolve(opts.sprites_token.clone(), &creds, login::SPRITES),
+        github_token: login::resolve(opts.github_token.clone(), &creds, login::GITHUB),
+        claude_oauth_token: login::resolve(opts.claude_oauth_token.clone(), &creds, login::CLAUDE),
+        ..opts.clone()
+    };
     let config_path = match &opts.config {
         Some(path) => path.clone(),
         None => find::config(&std::env::current_dir().map_err(|e| e.to_string())?)?,
     };
     let config = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
     let repo_dir = config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
-    let mut config = FactoryConfig::from_repo_file(&config, find::remote(&repo_dir))
+    let remote = find::remote(&repo_dir);
+    let mut config = FactoryConfig::from_repo_file(&config, remote.clone())
         .map_err(|e| format!("{}: {e}", config_path.display()))?;
     if opts.claude_oauth_token.is_some() {
         tracing::warn!("subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
         config.egress.always.push(ANTHROPIC_API_HOST.into());
     }
 
-    let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let release = daemon_binary::Release {
         base_url: daemon_binary::GITHUB.into(),
         repo: env!("CARGO_PKG_REPOSITORY").trim_start_matches("https://github.com/").into(),
@@ -232,13 +246,22 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
     tracing::info!(endpoint = %endpoint.id(), project = %config.repo.project, repo = %config.repo.repo().slug(), "factory ready");
 
     let mut factory =
-        Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon);
+        Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon)
+            .with_merge_mode_source(Box::new(move || {
+                let src =
+                    std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+                FactoryConfig::from_repo_file(&src, remote.clone())
+                    .map(|c| c.merge.mode)
+                    .map_err(|e| format!("{}: {e}", config_path.display()))
+            }));
     match &opts.github_token {
         Some(token) => {
             factory =
                 factory.with_codehost(Arc::new(GitHub::new(trailhead_codehost_github::API_URL, Some(token.clone()))))
         }
-        None => tracing::warn!("no GITHUB_TOKEN: merged and closed PRs are not noticed; finish merged tasks by hand"),
+        None => tracing::warn!(
+            "no GitHub token (GITHUB_TOKEN or `trailhead factory login github`): merged and closed PRs are not noticed; finish merged tasks by hand"
+        ),
     }
     let wake = Wake { store, ctx, project: factory.config.repo.project.clone() };
     Ok((Arc::new(factory), tunnel, lock, wake))
@@ -254,7 +277,10 @@ fn compute(
 ) -> Result<(Arc<dyn Compute>, Launch), String> {
     match config {
         ComputeConfig::Sprites => {
-            let token = opts.sprites_token.clone().ok_or("Sprites compute needs SPRITES_TOKEN")?;
+            let token = opts
+                .sprites_token
+                .clone()
+                .ok_or("Sprites compute needs SPRITES_TOKEN or `trailhead factory login sprites`")?;
             Ok((Arc::new(SpritesCompute::new(token).map_err(|e| e.to_string())?), launch))
         }
         #[cfg(feature = "docker")]
@@ -329,6 +355,11 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
             println!("tunnel: forwarding to {}", opts.server);
             tunnel.shutdown().await.map_err(|e| e.to_string())?;
             check_result(failed)
+        }
+        Cmd::Login(cmd) => {
+            let paths =
+                trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+            login::run(cmd, &paths.creds()).await
         }
         Cmd::Run(opts) => {
             let (factory, tunnel, _lock, source) = setup(&opts).await?;
