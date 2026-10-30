@@ -259,6 +259,29 @@ async fn too_many_steps_is_a_breach() {
 }
 
 #[tokio::test]
+async fn a_reviewer_that_breaches_parks_the_task_and_isnt_run_again() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Big diff", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+
+    // Every reviewer would breach on steps; only the first should ever run.
+    for _ in 0..3 {
+        r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
+    }
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("steps"), "{}", questions[0].body);
+    assert_eq!(task.run.review_rounds, Some(0), "a fresh count once a human reopens it");
+}
+
+#[tokio::test]
 async fn failed_check_requeues_and_next_attempt_gets_a_fresh_sandbox() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Lint me", "");
@@ -1017,6 +1040,31 @@ async fn the_run_loop_wakes_itself_when_the_window_resets() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(tracker.task(&key).status, Status::InReview, "started once the window reset");
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn the_run_loop_holds_due_reviews_while_the_window_is_paused() {
+    let r = pausing_rig();
+    let key = r.tracker.add_task("TRAIL", "Unreviewed", "");
+    let script = Script::new(changes()).quota("five_hour", 90, unix_now() + 2);
+    r.harness.push(Role::Worker, script);
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+
+    let factory = Arc::new(r.factory);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle =
+        tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), std::time::Duration::from_millis(5), async {
+            let _ = stopped.await;
+        }));
+    let tracker = r.tracker.clone();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(tracker.task(&key).run.reviewed, None, "no reviewer starts while the window is paused");
+    until("the review to land once the window resets", || tracker.task(&key).run.reviewed == Some(1)).await;
     stop.send(()).unwrap();
     handle.await.unwrap().unwrap();
 }

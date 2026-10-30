@@ -334,7 +334,10 @@ impl Factory {
                             let handle = running.spawn(async move { factory.resume_run(&task, &sandbox).await });
                             keys.insert(handle.id(), key);
                         }
-                        for task in due.reviews {
+                        // A review is a session on the same subscription window, so a pause holds them back too; the
+                        // next reconcile finds them due again (the resume below triggers one).
+                        let reviews_due = if self.usage_paused() { Vec::new() } else { due.reviews };
+                        for task in reviews_due {
                             let key = task.key.clone();
                             let factory = self.clone();
                             let handle = running.spawn(async move { factory.resume_review(&task).await });
@@ -365,7 +368,7 @@ impl Factory {
                     );
                 }
                 _ = wake.notified() => {}
-                _ = tokio::time::sleep(resume.unwrap_or_default()), if resume.is_some() => {}
+                _ = tokio::time::sleep(resume.unwrap_or_default()), if resume.is_some() => dirty = true,
                 _ = tokio::time::sleep(poll) => dirty = true,
                 Some(joined) = running.join_next_with_id() => match joined {
                     Ok((id, Ok(outcome))) => {
@@ -1007,9 +1010,24 @@ impl Factory {
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
             Run::Breach(reason, _) => {
+                // A breach is the task's doing, like a worker's: the round counts, and the task parks for a human
+                // rather than being reviewed again on the next reconcile (TRAIL-319). The reviewer's sandbox is
+                // already destroyed, so there's nothing to suspend.
                 self.setbacks.lock().unwrap().remove(&task.key);
-                tracing::warn!(task = %task.key.0, %reason, "reviewer breached its budget");
-                Ok(Outcome::AwaitingReview { pr: pr.clone() })
+                tracing::warn!(task = %task.key.0, %reason, "reviewer breached its budget; parking");
+                self.tracker.reopen(&task.key).await?;
+                self.tracker.claim(&task.key).await?;
+                let question = format!(
+                    "The reviewer breached its budget in review round {round}: {reason}. The PR may be too big to \
+                     review within the reviewer's budget; split it or raise the reviewer budget, then reopen the task."
+                );
+                self.tracker.ask(&task.key, &question).await?;
+                // A fresh count for when a human reopens the task, last like `request_rework`'s.
+                let fresh = RunUpdate { review_rounds: Some(0), ..RunUpdate::default() };
+                if let Err(e) = self.tracker.report(&task.key, fresh).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't reset the review count");
+                }
+                Ok(Outcome::Parked { reason })
             }
         }
     }
