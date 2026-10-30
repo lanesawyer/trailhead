@@ -1,5 +1,7 @@
 # Naming ideas
 
+> **Undecided.** Brainstormed names, not what anything is called. The one exception is grades, which are decided.
+
 Undecided. The theme is PNW hiking and climbing, to match Trailhead. With the factory built into Trailhead, these work as names for its parts.
 
 | Name | Meaning | Fits |

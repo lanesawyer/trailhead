@@ -1358,6 +1358,62 @@ async fn a_rework_that_fails_its_check_is_retried_not_parked() {
 }
 
 #[tokio::test]
+async fn a_parked_request_a_person_settled_is_not_reworked_by_reconcile() {
+    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 1"));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+
+    // A person fixes the PR by hand and moves the task back to review.
+    r.tracker.set_status(&key, Status::InReview);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reworked.is_empty(), "{done:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+}
+
+#[tokio::test]
+async fn no_worker_starts_on_a_task_whose_pr_merged_meanwhile() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open);
+    let pr = task.run.pr.clone().expect("a PR");
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let workers = |r: &Rig| r.daemon.requests().iter().filter(|q| q.role == Role::Worker).count();
+    let before = workers(&r);
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    assert_eq!(workers(&r), before, "no worker run started");
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn no_worker_starts_on_a_task_whose_pr_closed_meanwhile() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+
+    r.codehost.close(&pr);
+    let workers = |r: &Rig| r.daemon.requests().iter().filter(|q| q.role == Role::Worker).count();
+    let before = workers(&r);
+    r.factory.tick().await.unwrap();
+    assert_eq!(workers(&r), before, "no worker run started");
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test]
 async fn a_rework_request_cut_short_is_finished_by_reconcile() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");

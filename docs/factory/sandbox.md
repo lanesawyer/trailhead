@@ -1,5 +1,7 @@
 # Sandboxes: Sprites, connectors, environment and egress
 
+> **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
+
 The first `Compute` implementation is Fly.io Sprites. A sandbox holds no raw credentials, reaches only declared egress, refreshes its own environment on demand, and may install dependencies, with the gate at merge rather than at install.
 
 Checked against the Sprites docs on 2026-10-25: [Connectors](https://docs.sprites.dev/concepts/connectors/), [connector catalog](https://fly.io/sprites/ecosystem/), [networking](https://docs.sprites.dev/concepts/networking/), [policy API](https://sprites.dev/api/sprites/policies).

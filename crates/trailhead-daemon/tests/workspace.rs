@@ -209,6 +209,14 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
     let readme = std::fs::read_to_string(ws.dir().join("README.md")).unwrap();
     assert!(readme.contains("<<<<<<<") && readme.contains("main") && readme.contains("branch"), "{readme}");
 
+    // The base isn't in HEAD until the merge is committed, and aborting it never puts it there.
+    let base = rev(&src, "main");
+    assert!(!ws.contains(&base).await.unwrap());
+    git(&ws.dir(), &["merge", "--abort"]);
+    assert_eq!(ws.merge_head().await.unwrap(), None);
+    assert!(!ws.contains(&base).await.unwrap());
+    assert!(ws.contains(&ws.head().await.unwrap()).await.unwrap());
+
     // A later prepare, as from a warm checkpoint taken mid-merge, drops the merge.
     ws.prepare(&PrepareRequest { branch: None, merge_base: false, ..req }).await.unwrap();
     assert_eq!(ws.merge_head().await.unwrap(), None);

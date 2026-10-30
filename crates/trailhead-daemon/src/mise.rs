@@ -87,7 +87,13 @@ fn repo_tools(dir: &Path) -> Vec<String> {
 
 /// Which hosts installing `stack` and `repo` tools needs. `mise_missing` adds mise's own installer. A `[stack]` tool
 /// with no known hosts is an error; a repo tool with none is skipped with a warning, since its install is best effort.
-pub fn install_hosts_for(stack: &[String], repo: &[String], mise_missing: bool) -> Result<Vec<InstallHost>> {
+/// `repo_config` is whether the checkout has a mise config at all: it needs mise even when none of its tools are known.
+pub fn install_hosts_for(
+    stack: &[String],
+    repo: &[String],
+    repo_config: bool,
+    mise_missing: bool,
+) -> Result<Vec<InstallHost>> {
     let mut asks: Vec<(String, Vec<&'static str>)> = Vec::new();
     for tool in stack {
         let hosts = hosts_for(tool).ok_or_else(|| {
@@ -106,7 +112,7 @@ pub fn install_hosts_for(stack: &[String], repo: &[String], mise_missing: bool) 
             ),
         }
     }
-    if asks.is_empty() {
+    if asks.is_empty() && !(repo_config && mise_missing) {
         return Ok(Vec::new());
     }
     // Versions like `22` or `stable` are resolved over the network.
@@ -221,7 +227,7 @@ impl Mise {
     /// The hosts installing the factory's `tools` and the checkout's own mise tools at `dir` needs, worked out offline.
     pub async fn install_hosts(&self, dir: &Path, tools: &BTreeMap<String, String>) -> Result<Vec<InstallHost>> {
         let stack: Vec<String> = tools.keys().cloned().collect();
-        install_hosts_for(&stack, &repo_tools(dir), self.find().is_none())
+        install_hosts_for(&stack, &repo_tools(dir), Mise::repo_config(dir).is_some(), self.find().is_none())
     }
 
     /// Installs what the factory's `tools` and the repo's own mise config ask for, in the checkout at `dir`. The repo's
@@ -347,7 +353,7 @@ mod tests {
 
     #[test]
     fn a_node_stack_needs_only_nodejs_and_mises_version_lists() {
-        let hosts = install_hosts_for(&["node".to_string()], &[], false).unwrap();
+        let hosts = install_hosts_for(&["node".to_string()], &[], false, false).unwrap();
         assert_eq!(names(&hosts), ["mise.jdx.dev", "mise-versions.jdx.dev", "nodejs.org"]);
         assert_eq!(hosts.last().unwrap().tool, "node");
     }
@@ -355,15 +361,23 @@ mod tests {
     #[test]
     fn mises_installer_hosts_are_opened_only_when_mise_is_missing() {
         let node = ["node".to_string()];
-        assert!(!names(&install_hosts_for(&node, &[], false).unwrap()).contains(&"mise.run"));
-        let hosts = install_hosts_for(&node, &[], true).unwrap();
+        assert!(!names(&install_hosts_for(&node, &[], false, false).unwrap()).contains(&"mise.run"));
+        let hosts = install_hosts_for(&node, &[], false, true).unwrap();
         assert!(names(&hosts).contains(&"mise.run"), "{hosts:?}");
         assert!(hosts.iter().any(|h| h.host == "github.com" && h.tool == "mise"));
     }
 
     #[test]
     fn nothing_to_install_opens_nothing() {
-        assert!(install_hosts_for(&[], &[], true).unwrap().is_empty());
+        assert!(install_hosts_for(&[], &[], false, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_repo_config_with_no_known_tools_still_opens_mises_installer_when_mise_is_missing() {
+        let hosts = install_hosts_for(&[], &[], true, true).unwrap();
+        assert!(names(&hosts).contains(&"mise.run") && names(&hosts).contains(&"github.com"), "{hosts:?}");
+        assert!(install_hosts_for(&[], &["cargo:ripgrep".to_string()], true, true).unwrap().len() >= hosts.len());
+        assert!(install_hosts_for(&[], &[], true, false).unwrap().is_empty());
     }
 
     #[test]
@@ -379,10 +393,10 @@ mod tests {
 
     #[test]
     fn an_unknown_stack_tool_fails_naming_it_and_an_unknown_repo_tool_is_skipped() {
-        let err = install_hosts_for(&["zig".to_string()], &[], false).unwrap_err().to_string();
+        let err = install_hosts_for(&["zig".to_string()], &[], false, false).unwrap_err().to_string();
         assert!(err.contains("`zig`") && err.contains("[egress] install"), "{err}");
         let hosts =
-            install_hosts_for(&["node".to_string()], &["zig".to_string(), "python".to_string()], false).unwrap();
+            install_hosts_for(&["node".to_string()], &["zig".to_string(), "python".to_string()], true, false).unwrap();
         assert!(names(&hosts).contains(&"pypi.org") && !names(&hosts).contains(&"zig"));
     }
 
