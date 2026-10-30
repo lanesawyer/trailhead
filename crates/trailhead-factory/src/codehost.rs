@@ -123,6 +123,11 @@ pub trait CodeHost: Send + Sync {
     /// verdict on the old head still describes the work. A failure that isn't a merge conflict (the head moved under
     /// the update, say) is an error, not `Conflict`, which costs a rework.
     async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate>;
+    /// Whether a reviewer's verdict on `reviewed`, a head the PR had earlier, still counts on its current head: the
+    /// only commits since are merges of the base branch, each a merge commit whose second parent is on the base
+    /// branch, which is what `update_branch` makes. Any other commit, a conflict-resolving rework included, is work
+    /// no one reviewed. Also true when `reviewed` is the head. False, not an error, when the host can't tell.
+    async fn carries_verdict(&self, pr: &PrRef, reviewed: &str) -> Result<bool>;
     /// The PR's current title, which a squash merge takes as its commit subject.
     async fn title(&self, pr: &PrRef) -> Result<String>;
     /// The files the PR changes, with how and by how many lines, for grading it.

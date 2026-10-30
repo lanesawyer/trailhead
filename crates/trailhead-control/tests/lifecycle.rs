@@ -2246,6 +2246,40 @@ async fn a_pr_behind_its_base_is_updated_before_it_is_merged() {
 }
 
 #[tokio::test]
+async fn a_host_made_update_keeps_the_verdict_and_a_push_after_it_does_not() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "updated, not merged, while CI starts over");
+
+    // CI passes on the merge commit: merged on the verdict for the head before it, with no new review.
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "{:?}", done.reviewed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_push_on_top_of_a_host_made_update_needs_a_new_review() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    r.codehost.push_to(&pr);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    // The first pass withdraws the approval of the old head; the next sees a head nobody reviewed.
+    r.factory.reconcile().await.unwrap();
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
+}
+
+#[tokio::test]
 async fn lane_approving_a_grade_three_task_gets_it_merged() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;

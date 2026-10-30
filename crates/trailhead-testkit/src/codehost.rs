@@ -248,6 +248,23 @@ impl CodeHost for FakeCodeHost {
         Ok(BranchUpdate::Updated)
     }
 
+    async fn carries_verdict(&self, pr: &PrRef, reviewed: &str) -> Result<bool> {
+        self.find(pr, |p, s| {
+            let key = (pr.repo.slug(), p.spec.branch.clone());
+            let commits = s.branches.get(&key).map_or(&[][..], Vec::as_slice);
+            if s.heads.get(&key).map(String::as_str) == Some(reviewed) {
+                return true;
+            }
+            // Heads are `branch@n`, n commits in; a head a push moved past that isn't one of them.
+            let Some(n) = reviewed.strip_prefix(&format!("{}@", p.spec.branch)).and_then(|n| n.parse::<usize>().ok())
+            else {
+                return false;
+            };
+            s.heads.get(&key).is_some_and(|h| *h == format!("{}@{}", p.spec.branch, commits.len()))
+                && commits.get(n..).is_some_and(|since| since.iter().all(|c| !c.merges.is_empty()))
+        })
+    }
+
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
         self.find(pr, |p, _| match (p.merged, p.closed) {
             (true, _) => PrState::Merged { commit: Some(FakeCodeHost::merge_commit(&p.pr)) },
@@ -327,5 +344,24 @@ mod tests {
         host.set_behind(&pr, true);
         assert_eq!(host.update_branch(&pr).await.unwrap(), BranchUpdate::Conflict);
         assert!(host.behind(&pr).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn carries_a_verdict_over_merges_of_the_base_only() {
+        let host = FakeCodeHost::new();
+        let pr = open(&host).await;
+        let reviewed = host.head(&pr.repo, "b").unwrap();
+        assert!(host.carries_verdict(&pr, &reviewed).await.unwrap());
+
+        host.set_behind(&pr, true);
+        host.update_branch(&pr).await.unwrap();
+        assert!(host.carries_verdict(&pr, &reviewed).await.unwrap());
+
+        let work = Commit { message: "rework".into(), changes: vec![], merges: vec![] };
+        host.publish(&pr.repo, &host.head(&pr.repo, "b").unwrap(), "b", &[work]).await.unwrap();
+        assert!(!host.carries_verdict(&pr, &reviewed).await.unwrap());
+
+        host.push_to(&pr);
+        assert!(!host.carries_verdict(&pr, &reviewed).await.unwrap());
     }
 }
