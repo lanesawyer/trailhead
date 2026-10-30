@@ -71,11 +71,7 @@ impl CoreTracker {
 
     async fn task(&self, ctx: &Ctx, t: trailhead_core::Task) -> Result<Task> {
         let claims = self.store.live_claims(ctx, &[t.id]).await.map_err(map_err)?;
-        let run = match t.metadata.get(METADATA_KEY) {
-            Some(v) => serde_json::from_value(v.clone())
-                .map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", t.key)))?,
-            None => RunUpdate::default(),
-        };
+        let run = run_update(&t)?;
         let project = t.key.rsplit_once('-').map(|(p, _)| p.to_string()).unwrap_or_default();
         Ok(Task {
             key: TaskKey(t.key),
@@ -87,6 +83,20 @@ impl CoreTracker {
             holder: claims.get(&t.id).map(|c| c.holder.clone()),
             run,
         })
+    }
+
+    /// Converts the listed tasks, skipping (with a warning) any whose factory metadata won't parse, so one
+    /// bad value doesn't stop the factory for the whole project.
+    async fn tasks(&self, ctx: &Ctx, tasks: impl IntoIterator<Item = trailhead_core::Task>) -> Result<Vec<Task>> {
+        let mut out = Vec::new();
+        for t in tasks {
+            if let Err(e) = run_update(&t) {
+                tracing::warn!(task = %t.key, error = %e, "skipping a task with bad factory metadata");
+                continue;
+            }
+            out.push(self.task(ctx, t).await?);
+        }
+        Ok(out)
     }
 
     async fn set_status(&self, task: &TaskKey, to: trailhead_core::Status) -> Result<()> {
@@ -101,6 +111,15 @@ impl CoreTracker {
         let new = NewComment::new(kind, body.to_string());
         self.store.add_comment(&ctx, &task.0, new).await.map_err(map_err)?;
         Ok(())
+    }
+}
+
+fn run_update(t: &trailhead_core::Task) -> Result<RunUpdate> {
+    match t.metadata.get(METADATA_KEY) {
+        Some(v) => {
+            serde_json::from_value(v.clone()).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", t.key)))
+        }
+        None => Ok(RunUpdate::default()),
     }
 }
 
@@ -175,11 +194,7 @@ impl Tracker for CoreTracker {
                 ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
             }
         };
-        let mut out = Vec::with_capacity(tasks.len());
-        for t in tasks {
-            out.push(self.task(&ctx, t).await?);
-        }
-        Ok(out)
+        self.tasks(&ctx, tasks).await
     }
 
     async fn show(&self, task: &TaskKey) -> Result<Task> {
@@ -251,11 +266,7 @@ impl Tracker for CoreTracker {
         let ctx = self.ctx().await?;
         let filter = TaskFilter { project: Some(project.to_string()), limit: Some(1000), ..TaskFilter::default() };
         let tasks = self.store.list_tasks(&ctx, filter).await.map_err(map_err)?;
-        let mut out = Vec::new();
-        for t in tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some()) {
-            out.push(self.task(&ctx, t).await?);
-        }
-        Ok(out)
+        self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
     }
 
     async fn claim(&self, task: &TaskKey) -> Result<()> {
