@@ -15,6 +15,19 @@ pub fn config(dir: &Path) -> Result<PathBuf, String> {
     })
 }
 
+/// The repo the factory works on: the `[factory]` table of `config`, else of the nearest `.trailhead.toml`.
+pub fn repo(config_path: Option<&Path>) -> Result<Repo, String> {
+    let path = match config_path {
+        Some(path) => path.to_path_buf(),
+        None => config(&std::env::current_dir().map_err(|e| e.to_string())?)?,
+    };
+    let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let config = trailhead_factory::FactoryConfig::from_repo_file(&src, remote(dir))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(config.repo.repo())
+}
+
 /// The owner and name of the GitHub repo that `dir`'s `origin` remote points at.
 pub fn remote(dir: &Path) -> Option<Repo> {
     let out =
