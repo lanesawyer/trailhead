@@ -994,7 +994,11 @@ impl Factory {
         let prior = self.tracker.show(&task.key).await?.run.spend.unwrap_or_default();
         let run =
             self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
-        self.compute.destroy(&sandbox.id).await?;
+        // A sandbox that won't go doesn't undo the review: the verdict and spend are still recorded, and reconcile
+        // destroys the orphan.
+        if let Err(e) = self.compute.destroy(&sandbox.id).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't destroy the reviewer's sandbox; reconcile will");
+        }
         let run = match run {
             Ok(run) => run,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries).await),
