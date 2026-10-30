@@ -1865,6 +1865,28 @@ async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_reviewers_infrastructure_failures_are_persisted_and_reset_by_a_finished_review() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Flaky review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    assert_eq!(r.tracker.task(&key).run.infra_failures, Some(1), "kept in the metadata, not only in memory");
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.daemon.fail_runs(1, "connection lost");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).run.infra_failures, Some(2));
+
+    tokio::time::advance(std::time::Duration::from_secs(121)).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed.len(), 1, "{done:?}");
+    assert_eq!(r.tracker.task(&key).run.infra_failures.unwrap_or(0), 0, "a finished review ends the streak");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_review_cancelled_on_purpose_isnt_an_infrastructure_failure() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
     let key = r.tracker.add_task("TRAIL", "Stopped mid-review", "");
