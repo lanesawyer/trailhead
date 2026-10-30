@@ -217,6 +217,26 @@ async fn reopening_a_parked_task_frees_its_place_without_a_reconcile() {
 }
 
 #[tokio::test]
+async fn cancelling_or_finishing_a_parked_task_frees_its_place_without_a_reconcile() {
+    for status in [Status::Cancelled, Status::Done] {
+        let r = rig();
+        let key = r.tracker.add_task("TRAIL", "Expensive", "");
+        r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+        r.factory.tick().await.unwrap();
+        assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+
+        let next = r.tracker.add_task("TRAIL", "Next", "");
+        assert!(r.factory.tick().await.unwrap().is_empty(), "the parked task holds the one place");
+
+        r.tracker.set_status(&key, status);
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+        let ran = r.factory.tick().await.unwrap();
+        assert!(ran.iter().any(|(t, _)| t.key == next), "{status:?}: the next task started without a reconcile");
+    }
+}
+
+#[tokio::test]
 async fn the_run_loop_frees_a_parked_tasks_place_when_it_is_reopened() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Ambiguous", "");
