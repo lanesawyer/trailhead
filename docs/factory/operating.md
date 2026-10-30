@@ -18,10 +18,12 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 - **Installed.** From the repo:
 
   ```sh
-  cargo install --locked --path crates/trailhead --path crates/trailhead-factory-host --path crates/trailhead-daemon
+  cargo install --locked --path crates/trailhead
+  cargo install --locked --path crates/trailhead-factory-host
+  cargo install --locked --path crates/trailhead-daemon
   ```
 
-  (or the three `cargo install --locked --path ...` commands). Then `trailhead factory run` from anywhere in the repo runs the installed `trailhead-factory` with the same arguments (`check`, `--poll-secs`, ...), looking next to the `trailhead` executable first, then on PATH, like `cargo foo` runs `cargo-foo`. `--config` defaults to the nearest `factory.toml` at or above the working directory, and secrets still come from the environment (`fnox exec -- trailhead factory run`) until `factory login` (TRAIL-117). **A reinstall needs a factory restart**: a running control plane keeps running the old binary. Drain with one Ctrl-C (below), then start again.
+  Then `trailhead factory run` from anywhere in the repo runs the installed `trailhead-factory` with the same arguments (`check`, `--poll-secs`, ...), looking next to the `trailhead` executable first, then on PATH, like `cargo foo` runs `cargo-foo`. `--config` defaults to the nearest `factory.toml` at or above the working directory, and secrets still come from the environment (`fnox exec -- trailhead factory run`) until `factory login` (TRAIL-117). **A reinstall needs a factory restart**: a running control plane keeps running the old binary. Drain with one Ctrl-C (below), then start again.
 - `mise run factory` builds the daemon and the control plane in release mode and runs it in the foreground. Its output is the log.
 - `trailhead factory check` (under `fnox exec --`) reports what it can see without running anything: queued tasks, Sprites, its iroh endpoint. Stop `run` first; they share the lock below.
 - **To restart without losing work, Ctrl-C once and wait.** The first Ctrl-C drains: it starts no new runs, reworks or reviews, lets the runs in flight finish as usual (including the review a finished worker run starts), logs `draining: N runs in flight (TRAIL-n, ...); Ctrl-C again to cancel them`, and exits 0 when none are left. Reconcile keeps running during a drain, but anything it finds due waits for the next start. Then start the new build. Only SIGINT drains for now; SIGTERM and a `stop` command come with the service (TRAIL-112).
