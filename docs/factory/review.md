@@ -75,7 +75,8 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 | Breaches its budget | Counts, and the task is parked at once with a question naming the breach (TRAIL-268, TRAIL-319). Rerunning a reviewer that already overspent would only overspend again, so there is no retry to cap. Reopening the task starts the count again. |
 | Ends with no verdict | Given back; the reviewer is run again. |
 | Infrastructure failure | Given back; the task waits out the infra backoff, and parks at `max_infra_failures`. |
-| Conflict rework | Not a round (it has `max_conflict_reworks`), nor is the review after one. |
+| Cancellation | Given back, as for an infrastructure failure, but with no failure count, backoff or parking: a deliberate control-plane stop isn't a failure. |
+| Conflict rework | Not a round (it has `max_conflict_reworks`). The review after one doesn't use a round either, unless it asks for changes; then it counts as one. |
 
 ## The merger
 
