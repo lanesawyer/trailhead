@@ -4,6 +4,7 @@
 //! (`docs/factory/state.md`).
 
 mod core_tracker;
+pub mod daemon_binary;
 
 pub use core_tracker::{CoreTracker, METADATA_KEY};
 
