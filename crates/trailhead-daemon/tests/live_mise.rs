@@ -39,6 +39,7 @@ async fn a_stack_asking_for_node_22_gets_node_22() {
             command: "node --version | tee /dev/stderr | grep -q '^v22\\.'".into(),
         }),
         tools: [("node".to_string(), "22".to_string())].into(),
+        tool_hosts: Default::default(),
     };
     // As the control plane does: the daemon names the hosts the install needs, and exactly those are opened.
     let hosts = remote.install_hosts(&sandbox.id, &prepare).await.expect("the daemon names the install hosts");

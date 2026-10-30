@@ -495,6 +495,27 @@ async fn reconcile_reattaches_to_a_run_still_going_and_counts_all_its_spend() {
 }
 
 #[tokio::test]
+async fn a_reattached_run_counts_its_wall_clock_from_when_it_started() {
+    let r = rig();
+    // Started 61 minutes back against a 60 minute worker budget: nothing is left of it.
+    let key = going(&r, Usd::ZERO, 61 * 60).await;
+    r.daemon.ongoing_hung("trail-1-a1", vec![spent(1_000)]);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reattached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked, not given another full budget");
+    assert!(
+        r.tracker.comments(&key).iter().any(|c| c.kind == "question" && c.body.contains("60 minutes")),
+        "{:?}",
+        r.tracker.comments(&key)
+    );
+    let sandbox = r.compute.get("trailhead-w1").expect("sandbox kept for resuming");
+    assert!(!sandbox.labels.contains_key(label::ROLE), "connector access cut");
+    assert!(r.compute.checkpoints("trailhead-w1").last().unwrap().starts_with("parked:"));
+}
+
+#[tokio::test]
 async fn a_run_the_daemon_has_lost_goes_back_to_the_queue_without_using_an_attempt() {
     let r = rig();
     let key = going(&r, Usd::ZERO, 60).await;
@@ -2318,8 +2339,23 @@ async fn an_unknown_repo_tool_is_skipped_and_an_unknown_stack_tool_fails_the_pre
     let r = rig_with(&with_stack(r#"zig = "0.13""#));
     r.tracker.add_task("TRAIL", "Add a greeting", "");
     let err = r.factory.tick().await.unwrap_err().to_string();
-    assert!(err.contains("`zig`") && err.contains("[egress] install"), "{err}");
+    assert!(err.contains("`zig`") && err.contains("[egress.tools]"), "{err}");
     assert!(r.daemon.prepared().is_empty(), "the prepare failed before any checkout was prepared");
+}
+
+#[tokio::test]
+async fn egress_tools_in_factory_toml_cover_a_stack_tool_the_table_lacks() {
+    let config = with_stack(r#"zig = "0.13""#) + "\n[egress.tools]\nzig = [\"ziglang.org\"]\n";
+    let r = rig_with(&config);
+    r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
+    r.factory.tick().await.unwrap();
+
+    let (opened, agent) = install_and_agent_egress(&r, "trailhead-w1");
+    assert!(opened.iter().any(|d| d == "ziglang.org"), "{opened:?}");
+    assert!(!agent.iter().any(|d| d == "ziglang.org"), "closed before the agent runs: {agent:?}");
+    let blocked = r.daemon.requests().into_iter().next().unwrap().blocked_hosts;
+    assert!(blocked.iter().any(|d| d == "ziglang.org"), "{blocked:?}");
 }
 
 #[tokio::test]

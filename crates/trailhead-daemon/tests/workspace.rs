@@ -57,6 +57,7 @@ async fn prepare_clones_runs_setup_and_resets() {
         merge_base: false,
         setup: Some(check("setup", "touch .setup-ran")),
         tools: Default::default(),
+        tool_hosts: Default::default(),
     };
 
     ws.prepare(&req).await.unwrap();
@@ -104,6 +105,7 @@ async fn prepare_can_check_out_a_branchs_remote_head() {
         merge_base: false,
         setup: None,
         tools: Default::default(),
+        tool_hosts: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
     assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "the work starts from the PR head");
@@ -202,6 +204,7 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         merge_base: true,
         setup: None,
         tools: Default::default(),
+        tool_hosts: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
     assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "still at the PR head, merge uncommitted");
@@ -258,6 +261,7 @@ async fn prepare_installs_the_stack_with_mise_and_checks_run_under_it() {
         merge_base: false,
         setup: Some(check("setup", "echo \"pinned=$PINNED\" > .setup-env")),
         tools: [("node".to_string(), "22".to_string())].into(),
+        tool_hosts: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
 
@@ -299,6 +303,7 @@ async fn a_repos_own_mise_config_alone_bootstraps_best_effort() {
         merge_base: false,
         setup: None,
         tools: Default::default(),
+        tool_hosts: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
 
@@ -328,6 +333,7 @@ async fn a_failing_repo_config_does_not_fail_the_stack() {
         merge_base: false,
         setup: None,
         tools: [("node".to_string(), "22".to_string())].into(),
+        tool_hosts: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
     // Succeeds for the factory's tools (run outside the checkout), fails inside it.

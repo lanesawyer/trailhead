@@ -38,6 +38,9 @@ pub struct PrepareRequest {
     /// `setup` (`docs/factory/sandbox.md`). Empty for a repo that asks for none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, String>,
+    /// `[egress] tools` from factory.toml: download hosts per mise tool, for tools the daemon has no hosts for.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_hosts: BTreeMap<String, Vec<String>>,
 }
 
 /// A host the install step needs open, and the tool that needs it (`docs/factory/sandbox.md`). The daemon works these

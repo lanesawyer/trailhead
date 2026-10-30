@@ -340,6 +340,10 @@ pub struct EgressConfig {
     pub always: Vec<String>,
     #[serde(default)]
     pub install: Vec<String>,
+    /// Download hosts per mise tool (`zig = ["ziglang.org"]`), for a `[stack]` or `mise.toml` tool the daemon's table
+    /// doesn't know. Opened only while that tool installs; they take precedence over the table.
+    #[serde(default)]
+    pub tools: BTreeMap<String, Vec<String>>,
 }
 
 impl FactoryConfig {
@@ -443,6 +447,7 @@ impl FactoryConfig {
             merge_base: false,
             setup,
             tools: self.stack.tools.clone(),
+            tool_hosts: self.egress.tools.clone(),
         }
     }
 }

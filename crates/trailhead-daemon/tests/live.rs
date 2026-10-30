@@ -111,6 +111,7 @@ async fn daemon_in_a_sprite() {
                 branch: None,
                 setup: Some(Check { name: "setup".into(), command: "test -f Cargo.toml".into() }),
                 tools: Default::default(),
+                tool_hosts: Default::default(),
             };
             let t = Instant::now();
             remote.prepare(&sandbox.id, prepare.clone()).await.expect("first prepare");

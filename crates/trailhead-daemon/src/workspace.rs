@@ -23,6 +23,8 @@ pub struct GitWorkspace {
     /// Extra environment for git; tests use it to hide the machine's git config.
     git_env: Vec<(String, String)>,
     mise: Mise,
+    /// The request `install_hosts` just checked out, so the `prepare` that follows doesn't fetch and reset again.
+    checked_out: std::sync::Mutex<Option<PrepareRequest>>,
 }
 
 impl GitWorkspace {
@@ -37,6 +39,7 @@ impl GitWorkspace {
             block_patience: BLOCK_PATIENCE,
             git_env: Vec::new(),
             mise: Mise::new(),
+            checked_out: std::sync::Mutex::default(),
         }
     }
 
@@ -113,11 +116,15 @@ impl Workspace for GitWorkspace {
     async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
         // The repo's own mise config is in the checkout, so the hosts can't be known before the clone.
         self.checkout(req).await?;
-        self.mise.install_hosts(&self.dir, &req.tools).await
+        *self.checked_out.lock().unwrap() = Some(req.clone());
+        self.mise.install_hosts(&self.dir, &req.tools, &req.tool_hosts).await
     }
 
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
-        self.checkout(req).await?;
+        let fresh = self.checked_out.lock().unwrap().take().is_some_and(|done| done == *req);
+        if !fresh {
+            self.checkout(req).await?;
+        }
         // Before setup, so the repo's own build runs with the pinned tools.
         self.mise.bootstrap(&self.dir, &req.tools).await?;
         if let Some(setup) = &req.setup {

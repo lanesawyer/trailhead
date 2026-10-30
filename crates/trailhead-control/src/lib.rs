@@ -4,6 +4,7 @@
 //! (`docs/factory/state.md`).
 
 mod core_tracker;
+pub mod daemon_binary;
 
 pub use core_tracker::{CoreTracker, METADATA_KEY};
 
@@ -306,9 +307,13 @@ impl Factory {
         }
         let prepared = self.daemon.prepare(&sandbox.id, req).await;
         if prepared.is_err() {
-            self.install_opened.lock().unwrap().remove(&sandbox.id);
+            self.forget_install_opened(sandbox);
         }
         prepared
+    }
+
+    fn forget_install_opened(&self, sandbox: &Sandbox) {
+        self.install_opened.lock().unwrap().remove(&sandbox.id);
     }
 
     fn branch(task: &Task) -> String {
@@ -1365,7 +1370,10 @@ impl Factory {
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = self.compute.create(&spec).await?;
         self.prepare_sandbox(&sandbox, self.config.prepare_request(role, branch)).await?;
-        self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+        if let Err(e) = self.compute.set_egress(&sandbox.id, &self.agent_egress()).await {
+            self.forget_install_opened(&sandbox);
+            return Err(e);
+        }
         Ok(sandbox)
     }
 
@@ -1435,11 +1443,21 @@ impl Factory {
         }
         let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
         self.prepare_sandbox(&sandbox, prepare).await?;
-        let cp = self.compute.checkpoint(&sandbox.id, "warm").await?;
-        let labels = self.pooled(label::BUSY, Some(&cp.0), Some(task));
-        self.compute.set_labels(&sandbox.id, &labels).await?;
-        self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
-        Ok(Sandbox { labels, ..sandbox })
+        let warmed = async {
+            let cp = self.compute.checkpoint(&sandbox.id, "warm").await?;
+            let labels = self.pooled(label::BUSY, Some(&cp.0), Some(task));
+            self.compute.set_labels(&sandbox.id, &labels).await?;
+            self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+            Ok::<_, Error>(labels)
+        }
+        .await;
+        match warmed {
+            Ok(labels) => Ok(Sandbox { labels, ..sandbox }),
+            Err(e) => {
+                self.forget_install_opened(&sandbox);
+                Err(e)
+            }
+        }
     }
 
     /// Returns a worker sandbox to the pool: restored to its warm checkpoint, which wipes everything the task did,

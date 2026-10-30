@@ -90,7 +90,7 @@ Sprites egress is a DNS-based allowlist set from outside through the API. Change
 | `npm:` | `registry.npmjs.org` |
 | `pipx:`, `pypi:` | `pypi.org`, `files.pythonhosted.org` |
 
-A `[stack]` tool not in the table fails the prepare, naming the tool and saying to add its hosts to `[egress] install`. A tool from the repo's own `mise.toml` that isn't in it is skipped with a warning, the same best-effort rule as its install. The hosts of `[bootstrap.packages]` (apt and the like) aren't mapped; they go in `[egress] install` too.
+A tool the table doesn't know takes an entry in factory.toml: `[egress.tools]` maps a tool to its download hosts (`zig = ["ziglang.org"]`). The control plane sends the map in the prepare request, the daemon uses it for `[stack]` and `mise.toml` tools alike (an entry wins over the table), and the hosts open only while that tool installs, logged with the tool that asked. A `[stack]` tool in neither the table nor `[egress.tools]` fails the prepare, naming the tool and pointing at `[egress.tools]`. A tool from the repo's own `mise.toml` that is in neither is skipped with a warning, the same best-effort rule as its install. The hosts of `[bootstrap.packages]` (apt and the like) aren't mapped; they go in `[egress] install`.
 
 Decided: registry egress only during install phases. The risk isn't secrets, since the sandbox holds none; it's a malicious or typosquatted package whose install script acts with the sandbox's connector identity. Mitigations:
 

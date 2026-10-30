@@ -55,7 +55,7 @@ impl Workspace for FakeWorkspace {
 
     async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
         let stack: Vec<String> = req.tools.keys().cloned().collect();
-        trailhead_daemon::install_hosts_for(&stack, &self.repo_tools.lock().unwrap(), false, false)
+        trailhead_daemon::install_hosts_for(&stack, &self.repo_tools.lock().unwrap(), &req.tool_hosts, false, false)
     }
 
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
@@ -133,9 +133,12 @@ pub struct LocalDaemon {
     /// Errors the next runs fail with before the agent does anything, like a lost daemon.
     run_errors: Mutex<Vec<trailhead_factory::Error>>,
     /// Runs that are going in a sandbox from before this control plane: their events so far, and how they end.
-    ongoing: Mutex<HashMap<String, (Vec<RunEvent>, RunReport)>>,
+    ongoing: Mutex<HashMap<String, Ongoing>>,
     attached: Mutex<Vec<String>>,
 }
+
+/// A run from before this control plane: its events so far, and its report, or `None` if it never ends by itself.
+type Ongoing = (Vec<RunEvent>, Option<RunReport>);
 
 impl LocalDaemon {
     /// A daemon whose sandboxes reach a [`FakeTracker`].
@@ -228,7 +231,12 @@ impl LocalDaemon {
     /// A run already going in a sandbox, as after a control plane restart: an attach to it replays `events`, then
     /// ends with `report`. Any other run is unknown to the daemon.
     pub fn ongoing(&self, run: &str, events: Vec<RunEvent>, report: RunReport) {
-        self.ongoing.lock().unwrap().insert(run.to_string(), (events, report));
+        self.ongoing.lock().unwrap().insert(run.to_string(), (events, Some(report)));
+    }
+
+    /// [`LocalDaemon::ongoing`] for a run that never ends by itself: after the replay it waits to be cancelled.
+    pub fn ongoing_hung(&self, run: &str, events: Vec<RunEvent>) {
+        self.ongoing.lock().unwrap().insert(run.to_string(), (events, None));
     }
 
     /// The runs attached to so far, oldest first.
@@ -290,7 +298,7 @@ impl Daemon for LocalDaemon {
         self.runner.run(req, events, self.cancel_handle(sandbox)).await
     }
 
-    async fn attach(&self, _sandbox: &SandboxId, run: &str, events: EventSink) -> Result<RunReport> {
+    async fn attach(&self, sandbox: &SandboxId, run: &str, events: EventSink) -> Result<RunReport> {
         self.attached.lock().unwrap().push(run.to_string());
         let Some((replay, report)) = self.ongoing.lock().unwrap().remove(run) else {
             return Err(Error::NotFound(format!("run {run} on this daemon")));
@@ -298,7 +306,13 @@ impl Daemon for LocalDaemon {
         for ev in replay {
             let _ = events.send(ev);
         }
-        Ok(report)
+        match report {
+            Some(report) => Ok(report),
+            None => {
+                self.cancel_handle(sandbox).notified().await;
+                Err(Error::Cancelled)
+            }
+        }
     }
 
     async fn cancel(&self, sandbox: &SandboxId) -> Result<()> {

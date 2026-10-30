@@ -85,30 +85,36 @@ fn repo_tools(dir: &Path) -> Vec<String> {
     tools
 }
 
-/// Which hosts installing `stack` and `repo` tools needs. `mise_missing` adds mise's own installer. A `[stack]` tool
-/// with no known hosts is an error; a repo tool with none is skipped with a warning, since its install is best effort.
+/// Which hosts installing `stack` and `repo` tools needs. `configured` is the repo's `[egress] tools` from
+/// factory.toml (tool to hosts), which the control plane sends in the request: it covers a tool the table doesn't
+/// know and takes precedence over it. `mise_missing` adds mise's own installer. A `[stack]` tool with no hosts either
+/// way is an error; a repo tool with none is skipped with a warning, since its install is best effort.
 /// `repo_config` is whether the checkout has a mise config at all: it needs mise even when none of its tools are known.
 pub fn install_hosts_for(
     stack: &[String],
     repo: &[String],
+    configured: &BTreeMap<String, Vec<String>>,
     repo_config: bool,
     mise_missing: bool,
 ) -> Result<Vec<InstallHost>> {
-    let mut asks: Vec<(String, Vec<&'static str>)> = Vec::new();
+    let known = |tool: &str| -> Option<Vec<String>> {
+        configured.get(tool).cloned().or_else(|| hosts_for(tool).map(|h| h.into_iter().map(String::from).collect()))
+    };
+    let mut asks: Vec<(String, Vec<String>)> = Vec::new();
     for tool in stack {
-        let hosts = hosts_for(tool).ok_or_else(|| {
+        let hosts = known(tool).ok_or_else(|| {
             Error::Other(format!(
-                "[stack] tool `{tool}` has no known download hosts; add them to `[egress] install` in factory.toml"
+                "[stack] tool `{tool}` has no known download hosts; list them in factory.toml, e.g. `[egress.tools]` with `{tool} = [\"example.com\"]`"
             ))
         })?;
         asks.push((tool.clone(), hosts));
     }
     for tool in repo.iter().filter(|t| !stack.contains(t)) {
-        match hosts_for(tool) {
+        match known(tool) {
             Some(hosts) => asks.push((tool.clone(), hosts)),
             None => tracing::warn!(
                 %tool,
-                "the repo's mise.toml asks for a tool with no known download hosts; skipping it unless `[egress] install` covers it"
+                "the repo's mise.toml asks for a tool with no known download hosts; skipping it unless `[egress.tools]` in factory.toml lists them"
             ),
         }
     }
@@ -116,16 +122,17 @@ pub fn install_hosts_for(
         return Ok(Vec::new());
     }
     // Versions like `22` or `stable` are resolved over the network.
-    asks.insert(0, ("mise".into(), MISE_VERSIONS.to_vec()));
+    let strings = |hosts: &[&str]| hosts.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+    asks.insert(0, ("mise".into(), strings(MISE_VERSIONS)));
     if mise_missing {
-        asks.insert(0, ("mise".into(), ["mise.run"].into_iter().chain(GITHUB.iter().copied()).collect()));
+        asks.insert(0, ("mise".into(), strings(&[&["mise.run"], GITHUB].concat())));
     }
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for (tool, hosts) in asks {
         for host in hosts {
-            if seen.insert(host) {
-                out.push(InstallHost { host: host.to_string(), tool: tool.clone() });
+            if seen.insert(host.clone()) {
+                out.push(InstallHost { host, tool: tool.clone() });
             }
         }
     }
@@ -225,9 +232,14 @@ impl Mise {
     }
 
     /// The hosts installing the factory's `tools` and the checkout's own mise tools at `dir` needs, worked out offline.
-    pub async fn install_hosts(&self, dir: &Path, tools: &BTreeMap<String, String>) -> Result<Vec<InstallHost>> {
+    pub async fn install_hosts(
+        &self,
+        dir: &Path,
+        tools: &BTreeMap<String, String>,
+        configured: &BTreeMap<String, Vec<String>>,
+    ) -> Result<Vec<InstallHost>> {
         let stack: Vec<String> = tools.keys().cloned().collect();
-        install_hosts_for(&stack, &repo_tools(dir), Mise::repo_config(dir).is_some(), self.find().is_none())
+        install_hosts_for(&stack, &repo_tools(dir), configured, Mise::repo_config(dir).is_some(), self.find().is_none())
     }
 
     /// Installs what the factory's `tools` and the repo's own mise config ask for, in the checkout at `dir`. The repo's
@@ -347,13 +359,17 @@ mod tests {
         assert!(overridden(&stack, "not toml [").is_empty());
     }
 
+    fn none() -> BTreeMap<String, Vec<String>> {
+        BTreeMap::new()
+    }
+
     fn names(hosts: &[InstallHost]) -> Vec<&str> {
         hosts.iter().map(|h| h.host.as_str()).collect()
     }
 
     #[test]
     fn a_node_stack_needs_only_nodejs_and_mises_version_lists() {
-        let hosts = install_hosts_for(&["node".to_string()], &[], false, false).unwrap();
+        let hosts = install_hosts_for(&["node".to_string()], &[], &none(), false, false).unwrap();
         assert_eq!(names(&hosts), ["mise.jdx.dev", "mise-versions.jdx.dev", "nodejs.org"]);
         assert_eq!(hosts.last().unwrap().tool, "node");
     }
@@ -361,23 +377,25 @@ mod tests {
     #[test]
     fn mises_installer_hosts_are_opened_only_when_mise_is_missing() {
         let node = ["node".to_string()];
-        assert!(!names(&install_hosts_for(&node, &[], false, false).unwrap()).contains(&"mise.run"));
-        let hosts = install_hosts_for(&node, &[], false, true).unwrap();
+        assert!(!names(&install_hosts_for(&node, &[], &none(), false, false).unwrap()).contains(&"mise.run"));
+        let hosts = install_hosts_for(&node, &[], &none(), false, true).unwrap();
         assert!(names(&hosts).contains(&"mise.run"), "{hosts:?}");
         assert!(hosts.iter().any(|h| h.host == "github.com" && h.tool == "mise"));
     }
 
     #[test]
     fn nothing_to_install_opens_nothing() {
-        assert!(install_hosts_for(&[], &[], false, true).unwrap().is_empty());
+        assert!(install_hosts_for(&[], &[], &none(), false, true).unwrap().is_empty());
     }
 
     #[test]
     fn a_repo_config_with_no_known_tools_still_opens_mises_installer_when_mise_is_missing() {
-        let hosts = install_hosts_for(&[], &[], true, true).unwrap();
+        let hosts = install_hosts_for(&[], &[], &none(), true, true).unwrap();
         assert!(names(&hosts).contains(&"mise.run") && names(&hosts).contains(&"github.com"), "{hosts:?}");
-        assert!(install_hosts_for(&[], &["cargo:ripgrep".to_string()], true, true).unwrap().len() >= hosts.len());
-        assert!(install_hosts_for(&[], &[], true, false).unwrap().is_empty());
+        assert!(
+            install_hosts_for(&[], &["cargo:ripgrep".to_string()], &none(), true, true).unwrap().len() >= hosts.len()
+        );
+        assert!(install_hosts_for(&[], &[], &none(), true, false).unwrap().is_empty());
     }
 
     #[test]
@@ -392,12 +410,28 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_stack_tool_fails_naming_it_and_an_unknown_repo_tool_is_skipped() {
-        let err = install_hosts_for(&["zig".to_string()], &[], false, false).unwrap_err().to_string();
-        assert!(err.contains("`zig`") && err.contains("[egress] install"), "{err}");
-        let hosts =
-            install_hosts_for(&["node".to_string()], &["zig".to_string(), "python".to_string()], true, false).unwrap();
-        assert!(names(&hosts).contains(&"pypi.org") && !names(&hosts).contains(&"zig"));
+    fn an_unknown_stack_tool_fails_unless_factory_toml_lists_its_hosts() {
+        let zig = ["zig".to_string()];
+        let err = install_hosts_for(&zig, &[], &none(), false, false).unwrap_err().to_string();
+        assert!(err.contains("`zig`") && err.contains("[egress.tools]"), "{err}");
+        let configured = BTreeMap::from([("zig".to_string(), vec!["ziglang.org".to_string()])]);
+        let hosts = install_hosts_for(&zig, &[], &configured, false, false).unwrap();
+        assert!(hosts.iter().any(|h| h.host == "ziglang.org" && h.tool == "zig"), "{hosts:?}");
+    }
+
+    #[test]
+    fn configured_hosts_cover_a_repo_tool_and_override_the_table() {
+        let node = ["node".to_string()];
+        let zig = ["zig".to_string(), "python".to_string()];
+        let skipped = install_hosts_for(&node, &zig, &none(), true, false).unwrap();
+        assert!(names(&skipped).contains(&"pypi.org") && !names(&skipped).contains(&"ziglang.org"));
+        let configured = BTreeMap::from([
+            ("zig".to_string(), vec!["ziglang.org".to_string()]),
+            ("node".to_string(), vec!["mirror.example".to_string()]),
+        ]);
+        let hosts = install_hosts_for(&node, &zig, &configured, true, false).unwrap();
+        assert!(names(&hosts).contains(&"ziglang.org") && names(&hosts).contains(&"mirror.example"));
+        assert!(!names(&hosts).contains(&"nodejs.org"));
     }
 
     #[test]
