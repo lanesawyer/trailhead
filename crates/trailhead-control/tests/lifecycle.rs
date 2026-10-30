@@ -2142,8 +2142,8 @@ async fn a_grade_three_pr_waits_for_lane_who_approves_it() {
     assert_eq!(
         said(&r),
         [
-            "Grade 3 (task was 1; Cargo.lock changed): waiting for CI and Lane.",
-            "Grade 3 (task was 1; Cargo.lock changed): waiting for Lane."
+            "Grade 3 (task was 1; Cargo.lock changed): waiting for CI and a person.",
+            "Grade 3 (task was 1; Cargo.lock changed): waiting for a person."
         ]
     );
     assert_eq!(r.tracker.task(&key).status, Status::InReview, "the factory doesn't approve for Lane");
@@ -2156,7 +2156,7 @@ async fn a_grade_three_pr_waits_for_lane_who_approves_it() {
     assert_eq!(
         said(&r)[2..],
         [
-            "Grade 3 (task was 1; Cargo.lock changed): checks, CI, review and Lane's approval passed; not auto-merged at this grade, so Lane merges."
+            "Grade 3 (task was 1; Cargo.lock changed): checks, CI, review and a person's approval passed; not auto-merged at this grade, so a person merges."
         ]
     );
     let decision = task.run.merge.unwrap();

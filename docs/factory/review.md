@@ -84,7 +84,7 @@ The control plane acts as the merger. It is the factory project's only delegated
 
 1. After each pass that could change the answer (a verdict, a rework, CI finishing, Lane approving, a reconcile), it evaluates the PR's gates against its **current head**: the sandbox checks passed, the repo's CI is green on that commit, the latest verdict on that head approves, and, for grades whose gates require a human, Lane has approved.
 2. When they pass, it moves the task to `approved`. A push after that sends it back to `in_review`.
-3. It records the decision in the task's `factory` metadata (`merge`: the grade, which gates passed, and what it's waiting on) and says it once on the PR when it changes: "Grade 1: checks, CI and review passed; merging." or "Grade 3 (Cargo.lock changed): waiting for Lane."
+3. It records the decision in the task's `factory` metadata (`merge`: the grade, which gates passed, and what it's waiting on) and says it once on the PR when it changes: "Grade 1: checks, CI and review passed; merging." or "Grade 3 (Cargo.lock changed): waiting for a person."
 4. What it does with an `approved` task depends on `[factory.merge] mode` and the grade's `auto_merge`:
    - **`off`:** nothing; Lane merges every PR.
    - **`shadow`:** it posts what it *would* do and doesn't merge, including, when the PR is behind `main`, that it would update the branch first ("Would merge `main` into the branch, wait for CI on the new head, then squash-merge."). Lane merges as today, and compares. The default; Trailhead's own repo ran it until 2026-10-29 and is now `on` (TRAIL-313).

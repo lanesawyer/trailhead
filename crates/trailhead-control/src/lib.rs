@@ -144,7 +144,7 @@ pub struct Reconciled {
 }
 
 /// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
-/// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for Lane.` `merging` is whether the merger is on and will
+/// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for a person.` `merging` is whether the merger is on and will
 /// merge now.
 fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool) -> String {
     fn join(items: Vec<String>) -> String {
@@ -163,7 +163,7 @@ fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, mergin
                 "ci" if !d.failing.is_empty() => parts.push(format!("CI failed ({})", d.failing.join(", "))),
                 "ci" => waiting.push("CI".to_string()),
                 "agent_review" => waiting.push("review".into()),
-                "human" => waiting.push("Lane".into()),
+                "human" => waiting.push("a person".into()),
                 other => waiting.push(other.to_string()),
             }
         }
@@ -175,7 +175,7 @@ fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, mergin
     let passed = d.passed.iter().map(|g| match g.as_str() {
         "ci" => "CI".to_string(),
         "agent_review" => "review".into(),
-        "human" => "Lane's approval".into(),
+        "human" => "a person's approval".into(),
         other => other.to_string(),
     });
     let passed = join(passed.collect());
@@ -183,8 +183,8 @@ fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, mergin
         (Some(problem), ..) => format!("{head}: {passed} passed, but {problem}."),
         _ if merging => format!("{head}: {passed} passed; merging."),
         (None, true, _) => format!("{head}: {passed} passed; would merge (shadow)."),
-        (None, false, true) => format!("{head}: {passed} passed; Lane merges."),
-        (None, false, false) => format!("{head}: {passed} passed; not auto-merged at this grade, so Lane merges."),
+        (None, false, true) => format!("{head}: {passed} passed; a person merges."),
+        (None, false, false) => format!("{head}: {passed} passed; not auto-merged at this grade, so a person merges."),
     }
 }
 
