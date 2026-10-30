@@ -647,6 +647,8 @@ impl Factory {
         }
         let started = RunUpdate {
             attempt: Some(attempt),
+            // A task parked for giving up and reopened starts its count again.
+            attempt_base: task.run.gave_up.filter(|g| *g > task.run.attempt_base.unwrap_or(0)),
             sandbox: Some(name.clone()),
             profile: Some(self.config.repo.worker.clone()),
             started: Some(unix_now()),
@@ -818,7 +820,7 @@ impl Factory {
                 }
                 let max = self.config.repo.max_attempts;
                 // Counted from the last review that asked for changes, so reworks get attempts of their own.
-                let failed = attempt.saturating_sub(task.run.attempt_base.unwrap_or(0));
+                let failed = attempt.saturating_sub(task.run.attempt_floor());
                 if failed >= max {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
                     let last = self
@@ -830,14 +832,15 @@ impl Factory {
                         .filter(|f| !f.is_empty())
                         .unwrap_or_else(|| reason.clone());
                     sub.claim(&task.key).await?;
+                    // Recorded before the question, so a task that is parked has the marker; reopening it is all a
+                    // human has to do.
+                    sub.report(&task.key, RunUpdate { gave_up: Some(attempt), ..RunUpdate::default() }).await?;
                     sub.ask(
                         &task.key,
                         &format!(
                             "Gave up after {failed} failed attempts (the limit is {max}). The last failure: \
-                             {reason}\n\n{last}\n\nFix the cause, then reset the attempt count with `trailhead edit {key} \
-                             --meta factory.attempt_base={attempt}` and reopen the task; without the reset it \
-                             parks again on the next failure. Or raise `max_attempts` to allow more tries.",
-                            key = task.key.0
+                             {reason}\n\n{last}\n\nFix the cause, then reopen the task; the attempt count starts again from \
+                             here. Or raise `max_attempts` to allow more tries."
                         ),
                     )
                     .await?;

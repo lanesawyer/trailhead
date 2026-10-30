@@ -86,6 +86,10 @@ pub struct RunUpdate {
     /// the attempts of the task as a whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_base: Option<u32>,
+    /// The attempt at which the control plane parked the task for hitting `max_attempts`. A run that starts on the
+    /// reopened task counts from it (see `attempt_floor`), so a human only has to reopen it (TRAIL-308).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gave_up: Option<u32>,
     /// How the task's PR was merged, once it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
@@ -176,6 +180,7 @@ impl RunUpdate {
             infra_failures,
             changes_requested,
             attempt_base,
+            gave_up,
             merged,
             grade,
             ungraded,
@@ -197,6 +202,7 @@ impl RunUpdate {
         self.infra_failures = infra_failures.or(self.infra_failures.take());
         self.changes_requested = changes_requested.or(self.changes_requested.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
+        self.gave_up = gave_up.or(self.gave_up.take());
         self.merged = merged.or(self.merged.take());
         self.grade = grade.or(self.grade.take());
         self.ungraded = ungraded.or(self.ungraded.take());
@@ -208,6 +214,12 @@ impl RunUpdate {
     /// since finished on another attempt.
     pub fn pending_changes(&self) -> Option<&ChangesRequested> {
         self.changes_requested.as_ref().filter(|c| self.reviewed.is_none_or(|r| r == c.attempt))
+    }
+
+    /// The attempt `max_attempts` counts from: the last review that asked for changes, or the attempt the control
+    /// plane gave up at, whichever is later.
+    pub fn attempt_floor(&self) -> u32 {
+        self.attempt_base.unwrap_or(0).max(self.gave_up.unwrap_or(0))
     }
 
     pub fn is_empty(&self) -> bool {
