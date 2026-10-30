@@ -3,7 +3,7 @@
 //! `--daemon` wins when given. Otherwise the control plane downloads the release asset that matches its own
 //! version, checks it against the published SHA-256 and caches it in the data dir. A version with no release (a dev
 //! build) falls back to a local build, [`LOCAL_BUILD`]. Only a missing release falls back: a
-//! failed download or a checksum mismatch is an error, so a tampered or truncated binary never reaches a sandbox.
+//! failed download or a checksum mismatch is an error, so a corrupted or truncated binary never reaches a sandbox.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -239,7 +239,9 @@ mod tests {
 
         let local = dir.path().join("local");
         std::fs::write(&local, b"local build").unwrap();
-        assert!(err.contains("no release asset") && err.contains("--daemon"), "{err}");
+        let cache = tempfile::tempdir().unwrap();
+        assert_eq!(resolve(None, &local, &release(url, "0.3.0-dev"), cache.path()).await.unwrap(), b"local build");
+        assert!(std::fs::read_dir(cache.path()).unwrap().next().is_none(), "nothing is cached");
     }
 
     #[tokio::test]
