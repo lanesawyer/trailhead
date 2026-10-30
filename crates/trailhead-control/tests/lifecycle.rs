@@ -544,6 +544,34 @@ async fn reconcile_reattaches_to_a_run_still_going_and_counts_all_its_spend() {
 }
 
 #[tokio::test]
+async fn reconcile_does_not_reattach_to_a_run_whose_report_was_already_counted() {
+    let r = rig();
+    let key = going(&r, Usd::dollars(0.5), 120).await;
+    // The run ended and `conclude` counted its spend, then died before the sandbox was released.
+    let sub = Arc::new(r.tracker.clone()).sub_agent("trail-1-a1");
+    let counted = trailhead_factory::RunUpdate {
+        spend: Some(Usd::dollars(1.5)),
+        concluded: Some("trail-1-a1".into()),
+        ..Default::default()
+    };
+    sub.report(&key, counted).await.unwrap();
+    let report = trailhead_factory::RunReport {
+        result: trailhead_factory::RunResult::NeedsInput("Which greeting?".into()),
+        checks: vec![],
+        usage: Default::default(),
+    };
+    r.daemon.ongoing("trail-1-a1", vec![spent(400_000), spent(600_000)], report);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reattached.is_empty(), "{done:?}");
+    assert_eq!(done.requeued, std::slice::from_ref(&key.0));
+    assert!(r.daemon.attached().is_empty());
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.spend, Some(Usd::dollars(1.5)), "not counted a second time");
+    assert_eq!(task.status, Status::Open);
+}
+
+#[tokio::test]
 async fn a_reattached_run_counts_its_wall_clock_from_when_it_started() {
     let r = rig();
     // Started 61 minutes back against a 60 minute worker budget: nothing is left of it.
