@@ -346,6 +346,9 @@ pub struct UpdateArgs {
     scheduled_tz: Option<String>,
     /// Parent task key: moves the task under it as a subtask. An empty string makes it top-level.
     parent: Option<String>,
+    /// A JSON merge patch (RFC 7386) for the task's metadata: keys you give are set, a
+    /// `null` value removes a key, keys you leave out stay.
+    metadata: Option<serde_json::Map<String, serde_json::Value>>,
     /// The version you last saw; the update fails if the task changed since.
     version: Option<i64>,
     /// Posted as a `handoff` comment once the update succeeds: what changed, what's
@@ -702,7 +705,7 @@ impl TrailheadMcp {
             scheduled_at: attempt!(clearable(a.scheduled_at.as_deref(), trailhead_core::parse_at)),
             scheduled_tz: a.scheduled_tz.map(Some),
             parent: attempt!(clearable(a.parent.as_deref(), |p| Ok(p.to_owned()))),
-            ..Default::default()
+            metadata: a.metadata.map(serde_json::Value::Object),
         };
         let task = attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await);
         if let Some(body) = a.handoff.filter(|b| !b.trim().is_empty()) {
