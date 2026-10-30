@@ -628,3 +628,24 @@ async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
     }
     Ok(changes)
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_tool_result_ends_the_tool_call() {
+        let mut stream = Stream::new(ModelId("sonnet".into()), 0);
+        let call = json!({"type": "assistant", "message": {"id": "m1", "model": "sonnet", "usage": {},
+            "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "cargo test"}}]}});
+        let events = stream.read(&call);
+        assert!(events.iter().any(|e| matches!(e, RunEvent::ToolCall { .. })), "{events:?}");
+        let result = json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+            {"type": "text", "text": "not a result"}]}});
+        let events = stream.read(&result);
+        assert!(matches!(events.as_slice(), [RunEvent::ToolResult]), "{events:?}");
+    }
+}

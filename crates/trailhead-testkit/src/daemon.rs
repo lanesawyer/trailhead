@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
@@ -166,6 +167,12 @@ impl LocalDaemon {
             ongoing: Mutex::default(),
             attached: Mutex::default(),
         }
+    }
+
+    /// Has the daemon send a heartbeat this often instead of every 30 seconds.
+    pub fn heartbeat_every(mut self, every: Duration) -> LocalDaemon {
+        Arc::get_mut(&mut self.runner).expect("the runner isn't shared yet").heartbeat_every = every;
+        self
     }
 
     /// Has the agent leave conflict markers in these files.
