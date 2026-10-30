@@ -2316,14 +2316,78 @@ async fn an_approval_on_an_old_head_doesnt_count() {
 }
 
 #[tokio::test]
-async fn failed_ci_names_the_failing_checks_and_blocks_approval() {
+async fn failed_ci_sends_the_task_back_for_a_rework_told_what_failed() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["lint".into(), "test".into()] });
+    r.codehost.set_ci_logs(&pr, vec![("test".into(), "assertion failed: left == right".into())]);
     r.factory.reconcile().await.unwrap();
-    assert_eq!(r.tracker.task(&key).status, Status::InReview);
-    assert_eq!(said(&r).last().unwrap(), "Grade 1: CI failed (lint, test).");
-    assert_eq!(r.tracker.task(&key).run.merge.unwrap().failing, ["lint", "test"]);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open);
+    let wanted = task.run.changes_requested.expect("the rework is told why");
+    assert!(wanted.conflict, "counted as a conflict rework, not a review round");
+    assert!(
+        wanted.body.contains("lint, test") && wanted.body.contains("assertion failed: left == right"),
+        "{wanted:?}"
+    );
+    assert!(!wanted.body.contains("base branch was merged"), "{wanted:?}");
+    assert_eq!(task.run.conflict_reworks, Some(1));
+    assert_eq!(task.run.review_rounds, Some(1), "review rounds are left alone");
+}
+
+#[tokio::test]
+async fn red_ci_after_a_branch_update_unapproves_and_reworks_saying_the_merge_brought_it() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+
+    // Lane clicks Update branch: a clean merge keeps the verdict, then CI on the merge commit fails.
+    r.codehost.set_behind(&pr, true);
+    r.codehost.update_branch(&pr).await.unwrap();
+    r.codehost.set_ci(&pr, CiState::Pending);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::InReview, "pending CI is waited for");
+    assert!(r.tracker.task(&key).run.changes_requested.is_none());
+
+    r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open);
+    let wanted = task.run.changes_requested.expect("the rework is told why");
+    assert!(wanted.body.contains("test") && wanted.body.contains("base branch was merged"), "{wanted:?}");
+}
+
+#[tokio::test]
+async fn pending_ci_is_not_reworked() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, _) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    assert!(task.run.changes_requested.is_none());
+}
+
+#[tokio::test]
+async fn failed_ci_parks_the_task_at_the_conflict_rework_cap() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.tracker
+        .report(&key, trailhead_factory::RunUpdate { conflict_reworks: Some(4), ..Default::default() })
+        .await
+        .unwrap();
+    r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.conflict_reworks, Some(0), "a fresh count once a human reopens it");
+    let question = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").expect("a question");
+    assert!(
+        question.body.contains("CI keeps failing") && question.body.contains("max_conflict_reworks"),
+        "{}",
+        question.body
+    );
 }
 
 #[tokio::test]
