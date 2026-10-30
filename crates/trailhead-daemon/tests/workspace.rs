@@ -203,3 +203,25 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
     assert_eq!(ws.merge_head().await.unwrap(), None);
     assert_eq!(ws.head().await.unwrap(), rev(&src, "main"));
 }
+
+#[tokio::test]
+async fn conflict_markers_added_since_the_start_are_found_in_any_file() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "--quiet", "-b", "main"]);
+    git(&dir, &["config", "user.email", "a@b.c"]);
+    git(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("a.md"), "a\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "one"]);
+    let ws = GitWorkspace::new(&dir);
+    let start = ws.head().await.unwrap();
+    assert!(ws.conflict_markers(&start).await.unwrap().is_empty());
+
+    std::fs::write(dir.join("a.md"), "a\n=======\n").unwrap();
+    assert!(ws.conflict_markers(&start).await.unwrap().is_empty(), "a rule alone isn't a marker");
+    std::fs::write(dir.join("a.md"), "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> main\n").unwrap();
+    std::fs::write(dir.join("new.toml"), ">>>>>>> main\n").unwrap();
+    assert_eq!(ws.conflict_markers(&start).await.unwrap(), ["a.md", "new.toml"]);
+}
