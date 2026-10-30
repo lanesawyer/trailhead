@@ -58,6 +58,7 @@ const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 /// installer, registry and version lists, GitHub's release assets, and the toolchains' own download hosts.
 pub const MISE_DOMAINS: &[&str] = &[
     "mise.run",
+    "api.github.com",
     "mise.jdx.dev",
     "mise-versions.jdx.dev",
     "objects.githubusercontent.com",
@@ -285,11 +286,9 @@ impl Factory {
         let mut egress = self.agent_egress();
         let extra = self.config.egress.install.iter().cloned().chain(CLONE_DOMAINS.iter().map(|d| d.to_string()));
         egress.domains.extend(extra);
-        // Tool sources only for a repo that has a stack to install; the repo's own `mise.toml` adds its hosts to
-        // `[egress] install`.
-        if !self.config.stack.tools.is_empty() {
-            egress.domains.extend(MISE_DOMAINS.iter().map(|d| d.to_string()));
-        }
+        // Always: the control plane can't see whether the checkout has its own `mise.toml`, and bootstrap needs mise's
+        // installer and registry either way. A repo's own tools from other hosts go in `[egress] install`.
+        egress.domains.extend(MISE_DOMAINS.iter().map(|d| d.to_string()));
         egress
     }
 

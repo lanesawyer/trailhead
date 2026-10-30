@@ -27,6 +27,14 @@ fn upstream(root: &Path) -> std::path::PathBuf {
     src
 }
 
+/// Adds a dev-machine `mise.toml` to the upstream repo.
+fn add_mise_toml(root: &Path, src: &Path) {
+    std::fs::write(src.join("mise.toml"), "[tools]\nlima = \"latest\"\n").unwrap();
+    git(src, &["add", "."]);
+    git(src, &["commit", "--quiet", "-m", "mise"]);
+    git(src, &["push", "--quiet", root.join("remote/acme/widget.git").to_str().unwrap(), "main"]);
+}
+
 fn rev(dir: &Path, rev: &str) -> String {
     let out = Command::new("git").args(["rev-parse", rev]).current_dir(dir).output().unwrap();
     String::from_utf8(out.stdout).unwrap().trim().to_string()
@@ -227,7 +235,8 @@ fn fake_mise(dir: &Path) -> std::path::PathBuf {
 #[tokio::test]
 async fn prepare_installs_the_stack_with_mise_and_checks_run_under_it() {
     let root = tempfile::tempdir().unwrap();
-    upstream(root.path());
+    let src = upstream(root.path());
+    add_mise_toml(root.path(), &src);
     let tools = root.path().join("tools");
     std::fs::create_dir_all(&tools).unwrap();
     let conf = root.path().join("conf.d");
@@ -262,5 +271,64 @@ async fn prepare_installs_the_stack_with_mise_and_checks_run_under_it() {
     // Dropping the stack removes the factory's tools again.
     ws.prepare(&PrepareRequest { tools: Default::default(), setup: None, ..req }).await.unwrap();
     assert!(!conf.join("trailhead-factory.toml").exists());
-    assert!(ws.agent_env().await.is_empty(), "no stack and no mise.toml: the stock environment");
+}
+
+#[tokio::test]
+async fn a_repos_own_mise_config_alone_bootstraps_best_effort() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    add_mise_toml(root.path(), &src);
+    let tools = root.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let conf = root.path().join("conf.d");
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote)
+        .with_mise(Mise::with(fake_mise(&tools), &conf));
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: None,
+        tools: Default::default(),
+    };
+    ws.prepare(&req).await.unwrap();
+
+    // The repo's bootstrap fails (a dev-machine tool that can't install here): logged, not fatal.
+    std::fs::write(tools.join("mise"), "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/mise.log\"\nexit 1\n").unwrap();
+    ws.prepare(&req).await.unwrap();
+    let log = std::fs::read_to_string(tools.join("mise.log")).unwrap();
+    assert!(log.contains("bootstrap --only packages,tools,task"), "{log}");
+    assert!(!conf.join("trailhead-factory.toml").exists());
+}
+
+#[tokio::test]
+async fn a_failing_repo_config_does_not_fail_the_stack() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    add_mise_toml(root.path(), &src);
+    let tools = root.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let conf = root.path().join("conf.d");
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote)
+        .with_mise(Mise::with(fake_mise(&tools), &conf));
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: None,
+        tools: [("node".to_string(), "22".to_string())].into(),
+    };
+    ws.prepare(&req).await.unwrap();
+    // Succeeds for the factory's tools (run outside the checkout), fails inside it.
+    std::fs::write(
+        tools.join("mise"),
+        "#!/bin/sh\necho \"$PWD: $*\" >> \"$(dirname \"$0\")/mise.log\"\ncase \"$PWD\" in */widget) exit 1;; esac\n",
+    )
+    .unwrap();
+    ws.prepare(&req).await.unwrap();
+    let log = std::fs::read_to_string(tools.join("mise.log")).unwrap();
+    assert!(log.contains("conf.d: bootstrap --only tools"), "{log}");
 }

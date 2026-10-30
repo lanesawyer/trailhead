@@ -109,10 +109,20 @@ impl Mise {
     }
 
     async fn run(bin: &Path, dir: &Path, args: &[&str]) -> Result<String> {
+        Mise::exec(bin, dir, args, false).await
+    }
+
+    /// For the agent phase, where egress is closed: mise must not try to resolve versions or install.
+    async fn run_offline(bin: &Path, dir: &Path, args: &[&str]) -> Result<String> {
+        Mise::exec(bin, dir, args, true).await
+    }
+
+    async fn exec(bin: &Path, dir: &Path, args: &[&str], offline: bool) -> Result<String> {
         let out = Command::new(bin)
             .args(args)
             .current_dir(dir)
             .env("MISE_YES", "1")
+            .env("MISE_OFFLINE", if offline { "1" } else { "0" })
             .stdin(Stdio::null())
             .output()
             .await
@@ -150,19 +160,37 @@ impl Mise {
                 .await
                 .map_err(|e| Error::Other(format!("{}: {e}", self.generated().display())))?;
         }
-        // The checkout is the repo's own config, untrusted by default; the factory is the one installing it.
+        // The factory's own tools first, from outside the checkout so the repo's config can't fail them: these are what
+        // the run needs, and a failure here fails the prepare.
+        if !tools.is_empty() {
+            let home = self.conf_dir.clone();
+            let out = Mise::run(&bin, &home, &["bootstrap", "--only", "tools"]).await?;
+            tracing::info!("mise bootstrap of [stack]:\n{}", out.trim());
+        }
+        if repo_config.is_none() {
+            return Ok(());
+        }
+        // The repo's own config (dev-machine tools and all) is best effort: its failure is logged, not fatal, since
+        // `setup` and the checks say plainly if something the repo needed is missing. The checkout is untrusted by
+        // default; the factory is the one installing it.
         let _ = Mise::run(&bin, dir, &["trust"]).await;
-        let plan = Mise::run(&bin, dir, &["bootstrap", "plan"]).await?;
-        tracing::info!("mise bootstrap plan:\n{}", plan.trim());
-        let out = Mise::run(&bin, dir, &["bootstrap", "--only", BOOTSTRAP_PARTS]).await?;
-        tracing::info!("mise bootstrap:\n{}", out.trim());
+        match Mise::run(&bin, dir, &["bootstrap", "plan"]).await {
+            Ok(plan) => tracing::info!("mise bootstrap plan:\n{}", plan.trim()),
+            Err(e) => tracing::warn!(error = %e, "couldn't read the repo's mise bootstrap plan"),
+        }
+        match Mise::run(&bin, dir, &["bootstrap", "--only", BOOTSTRAP_PARTS]).await {
+            Ok(out) => tracing::info!("mise bootstrap of the repo's config:\n{}", out.trim()),
+            Err(e) => {
+                tracing::warn!(error = %e, "the repo's own mise config didn't fully install; continuing with [stack]")
+            }
+        }
         Ok(())
     }
 
     /// The environment mise gives a command in `dir`, with the pinned tools on PATH. Empty when `dir` isn't under mise.
     pub async fn env(&self, dir: &Path) -> BTreeMap<String, String> {
         let Some(bin) = self.find().filter(|_| self.active(dir)) else { return BTreeMap::new() };
-        let out = Mise::run(&bin, dir, &["env", "--json"]).await;
+        let out = Mise::run_offline(&bin, dir, &["env", "--json"]).await;
         match out.ok().and_then(|o| serde_json::from_str(o.trim()).ok()) {
             Some(env) => env,
             None => {
@@ -177,7 +205,7 @@ impl Mise {
         match self.find().filter(|_| self.active(dir)) {
             Some(bin) => {
                 let mut cmd = Command::new(bin);
-                cmd.args(["exec", "--", "sh", "-c"]).env("MISE_YES", "1");
+                cmd.args(["exec", "--", "sh", "-c"]).env("MISE_YES", "1").env("MISE_OFFLINE", "1");
                 cmd
             }
             None => {
