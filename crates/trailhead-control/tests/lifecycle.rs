@@ -16,7 +16,6 @@ const CONFIG: &str = r#"
 [repo]
 owner = "lanesawyer"
 name = "trailhead"
-project = "TRAIL"
 
 [checks]
 fmt = "cargo fmt --check"
@@ -63,7 +62,7 @@ fn rig_with(config: &str) -> Rig {
             .with_heads(move |repo, branch| heads.head(repo, branch)),
     );
     let factory = Factory::new(
-        FactoryConfig::parse(config).unwrap(),
+        FactoryConfig::parse_table(config, "TRAIL", None).unwrap(),
         Arc::new(compute.clone()),
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
@@ -606,7 +605,7 @@ async fn a_silent_hung_agent_hits_the_wall_clock() {
 }
 
 fn two_at_a_time() -> Rig {
-    rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_sandboxes = 2"))
+    rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 2"))
 }
 
 async fn until(what: &str, mut cond: impl FnMut() -> bool) {
@@ -1374,7 +1373,7 @@ async fn a_rework_started_by_hand_gets_the_prs_last_review_as_feedback() {
 
 #[tokio::test]
 async fn requested_changes_past_the_cap_park_the_task_with_the_last_review() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 2"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 2"));
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
     for body in ["first complaint", "second complaint"] {
         r.harness.push(Role::Worker, Script::new(changes()));
@@ -1425,7 +1424,7 @@ async fn a_rework_that_fails_its_check_is_retried_not_parked() {
 
 #[tokio::test]
 async fn a_parked_request_a_person_settled_is_not_reworked_by_reconcile() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 1"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 1"));
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
@@ -1661,7 +1660,7 @@ async fn the_agents_api_timeouts_dont_use_up_attempts() {
 
 #[tokio::test]
 async fn infrastructure_failures_past_the_cap_park_the_task_as_the_infrastructures_fault() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 3"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 3"));
     let key = r.tracker.add_task("TRAIL", "Lost daemon", "");
     r.daemon.fail_runs(3, "not found: run trail-1 on this daemon");
     for n in 1..=3 {
@@ -1730,7 +1729,7 @@ async fn failures_that_are_the_agents_or_the_tasks_still_use_up_attempts() {
 
 #[tokio::test]
 async fn two_runs_starting_together_never_take_the_same_idle_sandbox() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_sandboxes = 4"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 4"));
     let first = r.tracker.add_task("TRAIL", "First", "");
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
@@ -1789,7 +1788,7 @@ async fn a_sandbox_that_wont_release_after_the_agent_ends_the_run_doesnt_give_th
 #[tokio::test]
 async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_reopened() {
     let r = rig_with(
-        &CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 2\nmax_sandboxes = 2"),
+        &CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2\nmax_sandboxes = 2"),
     );
     let key = r.tracker.add_task("TRAIL", "Lost daemon", "");
     r.daemon.fail_runs(2, "connection lost");
@@ -1808,7 +1807,7 @@ async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_re
 
 #[tokio::test(start_paused = true)]
 async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 3"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 3"));
     let key = r.tracker.add_task("TRAIL", "Unreviewable", "");
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
@@ -1841,7 +1840,7 @@ async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() 
 
 #[tokio::test(start_paused = true)]
 async fn a_review_cancelled_on_purpose_isnt_an_infrastructure_failure() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 1"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 1"));
     let key = r.tracker.add_task("TRAIL", "Stopped mid-review", "");
     r.harness.push(Role::Worker, Script::new(changes()));
     let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
@@ -1905,7 +1904,7 @@ fn queued_rig() -> (Rig, TaskKey) {
 }
 
 fn queued_rig_with(extra: &str) -> (Rig, TaskKey) {
-    let config = CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nqueue = \"TRAIL-1\"");
+    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nqueue = \"TRAIL-1\"");
     let mut r = rig_with(&format!("{config}\n{extra}"));
     let queue = r.tracker.add_task("TRAIL", "Factory queue", "");
     let codehost = Arc::new(r.codehost.clone());

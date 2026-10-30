@@ -29,6 +29,7 @@ impl Role {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FactoryConfig {
+    #[serde(default)]
     pub repo: RepoConfig,
     #[serde(default)]
     pub stack: Stack,
@@ -111,7 +112,6 @@ impl Default for GradesConfig {
                     "4".to_string(),
                     globs(&[
                         ".github/**",
-                        "factory.toml",
                         "fnox.toml",
                         "mise.toml",
                         "AGENTS.md",
@@ -170,38 +170,50 @@ pub struct UsageConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct RepoConfig {
+    /// Default to the git remote's.
     pub owner: String,
     pub name: String,
-    #[serde(default = "default_base_branch")]
     pub base_branch: String,
-    /// The Trailhead project whose tasks run against this repo.
+    /// The Trailhead project whose tasks run against this repo: the file's top-level `project`, shared with the CLI.
+    #[serde(skip_deserializing)]
     pub project: String,
-    #[serde(default = "default_max_sandboxes")]
     pub max_sandboxes: usize,
     /// The profile tasks run on unless they name another.
-    #[serde(default = "default_worker")]
     pub worker: String,
-    #[serde(default = "default_reviewer")]
     pub reviewer: String,
     /// A task whose subtasks are the factory's work. Without one, every ready task in the project is.
-    #[serde(default)]
     pub queue: Option<String>,
     /// Attempts a task gets before it's parked for a human instead of retried.
-    #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
     /// Infrastructure failures in a row (sandbox, daemon or API trouble, not the task) at which a task is parked for a
     /// human instead of retried after a backoff.
-    #[serde(default = "default_max_infra_failures")]
     pub max_infra_failures: u32,
     /// Reviews of one task that may ask for changes before it's parked for a human instead of reworked again.
-    #[serde(default = "default_max_review_rounds")]
     pub max_review_rounds: u32,
     /// Reworks for a PR that conflicts with the base branch before the task is parked for a human. They don't use up
     /// review rounds.
-    #[serde(default = "default_max_conflict_reworks")]
     pub max_conflict_reworks: u32,
+}
+
+impl Default for RepoConfig {
+    fn default() -> RepoConfig {
+        RepoConfig {
+            owner: String::new(),
+            name: String::new(),
+            base_branch: default_base_branch(),
+            project: String::new(),
+            max_sandboxes: default_max_sandboxes(),
+            worker: default_worker(),
+            reviewer: default_reviewer(),
+            queue: None,
+            max_attempts: default_max_attempts(),
+            max_infra_failures: default_max_infra_failures(),
+            max_review_rounds: default_max_review_rounds(),
+            max_conflict_reworks: default_max_conflict_reworks(),
+        }
+    }
 }
 
 fn default_base_branch() -> String {
@@ -326,10 +338,44 @@ pub struct EgressConfig {
 }
 
 impl FactoryConfig {
-    pub fn parse(toml_src: &str) -> Result<FactoryConfig> {
-        let config: FactoryConfig = toml::from_str(toml_src).map_err(|e| Error::Config(e.to_string()))?;
-        config.validate()?;
-        Ok(config)
+    /// The factory's settings from a repo's `.trailhead.toml`: the top-level `project` and the `[factory]` table. The
+    /// CLI's own keys (`agent`) are left alone. `remote` is the git remote's owner and name, which `[factory.repo]`
+    /// falls back to.
+    pub fn from_repo_file(toml_src: &str, remote: Option<Repo>) -> Result<FactoryConfig> {
+        #[derive(Deserialize)]
+        struct File {
+            project: Option<String>,
+            #[allow(dead_code)]
+            agent: Option<String>,
+            factory: Option<toml::Table>,
+        }
+        let file: File = toml::from_str(toml_src).map_err(|e| Error::Config(e.to_string()))?;
+        let table = file.factory.ok_or_else(|| Error::Config("no [factory] table".into()))?;
+        let project = file.project.ok_or_else(|| Error::Config("no top-level `project`".into()))?;
+        let config = FactoryConfig::deserialize(table).map_err(|e| Error::Config(e.to_string()))?;
+        config.finish(project, remote)
+    }
+
+    /// The contents of the `[factory]` table alone, for `project`.
+    pub fn parse_table(factory_src: &str, project: &str, remote: Option<Repo>) -> Result<FactoryConfig> {
+        let config: FactoryConfig = toml::from_str(factory_src).map_err(|e| Error::Config(e.to_string()))?;
+        config.finish(project.to_string(), remote)
+    }
+
+    fn finish(mut self, project: String, remote: Option<Repo>) -> Result<FactoryConfig> {
+        self.repo.project = project;
+        for (field, from_remote) in [
+            (&mut self.repo.owner, remote.as_ref().map(|r| &r.owner)),
+            (&mut self.repo.name, remote.as_ref().map(|r| &r.name)),
+        ] {
+            if field.is_empty() {
+                *field = from_remote.cloned().ok_or_else(|| {
+                    Error::Config("[factory.repo] needs owner and name: there's no git remote to read them from".into())
+                })?;
+            }
+        }
+        self.validate()?;
+        Ok(self)
     }
 
     fn validate(&self) -> Result<()> {
@@ -433,9 +479,15 @@ impl FactoryConfig {
 mod tests {
     use super::*;
 
+    fn parse(factory_src: &str) -> Result<FactoryConfig> {
+        FactoryConfig::parse_table(factory_src, "TRAIL", None)
+    }
+
     #[test]
-    fn the_repos_own_factory_toml_parses() {
-        let config = FactoryConfig::parse(include_str!("../../../factory.toml")).unwrap();
+    fn the_repos_own_trailhead_toml_parses() {
+        let remote = Repo { owner: "lanesawyer".into(), name: "trailhead".into() };
+        let config = FactoryConfig::from_repo_file(include_str!("../../../.trailhead.toml"), Some(remote)).unwrap();
+        assert_eq!(config.repo.project, "TRAIL");
         assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
         assert_eq!(config.grades, GradesConfig::default(), "this repo's rules are the documented example");
         assert_eq!(config.merge.mode, MergeMode::On);
@@ -460,20 +512,20 @@ mod tests {
     #[test]
     fn grades_default_to_the_documented_rules_and_parse_from_the_file() {
         let base = SAMPLE;
-        let config = FactoryConfig::parse(base).unwrap();
+        let config = parse(base).unwrap();
         assert_eq!(config.grades, GradesConfig::default());
 
         let custom = format!("{base}\n[grades]\n3 = [\"Cargo.lock\"]\nmax_lines = 50\n");
-        let config = FactoryConfig::parse(&custom).unwrap();
+        let config = parse(&custom).unwrap();
         assert_eq!(config.grades.max_lines, 50);
         assert_eq!(config.grades.rules.keys().collect::<Vec<_>>(), ["3"]);
         assert_eq!(config.grades.grader().rules.len(), 1);
 
         let no_limit = format!("{base}\n[grades]\n2 = [\"src/**\"]\n");
-        assert_eq!(FactoryConfig::parse(&no_limit).unwrap().grades.max_lines, 600);
+        assert_eq!(parse(&no_limit).unwrap().grades.max_lines, 600);
 
         for bad in ["1 = [\"a\"]", "5 = [\"a\"]", "x = [\"a\"]", "max_line = 5"] {
-            let err = FactoryConfig::parse(&format!("{base}\n[grades]\n{bad}\n")).unwrap_err();
+            let err = parse(&format!("{base}\n[grades]\n{bad}\n")).unwrap_err();
             assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
         }
     }
@@ -482,7 +534,6 @@ mod tests {
 [repo]
 owner = "lanesawyer"
 name = "trailhead"
-project = "TRAIL"
 
 [stack]
 tools = { rust = "stable" }
@@ -520,7 +571,7 @@ require = ["checks", "agent_review", "human"]
 
     #[test]
     fn parses_the_documented_shape() {
-        let c = FactoryConfig::parse(SAMPLE).unwrap();
+        let c = parse(SAMPLE).unwrap();
         assert_eq!(c.repo.base_branch, "main");
         assert_eq!(c.worker().model, ModelAlias::Sonnet);
         assert_eq!(c.worker().budget.usd(), Usd::dollars(5.0));
@@ -531,18 +582,17 @@ require = ["checks", "agent_review", "human"]
     #[test]
     fn rejects_unknown_checks_and_profiles() {
         let bad = SAMPLE.replace("lint = ", "lnt = ");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
         let bad = SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"nope\"");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
         let bad = SAMPLE.replace("\"agent_review\", \"human\"", "\"agent_review\", \"vibes\"");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
     }
 
     #[test]
     fn gates_default_to_the_table_and_merge_mode_to_off() {
         let mut c =
-            FactoryConfig::parse(&SAMPLE.replace("[gates.1]\nrequire = [\"checks\", \"agent_review\", \"human\"]", ""))
-                .unwrap();
+            parse(&SAMPLE.replace("[gates.1]\nrequire = [\"checks\", \"agent_review\", \"human\"]", "")).unwrap();
         assert_eq!(c.merge.mode, MergeMode::Off);
         assert_eq!(c.gate(1).require, ["checks", "ci"]);
         assert!(c.gate(2).auto_merge);
@@ -552,7 +602,7 @@ require = ["checks", "agent_review", "human"]
 
         let custom =
             format!("{SAMPLE}\n[gates.2]\nrequire = [\"ci\"]\nauto_merge = true\n[merge]\nmode = \"shadow\"\n");
-        c = FactoryConfig::parse(&custom).unwrap();
+        c = parse(&custom).unwrap();
         assert_eq!(c.gate(2).require, ["ci"]);
         assert_eq!(c.gate(1).require, ["checks", "agent_review", "human"]);
         assert_eq!(c.merge.mode, MergeMode::Shadow);
@@ -561,37 +611,63 @@ require = ["checks", "agent_review", "human"]
     #[test]
     fn merge_mode_on_is_accepted_and_gates_for_unknown_grades_are_rejected() {
         let on = format!("{SAMPLE}\n[merge]\nmode = \"on\"\n");
-        assert_eq!(FactoryConfig::parse(&on).unwrap().merge.mode, MergeMode::On);
+        assert_eq!(parse(&on).unwrap().merge.mode, MergeMode::On);
         for bad in ["[merge]\nmode = \"yes\"", "[gates.t1]\nrequire = []", "[gates.5]\nrequire = []"] {
-            let err = FactoryConfig::parse(&format!("{SAMPLE}\n{bad}\n")).unwrap_err();
+            let err = parse(&format!("{SAMPLE}\n{bad}\n")).unwrap_err();
             assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
         }
     }
 
     #[test]
     fn compute_defaults_to_sprites() {
-        assert_eq!(FactoryConfig::parse(SAMPLE).unwrap().compute, ComputeConfig::Sprites);
+        assert_eq!(parse(SAMPLE).unwrap().compute, ComputeConfig::Sprites);
         let docker = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nruntime = \"runsc\"\n");
         assert_eq!(
-            FactoryConfig::parse(&docker).unwrap().compute,
+            parse(&docker).unwrap().compute,
             ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()) }
         );
         let bad = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nimgae = \"x\"\n");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
     }
 
     #[test]
     fn daemon_log_is_optional() {
-        assert_eq!(FactoryConfig::parse(SAMPLE).unwrap().daemon, DaemonConfig::default());
+        assert_eq!(parse(SAMPLE).unwrap().daemon, DaemonConfig::default());
         let with = format!("{SAMPLE}\n[daemon]\nlog = \"info,iroh=debug\"\n");
-        assert_eq!(FactoryConfig::parse(&with).unwrap().daemon.log.as_deref(), Some("info,iroh=debug"));
+        assert_eq!(parse(&with).unwrap().daemon.log.as_deref(), Some("info,iroh=debug"));
         let bad = format!("{SAMPLE}\n[daemon]\nlogg = \"x\"\n");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
     }
 
     #[test]
     fn worker_profile_must_have_worker_role() {
         let bad = SAMPLE.replace("[repo]\n", "[repo]\nworker = \"reviewer\"\n");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn the_repo_file_shares_project_and_defaults_owner_and_name_from_the_remote() {
+        let file = format!("agent = \"claude\"\nproject = \"TRAIL\"\n{}", factory_table(SAMPLE));
+        let file = file.replace("owner = \"lanesawyer\"\nname = \"trailhead\"\n", "");
+        let remote = Repo { owner: "o".into(), name: "n".into() };
+        let c = FactoryConfig::from_repo_file(&file, Some(remote.clone())).unwrap();
+        assert_eq!((c.repo.project.as_str(), c.repo.repo()), ("TRAIL", remote));
+        assert!(matches!(FactoryConfig::from_repo_file(&file, None), Err(Error::Config(_))));
+
+        let no_project = file.replace("project = \"TRAIL\"\n", "");
+        assert!(matches!(FactoryConfig::from_repo_file(&no_project, None), Err(Error::Config(_))));
+        let repeated = file.replace("[factory.repo]\n", "[factory.repo]\nproject = \"TRAIL\"\n");
+        assert!(matches!(FactoryConfig::from_repo_file(&repeated, None), Err(Error::Config(_))));
+        let typo = file.replace("agent =", "agnt =");
+        assert!(matches!(FactoryConfig::from_repo_file(&typo, None), Err(Error::Config(_))));
+    }
+
+    /// `src` (a bare factory table) with every table header under `[factory.`.
+    fn factory_table(src: &str) -> String {
+        let src = src.replace("\n[", "\n[factory.");
+        match src.strip_prefix('[') {
+            Some(rest) => format!("[factory.{rest}"),
+            None => src,
+        }
     }
 }

@@ -8,7 +8,7 @@ The software factory being built into Trailhead is designed in `docs/factory/`. 
 
 Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). First the rough edges live runs hit, starting with TRAIL-140. The task engine's core is in `crates/trailhead-core`; its server, MCP and CLI are in `crates/trailhead-server` and `crates/trailhead`. The factory's crates, none of them published yet:
 
-- `trailhead-factory`: types, the five traits (compute, harness, provider, tracker, code host), the daemon protocol and `factory.toml`.
+- `trailhead-factory`: types, the five traits (compute, harness, provider, tracker, code host), the daemon protocol and the `[factory]` settings in `.trailhead.toml`.
 - `trailhead-control`: the control plane (run loop, budgets, reviews, reconcile, the sandbox pool).
 - `trailhead-factory-host`: the `trailhead-factory` binary that runs the control plane beside the server (`mise run factory`).
 - `trailhead-daemon`: the daemon in each sandbox, and the iroh transport between it and the control plane.
