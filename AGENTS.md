@@ -19,6 +19,7 @@ Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). 
 
 - `cargo test` runs everything, including the concurrency suite in `crates/trailhead-core/tests/concurrency.rs`.
 - Commit subjects and PR titles are `type(scope): message [TRAIL-n]`: a type cliff.toml groups (feat, fix, perf, refactor, docs, test, chore, ci, build), the crate or area as scope, and the task key last in square brackets. Squash merges take the PR title, and cliff.toml drops unconventional commits from CHANGELOG.md. The factory titles its PRs this way too.
+- In `trailhead-control`, once a run has produced something (a verdict, spend, a breach), record it before any teardown. Once a sandbox or sub-agent exists, don't propagate errors with a bare `?`: route them through `infra_failed` or `review_infra_failed`, or log the error and carry on to the cleanup. Teardown failures are logged and left to reconcile, never allowed to skip a record or a park.
 - `cargo clippy --all-targets` and `cargo fmt --all` must be clean.
 - Local secrets come from Bitwarden Secrets Manager through fnox (`fnox.toml`; needs `BWS_ACCESS_TOKEN`). Tests that hit real services are `#[ignore]`d and run as mise tasks, e.g. `mise run test-live-sprites`.
 - The docs in `docs/` build into an mdBook (`mise run docs`); list any new page in `docs/SUMMARY.md` or it is left out of the book.

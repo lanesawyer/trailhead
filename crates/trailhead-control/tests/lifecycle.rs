@@ -183,6 +183,22 @@ async fn budget_breach_parks_the_task_and_suspends_its_sandbox() {
 }
 
 #[tokio::test]
+async fn a_breach_is_parked_and_recorded_even_when_the_checkpoint_fails() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.compute.fail("trailhead-w1", "checkpoint");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Parked { .. }), "{:?}", ran[0].1);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
+    let sandbox = r.compute.get("trailhead-w1").unwrap();
+    assert!(!sandbox.labels.contains_key(label::ROLE), "still cut off");
+}
+
+#[tokio::test]
 async fn a_parked_sandbox_keeps_its_place_in_the_cap() {
     let r = rig();
     r.tracker.add_task("TRAIL", "Expensive", "");
@@ -1801,8 +1817,15 @@ async fn a_sandbox_that_wont_release_after_the_agent_ends_the_run_doesnt_give_th
         // Restoring and destroying are all releasing does after the run; preparing a new sandbox does neither.
         r.compute.fail("trailhead-w1", "restore");
         r.compute.fail("trailhead-w1", "destroy");
-        let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
-        assert!(err.to_string().contains("Storage not ready"), "{err}");
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+        let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+        if status == Status::InReview {
+            // A release that fails is logged and left to reconcile; the PR still goes to review.
+            assert!(matches!(ran, Ok(Outcome::Reviewed { .. })), "{ran:?}");
+        } else {
+            let err = ran.unwrap_err();
+            assert!(err.to_string().contains("Storage not ready"), "{err}");
+        }
         let task = r.tracker.task(&key);
         assert_eq!(task.status, status);
         assert_eq!(task.run.attempt, Some(1), "the agent ended the run, so the attempt counts");

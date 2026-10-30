@@ -765,9 +765,14 @@ impl Factory {
         let (report, spend) = match run {
             Run::Breach(reason, spend) => {
                 tracing::warn!(task = %task.key.0, %reason, "budget breached; parking");
-                self.compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await?;
-                self.cut_off(sandbox).await?;
+                // The spend is recorded before any teardown, and a teardown that fails is left to reconcile.
                 sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await?;
+                if let Err(e) = self.compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await {
+                    tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't checkpoint the breached sandbox");
+                }
+                if let Err(e) = self.cut_off(sandbox).await {
+                    tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; reconcile will");
+                }
                 sub.ask(
                     &task.key,
                     &format!(
@@ -797,8 +802,12 @@ impl Factory {
             RunResult::PrOpened(pr) => {
                 // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
                 // starts from the PR branch.
-                self.release_worker(sandbox).await?;
-                self.tracker.revoke_sub_agent(name).await?;
+                if let Err(e) = self.release_worker(sandbox).await {
+                    tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile will");
+                }
+                if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
+                }
                 self.review(task, &pr, attempt, &report.checks).await
             }
             RunResult::NeedsInput(question) => Ok(Outcome::Parked { reason: question }),
@@ -827,14 +836,15 @@ impl Factory {
                 let failed = attempt.saturating_sub(task.run.attempt_base.unwrap_or(0));
                 if failed >= max {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
-                    let last = self
-                        .tracker
-                        .show(&task.key)
-                        .await?
-                        .run
-                        .failure
-                        .filter(|f| !f.is_empty())
-                        .unwrap_or_else(|| reason.clone());
+                    // A task that can't be read still parks, with this attempt's reason alone.
+                    let last = match self.tracker.show(&task.key).await {
+                        Ok(shown) => shown.run.failure.filter(|f| !f.is_empty()),
+                        Err(e) => {
+                            tracing::warn!(task = %task.key.0, error = %e, "couldn't read the last failure; parking without it");
+                            None
+                        }
+                    }
+                    .unwrap_or_else(|| reason.clone());
                     sub.claim(&task.key).await?;
                     sub.ask(
                         &task.key,
@@ -1436,8 +1446,17 @@ impl Factory {
         // Install egress only while the checkout is prepared, then narrowed before any agent runs.
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = self.compute.create(&spec).await?;
-        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, branch)).await?;
-        self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+        let ready = async {
+            self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, branch)).await?;
+            self.compute.set_egress(&sandbox.id, &self.agent_egress()).await
+        };
+        if let Err(e) = ready.await {
+            // Not handed out, so nothing else would clean it up before reconcile.
+            if let Err(d) = self.compute.destroy(&sandbox.id).await {
+                tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
+            }
+            return Err(e);
+        }
         Ok(sandbox)
     }
 

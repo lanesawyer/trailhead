@@ -101,7 +101,7 @@ impl FakeCompute {
         self.live.lock().unwrap().get(&SandboxId(name.into())).map_or(0, |l| l.wakes)
     }
 
-    /// Makes one operation (`restore`, `set_egress`, `set_labels` or `destroy`) fail on a sandbox until
+    /// Makes one operation (`restore`, `checkpoint` (any but the pool's "warm"), `set_egress`, `set_labels` or `destroy`) fail on a sandbox until
     /// [`FakeCompute::heal`], like a Sprite whose storage has gone bad.
     pub fn fail(&self, name: &str, op: &'static str) {
         self.failing.lock().unwrap().insert((name.to_string(), op));
@@ -156,6 +156,10 @@ impl Compute for FakeCompute {
     }
 
     async fn checkpoint(&self, id: &SandboxId, note: &str) -> Result<CheckpointId> {
+        // The pool's warm checkpoint is taken before a run starts, so a test can't fail only later ones through it.
+        if note != "warm" {
+            self.check(id, "checkpoint")?;
+        }
         self.with(id, |l| {
             let cp = CheckpointId(format!("{}-cp{}", id.0, l.checkpoints.len() + 1));
             l.checkpoints.push((cp.clone(), note.to_string()));
