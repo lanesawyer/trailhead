@@ -65,6 +65,10 @@ pub struct RunUpdate {
     /// Total spend across attempts and reviews.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend: Option<Usd>,
+    /// The run whose report was handled and its spend counted, so a control plane that restarts before the run's
+    /// sandbox is released doesn't reattach and count it again (TRAIL-255).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concluded: Option<String>,
     /// Why the last attempt failed, which the next attempt is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
@@ -167,6 +171,11 @@ pub struct ChangesRequested {
     /// Not a review: the PR no longer merges cleanly with the base branch, and the rework merges it in (TRAIL-199).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub conflict: bool,
+    /// The PR's head when this was requested. A head that has moved since means someone pushed to the PR, so the
+    /// request is stale: a person settled it (TRAIL-338). Unknown for requests recorded before this, or when the
+    /// host couldn't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
 }
 
 impl RunUpdate {
@@ -182,6 +191,7 @@ impl RunUpdate {
             conflict_reworks,
             reviewed,
             spend,
+            concluded,
             failure,
             retries,
             infra_failures,
@@ -205,6 +215,7 @@ impl RunUpdate {
         self.conflict_reworks = conflict_reworks.or(self.conflict_reworks.take());
         self.reviewed = reviewed.or(self.reviewed.take());
         self.spend = spend.or(self.spend.take());
+        self.concluded = concluded.or(self.concluded.take());
         self.failure = failure.or(self.failure.take());
         self.retries = retries.or(self.retries.take());
         self.infra_failures = infra_failures.or(self.infra_failures.take());
