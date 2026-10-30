@@ -24,8 +24,8 @@ use trailhead_factory::{
     BranchUpdate, ChangesRequested, CheckResult, CheckpointId, CiState, CodeHost, Compute, Daemon, Egress, Error,
     FactoryConfig, Feedback, HumanContext, IROH_DOMAINS, Labels, MergeDecision, MergeMode, MergeOutcome, Merged,
     MergedBy, ModelProvider, PrGrade, PrRef, PrState, PrepareRequest, Profile, Result, Role, RunEvent, RunReport,
-    RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict,
-    VerdictKind, label, review_name, run_name,
+    RunRequest, RunResult, RunUpdate, Sandbox, SandboxId, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd,
+    Verdict, VerdictKind, label, review_name, run_name,
 };
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -76,6 +76,9 @@ pub struct Factory {
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
     /// starting together never take the same sandbox.
     pool_pick: tokio::sync::Mutex<()>,
+    /// Hosts opened for a sandbox's install on top of the install set, until its run asks the daemon to confirm
+    /// they're blocked again.
+    install_opened: Mutex<HashMap<SandboxId, Vec<String>>>,
 }
 
 /// A pooled sandbox that keeps failing to release. Kept in memory only, so a restart counts again from zero.
@@ -225,6 +228,7 @@ impl Factory {
             ungraded: Mutex::default(),
             pause_logged: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
+            install_opened: Mutex::default(),
         }
     }
 
@@ -256,10 +260,18 @@ impl Factory {
 
     /// Install-phase hosts the agent phase drops, which the daemon confirms are unreachable before the agent starts.
     /// Wildcards can't be looked up, so they're left out.
-    fn blocked_hosts(&self) -> Vec<String> {
+    /// That includes the hosts opened for this sandbox's install.
+    fn blocked_hosts(&self, sandbox: &Sandbox) -> Vec<String> {
         let agent = self.agent_egress().domains;
-        let install = self.install_egress().domains;
-        install.into_iter().filter(|d| !d.contains('*') && !agent.contains(d)).collect()
+        let opened = self.install_opened.lock().unwrap().remove(&sandbox.id).unwrap_or_default();
+        let install = self.install_egress().domains.into_iter().chain(opened);
+        let mut blocked: Vec<String> = Vec::new();
+        for d in install.filter(|d| !d.contains('*') && !agent.contains(d)) {
+            if !blocked.contains(&d) {
+                blocked.push(d);
+            }
+        }
+        blocked
     }
 
     /// The agent phase's named hosts (wildcards can't be looked up), which the daemon keeps resolved.
@@ -272,6 +284,36 @@ impl Factory {
         let extra = self.config.egress.install.iter().cloned().chain(CLONE_DOMAINS.iter().map(|d| d.to_string()));
         egress.domains.extend(extra);
         egress
+    }
+
+    /// Prepares `sandbox`'s checkout under install egress. The control plane can't see the checkout, so the daemon
+    /// first says which hosts the tools it will install need (the `[stack]` and the repo's own mise config); exactly
+    /// those are opened on top of the install set for the prepare, each logged with the tool that asked, and
+    /// confirmed closed again before any agent runs.
+    async fn prepare_sandbox(&self, sandbox: &Sandbox, req: PrepareRequest) -> Result<()> {
+        let needs = self.daemon.install_hosts(&sandbox.id, &req).await?;
+        if !needs.is_empty() {
+            let mut egress = self.install_egress();
+            let mut opened = Vec::new();
+            for need in &needs {
+                tracing::info!(sandbox = %sandbox.name, host = %need.host, tool = %need.tool, "opening install egress");
+                if !egress.domains.contains(&need.host) {
+                    egress.domains.push(need.host.clone());
+                }
+                opened.push(need.host.clone());
+            }
+            self.compute.set_egress(&sandbox.id, &egress).await?;
+            self.install_opened.lock().unwrap().insert(sandbox.id.clone(), opened);
+        }
+        let prepared = self.daemon.prepare(&sandbox.id, req).await;
+        if prepared.is_err() {
+            self.forget_install_opened(sandbox);
+        }
+        prepared
+    }
+
+    fn forget_install_opened(&self, sandbox: &Sandbox) {
+        self.install_opened.lock().unwrap().remove(&sandbox.id);
     }
 
     fn branch(task: &Task) -> String {
@@ -661,7 +703,7 @@ impl Factory {
             max_steps: profile.budget.steps,
             required_checks: self.config.required_checks(),
             worker_checks: Vec::new(),
-            blocked_hosts: self.blocked_hosts(),
+            blocked_hosts: self.blocked_hosts(&sandbox),
             allowed_hosts: self.allowed_hosts(),
             credential,
         };
@@ -950,7 +992,7 @@ impl Factory {
             max_steps: profile.budget.steps,
             required_checks: Vec::new(),
             worker_checks: checks.to_vec(),
-            blocked_hosts: self.blocked_hosts(),
+            blocked_hosts: self.blocked_hosts(&sandbox),
             allowed_hosts: self.allowed_hosts(),
             credential,
         };
@@ -1327,8 +1369,11 @@ impl Factory {
         // Install egress only while the checkout is prepared, then narrowed before any agent runs.
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = self.compute.create(&spec).await?;
-        self.daemon.prepare(&sandbox.id, self.config.prepare_request(role, branch)).await?;
-        self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+        self.prepare_sandbox(&sandbox, self.config.prepare_request(role, branch)).await?;
+        if let Err(e) = self.compute.set_egress(&sandbox.id, &self.agent_egress()).await {
+            self.forget_install_opened(&sandbox);
+            return Err(e);
+        }
         Ok(sandbox)
     }
 
@@ -1343,6 +1388,10 @@ impl Factory {
         labels.insert(label::STATE.into(), state.into());
         if let Some(warm) = warm {
             labels.insert(label::WARM.into(), warm.into());
+            let stack = self.config.stack.tag();
+            if !stack.is_empty() {
+                labels.insert(label::STACK.into(), stack);
+            }
         }
         if let Some(task) = task {
             labels.insert(label::TASK.into(), task.key.0.clone());
@@ -1357,7 +1406,20 @@ impl Factory {
     async fn acquire_worker(&self, task: &Task, branch: Option<String>, merge_base: bool) -> Result<Sandbox> {
         let pick = self.pool_pick.lock().await;
         let idle = self.compute.list(&self.pooled(label::IDLE, None, None)).await?;
-        let (sandbox, warm) = match idle.into_iter().find(|s| !self.abandoned(&s.name)) {
+        let stack = self.config.stack.tag();
+        let mut current = Vec::new();
+        for s in idle {
+            if s.labels.get(label::STACK).map(String::as_str).unwrap_or("") == stack {
+                current.push(s);
+                continue;
+            }
+            // Built for another stack: reinstalling on top would keep the old tools, so start over.
+            tracing::info!(sandbox = %s.name, "[stack] changed; destroying the pooled sandbox to reinstall");
+            if let Err(e) = self.compute.destroy(&s.id).await {
+                tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack");
+            }
+        }
+        let (sandbox, warm) = match current.into_iter().find(|s| !self.abandoned(&s.name)) {
             Some(s) => {
                 let warm = s.labels.get(label::WARM).cloned();
                 (s, warm)
@@ -1380,12 +1442,22 @@ impl Factory {
             self.daemon.forget(&sandbox.id).await;
         }
         let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
-        self.daemon.prepare(&sandbox.id, prepare).await?;
-        let cp = self.compute.checkpoint(&sandbox.id, "warm").await?;
-        let labels = self.pooled(label::BUSY, Some(&cp.0), Some(task));
-        self.compute.set_labels(&sandbox.id, &labels).await?;
-        self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
-        Ok(Sandbox { labels, ..sandbox })
+        self.prepare_sandbox(&sandbox, prepare).await?;
+        let warmed = async {
+            let cp = self.compute.checkpoint(&sandbox.id, "warm").await?;
+            let labels = self.pooled(label::BUSY, Some(&cp.0), Some(task));
+            self.compute.set_labels(&sandbox.id, &labels).await?;
+            self.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+            Ok::<_, Error>(labels)
+        }
+        .await;
+        match warmed {
+            Ok(labels) => Ok(Sandbox { labels, ..sandbox }),
+            Err(e) => {
+                self.forget_install_opened(&sandbox);
+                Err(e)
+            }
+        }
     }
 
     /// Returns a worker sandbox to the pool: restored to its warm checkpoint, which wipes everything the task did,

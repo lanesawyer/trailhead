@@ -92,6 +92,7 @@ impl ClaudeCode {
         events: &EventSink,
     ) -> Result<Invocation> {
         let mut cmd = Command::new(&self.binary);
+        cmd.envs(&ctx.env);
         match &self.oauth_token {
             // An API key or base URL would take precedence over the token, so none may leak in from the environment.
             Some(token) => cmd

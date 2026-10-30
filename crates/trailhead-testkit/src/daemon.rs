@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 use trailhead_daemon::{RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, PrepareRequest, Repo, Result, RunEvent, RunReport,
-    RunRequest, SandboxId, Tracker,
+    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, InstallHost, PrepareRequest, Repo, Result,
+    RunEvent, RunReport, RunRequest, SandboxId, Tracker,
 };
 
 pub use trailhead_daemon::Connect;
@@ -41,6 +41,8 @@ pub struct FakeWorkspace {
     abandons_merge: AtomicBool,
     /// Files the agent leaves conflict markers in.
     markers: Mutex<Vec<String>>,
+    /// Tools in the fake checkout's own mise config.
+    repo_tools: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
@@ -49,6 +51,11 @@ pub struct FakeWorkspace {
 impl Workspace for FakeWorkspace {
     fn dir(&self) -> PathBuf {
         PathBuf::from("/work")
+    }
+
+    async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        let stack: Vec<String> = req.tools.keys().cloned().collect();
+        trailhead_daemon::install_hosts_for(&stack, &self.repo_tools.lock().unwrap(), &req.tool_hosts, false, false)
     }
 
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
@@ -157,6 +164,11 @@ impl LocalDaemon {
             ongoing: Mutex::default(),
             attached: Mutex::default(),
         }
+    }
+
+    /// Has the checkout's own mise config ask for these tools, as a `mise.toml` in the repo would.
+    pub fn repo_mise_tools(&self, tools: &[&str]) {
+        *self.workspace.repo_tools.lock().unwrap() = tools.iter().map(|t| t.to_string()).collect();
     }
 
     /// Has the agent leave conflict markers in these files.
@@ -268,6 +280,10 @@ impl LocalDaemon {
 
 #[async_trait]
 impl Daemon for LocalDaemon {
+    async fn install_hosts(&self, _sandbox: &SandboxId, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        self.runner.install_hosts(req).await
+    }
+
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
         self.runner.prepare(&req).await?;
         self.prepared.lock().unwrap().push((sandbox.clone(), req));

@@ -242,6 +242,23 @@ pub struct Stack {
     pub tools: BTreeMap<String, String>,
 }
 
+impl Stack {
+    /// A short stable tag, which pooled sandboxes carry so a changed `[stack]` reinstalls (FNV-1a;
+    /// `DefaultHasher` isn't stable across builds). Empty for no tools.
+    pub fn tag(&self) -> String {
+        if self.tools.is_empty() {
+            return String::new();
+        }
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for (k, v) in &self.tools {
+            for byte in format!("{k}={v};").bytes() {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            }
+        }
+        format!("{hash:016x}")
+    }
+}
+
 /// The fixed set of named checks. A repo leaves out what it doesn't have; exit code 0 passes.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -323,6 +340,10 @@ pub struct EgressConfig {
     pub always: Vec<String>,
     #[serde(default)]
     pub install: Vec<String>,
+    /// Download hosts per mise tool (`zig = ["ziglang.org"]`), for a `[stack]` or `mise.toml` tool the daemon's table
+    /// doesn't know. Opened only while that tool installs; they take precedence over the table.
+    #[serde(default)]
+    pub tools: BTreeMap<String, Vec<String>>,
 }
 
 impl FactoryConfig {
@@ -425,6 +446,8 @@ impl FactoryConfig {
             branch,
             merge_base: false,
             setup,
+            tools: self.stack.tools.clone(),
+            tool_hosts: self.egress.tools.clone(),
         }
     }
 }
@@ -432,6 +455,18 @@ impl FactoryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_stack_tag_follows_the_tools() {
+        let stack = |pairs: &[(&str, &str)]| Stack {
+            tools: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        };
+        assert_eq!(stack(&[]).tag(), "");
+        let a = stack(&[("node", "22")]).tag();
+        assert_eq!(a, stack(&[("node", "22")]).tag());
+        assert_ne!(a, stack(&[("node", "24")]).tag());
+        assert_ne!(a, stack(&[("node", "22"), ("rust", "stable")]).tag());
+    }
 
     #[test]
     fn the_repos_own_factory_toml_parses() {
