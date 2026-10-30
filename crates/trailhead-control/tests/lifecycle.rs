@@ -199,6 +199,47 @@ async fn a_breach_is_parked_and_recorded_even_when_the_checkpoint_fails() {
 }
 
 #[tokio::test]
+async fn a_breached_sandbox_that_cant_be_relabelled_is_still_cut_off_and_destroyed() {
+    for destroy_fails in [false, true] {
+        let r = rig();
+        let key = r.tracker.add_task("TRAIL", "Expensive", "");
+        // The labels only start failing once the sandbox is acquired, as when it goes bad mid-run.
+        r.compute.fail_after("trailhead-w1", "set_labels", 2);
+        if destroy_fails {
+            r.compute.fail("trailhead-w1", "destroy");
+        }
+        r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+
+        let ran = r.factory.tick().await.unwrap();
+        assert!(matches!(&ran[0].1, Outcome::Parked { .. }), "{:?}", ran[0].1);
+        let task = r.tracker.task(&key);
+        assert_eq!(task.status, Status::NeedsInput);
+        assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
+        if destroy_fails {
+            assert_eq!(
+                r.compute.egress("trailhead-w1"),
+                Some(trailhead_factory::Egress::none()),
+                "egress is cut before the labels"
+            );
+        } else {
+            assert!(r.compute.get("trailhead-w1").is_none(), "a sandbox that can't be cut off is destroyed");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_task_that_fails_its_last_attempt_is_parked_even_when_the_sandbox_wont_release() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 1"));
+    let key = r.tracker.add_task("TRAIL", "Fails", "");
+    r.compute.fail("trailhead-w1", "restore");
+    r.compute.fail("trailhead-w1", "destroy");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "no luck".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    assert!(matches!(ran, Ok(Outcome::Parked { .. })), "{ran:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test]
 async fn a_parked_sandbox_keeps_its_place_in_the_cap() {
     let r = rig();
     r.tracker.add_task("TRAIL", "Expensive", "");
@@ -1823,8 +1864,7 @@ async fn a_sandbox_that_wont_release_after_the_agent_ends_the_run_doesnt_give_th
             // A release that fails is logged and left to reconcile; the PR still goes to review.
             assert!(matches!(ran, Ok(Outcome::Reviewed { .. })), "{ran:?}");
         } else {
-            let err = ran.unwrap_err();
-            assert!(err.to_string().contains("Storage not ready"), "{err}");
+            assert!(matches!(ran, Ok(Outcome::Failed { .. })), "{ran:?}");
         }
         let task = r.tracker.task(&key);
         assert_eq!(task.status, status);

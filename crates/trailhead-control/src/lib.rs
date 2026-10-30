@@ -765,22 +765,35 @@ impl Factory {
         let (report, spend) = match run {
             Run::Breach(reason, spend) => {
                 tracing::warn!(task = %task.key.0, %reason, "budget breached; parking");
-                // The spend is recorded before any teardown, and a teardown that fails is left to reconcile.
-                sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await?;
+                // The spend is recorded before any teardown. A record that fails doesn't skip the kill switch or the
+                // park; its error is returned after them.
+                let recorded = sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await;
+                if let Err(e) = &recorded {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't record the breach's spend; cutting off anyway");
+                }
                 if let Err(e) = self.compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't checkpoint the breached sandbox");
                 }
                 if let Err(e) = self.cut_off(sandbox).await {
-                    tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; reconcile will");
+                    // Reconcile leaves a parked task's sandbox alone, so a sandbox that couldn't be cut off is
+                    // destroyed: that loses the suspended state, which beats leaving it reachable.
+                    tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
+                    self.daemon.forget(&sandbox.id).await;
+                    if let Err(e) = self.compute.destroy(&sandbox.id).await {
+                        tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile will");
+                    }
                 }
-                sub.ask(
-                    &task.key,
-                    &format!(
-                        "Budget breached: {reason}. The sandbox {} is suspended; raise the budget or cancel.",
-                        sandbox.name
-                    ),
-                )
-                .await?;
+                let asked = sub
+                    .ask(
+                        &task.key,
+                        &format!(
+                            "Budget breached: {reason}. The sandbox {} is suspended; raise the budget or cancel.",
+                            sandbox.name
+                        ),
+                    )
+                    .await;
+                recorded?;
+                asked?;
                 return Ok(Outcome::Parked { reason });
             }
             Run::Report(report, spend) => (report, spend),
@@ -817,7 +830,11 @@ impl Factory {
                     Err(e) if api_trouble => {
                         return Err(self.infra_failed(task, sub, name, e, infra_prior, None).await);
                     }
-                    released => released?,
+                    // Any other failure to release leaves the sandbox to reconcile; the park below still happens.
+                    Err(e) => {
+                        tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile will");
+                    }
+                    Ok(()) => {}
                 }
                 if api_trouble {
                     // The agent's own API trouble says nothing about the task. The daemon released the task before
@@ -1543,10 +1560,12 @@ impl Factory {
 
     /// The kill switch: without its role label a sandbox loses connector access, and without egress it reaches nothing.
     async fn cut_off(&self, sandbox: &Sandbox) -> Result<()> {
+        // Both halves run, egress first, so one failing doesn't skip the other.
         let mut labels = sandbox.labels.clone();
         labels.remove(label::ROLE);
-        self.compute.set_labels(&sandbox.id, &labels).await?;
-        self.compute.set_egress(&sandbox.id, &Egress::none()).await
+        let egress = self.compute.set_egress(&sandbox.id, &Egress::none()).await;
+        let relabelled = self.compute.set_labels(&sandbox.id, &labels).await;
+        egress.and(relabelled)
     }
 
     /// Runs one step in a sandbox, pricing usage as it streams in and cancelling on a breach.
