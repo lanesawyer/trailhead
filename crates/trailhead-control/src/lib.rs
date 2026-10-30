@@ -77,6 +77,9 @@ pub struct Factory {
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
+    /// Tasks whose PR a run just pushed to: the host's next `mergeable = false` for each may be a verdict on the head
+    /// before the push, so it is read as not yet worked out, once (TRAIL-241).
+    fresh_pushes: Mutex<HashSet<TaskKey>>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// Tasks already reported as ungraded, so a poll doesn't say it again.
@@ -239,6 +242,7 @@ impl Factory {
             merge_mode,
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
+            fresh_pushes: Mutex::default(),
             quota: Mutex::default(),
             ungraded: Mutex::default(),
             pause_logged: Mutex::default(),
@@ -800,6 +804,9 @@ impl Factory {
 
         match report.result {
             RunResult::PrOpened(pr) => {
+                if task.run.pending_changes().is_some_and(|c| c.conflict) {
+                    self.fresh_pushes.lock().unwrap().insert(task.key.clone());
+                }
                 // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
                 // starts from the PR branch.
                 self.release_worker(sandbox).await?;
@@ -1892,7 +1899,12 @@ impl Factory {
                 done.closed.push(task.key.0.clone());
                 Ok(None)
             }
-            PrState::Open { mergeable } => Ok(Some(mergeable)),
+            PrState::Open { mergeable } => {
+                // GitHub works `mergeable` out after a push, so right after one a `false` may be the old head's. Read
+                // it as unknown this once; the next reconcile asks again and gets the settled answer.
+                let fresh = self.fresh_pushes.lock().unwrap().remove(&task.key);
+                Ok(Some(if fresh && mergeable == Some(false) { None } else { mergeable }))
+            }
         }
     }
 
