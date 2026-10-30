@@ -72,6 +72,31 @@ pub(crate) async fn find_task(conn: &Connection, ctx: &Ctx, r: &str, include_del
     if ctx.in_scope(task.project_id) { Ok(task) } else { Err(Error::NotFound(format!("task {r}"))) }
 }
 
+/// Fails if making `parent` the parent of `task` would put `task` above itself.
+/// An existing cycle (from before this check) must not loop forever.
+pub(crate) async fn check_no_parent_cycle(
+    conn: &Connection,
+    workspace_id: Uuid,
+    task: &Task,
+    parent: &Task,
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    let mut up = parent.parent_id;
+    while let Some(id) = up {
+        if !seen.insert(id) {
+            return Err(Error::Invalid(format!(
+                "{} is under a parent cycle that already exists; fix it before moving tasks under it",
+                parent.key
+            )));
+        }
+        if id == task.id {
+            return Err(Error::Invalid(format!("{} is under {}, so it can't become its parent", parent.key, task.key)));
+        }
+        up = load_task(conn, workspace_id, &id.to_string(), true).await?.parent_id;
+    }
+    Ok(())
+}
+
 /// Compare-and-swap on `version`. Used by updates and undo alike.
 pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result<Task> {
     check_grade(&tx.ctx, before.grade, after.grade)?;
@@ -611,25 +636,7 @@ impl Store {
                         if p.id == before.id {
                             return Err(Error::Invalid("a task can't be its own parent".into()));
                         }
-                        // Walk up from the new parent; the task being moved must not be an ancestor.
-                        // An existing cycle (from before this check, or via undo) must not loop forever.
-                        let mut seen = std::collections::HashSet::new();
-                        let mut up = p.parent_id;
-                        while let Some(id) = up {
-                            if !seen.insert(id) {
-                                return Err(Error::Invalid(format!(
-                                    "{} is under a parent cycle that already exists; fix it before moving tasks under it",
-                                    p.key
-                                )));
-                            }
-                            if id == before.id {
-                                return Err(Error::Invalid(format!(
-                                    "{} is under {}, so it can't become its parent",
-                                    p.key, before.key
-                                )));
-                            }
-                            up = load_task(&tx.conn, ctx.workspace_id, &id.to_string(), true).await?.parent_id;
-                        }
+                        check_no_parent_cycle(&tx.conn, ctx.workspace_id, &before, &p).await?;
                         Some(p.id)
                     }
                     None => None,
