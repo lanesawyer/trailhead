@@ -45,7 +45,7 @@ auto_merge = true
 
 [factory.gates.2]
 require = ["checks", "ci", "agent_review"]
-auto_merge = false       # Trailhead itself: grade 1 only, to start
+auto_merge = false       # a person merges every code change
 
 [factory.gates.4]
 require = ["checks", "quorum"]   # or ["checks", "agent_review", "human"]
@@ -57,7 +57,7 @@ mode = "shadow"          # off | shadow | on
 
 Gates are keyed by grade (`[gates.1]` to `[gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[merge] mode = "on"` (TRAIL-205).
 
-Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. The maintainer grades the queue once grades exist and widens auto-merge from there. With the rules above, code in `crates/*/src` raises a grade-1 task to 2, so docs and test-only PRs merge on their own (deleting or renaming a test is still at least grade 2). Files that steer the agents (`AGENTS.md`, `.claude/`, `.mcp.json`, `skills/`, `.trailhead.toml`) are grade 4 with CI and the factory's policy. Decided (2026-10-29): test-only PRs are grade 1; grade 2 auto-merge waits on TRAIL-260, TRAIL-298 and TRAIL-295 and a run of grade 2 shadow decisions you agree with.
+Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. The maintainer grades the queue once grades exist and widens auto-merge from there. With the rules above, code in `crates/*/src` raises a grade-1 task to 2, so docs and test-only PRs merge on their own (deleting or renaming a test is still at least grade 2). Files that steer the agents (`AGENTS.md`, `.claude/`, `.mcp.json`, `skills/`, `.trailhead.toml`) are grade 4 with CI and the factory's policy. Decided (2026-10-29): test-only PRs are grade 1; grade 2 auto-merge waits on TRAIL-260, TRAIL-298 and TRAIL-295 and a run of grade 2 shadow decisions you agree with. Decided (2026-10-29): grade 2 auto-merges too, now that those three have landed and the grade 2 decisions so far were right (TRAIL-314). TRAIL-390, reworking a PR whose CI fails after a branch update, follows rather than blocks it.
 
 Decided: quorum reviewers must be independent. Quorums are built after the merger, once a repo wants a grade with no human gate (TRAIL-204).
 
@@ -73,7 +73,7 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 |---|---|
 | Approves, or asks for changes | Counts. At the cap, a review that still asks for changes parks the task. |
 | Breaches its budget | Counts, and the task is parked at once with a question naming the breach (TRAIL-268, TRAIL-319). Rerunning a reviewer that already overspent would only overspend again, so there is no retry to cap. Reopening the task starts the count again. |
-| Ends with no verdict | Given back; the reviewer is run again. |
+| Ends with no verdict | Given back and counted like an infrastructure failure: the task waits out the infra backoff, and parks at `max_infra_failures`. |
 | Infrastructure failure | Given back; the task waits out the infra backoff, and parks at `max_infra_failures`. |
 | Cancellation | Given back, as for an infrastructure failure, but with no failure count, backoff or parking: a deliberate control-plane stop isn't a failure. |
 | Conflict rework | Not a round (it has `max_conflict_reworks`). The review after one doesn't use a round either, unless it asks for changes; then it counts as one. |

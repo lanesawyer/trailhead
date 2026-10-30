@@ -5133,6 +5133,7 @@ dependencies = [
 name = "trailhead-factory-host"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
  "hex",
  "iroh",

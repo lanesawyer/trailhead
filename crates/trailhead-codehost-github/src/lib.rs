@@ -57,6 +57,14 @@ impl GitHub {
         self
     }
 
+    /// Checks the token: it must authenticate (`GET /user`) and read the repo's pulls. Returns the user's login.
+    pub async fn check_token(&self, repo: &Repo) -> Result<String> {
+        let user = self.call(self.request(Method::GET, "/user")).await?;
+        let pulls = format!("{}/pulls", Self::repo_path(repo));
+        self.call(self.request(Method::GET, &pulls).query(&[("per_page", "1")])).await?;
+        Ok(user["login"].as_str().unwrap_or("?").to_string())
+    }
+
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
         let req = self
             .http
