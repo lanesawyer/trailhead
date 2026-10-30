@@ -1069,7 +1069,15 @@ impl Factory {
         }
         let gate = self.config.gate(grade.grade);
         let verdict_approves = match &task.run.reviewed_head {
-            Some(reviewed) if *reviewed == head => {
+            // A clean merge of the base branch the host made since the review keeps the verdict (TRAIL-260), but only
+            // the verdict of this attempt: a rework (a conflict-resolving one included) takes a new attempt, and its
+            // merge commit is work no one reviewed, whatever its parents.
+            Some(reviewed)
+                if *reviewed == head
+                    || (task.run.reviewed.is_some()
+                        && task.run.reviewed == task.run.attempt
+                        && codehost.carries_verdict(pr, reviewed).await?) =>
+            {
                 self.tracker.last_review(key).await?.is_some_and(|v| v.kind == VerdictKind::Approve)
             }
             _ => false,
@@ -1784,7 +1792,7 @@ impl Factory {
                     (&task.run.pr, &self.codehost, &task.run.reviewed_head)
                     && !stale
                 {
-                    stale = codehost.head(pr).await? != *reviewed;
+                    stale = !codehost.carries_verdict(pr, reviewed).await?;
                 }
                 let due = task.run.pr.is_some() && stale && self.setback_over(&task.key);
                 if !due {

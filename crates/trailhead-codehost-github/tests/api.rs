@@ -57,6 +57,22 @@ impl Git {
     }
 }
 
+impl Git {
+    /// `sha` and everything it descends from.
+    fn history(&self, sha: &str) -> std::collections::BTreeSet<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut todo = vec![sha.to_string()];
+        while let Some(sha) = todo.pop() {
+            if seen.insert(sha.clone()) {
+                todo.extend(
+                    self.commits[&sha]["parents"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()),
+                );
+            }
+        }
+        seen
+    }
+}
+
 type Shared = Arc<Mutex<Git>>;
 
 fn seed() -> Shared {
@@ -229,11 +245,31 @@ async fn get_pull(State(g): State<Shared>, Path((_, _, n)): Path<(String, String
     }
 }
 
+fn parents(commit: &Value) -> Vec<Value> {
+    commit["parents"].as_array().unwrap().iter().map(|p| json!({ "sha": p })).collect()
+}
+
 /// `behind_by` for `main...<sha>`: 1 unless the head's history includes main's tip.
 async fn compare(State(g): State<Shared>, Path((_, _, spec)): Path<(String, String, String)>) -> Response {
     let g = g.lock().unwrap();
     let (base, head) = spec.split_once("...").unwrap();
-    Json(json!({ "behind_by": g.behind_by(&g.refs[base], head) })).into_response()
+    let tip = g.refs.get(base).cloned().unwrap_or_else(|| base.to_string());
+    let (from, to) = (g.history(&tip), g.history(head));
+    let commits: Vec<Value> =
+        to.difference(&from).map(|sha| json!({ "sha": sha, "parents": parents(&g.commits[sha]) })).collect();
+    let status = match (to.contains(&tip), from.contains(head)) {
+        (true, true) => "identical",
+        (true, false) => "ahead",
+        (false, true) => "behind",
+        _ => "diverged",
+    };
+    Json(json!({
+        "behind_by": g.behind_by(&tip, head),
+        "status": status,
+        "total_commits": commits.len(),
+        "commits": commits,
+    }))
+    .into_response()
 }
 
 async fn update_branch(
@@ -629,4 +665,32 @@ async fn a_422_that_is_not_a_conflict_is_an_error() {
     git.lock().unwrap().update_refusal = Some("expected head sha didn't match current head ref.".into());
     let err = gh.update_branch(&pr).await.unwrap_err();
     assert!(matches!(&err, Error::Other(m) if m.contains("expected head sha")), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_verdict_carries_over_merges_of_the_base_but_not_other_commits() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let started = head(&git, "main");
+    let work = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))], merges: vec![] };
+    gh.publish(&repo(), &started, "factory/trail-1", &[work]).await.unwrap();
+    let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };
+    let pr = gh.open_pr(&repo(), new).await.unwrap();
+    let reviewed = head(&git, "factory/trail-1");
+    assert!(gh.carries_verdict(&pr, &reviewed).await.unwrap(), "the head itself");
+
+    // Two updates in a row, each bringing in a commit that landed on main meanwhile.
+    for n in 0..2 {
+        let main = head(&git, "main");
+        let landed = Commit { message: "meanwhile".into(), changes: vec![change("b.txt", Some(b"b"))], merges: vec![] };
+        gh.publish(&repo(), &main, "main", &[landed]).await.unwrap();
+        assert_eq!(gh.update_branch(&pr).await.unwrap(), BranchUpdate::Updated, "{n}");
+        assert!(gh.carries_verdict(&pr, &reviewed).await.unwrap(), "after {} updates", n + 1);
+    }
+
+    // A commit of the PR's own after the updates: unreviewed work.
+    let tip = head(&git, "factory/trail-1");
+    let more = Commit { message: "more".into(), changes: vec![change("c.txt", Some(b"c"))], merges: vec![] };
+    gh.publish(&repo(), &tip, "factory/trail-1", &[more]).await.unwrap();
+    assert!(!gh.carries_verdict(&pr, &reviewed).await.unwrap());
 }
