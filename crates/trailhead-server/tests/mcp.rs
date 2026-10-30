@@ -360,3 +360,18 @@ async fn grade_is_set_cleared_and_filtered_over_mcp() {
     assert!(err && out.starts_with("error[forbidden]"), "{out}");
     agent.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn agents_patch_metadata_over_mcp() {
+    let s = start().await;
+    let client = connect(&s.url, &s.agent).await;
+    let (err, out) = call(&client, "update_task", json!({"task": "AUTH-1", "metadata": {"a": 1, "b": 2}})).await;
+    assert!(!err, "{out}");
+    let (_, out) = call(&client, "show", json!({"task": "AUTH-1"})).await;
+    assert!(out.contains(r#"metadata {"a":1,"b":2}"#), "{out}");
+    let (err, out) = call(&client, "update_task", json!({"task": "AUTH-1", "metadata": {"a": null}})).await;
+    assert!(!err, "{out}");
+    let (_, out) = call(&client, "show", json!({"task": "AUTH-1"})).await;
+    assert!(out.contains(r#"metadata {"b":2}"#), "{out}");
+    client.cancel().await.unwrap();
+}

@@ -50,6 +50,9 @@ async fn run(cli: Cli) -> Result<()> {
     if let Cmd::Serve { bind } = &cli.cmd {
         return server::serve(bind).await;
     }
+    if let Cmd::Factory { args } = &cli.cmd {
+        return cmd::factory::run(args);
+    }
     let paths = trailhead_server::Paths::from_env().context("no home directory")?;
     let url = match cli.url.clone() {
         Some(url) => url,
@@ -72,7 +75,7 @@ async fn run(cli: Cli) -> Result<()> {
     let cx = Ctx { c, json: cli.json, project: repo.project.clone() };
 
     match cli.cmd {
-        Cmd::Serve { .. } | Cmd::Server(_) | Cmd::Login => unreachable!(),
+        Cmd::Serve { .. } | Cmd::Factory { .. } | Cmd::Server(_) | Cmd::Login => unreachable!(),
         Cmd::Ready { project, grade, limit } => tasks::ready(&cx, project, grade, limit).await,
         Cmd::Ls { project, status, parent, all, today, grade, limit } => {
             tasks::ls(&cx, project, status, parent, all, today, grade, limit).await
@@ -87,7 +90,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Done { task, message } => tasks::finish(&cx, &task, "done", message).await,
         Cmd::Review { task, message } => tasks::finish(&cx, &task, "in_review", message).await,
         Cmd::Approve { task, message } => tasks::finish(&cx, &task, "approved", message).await,
-        Cmd::Cancel { task } => tasks::finish(&cx, &task, "cancelled", None).await,
+        Cmd::Cancel { task, duplicate_of } => tasks::cancel(&cx, &task, duplicate_of).await,
         Cmd::Reopen { task } => tasks::finish(&cx, &task, "open", None).await,
         Cmd::Rm { task } => tasks::rm(&cx, &task).await,
         Cmd::Comment { task, body, kind, to } => comments::comment(&cx, &task, &kind, &body, to).await,

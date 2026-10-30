@@ -313,7 +313,7 @@ async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => tracing::info!("received SIGINT; shutting down"),
+        _ = term.recv() => tracing::info!("received SIGTERM; shutting down"),
     }
 }

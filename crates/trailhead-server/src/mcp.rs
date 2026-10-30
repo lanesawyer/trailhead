@@ -208,6 +208,12 @@ fn detail_text(d: &TaskDetail, names: &dyn Fn(Uuid) -> String) -> String {
     if !d.blocks.is_empty() {
         out.push(format!("blocks {}", d.blocks.join(", ")));
     }
+    if let Some(k) = &d.duplicate_of {
+        out.push(format!("duplicate of {k}"));
+    }
+    if !d.duplicates.is_empty() {
+        out.push(format!("duplicates {}", d.duplicates.join(", ")));
+    }
     if t.metadata.as_object().is_some_and(|m| !m.is_empty()) {
         out.push(format!("metadata {}", t.metadata));
     }
@@ -322,6 +328,8 @@ pub struct UpdateArgs {
     priority: Option<i64>,
     /// Risk grade: 1 to 4, or `none` to clear it. Agents can only raise an existing grade.
     grade: Option<String>,
+    /// Task key this one duplicates: use with status cancelled. An empty string clears it.
+    duplicate_of: Option<String>,
     /// YYYY-MM-DD: the day it's due, without a time. An empty string removes the deadline.
     due_on: Option<String>,
     /// RFC 3339 timestamp with the local offset: a time it's due by, moving the day to
@@ -338,6 +346,9 @@ pub struct UpdateArgs {
     scheduled_tz: Option<String>,
     /// Parent task key: moves the task under it as a subtask. An empty string makes it top-level.
     parent: Option<String>,
+    /// A JSON merge patch (RFC 7386) for the task's metadata: keys you give are set, a
+    /// `null` value removes a key, keys you leave out stay.
+    metadata: Option<serde_json::Map<String, serde_json::Value>>,
     /// The version you last saw; the update fails if the task changed since.
     version: Option<i64>,
     /// Posted as a `handoff` comment once the update succeeds: what changed, what's
@@ -515,7 +526,13 @@ impl TrailheadMcp {
         for blocked in &a.blocks {
             attempt!(store.add_dependency(ctx, &task.key, blocked).await);
         }
-        text(task_line(&task))
+        let mut out = task_line(&task);
+        let similar = store.similar_tasks(ctx, &task.project_id.to_string(), &task.title, Some(task.id)).await;
+        let keys: Vec<_> = similar.unwrap_or_default().into_iter().map(|t| t.key).collect();
+        if !keys.is_empty() {
+            out.push_str(&format!("\npossible duplicates: {}", keys.join(", ")));
+        }
+        text(out)
     }
 
     async fn do_comment(&self, ctx: &Ctx, a: CommentArgs) -> Result<CallToolResult, ErrorData> {
@@ -649,7 +666,7 @@ impl TrailheadMcp {
     }
 
     #[tool(
-        description = "Create a task. Use blocks to make a subtask that blocks your own task.",
+        description = "Create a task. Use blocks to make a subtask that blocks your own task. Lists possible duplicates among open tasks, if any: check them and cancel with duplicate_of if yours is one.",
         annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
     )]
     async fn create_task(
@@ -680,6 +697,7 @@ impl TrailheadMcp {
             status,
             priority: a.priority,
             grade: attempt!(a.grade.as_deref().map(parse_grade).transpose()),
+            duplicate_of: attempt!(clearable(a.duplicate_of.as_deref(), |d| Ok(d.to_owned()))),
             due_on: attempt!(clearable(a.due_on.as_deref(), parse_date)),
             due_at: attempt!(clearable(a.due_at.as_deref(), trailhead_core::parse_at)),
             due_tz: a.due_tz.map(Some),
@@ -687,7 +705,7 @@ impl TrailheadMcp {
             scheduled_at: attempt!(clearable(a.scheduled_at.as_deref(), trailhead_core::parse_at)),
             scheduled_tz: a.scheduled_tz.map(Some),
             parent: attempt!(clearable(a.parent.as_deref(), |p| Ok(p.to_owned()))),
-            ..Default::default()
+            metadata: a.metadata.map(serde_json::Value::Object),
         };
         let task = attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await);
         if let Some(body) = a.handoff.filter(|b| !b.trim().is_empty()) {
