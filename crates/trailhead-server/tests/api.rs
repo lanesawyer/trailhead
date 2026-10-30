@@ -656,5 +656,5 @@ async fn an_agent_cant_set_a_first_grade_or_lower_one() {
     assert_eq!(r.status, StatusCode::OK, "an agent may raise a grade: {}", r.body);
     assert_eq!(r.body["grade"], 4);
     let r = api.as_human("GET", "/v1/tasks/AUTH-1", None).await;
-    assert!(r.body["task"]["grade"].is_null() && r.body["grade"].is_null(), "{}", r.body);
+    assert!(r.body["task"]["grade"].is_null(), "{}", r.body);
 }
