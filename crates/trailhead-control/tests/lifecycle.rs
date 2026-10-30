@@ -2363,6 +2363,15 @@ async fn a_merge_the_host_refuses_is_tried_again_not_reworked() {
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Approved, "still approved, not sent to a rework");
     assert!(task.run.pending_changes().is_none());
+    let why = "Required status check \"test\" is expected.";
+    assert_eq!(task.run.merge.as_ref().and_then(|d| d.refused.as_deref()), Some(why));
+    let said = |r: &Rig| r.codehost.prs()[0].comments.iter().filter(|c| c.contains("refused to merge")).count();
+    let noted = |r: &Rig| r.tracker.comments(&key).iter().filter(|c| c.body.contains("refused to merge")).count();
+    assert_eq!((said(&r), noted(&r)), (1, 1));
+
+    // Still refused for the same reason: tried again, but not said again.
+    r.factory.reconcile().await.unwrap();
+    assert_eq!((said(&r), noted(&r)), (1, 1));
 
     r.codehost.refuse_merge(None);
     r.factory.reconcile().await.unwrap();

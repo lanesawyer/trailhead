@@ -124,6 +124,9 @@ pub struct MergeDecision {
     pub human_head: Option<String>,
     /// Why the control plane couldn't act on the decision, such as not being a delegated reviewer.
     pub problem: Option<String>,
+    /// Why the code host last refused to merge this head, which is said once per reason and tried again each pass.
+    #[serde(default)]
+    pub refused: Option<String>,
     /// What was last said on the PR about this, so it's said once per change.
     pub message: String,
 }
