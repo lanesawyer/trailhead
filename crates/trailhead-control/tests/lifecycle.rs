@@ -2251,6 +2251,27 @@ async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
 }
 
 #[tokio::test]
+async fn switching_merge_mode_off_in_the_source_stops_the_merger_without_a_restart() {
+    let (mut r, queue) = queued_rig_with(&merging());
+    let mode = Arc::new(std::sync::Mutex::new(Ok(trailhead_factory::MergeMode::On)));
+    let source = mode.clone();
+    r.factory = r.factory.with_merge_mode_source(Box::new(move || source.lock().unwrap().clone()));
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    *mode.lock().unwrap() = Ok(trailhead_factory::MergeMode::Off);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+    // A source that can't be read keeps the last mode.
+    *mode.lock().unwrap() = Err("gone".into());
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    *mode.lock().unwrap() = Ok(trailhead_factory::MergeMode::On);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+}
+
+#[tokio::test]
 async fn a_conflict_at_merge_reworks_the_pr_instead_of_forcing_it() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;

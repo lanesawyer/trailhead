@@ -55,6 +55,9 @@ const MAX_INFRA_BACKOFF: Duration = Duration::from_secs(15 * 60);
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
+/// Reads the current `[merge] mode`, or says why it can't.
+pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String> + Send + Sync>;
+
 pub struct Factory {
     pub config: FactoryConfig,
     pub compute: Arc<dyn Compute>,
@@ -64,6 +67,10 @@ pub struct Factory {
     /// Reads PRs from the control plane, which sandboxes' own code host access can't serve. Without one, reconcile
     /// doesn't notice merges or closed PRs.
     pub codehost: Option<Arc<dyn CodeHost>>,
+    /// Where the merge mode is re-read from before each merge decision, so it can be switched without a restart.
+    merge_mode_source: Option<MergeModeSource>,
+    /// The merge mode last read from `merge_mode_source`, kept when a later read fails.
+    merge_mode: Mutex<MergeMode>,
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
@@ -212,6 +219,7 @@ impl Factory {
         provider: Arc<dyn ModelProvider>,
         daemon: Arc<dyn Daemon>,
     ) -> Factory {
+        let merge_mode = Mutex::new(config.merge.mode);
         Factory {
             config,
             compute,
@@ -219,6 +227,8 @@ impl Factory {
             provider,
             daemon,
             codehost: None,
+            merge_mode_source: None,
+            merge_mode,
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
             quota: Mutex::default(),
@@ -226,6 +236,30 @@ impl Factory {
             pause_logged: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
         }
+    }
+
+    /// Re-reads the merge mode from `source` before each merge decision, so switching it (to `off` as the quick stop)
+    /// takes effect on the next pass. A failed read keeps the last mode read and is logged.
+    pub fn with_merge_mode_source(mut self, source: MergeModeSource) -> Factory {
+        self.merge_mode_source = Some(source);
+        self
+    }
+
+    /// The merge mode now in force.
+    fn merge_mode(&self) -> MergeMode {
+        let mut mode = self.merge_mode.lock().unwrap();
+        if let Some(source) = &self.merge_mode_source {
+            match source() {
+                Ok(read) => {
+                    if read != *mode {
+                        tracing::info!(from = ?*mode, to = ?read, "merge mode changed");
+                    }
+                    *mode = read;
+                }
+                Err(why) => tracing::warn!(%why, mode = ?*mode, "can't re-read the merge mode; keeping the last one"),
+            }
+        }
+        *mode
     }
 
     /// Lets reconcile check each in-review task's PR (`docs/factory/operating.md`).
@@ -1068,6 +1102,7 @@ impl Factory {
             }
         }
         let gate = self.config.gate(grade.grade);
+        let merge_mode = self.merge_mode();
         let verdict_approves = match &task.run.reviewed_head {
             // A clean merge of the base branch the host made since the review keeps the verdict (TRAIL-260), but only
             // the verdict of this attempt: a rework (a conflict-resolving one included) takes a new attempt, and its
@@ -1111,7 +1146,7 @@ impl Factory {
             passed,
             waiting,
             failing,
-            would_merge: gates_pass && gate.auto_merge && self.config.merge.mode == MergeMode::Shadow,
+            would_merge: gates_pass && gate.auto_merge && merge_mode == MergeMode::Shadow,
             approved_head,
             human_head,
             problem: None,
@@ -1145,14 +1180,14 @@ impl Factory {
             }
         }
         // Without the right to approve, the merger can't act, so it only says what it would do, as in shadow mode.
-        let merging = self.config.merge.mode == MergeMode::On
+        let merging = merge_mode == MergeMode::On
             && gates_pass
             && decision.problem.is_none()
             && status == Status::Approved
             && (gate.auto_merge || decision.human_head.as_ref() == Some(&head));
         decision.message = decision_message(&grade, &decision, gate.auto_merge, merging);
         if prev.as_ref() != Some(&decision) {
-            if self.config.merge.mode != MergeMode::Off && prev.as_ref().is_none_or(|d| d.message != decision.message) {
+            if merge_mode != MergeMode::Off && prev.as_ref().is_none_or(|d| d.message != decision.message) {
                 codehost.comment(pr, &decision.message).await?;
             }
             if decision.problem.is_some() && prev.as_ref().is_none_or(|d| d.problem != decision.problem) {
