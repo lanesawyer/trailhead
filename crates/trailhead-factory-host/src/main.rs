@@ -1,10 +1,13 @@
 //! The factory's control plane, run next to a local Trailhead server (`docs/factory/state.md`):
 //!
 //! ```sh
-//! SPRITES_TOKEN=... trailhead-factory run --config factory.toml
+//! SPRITES_TOKEN=... trailhead-factory run   # or `trailhead factory run`
 //! ```
 //!
-//! The daemon uploaded to sandboxes is the release asset matching this binary's version, or `--daemon <path>`.
+//! The factory file is the nearest `factory.toml` at or above the working directory, or `--config <path>`.
+//!
+//! The daemon uploaded to sandboxes is `--daemon <path>`, else a `trailhead-daemon` next to this binary or on PATH,
+//! else the release asset matching this binary's version.
 //!
 //! Sandboxes run on Sprites unless the factory file sets `[compute] kind = "docker"`, which needs this binary built
 //! with the `docker` feature.
@@ -35,6 +38,7 @@ use trailhead_factory::{Compute, ComputeConfig, FactoryConfig};
 use trailhead_provider_anthropic::Anthropic;
 use trailhead_server::creds::{Cred, CredStore};
 
+mod find;
 mod wake;
 
 /// The agent the control plane acts as; sandboxes get its sub-agents.
@@ -52,11 +56,12 @@ struct Cli {
 
 #[derive(clap::Args)]
 struct Opts {
-    /// The repo's factory file (`docs/factory/sandbox.md`, `agents.md`, `review.md`).
+    /// The repo's factory file (`docs/factory/sandbox.md`, `agents.md`, `review.md`). Default: the nearest
+    /// `factory.toml` at or above the working directory.
     #[arg(long)]
-    config: PathBuf,
-    /// A daemon binary to start in each sandbox, built for Linux x86_64, instead of the release asset for this
-    /// version. Without it a dev build with no matching release uses `target/release/trailhead-daemon`.
+    config: Option<PathBuf>,
+    /// A daemon binary to start in each sandbox, built for Linux x86_64. Default: a `trailhead-daemon` next to this
+    /// binary or on PATH, else the release asset for this version.
     #[arg(long)]
     daemon: Option<PathBuf>,
     /// The local Trailhead server the API tunnel forwards to.
@@ -171,7 +176,11 @@ struct Wake {
 }
 
 async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String> {
-    let config = std::fs::read_to_string(&opts.config).map_err(|e| format!("{}: {e}", opts.config.display()))?;
+    let config_path = match &opts.config {
+        Some(path) => path.clone(),
+        None => find::config(&std::env::current_dir().map_err(|e| e.to_string())?)?,
+    };
+    let config = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
     let mut config = FactoryConfig::parse(&config).map_err(|e| e.to_string())?;
     if opts.claude_oauth_token.is_some() {
         tracing::warn!("subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
@@ -184,9 +193,13 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
         repo: env!("CARGO_PKG_REPOSITORY").trim_start_matches("https://github.com/").into(),
         version: env!("CARGO_PKG_VERSION").into(),
     };
+    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let path_dirs: Vec<PathBuf> =
+        std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let local = daemon_binary::find_local(beside.as_deref(), &path_dirs);
     let binary = daemon_binary::resolve(
         opts.daemon.as_deref(),
-        Path::new(daemon_binary::LOCAL_BUILD),
+        local.as_deref(),
         &release,
         &daemon_binary::cache_dir(&paths.data_dir),
     )
