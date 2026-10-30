@@ -1368,6 +1368,33 @@ async fn requested_changes_start_a_rework_on_the_pr_branch_with_the_review() {
 }
 
 #[tokio::test]
+async fn a_request_for_changes_is_stale_once_the_pr_head_has_moved() {
+    // The counts say a rework is wanted, as when the reset after a park was lost.
+    async fn left_in_review(push: bool) -> (Rig, TaskKey) {
+        let mut r = rig();
+        r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+        let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
+        let ran = r.factory.tick().await.unwrap();
+        let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+        assert!(r.tracker.task(&key).run.changes_requested.unwrap().head.is_some());
+        if push {
+            r.codehost.push_to(pr);
+        }
+        r.tracker.set_status(&key, Status::InReview);
+        (r, key)
+    }
+
+    let (r, key) = left_in_review(false).await;
+    assert_eq!(r.factory.reconcile().await.unwrap().reworked, vec![key.0.clone()], "the head is where it was");
+
+    let (r, key) = left_in_review(true).await;
+    assert!(r.factory.reconcile().await.unwrap().reworked.is_empty(), "someone pushed since the request");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+}
+
+#[tokio::test]
 async fn a_rework_started_by_hand_gets_the_prs_last_review_as_feedback() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
