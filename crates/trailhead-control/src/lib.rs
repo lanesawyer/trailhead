@@ -1868,7 +1868,8 @@ impl Factory {
         let round = task.run.conflict_reworks.unwrap_or(0) + 1;
         self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
         tracing::warn!(task = %task.key.0, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
-        let requested = ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true };
+        let head = Some(head.to_string());
+        let requested = ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head };
         self.request_rework(task, requested, round).await
     }
 
