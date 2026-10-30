@@ -32,6 +32,9 @@ pub mod label {
     pub const BROKEN: &str = "broken";
     /// The checkpoint a pooled sandbox is restored to before and after each task.
     pub const WARM: &str = "warm";
+    /// A tag of the `[stack]` the warm checkpoint was built for. A sandbox whose tag differs from the repo's current
+    /// stack is destroyed rather than reused, so a changed stack reinstalls. Absent for an empty stack.
+    pub const STACK: &str = "stack";
 }
 
 /// Domains iroh needs under a deny-by-default policy: n0's relays (which CNAME

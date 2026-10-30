@@ -2195,3 +2195,60 @@ async fn merge_mode_on_without_reviewer_rights_falls_back_to_saying_what_it_woul
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
     assert!(said(&r).last().unwrap().contains("passed, but the factory can't move the task to approved"));
 }
+
+fn with_stack(tools: &str) -> String {
+    CONFIG.replace("[checks]", &format!("[stack]\ntools = {{ {tools} }}\n\n[checks]"))
+}
+
+#[tokio::test]
+async fn the_stack_reaches_prepare_and_opens_tool_egress_only_for_install() {
+    let r = rig_with(&with_stack(r#"node = "22", pnpm = "9""#));
+    r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
+    r.factory.tick().await.unwrap();
+
+    let prepared = r.daemon.prepared();
+    let tools: Vec<_> = prepared[0].1.tools.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    assert_eq!(tools, ["node=22", "pnpm=9"]);
+    let egress = r.compute.egress("trailhead-w1").unwrap().domains;
+    assert!(!egress.iter().any(|d| d == "nodejs.org"), "tool sources are closed before the agent runs: {egress:?}");
+    let blocked = r.daemon.requests().into_iter().next().unwrap().blocked_hosts;
+    for host in ["mise.run", "nodejs.org", "static.rust-lang.org", "github.com"] {
+        assert!(blocked.iter().any(|d| d == host), "{host} is confirmed blocked: {blocked:?}");
+    }
+    let labels = r.compute.get("trailhead-w1").unwrap().labels;
+    assert!(labels.contains_key(label::STACK), "the warm checkpoint is keyed on the stack");
+}
+
+#[tokio::test]
+async fn a_pooled_sandbox_built_for_another_stack_is_replaced() {
+    let r = rig_with(&with_stack(r#"node = "22""#));
+    r.tracker.add_task("TRAIL", "First", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let id = r.compute.get("trailhead-w1").unwrap().id;
+    let old = r.compute.get("trailhead-w1").unwrap().labels;
+    assert_eq!(old.get(label::STATE).map(String::as_str), Some(label::IDLE));
+
+    // The same sandbox is reused while the stack is unchanged.
+    r.tracker.add_task("TRAIL", "Second", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let reused = r.compute.get("trailhead-w1").unwrap();
+    assert_eq!(reused.id, id);
+    let warm = reused.labels.get(label::WARM).cloned();
+
+    // A stale tag stands in for a stack that has since changed.
+    let mut stale = r.compute.get("trailhead-w1").unwrap().labels;
+    stale.insert(label::STACK.into(), "old".into());
+    r.compute.set_labels(&id, &stale).await.unwrap();
+    r.tracker.add_task("TRAIL", "Third", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let fresh = r.compute.get("trailhead-w1").unwrap();
+    assert_ne!(fresh.labels.get(label::WARM), warm.as_ref(), "a new sandbox, with its own first checkpoint");
+    assert_eq!(fresh.labels.get(label::STACK), old.get(label::STACK));
+}

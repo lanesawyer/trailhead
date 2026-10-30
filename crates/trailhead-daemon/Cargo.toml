@@ -20,6 +20,7 @@ trailhead-factory.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 tokio = { workspace = true, features = ["fs", "process", "io-util", "signal", "net"] }
 tracing.workspace = true
 iroh = { workspace = true, optional = true }

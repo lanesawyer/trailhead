@@ -54,6 +54,23 @@ const MAX_INFRA_BACKOFF: Duration = Duration::from_secs(15 * 60);
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
+/// Where mise and the tools a `[stack]` asks for come from during prepare (`docs/factory/sandbox.md`): mise's
+/// installer, registry and version lists, GitHub's release assets, and the toolchains' own download hosts.
+pub const MISE_DOMAINS: &[&str] = &[
+    "mise.run",
+    "mise.jdx.dev",
+    "mise-versions.jdx.dev",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "static.rust-lang.org",
+    "nodejs.org",
+    "registry.npmjs.org",
+    "go.dev",
+    "dl.google.com",
+    "pypi.org",
+    "files.pythonhosted.org",
+];
+
 pub struct Factory {
     pub config: FactoryConfig,
     pub compute: Arc<dyn Compute>,
@@ -268,6 +285,11 @@ impl Factory {
         let mut egress = self.agent_egress();
         let extra = self.config.egress.install.iter().cloned().chain(CLONE_DOMAINS.iter().map(|d| d.to_string()));
         egress.domains.extend(extra);
+        // Tool sources only for a repo that has a stack to install; the repo's own `mise.toml` adds its hosts to
+        // `[egress] install`.
+        if !self.config.stack.tools.is_empty() {
+            egress.domains.extend(MISE_DOMAINS.iter().map(|d| d.to_string()));
+        }
         egress
     }
 
@@ -1308,6 +1330,10 @@ impl Factory {
         labels.insert(label::STATE.into(), state.into());
         if let Some(warm) = warm {
             labels.insert(label::WARM.into(), warm.into());
+            let stack = self.config.stack.tag();
+            if !stack.is_empty() {
+                labels.insert(label::STACK.into(), stack);
+            }
         }
         if let Some(task) = task {
             labels.insert(label::TASK.into(), task.key.0.clone());
@@ -1322,7 +1348,20 @@ impl Factory {
     async fn acquire_worker(&self, task: &Task, branch: Option<String>, merge_base: bool) -> Result<Sandbox> {
         let pick = self.pool_pick.lock().await;
         let idle = self.compute.list(&self.pooled(label::IDLE, None, None)).await?;
-        let (sandbox, warm) = match idle.into_iter().find(|s| !self.abandoned(&s.name)) {
+        let stack = self.config.stack.tag();
+        let mut current = Vec::new();
+        for s in idle {
+            if s.labels.get(label::STACK).map(String::as_str).unwrap_or("") == stack {
+                current.push(s);
+                continue;
+            }
+            // Built for another stack: reinstalling on top would keep the old tools, so start over.
+            tracing::info!(sandbox = %s.name, "[stack] changed; destroying the pooled sandbox to reinstall");
+            if let Err(e) = self.compute.destroy(&s.id).await {
+                tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack");
+            }
+        }
+        let (sandbox, warm) = match current.into_iter().find(|s| !self.abandoned(&s.name)) {
             Some(s) => {
                 let warm = s.labels.get(label::WARM).cloned();
                 (s, warm)

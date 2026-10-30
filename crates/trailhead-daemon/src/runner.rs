@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -22,6 +23,10 @@ pub trait Workspace: Send + Sync {
     fn dir(&self) -> PathBuf;
     async fn prepare(&self, req: &PrepareRequest) -> Result<()>;
     async fn check(&self, check: &Check) -> CheckResult;
+    /// Environment for the agent on top of the daemon's: the repo's mise environment, when it has one.
+    async fn agent_env(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
     /// Returns once none of `hosts` resolve, or fails if they still do after a while.
     async fn confirm_blocked(&self, hosts: &[String]) -> Result<()>;
     /// The commit sha the checkout is at.
@@ -137,6 +142,7 @@ impl Runner {
             checks: req.worker_checks.clone(),
             title,
             base_branch: (req.role == Role::Reviewer).then(|| req.base_branch.clone()),
+            env: self.workspace.agent_env().await,
         };
         tracing::info!(task = %key, "agent starting");
         // Where the agent's work starts, which is what it's published on top of.

@@ -25,7 +25,7 @@ Assumed to work, not yet tested (TRAIL-97): Claude Code's exact setup (likely `A
 
 ## Standard checks
 
-Decided: repos describe their stack and a fixed set of named checks. mise is an implementation detail the user never touches.
+Decided; the stack is built (TRAIL-334), the checks still run as written. Repos describe their stack and a fixed set of named checks. mise is an implementation detail the user never touches.
 
 ```toml
 [stack]
@@ -42,7 +42,10 @@ build     = "cargo build"
 
 - **Fixed names, optional entries.** `setup`, `fmt`, `fmt_fix`, `lint`, `typecheck`, `test`, `build`. A repo leaves out what it doesn't have.
 - **Contract.** Exit code 0 is a pass. Structured output (JUnit, SARIF) can come later.
-- **Generated, not hand-written.** The factory turns `[stack]` and `[checks]` into mise tools and tasks when it bootstraps a sandbox. A repo with its own `mise.toml` keeps it, with the factory's tasks merged in.
+- **Generated, not hand-written.** Built (TRAIL-334): the daemon turns `[stack]` tools into a mise config and installs them when it prepares a worker's checkout, before `setup`. The checks stay plain commands from `factory.toml`, not generated mise tasks, since they'd add nothing; they run through `mise exec` so they see the pinned tools.
+- **How it installs.** In the prepare step, with install egress open: install mise to `~/.local/bin` if it's missing (the stock image doesn't ship it); write the `[stack]` tools to mise's global `conf.d` (`~/.config/mise/conf.d/trailhead-factory.toml`); `mise trust`; log `mise bootstrap plan`; run `mise bootstrap --only packages,tools,task`. The allowlist keeps out the parts that fight the sandbox (firewall, accounts, user, systemd units, services, dotfiles, remote), since the factory owns egress and the daemon's user, and a part a later mise adds isn't picked up by surprise.
+- **A repo with its own `mise.toml`** keeps it, and its `[bootstrap.packages]` and `bootstrap` task run too. The factory's tools sit in the global config, which has the lowest precedence, so the repo's own pins win; the daemon logs which `[stack]` tools the repo overrode. A repo with a `mise.toml` and no `[stack]` is bootstrapped from its own file alone. Reviewers prepare without `setup` but get the same tools.
+- **The agent's environment.** The daemon starts the agent with `mise env --json` applied, so its `cargo`, `node` and `python` are the pinned ones, and runs every check through `mise exec`. A checkout with neither a `[stack]` nor a mise config gets the stock environment.
 - **Policy refers to names.** Gates say which checks must pass (`require = ["fmt", "lint", "test"]`), so policy reads the same across stacks.
 - **Onboarding.** An agent can inspect a new repo and propose `[stack]` and `[checks]` for a human to confirm.
 
@@ -59,6 +62,7 @@ Decided 2026-10-27, replacing a fresh Sprite per task (decided 2026-10-26): work
 - **Reconcile.** Pooled Sprites are never destroyed at boot; one an interrupted run left busy goes back to idle.
 - **Broken Sprites.** A pooled Sprite that keeps failing to release (TRAIL-135: Sprites answered `503 Storage not ready` for 25 minutes) is retried with backoff from 30 s up to 5 min. After five failures or ten minutes, the factory gives up on it. It destroys the Sprite if the API allows, and otherwise labels it `state=broken` with no `role`, then destroys it on a later reconcile once the API recovers. A broken Sprite doesn't count toward `max_sandboxes`, so the next task gets a new one. If even the labels can't be changed, the control plane leaves it out in memory until it restarts. The failure counts are in memory too.
 - **Reviewers** get a fresh Sprite each and skip `setup`, since they only read the diff.
+- **Tools.** A pooled Sprite installs its `[stack]` once and keeps it in the warm checkpoint; later tasks only re-run the idempotent bootstrap. Sprites carry a `stack` label, a hash of the `[stack]` tools next to `warm`; an idle Sprite whose label differs from the repo's current stack is destroyed rather than reused, so a changed `[stack]` reinstalls on a fresh one.
 - **Bootstrap.** The stock image (Ubuntu 26.04, glibc 2.43) ships rustup/cargo, node, python, go, `gh`, git and Claude Code, but not mise. Uploading and starting the daemon and cloning takes about 11 s.
 - **Later:** deleting Sprites idle for N days, and a shared build cache in object storage for big pools, behind the same `Compute` seam.
 
@@ -68,7 +72,7 @@ Sprites egress is a DNS-based allowlist set from outside through the API. Change
 
 | Phase | Allowed domains |
 | --- | --- |
-| Install | Iroh relay and discovery, connector gateway, the repo's package registries and mise tool sources; `github.com` and `codeload.github.com` at bootstrap for public repos |
+| Install | Iroh relay and discovery, connector gateway, the repo's package registries; `github.com` and `codeload.github.com` at bootstrap for public repos; and, for a repo with a `[stack]`, mise's tool sources: `mise.run`, `mise.jdx.dev`, `mise-versions.jdx.dev`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` (GitHub release assets), `static.rust-lang.org`, `nodejs.org`, `registry.npmjs.org`, `go.dev`, `dl.google.com`, `pypi.org`, `files.pythonhosted.org`. A tool from elsewhere, or a repo's own `mise.toml` tools, need their hosts in `[egress] install` |
 | Agent work | Iroh relay and discovery, connector gateway |
 | Install requested mid-task | Install set, opened by the control plane on the daemon's request and closed after; each request logged |
 

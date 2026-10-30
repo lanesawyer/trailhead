@@ -47,6 +47,13 @@ description = "Build the sandbox image the Docker Compute starts by default (tra
 env = { DOCKER_HOST = "{{vars.docker_host}}" }
 run = "docker build -t trailhead-sandbox:latest crates/trailhead-compute-docker/image"
 
+[tasks.test-live-mise]
+description = "Install a [stack] with mise in a real Sprite and check a repo asking for node 22 gets it (creates and destroys one Sprite)"
+run = [
+  "cargo build --release -p trailhead-daemon --bin trailhead-daemon",
+  "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon fnox exec -- cargo test -p trailhead-daemon --test live_mise -- --ignored --nocapture",
+]
+
 [tasks.test-live-docker]
 description = "Run the Docker Compute test against the lima VM's engine (creates and destroys one container)"
 env = { DOCKER_HOST = "{{vars.docker_host}}" }

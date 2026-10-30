@@ -2,6 +2,8 @@
 //! [`Daemon`] trait and the messages it exchanges with the daemon in a sandbox.
 //! `trailhead-daemon` carries them over iroh; the testkit runs a daemon in-process.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +34,10 @@ pub struct PrepareRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge_base: bool,
     pub setup: Option<Check>,
+    /// The repo's `[stack]` tools (`rust = "stable"`, `node = "22"`), which the daemon installs with mise before
+    /// `setup` (`docs/factory/sandbox.md`). Empty for a repo that asks for none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
