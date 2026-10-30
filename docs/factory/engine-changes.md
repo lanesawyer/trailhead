@@ -1,5 +1,7 @@
 # Task-engine changes for the factory
 
+> **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
+
 Changes `trailhead-core` and `trailhead-server` need before the factory can use them fully. Statuses checked on 2026-10-28, after the MVP. Each is filed in `TRAIL`; the task key is in its heading. The MVP needs only #5 ([mvp.md](mvp.md)).
 
 ## 1. Resume affinity (TRAIL-83)

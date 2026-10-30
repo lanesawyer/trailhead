@@ -1,5 +1,7 @@
 # Cost and time controls
 
+> **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
+
 The control plane enforces budgets. Token and dollar counts come from the daemon's usage events; wall-clock, sandbox-hours and step counts from its own tracking. A hard stop removes the sandbox's connector label. Connector spend also rolls into the Sprites bill.
 
 | Scope | Limits | On breach |
