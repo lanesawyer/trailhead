@@ -52,6 +52,21 @@ description = "Run the Docker Compute test against the lima VM's engine (creates
 env = { DOCKER_HOST = "{{vars.docker_host}}" }
 run = "cargo test -p trailhead-compute-docker --test live -- --ignored --nocapture"
 
+[tasks.install]
+description = "Reinstall the CLI, the factory and the daemon from this checkout (cargo install takes one --path at a time)"
+run = """
+set -e
+# -j 4: full parallelism has OOM-killed a dev machine.
+cargo install --locked -j 4 --path crates/trailhead
+cargo install --locked -j 4 --path crates/trailhead-factory-host
+cargo install --locked -j 4 --path crates/trailhead-daemon
+# Anchored so this script's own command line doesn't match.
+if pgrep -f "^$HOME/.cargo/bin/trailhead-factory run" >/dev/null; then
+  echo
+  echo "A factory is still running the old trailhead-factory binary. Restart it: Ctrl-C once to drain, then 'fnox exec -- trailhead factory run' (later 'trailhead factory run', once TRAIL-117 lands)."
+fi
+"""
+
 [tasks.docs]
 description = "Build the docs (docs/) into a book with mdBook; `mdbook serve` previews it"
 run = "mdbook build"
