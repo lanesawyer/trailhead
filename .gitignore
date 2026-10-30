@@ -3,3 +3,5 @@
 *.db-wal
 *.db-shm
 /book
+/mermaid.min.js
+/mermaid-init.js

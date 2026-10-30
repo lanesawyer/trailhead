@@ -82,6 +82,26 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 
 The control plane acts as the merger. It is the factory project's only delegated reviewer ([lifecycle.md](lifecycle.md)), and the only agent that moves a factory task to `approved` or `done`.
 
+```mermaid
+flowchart TD
+    task["PR in review"] --> grade["Grade<br/>the task's, raised by the diff"]
+    grade --> gates{"Grade's gates pass on the current head?<br/>sandbox checks, CI, agent review, human"}
+    gates -->|"no"| wait["Record what it waits on; evaluate again<br/>after the next verdict, push, CI run or approval"]
+    gates -->|"yes"| approved["Task moves to approved"]
+    approved --> mode{"merge mode"}
+    mode -->|"off"| human["You merge"]
+    mode -->|"shadow"| shadow["Post what it would do"] --> human
+    mode -->|"on"| behind{"Behind main?"}
+    behind -->|"yes"| update["Merge main into the branch"]
+    update -->|"conflict"| rework["Back to running: rework on main"]
+    update -->|"clean"| ci["Wait for CI on the new head"]
+    ci --> gates
+    behind -->|"no"| merge["Squash-merge, pinned to the head"]
+    merge -->|"conflict"| rework
+    merge -->|"merged"| done["Task done"]
+    human --> done
+```
+
 1. After each pass that could change the answer (a verdict, a rework, CI finishing, you approving, a reconcile), it evaluates the PR's gates against its **current head**: the sandbox checks passed, the repo's CI is green on that commit, the latest verdict on that head approves, and, for grades whose gates require a human, you have approved.
 2. When they pass, it moves the task to `approved`. A push after that sends it back to `in_review`.
 3. It records the decision in the task's `factory` metadata (`merge`: the grade, which gates passed, and what it's waiting on) and says it once on the PR when it changes: "Grade 1: checks, CI and review passed; merging." or "Grade 3 (Cargo.lock changed): waiting for a person."
