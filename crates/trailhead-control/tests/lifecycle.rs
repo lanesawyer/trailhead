@@ -484,6 +484,11 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
 /// A worker run the last control plane left going: its task in progress under the run's sub-agent, on a busy pooled
 /// sandbox, with `before` already spent by earlier runs and the run started `ago` back.
 async fn going(r: &Rig, before: Usd, ago: i64) -> TaskKey {
+    going_on(r, before, ago, "trailhead-w1").await
+}
+
+/// [`going`] on the sandbox named `host`.
+async fn going_on(r: &Rig, before: Usd, ago: i64, host: &str) -> TaskKey {
     let key = r.tracker.add_task("TRAIL", "Going", "");
     let name = run_name(&key, 1);
     let tracker: Arc<dyn Tracker> = Arc::new(r.tracker.clone());
@@ -492,7 +497,7 @@ async fn going(r: &Rig, before: Usd, ago: i64) -> TaskKey {
     sub.claim(&key).await.unwrap();
     let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - ago;
     let report = trailhead_factory::RunUpdate {
-        host: Some("trailhead-w1".into()),
+        host: Some(host.into()),
         started: Some(started),
         spend: Some(before),
         ..update(1, &name)
@@ -506,7 +511,7 @@ async fn going(r: &Rig, before: Usd, ago: i64) -> TaskKey {
         (label::TASK.into(), key.0.clone()),
         (label::ROLE.into(), "worker".into()),
     ]);
-    r.compute.create(&SandboxSpec { name: "trailhead-w1".into(), labels, egress: Default::default() }).await.unwrap();
+    r.compute.create(&SandboxSpec { name: host.into(), labels, egress: Default::default() }).await.unwrap();
     key
 }
 
@@ -737,7 +742,11 @@ struct Drain {
     handle: tokio::task::JoinHandle<trailhead_factory::Result<()>>,
 }
 
-async fn drain_one_in_flight(mut r: Rig) -> Drain {
+async fn drain_one_in_flight(r: Rig) -> Drain {
+    drain_one_in_flight_polling(r, std::time::Duration::from_secs(60)).await
+}
+
+async fn drain_one_in_flight_polling(mut r: Rig, poll: std::time::Duration) -> Drain {
     let first = r.tracker.add_task("TRAIL", "First", "");
     let gate = Arc::new(tokio::sync::Notify::new());
     r.harness.push(Role::Worker, Script::new(changes()).wait_for(gate.clone()));
@@ -747,7 +756,7 @@ async fn drain_one_in_flight(mut r: Rig) -> Drain {
     let wake = Arc::new(tokio::sync::Notify::new());
     let handle = tokio::spawn(factory.run_draining(
         wake.clone(),
-        std::time::Duration::from_secs(60),
+        poll,
         async {
             let _ = draining.await;
         },
@@ -780,6 +789,26 @@ async fn a_drain_starts_nothing_new_and_returns_when_the_run_in_flight_finishes(
     assert_eq!(d.r.tracker.task(&d.first).status, Status::InReview);
     assert_eq!(d.r.tracker.task(&d.first).run.reviewed, Some(1));
     assert_eq!(d.r.tracker.task(&d.second).status, Status::Open);
+}
+
+#[tokio::test]
+async fn a_drain_keeps_following_a_live_run_reconcile_finds() {
+    let d = drain_one_in_flight_polling(rig(), std::time::Duration::from_millis(20)).await;
+
+    // A run the daemon still has turns up mid-drain, as when a run errors on the control plane's side.
+    let key = going_on(&d.r, Usd::ZERO, 60, "trailhead-w9").await;
+    d.r.daemon.ongoing_hung(&run_name(&key, 1), vec![spent(1_000)]);
+    let daemon = d.r.daemon.clone();
+    until("the live run to be followed", || daemon.attached() == [run_name(&key, 1)]).await;
+
+    // Once the first run finishes the drain still waits on the one it picked up.
+    d.gate.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!d.handle.is_finished(), "the drain waits for the live run too");
+    assert_eq!(d.r.tracker.task(&d.second).status, Status::Open, "and starts nothing new");
+
+    d.cancel.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), d.handle).await.unwrap().unwrap().unwrap();
 }
 
 #[tokio::test]

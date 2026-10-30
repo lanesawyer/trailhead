@@ -372,8 +372,9 @@ impl Factory {
                             let reviewing: Vec<&str> = due.reviews.iter().map(|t| t.key.0.as_str()).collect();
                             tracing::info!(?done, ?reviewing, "reconciled");
                         }
-                        // What reconcile found due is picked up again by the next start.
-                        let due = if draining { Due::default() } else { due };
+                        // Due reviews are new work, picked up again by the next start. Due runs are runs the daemon is
+                        // still working on, so a drain keeps following them and waits for them too.
+                        let due = if draining { Due { reviews: Vec::new(), ..due } } else { due };
                         for (task, sandbox) in due.runs {
                             let key = task.key.clone();
                             let factory = self.clone();
