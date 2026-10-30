@@ -258,7 +258,7 @@ const HUMAN_CONTEXT_CAP: usize = 6000;
 /// The most the answers may take of the human-context section, so notes keep the rest.
 const ANSWERS_CAP: usize = 4000;
 
-/// Lane's answers and the task's decisions and notes, for after the description. Empty when there are none. Past
+/// The answers and the task's decisions and notes, for after the description. Empty when there are none. Past
 /// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
 /// is always kept.
 fn human_section(task: &trailhead_factory::TaskSpec) -> String {
@@ -278,7 +278,7 @@ fn human_section(task: &trailhead_factory::TaskSpec) -> String {
         answers.push(entry);
     }
     if !answers.is_empty() {
-        out.push_str("\n\nQuestions you asked earlier and Lane's answers:");
+        out.push_str("\n\nQuestions you asked earlier and the answers you got:");
         answers.iter().rev().for_each(|e| out.push_str(e));
     }
     let mut kept = Vec::new();
