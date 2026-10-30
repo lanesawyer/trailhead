@@ -13,3 +13,4 @@ description = "Trailhead factory ModelProvider for Anthropic: model aliases, end
 [dependencies]
 trailhead-factory.workspace = true
 tracing.workspace = true
+reqwest.workspace = true
