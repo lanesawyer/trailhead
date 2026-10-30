@@ -1,5 +1,7 @@
 # Human interface
 
+> **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
+
 The factory's own client for people: watch runs live, steer them, and author tasks and specs. A native Bevy app, built in this repo but kept out of the default build. Trailhead facts checked against commit `9e68492`.
 
 ## Decisions

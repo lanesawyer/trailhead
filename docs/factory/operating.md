@@ -1,5 +1,7 @@
 # Operating the factory
 
+> Running the factory today. For what it is and how a task flows through it, read the [overview](overview.md) and [lifecycle](lifecycle.md) first.
+
 How to run the factory day to day, as it works today. It assumes this repo and its dev setup; the path to running it without the repo is TRAIL-114.
 
 ## One-time setup

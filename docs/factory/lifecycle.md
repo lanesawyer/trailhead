@@ -1,5 +1,7 @@
 # Task lifecycle
 
+> How one task moves through the factory, from queued spec to merged PR. Next: [Operating](operating.md) to run it, [Review](review.md) for grades, gates and the merger.
+
 Proposal: the factory's lifecycle is Trailhead's existing one plus conventions, with a few engine changes ([engine-changes.md](engine-changes.md)). One sandbox per task, created when the task starts running and destroyed when it's done.
 
 ## Trailhead today

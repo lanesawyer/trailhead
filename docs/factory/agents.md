@@ -1,5 +1,7 @@
 # Agents: daemon, profiles and context
 
+> **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
+
 A small daemon in every sandbox owns a typed contract with the control plane; the coding agent is a `Harness` plugin behind it. Profiles decide which harness, provider and model each role uses. The daemon's name is TBD (`factoryd` was a placeholder; see [naming.md](naming.md)).
 
 ## Harness boundary
