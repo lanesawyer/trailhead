@@ -6,6 +6,7 @@ pub mod codehost;
 pub mod compute;
 pub mod config;
 pub mod daemon;
+pub mod gateway;
 pub mod grade;
 pub mod harness;
 pub mod money;
@@ -26,6 +27,7 @@ pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
     RunResult, ToDaemon,
 };
+pub use gateway::{GatewayRequest, GatewayResponse, GatewaySandbox, GatewayState};
 pub use grade::{ChangedFile, FileStatus, Grader, PrGrade, glob_match};
 pub use harness::{
     EventSink, Feedback, FollowUp, Harness, RaiseGrade, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict,
