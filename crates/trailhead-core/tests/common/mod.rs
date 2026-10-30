@@ -29,6 +29,12 @@ impl Env {
         Env { store: Arc::new(store), human, clock, _dir: dir }
     }
 
+    /// A second connection to the database file, for writing rows the API refuses to.
+    pub async fn raw_conn(&self) -> libsql::Connection {
+        let db = libsql::Builder::new_local(self._dir.path().join("t.db")).build().await.unwrap();
+        db.connect().unwrap()
+    }
+
     pub async fn agent(&self, name: &str) -> Ctx {
         let a = self.store.create_agent(&self.human, name).await.unwrap();
         self.store.agent_ctx(self.human.workspace_id, a.id).await.unwrap()
