@@ -2111,13 +2111,11 @@ async fn an_approval_on_an_old_head_doesnt_count() {
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
     assert_eq!(said(&r).last().unwrap(), "Grade 1: waiting for CI and review.");
     r.codehost.set_ci(&pr, CiState::Passed);
-    r.factory.reconcile().await.unwrap();
-    assert_eq!(r.tracker.task(&key).status, Status::InReview, "CI alone isn't enough");
-    assert_eq!(said(&r).last().unwrap(), "Grade 1: waiting for review.");
 
+    // The next reconcile sees a head nobody reviewed, and reviews it (TRAIL-298).
     r.harness.push(Role::Reviewer, Script::new(approve()));
-    let shown = r.tracker.task(&key);
-    r.factory.review(&shown, &pr, 1, &[]).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
     assert_eq!(r.tracker.task(&key).status, Status::Approved);
     assert_eq!(said(&r).last().unwrap(), "Grade 1: checks, CI and review passed; would merge (shadow).");
 }
