@@ -2300,12 +2300,30 @@ fn merging() -> String {
 }
 
 #[tokio::test]
+async fn a_merge_that_does_not_happen_is_not_announced_until_it_does() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (_key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    // Only brought up to date: nothing merged, so nothing says "merged".
+    assert!(!r.codehost.prs()[0].merged);
+    assert!(said(&r).iter().all(|m| !m.contains("merged")), "{:?}", said(&r));
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    let merged: Vec<_> = said(&r).into_iter().filter(|m| m.contains("merged")).collect();
+    assert_eq!(merged, ["Grade 1: checks, CI and review passed; merged."]);
+}
+
+#[tokio::test]
 async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
-    assert_eq!(said(&r)[1..], ["Grade 1: checks, CI and review passed; merging."]);
+    assert_eq!(said(&r)[1..], ["Grade 1: checks, CI and review passed; merged."]);
     assert!(r.codehost.prs()[0].merged);
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Done);
