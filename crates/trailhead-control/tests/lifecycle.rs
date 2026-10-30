@@ -2202,6 +2202,28 @@ async fn shadow_mode_waits_for_ci_then_approves_and_says_each_change_once() {
 }
 
 #[tokio::test]
+async fn a_merge_the_merger_started_but_didnt_close_is_still_the_mergers() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+
+    // The merger recorded its intent and the host merged, but closing the task failed.
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    let intent = trailhead_factory::RunUpdate { merging: Some(head.clone()), ..Default::default() };
+    Tracker::report(&r.tracker, &key, intent).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Done);
+    assert_eq!(task.run.merged.expect("recorded").by, MergedBy::Merger);
+    let handoff = r.tracker.comments(&key).into_iter().find(|c| c.kind == "handoff").expect("a handoff").body;
+    assert!(handoff.contains("Grade 1; gates passed"), "{handoff}");
+}
+
+#[tokio::test]
 async fn a_grade_three_pr_waits_for_lane_who_approves_it() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
@@ -2386,6 +2408,25 @@ async fn a_merge_the_host_refuses_is_tried_again_not_reworked() {
     r.factory.reconcile().await.unwrap();
     assert!(r.codehost.prs()[0].merged);
     assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_merge_the_host_refused_is_not_the_mergers_when_a_person_merges_it_later() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.refuse_merge(Some("Required status check \"test\" is expected."));
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).run.merging.as_deref(), Some(""), "the intent is cleared");
+
+    r.codehost.refuse_merge(None);
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Done);
+    assert_eq!(task.run.merged.expect("recorded").by, MergedBy::Human);
 }
 
 #[tokio::test]
