@@ -959,17 +959,18 @@ impl Factory {
         let after_conflict = shown.run.pending_changes().is_some_and(|c| c.conflict);
         let round = if after_conflict { before } else { before + 1 };
         let retries = shown.run.retries.unwrap_or(0);
+        let infra_prior = shown.run.infra_failures;
         let name = reviewer_name(&task.key, attempt, before + 1, retries);
         self.tracker.report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() }).await?;
         let profile = self.config.reviewer().clone();
         let credential = match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
             Ok(credential) => credential,
-            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries).await),
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await),
         };
         let sub = self.tracker.sub_agent(&name);
         let sandbox = match self.create_sandbox(&name, task, Role::Reviewer, Some(Self::branch(task))).await {
             Ok(sandbox) => sandbox,
-            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries).await),
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await),
         };
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
         let req = RunRequest {
@@ -1001,7 +1002,7 @@ impl Factory {
         }
         let run = match run {
             Ok(run) => run,
-            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries).await),
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await),
         };
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
@@ -1011,8 +1012,15 @@ impl Factory {
             }
             Run::Report(_, s) | Run::Breach(_, s) => (*s, None, None),
         };
-        sub.report(&task.key, RunUpdate { spend: Some(spend), reviewed, reviewed_head, ..RunUpdate::default() })
-            .await?;
+        // A reviewer that finished (a verdict, or a breach that is the task's doing) ends the run of infrastructure failures.
+        let finished =
+            matches!(run, Run::Breach(..) | Run::Report(RunReport { result: RunResult::Reviewed(_), .. }, _));
+        let infra_failures = if finished { infra_prior.filter(|n| *n > 0).map(|_| 0) } else { None };
+        sub.report(
+            &task.key,
+            RunUpdate { spend: Some(spend), reviewed, reviewed_head, infra_failures, ..RunUpdate::default() },
+        )
+        .await?;
         self.tracker.revoke_sub_agent(&name).await?;
         match run {
             Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
@@ -1044,7 +1052,7 @@ impl Factory {
                 // No verdict, no round: handled like an infrastructure failure, so it backs off and is capped
                 // rather than being reviewed again on every pass (TRAIL-267).
                 let error = Error::Other(format!("the reviewer ended without a verdict: {:?}", report.result));
-                self.review_infra_failed(task, &name, error, before, retries).await;
+                self.review_infra_failed(task, &name, error, before, retries, infra_prior).await;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
             Run::Breach(reason, _) => {
@@ -1294,12 +1302,15 @@ impl Factory {
         error: Error,
         rounds_before: u32,
         retries: u32,
+        prior: Option<u32>,
     ) -> Error {
         // A deliberate stop gives the round back like a failure, but isn't one: no count, no backoff, no parking.
         let cancelled = matches!(error, Error::Cancelled);
+        // The persisted count survives a restart; the in-memory one covers a tracker that failed to write it.
         let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _)| *n);
-        let failures = held + 1;
+        let failures = prior.unwrap_or(0).max(held) + 1;
         let max = self.config.repo.max_infra_failures.max(1);
+        let park = !cancelled && failures >= max;
         if cancelled {
             tracing::info!(task = %task.key.0, "review cancelled; the round doesn't count");
         } else {
@@ -1307,15 +1318,19 @@ impl Factory {
             self.set_back(&task.key, failures);
         }
         // The retry's sub-agent and sandbox names carry the retry count: this one's sub-agent is revoked for good.
-        let give_back =
-            RunUpdate { review_rounds: Some(rounds_before), retries: Some(retries + 1), ..RunUpdate::default() };
+        let give_back = RunUpdate {
+            review_rounds: Some(rounds_before),
+            retries: Some(retries + 1),
+            infra_failures: (!cancelled).then_some(if park { 0 } else { failures }),
+            ..RunUpdate::default()
+        };
         if let Err(e) = self.tracker.report(&task.key, give_back).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't give the review round back");
         }
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the reviewer's sub-agent; reconcile will");
         }
-        if !cancelled && failures >= max {
+        if park {
             let question = format!(
                 "The infrastructure failed {failures} times in a row while reviewing the PR (the limit is {max}); \
                  it's not the task. The last error: {error}\n\nFix the cause, then reopen the task; raise \
@@ -1331,7 +1346,12 @@ impl Factory {
                     self.setbacks.lock().unwrap().remove(&task.key);
                 }
                 Err(e) => {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; the next reconcile tries again")
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; the next reconcile tries again");
+                    // Not parked, so the count mustn't start again: the next failure tries to park once more.
+                    let keep = RunUpdate { infra_failures: Some(failures), ..RunUpdate::default() };
+                    if let Err(e) = self.tracker.report(&task.key, keep).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't keep the infrastructure failure count");
+                    }
                 }
             }
         }
