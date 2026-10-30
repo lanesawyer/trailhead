@@ -97,4 +97,4 @@ run finished task=TRAIL-105 outcome=…
 - Reviewers try to build and can't, wasting time (TRAIL-136).
 - A pooled Sprite has 8 GB and no swap; heavy builds have restarted one mid-run (TRAIL-140).
 - No notifications (TRAIL-111); runs in a terminal rather than as a service (TRAIL-112).
-- The GitHub connector has classic `repo` scope on all of Lane's repos and lets every Sprite use it (TRAIL-95).
+- The GitHub connector has classic `repo` scope on all of the maintainer's repos and lets every Sprite use it (TRAIL-95).
