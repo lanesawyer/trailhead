@@ -4,12 +4,13 @@
 //! SPRITES_TOKEN=... trailhead-factory run   # or `trailhead factory run`
 //! ```
 //!
-//! The factory file is the nearest `factory.toml` at or above the working directory, or `--config <path>`.
+//! The factory's settings are the `[factory]` table of the nearest `.trailhead.toml` at or above the working directory,
+//! or of `--config <path>`.
 //!
 //! The daemon uploaded to sandboxes is `--daemon <path>`, else a `trailhead-daemon` next to this binary or on PATH,
 //! else the release asset matching this binary's version.
 //!
-//! Sandboxes run on Sprites unless the factory file sets `[compute] kind = "docker"`, which needs this binary built
+//! Sandboxes run on Sprites unless the factory file sets `[factory.compute] kind = "docker"`, which needs this binary built
 //! with the `docker` feature.
 //!
 //! It opens the server's database as the `factory` agent, keeps its iroh identity and daemon master key in the
@@ -56,8 +57,8 @@ struct Cli {
 
 #[derive(clap::Args)]
 struct Opts {
-    /// The repo's factory file (`docs/factory/sandbox.md`, `agents.md`, `review.md`). Default: the nearest
-    /// `factory.toml` at or above the working directory.
+    /// The repo file with the `[factory]` table (`docs/factory/sandbox.md`, `agents.md`, `review.md`). Default: the
+    /// nearest `.trailhead.toml` at or above the working directory.
     #[arg(long)]
     config: Option<PathBuf>,
     /// A daemon binary to start in each sandbox, built for Linux x86_64. Default: a `trailhead-daemon` next to this
@@ -181,7 +182,9 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
         None => find::config(&std::env::current_dir().map_err(|e| e.to_string())?)?,
     };
     let config = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
-    let mut config = FactoryConfig::parse(&config).map_err(|e| e.to_string())?;
+    let repo_dir = config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+    let mut config = FactoryConfig::from_repo_file(&config, find::remote(&repo_dir))
+        .map_err(|e| format!("{}: {e}", config_path.display()))?;
     if opts.claude_oauth_token.is_some() {
         tracing::warn!("subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
         config.egress.always.push(ANTHROPIC_API_HOST.into());

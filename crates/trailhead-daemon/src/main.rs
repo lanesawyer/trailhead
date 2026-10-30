@@ -73,6 +73,10 @@ impl CodeHost for NoCodeHost {
         Err(Error::Forbidden(self.0.clone()))
     }
 
+    async fn carries_verdict(&self, _: &PrRef, _: &str) -> Result<bool> {
+        Err(Error::Forbidden(self.0.clone()))
+    }
+
     async fn pr_state(&self, _: &PrRef) -> Result<PrState> {
         Err(Error::Forbidden(self.0.clone()))
     }

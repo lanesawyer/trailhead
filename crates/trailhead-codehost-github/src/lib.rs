@@ -399,6 +399,31 @@ impl CodeHost for GitHub {
         }
     }
 
+    async fn carries_verdict(&self, pr: &PrRef, reviewed: &str) -> Result<bool> {
+        let r = Self::repo_path(&pr.repo);
+        let p = self.call(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
+        let (Some(base), Some(head)) = (p["base"]["ref"].as_str(), p["head"]["sha"].as_str()) else {
+            return Err(Error::Other(format!("github: PR {} has no base or head", pr.number)));
+        };
+        if head == reviewed {
+            return Ok(true);
+        }
+        // What the PR has that its base lacks: its own commits. A merge of the base brings in base commits, which
+        // aren't among them, so a commit since `reviewed` that is one of them must be a merge of the base itself.
+        let own = self.call(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
+        let since = self.call(self.request(Method::GET, &format!("{r}/compare/{reviewed}...{head}"))).await?;
+        // `reviewed` must lead to the head, and a listing cut short can't be vouched for.
+        if since["status"].as_str() != Some("ahead") {
+            return Ok(false);
+        }
+        let (Some(own), Some(since)) = (complete_commits(&own), complete_commits(&since)) else { return Ok(false) };
+        let own_shas: Vec<&str> = own.iter().filter_map(|c| c["sha"].as_str()).collect();
+        Ok(since.iter().filter(|c| c["sha"].as_str().is_some_and(|s| own_shas.contains(&s))).all(|c| {
+            let parents = c["parents"].as_array().map(Vec::as_slice).unwrap_or_default();
+            parents.len() == 2 && parents[1]["sha"].as_str().is_some_and(|second| !own_shas.contains(&second))
+        }))
+    }
+
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
         let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
         let p = self.call(self.request(Method::GET, &path)).await?;
@@ -458,6 +483,12 @@ impl CodeHost for GitHub {
         }
         Ok(out)
     }
+}
+
+/// The commits of a compare response, unless the host cut the list short (it lists at most 250).
+fn complete_commits(compare: &Value) -> Option<&Vec<Value>> {
+    let commits = compare["commits"].as_array()?;
+    (compare["total_commits"].as_u64()? == commits.len() as u64).then_some(commits)
 }
 
 #[cfg(test)]

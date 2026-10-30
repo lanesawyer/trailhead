@@ -47,7 +47,7 @@ The Rust orchestrator stays deterministic. Model-driven "orchestration" means a 
 | Utility | Haiku | Summarize logs, draft PR text, classify failures, update status |
 
 ```toml
-[profiles.worker]
+[factory.profiles.worker]
 role     = "worker"
 adapter  = "claude-code"        # or codex, own-loop, ...
 provider = "anthropic"
@@ -55,7 +55,7 @@ model    = "sonnet"             # resolved to a model id per provider
 budget   = { usd = 5, minutes = 60, steps = 40 }
 escalate_to = "worker-opus"     # after repeated failure
 
-[profiles.utility]
+[factory.profiles.utility]
 role     = "utility"
 adapter  = "own-loop"
 provider = "anthropic"

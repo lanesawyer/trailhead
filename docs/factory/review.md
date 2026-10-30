@@ -17,7 +17,7 @@ Named after the climbing classes of the Yosemite Decimal System: the higher the 
 | 1 | A walk on a trail | Docs, new or changed tests, formatting | Checks + CI; auto-merge |
 | 2 | Off-trail | Ordinary code within existing modules | Checks + CI + agent review; auto-merge |
 | 3 | Scrambling, above Treeline | New or upgraded dependencies, schema or migrations, public API changes, large diffs | Checks + CI + agent review + human |
-| 4 | Exposed | Auth, secrets handling, sandbox egress, CI workflows, the factory's own policy (`factory.toml`) and profiles | Checks + CI + human; agent review advisory |
+| 4 | Exposed | Auth, secrets handling, sandbox egress, CI workflows, the factory's own policy (`.trailhead.toml`) and profiles | Checks + CI + human; agent review advisory |
 
 How grades are set:
 
@@ -29,29 +29,29 @@ How grades are set:
 
 ## Gate policy
 
-Decided: gates per grade are configurable per repo, in `factory.toml`. The table above is the default. A repo can be fully autonomous, with no human gate at any grade; there, the top grade requires a quorum of independent agents.
+Decided: gates per grade are configurable per repo, in `.trailhead.toml`. The table above is the default. A repo can be fully autonomous, with no human gate at any grade; there, the top grade requires a quorum of independent agents.
 
 ```toml
-[grades]
+[factory.grades]
 # Path globs that raise a PR to at least this grade; unmatched files don't raise it.
 2 = ["crates/*/src/**", "crates/*/build.rs", "crates/*/benches/**", "crates/*/examples/**", "cliff.toml", "rustfmt.toml"]
 3 = ["**/Cargo.toml", "Cargo.lock", "**/migrations/**"]
-4 = [".github/**", "factory.toml", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE"]
+4 = [".github/**", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE"]
 max_lines = 600          # bigger diffs are at least grade 3
 
-[gates.1]
+[factory.gates.1]
 require = ["checks", "ci"]
 auto_merge = true
 
-[gates.2]
+[factory.gates.2]
 require = ["checks", "ci", "agent_review"]
 auto_merge = false       # Trailhead itself: grade 1 only, to start
 
-[gates.4]
+[factory.gates.4]
 require = ["checks", "quorum"]   # or ["checks", "agent_review", "human"]
 quorum = { reviewers = 3, agree = 3, distinct_models = true }
 
-[merge]
+[factory.merge]
 mode = "shadow"          # off | shadow | on
 ```
 
@@ -85,19 +85,19 @@ The control plane acts as the merger. It is the factory project's only delegated
 1. After each pass that could change the answer (a verdict, a rework, CI finishing, Lane approving, a reconcile), it evaluates the PR's gates against its **current head**: the sandbox checks passed, the repo's CI is green on that commit, the latest verdict on that head approves, and, for grades whose gates require a human, Lane has approved.
 2. When they pass, it moves the task to `approved`. A push after that sends it back to `in_review`.
 3. It records the decision in the task's `factory` metadata (`merge`: the grade, which gates passed, and what it's waiting on) and says it once on the PR when it changes: "Grade 1: checks, CI and review passed; merging." or "Grade 3 (Cargo.lock changed): waiting for Lane."
-4. What it does with an `approved` task depends on `[merge] mode` and the grade's `auto_merge`:
+4. What it does with an `approved` task depends on `[factory.merge] mode` and the grade's `auto_merge`:
    - **`off`:** nothing; Lane merges every PR.
    - **`shadow`:** it posts what it *would* do and doesn't merge, including, when the PR is behind `main`, that it would update the branch first ("Would merge `main` into the branch, wait for CI on the new head, then squash-merge."). Lane merges as today, and compares. The default; Trailhead's own repo ran it until 2026-10-29 and is now `on` (TRAIL-313).
    - **`on`:** for a grade with `auto_merge`, it first brings the PR up to date (below), then squash-merges it, pinned to the head its gates passed on. A merge conflict sends the task back to running, to rework the PR on top of `main`; a moved head or a merge the host refuses for another reason is tried again on the next pass, not reworked. For other grades, Lane's approval is the human gate and the merger merges after it.
 
    **Updating the branch (TRAIL-212).** `main` requires its checks to pass on a branch that's up to date with it (strict status checks), so a green run against an old base isn't enough: PR #21 merged on one while `main` had since changed a signature, and `main` stopped compiling. Before merging, the merger asks the host whether the PR is behind its base (`CodeHost::behind`). If it is, it merges the base branch into the PR branch (`CodeHost::update_branch`: a merge commit, never a rebase and force-push) and goes back to waiting for CI on the new head. It merges only when CI is green on a head that isn't behind. Another PR landing meanwhile just repeats this.
    - **Conflicts.** If the base branch doesn't merge cleanly, the task goes back to running for a rework on top of `main`, as for any merge conflict ([lifecycle.md](lifecycle.md)). Only a real merge conflict does: the host also refuses an update when there's nothing to merge in (an update it queued earlier has landed, so the merger looks at the head again) or when the head moved since the merger read it (the update names the head it read, so a push that raced it isn't merged over). Those are not conflicts, since a conflict costs a review round (TRAIL-199); the first is `UpToDate` and the second an error the merger retries on its next tick.
-   - **The verdict survives a clean update.** Decided: a merge of `main` with no conflicts keeps the reviewer's approval, and CI on the new head is the gate. The merge commit adds no work of the PR's own, and the reviewer saw the PR's diff against `main`, which the merge doesn't change; re-reviewing every PR each time something else lands would never converge. So step 1's "the latest verdict on that head approves" is evaluated against the head before the update, as long as the only commits since are merges of the base branch the host made. Any other push, including a conflict-resolving rework, is a new head and needs a new verdict. The sandbox checks are not re-run; CI is.
+   - **The verdict survives a clean update.** Decided: a merge of `main` with no conflicts keeps the reviewer's approval, and CI on the new head is the gate. The merge commit adds no work of the PR's own, and the reviewer saw the PR's diff against `main`, which the merge doesn't change; re-reviewing every PR each time something else lands would never converge. So step 1's "the latest verdict on that head approves" is evaluated against the head before the update, as long as the only commits since are merges of the base branch the host made. The merger checks that with `CodeHost::carries_verdict`: the head the verdict is for must lead to the current head, and every commit since that the PR has and its base lacks must be a two-parent merge commit whose second parent is on the base branch (TRAIL-260). A listing the host cut short can't be vouched for, so it counts as a new head. That is a check of shape, not content: a merge whose second parent is on the base passes even if it changes the tree beyond a clean merge, and a conflict-resolving rework pushes exactly such a merge. So the merger carries only a verdict given on the task's current attempt; a rework takes a new attempt, so its merge commit can't inherit the old approval, and it needs a new verdict like any other push. A person's hand-edited merge of the base (an "evil merge") is a known gap the check can't see. The sandbox checks are not re-run; CI is.
 5. However a PR is merged, by the merger or by Lane on GitHub, the task is closed as `done` the same way, with a handoff naming the PR and the merge commit (TRAIL-198). `done` always means merged.
 
 ## The ratchet
 
-Decided: agents may tighten the policy under the repo's normal gates, but any change that loosens it always needs a human, even in a fully autonomous repo. Loosening includes dropping a gate, lowering a quorum, raising a budget, moving work to a cheaper profile, moving Treeline up, lowering a path's grade, or lowering a task's grade. Until the policy lives somewhere the control plane can diff, every change to `factory.toml` is grade 4, so a human sees it. Trailhead already applies the same rule to `require_review` and project reviewers.
+Decided: agents may tighten the policy under the repo's normal gates, but any change that loosens it always needs a human, even in a fully autonomous repo. Loosening includes dropping a gate, lowering a quorum, raising a budget, moving work to a cheaper profile, moving Treeline up, lowering a path's grade, or lowering a task's grade. Until the policy lives somewhere the control plane can diff, every change to `[factory]` in `.trailhead.toml` is grade 4, so a human sees it. Trailhead already applies the same rule to `require_review` and project reviewers.
 
 ## Rules that keep the gate honest
 

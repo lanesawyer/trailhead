@@ -16,7 +16,6 @@ const CONFIG: &str = r#"
 [repo]
 owner = "lanesawyer"
 name = "trailhead"
-project = "TRAIL"
 
 [checks]
 fmt = "cargo fmt --check"
@@ -63,7 +62,7 @@ fn rig_with(config: &str) -> Rig {
             .with_heads(move |repo, branch| heads.head(repo, branch)),
     );
     let factory = Factory::new(
-        FactoryConfig::parse(config).unwrap(),
+        FactoryConfig::parse_table(config, "TRAIL", None).unwrap(),
         Arc::new(compute.clone()),
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
@@ -606,7 +605,7 @@ async fn a_silent_hung_agent_hits_the_wall_clock() {
 }
 
 fn two_at_a_time() -> Rig {
-    rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_sandboxes = 2"))
+    rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 2"))
 }
 
 async fn until(what: &str, mut cond: impl FnMut() -> bool) {
@@ -1374,7 +1373,7 @@ async fn a_rework_started_by_hand_gets_the_prs_last_review_as_feedback() {
 
 #[tokio::test]
 async fn requested_changes_past_the_cap_park_the_task_with_the_last_review() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 2"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 2"));
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
     for body in ["first complaint", "second complaint"] {
         r.harness.push(Role::Worker, Script::new(changes()));
@@ -1425,7 +1424,7 @@ async fn a_rework_that_fails_its_check_is_retried_not_parked() {
 
 #[tokio::test]
 async fn a_parked_request_a_person_settled_is_not_reworked_by_reconcile() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 1"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 1"));
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
@@ -1661,7 +1660,7 @@ async fn the_agents_api_timeouts_dont_use_up_attempts() {
 
 #[tokio::test]
 async fn infrastructure_failures_past_the_cap_park_the_task_as_the_infrastructures_fault() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 3"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 3"));
     let key = r.tracker.add_task("TRAIL", "Lost daemon", "");
     r.daemon.fail_runs(3, "not found: run trail-1 on this daemon");
     for n in 1..=3 {
@@ -1730,7 +1729,7 @@ async fn failures_that_are_the_agents_or_the_tasks_still_use_up_attempts() {
 
 #[tokio::test]
 async fn two_runs_starting_together_never_take_the_same_idle_sandbox() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_sandboxes = 4"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 4"));
     let first = r.tracker.add_task("TRAIL", "First", "");
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
@@ -1789,7 +1788,7 @@ async fn a_sandbox_that_wont_release_after_the_agent_ends_the_run_doesnt_give_th
 #[tokio::test]
 async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_reopened() {
     let r = rig_with(
-        &CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 2\nmax_sandboxes = 2"),
+        &CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2\nmax_sandboxes = 2"),
     );
     let key = r.tracker.add_task("TRAIL", "Lost daemon", "");
     r.daemon.fail_runs(2, "connection lost");
@@ -1808,7 +1807,7 @@ async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_re
 
 #[tokio::test(start_paused = true)]
 async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 3"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 3"));
     let key = r.tracker.add_task("TRAIL", "Unreviewable", "");
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
@@ -1841,7 +1840,7 @@ async fn reviews_that_fail_on_the_infrastructure_back_off_and_park_at_the_cap() 
 
 #[tokio::test(start_paused = true)]
 async fn a_review_cancelled_on_purpose_isnt_an_infrastructure_failure() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_infra_failures = 1"));
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 1"));
     let key = r.tracker.add_task("TRAIL", "Stopped mid-review", "");
     r.harness.push(Role::Worker, Script::new(changes()));
     let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
@@ -1905,7 +1904,7 @@ fn queued_rig() -> (Rig, TaskKey) {
 }
 
 fn queued_rig_with(extra: &str) -> (Rig, TaskKey) {
-    let config = CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nqueue = \"TRAIL-1\"");
+    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nqueue = \"TRAIL-1\"");
     let mut r = rig_with(&format!("{config}\n{extra}"));
     let queue = r.tracker.add_task("TRAIL", "Factory queue", "");
     let codehost = Arc::new(r.codehost.clone());
@@ -2291,6 +2290,69 @@ async fn a_pr_behind_its_base_is_updated_before_it_is_merged() {
     r.factory.reconcile().await.unwrap();
     assert!(!r.codehost.prs()[0].merged, "not merged while behind");
     assert_ne!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_host_made_update_keeps_the_verdict_and_a_push_after_it_does_not() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "updated, not merged, while CI starts over");
+
+    // CI passes on the merge commit: merged on the verdict for the head before it, with no new review.
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "{:?}", done.reviewed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_resolving_rework_doesnt_inherit_the_verdict() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "back to running for a rework");
+
+    // The rework pushes a single commit that merges the base: a merge the host didn't make, holding the resolution.
+    r.codehost.set_conflicts(false);
+    let resolution = Commit { message: "fix: resolve".into(), changes: vec![], merges: vec!["base".into()] };
+    r.harness
+        .push(Role::Worker, Script::new(RunOutcome::Changes { commits: vec![resolution], summary: "Done.".into() }));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.factory.tick().await.unwrap();
+    r.codehost.set_ci(&pr, CiState::Passed);
+
+    // Reviews of the resolution then fail on the infrastructure, so the passes wait out a backoff and evaluate the
+    // gates meanwhile.
+    r.daemon.fail_runs(3, "connection lost");
+    for _ in 0..3 {
+        let done = r.factory.reconcile().await.unwrap();
+        assert!(done.reviewed.is_empty() && done.merged.is_empty(), "{done:?}");
+    }
+    assert!(!r.codehost.prs()[0].merged, "the old approval doesn't cover the resolution");
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_push_on_top_of_a_host_made_update_needs_a_new_review() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    r.codehost.push_to(&pr);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    // The first pass withdraws the approval of the old head; the next sees a head nobody reviewed.
+    r.factory.reconcile().await.unwrap();
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
 }
 
 #[tokio::test]

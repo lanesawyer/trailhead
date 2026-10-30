@@ -30,10 +30,10 @@ Assumed to work, not yet tested (TRAIL-97): Claude Code's exact setup (likely `A
 Decided: repos describe their stack and a fixed set of named checks. mise is an implementation detail the user never touches.
 
 ```toml
-[stack]
+[factory.stack]
 tools = { rust = "stable", node = "lts" }
 
-[checks]
+[factory.checks]
 fmt       = "cargo fmt --check"
 fmt_fix   = "cargo fmt"
 lint      = "cargo clippy -- -D warnings"
@@ -44,9 +44,9 @@ build     = "cargo build"
 
 - **Fixed names, optional entries.** `setup`, `fmt`, `fmt_fix`, `lint`, `typecheck`, `test`, `build`. A repo leaves out what it doesn't have.
 - **Contract.** Exit code 0 is a pass. Structured output (JUnit, SARIF) can come later.
-- **Generated, not hand-written.** The factory turns `[stack]` and `[checks]` into mise tools and tasks when it bootstraps a sandbox. A repo with its own `mise.toml` keeps it, with the factory's tasks merged in.
+- **Generated, not hand-written.** The factory turns `[factory.stack]` and `[factory.checks]` into mise tools and tasks when it bootstraps a sandbox. A repo with its own `mise.toml` keeps it, with the factory's tasks merged in.
 - **Policy refers to names.** Gates say which checks must pass (`require = ["fmt", "lint", "test"]`), so policy reads the same across stacks.
-- **Onboarding.** An agent can inspect a new repo and propose `[stack]` and `[checks]` for a human to confirm.
+- **Onboarding.** An agent can inspect a new repo and propose `[factory.stack]` and `[factory.checks]` for a human to confirm.
 
 This lives in the per-repo factory file, with agent profiles ([agents.md](agents.md)) and gate policy ([review.md](review.md)).
 
@@ -82,7 +82,7 @@ Decided: registry egress only during install phases. The risk isn't secrets, sin
 
 ## Docker
 
-Decided 2026-10-28 (TRAIL-119): `trailhead-compute-docker` runs sandboxes as containers on a Docker engine (or Podman's Docker API), for agents on your own machine. `factory.toml` picks it with `[compute] kind = "docker"`, optionally with `image`, `network` and `runtime` (an OCI runtime such as `runsc`). The `trailhead-factory` binary needs the `docker` feature for it.
+Decided 2026-10-28 (TRAIL-119): `trailhead-compute-docker` runs sandboxes as containers on a Docker engine (or Podman's Docker API), for agents on your own machine. `.trailhead.toml` picks it with `[factory.compute] kind = "docker"`, optionally with `image`, `network` and `runtime` (an OCI runtime such as `runsc`). The `trailhead-factory` binary needs the `docker` feature for it.
 
 - **The engine on a dev machine.** `mise run docker-up` starts rootless Docker in a lima VM with no host mounts, so nothing is installed system-wide and a container escape lands in the VM, not beside the control plane and the Trailhead database. mise installs lima and the Docker CLI; on Linux, qemu and access to `/dev/kvm` are the one prerequisite it can't install (on macOS lima uses the built-in Virtualization framework). `docker_host` in `mise.toml` is the VM's socket, and the Docker tasks set `DOCKER_HOST` to it. colima was tried first and dropped: it forces lima's `user-v2` network on Linux, and qemu 10.2 aborted in that path (`net_fill_rstate: Assertion 'size == 0'`) as soon as an image build pulled packages. lima's own `docker` template uses slirp and doesn't hit it.
 - **Identity and labels.** A sandbox's id is its container name, which survives a restore. Docker labels can't change after creation, so labels and egress live in one JSON state file per sandbox under `<data dir>/factory/docker`; the container carries only `dev.trailhead.sandbox=<name>`, which `list` filters on (`docker ps --filter label=dev.trailhead.sandbox`).

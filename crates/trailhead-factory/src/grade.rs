@@ -122,7 +122,7 @@ pub fn is_test_path(path: &str) -> bool {
 
 /// Files that define what the repo's checks run: editing one can weaken the gate it feeds.
 const CHECK_DEFINITIONS: &[&str] = &[
-    "factory.toml",
+    ".trailhead.toml",
     "mise.toml",
     ".mise.toml",
     "Makefile",
@@ -227,7 +227,7 @@ mod tests {
         Rules {
             two: v(&["crates/**"]),
             three: v(&["**/Cargo.toml", "Cargo.lock", "**/migrations/**"]),
-            four: v(&[".github/**", "factory.toml"]),
+            four: v(&[".github/**", ".trailhead.toml"]),
         }
     }
 
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(g.describe(), "Grade 2 (task was 1; crates/a/src/lib.rs changed)");
         let g = grader(&r).grade(Some(3), &[modified("crates/a/src/lib.rs")]);
         assert_eq!((g.grade, g.reasons.is_empty()), (3, true), "a higher task grade stands");
-        let g = grader(&r).grade(Some(2), &[modified("factory.toml")]);
+        let g = grader(&r).grade(Some(2), &[modified(".trailhead.toml")]);
         assert_eq!(g.grade, 4);
     }
 

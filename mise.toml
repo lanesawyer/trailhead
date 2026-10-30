@@ -25,7 +25,7 @@ description = "Run the factory's control plane for this repo (needs a `factory` 
 run = [
   "cargo build --release -p trailhead-daemon --bin trailhead-daemon",
   "cargo build --release -p trailhead-factory-host",
-  "fnox exec -- {{config_root}}/target/release/trailhead-factory run --config {{config_root}}/factory.toml --daemon {{config_root}}/target/release/trailhead-daemon",
+  "fnox exec -- {{config_root}}/target/release/trailhead-factory run --config {{config_root}}/.trailhead.toml --daemon {{config_root}}/target/release/trailhead-daemon",
 ]
 
 [tasks.docker-up]
