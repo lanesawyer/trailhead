@@ -7,7 +7,8 @@ docker-cli = "latest"
 fnox = { version = "latest", workflow = "release.yml" }
 lima = "latest"
 mdbook = "0.5.4"
-mdbook-mermaid = "latest"
+# Not in the mise registry; the preprocessor ships prebuilt binaries on GitHub (0.16+ supports mdBook 0.5).
+"github:badboy/mdbook-mermaid" = "latest"
 rust = "latest"
 
 [tasks.test-live-sprites]

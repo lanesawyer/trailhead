@@ -142,4 +142,9 @@ pub trait CodeHost: Send + Sync {
     /// The repo's CI on the PR's current head: its check runs and commit statuses, which are pending until every one
     /// has finished and at least one exists, and failed with the names of those that failed as soon as any has.
     async fn ci(&self, pr: &PrRef) -> Result<Ci>;
+    /// The end of the log of each of the named failed checks on the PR's current head, as (check, log), for the
+    /// checks the host keeps a log of; a check without one is left out. Best effort: a host with no logs says none.
+    async fn ci_logs(&self, _pr: &PrRef, _checks: &[String]) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
@@ -16,11 +17,13 @@ pub struct Script {
     pub gate: Option<Arc<Notify>>,
     /// Usage window readings reported before the first step, as Claude Code does at session start.
     pub quota: Vec<(String, u32, i64)>,
+    /// A tool call that takes this long after the steps, sending no events meanwhile.
+    pub slow_tool: Option<Duration>,
 }
 
 impl Script {
     pub fn new(outcome: RunOutcome) -> Script {
-        Script { steps: Vec::new(), outcome, hang: false, gate: None, quota: Vec::new() }
+        Script { steps: Vec::new(), outcome, hang: false, gate: None, quota: Vec::new(), slow_tool: None }
     }
 
     pub fn hang(mut self) -> Script {
@@ -31,6 +34,12 @@ impl Script {
     /// Reports `window` as `used_percent` full, resetting at `resets_at` (unix seconds).
     pub fn quota(mut self, window: &str, used_percent: u32, resets_at: i64) -> Script {
         self.quota.push((window.to_string(), used_percent, resets_at));
+        self
+    }
+
+    /// Runs a tool call that takes `time` after the steps and sends no events until it's done, like `cargo test`.
+    pub fn slow_tool(mut self, time: Duration) -> Script {
+        self.slow_tool = Some(time);
         self
     }
 
@@ -95,6 +104,11 @@ impl Harness for ScriptedHarness {
             let _ = events.send(RunEvent::Usage { model: ctx.model.clone(), usage });
             // Lets a canceller act between steps, as a real model call would.
             tokio::task::yield_now().await;
+        }
+        if let Some(time) = script.slow_tool {
+            let _ = events.send(RunEvent::ToolCall { name: "Bash".into(), detail: Some("cargo test".into()) });
+            tokio::time::sleep(time).await;
+            let _ = events.send(RunEvent::ToolResult);
         }
         if let Some(gate) = &script.gate {
             gate.notified().await;

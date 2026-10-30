@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -19,6 +19,8 @@ use uuid::Uuid;
 /// The metadata key the factory's run fields live under.
 pub const METADATA_KEY: &str = "factory";
 
+const PAGE_SIZE: i64 = 1000;
+
 #[derive(Clone)]
 pub struct CoreTracker {
     store: Arc<Store>,
@@ -27,12 +29,36 @@ pub struct CoreTracker {
     /// Set when acting as one of `ctx`'s sub-agents, by the part after its name.
     sub: Option<String>,
     agent: String,
+    /// The bad factory metadata already noted on each task (key to note), so each is said once.
+    flagged: Arc<Mutex<HashMap<String, String>>>,
+    /// How many tasks one `list_tasks` call reads; longer lists are read a page at a time.
+    page_size: i64,
 }
 
 impl CoreTracker {
     /// A tracker acting as the agent behind `ctx`, whose full name is `agent`.
     pub fn new(store: Arc<Store>, ctx: Ctx, agent: &str) -> CoreTracker {
-        CoreTracker { store, ctx, sub: None, agent: agent.to_string() }
+        CoreTracker { store, ctx, sub: None, agent: agent.to_string(), flagged: Arc::default(), page_size: PAGE_SIZE }
+    }
+
+    /// Read lists `page_size` tasks at a time instead of the default, so a test needn't make a thousand tasks.
+    pub fn with_page_size(mut self, page_size: usize) -> CoreTracker {
+        self.page_size = page_size.max(1) as i64;
+        self
+    }
+
+    /// Every task matching `filter`, read a page at a time. `filter.limit` and `filter.offset` are ignored.
+    async fn list_all(&self, ctx: &Ctx, filter: TaskFilter) -> Result<Vec<trailhead_core::Task>> {
+        let mut all = Vec::new();
+        loop {
+            let page = TaskFilter { limit: Some(self.page_size), offset: Some(all.len() as i64), ..filter.clone() };
+            let tasks = self.store.list_tasks(ctx, page).await.map_err(map_err)?;
+            let full = tasks.len() as i64 >= self.page_size;
+            all.extend(tasks);
+            if !full {
+                return Ok(all);
+            }
+        }
     }
 
     /// A tracker for whoever holds this credential's token, as a daemon would connect.
@@ -85,18 +111,42 @@ impl CoreTracker {
         })
     }
 
-    /// Converts the listed tasks, skipping (with a warning) any whose factory metadata won't parse, so one
-    /// bad value doesn't stop the factory for the whole project.
+    /// Converts the listed tasks, skipping any whose factory metadata won't parse, so one bad value doesn't
+    /// stop the factory for the whole project. A skipped task gets a note naming the problem, once.
     async fn tasks(&self, ctx: &Ctx, tasks: impl IntoIterator<Item = trailhead_core::Task>) -> Result<Vec<Task>> {
         let mut out = Vec::new();
         for t in tasks {
             if let Err(e) = run_update(&t) {
-                tracing::warn!(task = %t.key, error = %e, "skipping a task with bad factory metadata");
+                self.flag_bad_metadata(ctx, &t, &e.to_string()).await;
                 continue;
             }
             out.push(self.task(ctx, t).await?);
         }
         Ok(out)
+    }
+
+    /// Notes on the task, and logs, that its factory metadata is skipped, unless this note is already there.
+    async fn flag_bad_metadata(&self, ctx: &Ctx, t: &trailhead_core::Task, error: &str) {
+        let fields = bad_fields(t);
+        let fields = if fields.is_empty() { String::new() } else { format!(" in {}", fields.join(", ")) };
+        let body = format!(
+            "The factory is skipping this task: its `{METADATA_KEY}` metadata is malformed{fields} ({error}). \
+             Fix or remove that field and the factory will pick the task up again."
+        );
+        if self.flagged.lock().unwrap().get(&t.key) == Some(&body) {
+            return;
+        }
+        tracing::warn!(task = %t.key, error, "skipping a task with bad factory metadata");
+        // A note from before a restart counts, so a restart doesn't repeat it.
+        let posted = match self.store.list_comments(ctx, &t.key).await {
+            Ok(cs) if cs.iter().any(|c| c.kind == CommentKind::Note && c.body == body) => true,
+            _ => self.comment(&TaskKey(t.key.clone()), CommentKind::Note, &body).await.is_ok(),
+        };
+        if posted {
+            self.flagged.lock().unwrap().insert(t.key.clone(), body);
+        } else {
+            tracing::warn!(task = %t.key, "couldn't note the bad factory metadata on the task");
+        }
     }
 
     async fn set_status(&self, task: &TaskKey, to: trailhead_core::Status) -> Result<()> {
@@ -121,6 +171,14 @@ fn run_update(t: &trailhead_core::Task) -> Result<RunUpdate> {
         }
         None => Ok(RunUpdate::default()),
     }
+}
+
+/// The fields of the task's factory metadata that don't parse on their own.
+fn bad_fields(t: &trailhead_core::Task) -> Vec<String> {
+    let Some(serde_json::Value::Object(map)) = t.metadata.get(METADATA_KEY) else { return Vec::new() };
+    let bad =
+        |(k, v): &(&String, &serde_json::Value)| serde_json::from_value::<RunUpdate>(json!({ k.as_str(): v })).is_err();
+    map.iter().filter(bad).map(|(k, _)| format!("`{k}`")).collect()
 }
 
 fn same_title(a: &str, b: &str) -> bool {
@@ -184,13 +242,12 @@ impl Tracker for CoreTracker {
                 let filter = TaskFilter {
                     project: Some(project.to_string()),
                     parent: Some(queue.0.clone()),
-                    limit: Some(1000),
                     ..TaskFilter::default()
                 };
                 let queued: std::collections::HashSet<_> =
-                    self.store.list_tasks(&ctx, filter).await.map_err(map_err)?.into_iter().map(|t| t.id).collect();
-                let ready =
-                    self.store.ready(&ctx, Some(project), Some(1000), GradeFilter::Any).await.map_err(map_err)?;
+                    self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id).collect();
+                // Unlimited: a cap here would hide queued tasks behind other ready ones.
+                let ready = self.store.ready(&ctx, Some(project), Some(-1), GradeFilter::Any).await.map_err(map_err)?;
                 ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
             }
         };
@@ -264,8 +321,8 @@ impl Tracker for CoreTracker {
 
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter { project: Some(project.to_string()), limit: Some(1000), ..TaskFilter::default() };
-        let tasks = self.store.list_tasks(&ctx, filter).await.map_err(map_err)?;
+        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let tasks = self.list_all(&ctx, filter).await?;
         self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
     }
 
@@ -376,8 +433,8 @@ impl Tracker for CoreTracker {
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter { project: Some(project.to_string()), limit: Some(1000), ..TaskFilter::default() };
-        let tasks = self.store.list_tasks(&ctx, filter).await.map_err(map_err)?;
+        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let tasks = self.list_all(&ctx, filter).await?;
         Ok(tasks.into_iter().find(|t| same_title(&t.title, title)).map(|t| TaskKey(t.key)))
     }
 

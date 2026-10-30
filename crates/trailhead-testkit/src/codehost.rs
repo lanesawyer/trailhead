@@ -23,6 +23,8 @@ pub struct FakePr {
     pub files: Option<Vec<ChangedFile>>,
     /// CI on the PR's head: pending until a test says otherwise.
     pub ci: CiState,
+    /// The log tails of failed checks, by check name.
+    pub ci_logs: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -108,6 +110,11 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.ci = ci).unwrap();
     }
 
+    /// Sets the log tails the host keeps of failed checks.
+    pub fn set_ci_logs(&self, pr: &PrRef, logs: Vec<(String, String)>) {
+        self.find(pr, |p, _| p.ci_logs = logs).unwrap();
+    }
+
     /// Someone pushes to the PR's branch, moving its head and restarting CI.
     pub fn push_to(&self, pr: &PrRef) {
         let (key, head) = self
@@ -172,6 +179,7 @@ impl CodeHost for FakeCodeHost {
             behind: false,
             files: None,
             ci: CiState::Pending,
+            ci_logs: Vec::new(),
         });
         Ok(r)
     }
@@ -284,6 +292,10 @@ impl CodeHost for FakeCodeHost {
     async fn ci(&self, pr: &PrRef) -> Result<Ci> {
         let head = CodeHost::head(self, pr).await?;
         self.find(pr, |p, _| Ci { head, state: p.ci.clone() })
+    }
+
+    async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {
+        self.find(pr, |p, _| p.ci_logs.iter().filter(|(n, _)| checks.contains(n)).cloned().collect())
     }
 
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
