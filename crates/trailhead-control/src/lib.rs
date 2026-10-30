@@ -530,7 +530,7 @@ impl Factory {
             return self.tracker.ready(self.project(), None, room).await;
         }
         // Ungraded tasks mustn't crowd graded ones out of the limit.
-        let ready = self.tracker.ready(self.project(), queue.as_ref(), 1000).await?;
+        let ready = self.tracker.ready(self.project(), queue.as_ref(), usize::MAX).await?;
         let (graded, ungraded): (Vec<Task>, Vec<Task>) = ready.into_iter().partition(|t| t.grade.is_some());
         for task in ungraded {
             self.report_ungraded(&task).await;

@@ -19,6 +19,8 @@ use uuid::Uuid;
 /// The metadata key the factory's run fields live under.
 pub const METADATA_KEY: &str = "factory";
 
+const PAGE_SIZE: i64 = 1000;
+
 #[derive(Clone)]
 pub struct CoreTracker {
     store: Arc<Store>,
@@ -29,12 +31,34 @@ pub struct CoreTracker {
     agent: String,
     /// The bad factory metadata already noted on each task (key to note), so each is said once.
     flagged: Arc<Mutex<HashMap<String, String>>>,
+    /// How many tasks one `list_tasks` call reads; longer lists are read a page at a time.
+    page_size: i64,
 }
 
 impl CoreTracker {
     /// A tracker acting as the agent behind `ctx`, whose full name is `agent`.
     pub fn new(store: Arc<Store>, ctx: Ctx, agent: &str) -> CoreTracker {
-        CoreTracker { store, ctx, sub: None, agent: agent.to_string(), flagged: Arc::default() }
+        CoreTracker { store, ctx, sub: None, agent: agent.to_string(), flagged: Arc::default(), page_size: PAGE_SIZE }
+    }
+
+    /// Read lists `page_size` tasks at a time instead of the default, so a test needn't make a thousand tasks.
+    pub fn with_page_size(mut self, page_size: usize) -> CoreTracker {
+        self.page_size = page_size.max(1) as i64;
+        self
+    }
+
+    /// Every task matching `filter`, read a page at a time. `filter.limit` and `filter.offset` are ignored.
+    async fn list_all(&self, ctx: &Ctx, filter: TaskFilter) -> Result<Vec<trailhead_core::Task>> {
+        let mut all = Vec::new();
+        loop {
+            let page = TaskFilter { limit: Some(self.page_size), offset: Some(all.len() as i64), ..filter.clone() };
+            let tasks = self.store.list_tasks(ctx, page).await.map_err(map_err)?;
+            let full = tasks.len() as i64 >= self.page_size;
+            all.extend(tasks);
+            if !full {
+                return Ok(all);
+            }
+        }
     }
 
     /// A tracker for whoever holds this credential's token, as a daemon would connect.
@@ -218,13 +242,12 @@ impl Tracker for CoreTracker {
                 let filter = TaskFilter {
                     project: Some(project.to_string()),
                     parent: Some(queue.0.clone()),
-                    limit: Some(1000),
                     ..TaskFilter::default()
                 };
                 let queued: std::collections::HashSet<_> =
-                    self.store.list_tasks(&ctx, filter).await.map_err(map_err)?.into_iter().map(|t| t.id).collect();
-                let ready =
-                    self.store.ready(&ctx, Some(project), Some(1000), GradeFilter::Any).await.map_err(map_err)?;
+                    self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id).collect();
+                // Unlimited: a cap here would hide queued tasks behind other ready ones.
+                let ready = self.store.ready(&ctx, Some(project), Some(-1), GradeFilter::Any).await.map_err(map_err)?;
                 ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
             }
         };
@@ -298,8 +321,8 @@ impl Tracker for CoreTracker {
 
     async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter { project: Some(project.to_string()), limit: Some(1000), ..TaskFilter::default() };
-        let tasks = self.store.list_tasks(&ctx, filter).await.map_err(map_err)?;
+        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let tasks = self.list_all(&ctx, filter).await?;
         self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
     }
 
@@ -410,8 +433,8 @@ impl Tracker for CoreTracker {
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter { project: Some(project.to_string()), limit: Some(1000), ..TaskFilter::default() };
-        let tasks = self.store.list_tasks(&ctx, filter).await.map_err(map_err)?;
+        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let tasks = self.list_all(&ctx, filter).await?;
         Ok(tasks.into_iter().find(|t| same_title(&t.title, title)).map(|t| TaskKey(t.key)))
     }
 
