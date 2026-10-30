@@ -588,6 +588,24 @@ async fn a_merge_the_agent_started_itself_is_published_as_a_merge_commit() {
 }
 
 #[tokio::test]
+async fn a_merge_with_conflict_markers_left_in_it_is_not_published() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.daemon.leave_conflict_markers(&["docs/guide.md"]);
+    let before = r.codehost.commits(&pr.repo, "factory/trail-1").len();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.codehost.commits(&pr.repo, "factory/trail-1").len(), before, "nothing published");
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    assert!(comments.iter().any(|c| c.body.contains("docs/guide.md")), "{comments:?}");
+}
+
+#[tokio::test]
 async fn last_review_reads_the_reviewers_verdict_and_the_latest_wins() {
     let r = rig().await;
     let key = r.task("Add a greeting").await;
