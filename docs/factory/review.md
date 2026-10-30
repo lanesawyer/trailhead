@@ -86,18 +86,21 @@ The control plane acts as the merger. It is the factory project's only delegated
 flowchart TD
     task["PR in review"] --> grade["Grade<br/>the task's, raised by the diff"]
     grade --> gates{"Grade's gates pass on the current head?<br/>sandbox checks, CI, agent review, human"}
-    gates -->|"no"| wait["Record what it waits on; evaluate again<br/>after the next verdict, push, CI run or approval"]
+    gates -->|"no: waiting on a person, a verdict or a pending check"| wait["Record what it waits on; evaluate again<br/>after the next verdict, push, CI run or approval"]
+    gates -->|"CI fails on the head"| left{"Reworks left?<br/>max_conflict_reworks"}
     gates -->|"yes"| approved["Task moves to approved"]
     approved --> mode{"merge mode"}
     mode -->|"off"| human["You merge"]
     mode -->|"shadow"| shadow["Post what it would do"] --> human
     mode -->|"on"| behind{"Behind main?"}
     behind -->|"yes"| update["Merge main into the branch"]
-    update -->|"conflict"| rework["Back to running: rework on main"]
+    update -->|"conflict"| left
     update -->|"clean"| ci["Wait for CI on the new head"]
     ci --> gates
     behind -->|"no"| merge["Squash-merge, pinned to the head"]
-    merge -->|"conflict"| rework
+    merge -->|"conflict"| left
+    left -->|"yes: unapprove if approved"| rework["Back to running: rework on main or the failure"]
+    left -->|"no"| parked["Parked with a question"]
     merge -->|"merged"| done["Task done"]
     human --> done
 ```

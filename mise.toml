@@ -8,7 +8,7 @@ fnox = { version = "latest", workflow = "release.yml" }
 lima = "latest"
 mdbook = "0.5.4"
 # Not in the mise registry; the preprocessor ships prebuilt binaries on GitHub (0.16+ supports mdBook 0.5).
-"github:badboy/mdbook-mermaid" = "latest"
+"github:badboy/mdbook-mermaid" = "0.16"
 rust = "latest"
 
 [tasks.test-live-sprites]

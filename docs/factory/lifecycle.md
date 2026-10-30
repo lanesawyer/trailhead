@@ -29,12 +29,15 @@ flowchart TD
     rounds -->|"yes: reopened with the review"| queued
     rounds -->|"no"| parked
     review -->|"approves"| gates{"Gates pass?<br/>checks, CI, human by grade"}
-    gates -->|"no: wait"| gates
+    gates -->|"no: waiting on a person or a pending check"| gates
+    gates -->|"CI fails on the head"| reworks{"Reworks left?<br/>max_conflict_reworks"}
     gates -->|"yes"| approved["approved"]
     approved --> merge["Merge<br/>the merger or a person"]
-    merge -->|"conflict: rework on top of main"| queued
+    merge -->|"conflict"| reworks
+    reworks -->|"yes: rework on top of main, or fix the CI failure"| queued
+    reworks -->|"no"| parked
     merge -->|"merged"| done["done"]
-    pr -->|"PR conflicts: reconcile reopens"| queued
+    pr -->|"PR conflicts: reconcile reopens"| reworks
     pr -->|"PR closed unmerged"| parked
 ```
 
