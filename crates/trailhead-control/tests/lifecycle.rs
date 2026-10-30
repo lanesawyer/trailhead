@@ -2696,6 +2696,24 @@ async fn merge_mode_on_without_reviewer_rights_falls_back_to_saying_what_it_woul
     assert!(said(&r).last().unwrap().contains("passed, but the factory can't move the task to approved"));
 }
 
+#[tokio::test]
+async fn no_runs_start_while_the_server_is_down() {
+    let mut r = rig();
+    let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = up.clone();
+    r.factory = r.factory.with_server_check(Box::new(move || {
+        let up = seen.load(std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move { if up { Ok(()) } else { Err("connection refused".to_string()) } })
+    }));
+    r.tracker.add_task("TRAIL", "First", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert!(r.factory.tick().await.unwrap().is_empty(), "nothing starts while the server is down");
+    assert!(r.compute.list(&Default::default()).await.unwrap().is_empty(), "no sandbox was acquired");
+    up.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(r.factory.tick().await.unwrap().len(), 1, "runs start once it is back");
+}
+
 #[tokio::test(start_paused = true)]
 async fn reviews_that_end_without_a_verdict_back_off_and_park_at_the_cap() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 3"));
