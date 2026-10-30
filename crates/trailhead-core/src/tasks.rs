@@ -19,7 +19,7 @@ use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 use crate::when;
 
-pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on, grade";
+pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on, grade, duplicate_of";
 
 fn prefixed_cols(prefix: &str) -> String {
     TASK_COLS.split(", ").map(|c| format!("{prefix}.{c}")).collect::<Vec<_>>().join(", ")
@@ -51,6 +51,7 @@ pub(crate) fn task_from_row(row: &Row) -> Result<Task> {
         scheduled_tz: row.get(21)?,
         due_on: get_opt_date(row, 22)?,
         grade: row.get(23)?,
+        duplicate_of: get_opt_uuid(row, 24)?,
     })
 }
 
@@ -87,7 +88,7 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result
             &format!(
                 "UPDATE tasks SET title = ?1, description = ?2, status = ?3, priority = ?4, due_at = ?5, due_tz = ?6,
                  parent_id = ?7, metadata = ?8, deleted_at = ?9, version = version + 1, updated_at = ?10,
-                 scheduled_on = ?13, scheduled_at = ?14, scheduled_tz = ?15, due_on = ?16, due_by = ?17, grade = ?18 WHERE id = ?11 AND version = ?12 RETURNING {TASK_COLS}"
+                 scheduled_on = ?13, scheduled_at = ?14, scheduled_tz = ?15, due_on = ?16, due_by = ?17, grade = ?18, duplicate_of = ?19 WHERE id = ?11 AND version = ?12 RETURNING {TASK_COLS}"
             ),
             libsql::params![
                 after.title,
@@ -108,6 +109,7 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result
                 opt_date_value(after.due_on),
                 opt_ts_value(due_by),
                 after.grade,
+                opt_uuid_value(after.duplicate_of),
             ],
         )
         .await?;
@@ -251,6 +253,9 @@ pub struct TaskPatch {
     pub priority: Option<i64>,
     /// `Some(None)` clears the grade. Agents can only raise an existing one.
     pub grade: Option<Option<i64>>,
+    /// The task this one duplicates, which needs it cancelled (set `status` in the same patch).
+    /// `Some(None)` clears it. Leaving `cancelled` clears it too.
+    pub duplicate_of: Option<Option<String>>,
     /// A new day drops any due time unless `due_at` comes with it; clearing it
     /// removes the deadline.
     pub due_on: Option<Option<Date>>,
@@ -420,6 +425,10 @@ pub struct TaskDetail {
     /// Keys of tasks this one blocks.
     pub blocks: Vec<String>,
     pub comments: Vec<Comment>,
+    /// Key of the task this one was cancelled as a duplicate of.
+    pub duplicate_of: Option<String>,
+    /// Keys of tasks cancelled as duplicates of this one.
+    pub duplicates: Vec<String>,
 }
 
 impl Store {
@@ -635,6 +644,24 @@ impl Store {
                 }
                 check_review(tx, &before, to).await?;
                 after.status = to;
+                if to != Status::Cancelled {
+                    after.duplicate_of = None;
+                }
+            }
+            if let Some(d) = &patch.duplicate_of {
+                after.duplicate_of = match d {
+                    Some(d) => {
+                        let d = find_task(&tx.conn, ctx, d, false).await?;
+                        if d.id == before.id {
+                            return Err(Error::Invalid("a task can't duplicate itself".into()));
+                        }
+                        if after.status != Status::Cancelled {
+                            return Err(Error::Invalid("only a cancelled task can be a duplicate".into()));
+                        }
+                        Some(d.id)
+                    }
+                    None => None,
+                };
             }
             if after == before {
                 return Ok(before);
@@ -709,7 +736,24 @@ impl Store {
             .await?;
         let blocks = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
         let comments = list_comments_for(&conn, task.id).await?;
-        Ok(TaskDetail { task, claim, blocked_by, blocks, comments })
+        let duplicate_of = match task.duplicate_of {
+            Some(id) => {
+                let original = load_task(&conn, ctx.workspace_id, &id.to_string(), true).await?;
+                Some(visible_key(ctx, &original))
+            }
+            None => None,
+        };
+        let rows = conn
+            .query(
+                &format!(
+                    "SELECT {} FROM tasks t WHERE t.duplicate_of = ?1 AND t.deleted_at IS NULL ORDER BY t.key",
+                    prefixed_cols("t")
+                ),
+                [task.id.to_string()],
+            )
+            .await?;
+        let duplicates = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
+        Ok(TaskDetail { task, claim, blocked_by, blocks, comments, duplicate_of, duplicates })
     }
 
     pub async fn list_tasks(&self, ctx: &Ctx, filter: TaskFilter) -> Result<Vec<Task>> {
@@ -795,6 +839,46 @@ impl Store {
             )
             .await?;
         collect(rows, task_from_row).await
+    }
+
+    /// Unfinished tasks in `project` whose titles share most of their significant words with
+    /// `title`, closest first. For warning about a probable duplicate; `exclude` leaves out a
+    /// task just created.
+    pub async fn similar_tasks(
+        &self,
+        ctx: &Ctx,
+        project: &str,
+        title: &str,
+        exclude: Option<Uuid>,
+    ) -> Result<Vec<Task>> {
+        let words = title_words(title);
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.reader()?;
+        let project = find_project(&conn, ctx, project).await?;
+        let q = words.iter().map(|w| format!("\"{w}\"")).collect::<Vec<_>>().join(" OR ");
+        let rows = conn
+            .query(
+                &format!(
+                    "SELECT {TASK_COLS} FROM tasks t WHERE t.workspace_id = ?1 AND t.project_id = ?2
+                       AND t.deleted_at IS NULL AND t.status NOT IN ('done', 'cancelled')
+                       AND t.rowid IN (SELECT rowid FROM tasks_fts WHERE tasks_fts MATCH ?3)"
+                ),
+                libsql::params![ctx.workspace_id.to_string(), project.id.to_string(), format!("title : ({q})")],
+            )
+            .await?;
+        // Needs two shared words (one, for a title with only one), and at least half of the new title's.
+        let need = words.len().min(2).max(words.len().div_ceil(2));
+        let mut scored: Vec<_> = collect(rows, task_from_row)
+            .await?
+            .into_iter()
+            .filter(|t| Some(t.id) != exclude)
+            .map(|t| (title_words(&t.title).intersection(&words).count(), t))
+            .filter(|(n, _)| *n >= need)
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.key.cmp(&b.1.key)));
+        Ok(scored.into_iter().take(5).map(|(_, t)| t).collect())
     }
 
     /// Full-text search over titles, descriptions and comments.
@@ -900,6 +984,18 @@ impl Store {
             })
             .collect())
     }
+}
+
+const STOP_WORDS: &[&str] =
+    &["the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use"];
+
+/// The lowercase words of a title that say what it's about.
+fn title_words(title: &str) -> std::collections::BTreeSet<String> {
+    title
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|w| w.chars().count() >= 3 && !STOP_WORDS.contains(&w.as_str()))
+        .collect()
 }
 
 /// Statuses as a SQL list. They're fixed identifiers, so inlining them is safe.
