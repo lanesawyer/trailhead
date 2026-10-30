@@ -61,6 +61,14 @@ impl SpritesCompute {
         self
     }
 
+    /// Whether the token is good for the API: lists one Sprite.
+    pub async fn check(&self) -> Result<()> {
+        let mut url = self.url(&[]);
+        url.query_pairs_mut().append_pair("max_results", "1");
+        ok(send_idempotent(self.quick_request(Method::GET, url)).await?).await?;
+        Ok(())
+    }
+
     /// The recent output of a program started with `start`, for diagnosing a sandbox.
     pub async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
         let mut url = self.url(&[&id.0, "services", program, "logs"]);
