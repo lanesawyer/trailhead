@@ -588,7 +588,27 @@ async fn conflict_and_rework(r: &Rig, key: &TaskKey, pr: &trailhead_factory::PrR
         r.harness.push(Role::Reviewer, Script::new(approve()));
         r.factory.tick().await.unwrap();
         assert_eq!(r.show(key).await.status, Status::InReview);
+        // The host's answer for the pushed head is in: the one poll after a push is spent on it.
+        assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
     }
+}
+
+#[tokio::test]
+async fn a_stale_conflict_right_after_a_conflict_rework_is_read_once_as_unknown() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    // The host still says `false`, which is the head from before the push.
+    r.factory.tick().await.unwrap();
+    assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty(), "no second rework on the stale answer");
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.conflict_reworks, Some(1));
+    // Still `false` on the next poll, so it's real.
+    assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
 }
 
 #[tokio::test]
