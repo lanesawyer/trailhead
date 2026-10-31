@@ -53,4 +53,5 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 | Protocol | Strongly typed | Shared Rust types over Iroh; daemon name TBD |
 | Specs | Human-led, written with AI, entered through Trailhead | Approved spec is the source of acceptance criteria |
 | Control plane location | Runs anywhere | Starts on the maintainer's machine |
+| Control planes and repos | One control plane per machine, many repos | Per-repo settings live in each repo's `.trailhead.toml`; host settings (cross-repo `max_sandboxes`, `pause_at`) and the repo list live in the user `config.toml` (TRAIL-167) |
 | Human interface | Native Bevy app with feathers ([ui.md](ui.md)) | In this repo outside the default build; a client of the API like any other |
