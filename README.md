@@ -29,7 +29,7 @@ Agents act as themselves, never as you: `trailhead agent add claude` creates an 
 
 ## The factory
 
-The factory isn't packaged yet. It runs from this repo with its dev setup: a Sprites token and a Claude token through [fnox](https://github.com/jdx/fnox), a `factory` agent, and the repo's settings in `.trailhead.toml`. Then:
+The factory isn't packaged yet. It runs from this repo with its dev setup: a Sprites token and a Claude token (from the environment, [fnox](https://github.com/jdx/fnox) if installed, or `trailhead factory login`), a `factory` agent, and the repo's settings in `.trailhead.toml`. Then:
 
 ```sh
 mise run factory                                               # build and run the control plane

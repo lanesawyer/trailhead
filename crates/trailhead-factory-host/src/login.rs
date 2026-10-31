@@ -1,6 +1,6 @@
 //! `trailhead factory login sprites|claude|github|github-writer`: saves the factory's secrets in the credential store
-//! (the OS keyring, else a `0600` file), so `run` needs no environment variables or fnox. The environment still wins when set.
-//! Secrets are read from stdin and never printed.
+//! (the OS keyring, else a `0600` file), so `run` needs no environment variables or fnox. The environment wins when
+//! set, then fnox, then these. Secrets are read from stdin and never printed.
 
 use std::io::{BufRead, IsTerminal};
 
@@ -9,6 +9,8 @@ use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_factory::Repo;
 use trailhead_server::creds::{Cred, CredStore, Saved};
+
+use crate::fnox::Fnox;
 
 pub const SPRITES: Cred<'static> = Cred::Secret("sprites");
 pub const CLAUDE: Cred<'static> = Cred::Secret("claude");
@@ -37,11 +39,41 @@ pub enum Login {
     },
 }
 
-/// A secret from the environment if it's set and not blank, else the one saved by `login`.
-pub fn resolve(env: Option<String>, creds: &CredStore, cred: Cred) -> Option<String> {
-    env.map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .or_else(|| creds.read(cred).map(|(v, _)| v).filter(|v| !v.is_empty()))
+/// Where a secret came from, for the startup log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Env,
+    Fnox,
+    Keyring,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Env => "env",
+            Source::Fnox => "fnox",
+            Source::Keyring => "keyring",
+        }
+    }
+}
+
+/// A secret from the environment if it's set and not blank, else the one fnox defines, else the one saved by `login`.
+/// Logs which source it came from, never the value.
+pub fn resolve(name: &str, env: Option<String>, fnox: &Fnox, creds: &CredStore, cred: Cred) -> Option<String> {
+    let found = match env.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+        Some(v) => Some((v, Source::Env)),
+        None => match fnox.get(name) {
+            Some(v) => Some((v, Source::Fnox)),
+            None => creds.read(cred).map(|(v, _)| v).filter(|v| !v.is_empty()).map(|v| (v, Source::Keyring)),
+        },
+    };
+    match found {
+        Some((v, source)) => {
+            tracing::info!("{name} from {}", source.label());
+            Some(v)
+        }
+        None => None,
+    }
 }
 
 /// The first line of `input`, trimmed; prompts on stderr first when stdin is a terminal.
@@ -139,8 +171,8 @@ pub async fn github_writer(
 
 /// The gateway's GitHub token, from `GITHUB_WRITER_TOKEN` or the saved one. Never falls back to the read token.
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
-pub fn github_writer_token(creds: &CredStore) -> Option<String> {
-    resolve(std::env::var("GITHUB_WRITER_TOKEN").ok(), creds, GITHUB_WRITER)
+pub fn github_writer_token(fnox: &Fnox, creds: &CredStore) -> Option<String> {
+    resolve("GITHUB_WRITER_TOKEN", std::env::var("GITHUB_WRITER_TOKEN").ok(), fnox, creds, GITHUB_WRITER)
 }
 
 pub async fn run(cmd: Login, creds: &CredStore) -> Result<(), String> {
@@ -186,15 +218,96 @@ mod tests {
         h.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {token}"))
     }
 
+    /// A script standing in for `fnox`: `export --format json` defines SPRITES_TOKEN and a blank CLAUDE_CODE_OAUTH_TOKEN,
+    /// and not GITHUB_TOKEN. With `fail` it exits 1 as a refused provider login would.
+    fn fake_fnox(dir: &tempfile::TempDir, fail: bool) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.path().join("fnox");
+        let body = if fail {
+            "echo 'provider auth failed' >&2; exit 1"
+        } else {
+            "echo '{\"secrets\":{\"SPRITES_TOKEN\":\"from-fnox\",\"OTHER\":\"x\",\"CLAUDE_CODE_OAUTH_TOKEN\":\"\"}}'"
+        };
+        std::fs::write(&path, format!("#!/bin/sh\n[ \"$1 $2 $3\" = \"export --format json\" ] || exit 2\n{body}\n"))
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.display().to_string()
+    }
+
+    /// A working directory holding a `fnox.toml`, which is all the host looks for before running fnox.
+    fn repo_with_config(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("fnox.toml"), "").unwrap();
+        repo
+    }
+
+    fn load(program: &str, repo: &std::path::Path) -> Result<Fnox, String> {
+        Fnox::load(program, repo, None)
+    }
+
     #[test]
-    fn the_environment_wins_over_the_saved_secret() {
+    fn the_environment_wins_over_fnox_and_fnox_over_the_saved_secret() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let creds = store(&dir);
-        assert_eq!(resolve(None, &creds, SPRITES), None);
+        let fnox = load(&fake_fnox(&dir, false), &repo_with_config(&dir)).unwrap();
         creds.save(SPRITES, "saved").unwrap();
-        assert_eq!(resolve(None, &creds, SPRITES).as_deref(), Some("saved"));
-        assert_eq!(resolve(Some("  ".into()), &creds, SPRITES).as_deref(), Some("saved"));
-        assert_eq!(resolve(Some("env".into()), &creds, SPRITES).as_deref(), Some("env"));
+        let got = |env: Option<&str>| resolve("SPRITES_TOKEN", env.map(Into::into), &fnox, &creds, SPRITES);
+        assert_eq!(got(Some("env")).as_deref(), Some("env"));
+        assert_eq!(got(Some("  ")).as_deref(), Some("from-fnox"));
+        assert_eq!(got(None).as_deref(), Some("from-fnox"));
+    }
+
+    #[test]
+    fn a_name_fnox_doesnt_define_or_leaves_blank_falls_back_to_the_saved_secret() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        let fnox = load(&fake_fnox(&dir, false), &repo_with_config(&dir)).unwrap();
+        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB), None);
+        creds.save(GITHUB, "saved").unwrap();
+        creds.save(CLAUDE, "saved-claude").unwrap();
+        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB).as_deref(), Some("saved"));
+        assert_eq!(resolve("CLAUDE_CODE_OAUTH_TOKEN", None, &fnox, &creds, CLAUDE).as_deref(), Some("saved-claude"));
+    }
+
+    #[test]
+    fn fnox_missing_or_without_a_config_defines_nothing() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        let repo = repo_with_config(&dir);
+        let missing = dir.path().join("no-such-fnox").display().to_string();
+        let fnox = load(&missing, &repo).unwrap();
+        creds.save(GITHUB, "saved").unwrap();
+        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB).as_deref(), Some("saved"));
+        assert_eq!(resolve("SPRITES_TOKEN", None, &fnox, &creds, SPRITES), None);
+        // Even a fnox that would fail isn't run when there's no config for it to read.
+        let bare = dir.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let fnox = load(&fake_fnox(&dir, true), &bare);
+        assert!(fnox.is_ok(), "{fnox:?}");
+    }
+
+    #[test]
+    fn fnox_failing_against_a_config_is_an_error_naming_fnox() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let err = load(&fake_fnox(&dir, true), &repo_with_config(&dir)).unwrap_err();
+        assert!(err.contains("fnox") && err.contains("provider auth failed"), "{err}");
+    }
+
+    #[test]
+    fn a_global_fnox_config_counts_as_a_config() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("config.toml");
+        std::fs::write(&global, "").unwrap();
+        let bare = dir.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let err = Fnox::load(&fake_fnox(&dir, true), &bare, Some(&global)).unwrap_err();
+        assert!(err.contains("fnox"), "{err}");
     }
 
     #[test]

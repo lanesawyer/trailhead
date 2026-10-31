@@ -32,7 +32,7 @@ pub struct LogsOpts {
 
 pub async fn status(opts: &Opts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let opts = resolve_opts(opts, &paths);
+    let opts = resolve_opts(opts, &paths)?;
     let (_, _, config) = load_config(&opts)?;
     let (compute, _) = compute(&config.compute, &opts, &paths, trailhead_daemon::net::Launch::new(Default::default()))?;
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
@@ -52,7 +52,7 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
 
 pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let opts = resolve_opts(&logs.opts, &paths);
+    let opts = resolve_opts(&logs.opts, &paths)?;
     let (_, _, config) = load_config(&opts)?;
     if !matches!(config.compute, ComputeConfig::Sprites) {
         return Err("`logs` reads Sprites services; Docker sandboxes' logs are `docker logs` on the container".into());

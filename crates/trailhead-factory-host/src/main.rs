@@ -43,6 +43,7 @@ use trailhead_provider_anthropic::Anthropic;
 use trailhead_server::creds::{Cred, CredStore};
 
 mod find;
+mod fnox;
 mod login;
 mod ops;
 mod repos;
@@ -193,15 +194,29 @@ async fn factory_ctx(store: &Store, create: bool) -> Result<Ctx, String> {
     store.agent_ctx(ws.id, agent.id).await.map_err(|e| e.to_string())
 }
 
-/// `opts` with the secrets the environment didn't set filled in from what `trailhead factory login` saved.
-fn resolve_opts(opts: &Opts, paths: &trailhead_server::Paths) -> Opts {
+/// `opts` with the secrets the environment didn't set filled in from fnox, then from what `trailhead factory login` saved.
+fn resolve_opts(opts: &Opts, paths: &trailhead_server::Paths) -> Result<Opts, String> {
     let creds = paths.creds();
-    Opts {
-        sprites_token: login::resolve(opts.sprites_token.clone(), &creds, login::SPRITES),
-        github_token: login::resolve(opts.github_token.clone(), &creds, login::GITHUB),
-        claude_oauth_token: login::resolve(opts.claude_oauth_token.clone(), &creds, login::CLAUDE),
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    // fnox is only asked when something is missing from the environment, so a broken fnox can't block a full env.
+    let blank = |v: &Option<String>| v.as_deref().is_none_or(|v| v.trim().is_empty());
+    let fnox = if blank(&opts.sprites_token) || blank(&opts.github_token) || blank(&opts.claude_oauth_token) {
+        fnox::Fnox::load("fnox", &cwd, fnox::global_config().as_deref())?
+    } else {
+        fnox::Fnox::none()
+    };
+    Ok(Opts {
+        sprites_token: login::resolve("SPRITES_TOKEN", opts.sprites_token.clone(), &fnox, &creds, login::SPRITES),
+        github_token: login::resolve("GITHUB_TOKEN", opts.github_token.clone(), &fnox, &creds, login::GITHUB),
+        claude_oauth_token: login::resolve(
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            opts.claude_oauth_token.clone(),
+            &fnox,
+            &creds,
+            login::CLAUDE,
+        ),
         ..opts.clone()
-    }
+    })
 }
 
 /// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
@@ -237,7 +252,7 @@ struct Setup {
 
 async fn setup(run: &RunOpts) -> Result<Setup, String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let opts = &resolve_opts(&run.opts, &paths);
+    let opts = &resolve_opts(&run.opts, &paths)?;
     let user_config = paths.config_dir.join("config.toml");
     let host_config = match std::fs::read_to_string(&user_config) {
         Ok(src) => trailhead_factory::HostConfig::from_user_config(&src)
@@ -414,7 +429,14 @@ fn compute(
                 docker.network = network.clone();
             }
             docker.runtime = runtime.clone();
-            docker.connections = gateway_connections(login::github_writer_token(&paths.creds()));
+            let writer = match std::env::var("GITHUB_WRITER_TOKEN").ok().filter(|v| !v.trim().is_empty()) {
+                Some(_) => fnox::Fnox::none(),
+                None => {
+                    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+                    fnox::Fnox::load("fnox", &cwd, fnox::global_config().as_deref())?
+                }
+            };
+            docker.connections = gateway_connections(login::github_writer_token(&writer, &paths.creds()));
             if docker.connections.is_empty() {
                 tracing::warn!(
                     "no GitHub writer token (GITHUB_WRITER_TOKEN or `trailhead factory login github-writer`): Docker sandboxes can't publish"
@@ -586,6 +608,7 @@ mod tests {
 
     #[test]
     fn second_control_plane_is_refused_naming_the_holder() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let held = lock_control_plane(dir.path(), "acme/app").unwrap();
         let err = lock_control_plane(dir.path(), "acme/other").unwrap_err();
