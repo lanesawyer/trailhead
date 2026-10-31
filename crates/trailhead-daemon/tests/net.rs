@@ -88,11 +88,20 @@ struct Rig {
 
 impl Rig {
     async fn new() -> Rig {
+        Rig::beating(None).await
+    }
+
+    /// A rig whose daemon heartbeats this often, if given.
+    async fn beating(every: Option<Duration>) -> Rig {
         let tracker = FakeTracker::new("factory");
         let compute = FakeCompute::new();
         let codehost = FakeCodeHost::new();
         let harness = Arc::new(ScriptedHarness::new());
-        let local = Arc::new(LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone()));
+        let mut local = LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone());
+        if let Some(every) = every {
+            local = local.heartbeat_every(every);
+        }
+        let local = Arc::new(local);
         let lookup = Arc::new(MemoryLookup::new());
         let control = endpoint(SecretKey::generate(), Some(lookup.clone())).await;
         let remote = Arc::new(RemoteDaemon::new(
@@ -270,6 +279,49 @@ async fn a_run_survives_a_dropped_connection() {
     assert_eq!(r.harness.contexts().len(), 1, "the run went on rather than starting again");
     assert_eq!(r.compute.wakes("flaky"), 2, "redialed once after the drop");
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
+}
+
+#[tokio::test]
+async fn a_reattach_isnt_replayed_stale_heartbeats() {
+    let mut r = Rig::beating(Some(Duration::from_millis(250))).await;
+    r.serve("quiet").await;
+    let sandbox = r.sandbox("quiet").await;
+    let key = r.tracker.add_task("TRAIL", "Quiet", "");
+    let gate = Arc::new(Notify::new());
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100).wait_for(gate.clone()));
+    let cred = r.tracker.create_sub_agent("quiet-a1", "TRAIL", Duration::from_secs(600)).await.unwrap();
+    let (events, mut first) = tokio::sync::mpsc::unbounded_channel();
+    let run = tokio::spawn({
+        let remote = r.remote.clone();
+        let sandbox = sandbox.clone();
+        let req = request("quiet-a1", key.clone(), cred);
+        async move { remote.run(&sandbox, req, events).await }
+    });
+    // The agent sits quiet through several heartbeats, as if the control plane were away.
+    let mut beats = 0;
+    while beats < 3 {
+        let ev = tokio::time::timeout(Duration::from_secs(10), first.recv()).await.unwrap().unwrap();
+        beats += usize::from(matches!(ev, RunEvent::Heartbeat { .. }));
+    }
+
+    // A control plane that attaches now (as after a restart) gets the run's events but none of those heartbeats.
+    let (events, mut second) = tokio::sync::mpsc::unbounded_channel();
+    let attach = tokio::spawn({
+        let remote = r.remote.clone();
+        let sandbox = sandbox.clone();
+        async move { remote.attach(&sandbox, "quiet-a1", events).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut replayed = Vec::new();
+    while let Ok(ev) = second.try_recv() {
+        replayed.push(ev);
+    }
+    assert!(replayed.iter().any(|e| matches!(e, RunEvent::StepStarted { .. })), "{replayed:?}");
+    assert!(!replayed.iter().any(|e| matches!(e, RunEvent::Heartbeat { .. })), "stale heartbeats: {replayed:?}");
+
+    gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(20), run).await.unwrap().unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(20), attach).await.unwrap().unwrap().unwrap();
 }
 
 #[tokio::test]

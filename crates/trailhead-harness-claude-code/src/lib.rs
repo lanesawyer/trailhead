@@ -258,7 +258,7 @@ const HUMAN_CONTEXT_CAP: usize = 6000;
 /// The most the answers may take of the human-context section, so notes keep the rest.
 const ANSWERS_CAP: usize = 4000;
 
-/// Lane's answers and the task's decisions and notes, for after the description. Empty when there are none. Past
+/// The answers and the task's decisions and notes, for after the description. Empty when there are none. Past
 /// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
 /// is always kept.
 fn human_section(task: &trailhead_factory::TaskSpec) -> String {
@@ -278,7 +278,7 @@ fn human_section(task: &trailhead_factory::TaskSpec) -> String {
         answers.push(entry);
     }
     if !answers.is_empty() {
-        out.push_str("\n\nQuestions you asked earlier and Lane's answers:");
+        out.push_str("\n\nQuestions you asked earlier and the answers you got:");
         answers.iter().rev().for_each(|e| out.push_str(e));
     }
     let mut kept = Vec::new();
@@ -476,6 +476,14 @@ impl Stream {
                     }
                 }
             }
+            // A tool's result going back to the model: the call is over.
+            Some("user") => {
+                for block in msg["message"]["content"].as_array().into_iter().flatten() {
+                    if block["type"] == "tool_result" {
+                        out.push(RunEvent::ToolResult);
+                    }
+                }
+            }
             Some("result") => self.result = Some(msg.clone()),
             Some("rate_limit_event") => out.extend(quota(&msg["rate_limit_info"])),
             _ => {}
@@ -619,4 +627,25 @@ async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
         changes.push(FileChange { path, contents });
     }
     Ok(changes)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_tool_result_ends_the_tool_call() {
+        let mut stream = Stream::new(ModelId("sonnet".into()), 0);
+        let call = json!({"type": "assistant", "message": {"id": "m1", "model": "sonnet", "usage": {},
+            "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "cargo test"}}]}});
+        let events = stream.read(&call);
+        assert!(events.iter().any(|e| matches!(e, RunEvent::ToolCall { .. })), "{events:?}");
+        let result = json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+            {"type": "text", "text": "not a result"}]}});
+        let events = stream.read(&result);
+        assert!(matches!(events.as_slice(), [RunEvent::ToolResult]), "{events:?}");
+    }
 }

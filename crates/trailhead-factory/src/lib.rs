@@ -6,6 +6,7 @@ pub mod codehost;
 pub mod compute;
 pub mod config;
 pub mod daemon;
+pub mod gateway;
 pub mod grade;
 pub mod harness;
 pub mod money;
@@ -19,13 +20,14 @@ pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };
 pub use config::{
-    Budget, Checks, ComputeConfig, FactoryConfig, Gate, GradesConfig, MergeConfig, MergeMode, Profile, Role,
-    UsageConfig,
+    Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_HOST, GATEWAY_PORT, Gate, GradesConfig,
+    MergeConfig, MergeMode, Profile, Role, UsageConfig,
 };
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
-    RunResult, ToDaemon,
+    RunResult, SPRITES_GATEWAY_LIST, ToDaemon,
 };
+pub use gateway::{GatewayRequest, GatewayResponse, GatewaySandbox, GatewayState};
 pub use grade::{ChangedFile, FileStatus, Grader, PrGrade, glob_match};
 pub use harness::{
     EventSink, Feedback, FollowUp, Harness, RaiseGrade, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict,
@@ -56,6 +58,18 @@ pub enum Error {
     Cancelled,
     #[error("{0}")]
     Other(String),
+}
+
+impl Error {
+    /// [`Error::Rejected`] for a client error the remote won't answer differently next time (any 4xx but 408 and
+    /// 429), otherwise [`Error::Other`].
+    pub fn from_status(status: u16, msg: String) -> Error {
+        if (400..500).contains(&status) && !matches!(status, 408 | 429) {
+            Error::Rejected(msg)
+        } else {
+            Error::Other(msg)
+        }
+    }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

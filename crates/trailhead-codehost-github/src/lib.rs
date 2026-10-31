@@ -140,7 +140,7 @@ impl GitHub {
             StatusCode::NOT_FOUND => Error::NotFound(msg),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Forbidden(msg),
             StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY => Error::Conflict(msg),
-            _ => Error::Other(msg),
+            s => Error::from_status(s.as_u16(), msg),
         })
     }
 
@@ -286,6 +286,19 @@ fn summarize_ci(runs: &[Value], statuses: &[Value]) -> CiState {
     }
 }
 
+/// The end of a job log: its last lines, within a size that fits in a prompt.
+fn log_tail(log: &str) -> String {
+    const LINES: usize = 80;
+    const BYTES: usize = 6000;
+    let lines: Vec<&str> = log.lines().collect();
+    let tail = lines[lines.len().saturating_sub(LINES)..].join("\n");
+    let mut start = tail.len().saturating_sub(BYTES);
+    while !tail.is_char_boundary(start) {
+        start += 1;
+    }
+    tail[start..].to_string()
+}
+
 fn pr_ref(repo: &Repo, p: &Value) -> PrRef {
     PrRef {
         repo: repo.clone(),
@@ -374,7 +387,7 @@ impl CodeHost for GitHub {
                 PrState::Open { mergeable: Some(false) } => Ok(MergeOutcome::Conflict),
                 _ => Ok(MergeOutcome::Refused(message)),
             },
-            s => Err(Error::Other(format!("github {s}: {message}"))),
+            s => Err(Error::from_status(s.as_u16(), format!("github {s}: {message}"))),
         }
     }
 
@@ -419,7 +432,7 @@ impl CodeHost for GitHub {
                     Err(Error::Other(format!("github {status}: {message}")))
                 }
             }
-            s => Err(Error::Other(format!("github {s}: {message}"))),
+            s => Err(Error::from_status(s.as_u16(), format!("github {s}: {message}"))),
         }
     }
 
@@ -491,6 +504,28 @@ impl CodeHost for GitHub {
         let combined = self.call(self.request(Method::GET, &format!("{r}/commits/{head}/status"))).await?;
         let statuses = combined["statuses"].as_array().map(Vec::as_slice).unwrap_or_default();
         Ok(Ci { state: summarize_ci(&runs, statuses), head })
+    }
+
+    async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {
+        let r = Self::repo_path(&pr.repo);
+        let head = CodeHost::head(self, pr).await?;
+        let req = self.request(Method::GET, &format!("{r}/commits/{head}/check-runs")).query(&[("per_page", "100")]);
+        let found = self.call(req).await?;
+        let mut out = Vec::new();
+        for run in found["check_runs"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            let name = run["name"].as_str().unwrap_or_default();
+            let (Some(id), true) = (run["id"].as_u64(), checks.iter().any(|c| c == name)) else { continue };
+            if out.iter().any(|(n, _): &(String, String)| n == name) {
+                continue;
+            }
+            // An Actions job's id is its check run's; a check from elsewhere has no such log, which is left out.
+            if let Ok(Value::String(log)) =
+                self.call(self.request(Method::GET, &format!("{r}/actions/jobs/{id}/logs"))).await
+            {
+                out.push((name.to_string(), log_tail(&log)));
+            }
+        }
+        Ok(out)
     }
 
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {

@@ -161,6 +161,34 @@ pub enum ComputeConfig {
     },
 }
 
+/// The Docker gateway's name on each sandbox's network (`docs/factory/sandbox.md`).
+pub const GATEWAY_HOST: &str = "trailhead-gateway";
+/// The port the Docker gateway listens on.
+pub const GATEWAY_PORT: u16 = 8080;
+/// The Anthropic connection's id in the Docker gateway's list.
+pub const GATEWAY_ANTHROPIC_ID: &str = "anthropic";
+
+impl ComputeConfig {
+    /// The connector list URL for a daemon's secrets. `None` on Sprites, which have Fly's.
+    pub fn gateway_list(&self) -> Option<String> {
+        match self {
+            ComputeConfig::Sprites => None,
+            ComputeConfig::Docker { .. } => Some(format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway/list")),
+        }
+    }
+
+    /// Where runs send model calls: the Docker gateway's Anthropic connection, else `configured`
+    /// (`--model-endpoint`).
+    pub fn model_endpoint(&self, configured: &str) -> String {
+        match self {
+            ComputeConfig::Sprites => configured.into(),
+            ComputeConfig::Docker { .. } => {
+                format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway/anthropic/{GATEWAY_ANTHROPIC_ID}")
+            }
+        }
+    }
+}
+
 /// Subscription usage windows (`docs/factory/budgets.md`): at or past `pause_at[window]` percent, no new runs
 /// start until that window resets, leaving room for whatever else shares the subscription.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -293,6 +321,20 @@ pub struct Profile {
     pub model: ModelAlias,
     pub budget: Budget,
     pub escalate_to: Option<String>,
+    /// Minutes of silence from the agent (no steps, tool calls or output, not counting a tool call that's still
+    /// running) after which a run is stopped and fails as a stall.
+    #[serde(default = "default_stall_timeout")]
+    pub stall_timeout: u32,
+}
+
+fn default_stall_timeout() -> u32 {
+    5
+}
+
+impl Profile {
+    pub fn stall_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.stall_timeout) * 60)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -446,18 +488,15 @@ impl FactoryConfig {
         Gate { require: require.iter().map(|r| r.to_string()).collect(), auto_merge, quorum: None }
     }
 
-    /// The lowest grade's gate, which decides what a worker's checks must cover before it opens a PR.
-    pub fn default_gate(&self) -> Gate {
-        self.gate(1)
-    }
-
-    /// The checks a worker must pass before opening a PR under the default gate.
+    /// The checks a worker must pass before opening a PR: every verifying check the repo defines. The grade isn't
+    /// known until the PR exists, and any grade's gate may require `checks` or a named check, so the worker runs them
+    /// all and the merger can count a gate's check requirements as met.
     pub fn required_checks(&self) -> Vec<Check> {
-        let gate = self.default_gate();
-        let all =
-            self.checks.verifying().into_iter().map(|(n, c)| Check { name: n.to_string(), command: c.to_string() });
-        let everything = gate.require.iter().any(|r| r == "checks");
-        all.filter(|c| everything || gate.require.contains(&c.name)).collect()
+        self.checks
+            .verifying()
+            .into_iter()
+            .map(|(n, c)| Check { name: n.to_string(), command: c.to_string() })
+            .collect()
     }
 
     /// Readies a checkout, on `branch` when given (a rework). Only workers build: a reviewer reads the diff, so it
@@ -583,6 +622,14 @@ require = ["checks", "agent_review", "human"]
     }
 
     #[test]
+    fn workers_run_every_check_whatever_the_gates_require() {
+        let c = parse(&SAMPLE.replace("require = [\"checks\", \"agent_review\", \"human\"]", "require = [\"ci\"]"))
+            .unwrap();
+        let names: Vec<_> = c.required_checks().into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["fmt", "lint", "test"]);
+    }
+
+    #[test]
     fn rejects_unknown_checks_and_profiles() {
         let bad = SAMPLE.replace("lint = ", "lnt = ");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
@@ -590,6 +637,18 @@ require = ["checks", "agent_review", "human"]
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
         let bad = SAMPLE.replace("\"agent_review\", \"human\"", "\"agent_review\", \"vibes\"");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn docker_compute_uses_the_gateway_for_models_and_connectors() {
+        let docker = ComputeConfig::Docker { image: None, network: None, runtime: None };
+        assert_eq!(ComputeConfig::Sprites.gateway_list(), None);
+        assert_eq!(ComputeConfig::Sprites.model_endpoint("https://m.example"), "https://m.example");
+        assert_eq!(docker.gateway_list().unwrap(), "http://trailhead-gateway:8080/v1/gateway/list");
+        assert_eq!(
+            docker.model_endpoint("https://m.example"),
+            "http://trailhead-gateway:8080/v1/gateway/anthropic/anthropic"
+        );
     }
 
     #[test]
