@@ -59,6 +59,10 @@ pub enum Error {
     /// [`Error::Other`], which may be a blip worth retrying.
     #[error("rejected: {0}")]
     Rejected(String),
+    /// A resource the run needs is short right now (a full disk, say) and will be again only when something is
+    /// freed. The work is worth retrying later, and waiting doesn't count as a failure of the task or the sandbox.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]
