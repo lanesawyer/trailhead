@@ -21,7 +21,7 @@ Decided: model access and GitHub go through connectors. The gateway injects the 
 - **Discovery.** Inside a sandbox, `GET https://api.sprites.dev/v1/gateway/list` (no auth header; the gateway identifies the Sprite) returns each ready connector's `gateway_base_url` (`https://api.sprites.dev/v1/gateway/<provider>/<connection_id>`). The only egress domain the gateway needs is `api.sprites.dev`. Every Sprite ships a `sprite-api-gateway` skill for Claude Code, Codex, Cursor and Gemini.
 - **The one credential a sandbox holds** is its short-lived, project-scoped Trailhead sub-agent token; see [state.md](state.md).
 
-**Subscription mode** (TRAIL-101, opt-in, for Lane's own use): `trailhead-factory run --claude-oauth-token …` (or `CLAUDE_CODE_OAUTH_TOKEN`, from `claude setup-token`) runs Claude Code in sandboxes on a Claude subscription instead of a model connector. The token travels in the daemon's `0600` secrets file (kept, so a cold wake can restart the daemon), never in run requests or on a command line. Claude Code gets it as `CLAUDE_CODE_OAUTH_TOKEN`, with any API key or base URL stripped, and agent egress adds `api.anthropic.com`. The trade-offs: it breaks "sandboxes hold no raw credentials", since an injected agent could leak a token good for the whole subscription; spend is priced at API rates as a proxy, since a subscription has rate limits rather than per-call prices; parallel sandboxes share the plan's limits; and whether the plan's terms allow unattended use is for Lane to confirm. The connector stays the design beyond Lane's own use.
+**Subscription mode** (TRAIL-101, opt-in, for the maintainer's own use): `trailhead-factory run --claude-oauth-token …` (or `CLAUDE_CODE_OAUTH_TOKEN`, from `claude setup-token`) runs Claude Code in sandboxes on a Claude subscription instead of a model connector. The token travels in the daemon's `0600` secrets file (kept, so a cold wake can restart the daemon), never in run requests or on a command line. Claude Code gets it as `CLAUDE_CODE_OAUTH_TOKEN`, with any API key or base URL stripped, and agent egress adds `api.anthropic.com`. The trade-offs: it breaks "sandboxes hold no raw credentials", since an injected agent could leak a token good for the whole subscription; spend is priced at API rates as a proxy, since a subscription has rate limits rather than per-call prices; parallel sandboxes share the plan's limits; and whether the plan's terms allow unattended use is for the maintainer to confirm. The connector stays the design beyond the maintainer's own use.
 
 Assumed to work, not yet tested (TRAIL-97): Claude Code's exact setup (likely `ANTHROPIC_BASE_URL` set to the gateway URL plus a placeholder key), and whether the gateway's 120-second timeout, documented for several connectors, cuts off long streaming calls. The connector takes an API key; a Claude subscription doesn't plug into it.
 
@@ -91,7 +91,7 @@ Decided 2026-10-28 (TRAIL-119): `trailhead-compute-docker` runs sandboxes as con
 - **Wake** starts a stopped container; containers don't pause.
 - **Egress, for now, is all or nothing.** No egress disconnects the container from every network. Any allowlist connects it to the sandbox network (`trailhead-sandboxes`) unfiltered, and logs a warning. The gateway below replaces this (TRAIL-174).
 - **Credentials.** There are no connectors, so the daemon finds no GitHub connector and can't publish, and Claude Code only works in subscription mode. The gateway below fixes this too (TRAIL-175).
-- **The image.** `mise run docker-image` builds `trailhead-sandbox:latest` from `crates/trailhead-compute-docker/image`: Ubuntu 26.04 with git, a C toolchain, rustup and Claude Code, as the user `trailhead`. The daemon lives in `/home/trailhead/.trailhead` and checks out into `/home/trailhead/work`. It's the same Ubuntu as the stock Sprite, so a daemon built on Lane's machine runs in both.
+- **The image.** `mise run docker-image` builds `trailhead-sandbox:latest` from `crates/trailhead-compute-docker/image`: Ubuntu 26.04 with git, a C toolchain, rustup and Claude Code, as the user `trailhead`. The daemon lives in `/home/trailhead/.trailhead` and checks out into `/home/trailhead/work`. It's the same Ubuntu as the stock Sprite, so a daemon built on the maintainer's machine runs in both.
 - **Isolation.** Containers share the engine's kernel. On a dev machine that's the lima VM's; on a bare Docker host, prefer gVisor (`runtime = "runsc"`) or rootless Docker (TRAIL-177).
 - **Tests.** `mise run test-live-docker` runs the lifecycle against the engine with a small `alpine` container.
 
@@ -157,7 +157,7 @@ A Sprite pauses about 30 seconds after its last inbound activity (an exec, a req
 
 Iroh runs in every phase: Trailhead's `dumbpipe` tunnel is the sandbox's only channel to the control plane and Trailhead.
 
-Tested 2026-10-26 (M0) with dumbpipe 0.40.1. The Sprite was NATed at 10.0.0.1; the peer was Lane's machine behind home NAT, 46 ms ICMP RTT away.
+Tested 2026-10-26 (M0) with dumbpipe 0.40.1. The Sprite was NATed at 10.0.0.1; the peer was the maintainer's machine behind home NAT, 46 ms ICMP RTT away.
 
 | Policy | Path | Steady RTT on one connection |
 | --- | --- | --- |

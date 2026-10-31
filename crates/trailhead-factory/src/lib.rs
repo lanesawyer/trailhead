@@ -60,6 +60,18 @@ pub enum Error {
     Other(String),
 }
 
+impl Error {
+    /// [`Error::Rejected`] for a client error the remote won't answer differently next time (any 4xx but 408 and
+    /// 429), otherwise [`Error::Other`].
+    pub fn from_status(status: u16, msg: String) -> Error {
+        if (400..500).contains(&status) && !matches!(status, 408 | 429) {
+            Error::Rejected(msg)
+        } else {
+            Error::Other(msg)
+        }
+    }
+}
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// The deterministic name for a task's sandbox and sub-agent on one attempt

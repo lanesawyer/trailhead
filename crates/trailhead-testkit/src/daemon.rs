@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
-use trailhead_daemon::{RENEW_EVERY, Runner, Workspace};
+use trailhead_daemon::{HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
     Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, PrepareRequest, Repo, Result, RunEvent, RunReport,
     RunRequest, SandboxId, Tracker,
@@ -41,6 +42,8 @@ pub struct FakeWorkspace {
     abandons_merge: AtomicBool,
     /// Whether the agent commits the merge itself: `merge_head` sees none after prepare, but HEAD has the base.
     commits_merge: AtomicBool,
+    /// Whether the agent rebases: the run's starting commit is no longer in HEAD's history.
+    rebases: AtomicBool,
     /// Files the agent leaves conflict markers in.
     markers: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
@@ -79,7 +82,10 @@ impl Workspace for FakeWorkspace {
         Ok(merging.then(|| FAKE_BASE_MERGE.to_string()))
     }
 
-    async fn contains(&self, _commit: &str) -> Result<bool> {
+    async fn contains(&self, commit: &str) -> Result<bool> {
+        if self.rebases.load(Ordering::SeqCst) && commit != FAKE_BASE_MERGE {
+            return Ok(false);
+        }
         Ok(!self.abandons_merge.load(Ordering::SeqCst))
     }
 
@@ -147,7 +153,14 @@ impl LocalDaemon {
 
     pub fn connecting(harness: Arc<dyn Harness>, codehost: Arc<dyn CodeHost>, connect: Connect) -> LocalDaemon {
         let workspace = Arc::new(FakeWorkspace::default());
-        let runner = Runner { harness, codehost, workspace: workspace.clone(), connect, renew_every: RENEW_EVERY };
+        let runner = Runner {
+            harness,
+            codehost,
+            workspace: workspace.clone(),
+            connect,
+            renew_every: RENEW_EVERY,
+            heartbeat_every: HEARTBEAT_EVERY,
+        };
         LocalDaemon {
             runner: Arc::new(runner),
             workspace,
@@ -159,6 +172,12 @@ impl LocalDaemon {
             ongoing: Mutex::default(),
             attached: Mutex::default(),
         }
+    }
+
+    /// Has the daemon send a heartbeat this often instead of every 30 seconds.
+    pub fn heartbeat_every(mut self, every: Duration) -> LocalDaemon {
+        Arc::get_mut(&mut self.runner).expect("the runner isn't shared yet").heartbeat_every = every;
+        self
     }
 
     /// Has the agent leave conflict markers in these files.
@@ -174,6 +193,11 @@ impl LocalDaemon {
     /// Has the agent abort the merge of the base branch that prepare started.
     pub fn agent_aborts_merge(&self) {
         self.workspace.abandons_merge.store(true, Ordering::SeqCst);
+    }
+
+    /// Has the agent rebase its commits, so the commit the run started at is no longer an ancestor of HEAD.
+    pub fn agent_rebases(&self) {
+        self.workspace.rebases.store(true, Ordering::SeqCst);
     }
 
     /// Has the agent run `git commit` to finish the merge of the base branch that prepare started.
