@@ -80,10 +80,17 @@ impl Workspace for GitWorkspace {
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
         let base = &req.base_branch;
         if self.dir.join(".git").exists() {
-            // A merge left under way (a warm checkpoint taken mid-rework) would block the checkout.
-            let _ = self.git(&self.dir, &["merge", "--abort"]).await;
+            // A merge left under way (a warm checkpoint taken mid-rework) would block the checkout. Abort it if
+            // there is one; whatever that does, the hard reset clears the index, the merge state and any conflicted
+            // files, which `--abort` can fail to do.
+            if self.merge_head().await?.is_some()
+                && let Err(e) = self.git(&self.dir, &["merge", "--abort"]).await
+            {
+                tracing::warn!(error = %e, "couldn't abort the merge a checkout was left in; resetting it instead");
+            }
+            self.git(&self.dir, &["reset", "--quiet", "--hard"]).await?;
             self.git(&self.dir, &["fetch", "--quiet", "origin", base]).await?;
-            self.git(&self.dir, &["checkout", "--quiet", "-B", base, &format!("origin/{base}")]).await?;
+            self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", base, &format!("origin/{base}")]).await?;
             self.git(&self.dir, &["clean", "--quiet", "-fd"]).await?;
         } else {
             let parent = self.dir.parent().unwrap_or(Path::new("/"));
@@ -95,7 +102,7 @@ impl Workspace for GitWorkspace {
         if let Some(branch) = &req.branch {
             // A rework builds on the PR branch's head, so what it publishes lands on top of it.
             self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await?;
-            self.git(&self.dir, &["checkout", "--quiet", "-B", branch, &format!("origin/{branch}")]).await?;
+            self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")]).await?;
         }
         if let Some(setup) = &req.setup {
             let result = self.check(setup).await;

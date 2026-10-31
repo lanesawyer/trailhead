@@ -33,7 +33,7 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = resolve_opts(opts, &paths);
     let (_, _, config) = load_config(&opts)?;
-    let (compute, _) = compute(&config.compute, &opts, &paths, Default::default())?;
+    let (compute, _) = compute(&config.compute, &opts, &paths, Default::default(), true)?;
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
     let tracker = CoreTracker::new(store, ctx, AGENT);
@@ -53,7 +53,7 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = resolve_opts(&logs.opts, &paths);
     let (_, _, config) = load_config(&opts)?;
-    let (compute, _) = compute(&config.compute, &opts, &paths, Default::default())?;
+    let (compute, _) = compute(&config.compute, &opts, &paths, Default::default(), true)?;
 
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
