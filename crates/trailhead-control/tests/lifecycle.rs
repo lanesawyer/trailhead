@@ -2880,3 +2880,34 @@ async fn reviews_that_end_without_a_verdict_back_off_and_park_at_the_cap() {
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("without a verdict"), "{}", questions[0].body);
 }
+
+const NO_REVIEW_GATE: &str = r#"
+[gates.1]
+require = ["checks", "ci"]
+auto_merge = true
+
+[merge]
+mode = "shadow"
+"#;
+
+#[tokio::test(start_paused = true)]
+async fn a_review_backed_off_after_an_infrastructure_failure_is_not_skipped_by_approval() {
+    let (r, queue) = queued_rig_with(NO_REVIEW_GATE);
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 1);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.factory.tick().await.unwrap();
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+    assert_eq!(r.tracker.task(&key).run.reviewed, None);
+
+    // CI passes while the review is backed off: the gates (which don't ask for the review) must not approve yet.
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).run.reviewed, Some(1), "the review ran once the backoff was over");
+}
