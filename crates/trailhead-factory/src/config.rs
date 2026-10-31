@@ -215,8 +215,10 @@ pub struct RepoConfig {
     /// The profile tasks run on unless they name another.
     pub worker: String,
     pub reviewer: String,
-    /// A task whose subtasks are the factory's work. Without one, every ready task in the project is.
-    pub queue: Option<String>,
+    /// Tasks whose direct subtasks are the factory's work: one key or a list of them. Without any, every ready task in
+    /// the project is.
+    #[serde(deserialize_with = "string_or_list")]
+    pub queue: Vec<String>,
     /// Attempts a task gets before it's parked for a human instead of retried.
     pub max_attempts: u32,
     /// Infrastructure failures in a row (sandbox, daemon or API trouble, not the task) at which a task is parked for a
@@ -239,13 +241,27 @@ impl Default for RepoConfig {
             max_sandboxes: default_max_sandboxes(),
             worker: default_worker(),
             reviewer: default_reviewer(),
-            queue: None,
+            queue: Vec::new(),
             max_attempts: default_max_attempts(),
             max_infra_failures: default_max_infra_failures(),
             max_review_rounds: default_max_review_rounds(),
             max_conflict_reworks: default_max_conflict_reworks(),
         }
     }
+}
+
+/// A key as a string, or a list of them.
+fn string_or_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Keys {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Keys::deserialize(d)? {
+        Keys::One(s) => vec![s],
+        Keys::Many(v) => v,
+    })
 }
 
 fn default_base_branch() -> String {
@@ -648,6 +664,13 @@ mod tests {
         assert_eq!(raised(".claude/settings.json"), Some("4"));
     }
 
+    #[test]
+    fn queue_is_a_key_or_a_list_of_them() {
+        let with = |q: &str| parse(&SAMPLE.replace("[repo]\n", &format!("[repo]\n{q}\n"))).unwrap().repo.queue;
+        assert!(parse(SAMPLE).unwrap().repo.queue.is_empty());
+        assert_eq!(with("queue = \"TRAIL-102\""), ["TRAIL-102"]);
+        assert_eq!(with("queue = [\"TRAIL-102\", \"TRAIL-167\"]"), ["TRAIL-102", "TRAIL-167"]);
+    }
     #[test]
     fn grades_default_to_the_documented_rules_and_parse_from_the_file() {
         let base = SAMPLE;
