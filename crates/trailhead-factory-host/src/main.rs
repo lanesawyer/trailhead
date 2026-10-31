@@ -43,6 +43,7 @@ use trailhead_server::creds::{Cred, CredStore};
 mod find;
 mod fnox;
 mod login;
+mod ops;
 mod wake;
 
 /// The agent the control plane acts as; sandboxes get its sub-agents.
@@ -100,6 +101,10 @@ enum Cmd {
     Check(Opts),
     /// Run the control plane until Ctrl-C.
     Run(Opts),
+    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; runs beside `run`.
+    Status(Opts),
+    /// Print the daemon's service log from a task's sandbox.
+    Logs(ops::LogsOpts),
     /// Save a secret in the OS keyring (read from stdin), so `run` needs no environment variables.
     #[command(subcommand)]
     Login(login::Login),
@@ -182,9 +187,8 @@ struct Wake {
     project: String,
 }
 
-async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String> {
-    let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    // The environment wins, then fnox if it's installed, then what `trailhead factory login` saved.
+/// `opts` with the secrets the environment didn't set filled in from fnox, then from what `trailhead factory login` saved.
+fn resolve_opts(opts: &Opts, paths: &trailhead_server::Paths) -> Result<Opts, String> {
     let creds = paths.creds();
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     // fnox is only asked when something is missing from the environment, so a broken fnox can't block a full env.
@@ -194,7 +198,7 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
     } else {
         fnox::Fnox::none()
     };
-    let opts = &Opts {
+    Ok(Opts {
         sprites_token: login::resolve("SPRITES_TOKEN", opts.sprites_token.clone(), &fnox, &creds, login::SPRITES),
         github_token: login::resolve("GITHUB_TOKEN", opts.github_token.clone(), &fnox, &creds, login::GITHUB),
         claude_oauth_token: login::resolve(
@@ -205,16 +209,27 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
             login::CLAUDE,
         ),
         ..opts.clone()
-    };
+    })
+}
+
+/// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
+fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig), String> {
     let config_path = match &opts.config {
         Some(path) => path.clone(),
         None => find::config(&std::env::current_dir().map_err(|e| e.to_string())?)?,
     };
-    let config = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
     let repo_dir = config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
     let remote = find::remote(&repo_dir);
-    let mut config = FactoryConfig::from_repo_file(&config, remote.clone())
-        .map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let config =
+        FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| format!("{}: {e}", config_path.display()))?;
+    Ok((config_path, remote, config))
+}
+
+async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String> {
+    let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+    let opts = &resolve_opts(opts, &paths)?;
+    let (config_path, remote, mut config) = load_config(opts)?;
     if opts.claude_oauth_token.is_some() {
         tracing::warn!("subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
         config.egress.always.push(ANTHROPIC_API_HOST.into());
@@ -262,6 +277,7 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
 
     let mut factory =
         Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(opts.model_endpoint.clone())), daemon)
+            .with_server_check(server_check(opts.server))
             .with_merge_mode_source(Box::new(move || {
                 let src =
                     std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
@@ -280,6 +296,19 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
     }
     let wake = Wake { store, ctx, project: factory.config.repo.project.clone() };
     Ok((Arc::new(factory), tunnel, lock, wake))
+}
+
+/// Whether something accepts connections at the server's address, which the daemons' API tunnel forwards to.
+fn server_check(server: SocketAddr) -> trailhead_control::ServerCheck {
+    Box::new(move || {
+        Box::pin(async move {
+            match tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(server)).await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(e)) => Err(format!("can't connect to {server}: {e}")),
+                Err(_) => Err(format!("connecting to {server} timed out")),
+            }
+        })
+    })
 }
 
 /// The sandboxes' `Compute`, and where the daemon lives in them.
@@ -371,6 +400,8 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
             tunnel.shutdown().await.map_err(|e| e.to_string())?;
             check_result(failed)
         }
+        Cmd::Status(opts) => ops::status(&opts).await,
+        Cmd::Logs(logs) => ops::logs(&logs).await,
         Cmd::Login(cmd) => {
             let paths =
                 trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
@@ -430,7 +461,16 @@ async fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_result, lock_control_plane};
+    use super::{check_result, lock_control_plane, server_check};
+
+    #[tokio::test]
+    async fn server_check_sees_whether_something_listens() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert_eq!(server_check(addr)().await, Ok(()));
+        drop(listener);
+        assert!(server_check(addr)().await.unwrap_err().contains("can't connect"));
+    }
 
     #[test]
     fn second_control_plane_is_refused_naming_the_holder() {
