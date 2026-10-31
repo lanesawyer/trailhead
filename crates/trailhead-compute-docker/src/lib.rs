@@ -261,7 +261,6 @@ impl DockerCompute {
         self.docker.start_exec(&exec.id, Some(opts)).await.map_err(docker_err).map(drop)
     }
 
-    /// Streams the container's filesystem into a new image tagged `image`.
     /// Removes the image tagged `image`, if there is one. Used for what a failed import left behind.
     async fn remove_image_tag(&self, image: &str) {
         match self
@@ -276,6 +275,7 @@ impl DockerCompute {
         }
     }
 
+    /// Streams the container's filesystem into a new image tagged `image`.
     async fn import_filesystem(&self, name: &str, image: &str, note: &str, changes: Vec<String>) -> Result<()> {
         // The export is read by a task of its own and passed through a channel, so the request body owns what it needs.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(4);

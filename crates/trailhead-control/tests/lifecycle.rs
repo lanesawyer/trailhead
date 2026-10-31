@@ -3034,3 +3034,19 @@ async fn a_host_out_of_disk_is_waited_out_never_parked() {
     assert_eq!(task.run.infra_failures.unwrap_or(0), 0, "waiting for disk isn't counted as a failure");
     assert_eq!(task.run.attempt, Some(0), "no attempt was used");
 }
+
+#[tokio::test]
+async fn disk_waits_dont_count_toward_parking_a_later_real_failure() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
+    let key = r.tracker.add_task("TRAIL", "Waits then fails", "");
+    for n in 1..=2 {
+        r.compute.fail(&format!("trailhead-w{n}"), "preflight");
+        let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+        assert!(matches!(err, trailhead_factory::Error::Unavailable(_)), "{err}");
+    }
+    r.compute.fail("trailhead-w3", "set_labels");
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open, "one real failure after the waits isn't enough to park");
+    assert_eq!(task.run.infra_failures, Some(1));
+}
