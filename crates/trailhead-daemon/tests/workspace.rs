@@ -294,11 +294,13 @@ async fn prepare_trims_target_to_the_cap_after_setup() {
         setup: Some(check(
             "setup",
             "mkdir -p target/debug/incremental && head -c 3000 /dev/zero > target/debug/incremental/x \
-             && head -c 1000 /dev/zero > target/debug/lib",
+             && mkdir -p target/debug/.fingerprint/x-1 target/debug/deps \
+             && touch target/debug/.fingerprint/x-1/invoked.timestamp \
+             && head -c 1000 /dev/zero > target/debug/deps/libx-1.rlib",
         )),
         target_cap_bytes: Some(2000),
     };
     ws.prepare(&req).await.unwrap();
     assert!(!ws.dir().join("target/debug/incremental").exists());
-    assert!(ws.dir().join("target/debug/lib").exists());
+    assert!(ws.dir().join("target/debug/deps/libx-1.rlib").exists());
 }

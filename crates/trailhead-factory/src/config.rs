@@ -149,7 +149,7 @@ pub struct DaemonConfig {
     pub target_cap_bytes: u64,
 }
 
-/// 6 GiB: a Trailhead build is about 11 GB, 3.4 GB of it incremental caches (docs/factory/sandbox.md).
+/// 6 GiB: a trim to it costs about 24 s a task on Trailhead, and lower caps cost minutes (docs/factory/sandbox.md).
 pub const DEFAULT_TARGET_CAP_BYTES: u64 = 6 << 30;
 
 fn default_target_cap_bytes() -> u64 {
