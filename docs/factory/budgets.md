@@ -36,6 +36,7 @@ Decided 2026-10-28 (TRAIL-160). In subscription mode, the factory shares the mai
 
 - The harness reports each window as `RunEvent::Quota { window, used_percent, resets_at }`, and the control plane keeps the latest reading in memory.
 - `[factory.usage] pause_at` in `.trailhead.toml` sets a threshold per window, in percent. At or past it, no new runs start; runs already going finish. The control plane logs the pause once, then sets a timer for the reset and starts runs again when it fires.
+- `pause_at` also goes in `[factory]` of the per-machine `<config dir>/config.toml`, alongside `max_sandboxes` and `repos`. That value wins per window; the repo-level `[factory.usage] pause_at` still works but is deprecated and logs a warning, and where repos disagree the strictest applies.
 - Readings arrive only while something runs, and only once per session, so a long run's reading goes stale. Leave margin in the threshold.
 - A run that hits the limit mid-way fails and is requeued, and the pause holds it until the reset. It still uses up an attempt (TRAIL-159).
 - Any harness can report the same event; Codex CLI reports similar windows.

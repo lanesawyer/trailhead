@@ -215,6 +215,16 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = &resolve_opts(opts, &paths);
     let (config_path, remote, mut config) = load_config(opts)?;
+    let user_config = paths.config_dir.join("config.toml");
+    let host = match std::fs::read_to_string(&user_config) {
+        Ok(src) => trailhead_factory::HostConfig::from_user_config(&src)
+            .map_err(|e| format!("{}: {e}", user_config.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => return Err(format!("{}: {e}", user_config.display())),
+    };
+    let (pause_at, warnings) = host.effective_pause_at([(config.repo.project.as_str(), &config.usage)]);
+    warnings.iter().for_each(|w| tracing::warn!("{w}"));
+    config.usage.pause_at = pause_at;
     if opts.claude_oauth_token.is_some() {
         tracing::warn!("subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
         config.egress.always.push(ANTHROPIC_API_HOST.into());
