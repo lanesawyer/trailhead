@@ -4,11 +4,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, FACTORY_LABEL};
 use trailhead_core::Store;
 use trailhead_factory::compute::label;
-use trailhead_factory::{ComputeConfig, Labels, Sandbox, Status, Task, TaskKey, Tracker};
+use trailhead_factory::{Labels, Sandbox, Status, Task, TaskKey, Tracker};
 
 use crate::{AGENT, Opts, compute, factory_ctx, load_config, resolve_opts};
 
@@ -34,8 +33,7 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = resolve_opts(opts, &paths);
     let (_, _, config) = load_config(&opts)?;
-    let (compute, _) =
-        compute(&config.compute, &opts, &paths, trailhead_daemon::net::Launch::new(Default::default()), true)?;
+    let (compute, _) = compute(&config.compute, &opts, &paths, Default::default(), true)?;
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
     let tracker = CoreTracker::new(store, ctx, AGENT);
@@ -55,13 +53,7 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = resolve_opts(&logs.opts, &paths);
     let (_, _, config) = load_config(&opts)?;
-    if !matches!(config.compute, ComputeConfig::Sprites) {
-        return Err("`logs` reads Sprites services; Docker sandboxes' logs are `docker logs` on the container".into());
-    }
-    let token = opts.sprites_token.clone().ok_or("`logs` needs SPRITES_TOKEN or `trailhead factory login sprites`")?;
-    let sprites = SpritesCompute::new(token).map_err(|e| e.to_string())?;
-    let (compute, _) =
-        compute(&config.compute, &opts, &paths, trailhead_daemon::net::Launch::new(Default::default()), true)?;
+    let (compute, _) = compute(&config.compute, &opts, &paths, Default::default(), true)?;
 
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
@@ -78,7 +70,7 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
 
     let mut printed = String::new();
     loop {
-        let log = sprites.logs(&sandbox.id, DAEMON_PROGRAM).await.map_err(|e| format!("{}: {e}", sandbox.name))?;
+        let log = compute.logs(&sandbox.id, DAEMON_PROGRAM).await.map_err(|e| format!("{}: {e}", sandbox.name))?;
         print!("{}", new_output(&printed, &log));
         printed = log;
         if !logs.follow {

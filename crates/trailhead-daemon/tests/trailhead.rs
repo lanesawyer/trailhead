@@ -102,7 +102,7 @@ impl Rig {
             control_ep.clone(),
             MASTER,
             Arc::new(compute.clone()),
-            Launch::new(b"daemon".to_vec()),
+            Launch::new(b"daemon".to_vec(), &target()),
         ));
         let tunnel = Router::builder(control_ep).accept(API_ALPN, ApiTunnel::new(server, remote.peers())).spawn();
 
@@ -314,4 +314,15 @@ async fn the_tunnel_refuses_strangers_and_bad_tokens() {
     .unwrap()
     .unwrap_err();
     assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+}
+
+/// A compute-neutral target: these tests don't depend on any real compute's paths.
+fn target() -> trailhead_factory::Target {
+    trailhead_factory::Target {
+        dir: "/sandbox/.trailhead".into(),
+        workdir: "/sandbox/work".into(),
+        gateway_list: "http://gateway.test/v1/gateway/list".into(),
+        model_endpoint: None,
+        hold_socket: None,
+    }
 }

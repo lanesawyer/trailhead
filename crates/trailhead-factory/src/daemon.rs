@@ -152,11 +152,12 @@ pub struct DaemonSecrets {
     pub gateway_list: String,
 }
 
-/// Where a Sprite lists its connectors.
-pub const SPRITES_GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
+/// Compatibility only: secrets files written before `gateway_list` existed were all Sprites', so they take its list.
+/// New files always carry the compute's own (`Target::gateway_list`).
+const LEGACY_GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
 
 fn default_gateway_list() -> String {
-    SPRITES_GATEWAY_LIST.into()
+    LEGACY_GATEWAY_LIST.into()
 }
 
 impl std::fmt::Debug for DaemonSecrets {
@@ -196,7 +197,7 @@ mod tests {
     #[test]
     fn secrets_parse_with_and_without_a_gateway_list() {
         let old: DaemonSecrets = serde_json::from_str(r#"{"secret_key":"aa","control_plane":"bb"}"#).unwrap();
-        assert_eq!(old.gateway_list, SPRITES_GATEWAY_LIST);
+        assert_eq!(old.gateway_list, LEGACY_GATEWAY_LIST);
         let new: DaemonSecrets =
             serde_json::from_str(r#"{"secret_key":"aa","control_plane":"bb","gateway_list":"http://g/list"}"#).unwrap();
         assert_eq!(new.gateway_list, "http://g/list");
