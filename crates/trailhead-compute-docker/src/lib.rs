@@ -35,8 +35,8 @@ use bollard::query_parameters::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use trailhead_factory::{
-    CheckpointId, Compute, Egress, Error, GATEWAY_HOST, GatewayConnection, GatewayRequest, Labels, Program, Result,
-    Sandbox, SandboxId, SandboxSpec,
+    CheckpointId, Compute, Egress, Error, GATEWAY_ANTHROPIC_ID, GATEWAY_HOST, GATEWAY_PORT, GatewayConnection,
+    GatewayRequest, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec, Target,
 };
 
 mod gateway;
@@ -62,6 +62,18 @@ pub const DEFAULT_IMAGE: &str = "trailhead-sandbox:latest";
 pub const DEFAULT_NETWORK: &str = "trailhead-gateway-out";
 /// Where the daemon lives in [`DEFAULT_IMAGE`], whose user is `trailhead`.
 pub const HOME: &str = "/home/trailhead";
+
+/// A Docker sandbox's launch facts: connectors and model calls both go through the gateway container.
+pub fn target() -> Target {
+    let gateway = format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway");
+    Target {
+        dir: format!("{HOME}/.trailhead"),
+        workdir: format!("{HOME}/work"),
+        gateway_list: format!("{gateway}/list"),
+        model_endpoint: Some(format!("{gateway}/anthropic/{GATEWAY_ANTHROPIC_ID}")),
+        hold_socket: None,
+    }
+}
 
 const SUPERVISE: &str = include_str!("supervise.sh");
 const SUPERVISE_PATH: &str = "/opt/trailhead/supervise";
@@ -163,13 +175,6 @@ impl DockerCompute {
         // The watcher is what starts and syncs the gateway; marking it started keeps it from ever running.
         compute.watching.store(true, Ordering::SeqCst);
         compute
-    }
-
-    /// The recent output of a program started with `start`.
-    pub async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
-        let log = format!("$HOME/.trailhead/programs/{}/log", shell_quote(program));
-        let (_, out) = self.exec(&id.0, None, &format!("tail -n 3000 {log}")).await?;
-        Ok(out)
     }
 
     fn state_path(&self, name: &str) -> PathBuf {
@@ -532,6 +537,12 @@ impl Compute for DockerCompute {
         self.attach(&id.0, &state).await
     }
 
+    async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
+        let log = format!("$HOME/.trailhead/programs/{}/log", shell_quote(program));
+        let (_, out) = self.exec(&id.0, None, &format!("tail -n 3000 {log}")).await?;
+        Ok(out)
+    }
+
     /// Fails with [`Error::Unavailable`], for the control plane to wait out, when the sandbox's disk (the Docker
     /// engine's) has less free than [`disk_needed`] for its filesystem, so a run doesn't start only to fail partway
     /// through a build or a checkpoint.
@@ -871,5 +882,22 @@ mod tests {
         };
         compute.write_state("trail-1-a1", &state).await.unwrap();
         assert_eq!(compute.read_state("trail-1-a1").await.unwrap(), state);
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    #[test]
+    fn a_docker_target_uses_the_gateway_for_models_and_connectors() {
+        let t = target();
+        assert_eq!((t.dir.as_str(), t.workdir.as_str()), ("/home/trailhead/.trailhead", "/home/trailhead/work"));
+        assert_eq!(t.gateway_list, "http://trailhead-gateway:8080/v1/gateway/list");
+        assert_eq!(
+            t.model_endpoint("https://m.example"),
+            "http://trailhead-gateway:8080/v1/gateway/anthropic/anthropic"
+        );
+        assert_eq!(t.hold_socket, None);
     }
 }
