@@ -18,7 +18,7 @@ pub struct Check {
 }
 
 /// Gets a sandbox's checkout ready before any agent runs: clone or refresh the
-/// repo at the base branch, then run the repo's `setup` check. Runs while the
+/// repo at the base branch, then run the repo's `setup` and `trim` checks. Runs while the
 /// sandbox has install-phase egress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareRequest {
@@ -32,6 +32,16 @@ pub struct PrepareRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge_base: bool,
     pub setup: Option<Check>,
+    /// The repo's `trim` check, run after setup to cut build output and caches down so the warm checkpoint taken
+    /// next stays small. A failure is logged and the sandbox goes on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim: Option<Check>,
+    /// Log a warning when the checkout's filesystem uses more than this after setup and trim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_warn_bytes: Option<u64>,
+    /// Fail the prepare, so no warm checkpoint is taken, when the checkout's filesystem uses more than this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_limit_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
