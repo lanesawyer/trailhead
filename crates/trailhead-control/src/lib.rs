@@ -1255,6 +1255,14 @@ impl Factory {
             }
         }
         let gates_pass = waiting.is_empty();
+        // The control plane's own approval stands only while its gates pass: a grade raised to one that needs Lane, or
+        // a verdict that no longer approves, takes it back. CI running again on the head is waited for (a failure
+        // reworks the task). Lane's approval (no mark) is his to withdraw.
+        if status == Status::Approved && approved_head.is_some() && waiting.iter().any(|w| w != "ci") {
+            tracing::info!(task = %key.0, %head, "the gates no longer pass; withdrawing the approval");
+            self.tracker.unapprove(key).await?;
+            (status, approved_head, human_head) = (Status::InReview, None, None);
+        }
         let mut decision = MergeDecision {
             grade: grade.grade,
             head: head.clone(),
