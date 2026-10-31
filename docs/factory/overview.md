@@ -29,6 +29,23 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 - **Connector gateway (Fly.io).** Injects credentials for the model provider and GitHub on the sandbox's behalf.
 - **Egress.** Sandboxes reach the Iroh relay and the connector gateway, plus package registries during install phases only. See [sandbox.md](sandbox.md).
 
+```mermaid
+flowchart LR
+    cli["CLI"] --> server
+    mcp["MCP"] --> server
+    subgraph trailhead["Task engine"]
+        server["Server"] --> core["Core"] --> db[("SQLite")]
+    end
+    cp["Control plane<br/>trailhead-factory"] --> core
+    cp -->|"Compute"| compute["Sandbox provider<br/>Sprites or Docker"]
+    cp <-->|"iroh"| daemon
+    cp -->|"CodeHost"| host["GitHub"]
+    subgraph sandbox["Sandbox"]
+        daemon["Daemon"] --> agent["Agent harness"]
+    end
+    compute -.->|"creates"| sandbox
+```
+
 ## Decisions
 
 | Area | Decision | Notes |

@@ -6,6 +6,40 @@ The vocabulary the rest of the docs use. [The Plan](PLAN.md) has the full data m
 
 A task belongs to one project and has a key like `DEMO-1`. Its status is one of `open`, `in_progress`, `needs_input`, `in_review`, `approved`, `done` and `cancelled`, with transitions enforced in the engine. "Blocked" is computed from dependencies, never stored.
 
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> open
+    open --> in_progress
+    open --> needs_input
+    open --> in_review
+    open --> done
+    open --> cancelled
+    in_progress --> open
+    in_progress --> needs_input
+    in_progress --> in_review
+    in_progress --> done
+    in_progress --> cancelled
+    needs_input --> open
+    needs_input --> in_progress
+    needs_input --> in_review
+    needs_input --> cancelled
+    in_review --> open
+    in_review --> in_progress
+    in_review --> needs_input
+    in_review --> approved
+    in_review --> done
+    in_review --> cancelled
+    approved --> open
+    approved --> in_review
+    approved --> done
+    approved --> cancelled
+    done --> open
+    cancelled --> open
+```
+
+The arrows are every move the engine allows (`Status::can_transition_to`); anything else is rejected. A closed task (`done` or `cancelled`) can only be reopened, and only `in_review` leads to `approved`. Only `in_progress` and `needs_input` keep a claim: a move to any other status, `open` included, releases it.
+
 - `in_review`: an agent finished and someone must approve it.
 - `approved`: a reviewer cleared it and it waits to be finished. For the factory, that means waiting to merge. Whoever finishes it moves it to `done`.
 - `needs_input`: a question is open and the task is out of the ready queue.
