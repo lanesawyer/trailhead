@@ -155,6 +155,7 @@ pub enum ComputeConfig {
     /// defaults.
     Docker {
         image: Option<String>,
+        /// The bridge network the gateway gets out on. Sandboxes aren't on it.
         network: Option<String>,
         /// The OCI runtime, such as `runsc` (gVisor).
         runtime: Option<String>,
@@ -167,6 +168,8 @@ pub const GATEWAY_HOST: &str = "trailhead-gateway";
 pub const GATEWAY_PORT: u16 = 8080;
 /// The Anthropic connection's id in the Docker gateway's list.
 pub const GATEWAY_ANTHROPIC_ID: &str = "anthropic";
+/// The GitHub connection's id in the Docker gateway's list.
+pub const GATEWAY_GITHUB_ID: &str = "github";
 
 impl ComputeConfig {
     /// The connector list URL for a daemon's secrets. `None` on Sprites, which have Fly's.

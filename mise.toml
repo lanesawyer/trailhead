@@ -48,9 +48,20 @@ env = { DOCKER_HOST = "{{vars.docker_host}}" }
 run = "docker build -t trailhead-sandbox:latest crates/trailhead-compute-docker/image"
 
 [tasks.test-live-docker]
-description = "Run the Docker Compute test against the lima VM's engine (creates and destroys one container)"
+description = "Run the Docker Compute and gateway tests against the lima VM's engine (creates and destroys small containers and their gateway; needs `mise run docker-image`)"
 env = { DOCKER_HOST = "{{vars.docker_host}}" }
-run = "cargo test -p trailhead-compute-docker --test live -- --ignored --nocapture"
+run = [
+  "cargo build -j 4 --release -p trailhead-daemon --bin trailhead-daemon",
+  "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon cargo test -j 4 -p trailhead-compute-docker --test live -- --ignored --nocapture --test-threads=1 --skip credentials",
+]
+
+[tasks.test-live-docker-credentials]
+description = "With real credentials from fnox, in the lima VM: one small model call on the subscription through the gateway's proxy, and one read-only GitHub call through its connection"
+env = { DOCKER_HOST = "{{vars.docker_host}}" }
+run = [
+  "cargo build -j 4 --release -p trailhead-daemon --bin trailhead-daemon",
+  "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon fnox exec -- cargo test -j 4 -p trailhead-compute-docker --test live credentials -- --ignored --nocapture --test-threads=1",
+]
 
 [tasks.install]
 description = "Reinstall the CLI, the factory and the daemon from this checkout (cargo install takes one --path at a time)"
