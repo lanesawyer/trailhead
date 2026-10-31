@@ -171,7 +171,7 @@ impl Factory {
         // A deliberate stop gives the round back like a failure, but isn't one: no count, no backoff, no parking.
         let cancelled = matches!(error, Error::Cancelled);
         // The persisted count survives a restart; the in-memory one covers a tracker that failed to write it.
-        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _)| *n);
+        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
         let failures = prior.unwrap_or(0).max(held) + 1;
         let max = self.config.repo.max_infra_failures.max(1);
         let park = !cancelled && failures >= max;
