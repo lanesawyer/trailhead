@@ -17,6 +17,7 @@ use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::task::{self, JoinSet};
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use tokio::sync::mpsc;
 use trailhead_factory::harness::is_transient_api_error;
@@ -65,6 +66,24 @@ pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String
 pub type ServerCheck =
     Box<dyn Fn() -> futures_util::future::BoxFuture<'static, std::result::Result<(), String>> + Send + Sync>;
 
+/// State shared by every [`Factory`] on one host (one per repo): a usage reading from any repo's run pauses them all,
+/// and the sandbox cap can span repos.
+#[derive(Default)]
+pub struct Host {
+    /// The most sandboxes held for workers across all repos; `None` is no cross-repo cap.
+    max_sandboxes: Option<usize>,
+    /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
+    quota: Mutex<HashMap<String, (u32, i64)>>,
+    /// The reset a pause was last logged for, so a pause is logged once per host rather than on every poll.
+    pause_logged: Mutex<Option<i64>>,
+}
+
+impl Host {
+    pub fn new(max_sandboxes: Option<usize>) -> Arc<Host> {
+        Arc::new(Host { max_sandboxes, ..Host::default() })
+    }
+}
+
 pub struct Factory {
     pub config: FactoryConfig,
     pub compute: Arc<dyn Compute>,
@@ -92,12 +111,10 @@ pub struct Factory {
     /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
     /// (a 202), so until the head moves the PR is still behind and asking again would only queue another.
     updating: Mutex<HashMap<TaskKey, String>>,
-    /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
-    quota: Mutex<HashMap<String, (u32, i64)>>,
+    /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
+    host: Arc<Host>,
     /// Tasks already reported as ungraded, so a poll doesn't say it again.
     ungraded: Mutex<HashSet<TaskKey>>,
-    /// The reset a pause was last logged for, so a pause is logged once rather than on every poll.
-    pause_logged: Mutex<Option<i64>>,
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
     /// starting together never take the same sandbox.
     pool_pick: tokio::sync::Mutex<()>,
@@ -270,6 +287,7 @@ impl Factory {
         tracker: Arc<dyn Tracker>,
         provider: Arc<dyn ModelProvider>,
         daemon: Arc<dyn Daemon>,
+        host: Arc<Host>,
     ) -> Factory {
         let merge_mode = Mutex::new(config.merge.mode);
         Factory {
@@ -287,9 +305,8 @@ impl Factory {
             setbacks: Mutex::default(),
             fresh_pushes: Mutex::default(),
             updating: Mutex::default(),
-            quota: Mutex::default(),
+            host,
             ungraded: Mutex::default(),
-            pause_logged: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
         }
     }
@@ -450,7 +467,8 @@ impl Factory {
                         for (task, sandbox) in due.runs {
                             let key = task.key.clone();
                             let factory = self.clone();
-                            let handle = running.spawn(async move { factory.resume_run(&task, &sandbox).await });
+                            let handle = running
+                                .spawn(async move { factory.resume_run(&task, &sandbox).await }.in_current_span());
                             keys.insert(handle.id(), key);
                         }
                         // A review is a session on the same subscription window, so a pause holds them back too; the
@@ -459,7 +477,8 @@ impl Factory {
                         for task in reviews_due {
                             let key = task.key.clone();
                             let factory = self.clone();
-                            let handle = running.spawn(async move { factory.resume_review(&task).await });
+                            let handle =
+                                running.spawn(async move { factory.resume_review(&task).await }.in_current_span());
                             keys.insert(handle.id(), key);
                             reviews.insert(handle.id());
                         }
@@ -540,7 +559,7 @@ impl Factory {
             .into_iter()
             .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !busy.contains(&TaskKey(t.clone()))))
             .count();
-        let room = self.config.repo.max_sandboxes.saturating_sub(keys.len() - reviewing + others);
+        let room = self.room(keys.len() - reviewing + others).await?;
         if room == 0 {
             return Ok(());
         }
@@ -548,7 +567,7 @@ impl Factory {
         for task in ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)) {
             let key = task.key.clone();
             let factory = self.clone();
-            let handle = running.spawn(async move { factory.run_task(&task).await });
+            let handle = running.spawn(async move { factory.run_task(&task).await }.in_current_span());
             keys.insert(handle.id(), key);
         }
         Ok(())
@@ -620,6 +639,33 @@ impl Factory {
         Ok(out)
     }
 
+    /// Places left to start runs in, given how many this repo holds: the repo's cap, and the host's when it has one,
+    /// counted from the compute host's sandboxes in every repo so a restart sees the truth.
+    async fn room(&self, own: usize) -> Result<usize> {
+        let repo_room = self.config.repo.max_sandboxes.saturating_sub(own);
+        let Some(cap) = self.host.max_sandboxes else { return Ok(repo_room) };
+        let host_room = cap.saturating_sub(own + self.occupied_elsewhere().await?);
+        Ok(repo_room.min(host_room))
+    }
+
+    /// Worker sandboxes held by other repos' factories, which also take places under the host's cap.
+    async fn occupied_elsewhere(&self) -> Result<usize> {
+        let mine = self.config.repo.repo().slug();
+        let factory = Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into())]);
+        let mut workers = factory.clone();
+        workers.insert(label::ROLE.into(), Role::Worker.as_str().into());
+        let mut busy = factory;
+        busy.insert(label::POOL.into(), Role::Worker.as_str().into());
+        busy.insert(label::STATE.into(), label::BUSY.into());
+        let mut names = HashSet::new();
+        for s in self.compute.list(&workers).await?.into_iter().chain(self.compute.list(&busy).await?) {
+            if s.labels.get(label::REPO).is_some_and(|r| *r != mine) {
+                names.insert(s.name);
+            }
+        }
+        Ok(names.len())
+    }
+
     /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened, cancelled or finished are
     /// released. A parked task keeps its sandbox, so without this the place stays taken until the next reconcile
     /// (TRAIL-108, TRAIL-257). A reopened task's next attempt starts from a fresh checkout with the answer in its prompt.
@@ -665,8 +711,7 @@ impl Factory {
         if self.usage_paused() || !self.server_up().await {
             return Ok(Vec::new());
         }
-        let room =
-            self.config.repo.max_sandboxes.saturating_sub(self.occupied_after_release(&HashSet::new()).await?.len());
+        let room = self.room(self.occupied_after_release(&HashSet::new()).await?.len()).await?;
         if room == 0 {
             return Ok(Vec::new());
         }
@@ -1789,7 +1834,7 @@ impl Factory {
                 RunEvent::NeedsInput { question } => tracing::info!(task = %key, %question, "asked"),
                 RunEvent::Quota { window, used_percent, resets_at } => {
                     tracing::info!(%window, used_percent, resets_in = ?until(resets_at), "subscription usage");
-                    self.quota.lock().unwrap().insert(window, (used_percent, resets_at));
+                    self.host.quota.lock().unwrap().insert(window, (used_percent, resets_at));
                 }
                 _ => {}
             }
@@ -1884,8 +1929,13 @@ impl Factory {
         let mut done = Reconciled::default();
         let mut due = Due::default();
         let live = self.compute.list(&self.base_labels()).await?;
-        let tasks: Vec<Task> =
-            self.tracker.in_flight(self.project()).await?.into_iter().filter(|t| !running.contains(&t.key)).collect();
+        let tasks: Vec<Task> = self
+            .tracker
+            .in_flight(self.project(), self.queue().as_ref())
+            .await?
+            .into_iter()
+            .filter(|t| !running.contains(&t.key))
+            .collect();
 
         // Runs the daemon may still be working on, which are followed again rather than requeued (TRAIL-137).
         let live_runs: Vec<(&Task, &Sandbox)> =
@@ -2220,7 +2270,7 @@ impl Factory {
     /// whose window has since reset no longer counts.
     fn paused_until(&self) -> Option<(String, u32, i64)> {
         let now = unix_now();
-        let quota = self.quota.lock().unwrap();
+        let quota = self.host.quota.lock().unwrap();
         self.config
             .usage
             .pause_at
@@ -2235,7 +2285,7 @@ impl Factory {
     /// Whether to hold off starting runs because a usage window is nearly full. Running ones carry on.
     fn usage_paused(&self) -> bool {
         let paused = self.paused_until();
-        let mut logged = self.pause_logged.lock().unwrap();
+        let mut logged = self.host.pause_logged.lock().unwrap();
         match &paused {
             Some((window, used, resets_at)) if *logged != Some(*resets_at) => {
                 tracing::warn!(

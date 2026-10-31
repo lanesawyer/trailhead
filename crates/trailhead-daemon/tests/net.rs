@@ -10,7 +10,7 @@ use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, RelayMode, SecretKey};
 use tokio::sync::Notify;
-use trailhead_control::{Factory, Outcome};
+use trailhead_control::{Factory, Host, Outcome};
 use trailhead_daemon::net::{
     ALPN, DaemonProtocol, Launch, RemoteDaemon, build_id, read_frame, sandbox_key, write_frame,
 };
@@ -141,6 +141,7 @@ impl Rig {
             Arc::new(self.tracker.clone()),
             Arc::new(FakeProvider::new(1)),
             self.remote.clone(),
+            Host::new(None),
         )
     }
 }

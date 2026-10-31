@@ -42,7 +42,10 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     let labels =
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
     let sandboxes = compute.list(&labels).await.map_err(|e| format!("listing sandboxes: {e}"))?;
-    let tasks = tracker.in_flight(&config.repo.project).await.map_err(|e| e.to_string())?;
+    let tasks = tracker
+        .in_flight(&config.repo.project, config.repo.queue.clone().map(TaskKey).as_ref())
+        .await
+        .map_err(|e| e.to_string())?;
     print!("{}", render_status(&sandboxes, &tasks));
     Ok(())
 }
