@@ -1199,7 +1199,18 @@ impl Factory {
             if approved_head.is_none() && human_head.is_none() {
                 human_head = Some(head.clone());
             }
-            if approved_head.as_ref().or(human_head.as_ref()) != Some(&head) {
+            let given_on = approved_head.as_ref().or(human_head.as_ref()).cloned();
+            // A clean merge of the base branch the host made since (the merger's own update) keeps the approval, Lane's
+            // included, as it keeps the verdict; CI on the new head is the gate.
+            let carried = match &given_on {
+                Some(given) if *given != head => codehost.carries_verdict(pr, given).await?,
+                _ => false,
+            };
+            if carried {
+                tracing::info!(task = %key.0, %head, "the PR was only updated from its base; keeping the approval");
+                approved_head = approved_head.map(|_| head.clone());
+                human_head = human_head.map(|_| head.clone());
+            } else if given_on.as_ref() != Some(&head) {
                 tracing::info!(task = %key.0, %head, "the PR has a new head; sending the task back to review");
                 self.tracker.unapprove(key).await?;
                 (status, approved_head, human_head) = (Status::InReview, None, None);
