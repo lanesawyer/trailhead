@@ -943,14 +943,11 @@ async fn reviewers_cannot_approve_their_own_work() {
     ));
     env.store.update_task(&lead, &t.key, status(Status::InReview), None).await.unwrap();
     for to in [Status::Approved, Status::Done] {
-        assert!(matches!(env.store.update_task(&lead, &t.key, status(to), None).await, Err(Error::ReviewRequired)));
+        assert!(matches!(env.store.update_task(&lead, &t.key, status(to), None).await, Err(Error::Forbidden(_))));
     }
     env.store.update_task(&other, &t.key, status(Status::Approved), None).await.unwrap();
     // Nor can it finish what another reviewer approved.
-    assert!(matches!(
-        env.store.update_task(&lead, &t.key, status(Status::Done), None).await,
-        Err(Error::ReviewRequired)
-    ));
+    assert!(matches!(env.store.update_task(&lead, &t.key, status(Status::Done), None).await, Err(Error::Forbidden(_))));
     let done = env.store.update_task(&other, &t.key, status(Status::Done), None).await.unwrap();
     assert_eq!(done.status, Status::Done);
 
@@ -959,7 +956,7 @@ async fn reviewers_cannot_approve_their_own_work() {
     env.store.update_task(&lead, &u.key, status(Status::InReview), None).await.unwrap();
     assert!(matches!(
         env.store.update_task(&lead, &u.key, status(Status::Approved), None).await,
-        Err(Error::ReviewRequired)
+        Err(Error::Forbidden(_))
     ));
 
     // A reviewer holding in-progress work still finishes it where the plan allows.
@@ -992,7 +989,7 @@ async fn a_reviewer_approves_work_it_only_parked_in_an_earlier_round() {
     env.store.update_task(&env.human, &u.key, status(Status::InReview), None).await.unwrap();
     assert!(matches!(
         env.store.update_task(&factory, &u.key, status(Status::Done), None).await,
-        Err(Error::ReviewRequired)
+        Err(Error::Forbidden(_))
     ));
 }
 
