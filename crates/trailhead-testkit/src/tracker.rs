@@ -235,13 +235,13 @@ impl Tracker for FakeTracker {
         Arc::new(FakeTracker { state: self.state.clone(), agent: format!("{}/{name}", self.agent) })
     }
 
-    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>> {
+    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
         self.check_live()?;
         let s = self.state.lock().unwrap();
         Ok(s.tasks
             .values()
             .filter(|t| t.project == project && t.status == Status::Open && t.holder.is_none())
-            .filter(|t| queue.is_none_or(|q| s.parents.get(&t.key) == Some(q)))
+            .filter(|t| queue.is_empty() || s.parents.get(&t.key).is_some_and(|p| queue.contains(p)))
             .take(limit)
             .cloned()
             .collect())
@@ -301,7 +301,7 @@ impl Tracker for FakeTracker {
         }))
     }
 
-    async fn in_flight(&self, project: &str, queue: Option<&TaskKey>) -> Result<Vec<Task>> {
+    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
         self.check_live()?;
         let s = self.state.lock().unwrap();
         Ok(s.tasks
@@ -309,7 +309,7 @@ impl Tracker for FakeTracker {
             .filter(|t| {
                 t.project == project && !t.run.is_empty() && !matches!(t.status, Status::Done | Status::Cancelled)
             })
-            .filter(|t| queue.is_none_or(|q| s.parents.get(&t.key) == Some(q)))
+            .filter(|t| queue.is_empty() || s.parents.get(&t.key).is_some_and(|p| queue.contains(p)))
             .cloned()
             .collect())
     }

@@ -42,7 +42,7 @@ impl Factory {
         let live = self.compute.list(&self.base_labels()).await?;
         let tasks: Vec<Task> = self
             .tracker
-            .in_flight(self.project(), self.queue().as_ref())
+            .in_flight(self.project(), &self.queue())
             .await?
             .into_iter()
             .filter(|t| !running.contains(&t.key))

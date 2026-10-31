@@ -240,8 +240,8 @@ impl Factory {
         &self.config.repo.project
     }
 
-    fn queue(&self) -> Option<TaskKey> {
-        self.config.repo.queue.clone().map(TaskKey)
+    fn queue(&self) -> Vec<TaskKey> {
+        self.config.repo.queue.iter().cloned().map(TaskKey).collect()
     }
 
     fn base_labels(&self) -> Labels {

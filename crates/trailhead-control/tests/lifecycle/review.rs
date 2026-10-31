@@ -133,12 +133,7 @@ async fn an_approval_files_its_follow_ups_as_unqueued_tasks_linked_to_the_source
         assert_eq!(t.status, Status::Open);
         assert!(t.description.contains(&key.0) && t.description.contains(&pr.url), "{}", t.description);
         assert!(
-            r.tracker
-                .ready("TRAIL", Some(&TaskKey("TRAIL-102".into())), 10)
-                .await
-                .unwrap()
-                .iter()
-                .all(|q| q.key != t.key)
+            r.tracker.ready("TRAIL", &[TaskKey("TRAIL-102".into())], 10).await.unwrap().iter().all(|q| q.key != t.key)
         );
     }
     let comment = r.codehost.prs()[0].comments.last().unwrap().clone();

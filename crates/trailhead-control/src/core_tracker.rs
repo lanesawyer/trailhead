@@ -232,20 +232,22 @@ impl Tracker for CoreTracker {
         Arc::new(sub)
     }
 
-    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>> {
+    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
         let tasks = match queue {
-            None => {
-                self.store.ready(&ctx, Some(project), Some(limit as i64), GradeFilter::Any).await.map_err(map_err)?
-            }
-            Some(queue) => {
-                let filter = TaskFilter {
-                    project: Some(project.to_string()),
-                    parent: Some(queue.0.clone()),
-                    ..TaskFilter::default()
-                };
-                let queued: std::collections::HashSet<_> =
-                    self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id).collect();
+            [] => self.store.ready(&ctx, Some(project), Some(limit as i64), GradeFilter::Any).await.map_err(map_err)?,
+            queue => {
+                // The store orders ready tasks by priority, so filtering its one list orders across every queue and
+                // lists a task once even if it is under two of them.
+                let mut queued = std::collections::HashSet::new();
+                for q in queue {
+                    let filter = TaskFilter {
+                        project: Some(project.to_string()),
+                        parent: Some(q.0.clone()),
+                        ..TaskFilter::default()
+                    };
+                    queued.extend(self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id));
+                }
                 // Unlimited: a cap here would hide queued tasks behind other ready ones.
                 let ready = self.store.ready(&ctx, Some(project), Some(-1), GradeFilter::Any).await.map_err(map_err)?;
                 ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
@@ -319,14 +321,16 @@ impl Tracker for CoreTracker {
         }))
     }
 
-    async fn in_flight(&self, project: &str, queue: Option<&TaskKey>) -> Result<Vec<Task>> {
+    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter {
-            project: Some(project.to_string()),
-            parent: queue.map(|q| q.0.clone()),
-            ..TaskFilter::default()
-        };
-        let tasks = self.list_all(&ctx, filter).await?;
+        let parents: Vec<Option<String>> =
+            if queue.is_empty() { vec![None] } else { queue.iter().map(|q| Some(q.0.clone())).collect() };
+        let mut tasks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for parent in parents {
+            let filter = TaskFilter { project: Some(project.to_string()), parent, ..TaskFilter::default() };
+            tasks.extend(self.list_all(&ctx, filter).await?.into_iter().filter(|t| seen.insert(t.id)));
+        }
         self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
     }
 

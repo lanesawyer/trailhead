@@ -178,11 +178,12 @@ impl Factory {
     /// poll (`docs/factory/review.md#grades`).
     async fn ready_graded(&self, room: usize) -> Result<Vec<Task>> {
         let queue = self.queue();
-        if queue.is_none() {
-            return self.tracker.ready(self.project(), None, room).await;
+        // With no queue the whole project is the factory's by configuration, so a grade is not what releases a task.
+        if queue.is_empty() {
+            return self.tracker.ready(self.project(), &[], room).await;
         }
         // Ungraded tasks mustn't crowd graded ones out of the limit.
-        let ready = self.tracker.ready(self.project(), queue.as_ref(), usize::MAX).await?;
+        let ready = self.tracker.ready(self.project(), &queue, usize::MAX).await?;
         let (graded, ungraded): (Vec<Task>, Vec<Task>) = ready.into_iter().partition(|t| t.grade.is_some());
         for task in ungraded {
             self.report_ungraded(&task).await;

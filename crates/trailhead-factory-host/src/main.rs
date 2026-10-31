@@ -480,10 +480,15 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
             for entry in &setup.repos {
                 let factory = &entry.factory;
                 let project = &factory.config.repo.project;
-                let queue = factory.config.repo.queue.clone().map(trailhead_factory::TaskKey);
-                match factory.tracker.ready(project, queue.as_ref(), 10).await {
+                let queue: Vec<_> = factory.config.repo.queue.iter().cloned().map(trailhead_factory::TaskKey).collect();
+                match factory.tracker.ready(project, &queue, 10).await {
                     Ok(ready) => {
-                        let scope = queue.as_ref().map_or(project.clone(), |q| format!("{project}, under {}", q.0));
+                        let scope = if queue.is_empty() {
+                            project.clone()
+                        } else {
+                            let keys: Vec<_> = queue.iter().map(|q| q.0.as_str()).collect();
+                            format!("{project}, under {}", keys.join(", "))
+                        };
                         println!(
                             "{}: tracker: acting as {AGENT}; {} ready task(s) in {scope}",
                             entry.slug,
