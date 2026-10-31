@@ -23,7 +23,7 @@ pub use compute::{
 };
 pub use config::{
     Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_GITHUB_ID, GATEWAY_HOST, GATEWAY_PORT,
-    Gate, GradesConfig, MergeConfig, MergeMode, Profile, Role, UsageConfig,
+    Gate, GateKind, GradesConfig, MergeConfig, MergeMode, Profile, Role, UsageConfig,
 };
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
@@ -61,6 +61,10 @@ pub enum Error {
     /// [`Error::Other`], which may be a blip worth retrying.
     #[error("rejected: {0}")]
     Rejected(String),
+    /// A resource the run needs is short right now (a full disk, say) and will be again only when something is
+    /// freed. The work is worth retrying later, and waiting doesn't count as a failure of the task or the sandbox.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]

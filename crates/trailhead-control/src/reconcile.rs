@@ -144,7 +144,11 @@ impl Factory {
         if merged.by == MergedBy::Merger
             && let Some(d) = self.tracker.show(&task.key).await?.run.merge
         {
-            handoff.push_str(&format!(" Grade {}; gates passed: {}.", d.grade, d.passed.join(", ")));
+            handoff.push_str(&format!(
+                " Grade {}; gates passed: {}.",
+                d.grade,
+                d.passed.iter().map(|g| g.as_str()).collect::<Vec<_>>().join(", ")
+            ));
         }
         self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
         // A parked task can't be finished from where it is: it goes back to open and is claimed first.
