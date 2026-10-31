@@ -70,7 +70,7 @@ pub fn validate(specs: &[RepoSpec]) -> Result<(), String> {
     let mut slugs: HashMap<String, &RepoSpec> = HashMap::new();
     let mut names: HashMap<String, &RepoSpec> = HashMap::new();
     let mut queues: HashMap<(String, Option<String>), &RepoSpec> = HashMap::new();
-    for spec in specs {
+    for (i, spec) in specs.iter().enumerate() {
         if let Some(first) =
             specs.first().filter(|f| f.config.compute != spec.config.compute || f.config.daemon != spec.config.daemon)
         {
@@ -105,6 +105,20 @@ pub fn validate(specs: &[RepoSpec]) -> Result<(), String> {
                 other.slug(),
                 spec.dir.display(),
                 spec.slug(),
+            ));
+        }
+        // A repo with no queue takes every ready task in its project, so it overlaps any other repo there.
+        if let Some(other) = specs[..i]
+            .iter()
+            .find(|o| o.config.repo.project == repo.project && (o.config.repo.queue.is_none() || repo.queue.is_none()))
+        {
+            return Err(format!(
+                "{} ({}) and {} ({}) share project {} and one has no queue, so it would take the other's tasks; give each a queue",
+                other.dir.display(),
+                other.slug(),
+                spec.dir.display(),
+                spec.slug(),
+                repo.project,
             ));
         }
     }
@@ -168,6 +182,15 @@ mod tests {
         b.config.compute = trailhead_factory::ComputeConfig::Docker { image: None, network: None, runtime: None };
         let err = validate(&[a, b]).unwrap_err();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("[factory.compute]"), "{err}");
+    }
+
+    #[test]
+    fn a_queueless_repo_overlaps_another_on_its_project() {
+        let a = spec("/a", "o", "alpha", "TRAIL", None);
+        let b = spec("/b", "o", "beta", "TRAIL", Some("TRAIL-2"));
+        assert!(validate(&[a, b]).unwrap_err().contains("no queue"));
+        let (a, b) = (spec("/a", "o", "alpha", "TRAIL", None), spec("/b", "o", "beta", "TRAIL", Some("TRAIL-2")));
+        assert!(validate(&[b, a]).unwrap_err().contains("no queue"));
     }
 
     #[test]

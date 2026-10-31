@@ -301,7 +301,7 @@ impl Tracker for FakeTracker {
         }))
     }
 
-    async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
+    async fn in_flight(&self, project: &str, queue: Option<&TaskKey>) -> Result<Vec<Task>> {
         self.check_live()?;
         let s = self.state.lock().unwrap();
         Ok(s.tasks
@@ -309,6 +309,7 @@ impl Tracker for FakeTracker {
             .filter(|t| {
                 t.project == project && !t.run.is_empty() && !matches!(t.status, Status::Done | Status::Cancelled)
             })
+            .filter(|t| queue.is_none_or(|q| s.parents.get(&t.key) == Some(q)))
             .cloned()
             .collect())
     }

@@ -198,3 +198,52 @@ async fn two_repos_loops_run_at_once_each_taking_only_its_own_projects_tasks() {
         assert!(!seen.is_empty() && seen.iter().all(|k| k == own), "{project} saw {seen:?}");
     }
 }
+
+#[tokio::test]
+async fn repos_sharing_a_project_through_different_queues_leave_each_others_in_flight_tasks_alone() {
+    use trailhead_factory::{RunUpdate, Status, Tracker};
+
+    let compute = FakeCompute::new();
+    let host = Host::new(None);
+    let tracker = FakeTracker::new("factory");
+    let q1 = tracker.add_task("TRAIL", "Alpha's queue", "");
+    let q2 = tracker.add_task("TRAIL", "Beta's queue", "");
+    let mut factories = Vec::new();
+    for (name, queue) in [("alpha", &q1), ("beta", &q2)] {
+        let codehost = FakeCodeHost::new();
+        let harness = Arc::new(ScriptedHarness::new());
+        let daemon = Arc::new(LocalDaemon::new(harness, Arc::new(codehost), tracker.clone()));
+        factories.push(Factory::new(
+            FactoryConfig::parse_table(&config(name, &format!("queue = \"{}\"", queue.0)), "TRAIL", None).unwrap(),
+            Arc::new(compute.clone()),
+            Arc::new(tracker.clone()),
+            Arc::new(FakeProvider::new(1)),
+            daemon,
+            host.clone(),
+        ));
+    }
+    // Beta's run is live: its task is in progress, held by its run's sub-agent, with a sandbox alpha can't see.
+    let task = tracker.add_subtask(&q2, "Beta's task", "");
+    tracker.set_status(&task, Status::InProgress);
+    tracker
+        .report(
+            &task,
+            RunUpdate {
+                sandbox: Some("beta-run".into()),
+                host: Some("beta-w1".into()),
+                attempt: Some(1),
+                ..RunUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let done = factories[0].reconcile().await.unwrap();
+    assert!(done.requeued.is_empty() && done.reviewed.is_empty(), "alpha touched beta's task: {done:?}");
+    assert_eq!(tracker.task(&task).status, Status::InProgress);
+    assert!(
+        tracker.in_flight("TRAIL", Some(&q1)).await.unwrap().is_empty(),
+        "alpha's in-flight set holds only its own queue's tasks"
+    );
+    assert_eq!(tracker.in_flight("TRAIL", Some(&q2)).await.unwrap().len(), 1);
+}

@@ -1929,8 +1929,13 @@ impl Factory {
         let mut done = Reconciled::default();
         let mut due = Due::default();
         let live = self.compute.list(&self.base_labels()).await?;
-        let tasks: Vec<Task> =
-            self.tracker.in_flight(self.project()).await?.into_iter().filter(|t| !running.contains(&t.key)).collect();
+        let tasks: Vec<Task> = self
+            .tracker
+            .in_flight(self.project(), self.queue().as_ref())
+            .await?
+            .into_iter()
+            .filter(|t| !running.contains(&t.key))
+            .collect();
 
         // Runs the daemon may still be working on, which are followed again rather than requeued (TRAIL-137).
         let live_runs: Vec<(&Task, &Sandbox)> =
