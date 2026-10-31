@@ -108,6 +108,7 @@ async fn daemon_in_a_sprite() {
                 repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
                 base_branch: "main".into(),
                 merge_base: false,
+                target_cap_bytes: None,
                 branch: None,
                 setup: Some(Check { name: "setup".into(), command: "test -f Cargo.toml".into() }),
             };

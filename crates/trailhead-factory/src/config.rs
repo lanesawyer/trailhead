@@ -138,11 +138,28 @@ impl GradesConfig {
 }
 
 /// How the daemon in each sandbox is started.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
     /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`. The daemon's default when unset.
     pub log: Option<String>,
+    /// How big a worker's cargo `target` may be when its warm checkpoint is taken; 0 for no cap.
+    /// `docs/factory/sandbox.md` has the numbers behind the default.
+    #[serde(default = "default_target_cap_bytes")]
+    pub target_cap_bytes: u64,
+}
+
+/// 6 GiB: a Trailhead build is about 11 GB, 3.4 GB of it incremental caches (docs/factory/sandbox.md).
+pub const DEFAULT_TARGET_CAP_BYTES: u64 = 6 << 30;
+
+fn default_target_cap_bytes() -> u64 {
+    DEFAULT_TARGET_CAP_BYTES
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        DaemonConfig { log: None, target_cap_bytes: DEFAULT_TARGET_CAP_BYTES }
+    }
 }
 
 /// Where sandboxes run. Sprites unless the factory file says otherwise.
@@ -505,6 +522,7 @@ impl FactoryConfig {
     /// Readies a checkout, on `branch` when given (a rework). Only workers build: a reviewer reads the diff, so it
     /// skips `setup`.
     pub fn prepare_request(&self, role: Role, branch: Option<String>) -> PrepareRequest {
+        let target_cap_bytes = Some(self.daemon.target_cap_bytes).filter(|&b| b > 0);
         let setup = match role {
             Role::Worker => self.checks.setup.as_ref().map(|c| Check { name: "setup".into(), command: c.clone() }),
             _ => None,
@@ -515,6 +533,7 @@ impl FactoryConfig {
             branch,
             merge_base: false,
             setup,
+            target_cap_bytes,
         }
     }
 }
