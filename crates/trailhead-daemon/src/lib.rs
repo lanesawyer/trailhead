@@ -6,7 +6,7 @@
 //! plane.
 
 mod runner;
-mod trim;
+pub mod trim;
 mod workspace;
 
 #[cfg(feature = "net")]
