@@ -110,6 +110,15 @@ impl Workspace for GitWorkspace {
                 return Err(Error::Other(format!("setup failed: {}", result.output.trim())));
             }
         }
+        if let Some(cap) = req.target_cap_bytes {
+            // The sandbox works whatever the trim does, so a failure is logged, not returned.
+            let target = self.dir.join("target");
+            match tokio::task::spawn_blocking(move || crate::trim::trim_target(&target, cap)).await {
+                Ok(Ok(t)) => tracing::info!(before = t.before, after = t.after, cap, "trimmed the cargo target"),
+                Ok(Err(e)) => tracing::warn!(error = %e, "couldn't trim the cargo target"),
+                Err(e) => tracing::warn!(error = %e, "the cargo target trim panicked"),
+            }
+        }
         if req.merge_base && req.branch.is_some() {
             // After setup, which would trip over conflict markers. Conflicts are the point: the agent resolves them.
             let base = format!("origin/{}", req.base_branch);

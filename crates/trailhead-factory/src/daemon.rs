@@ -32,6 +32,9 @@ pub struct PrepareRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge_base: bool,
     pub setup: Option<Check>,
+    /// Trim the checkout's cargo `target` to this size after setup, so the warm checkpoint taken next stays small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_cap_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
