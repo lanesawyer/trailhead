@@ -2419,6 +2419,23 @@ async fn a_merge_the_merger_started_but_didnt_close_is_still_the_mergers() {
 }
 
 #[tokio::test]
+async fn the_pr_says_the_review_asked_for_changes_even_where_agent_review_is_advisory() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 4);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let said = said(&r);
+    assert!(
+        said.iter()
+            .any(|m| m.starts_with("Grade 4:")
+                && m.ends_with("The latest review asked for changes; a rework is running.")),
+        "{said:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_grade_three_pr_waits_for_lane_who_approves_it() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;

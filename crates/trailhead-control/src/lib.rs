@@ -176,7 +176,33 @@ fn merged_by(task: &Task) -> MergedBy {
 /// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
 /// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for a person.` `merging` is whether the merger is on and will
 /// try to merge now; the message then says the merge happened, so it is only posted once it has.
-fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool, behind: bool) -> String {
+fn decision_message(
+    grade: &PrGrade,
+    d: &MergeDecision,
+    auto_merge: bool,
+    merging: bool,
+    behind: bool,
+    changes: Option<Rework>,
+) -> String {
+    let message = gate_message(grade, d, auto_merge, merging, behind);
+    match changes {
+        Some(Rework::Running) => format!("{message} The latest review asked for changes; a rework is running."),
+        Some(Rework::Pushed) => format!("{message} The latest review asked for changes; the rework has pushed."),
+        None => message,
+    }
+}
+
+/// Where the changes the latest review asked for stand, said on the PR at every grade, since a grade whose gate
+/// doesn't need the agent review would otherwise read as if nothing were wrong (TRAIL-388).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rework {
+    /// The review of the PR's current head asked for changes.
+    Running,
+    /// The PR's head has moved since the review that asked for changes, and no review has judged the new head.
+    Pushed,
+}
+
+fn gate_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool, behind: bool) -> String {
     fn join(items: Vec<String>) -> String {
         match items.as_slice() {
             [] => String::new(),
@@ -1137,6 +1163,10 @@ impl Factory {
                     self.tracker
                         .report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() })
                         .await?;
+                    // While the task is still in review, so the PR says the review asked for changes at any grade.
+                    if let Err(e) = self.evaluate_gates(&task.key).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
+                    }
                     self.request_rework(task, requested, round).await?;
                 } else if let Err(e) = self.evaluate_gates(&task.key).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
@@ -1318,7 +1348,8 @@ impl Factory {
             && (gate.auto_merge || decision.human_head.as_ref() == Some(&head));
         // Only the shadow merger's "would merge" says whether the PR is behind: it is the one that never acts on it.
         let behind = decision.would_merge && codehost.behind(pr).await?;
-        decision.message = decision_message(&grade, &decision, gate.auto_merge, merging, behind);
+        let changes = self.rework_state(&task, &head).await?;
+        decision.message = decision_message(&grade, &decision, gate.auto_merge, merging, behind, changes);
         // A refusal stands for the head it was given on, until a merge succeeds or the head moves.
         if merging {
             decision.refused = prev.as_ref().filter(|d| d.head == head).and_then(|d| d.refused.clone());
@@ -1342,6 +1373,18 @@ impl Factory {
             self.merge(&task, pr, &decision, &message).await?;
         }
         Ok(())
+    }
+
+    /// Whether the latest review asked for changes that the PR's `head` still hasn't answered.
+    async fn rework_state(&self, task: &Task, head: &str) -> Result<Option<Rework>> {
+        if task.run.reviewed_head.as_deref() == Some(head) {
+            let asked =
+                self.tracker.last_review(&task.key).await?.is_some_and(|v| v.kind == VerdictKind::RequestChanges);
+            return Ok(asked.then_some(Rework::Running));
+        }
+        let pushed =
+            task.run.pending_changes().is_some_and(|c| !c.conflict && c.head.as_deref().is_some_and(|h| h != head));
+        Ok(pushed.then_some(Rework::Pushed))
     }
 
     /// Merges an approved PR whose decision says to: brings it up to date with the base branch first, and sends a
