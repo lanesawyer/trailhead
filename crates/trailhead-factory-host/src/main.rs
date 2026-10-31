@@ -296,7 +296,7 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
         .map_err(|e| format!("binding the iroh endpoint: {e}"))?;
     // `repos::validate` made the compute and daemon settings the same for every repo.
     let shared = &specs[0].config;
-    let (compute, launch) = compute(&shared.compute, opts, &paths, Launch::new(binary))?;
+    let (compute, launch) = compute(&shared.compute, opts, &paths, Launch::new(binary), false)?;
     let launch = Launch {
         claude_oauth_token: opts.claude_oauth_token.clone(),
         log: shared.daemon.log.clone(),
@@ -389,11 +389,14 @@ fn server_check(server: SocketAddr) -> trailhead_control::ServerCheck {
 
 /// The sandboxes' `Compute`, and where the daemon lives in them.
 #[cfg_attr(not(feature = "docker"), allow(unused_variables))]
+/// `read_only` is for `status` and `logs`, which list sandboxes beside a running factory: a Docker compute made for
+/// it never starts, replaces or syncs the gateway.
 fn compute(
     config: &ComputeConfig,
     opts: &Opts,
     paths: &trailhead_server::Paths,
     launch: Launch,
+    read_only: bool,
 ) -> Result<(Arc<dyn Compute>, Launch), String> {
     match config {
         ComputeConfig::Sprites => {
@@ -425,7 +428,8 @@ fn compute(
                     "no Claude subscription token: Docker sandboxes have no model access until the gateway holds a credential for it"
                 );
             }
-            let compute = DockerCompute::new(docker).map_err(|e| e.to_string())?;
+            let compute = if read_only { DockerCompute::read_only(docker) } else { DockerCompute::new(docker) }
+                .map_err(|e| e.to_string())?;
             let launch = Launch { dir: format!("{HOME}/.trailhead"), workdir: format!("{HOME}/work"), ..launch };
             Ok((Arc::new(compute), launch))
         }
