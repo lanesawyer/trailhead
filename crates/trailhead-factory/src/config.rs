@@ -460,18 +460,15 @@ impl FactoryConfig {
         Gate { require: require.iter().map(|r| r.to_string()).collect(), auto_merge, quorum: None }
     }
 
-    /// The lowest grade's gate, which decides what a worker's checks must cover before it opens a PR.
-    pub fn default_gate(&self) -> Gate {
-        self.gate(1)
-    }
-
-    /// The checks a worker must pass before opening a PR under the default gate.
+    /// The checks a worker must pass before opening a PR: every verifying check the repo defines. The grade isn't
+    /// known until the PR exists, and any grade's gate may require `checks` or a named check, so the worker runs them
+    /// all and the merger can count a gate's check requirements as met.
     pub fn required_checks(&self) -> Vec<Check> {
-        let gate = self.default_gate();
-        let all =
-            self.checks.verifying().into_iter().map(|(n, c)| Check { name: n.to_string(), command: c.to_string() });
-        let everything = gate.require.iter().any(|r| r == "checks");
-        all.filter(|c| everything || gate.require.contains(&c.name)).collect()
+        self.checks
+            .verifying()
+            .into_iter()
+            .map(|(n, c)| Check { name: n.to_string(), command: c.to_string() })
+            .collect()
     }
 
     /// Readies a checkout, on `branch` when given (a rework). Only workers build: a reviewer reads the diff, so it
@@ -592,6 +589,14 @@ require = ["checks", "agent_review", "human"]
         assert_eq!(c.repo.base_branch, "main");
         assert_eq!(c.worker().model, ModelAlias::Sonnet);
         assert_eq!(c.worker().budget.usd(), Usd::dollars(5.0));
+        let names: Vec<_> = c.required_checks().into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["fmt", "lint", "test"]);
+    }
+
+    #[test]
+    fn workers_run_every_check_whatever_the_gates_require() {
+        let c = parse(&SAMPLE.replace("require = [\"checks\", \"agent_review\", \"human\"]", "require = [\"ci\"]"))
+            .unwrap();
         let names: Vec<_> = c.required_checks().into_iter().map(|c| c.name).collect();
         assert_eq!(names, ["fmt", "lint", "test"]);
     }
