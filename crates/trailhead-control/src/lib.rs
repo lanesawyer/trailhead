@@ -1164,7 +1164,8 @@ impl Factory {
                         .report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() })
                         .await?;
                     // While the task is still in review, so the PR says the review asked for changes at any grade.
-                    if let Err(e) = self.evaluate_gates(&task.key).await {
+                    // Message only: a verdict that asks for changes mustn't approve, or merge on Lane's earlier approval.
+                    if let Err(e) = self.say_gates(&task.key).await {
                         tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
                     }
                     self.request_rework(task, requested, round).await?;
@@ -1210,6 +1211,16 @@ impl Factory {
     /// review. In shadow mode it says what it would do on the PR whenever that changes. In `on` mode it also squash-merges
     /// an approved task whose grade auto-merges, or that Lane approved, and closes it as done.
     pub async fn evaluate_gates(&self, key: &TaskKey) -> Result<()> {
+        self.evaluate(key, true).await
+    }
+
+    /// Like `evaluate_gates`, but only says on the PR where things stand: it neither approves nor merges. For when the
+    /// task must stay as it is, a review owed (TRAIL-263) or changes just asked for (TRAIL-388).
+    async fn say_gates(&self, key: &TaskKey) -> Result<()> {
+        self.evaluate(key, false).await
+    }
+
+    async fn evaluate(&self, key: &TaskKey, act: bool) -> Result<()> {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let task = self.tracker.show(key).await?;
         let Some(pr) = &task.run.pr else { return Ok(()) };
@@ -1314,7 +1325,7 @@ impl Factory {
             message: String::new(),
         };
         // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
-        if gates_pass && status == Status::InReview {
+        if act && gates_pass && status == Status::InReview {
             decision.approved_head = Some(head.clone());
             // The mark goes down before the approval so it can't pass for Lane's. Not again while approving is known
             // to fail, which would write the task every pass.
@@ -1341,7 +1352,8 @@ impl Factory {
             }
         }
         // Without the right to approve, the merger can't act, so it only says what it would do, as in shadow mode.
-        let merging = merge_mode == MergeMode::On
+        let merging = act
+            && merge_mode == MergeMode::On
             && gates_pass
             && decision.problem.is_none()
             && status == Status::Approved
@@ -2191,6 +2203,9 @@ impl Factory {
                 if !owed {
                     // CI may have finished, or Lane approved, since the gates were last looked at.
                     self.evaluate_gates(&task.key).await?;
+                } else if task.run.pending_changes().is_some_and(|c| !c.conflict) {
+                    // The rework has pushed and its head awaits review: say so, without approving.
+                    self.say_gates(&task.key).await?;
                 }
                 return Ok(due);
             }
