@@ -1,6 +1,6 @@
-//! `trailhead factory login sprites|claude|github`: saves the factory's secrets in the credential store (the OS
-//! keyring, else a `0600` file), so `run` needs no environment variables or fnox. The environment wins when set, then
-//! fnox, then these. Secrets are read from stdin and never printed.
+//! `trailhead factory login sprites|claude|github|github-writer`: saves the factory's secrets in the credential store
+//! (the OS keyring, else a `0600` file), so `run` needs no environment variables or fnox. The environment wins when
+//! set, then fnox, then these. Secrets are read from stdin and never printed.
 
 use std::io::{BufRead, IsTerminal};
 
@@ -15,6 +15,8 @@ use crate::fnox::Fnox;
 pub const SPRITES: Cred<'static> = Cred::Secret("sprites");
 pub const CLAUDE: Cred<'static> = Cred::Secret("claude");
 pub const GITHUB: Cred<'static> = Cred::Secret("github");
+/// The Docker gateway's GitHub token. Separate from [`GITHUB`] so the control plane's own token stays read-only.
+pub const GITHUB_WRITER: Cred<'static> = Cred::Secret("github-writer");
 
 #[derive(Subcommand)]
 pub enum Login {
@@ -24,6 +26,13 @@ pub enum Login {
     Claude,
     /// Save a GitHub token (`GITHUB_TOKEN`) after checking it can read the repo's pull requests.
     Github {
+        /// The repo file whose `[factory]` names the repo to check. Default: the nearest `.trailhead.toml`.
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Save the Docker gateway's GitHub token (`GITHUB_WRITER_TOKEN`) after checking it can push to the repo. It needs
+    /// contents, pull requests and issues write; the read-only `login github` token is kept separate.
+    GithubWriter {
         /// The repo file whose `[factory]` names the repo to check. Default: the nearest `.trailhead.toml`.
         #[arg(long)]
         config: Option<std::path::PathBuf>,
@@ -144,6 +153,28 @@ pub async fn github(
     Ok(format!("{msg} (user {user}, can read {}'s pull requests)", repo.slug()))
 }
 
+pub async fn github_writer(
+    creds: &CredStore,
+    input: &mut impl BufRead,
+    interactive: bool,
+    api: &str,
+    repo: &Repo,
+) -> Result<String, String> {
+    let token = read_secret("GitHub token that can write", input, interactive)?;
+    let user = GitHub::new(api, Some(token.clone()))
+        .check_writer(repo)
+        .await
+        .map_err(|e| format!("GitHub refused the token: {e}"))?;
+    let msg = saved("GitHub writer token", creds, GITHUB_WRITER, &token)?;
+    Ok(format!("{msg} (user {user}, can push to {})", repo.slug()))
+}
+
+/// The gateway's GitHub token, from `GITHUB_WRITER_TOKEN` or the saved one. Never falls back to the read token.
+#[allow(dead_code)] // The Docker wiring pushes it to the gateway.
+pub fn github_writer_token(fnox: &Fnox, creds: &CredStore) -> Option<String> {
+    resolve("GITHUB_WRITER_TOKEN", std::env::var("GITHUB_WRITER_TOKEN").ok(), fnox, creds, GITHUB_WRITER)
+}
+
 pub async fn run(cmd: Login, creds: &CredStore) -> Result<(), String> {
     let interactive = std::io::stdin().is_terminal();
     let mut input = std::io::stdin().lock();
@@ -153,6 +184,10 @@ pub async fn run(cmd: Login, creds: &CredStore) -> Result<(), String> {
         Login::Github { config } => {
             let repo = crate::find::repo(config.as_deref())?;
             github(creds, &mut input, interactive, trailhead_codehost_github::API_URL, &repo).await?
+        }
+        Login::GithubWriter { config } => {
+            let repo = crate::find::repo(config.as_deref())?;
+            github_writer(creds, &mut input, interactive, trailhead_codehost_github::API_URL, &repo).await?
         }
     };
     println!("{msg}");
@@ -344,5 +379,29 @@ mod tests {
         let msg = github(&creds, &mut "good\n".as_bytes(), false, &api, &repo).await.unwrap();
         assert!(msg.contains("octo") && !msg.contains("good"), "{msg}");
         assert_eq!(creds.read(GITHUB).unwrap().0, "good");
+    }
+
+    #[tokio::test]
+    async fn a_github_writer_token_must_push_and_stays_apart_from_the_read_token() {
+        let app = Router::new().route("/user", get(|| async { (StatusCode::OK, r#"{"login":"octo"}"#) })).route(
+            "/repos/{o}/{r}",
+            get(|h: HeaderMap| async move {
+                let push = authorized(&h, "writer");
+                (StatusCode::OK, format!(r#"{{"permissions":{{"pull":true,"push":{push}}}}}"#))
+            }),
+        );
+        let api = serve(app).await;
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        let repo = Repo { owner: "acme".into(), name: "app".into() };
+        creds.save(GITHUB, "reader").unwrap();
+
+        let err = github_writer(&creds, &mut "reader\n".as_bytes(), false, &api, &repo).await.unwrap_err();
+        assert!(err.contains("can't push") && creds.read(GITHUB_WRITER).is_none(), "{err}");
+
+        let msg = github_writer(&creds, &mut "writer\n".as_bytes(), false, &api, &repo).await.unwrap();
+        assert!(msg.contains("octo") && !msg.contains("writer\n"), "{msg}");
+        assert_eq!(creds.read(GITHUB_WRITER).unwrap().0, "writer");
+        assert_eq!(creds.read(GITHUB).unwrap().0, "reader");
     }
 }
