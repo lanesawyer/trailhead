@@ -2474,6 +2474,27 @@ async fn an_approval_on_an_old_head_doesnt_count() {
 }
 
 #[tokio::test]
+async fn the_factory_withdraws_its_approval_when_gates_stop_passing_on_the_same_head() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+
+    // CI running again on the same head is waited for, not a reason to withdraw.
+    r.codehost.set_ci(&pr, CiState::Pending);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+
+    // Lane raises the grade to one that needs a person.
+    r.tracker.set_grade(&key, 3);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.merge.unwrap().approved_head, None);
+}
+
+#[tokio::test]
 async fn failed_ci_sends_the_task_back_for_a_rework_told_what_failed() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
