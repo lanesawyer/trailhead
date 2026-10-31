@@ -429,3 +429,46 @@ async fn programs_run_as_the_sandbox_user() {
     env.finish().await;
     outcome.unwrap();
 }
+
+/// A pooled worker checkpoints after every task, restored from the last: its images must stay one layer each and
+/// the old warm ones must go, however many tasks it runs (TRAIL-176).
+#[tokio::test]
+#[ignore = "needs a Docker engine and trailhead-sandbox:latest"]
+async fn warm_checkpoints_stay_flat_and_old_ones_go() {
+    let env = live("warm");
+    let compute = env.compute.clone();
+    let name = format!("th-live-warm-{}", std::process::id());
+    let spec = SandboxSpec { name: name.clone(), labels: Labels::new(), egress: Egress::none() };
+    let sandbox = compute.create(&spec).await.unwrap();
+
+    let (c, n) = (compute.clone(), name.clone());
+    let result = async move {
+        c.preflight(&sandbox.id).await.unwrap();
+        let filter = format!("label=dev.trailhead.checkpoint-of={n}");
+        let mut warm = None;
+        for task in 0..6 {
+            if let Some(cp) = &warm {
+                c.restore(&sandbox.id, cp).await.unwrap();
+            }
+            // Each task rewrites the same big file, as a build rewrites `target`.
+            sh(&n, "head -c 20000000 /dev/urandom > $HOME/target.bin; echo done >> $HOME/log").await;
+            let cp = c.checkpoint(&sandbox.id, "warm").await.unwrap();
+            // The control plane labels the sandbox with the new warm checkpoint after the checkpoint returns.
+            let labels = Labels::from([("warm".into(), cp.0.clone())]);
+            c.set_labels(&sandbox.id, &labels).await.unwrap();
+            let layers = docker(&["image", "inspect", "-f", "{{len .RootFS.Layers}}", &cp.0]).await;
+            assert_eq!(layers, "1", "task {task}");
+            let images = docker(&["images", "--filter", &filter, "--format", "{{.Repository}}:{{.Tag}}"]).await;
+            assert!(images.lines().count() <= 2, "task {task}: {images}");
+            warm = Some(cp);
+        }
+        let cp = warm.unwrap();
+        c.restore(&sandbox.id, &cp).await.unwrap();
+        assert_eq!(sh(&n, "wc -l < $HOME/log").await.trim(), "6");
+        assert_eq!(sh(&n, "id -un").await.trim(), "trailhead");
+    };
+    let outcome = tokio::spawn(result).await;
+    compute.destroy(&SandboxId(name)).await.unwrap();
+    env.finish().await;
+    outcome.unwrap();
+}

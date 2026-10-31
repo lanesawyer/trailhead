@@ -111,4 +111,9 @@ pub trait Compute: Send + Sync {
     async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()>;
     async fn set_labels(&self, id: &SandboxId, labels: &Labels) -> Result<()>;
     async fn destroy(&self, id: &SandboxId) -> Result<()>;
+    /// Fails, with a message saying why, when the sandbox is in no state to start a run, such as its host being out
+    /// of disk. Called before a run begins, so the trouble is reported then rather than found by the agent midway.
+    async fn preflight(&self, _id: &SandboxId) -> Result<()> {
+        Ok(())
+    }
 }
