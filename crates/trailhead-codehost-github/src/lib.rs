@@ -65,6 +65,22 @@ impl GitHub {
         Ok(user["login"].as_str().unwrap_or("?").to_string())
     }
 
+    /// Checks a token meant to write: it must authenticate and have push access to the repo (the `permissions`
+    /// GitHub reports for the token on `GET /repos/o/r`), which holds for classic and fine-grained tokens alike.
+    /// GitHub doesn't report pull request or issue write there, so those can't be checked without writing.
+    /// Returns the user's login.
+    pub async fn check_writer(&self, repo: &Repo) -> Result<String> {
+        let user = self.call(self.request(Method::GET, "/user")).await?;
+        let info = self.call(self.request(Method::GET, &Self::repo_path(repo))).await?;
+        if info["permissions"]["push"].as_bool() != Some(true) {
+            return Err(Error::Forbidden(format!(
+                "the token can't push to {}/{} (needs contents, pull requests and issues write)",
+                repo.owner, repo.name
+            )));
+        }
+        Ok(user["login"].as_str().unwrap_or("?").to_string())
+    }
+
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
         let req = self
             .http

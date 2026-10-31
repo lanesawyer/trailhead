@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
@@ -22,6 +22,35 @@ use trailhead_factory::{
 use trailhead_harness_claude_code::ClaudeCode;
 
 #[derive(Parser)]
+#[command(args_conflicts_with_subcommands = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    daemon: Option<Args>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// The Docker sandboxes' gateway: an allowlisting HTTP proxy and its control socket.
+    Gateway {
+        /// Where the proxy listens.
+        #[arg(long, default_value = "0.0.0.0:3128")]
+        listen: std::net::SocketAddr,
+        /// The control socket's path.
+        #[arg(long, default_value = "/run/trailhead-gateway.sock")]
+        socket: PathBuf,
+        #[arg(long, default_value = "info")]
+        log: String,
+    },
+    /// Sends the gateway one control message (JSON on stdin) and prints its response.
+    GatewayCtl {
+        #[arg(long, default_value = "/run/trailhead-gateway.sock")]
+        socket: PathBuf,
+    },
+}
+
+#[derive(clap::Args)]
 struct Args {
     /// A JSON `DaemonSecrets` file (0600). It stays, because the Sprite restarts the daemon after a cold wake.
     #[arg(long)]
@@ -41,9 +70,6 @@ struct Args {
     #[arg(long, default_value = "info")]
     log: String,
 }
-
-/// Where connectors are listed from inside a Sprite.
-const GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
 
 /// Stands in for a code host when the sandbox has no GitHub connector, so runs fail with the reason.
 struct NoCodeHost(String);
@@ -99,9 +125,9 @@ impl CodeHost for NoCodeHost {
 }
 
 /// GitHub through the Sprite's GitHub connector, found in the gateway's list.
-async fn codehost(author: Identity) -> Arc<dyn CodeHost> {
+async fn codehost(author: Identity, gateway_list: &str) -> Arc<dyn CodeHost> {
     let found = async {
-        let list: serde_json::Value = reqwest::get(GATEWAY_LIST).await?.error_for_status()?.json().await?;
+        let list: serde_json::Value = reqwest::get(gateway_list).await?.error_for_status()?.json().await?;
         let conns = list["connections"].as_array().cloned().unwrap_or_default();
         Ok::<_, reqwest::Error>(
             conns
@@ -127,10 +153,52 @@ fn read_secrets(path: &PathBuf) -> std::result::Result<DaemonSecrets, String> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let args = Args::parse();
+    let cli = Cli::parse();
+    let args = match (cli.command, cli.daemon) {
+        (Some(command), _) => return gateway_command(command).await,
+        (None, Some(args)) => args,
+        (None, None) => Cli::command()
+            .error(clap::error::ErrorKind::MissingRequiredArgument, "--secrets and --workdir are required")
+            .exit(),
+    };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| args.log.as_str().into());
     tracing_subscriber::fmt().with_env_filter(filter).init();
     match serve(args).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("trailhead-daemon: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn gateway_command(command: Command) -> std::process::ExitCode {
+    use std::io::Read;
+    use trailhead_daemon::gateway;
+    use trailhead_factory::{GatewayRequest, GatewayResponse};
+    let result: std::result::Result<(), String> = async {
+        match command {
+            Command::Gateway { listen, socket, log } => {
+                let filter =
+                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| log.as_str().into());
+                tracing_subscriber::fmt().with_env_filter(filter).init();
+                gateway::run(listen, &socket).await.map_err(|e| e.to_string())
+            }
+            Command::GatewayCtl { socket } => {
+                let mut input = String::new();
+                std::io::stdin().read_to_string(&mut input).map_err(|e| e.to_string())?;
+                let req: GatewayRequest = serde_json::from_str(&input).map_err(|e| format!("bad message: {e}"))?;
+                let resp = gateway::ctl(&socket, &req).await.map_err(|e| format!("{}: {e}", socket.display()))?;
+                println!("{}", serde_json::to_string(&resp).map_err(|e| e.to_string())?);
+                match resp {
+                    GatewayResponse::Error { message } => Err(message),
+                    _ => Ok(()),
+                }
+            }
+        }
+    }
+    .await;
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("trailhead-daemon: {e}");
@@ -145,6 +213,7 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     let control_plane = parse_endpoint_id(&secrets.control_plane).map_err(|e| e.to_string())?;
 
     let endpoint = Endpoint::builder(presets::N0)
+        .proxy_from_env()
         .secret_key(key)
         .alpns(vec![ALPN.to_vec()])
         .bind()
@@ -159,7 +228,7 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
             Some(token) => ClaudeCode::new(args.claude).with_oauth_token(token),
             None => ClaudeCode::new(args.claude),
         }),
-        codehost: codehost(Identity { name: args.author_name, email: args.author_email }).await,
+        codehost: codehost(Identity { name: args.author_name, email: args.author_email }, &secrets.gateway_list).await,
         workspace: Arc::new(GitWorkspace::new(args.workdir)),
         connect,
         renew_every: RENEW_EVERY,

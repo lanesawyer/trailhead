@@ -5,6 +5,7 @@
 //! feature adds the iroh transport: [`net::DaemonProtocol`] in the sandbox and [`net::RemoteDaemon`] in the control
 //! plane.
 
+pub mod gateway;
 mod runner;
 mod workspace;
 
