@@ -17,14 +17,12 @@
 
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use trailhead_compute_docker::{DockerCompute, DockerConfig, GATEWAY_BIN, MARKER, sandbox_network};
+use trailhead_compute_docker::{GATEWAY_BIN, MARKER, sandbox_network};
 use trailhead_factory::{
-    AuthScheme, Compute, GATEWAY_GITHUB_ID, GATEWAY_HOST, GATEWAY_PORT, GatewayConnection, GatewayResponse,
-    GatewayState, Labels, SandboxId, Secret,
+    GATEWAY_GITHUB_ID, GATEWAY_HOST, GATEWAY_PORT, GatewayRequest, GatewayResponse, GatewayState, Labels,
 };
 
 const PROJECT: &str = "LIVE";
@@ -91,13 +89,28 @@ async fn agent_running(sandbox: &str) -> bool {
     status.success()
 }
 
-async fn gateway_state() -> GatewayState {
-    let script = format!("printf '{{\"type\":\"state\"}}' | {GATEWAY_BIN} gateway-ctl");
+/// Sends `request` on the gateway's control socket, as the engine's own control plane does.
+async fn gateway_ctl(request: &GatewayRequest) -> GatewayResponse {
+    let script = format!("printf '%s' '{}' | {GATEWAY_BIN} gateway-ctl", serde_json::to_string(request).unwrap());
     let out = docker(&["exec", GATEWAY_HOST, "/bin/sh", "-c", &script]).await;
-    match serde_json::from_str(&out).unwrap() {
+    serde_json::from_str(&out).unwrap()
+}
+
+async fn gateway_state() -> GatewayState {
+    match gateway_ctl(&GatewayRequest::State).await {
         GatewayResponse::State(state) => state,
         other => panic!("{other:?}"),
     }
+}
+
+/// Replaces the labels the gateway holds for `sandbox`, leaving its address and egress alone. That is the gateway's
+/// half of the control plane's `set_labels`, made alone: a second `DockerCompute` over the factory's state directory
+/// would resync, which deletes the state of a sandbox the factory has begun to create.
+async fn set_gateway_labels(sandbox: &str, labels: Labels) {
+    let state = gateway_state().await;
+    let address = state.sandboxes.iter().find(|s| s.name == sandbox).expect("sandbox registered").address;
+    let register = GatewayRequest::Register { name: sandbox.to_string(), address, labels };
+    assert_eq!(gateway_ctl(&register).await, GatewayResponse::Ok);
 }
 
 async fn github(token: &str, method: reqwest::Method, repo: &str, path: &str, body: Option<Value>) -> (u16, Value) {
@@ -141,7 +154,7 @@ async fn reviewed(env: &Env, number: u64) -> bool {
 }
 
 /// The checks that go with one agent working in `sandbox`.
-async fn probe(env: &Env, compute: &DockerCompute, sandbox: &str, role: &str) {
+async fn probe(env: &Env, sandbox: &str, role: &str) {
     println!("probing the {role} in {sandbox}");
 
     // An off-allowlist host is refused while the agent works.
@@ -167,13 +180,12 @@ async fn probe(env: &Env, compute: &DockerCompute, sandbox: &str, role: &str) {
 
     if role == "worker" {
         // The kill switch: without its role label the sandbox gets nothing, and gets it back with the label.
-        let id = SandboxId(sandbox.to_string());
-        let labels = compute.list(&Labels::new()).await.unwrap().into_iter().find(|s| s.id == id).unwrap().labels;
+        let labels = state.sandboxes.iter().find(|s| s.name == sandbox).unwrap().labels.clone();
         let mut without = labels.clone();
         without.remove("role");
-        compute.set_labels(&id, &without).await.unwrap();
+        set_gateway_labels(sandbox, without).await;
         let cut = curl(sandbox, &own, &junk).await;
-        compute.set_labels(&id, &labels).await.unwrap();
+        set_gateway_labels(sandbox, labels).await;
         assert_eq!(cut, "403", "worker: GitHub after the role label was removed");
         assert_eq!(curl(sandbox, &own, &junk).await, "200", "worker: GitHub with the role label back");
     }
@@ -221,23 +233,21 @@ async fn run(env: &Env, dir: &Path, factory: &mut tokio::process::Child) {
     let (mut worker_probed, mut reviewer_probed) = (false, false);
     let start = Instant::now();
     let mut pr: Option<u64> = None;
-    let mut compute: Option<DockerCompute> = None;
     while start.elapsed() < DEADLINE {
         tokio::time::sleep(Duration::from_secs(5)).await;
         if let Some(status) = factory.try_wait().unwrap() {
             panic!("the factory exited early ({status}); see {}", dir.join("factory.log").display());
         }
         if !sandbox_containers().await.is_empty() {
-            // Made once the factory has started the gateway, so this doesn't start it first.
-            let c = compute.get_or_insert_with(|| second_control_plane(env, dir));
-            for s in c.list(&Labels::new()).await.unwrap() {
+            // The gateway's own record of each sandbox and its labels; it exists once the factory has made one.
+            for s in gateway_state().await.sandboxes {
                 let (probed, role) = match s.labels.get("role").map(String::as_str) {
                     Some("worker") => (&mut worker_probed, "worker"),
                     Some("reviewer") => (&mut reviewer_probed, "reviewer"),
                     _ => continue,
                 };
-                if !*probed && agent_running(&s.id.0).await {
-                    probe(env, c, &s.id.0, role).await;
+                if !*probed && agent_running(&s.name).await {
+                    probe(env, &s.name, role).await;
                     *probed = true;
                 }
             }
@@ -261,19 +271,24 @@ async fn run(env: &Env, dir: &Path, factory: &mut tokio::process::Child) {
     );
 }
 
-/// A `DockerCompute` over the factory's state directory and gateway, to change a live sandbox's labels the way the
-/// control plane does. It carries the factory's connection, so its sync leaves the gateway's credential alone.
-fn second_control_plane(env: &Env, dir: &Path) -> DockerCompute {
-    let daemon = Arc::new(std::fs::read(&env.daemon).unwrap());
-    let mut config = DockerConfig::new(dir.join("data/factory/docker"), daemon);
-    config.connections = vec![GatewayConnection {
-        provider: "github".into(),
-        id: GATEWAY_GITHUB_ID.into(),
-        upstream: "https://api.github.com".into(),
-        auth: AuthScheme::Bearer,
-        credential: Secret::new(env.writer.clone()),
-    }];
-    DockerCompute::new(config).unwrap()
+/// Stops the test's `trailhead` server, whether or not the test passed; the CLI started it in the background.
+struct StopServer {
+    cli: String,
+    dir: std::path::PathBuf,
+    url: String,
+}
+
+impl Drop for StopServer {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new(&self.cli)
+            .current_dir(&self.dir)
+            .env("TRAILHEAD_NO_KEYRING", "1")
+            .env("TRAILHEAD_DATA_DIR", self.dir.join("data"))
+            .env("TRAILHEAD_CONFIG_DIR", self.dir.join("config"))
+            .env("TRAILHEAD_URL", &self.url)
+            .args(["--as-me", "server", "stop"])
+            .output();
+    }
 }
 
 /// Removes what the run left on the engine and the scratch repo, whether or not the test passed. Drops after the
@@ -324,6 +339,8 @@ async fn a_task_runs_on_docker_through_the_gateway() {
     let dir = tmp.path();
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let url = format!("http://127.0.0.1:{port}");
+    // Declared after `tmp`, so it drops first, while the server's directories still exist.
+    let _stop = StopServer { cli: env.cli.clone(), dir: dir.to_path_buf(), url: url.clone() };
     std::fs::write(dir.join(".trailhead.toml"), factory_toml(&env.repo)).unwrap();
     cli(&env, dir, &url, &["project", "add", PROJECT, "Live Docker factory test"]).await;
     let description =
@@ -354,5 +371,4 @@ async fn a_task_runs_on_docker_through_the_gateway() {
     run(&env, dir, &mut factory).await;
     println!("{}", cli(&env, dir, &url, &["show", TASK]).await);
     factory.kill().await.unwrap();
-    cli(&env, dir, &url, &["server", "stop"]).await;
 }
