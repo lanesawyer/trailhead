@@ -43,6 +43,15 @@ enum Command {
         #[arg(long, default_value = "info")]
         log: String,
     },
+    /// Trims a cargo `target` directory to a size, for a repo's `trim` check (`"$TRAILHEAD_DAEMON" trim-cargo`).
+    TrimCargo {
+        /// The size to trim to, in bytes.
+        #[arg(long)]
+        cap: u64,
+        /// The directory to trim.
+        #[arg(long, default_value = "target")]
+        target: PathBuf,
+    },
     /// Sends the gateway one control message (JSON on stdin) and prints its response.
     GatewayCtl {
         #[arg(long, default_value = "/run/trailhead-gateway.sock")]
@@ -155,6 +164,18 @@ fn read_secrets(path: &PathBuf) -> std::result::Result<DaemonSecrets, String> {
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let args = match (cli.command, cli.daemon) {
+        (Some(Command::TrimCargo { cap, target }), _) => {
+            return match trailhead_daemon::trim::trim_target(&target, cap) {
+                Ok(t) => {
+                    println!("trimmed {} from {} to {} bytes (cap {cap})", target.display(), t.before, t.after);
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("trailhead-daemon: trim-cargo {}: {e}", target.display());
+                    std::process::ExitCode::FAILURE
+                }
+            };
+        }
         (Some(command), _) => return gateway_command(command).await,
         (None, Some(args)) => args,
         (None, None) => Cli::command()
@@ -184,6 +205,7 @@ async fn gateway_command(command: Command) -> std::process::ExitCode {
                 tracing_subscriber::fmt().with_env_filter(filter).init();
                 gateway::run(listen, &socket).await.map_err(|e| e.to_string())
             }
+            Command::TrimCargo { .. } => unreachable!("handled in main"),
             Command::GatewayCtl { socket } => {
                 let mut input = String::new();
                 std::io::stdin().read_to_string(&mut input).map_err(|e| e.to_string())?;

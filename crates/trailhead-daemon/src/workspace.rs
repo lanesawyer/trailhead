@@ -48,6 +48,53 @@ impl GitWorkspace {
         self
     }
 
+    /// Compares the checkout's filesystem use with the request's limits, which are stack-neutral: whatever a new
+    /// stack leaves behind counts. Over the warn size logs; over the limit fails, so no warm checkpoint is taken.
+    /// A `df` that can't be read is logged and ignored.
+    async fn check_disk(&self, req: &PrepareRequest) -> Result<()> {
+        if req.disk_warn_bytes.is_none() && req.disk_limit_bytes.is_none() {
+            return Ok(());
+        }
+        let used = match self.disk_used().await {
+            Ok(used) => used,
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't read the sandbox's disk use");
+                return Ok(());
+            }
+        };
+        if let Some(limit) = req.disk_limit_bytes
+            && used > limit
+        {
+            return Err(Error::Other(format!(
+                "the sandbox uses {used} bytes of disk after setup, over disk_limit_bytes ({limit}); not taking a warm checkpoint (add or tighten the repo's `trim` check)"
+            )));
+        }
+        if let Some(warn) = req.disk_warn_bytes
+            && used > warn
+        {
+            tracing::warn!(
+                used,
+                warn,
+                "the sandbox is over disk_warn_bytes after setup; add or tighten the repo's `trim` check"
+            );
+        }
+        Ok(())
+    }
+
+    /// Bytes used on the filesystem holding the checkout.
+    async fn disk_used(&self) -> Result<u64> {
+        let out = Command::new("df")
+            .args(["-Pk"])
+            .arg(&self.dir)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .map_err(|e| Error::Other(format!("df: {e}")))?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let used_kib = out.status.success().then(|| parse_df_used(&text)).flatten();
+        used_kib.map(|k| k * 1024).ok_or_else(|| Error::Other(format!("unreadable df output: {}", text.trim())))
+    }
+
     async fn git(&self, cwd: &Path, args: &[&str]) -> Result<()> {
         self.git_output(cwd, args).await.map(drop)
     }
@@ -80,10 +127,17 @@ impl Workspace for GitWorkspace {
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
         let base = &req.base_branch;
         if self.dir.join(".git").exists() {
-            // A merge left under way (a warm checkpoint taken mid-rework) would block the checkout.
-            let _ = self.git(&self.dir, &["merge", "--abort"]).await;
+            // A merge left under way (a warm checkpoint taken mid-rework) would block the checkout. Abort it if
+            // there is one; whatever that does, the hard reset clears the index, the merge state and any conflicted
+            // files, which `--abort` can fail to do.
+            if self.merge_head().await?.is_some()
+                && let Err(e) = self.git(&self.dir, &["merge", "--abort"]).await
+            {
+                tracing::warn!(error = %e, "couldn't abort the merge a checkout was left in; resetting it instead");
+            }
+            self.git(&self.dir, &["reset", "--quiet", "--hard"]).await?;
             self.git(&self.dir, &["fetch", "--quiet", "origin", base]).await?;
-            self.git(&self.dir, &["checkout", "--quiet", "-B", base, &format!("origin/{base}")]).await?;
+            self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", base, &format!("origin/{base}")]).await?;
             self.git(&self.dir, &["clean", "--quiet", "-fd"]).await?;
         } else {
             let parent = self.dir.parent().unwrap_or(Path::new("/"));
@@ -95,7 +149,7 @@ impl Workspace for GitWorkspace {
         if let Some(branch) = &req.branch {
             // A rework builds on the PR branch's head, so what it publishes lands on top of it.
             self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await?;
-            self.git(&self.dir, &["checkout", "--quiet", "-B", branch, &format!("origin/{branch}")]).await?;
+            self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")]).await?;
         }
         if let Some(setup) = &req.setup {
             let result = self.check(setup).await;
@@ -103,6 +157,14 @@ impl Workspace for GitWorkspace {
                 return Err(Error::Other(format!("setup failed: {}", result.output.trim())));
             }
         }
+        if let Some(trim) = &req.trim {
+            // The sandbox works whatever the trim does, so a failure is logged, not returned.
+            let result = self.check(trim).await;
+            if !result.passed {
+                tracing::warn!(output = %result.output.trim(), "the trim check failed; carrying on untrimmed");
+            }
+        }
+        self.check_disk(req).await?;
         if req.merge_base && req.branch.is_some() {
             // After setup, which would trip over conflict markers. Conflicts are the point: the agent resolves them.
             let base = format!("origin/{}", req.base_branch);
@@ -184,6 +246,7 @@ impl Workspace for GitWorkspace {
             .arg(format!("exec 2>&1\n{}", check.command))
             .current_dir(&self.dir)
             .stdin(Stdio::null())
+            .envs(std::env::current_exe().ok().map(|exe| ("TRAILHEAD_DAEMON", exe)))
             .kill_on_drop(true)
             .output()
             .await;
@@ -193,6 +256,11 @@ impl Workspace for GitWorkspace {
         };
         CheckResult { name: check.name.clone(), passed, output: tail(output) }
     }
+}
+
+/// The "Used" column (KiB) of `df -P`'s one data line.
+fn parse_df_used(out: &str) -> Option<u64> {
+    out.lines().nth(1)?.split_whitespace().nth(2)?.parse().ok()
 }
 
 /// The files a unified diff adds a `<<<<<<<` or `>>>>>>>` line to.
@@ -222,4 +290,16 @@ fn tail(mut s: String) -> String {
         s.replace_range(..cut, "…");
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_df_used;
+
+    #[test]
+    fn df_used_is_the_third_column_of_the_data_line() {
+        let out = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/vda1 100000 4242 95000 5% /\n";
+        assert_eq!(parse_df_used(out), Some(4242));
+        assert_eq!(parse_df_used("garbage"), None);
+    }
 }

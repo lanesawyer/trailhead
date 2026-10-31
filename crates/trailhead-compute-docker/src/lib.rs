@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -148,6 +148,21 @@ impl DockerCompute {
     pub fn with_client(docker: Docker, config: DockerConfig) -> DockerCompute {
         let daemon_digest = gateway::digest(&config.daemon).into();
         DockerCompute { docker, config, link: Default::default(), daemon_digest, watching: Default::default() }
+    }
+
+    /// Connects like [`DockerCompute::new`] for reading only (`list`, `logs`): it never starts, replaces or syncs the
+    /// gateway, so it's safe beside a running factory and needs no daemon binary. A sandbox it changed would have no
+    /// gateway behind it, so don't use it for that.
+    pub fn read_only(config: DockerConfig) -> Result<DockerCompute> {
+        let docker = Docker::connect_with_defaults().map_err(docker_err)?;
+        Ok(DockerCompute::read_only_with_client(docker, config))
+    }
+
+    pub fn read_only_with_client(docker: Docker, config: DockerConfig) -> DockerCompute {
+        let compute = DockerCompute::with_client(docker, config);
+        // The watcher is what starts and syncs the gateway; marking it started keeps it from ever running.
+        compute.watching.store(true, Ordering::SeqCst);
+        compute
     }
 
     /// The recent output of a program started with `start`.
@@ -683,6 +698,65 @@ fn io_err(path: &Path, e: std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Docker API on a unix socket that answers every request with an empty list and records the paths asked for.
+    async fn recording_docker(dir: &Path) -> (Docker, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let sock = dir.join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut conn, _)) = listener.accept().await else { return };
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    while let Ok(n) = conn.read(&mut buf).await {
+                        if n == 0 {
+                            return;
+                        }
+                        let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        if let Some(path) = req.split_whitespace().nth(1) {
+                            log.lock().unwrap().push(path.to_string());
+                        }
+                        let reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]";
+                        if conn.write_all(reply.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let docker = Docker::connect_with_unix(sock.to_str().unwrap(), 5, bollard::API_DEFAULT_VERSION).unwrap();
+        (docker, seen)
+    }
+
+    #[tokio::test]
+    async fn listing_read_only_never_touches_the_gateway() {
+        let dir = tempfile::tempdir().unwrap();
+        let (docker, seen) = recording_docker(dir.path()).await;
+        let config = DockerConfig::new(dir.path().join("state"), Default::default());
+        let compute = DockerCompute::read_only_with_client(docker, config);
+        assert!(compute.list(&Labels::default()).await.unwrap().is_empty());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let paths = seen.lock().unwrap().clone();
+        assert!(!paths.is_empty());
+        assert!(paths.iter().all(|p| p.contains("/containers/json")), "{paths:?}");
+    }
+
+    #[tokio::test]
+    async fn listing_normally_watches_the_gateway() {
+        // The control for the test above: the same list without `read_only` does go looking for the gateway.
+        let dir = tempfile::tempdir().unwrap();
+        let (docker, seen) = recording_docker(dir.path()).await;
+        let config = DockerConfig::new(dir.path().join("state"), Default::default());
+        let compute = DockerCompute::with_client(docker, config);
+        compute.list(&Labels::default()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let paths = seen.lock().unwrap().clone();
+        assert!(paths.iter().any(|p| p.contains("trailhead-gateway")), "{paths:?}");
+    }
 
     #[test]
     fn sandboxes_go_through_the_gateway_but_not_to_it() {
