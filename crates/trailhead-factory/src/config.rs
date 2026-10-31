@@ -170,6 +170,8 @@ pub const GATEWAY_PORT: u16 = 8080;
 pub const GATEWAY_ANTHROPIC_ID: &str = "anthropic";
 /// The GitHub connection's id in the Docker gateway's list.
 pub const GATEWAY_GITHUB_ID: &str = "github";
+/// The git connection's id in the Docker gateway's list: smart-HTTP to `https://github.com`, read only.
+pub const GATEWAY_GIT_ID: &str = "github";
 
 impl ComputeConfig {
     /// The connector list URL for a daemon's secrets. `None` on Sprites, which have Fly's.

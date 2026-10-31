@@ -143,7 +143,7 @@ The principle the design follows instead, the same as on Sprites: sandboxes reac
 
 **Open questions.**
 - **Subscription mode through the gateway.** Can Claude Code use a placeholder `ANTHROPIC_AUTH_TOKEN` against the gateway, with the gateway putting in the real OAuth bearer and the `oauth` beta header? If so, Docker keeps "sandboxes hold no keys" even on a subscription.
-- **Private repos.** The gateway could forward git's smart-HTTP to `github.com/<owner>/<repo>.git` with the token, so `git clone` works for private repos, which Sprites can't do yet (TRAIL-96). Later, not now.
+- **Private repos on Sprites.** Docker does this now: the gateway has a `git` connection to `https://github.com` with the writer token, limited to the sandbox's repo and read only (`info/refs?service=git-upload-pack` and `git-upload-pack`), and the daemon clones and fetches through it. Git sends a body past `http.postBuffer` chunked, which the gateway refuses (it wants a Content-Length, 32 MiB at most), so the daemon raises the buffer to 32 MiB. Sprites still can't clone private repos (TRAIL-96).
 - **Streaming and timeouts.** The gateway forwards streamed responses as they arrive and sets no total timeout, unlike Fly's 120 s (TRAIL-97).
 - **Podman and bare-metal hosts.** On a bare-metal host the gateway sits beside the control plane, so TRAIL-177's runtime defaults apply to it as well as to the sandboxes.
 
