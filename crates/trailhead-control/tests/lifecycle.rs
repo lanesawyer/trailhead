@@ -2730,6 +2730,47 @@ async fn a_pr_behind_its_base_is_updated_before_it_is_merged() {
 }
 
 #[tokio::test]
+async fn an_update_the_host_has_queued_is_not_asked_for_again() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.queue_updates(true);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    assert_eq!(r.codehost.update_requests(), 1, "asked once while the head hasn't moved");
+    assert!(!r.codehost.prs()[0].merged);
+
+    r.codehost.land_updates(&pr).await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.codehost.update_requests(), 2);
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn shadow_mode_says_it_would_bring_a_behind_pr_up_to_date_first() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (_key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(
+        said(&r).last().unwrap(),
+        "Grade 1: checks, CI and review passed; would bring the branch up to date, then merge (shadow)."
+    );
+    assert_eq!(r.codehost.update_requests(), 0, "shadow mode changes nothing");
+
+    r.codehost.set_behind(&pr, false);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(said(&r).last().unwrap(), "Grade 1: checks, CI and review passed; would merge (shadow).");
+}
+
+#[tokio::test]
 async fn a_host_made_update_keeps_the_verdict_and_a_push_after_it_does_not() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
