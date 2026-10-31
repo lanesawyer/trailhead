@@ -117,6 +117,8 @@ pub struct DockerCompute {
     docker: Docker,
     config: DockerConfig,
     link: Arc<tokio::sync::Mutex<Link>>,
+    /// The SHA-256 of `config.daemon`, hex.
+    daemon_digest: Arc<str>,
     watching: Arc<AtomicBool>,
 }
 
@@ -135,7 +137,8 @@ impl DockerCompute {
     }
 
     pub fn with_client(docker: Docker, config: DockerConfig) -> DockerCompute {
-        DockerCompute { docker, config, link: Default::default(), watching: Default::default() }
+        let daemon_digest = gateway::digest(&config.daemon).into();
+        DockerCompute { docker, config, link: Default::default(), daemon_digest, watching: Default::default() }
     }
 
     /// The recent output of a program started with `start`.
@@ -627,6 +630,14 @@ mod tests {
             assert!(env.contains(&format!("{proxy}=http://trailhead-gateway:8080")), "{env:?}");
         }
         assert!(env.contains(&"NO_PROXY=trailhead-gateway,localhost,127.0.0.1,::1".to_string()), "{env:?}");
+    }
+
+    #[test]
+    fn the_daemon_digest_follows_the_binary() {
+        let (a, b) = (gateway::digest(b"one"), gateway::digest(b"two"));
+        assert_eq!(a, gateway::digest(b"one"));
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 64);
     }
 
     #[test]
