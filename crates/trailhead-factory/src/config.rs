@@ -138,11 +138,32 @@ impl GradesConfig {
 }
 
 /// How the daemon in each sandbox is started.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
     /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`. The daemon's default when unset.
     pub log: Option<String>,
+    /// Warn when the sandbox's filesystem uses more than this after setup and trim, before the warm checkpoint is
+    /// taken; 0 for no warning. Stack-neutral, so a new stack's caches can't fill the disk unnoticed.
+    #[serde(default = "default_disk_warn_bytes")]
+    pub disk_warn_bytes: u64,
+    /// Refuse to take the warm checkpoint (the prepare fails and the sandbox is destroyed) when the filesystem uses
+    /// more than this; 0 for no limit, the default.
+    #[serde(default)]
+    pub disk_limit_bytes: u64,
+}
+
+/// 16 GiB: a Trailhead sandbox with its cargo `target` trimmed to 6 GiB uses about 10 GiB (docs/factory/sandbox.md).
+pub const DEFAULT_DISK_WARN_BYTES: u64 = 16 << 30;
+
+fn default_disk_warn_bytes() -> u64 {
+    DEFAULT_DISK_WARN_BYTES
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        DaemonConfig { log: None, disk_warn_bytes: DEFAULT_DISK_WARN_BYTES, disk_limit_bytes: 0 }
+    }
 }
 
 /// Where sandboxes run. Sprites unless the factory file says otherwise.
@@ -291,6 +312,10 @@ pub struct Stack {
 #[serde(deny_unknown_fields)]
 pub struct Checks {
     pub setup: Option<String>,
+    /// Runs after `setup` and before the warm checkpoint, to cut build output and caches down to a size worth
+    /// exporting on every task (`docs/factory/sandbox.md` has suggestions per stack). `$TRAILHEAD_DAEMON` is the
+    /// daemon binary, whose `trim-cargo` does it for cargo.
+    pub trim: Option<String>,
     pub fmt: Option<String>,
     pub fmt_fix: Option<String>,
     pub lint: Option<String>,
@@ -300,7 +325,7 @@ pub struct Checks {
 }
 
 impl Checks {
-    /// The verification checks, in the order they run. `setup` and `fmt_fix` change the tree, so they're left out.
+    /// The verification checks, in the order they run. `setup`, `trim` and `fmt_fix` change the tree, so they're left out.
     pub fn verifying(&self) -> Vec<(&'static str, &str)> {
         [
             ("fmt", &self.fmt),
@@ -505,16 +530,19 @@ impl FactoryConfig {
     /// Readies a checkout, on `branch` when given (a rework). Only workers build: a reviewer reads the diff, so it
     /// skips `setup`.
     pub fn prepare_request(&self, role: Role, branch: Option<String>) -> PrepareRequest {
-        let setup = match role {
-            Role::Worker => self.checks.setup.as_ref().map(|c| Check { name: "setup".into(), command: c.clone() }),
-            _ => None,
+        let named = |name: &str, c: &Option<String>| {
+            c.as_ref().filter(|_| role == Role::Worker).map(|c| Check { name: name.into(), command: c.clone() })
         };
+        let some = |b: u64| Some(b).filter(|&b| b > 0);
         PrepareRequest {
             repo: self.repo.repo(),
             base_branch: self.repo.base_branch.clone(),
             branch,
             merge_base: false,
-            setup,
+            setup: named("setup", &self.checks.setup),
+            trim: named("trim", &self.checks.trim),
+            disk_warn_bytes: some(self.daemon.disk_warn_bytes),
+            disk_limit_bytes: some(self.daemon.disk_limit_bytes),
         }
     }
 }
@@ -532,6 +560,11 @@ mod tests {
         let remote = Repo { owner: "lanesawyer".into(), name: "trailhead".into() };
         let config = FactoryConfig::from_repo_file(include_str!("../../../.trailhead.toml"), Some(remote)).unwrap();
         assert_eq!(config.repo.project, "TRAIL");
+        let prepare = config.prepare_request(Role::Worker, None);
+        assert!(prepare.trim.unwrap().command.contains("trim-cargo"));
+        assert_eq!(prepare.disk_warn_bytes, Some(DEFAULT_DISK_WARN_BYTES));
+        assert_eq!(prepare.disk_limit_bytes, None);
+        assert!(config.prepare_request(Role::Reviewer, None).trim.is_none(), "reviewers don't build");
         assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
         assert_eq!(config.grades, GradesConfig::default(), "this repo's rules are the documented example");
         assert_eq!(config.merge.mode, MergeMode::On);
