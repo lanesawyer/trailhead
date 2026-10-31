@@ -54,6 +54,8 @@ pub const CHECKPOINT_NOTE: &str = "dev.trailhead.checkpoint-note";
 const WARM_NOTE: &str = "warm";
 /// The repository checkpoint images are imported to.
 pub const CHECKPOINT_REPO: &str = "trailhead-checkpoint";
+/// How long a checkpoint's export and import may take: a whole filesystem, far past the client's usual two minutes.
+const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// The sandbox image built by `mise run docker-image`.
 pub const DEFAULT_IMAGE: &str = "trailhead-sandbox:latest";
 /// The ordinary bridge network the gateway gets out on. Sandboxes are never on it.
@@ -256,9 +258,10 @@ impl DockerCompute {
     async fn import_filesystem(&self, name: &str, image: &str, note: &str, changes: Vec<String>) -> Result<()> {
         // The export is read by a task of its own and passed through a channel, so the request body owns what it needs.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(4);
-        let (docker, owned) = (self.docker.clone(), name.to_string());
+        let docker = self.docker.clone().with_timeout(CHECKPOINT_TIMEOUT);
+        let (exporter, owned) = (docker.clone(), name.to_string());
         let export = tokio::spawn(async move {
-            let mut tar = docker.export_container(&owned);
+            let mut tar = exporter.export_container(&owned);
             while let Some(chunk) = tar.next().await {
                 let chunk = chunk.map_err(std::io::Error::other);
                 let failed = chunk.is_err();
@@ -275,7 +278,7 @@ impl DockerCompute {
             changes,
             ..Default::default()
         };
-        let mut progress = self.docker.create_image(Some(opts), Some(body), None);
+        let mut progress = docker.create_image(Some(opts), Some(body), None);
         let mut result = Ok(());
         while let Some(step) = progress.next().await {
             if let Err(e) = step {
