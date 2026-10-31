@@ -199,7 +199,13 @@ async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
     // A delegated reviewer approves like a human would, but not work it did: the
     // claim is released on the way to review, so the event log says who did it.
     if tx.ctx.agent_id.is_some_and(|a| project.reviewers.contains(&a)) {
-        return if in_review && did_work(tx, task).await? { Err(Error::ReviewRequired) } else { Ok(()) };
+        return if in_review && did_work(tx, task).await? {
+            Err(Error::Forbidden(
+                "a reviewer can't approve or finish work it did; another reviewer or a human has to".into(),
+            ))
+        } else {
+            Ok(())
+        };
     }
     if gated { Err(Error::ReviewRequired) } else { Ok(()) }
 }
