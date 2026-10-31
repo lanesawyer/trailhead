@@ -143,7 +143,7 @@ impl GradesConfig {
 pub struct DaemonConfig {
     /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`. The daemon's default when unset.
     pub log: Option<String>,
-    /// Warn when the sandbox's filesystem uses more than this after setup and trim, before the warm checkpoint is
+    /// Warn when the sandbox (its checkout and home directory) uses more than this after setup and trim, before the warm checkpoint is
     /// taken; 0 for no warning. Stack-neutral, so a new stack's caches can't fill the disk unnoticed.
     #[serde(default = "default_disk_warn_bytes")]
     pub disk_warn_bytes: u64,
@@ -153,7 +153,7 @@ pub struct DaemonConfig {
     pub disk_limit_bytes: u64,
 }
 
-/// 16 GiB: a Trailhead sandbox with its cargo `target` trimmed to 6 GiB uses about 10 GiB (docs/factory/sandbox.md).
+/// 16 GiB, about twice what a Trailhead sandbox owns (checkout and home) with its cargo `target` trimmed to 6 GiB (docs/factory/sandbox.md).
 pub const DEFAULT_DISK_WARN_BYTES: u64 = 16 << 30;
 
 fn default_disk_warn_bytes() -> u64 {

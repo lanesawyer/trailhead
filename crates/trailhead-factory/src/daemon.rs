@@ -36,10 +36,10 @@ pub struct PrepareRequest {
     /// next stays small. A failure is logged and the sandbox goes on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trim: Option<Check>,
-    /// Log a warning when the checkout's filesystem uses more than this after setup and trim.
+    /// Log a warning when the sandbox (its checkout and home directory) uses more than this after setup and trim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_warn_bytes: Option<u64>,
-    /// Fail the prepare, so no warm checkpoint is taken, when the checkout's filesystem uses more than this.
+    /// Fail the prepare, so no warm checkpoint is taken, when the sandbox (its checkout and home directory) uses more than this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_limit_bytes: Option<u64>,
 }

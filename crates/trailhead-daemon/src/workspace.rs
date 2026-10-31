@@ -48,7 +48,7 @@ impl GitWorkspace {
         self
     }
 
-    /// Compares the checkout's filesystem use with the request's limits, which are stack-neutral: whatever a new
+    /// Compares the sandbox's own disk use (checkout and home) with the request's limits, which are stack-neutral: whatever a new
     /// stack leaves behind counts. Over the warn size logs; over the limit fails, so no warm checkpoint is taken.
     /// A `df` that can't be read is logged and ignored.
     async fn check_disk(&self, req: &PrepareRequest) -> Result<()> {
@@ -81,18 +81,32 @@ impl GitWorkspace {
         Ok(())
     }
 
-    /// Bytes used on the filesystem holding the checkout.
+    /// Bytes this sandbox owns: the checkout plus `$HOME`, where toolchains and package caches (`~/.cargo`,
+    /// `~/.gradle`, `~/.cache`) live. Not `df`: on Docker that reports the engine's disk, which holds every other
+    /// sandbox and image. `-x` stays on one filesystem.
     async fn disk_used(&self) -> Result<u64> {
-        let out = Command::new("df")
-            .args(["-Pk"])
-            .arg(&self.dir)
+        let mut roots = vec![self.dir.clone()];
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+            && !home.as_os_str().is_empty()
+        {
+            // A checkout under `$HOME` is already counted there.
+            if self.dir.starts_with(&home) {
+                roots.clear();
+            }
+            roots.push(home);
+        }
+        let out = Command::new("du")
+            .arg("-sxk")
+            .args(&roots)
             .stdin(Stdio::null())
             .output()
             .await
-            .map_err(|e| Error::Other(format!("df: {e}")))?;
+            .map_err(|e| Error::Other(format!("du: {e}")))?;
+        // `du` exits non-zero for a directory it can't read but still prints the rest.
         let text = String::from_utf8_lossy(&out.stdout);
-        let used_kib = out.status.success().then(|| parse_df_used(&text)).flatten();
-        used_kib.map(|k| k * 1024).ok_or_else(|| Error::Other(format!("unreadable df output: {}", text.trim())))
+        parse_du_total(&text)
+            .map(|k| k * 1024)
+            .ok_or_else(|| Error::Other(format!("unreadable du output: {}", text.trim())))
     }
 
     async fn git(&self, cwd: &Path, args: &[&str]) -> Result<()> {
@@ -259,8 +273,10 @@ impl Workspace for GitWorkspace {
 }
 
 /// The "Used" column (KiB) of `df -P`'s one data line.
-fn parse_df_used(out: &str) -> Option<u64> {
-    out.lines().nth(1)?.split_whitespace().nth(2)?.parse().ok()
+/// The sum of the sizes `du -sk` prints, one line per path; `None` if no line parses.
+fn parse_du_total(out: &str) -> Option<u64> {
+    let sizes: Vec<u64> = out.lines().filter_map(|l| l.split_whitespace().next()?.parse().ok()).collect();
+    (!sizes.is_empty()).then(|| sizes.iter().sum())
 }
 
 /// The files a unified diff adds a `<<<<<<<` or `>>>>>>>` line to.
@@ -294,12 +310,11 @@ fn tail(mut s: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_df_used;
+    use super::parse_du_total;
 
     #[test]
-    fn df_used_is_the_third_column_of_the_data_line() {
-        let out = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/vda1 100000 4242 95000 5% /\n";
-        assert_eq!(parse_df_used(out), Some(4242));
-        assert_eq!(parse_df_used("garbage"), None);
+    fn du_total_sums_the_size_column() {
+        assert_eq!(parse_du_total("4242\t/work/widget\n100\t/home/me\n"), Some(4342));
+        assert_eq!(parse_du_total("garbage"), None);
     }
 }
