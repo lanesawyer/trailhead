@@ -315,8 +315,9 @@ pub trait Tracker: Send + Sync {
     async fn human_context(&self, task: &TaskKey) -> Result<HumanContext>;
     /// The task's latest `review` comment, whoever left it, if it has one.
     async fn last_review(&self, task: &TaskKey) -> Result<Option<Verdict>>;
-    /// Open, in-progress, parked or in-review tasks that carry factory metadata.
-    async fn in_flight(&self, project: &str) -> Result<Vec<Task>>;
+    /// Open, in-progress, parked or in-review tasks that carry factory metadata, limited to the queue's subtasks when
+    /// there is one, so repos sharing a project through different queues never see each other's runs.
+    async fn in_flight(&self, project: &str, queue: Option<&TaskKey>) -> Result<Vec<Task>>;
 
     async fn claim(&self, task: &TaskKey) -> Result<()>;
     async fn renew(&self, task: &TaskKey) -> Result<()>;

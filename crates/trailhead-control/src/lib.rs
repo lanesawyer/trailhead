@@ -17,6 +17,7 @@ use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::task::{self, JoinSet};
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use tokio::sync::mpsc;
 use trailhead_factory::harness::is_transient_api_error;
@@ -466,7 +467,8 @@ impl Factory {
                         for (task, sandbox) in due.runs {
                             let key = task.key.clone();
                             let factory = self.clone();
-                            let handle = running.spawn(async move { factory.resume_run(&task, &sandbox).await });
+                            let handle = running
+                                .spawn(async move { factory.resume_run(&task, &sandbox).await }.in_current_span());
                             keys.insert(handle.id(), key);
                         }
                         // A review is a session on the same subscription window, so a pause holds them back too; the
@@ -475,7 +477,8 @@ impl Factory {
                         for task in reviews_due {
                             let key = task.key.clone();
                             let factory = self.clone();
-                            let handle = running.spawn(async move { factory.resume_review(&task).await });
+                            let handle =
+                                running.spawn(async move { factory.resume_review(&task).await }.in_current_span());
                             keys.insert(handle.id(), key);
                             reviews.insert(handle.id());
                         }
@@ -564,7 +567,7 @@ impl Factory {
         for task in ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)) {
             let key = task.key.clone();
             let factory = self.clone();
-            let handle = running.spawn(async move { factory.run_task(&task).await });
+            let handle = running.spawn(async move { factory.run_task(&task).await }.in_current_span());
             keys.insert(handle.id(), key);
         }
         Ok(())
@@ -1926,8 +1929,13 @@ impl Factory {
         let mut done = Reconciled::default();
         let mut due = Due::default();
         let live = self.compute.list(&self.base_labels()).await?;
-        let tasks: Vec<Task> =
-            self.tracker.in_flight(self.project()).await?.into_iter().filter(|t| !running.contains(&t.key)).collect();
+        let tasks: Vec<Task> = self
+            .tracker
+            .in_flight(self.project(), self.queue().as_ref())
+            .await?
+            .into_iter()
+            .filter(|t| !running.contains(&t.key))
+            .collect();
 
         // Runs the daemon may still be working on, which are followed again rather than requeued (TRAIL-137).
         let live_runs: Vec<(&Task, &Sandbox)> =
