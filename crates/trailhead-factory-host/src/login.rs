@@ -1,5 +1,5 @@
-//! `trailhead factory login sprites|claude|anthropic|github|github-writer`: saves the factory's secrets in the credential store (the OS
-//! keyring, else a `0600` file), so `run` needs no environment variables or fnox. The environment still wins when set.
+//! `trailhead factory login sprites|claude|github|github-writer`: saves the factory's secrets in the credential store
+//! (the OS keyring, else a `0600` file), so `run` needs no environment variables or fnox. The environment still wins when set.
 //! Secrets are read from stdin and never printed.
 
 use std::io::{BufRead, IsTerminal};
@@ -13,7 +13,6 @@ use trailhead_server::creds::{Cred, CredStore, Saved};
 pub const SPRITES: Cred<'static> = Cred::Secret("sprites");
 pub const CLAUDE: Cred<'static> = Cred::Secret("claude");
 pub const GITHUB: Cred<'static> = Cred::Secret("github");
-pub const ANTHROPIC: Cred<'static> = Cred::Secret("anthropic");
 /// The Docker gateway's GitHub token. Separate from [`GITHUB`] so the control plane's own token stays read-only.
 pub const GITHUB_WRITER: Cred<'static> = Cred::Secret("github-writer");
 
@@ -23,8 +22,6 @@ pub enum Login {
     Sprites,
     /// Save a Claude subscription token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`).
     Claude,
-    /// Save an Anthropic API key (`ANTHROPIC_API_KEY`) for the Docker gateway after checking it with `GET /v1/models`.
-    Anthropic,
     /// Save a GitHub token (`GITHUB_TOKEN`) after checking it can read the repo's pull requests.
     Github {
         /// The repo file whose `[factory]` names the repo to check. Default: the nearest `.trailhead.toml`.
@@ -124,19 +121,6 @@ pub async fn github(
     Ok(format!("{msg} (user {user}, can read {}'s pull requests)", repo.slug()))
 }
 
-pub async fn anthropic(
-    creds: &CredStore,
-    input: &mut impl BufRead,
-    interactive: bool,
-    api: &str,
-) -> Result<String, String> {
-    let key = read_secret("Anthropic API key", input, interactive)?;
-    trailhead_provider_anthropic::Anthropic::check_key(api, &key)
-        .await
-        .map_err(|e| format!("the Anthropic API refused the key: {e}"))?;
-    saved("Anthropic API key", creds, ANTHROPIC, &key)
-}
-
 pub async fn github_writer(
     creds: &CredStore,
     input: &mut impl BufRead,
@@ -151,12 +135,6 @@ pub async fn github_writer(
         .map_err(|e| format!("GitHub refused the token: {e}"))?;
     let msg = saved("GitHub writer token", creds, GITHUB_WRITER, &token)?;
     Ok(format!("{msg} (user {user}, can push to {})", repo.slug()))
-}
-
-/// The Anthropic API key, from `ANTHROPIC_API_KEY` or the saved one, for the Docker gateway.
-#[allow(dead_code)] // The Docker wiring pushes it to the gateway.
-pub fn anthropic_key(creds: &CredStore) -> Option<String> {
-    resolve(std::env::var("ANTHROPIC_API_KEY").ok(), creds, ANTHROPIC)
 }
 
 /// The gateway's GitHub token, from `GITHUB_WRITER_TOKEN` or the saved one. Never falls back to the read token.
@@ -175,7 +153,6 @@ pub async fn run(cmd: Login, creds: &CredStore) -> Result<(), String> {
             let repo = crate::find::repo(config.as_deref())?;
             github(creds, &mut input, interactive, trailhead_codehost_github::API_URL, &repo).await?
         }
-        Login::Anthropic => anthropic(creds, &mut input, interactive, trailhead_provider_anthropic::API_URL).await?,
         Login::GithubWriter { config } => {
             let repo = crate::find::repo(config.as_deref())?;
             github_writer(creds, &mut input, interactive, trailhead_codehost_github::API_URL, &repo).await?
@@ -289,31 +266,6 @@ mod tests {
         let msg = github(&creds, &mut "good\n".as_bytes(), false, &api, &repo).await.unwrap();
         assert!(msg.contains("octo") && !msg.contains("good"), "{msg}");
         assert_eq!(creds.read(GITHUB).unwrap().0, "good");
-    }
-
-    #[tokio::test]
-    async fn an_anthropic_key_is_checked_before_it_is_saved() {
-        let app = Router::new().route(
-            "/v1/models",
-            get(|h: HeaderMap| async move {
-                if h.get("x-api-key").and_then(|v| v.to_str().ok()) == Some("good") {
-                    (StatusCode::OK, r#"{"data":[]}"#)
-                } else {
-                    (StatusCode::UNAUTHORIZED, "{}")
-                }
-            }),
-        );
-        let api = serve(app).await;
-        let dir = tempfile::tempdir().unwrap();
-        let creds = store(&dir);
-
-        let err = anthropic(&creds, &mut "bad\n".as_bytes(), false, &api).await.unwrap_err();
-        assert!(err.contains("401") && creds.read(ANTHROPIC).is_none(), "{err}");
-
-        let msg = anthropic(&creds, &mut "good\n".as_bytes(), false, &api).await.unwrap();
-        assert!(!msg.contains("good"), "{msg}");
-        assert_eq!(creds.read(ANTHROPIC).unwrap().0, "good");
-        assert_eq!(resolve(None, &creds, ANTHROPIC).as_deref(), Some("good"));
     }
 
     #[tokio::test]

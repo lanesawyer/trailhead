@@ -43,27 +43,6 @@ impl Anthropic {
         Anthropic { endpoint: Endpoint { base_url: base_url.into() } }
     }
 
-    /// Checks an API key with the cheapest authenticated call, `GET /v1/models`, against `base_url`.
-    pub async fn check_key(base_url: &str, key: &str) -> Result<(), String> {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("trailhead-factory")
-            .build()
-            .map_err(|e| e.to_string())?;
-        let res = http
-            .get(format!("{}/v1/models", base_url.trim_end_matches('/')))
-            .query(&[("limit", "1")])
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .send()
-            .await
-            .map_err(|e| format!("calling {base_url}: {e}"))?;
-        match res.status() {
-            s if s.is_success() => Ok(()),
-            s => Err(format!("{s} from GET /v1/models")),
-        }
-    }
-
     /// The price for a model id as Claude Code reports it. An id this table doesn't know is priced as Opus, the most
     /// expensive, so a budget stops early rather than late.
     pub fn price_for(model: &ModelId) -> Price {

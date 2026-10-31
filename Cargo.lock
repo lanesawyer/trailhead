@@ -5172,7 +5172,6 @@ dependencies = [
 name = "trailhead-provider-anthropic"
 version = "0.1.0"
 dependencies = [
- "reqwest",
  "tracing",
  "trailhead-factory",
 ]
