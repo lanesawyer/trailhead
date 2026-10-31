@@ -1745,6 +1745,7 @@ impl Factory {
             self.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
             self.daemon.forget(&sandbox.id).await;
         }
+        self.compute.preflight(&sandbox.id).await?;
         let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
         self.daemon.prepare(&sandbox.id, prepare).await?;
         let cp = self.compute.checkpoint(&sandbox.id, "warm").await?;

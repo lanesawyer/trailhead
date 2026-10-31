@@ -5024,6 +5024,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bollard",
+ "bytes",
  "futures-util",
  "serde",
  "serde_json",

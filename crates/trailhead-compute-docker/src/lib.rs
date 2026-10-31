@@ -6,7 +6,10 @@
 //! - Docker labels can't change after creation, so a sandbox's labels live in a state file per sandbox in the state
 //!   directory. The container carries only [`MARKER`], which `list` filters on and `docker ps --filter label=...`
 //!   shows.
-//! - A checkpoint is a `docker commit` of the container, and restoring recreates the container from that image.
+//! - A checkpoint is the container's filesystem exported and imported as a one-layer image, and restoring recreates
+//!   the container from that image. Not a `docker commit`: that adds a layer on top of the image the container came
+//!   from, so a pooled sandbox that checkpoints after every task would grow a chain of layers, each keeping what the
+//!   last rewrote, until the disk fills or overlay2's ~125-layer limit is hit (TRAIL-176).
 //! - Programs are supervised by `supervise.sh`, the container's main process, which restarts them when they exit
 //!   and starts them again when the container restarts (it runs with `restart: unless-stopped`).
 //! - A sandbox's way out is the gateway (`gateway.rs`): each sandbox has its own `--internal` network shared only
@@ -26,7 +29,7 @@ use bollard::models::{
     ContainerConfig, ContainerCreateBody, ExecConfig, HostConfig, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    CommitContainerOptions, CreateContainerOptions, InspectContainerOptions, ListContainersOptions, ListImagesOptions,
+    CreateContainerOptions, CreateImageOptions, InspectContainerOptions, ListContainersOptions, ListImagesOptions,
     RemoveContainerOptions, RemoveImageOptions, UploadToContainerOptions,
 };
 use futures_util::StreamExt;
@@ -44,7 +47,12 @@ pub use gateway::{GATEWAY_BIN, GATEWAY_LABEL, sandbox_network};
 pub const MARKER: &str = "dev.trailhead.sandbox";
 /// The label on checkpoint images, set to the sandbox they came from, so `destroy` can remove them.
 pub const CHECKPOINT_OF: &str = "dev.trailhead.checkpoint-of";
-/// The repository checkpoint images are committed to.
+/// The label on checkpoint images holding the note they were taken with.
+pub const CHECKPOINT_NOTE: &str = "dev.trailhead.checkpoint-note";
+/// The note of a pool's warm checkpoints, the only ones a later checkpoint may remove: the rest (a parked
+/// sandbox's) stay until the sandbox is destroyed.
+const WARM_NOTE: &str = "warm";
+/// The repository checkpoint images are imported to.
 pub const CHECKPOINT_REPO: &str = "trailhead-checkpoint";
 /// The sandbox image built by `mise run docker-image`.
 pub const DEFAULT_IMAGE: &str = "trailhead-sandbox:latest";
@@ -55,6 +63,9 @@ pub const HOME: &str = "/home/trailhead";
 
 const SUPERVISE: &str = include_str!("supervise.sh");
 const SUPERVISE_PATH: &str = "/opt/trailhead/supervise";
+
+/// The least free disk, in bytes, a run may start with (`DockerConfig::min_free_bytes`).
+pub const DEFAULT_MIN_FREE_BYTES: u64 = 10 << 30;
 
 /// How long `start` watches a new program for an early exit.
 const START_WATCH: Duration = Duration::from_secs(3);
@@ -75,6 +86,8 @@ pub struct DockerConfig {
     pub daemon: Arc<Vec<u8>>,
     /// What the gateway may forward to. Sent to it on stdin, never kept on disk.
     pub connections: Vec<GatewayConnection>,
+    /// The least free space the Docker engine's disk may have when a run is about to start.
+    pub min_free_bytes: u64,
 }
 
 impl DockerConfig {
@@ -87,6 +100,7 @@ impl DockerConfig {
             gateway: GATEWAY_HOST.into(),
             daemon,
             connections: Vec::new(),
+            min_free_bytes: DEFAULT_MIN_FREE_BYTES,
         }
     }
 }
@@ -238,6 +252,64 @@ impl DockerCompute {
         self.docker.start_exec(&exec.id, Some(opts)).await.map_err(docker_err).map(drop)
     }
 
+    /// Streams the container's filesystem into a new image tagged `image`.
+    async fn import_filesystem(&self, name: &str, image: &str, note: &str, changes: Vec<String>) -> Result<()> {
+        // The export is read by a task of its own and passed through a channel, so the request body owns what it needs.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(4);
+        let (docker, owned) = (self.docker.clone(), name.to_string());
+        let export = tokio::spawn(async move {
+            let mut tar = docker.export_container(&owned);
+            while let Some(chunk) = tar.next().await {
+                let chunk = chunk.map_err(std::io::Error::other);
+                let failed = chunk.is_err();
+                if tx.send(chunk).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
+        let body = bollard::body_try_stream(futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)));
+        let opts = CreateImageOptions {
+            from_src: Some("-".into()),
+            repo: Some(image.into()),
+            message: Some(note.into()),
+            changes,
+            ..Default::default()
+        };
+        let mut progress = self.docker.create_image(Some(opts), Some(body), None);
+        let mut result = Ok(());
+        while let Some(step) = progress.next().await {
+            if let Err(e) = step {
+                result = Err(docker_err(e));
+                break;
+            }
+        }
+        drop(progress);
+        let _ = export.await;
+        result
+    }
+
+    /// Removes the sandbox's warm checkpoints other than `keep` that none of its labels point at. A parked
+    /// sandbox's checkpoint is never one of them, nor is one a container still uses (Docker refuses).
+    async fn prune_checkpoints(&self, id: &SandboxId, keep: &CheckpointId) -> Result<()> {
+        let labels = self.read_state(&id.0).await?.labels;
+        let filter = vec![format!("{CHECKPOINT_OF}={}", id.0), format!("{CHECKPOINT_NOTE}={WARM_NOTE}")];
+        let opts =
+            ListImagesOptions { filters: Some(HashMap::from([("label".to_string(), filter)])), ..Default::default() };
+        for image in self.docker.list_images(Some(opts)).await.map_err(docker_err)? {
+            let tags: Vec<&String> = image.repo_tags.iter().filter(|t| t.starts_with(CHECKPOINT_REPO)).collect();
+            if tags.iter().any(|t| **t == keep.0 || labels.values().any(|v| v == *t)) {
+                continue;
+            }
+            for tag in tags {
+                match self.docker.remove_image(tag, None::<RemoveImageOptions>, None).await {
+                    Err(e) if !matches!(status(&e), Some(404 | 409)) => return Err(docker_err(e)),
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn sandbox(&self, name: &str) -> Result<Sandbox> {
         let state = self.read_state(name).await?;
         Ok(Sandbox { id: SandboxId(name.into()), name: name.into(), labels: state.labels })
@@ -283,20 +355,29 @@ impl Compute for DockerCompute {
         Ok(out)
     }
 
+    /// Exports the paused container's filesystem and imports it as a single-layer image, so a checkpoint is about
+    /// the size of the live filesystem however many came before it. The container's user, working directory and
+    /// environment are carried over. Warm checkpoints of the sandbox that no label points at any more are removed
+    /// afterwards.
     async fn checkpoint(&self, id: &SandboxId, note: &str) -> Result<CheckpointId> {
         let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
-        let tag = format!("{}-{millis}", id.0);
-        let opts = CommitContainerOptions {
-            container: Some(id.0.clone()),
-            repo: Some(CHECKPOINT_REPO.into()),
-            tag: Some(tag.clone()),
-            comment: Some(note.into()),
-            pause: true,
-            changes: Some(format!("LABEL {CHECKPOINT_OF}={}", id.0)),
-            ..Default::default()
-        };
-        self.docker.commit_container(opts, ContainerConfig::default()).await.map_err(docker_err)?;
-        Ok(CheckpointId(format!("{CHECKPOINT_REPO}:{tag}")))
+        let cp = CheckpointId(format!("{CHECKPOINT_REPO}:{}-{millis}", id.0));
+        let info = self.docker.inspect_container(&id.0, None::<InspectContainerOptions>).await.map_err(docker_err)?;
+        let state = info.state.as_ref();
+        let pause = state.and_then(|s| s.running) == Some(true) && state.and_then(|s| s.paused) != Some(true);
+        let changes = image_changes(&id.0, note, info.config.as_ref());
+        if pause {
+            self.docker.pause_container(&id.0).await.map_err(docker_err)?;
+        }
+        let imported = self.import_filesystem(&id.0, &cp.0, note, changes).await;
+        if pause && let Err(e) = self.docker.unpause_container(&id.0).await {
+            tracing::warn!(sandbox = %id.0, error = %e, "couldn't unpause the sandbox after checkpointing it");
+        }
+        imported?;
+        if let Err(e) = self.prune_checkpoints(id, &cp).await {
+            tracing::warn!(sandbox = %id.0, error = %e, "couldn't remove old checkpoints");
+        }
+        Ok(cp)
     }
 
     /// Recreates the container from the checkpoint's image, keeping its name, labels and egress. Its programs start
@@ -393,6 +474,28 @@ impl Compute for DockerCompute {
         self.attach(&id.0, &state).await
     }
 
+    /// Fails when the sandbox's disk, which is the Docker engine's, has less than `min_free_bytes` free, so a run
+    /// doesn't start only to fail partway through a build.
+    async fn preflight(&self, id: &SandboxId) -> Result<()> {
+        let (code, out) = self.exec(&id.0, None, "df -Pk /").await?;
+        let Some(free) = (code == 0).then(|| free_bytes(&out)).flatten() else {
+            return Err(Error::Other(format!(
+                "sandbox {}: couldn't read its free disk space ({code}): {}",
+                id.0,
+                out.trim()
+            )));
+        };
+        if free < self.config.min_free_bytes {
+            return Err(Error::Other(format!(
+                "sandbox {}: only {} MiB of disk free, below the {} MiB a task needs; free up space on the Docker host (docker system df)",
+                id.0,
+                free >> 20,
+                self.config.min_free_bytes >> 20
+            )));
+        }
+        Ok(())
+    }
+
     /// Removes the container, its network, its checkpoint images and its state file. The state file goes last, so a
     /// teardown that stops partway is finished by the next resync.
     async fn destroy(&self, id: &SandboxId) -> Result<()> {
@@ -428,6 +531,35 @@ pub fn run_script(cmd: &str, args: &[String]) -> String {
 
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The Dockerfile instructions that give an imported filesystem the container's identity: its checkpoint labels,
+/// user, working directory and environment. (Its command and entrypoint are set again when it is restored.)
+fn image_changes(sandbox: &str, note: &str, config: Option<&ContainerConfig>) -> Vec<String> {
+    let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('$', "\\$"));
+    let mut out =
+        vec![format!("LABEL {CHECKPOINT_OF}={}", quote(sandbox)), format!("LABEL {CHECKPOINT_NOTE}={}", quote(note))];
+    if let Some(config) = config {
+        if let Some(user) = config.user.as_deref().filter(|u| !u.is_empty()) {
+            out.push(format!("USER {user}"));
+        }
+        if let Some(dir) = config.working_dir.as_deref().filter(|d| !d.is_empty()) {
+            out.push(format!("WORKDIR {dir}"));
+        }
+        for var in config.env.iter().flatten() {
+            if let Some((k, v)) = var.split_once('=') {
+                out.push(format!("ENV {k}={}", quote(v)));
+            }
+        }
+    }
+    out
+}
+
+/// The free bytes on the filesystem `df -Pk` reports last.
+fn free_bytes(df: &str) -> Option<u64> {
+    let line = df.lines().rfind(|l| !l.trim().is_empty())?;
+    let kib: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+    kib.checked_mul(1024)
 }
 
 fn parent(path: &str) -> &str {
@@ -524,6 +656,35 @@ mod tests {
         assert!(matches!(docker_err(err(404)), Error::NotFound(_)));
         assert!(matches!(docker_err(err(429)), Error::Other(_)));
         assert!(matches!(docker_err(err(500)), Error::Other(_)));
+    }
+
+    #[test]
+    fn checkpoint_images_keep_the_containers_identity() {
+        let config = ContainerConfig {
+            user: Some("trailhead".into()),
+            working_dir: Some("/work".into()),
+            env: Some(vec!["PATH=/usr/bin:/bin".into(), "NOTE=a \"b\" $c".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            image_changes("t-w1", "warm", Some(&config)),
+            [
+                "LABEL dev.trailhead.checkpoint-of=\"t-w1\"",
+                "LABEL dev.trailhead.checkpoint-note=\"warm\"",
+                "USER trailhead",
+                "WORKDIR /work",
+                "ENV PATH=\"/usr/bin:/bin\"",
+                "ENV NOTE=\"a \\\"b\\\" \\$c\"",
+            ]
+        );
+        assert_eq!(image_changes("t-w1", "warm", None).len(), 2);
+    }
+
+    #[test]
+    fn free_space_is_read_from_df() {
+        let df = "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 60000000 50000000 1000 99% /\n";
+        assert_eq!(free_bytes(df), Some(1000 * 1024));
+        assert_eq!(free_bytes("garbage"), None);
     }
 
     #[test]

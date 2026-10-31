@@ -14,6 +14,7 @@ description = "Trailhead factory Compute for Docker (or Podman's Docker API): sa
 trailhead-factory.workspace = true
 async-trait.workspace = true
 bollard.workspace = true
+bytes.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
