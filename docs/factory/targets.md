@@ -26,7 +26,8 @@ kind = "sprites"
 priority = 2
 max_sandboxes = 4
 daily_usd = 5
-usd_per_hour = 0.0   # set from Fly's pricing; see Spend
+usd_per_vcpu_hour = 0.0385
+usd_per_gb_hour = 0.021875
 ```
 
 `[factory.compute]` keeps working and means one target, so existing files don't change. Setting both is an error. Listing only `local` is how a factory stays local.
@@ -45,7 +46,13 @@ Today `Factory` and `RemoteDaemon` each hold one `Compute`, and these are set on
 
 ## Spend
 
-Proposal. Nothing measures what a Sprite costs today: the budgets count tokens, time and steps. The cap starts as an estimate: sandbox time on the target times `usd_per_hour`. It's kept in a file under the data dir, because the control plane has no database and a restart mustn't reset the day. A day is the machine's local day. At the cap, the target takes no new runs, those running finish, and the log and `factory status` say so. So the cap can be passed by what's already running. If Fly offers usage numbers per Sprite or organization, those replace the estimate (open question).
+Proposal. Sprites has a usage API: \`GET /v1/usage\` and \`/v1/usage/{sprite}\` return \`cpu_time_sec\` and \`reserved_memory_byte_sec\`, by time bucket and per Sprite, and need the \`usage.read\` scope. It reports usage, not dollars, so the rates are config, from [Fly's pricing](https://fly.io/sprites.md) (\$0.0385 per vCPU hour and \$0.021875 per GB hour on 2026-10-31).
+
+It can't be trusted alone. Checked 2026-10-31 with the factory's token: a 200 with \`partial: false\`, zero usage, \`last_recorded_at: null\`, and an empty \`/v1/usage/filters/sprites\`, for an organization whose Sprites had run the night before. An empty answer looks exactly like nothing spent, so a cap built on it alone would never trip.
+
+So the control plane also keeps its own estimate, and the cap uses the higher of the two: its sandbox time on the target, priced as if the Sprite ran flat out (the billing docs' 8 vCPUs and 4 GB, about \$0.40 an hour, or about 12.6 Sprite-hours for \$5). That over-counts an idle Sprite, which fails towards spending less. The estimate is kept in a file under the data dir, because the control plane has no database and a restart mustn't reset the day. A day is the machine's local day. Polls stay rare, at most once a minute, like the other usage polls.
+
+At the cap, the target takes no new runs, those running finish, and the log and \`factory status\` say so. So the cap can be passed by what's already running. It covers compute only: storage and a plan's included allowance aren't counted, so it can differ from the invoice.
 
 The cap is per repo for now. A host-wide cap belongs with TRAIL-168 and TRAIL-169's user config.
 
@@ -91,7 +98,7 @@ If the VM has to be stopped rather than frozen, its runs are lost. Those tasks a
 - Does a lima or qemu snapshot free the RAM and resume cleanly? The spike decides whether freezing exists.
 - How long may a frozen run wait before it should be stopped and requeued? Leaning: a day.
 - Should overflow wait? With two local places, a third queued task spends money at once. Leaning: no wait, since the cap bounds it.
-- Does Fly report usage we can read, so the cap needn't be an estimate?
+- Why does \`/v1/usage\` report nothing for this organization, when the dashboard has numbers? Until that's answered, the estimate is what actually enforces the cap.
 - Should a target's `priority` be per role, so reviews can prefer Sprites while local builds run?
 
 ## Order of work
