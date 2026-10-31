@@ -11,10 +11,15 @@ use crate::Workspace;
 /// Keep the end of a check's output, where failures usually are.
 const OUTPUT_TAIL: usize = 16 * 1024;
 
+/// Git sends a request body bigger than `http.postBuffer` chunked, which the gateway refuses (it wants a
+/// Content-Length, 32 MiB at most). Set to that limit, a fetch is chunked only if the gateway would refuse it anyway.
+const POST_BUFFER: &str = "http.postBuffer=33554432";
+
 /// How long to wait for narrowed egress to take effect. Sprites took under a second in M0's tests.
 const BLOCK_PATIENCE: Duration = Duration::from_secs(15);
 
-/// A git checkout of a public GitHub repo, cloned anonymously during prepare.
+/// A git checkout of a GitHub repo, cloned during prepare: anonymously from github.com, or from wherever
+/// `with_remote` points (a gateway git connection, for private repos).
 pub struct GitWorkspace {
     dir: PathBuf,
     /// Where repos are cloned from; tests point it at a local directory.
@@ -54,6 +59,7 @@ impl GitWorkspace {
 
     async fn git_output(&self, cwd: &Path, args: &[&str]) -> Result<String> {
         let out = Command::new("git")
+            .args(["-c", POST_BUFFER])
             .args(args)
             .envs(self.git_env.clone())
             .current_dir(cwd)

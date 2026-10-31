@@ -63,6 +63,8 @@ pub enum AuthScheme {
     Bearer,
     /// `x-api-key: <credential>`.
     XApiKey,
+    /// `Authorization: Basic base64("x-access-token:<credential>")`, which is how GitHub takes a token for git.
+    GitBasic,
 }
 
 /// A connection: an upstream the gateway may forward to for sandboxes whose role allows it.
