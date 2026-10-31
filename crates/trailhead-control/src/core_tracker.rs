@@ -319,9 +319,13 @@ impl Tracker for CoreTracker {
         }))
     }
 
-    async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
+    async fn in_flight(&self, project: &str, queue: Option<&TaskKey>) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let filter = TaskFilter {
+            project: Some(project.to_string()),
+            parent: queue.map(|q| q.0.clone()),
+            ..TaskFilter::default()
+        };
         let tasks = self.list_all(&ctx, filter).await?;
         self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
     }

@@ -5,8 +5,9 @@
 //! trailhead-factory run             # or `trailhead factory run`
 //! ```
 //!
-//! The factory's settings are the `[factory]` table of the nearest `.trailhead.toml` at or above the working directory,
-//! or of `--config <path>`.
+//! The factory's settings are the `[factory]` table of each repo's `.trailhead.toml`: every `--repo <dir>`, else the `repos` in
+//! `[factory]` of the user config, else the nearest one at or above the working directory,
+//! or `--config <path>`. Repos share one process, so their `[factory.compute]` and `[factory.daemon]` must match.
 //!
 //! The daemon uploaded to sandboxes is `--daemon <path>`, else a `trailhead-daemon` next to this binary or on PATH,
 //! else the release asset matching this binary's version.
@@ -31,6 +32,7 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, SecretKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
+use tracing::Instrument;
 use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, daemon_binary};
@@ -43,6 +45,7 @@ use trailhead_server::creds::{Cred, CredStore};
 mod find;
 mod login;
 mod ops;
+mod repos;
 mod wake;
 
 /// The agent the control plane acts as; sandboxes get its sub-agents.
@@ -94,12 +97,23 @@ struct Opts {
     create_agent: bool,
 }
 
+/// What `check` and `run` take: the repos to work on, and the shared options.
+#[derive(clap::Args, Clone)]
+struct RunOpts {
+    /// A repo directory whose `.trailhead.toml` has a `[factory]` table; repeat for several. Default: the `repos` in
+    /// `[factory]` of the user config, else the repo at or above the working directory.
+    #[arg(long, conflicts_with = "config")]
+    repo: Vec<PathBuf>,
+    #[command(flatten)]
+    opts: Opts,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Set everything up and report, without running anything.
-    Check(Opts),
-    /// Run the control plane until Ctrl-C.
-    Run(Opts),
+    Check(RunOpts),
+    /// Run the control plane for every repo until Ctrl-C.
+    Run(RunOpts),
     /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; runs beside `run`.
     Status(Opts),
     /// Print the daemon's service log from a task's sandbox.
@@ -179,13 +193,6 @@ async fn factory_ctx(store: &Store, create: bool) -> Result<Ctx, String> {
     store.agent_ctx(ws.id, agent.id).await.map_err(|e| e.to_string())
 }
 
-/// What the run loop's wake-up watcher reads the project's changes with.
-struct Wake {
-    store: Arc<Store>,
-    ctx: Ctx,
-    project: String,
-}
-
 /// `opts` with the secrets the environment didn't set filled in from what `trailhead factory login` saved.
 fn resolve_opts(opts: &Opts, paths: &trailhead_server::Paths) -> Opts {
     let creds = paths.creds();
@@ -211,23 +218,47 @@ fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>,
     Ok((config_path, remote, config))
 }
 
-async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String> {
+/// One repo's factory, ready to run.
+struct Entry {
+    factory: Arc<Factory>,
+    /// `owner/name`, which the repo's log lines carry as `repo=`.
+    slug: String,
+}
+
+/// Everything `check` and `run` share: one store, agent, key set, iroh endpoint with its API tunnel, compute and
+/// host, and a factory for each repo.
+struct Setup {
+    repos: Vec<Entry>,
+    tunnel: Router,
+    _lock: File,
+    store: Arc<Store>,
+    ctx: Ctx,
+}
+
+async fn setup(run: &RunOpts) -> Result<Setup, String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let opts = &resolve_opts(opts, &paths);
-    let (config_path, remote, mut config) = load_config(opts)?;
+    let opts = &resolve_opts(&run.opts, &paths);
     let user_config = paths.config_dir.join("config.toml");
-    let host = match std::fs::read_to_string(&user_config) {
+    let host_config = match std::fs::read_to_string(&user_config) {
         Ok(src) => trailhead_factory::HostConfig::from_user_config(&src)
             .map_err(|e| format!("{}: {e}", user_config.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
         Err(e) => return Err(format!("{}: {e}", user_config.display())),
     };
-    let (pause_at, warnings) = host.effective_pause_at([(config.repo.project.as_str(), &config.usage)]);
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let dirs = repos::dirs(&run.repo, opts.config.as_deref(), &host_config, home.as_deref(), &cwd)?;
+    let mut specs = repos::load_all(&dirs, opts.config.as_deref())?;
+
+    let (pause_at, warnings) =
+        host_config.effective_pause_at(specs.iter().map(|s| (s.config.repo.project.as_str(), &s.config.usage)));
     warnings.iter().for_each(|w| tracing::warn!("{w}"));
-    config.usage.pause_at = pause_at;
-    if opts.claude_oauth_token.is_some() {
-        tracing::warn!("subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
-        config.egress.always.push(ANTHROPIC_API_HOST.into());
+    for spec in &mut specs {
+        spec.config.usage.pause_at = pause_at.clone();
+        if opts.claude_oauth_token.is_some() {
+            tracing::warn!(repo = %spec.slug(), "subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
+            spec.config.egress.always.push(ANTHROPIC_API_HOST.into());
+        }
     }
 
     let release = daemon_binary::Release {
@@ -246,15 +277,16 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
         &daemon_binary::cache_dir(&paths.data_dir),
     )
     .await?;
+    let slugs: Vec<String> = specs.iter().map(|s| s.slug()).collect();
     // Before the store opens or the endpoint binds, so a refused start changes nothing.
-    let lock = lock_control_plane(&paths.data_dir, &config.repo.repo().slug())?;
+    let lock = lock_control_plane(&paths.data_dir, &slugs.join(", "))?;
     let db = paths.db();
     if let Some(dir) = db.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let store = Arc::new(Store::open_local(&db).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, opts.create_agent).await?;
-    let tracker = CoreTracker::new(store.clone(), ctx.clone(), AGENT);
+    let tracker = Arc::new(CoreTracker::new(store.clone(), ctx.clone(), AGENT));
     let (key, master) = load_or_create_keys(&paths.creds())?;
 
     let endpoint = Endpoint::builder(presets::N0)
@@ -262,45 +294,84 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
         .bind()
         .await
         .map_err(|e| format!("binding the iroh endpoint: {e}"))?;
-    let (compute, launch) = compute(&config.compute, opts, &paths, Launch::new(binary))?;
+    // `repos::validate` made the compute and daemon settings the same for every repo.
+    let shared = &specs[0].config;
+    let (compute, launch) = compute(&shared.compute, opts, &paths, Launch::new(binary))?;
     let launch = Launch {
         claude_oauth_token: opts.claude_oauth_token.clone(),
-        log: config.daemon.log.clone(),
-        gateway_list: config.compute.gateway_list(),
+        log: shared.daemon.log.clone(),
+        gateway_list: shared.compute.gateway_list(),
         ..launch
     };
     let daemon = Arc::new(RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch));
     let tunnel =
         Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, daemon.peers())).spawn();
-    tracing::info!(endpoint = %endpoint.id(), project = %config.repo.project, repo = %config.repo.repo().slug(), "factory ready");
+    tracing::info!(endpoint = %endpoint.id(), repos = %slugs.join(", "), "factory ready");
 
-    let model_endpoint = config.compute.model_endpoint(&opts.model_endpoint);
-    let mut factory = Factory::new(
-        config,
-        compute,
-        Arc::new(tracker),
-        Arc::new(Anthropic::new(model_endpoint)),
-        daemon,
-        Host::new(None),
-    )
-    .with_server_check(server_check(opts.server))
-    .with_merge_mode_source(Box::new(move || {
-        let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
-        FactoryConfig::from_repo_file(&src, remote.clone())
-            .map(|c| c.merge.mode)
-            .map_err(|e| format!("{}: {e}", config_path.display()))
-    }));
-    match &opts.github_token {
-        Some(token) => {
-            factory =
-                factory.with_codehost(Arc::new(GitHub::new(trailhead_codehost_github::API_URL, Some(token.clone()))))
+    let host = Host::new(host_config.max_sandboxes);
+    let mut repos = Vec::new();
+    for spec in specs {
+        let slug = spec.slug();
+        let repos::RepoSpec { config_path, remote, config, .. } = spec;
+        let model_endpoint = config.compute.model_endpoint(&opts.model_endpoint);
+        let mut factory = Factory::new(
+            config,
+            compute.clone(),
+            tracker.clone(),
+            Arc::new(Anthropic::new(model_endpoint)),
+            daemon.clone(),
+            host.clone(),
+        )
+        .with_server_check(server_check(opts.server))
+        .with_merge_mode_source(Box::new(move || {
+            let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+            FactoryConfig::from_repo_file(&src, remote.clone())
+                .map(|c| c.merge.mode)
+                .map_err(|e| format!("{}: {e}", config_path.display()))
+        }));
+        match &opts.github_token {
+            Some(token) => {
+                factory = factory
+                    .with_codehost(Arc::new(GitHub::new(trailhead_codehost_github::API_URL, Some(token.clone()))))
+            }
+            None => tracing::warn!(
+                repo = %slug,
+                "no GitHub token (GITHUB_TOKEN or `trailhead factory login github`): merged and closed PRs are not noticed; finish merged tasks by hand"
+            ),
         }
-        None => tracing::warn!(
-            "no GitHub token (GITHUB_TOKEN or `trailhead factory login github`): merged and closed PRs are not noticed; finish merged tasks by hand"
-        ),
+        repos.push(Entry { factory: Arc::new(factory), slug });
     }
-    let wake = Wake { store, ctx, project: factory.config.repo.project.clone() };
-    Ok((Arc::new(factory), tunnel, lock, wake))
+    Ok(Setup { repos, tunnel, _lock: lock, store, ctx })
+}
+
+/// Resolves once the watch channel it came from is set.
+async fn fired(mut rx: tokio::sync::watch::Receiver<bool>) {
+    let _ = rx.wait_for(|set| *set).await;
+}
+
+/// One repo's run loop, with the wake-up watcher for its project. Whether it stopped on an error (already logged).
+async fn run_repo(
+    entry: Entry,
+    store: Arc<Store>,
+    ctx: Ctx,
+    poll: Duration,
+    drain: tokio::sync::watch::Receiver<bool>,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    let wake = Arc::new(Notify::new());
+    let project = entry.factory.config.repo.project.clone();
+    let watcher = tokio::spawn(
+        wake::wake_on_changes(store, ctx, project, wake.clone(), wake::INTERVAL).instrument(tracing::Span::current()),
+    );
+    let ran = entry.factory.clone().run_draining(wake, poll, fired(drain), fired(cancel)).await;
+    watcher.abort();
+    match ran {
+        Ok(()) => false,
+        Err(e) => {
+            tracing::error!(error = %e, "this repo's loop stopped; the other repos carry on");
+            true
+        }
+    }
 }
 
 /// Whether something accepts connections at the server's address, which the daemons' API tunnel forwards to.
@@ -399,28 +470,36 @@ fn check_result(failed: usize) -> Result<(), String> {
 
 async fn main_inner(cli: Cli) -> Result<(), String> {
     match cli.cmd {
-        Cmd::Check(opts) => {
-            let (factory, tunnel, _lock, _) = setup(&opts).await?;
-            let project = &factory.config.repo.project;
-            let queue = factory.config.repo.queue.clone().map(trailhead_factory::TaskKey);
+        Cmd::Check(run) => {
+            let setup = setup(&run).await?;
             let mut failed = 0;
-            match factory.tracker.ready(project, queue.as_ref(), 10).await {
-                Ok(ready) => {
-                    let scope = queue.as_ref().map_or(project.clone(), |q| format!("{project}, under {}", q.0));
-                    println!("tracker: acting as {AGENT}; {} ready task(s) in {scope}", ready.len());
-                    for t in &ready {
-                        println!("  {} {}", t.key.0, t.title);
+            for entry in &setup.repos {
+                let factory = &entry.factory;
+                let project = &factory.config.repo.project;
+                let queue = factory.config.repo.queue.clone().map(trailhead_factory::TaskKey);
+                match factory.tracker.ready(project, queue.as_ref(), 10).await {
+                    Ok(ready) => {
+                        let scope = queue.as_ref().map_or(project.clone(), |q| format!("{project}, under {}", q.0));
+                        println!(
+                            "{}: tracker: acting as {AGENT}; {} ready task(s) in {scope}",
+                            entry.slug,
+                            ready.len()
+                        );
+                        for t in &ready {
+                            println!("  {} {}", t.key.0, t.title);
+                        }
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        println!("{}: tracker: acting as {AGENT}; {e}", entry.slug);
                     }
                 }
-                Err(e) => {
-                    failed += 1;
-                    println!("tracker: acting as {AGENT}; {e}");
-                }
             }
-            match factory.compute.list(&Default::default()).await {
+            let first = &setup.repos[0].factory;
+            match first.compute.list(&Default::default()).await {
                 Ok(live) => println!(
                     "compute: {} reachable; {} sandbox(es) visible",
-                    compute_name(&factory.config.compute),
+                    compute_name(&first.config.compute),
                     live.len()
                 ),
                 Err(e) => {
@@ -428,9 +507,9 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
                     println!("compute: {e}");
                 }
             }
-            println!("endpoint: {}", tunnel.endpoint().id());
-            println!("tunnel: forwarding to {}", opts.server);
-            tunnel.shutdown().await.map_err(|e| e.to_string())?;
+            println!("endpoint: {}", setup.tunnel.endpoint().id());
+            println!("tunnel: forwarding to {}", run.opts.server);
+            setup.tunnel.shutdown().await.map_err(|e| e.to_string())?;
             check_result(failed)
         }
         Cmd::Status(opts) => ops::status(&opts).await,
@@ -440,41 +519,41 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
                 trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
             login::run(cmd, &paths.creds()).await
         }
-        Cmd::Run(opts) => {
-            let (factory, tunnel, _lock, source) = setup(&opts).await?;
-            let wake = Arc::new(Notify::new());
-            let watcher = tokio::spawn(wake::wake_on_changes(
-                source.store,
-                source.ctx,
-                source.project,
-                wake.clone(),
-                wake::INTERVAL,
-            ));
+        Cmd::Run(run) => {
+            let Setup { repos, tunnel, _lock, store, ctx } = setup(&run).await?;
             // The first Ctrl-C drains; the second cancels what is left.
-            let (drain_tx, drain) = tokio::sync::oneshot::channel::<()>();
-            let (cancel_tx, cancel) = tokio::sync::oneshot::channel::<()>();
+            let (drain_tx, drain) = tokio::sync::watch::channel(false);
+            let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
             tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
-                let _ = drain_tx.send(());
+                let _ = drain_tx.send(true);
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!("stopping; runs in flight are requeued on the next start");
-                let _ = cancel_tx.send(());
+                let _ = cancel_tx.send(true);
             });
-            let ran = factory
-                .run_draining(
-                    wake,
-                    Duration::from_secs(opts.poll_secs),
-                    async {
-                        let _ = drain.await;
-                    },
-                    async {
-                        let _ = cancel.await;
-                    },
-                )
-                .await;
-            watcher.abort();
+            let poll = Duration::from_secs(run.opts.poll_secs);
+            let mut loops = tokio::task::JoinSet::new();
+            for entry in repos {
+                let span = tracing::info_span!("repo", repo = %entry.slug);
+                let (store, ctx, drain, cancel) = (store.clone(), ctx.clone(), drain.clone(), cancel.clone());
+                loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel).instrument(span));
+            }
+            let mut failed = 0;
+            while let Some(joined) = loops.join_next().await {
+                match joined {
+                    Ok(false) => {}
+                    Ok(true) => failed += 1,
+                    Err(e) => {
+                        failed += 1;
+                        tracing::error!(error = %e, "a repo's loop panicked; the other repos carry on");
+                    }
+                }
+            }
             tunnel.shutdown().await.map_err(|e| e.to_string())?;
-            ran.map_err(|e| e.to_string())
+            match failed {
+                0 => Ok(()),
+                n => Err(format!("{n} repo loop(s) stopped on an error")),
+            }
         }
     }
 }

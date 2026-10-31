@@ -3006,3 +3006,16 @@ async fn a_review_backed_off_after_an_infrastructure_failure_is_not_skipped_by_a
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).run.reviewed, Some(1), "the review ran once the backoff was over");
 }
+
+#[tokio::test]
+async fn a_sandbox_out_of_disk_is_reported_before_the_run_starts() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Needs disk", "");
+    r.compute.fail("trailhead-w1", "preflight");
+    r.harness.push(Role::Worker, Script::new(changes()));
+
+    let _ = r.factory.tick().await;
+    assert!(r.codehost.prs().is_empty());
+    assert!(r.compute.checkpoints("trailhead-w1").is_empty(), "never prepared, so never warmed");
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+}
