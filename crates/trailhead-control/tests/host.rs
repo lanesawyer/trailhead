@@ -134,3 +134,67 @@ async fn a_repos_own_cap_still_applies_under_a_roomy_host() {
     queue(&a);
     assert!(a.factory.tick().await.unwrap().is_empty());
 }
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..400 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn two_repos_loops_run_at_once_each_taking_only_its_own_projects_tasks() {
+    let compute = FakeCompute::new();
+    let host = Host::new(None);
+    let tracker = FakeTracker::new("factory");
+    let mut loops = Vec::new();
+    let mut harnesses = Vec::new();
+    for (name, project) in [("alpha", "ALPHA"), ("beta", "BETA")] {
+        let codehost = FakeCodeHost::new();
+        let harness = Arc::new(ScriptedHarness::new());
+        let heads = codehost.clone();
+        let daemon = Arc::new(
+            LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone())
+                .with_heads(move |repo, branch| heads.head(repo, branch)),
+        );
+        let factory = Arc::new(Factory::new(
+            FactoryConfig::parse_table(&config(name, ""), project, None).unwrap(),
+            Arc::new(compute.clone()),
+            Arc::new(tracker.clone()),
+            Arc::new(FakeProvider::new(1)),
+            daemon,
+            host.clone(),
+        ));
+        harness.push(Role::Worker, Script::new(changes()));
+        harness.push(Role::Reviewer, Script::new(approve()));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(factory.run(
+            Arc::new(tokio::sync::Notify::new()),
+            std::time::Duration::from_millis(5),
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        loops.push((stop, handle));
+        harnesses.push((project, harness));
+    }
+    let alpha = tracker.add_task("ALPHA", "Alpha's task", "");
+    let beta = tracker.add_task("BETA", "Beta's task", "");
+
+    for (project, harness) in &harnesses {
+        let harness = harness.clone();
+        until(&format!("{project}'s run"), move || !harness.contexts().is_empty()).await;
+    }
+    for (stop, handle) in loops {
+        stop.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+    for (project, harness) in &harnesses {
+        let seen: Vec<_> = harness.contexts().iter().map(|c| c.task.key.clone()).collect();
+        let own = if *project == "ALPHA" { &alpha } else { &beta };
+        assert!(!seen.is_empty() && seen.iter().all(|k| k == own), "{project} saw {seen:?}");
+    }
+}
