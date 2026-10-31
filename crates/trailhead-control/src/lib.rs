@@ -89,6 +89,9 @@ pub struct Factory {
     /// Tasks whose PR a run just pushed to: the host's next `mergeable = false` for each may be a verdict on the head
     /// before the push, so it is read as not yet worked out, once (TRAIL-241).
     fresh_pushes: Mutex<HashSet<TaskKey>>,
+    /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
+    /// (a 202), so until the head moves the PR is still behind and asking again would only queue another.
+    updating: Mutex<HashMap<TaskKey, String>>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// Tasks already reported as ungraded, so a poll doesn't say it again.
@@ -173,7 +176,7 @@ fn merged_by(task: &Task) -> MergedBy {
 /// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
 /// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for a person.` `merging` is whether the merger is on and will
 /// try to merge now; the message then says the merge happened, so it is only posted once it has.
-fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool) -> String {
+fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool, behind: bool) -> String {
     fn join(items: Vec<String>) -> String {
         match items.as_slice() {
             [] => String::new(),
@@ -209,6 +212,9 @@ fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, mergin
     match (&d.problem, d.would_merge, auto_merge) {
         (Some(problem), ..) => format!("{head}: {passed} passed, but {problem}."),
         _ if merging => format!("{head}: {passed} passed; merged."),
+        (None, true, _) if behind => {
+            format!("{head}: {passed} passed; would bring the branch up to date, then merge (shadow).")
+        }
         (None, true, _) => format!("{head}: {passed} passed; would merge (shadow)."),
         (None, false, true) => format!("{head}: {passed} passed; a person merges."),
         (None, false, false) => format!("{head}: {passed} passed; not auto-merged at this grade, so a person merges."),
@@ -254,6 +260,7 @@ impl Factory {
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
             fresh_pushes: Mutex::default(),
+            updating: Mutex::default(),
             quota: Mutex::default(),
             ungraded: Mutex::default(),
             pause_logged: Mutex::default(),
@@ -1309,7 +1316,9 @@ impl Factory {
             && decision.problem.is_none()
             && status == Status::Approved
             && (gate.auto_merge || decision.human_head.as_ref() == Some(&head));
-        decision.message = decision_message(&grade, &decision, gate.auto_merge, merging);
+        // Only the shadow merger's "would merge" says whether the PR is behind: it is the one that never acts on it.
+        let behind = decision.would_merge && codehost.behind(pr).await?;
+        decision.message = decision_message(&grade, &decision, gate.auto_merge, merging, behind);
         // A refusal stands for the head it was given on, until a merge succeeds or the head moves.
         if merging {
             decision.refused = prev.as_ref().filter(|d| d.head == head).and_then(|d| d.refused.clone());
@@ -1346,13 +1355,25 @@ impl Factory {
             return Ok(());
         }
         if codehost.behind(pr).await? {
+            // An update asked for on this head is still queued: the head moves when it lands.
+            if self.updating.lock().unwrap().get(&task.key) == Some(&decision.head) {
+                tracing::debug!(task = %task.key.0, pr = %pr.url, "the branch update is still queued; waiting");
+                return Ok(());
+            }
             match codehost.update_branch(pr).await? {
-                BranchUpdate::Conflict => self.rework_conflict(task, pr, attempt).await?,
+                BranchUpdate::Conflict => {
+                    self.updating.lock().unwrap().remove(&task.key);
+                    self.rework_conflict(task, pr, attempt).await?
+                }
                 // CI starts over on the new head; the next pass looks at it again.
-                BranchUpdate::Updated | BranchUpdate::UpToDate => {}
+                BranchUpdate::Updated => {
+                    self.updating.lock().unwrap().insert(task.key.clone(), decision.head.clone());
+                }
+                BranchUpdate::UpToDate => {}
             }
             return Ok(());
         }
+        self.updating.lock().unwrap().remove(&task.key);
         // Recorded first: if closing the task fails after the merge, reconcile still knows the merger did it.
         self.tracker
             .report(&task.key, RunUpdate { merging: Some(decision.head.clone()), ..RunUpdate::default() })

@@ -335,7 +335,7 @@ fn compute(
         #[cfg(feature = "docker")]
         ComputeConfig::Docker { image, network, runtime } => {
             use trailhead_compute_docker::{DockerCompute, DockerConfig, HOME};
-            let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"));
+            let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), launch.binary.clone());
             if let Some(image) = image {
                 docker.image = image.clone();
             }
@@ -343,6 +343,24 @@ fn compute(
                 docker.network = network.clone();
             }
             docker.runtime = runtime.clone();
+            let writer = match std::env::var("GITHUB_WRITER_TOKEN").ok().filter(|v| !v.trim().is_empty()) {
+                Some(_) => fnox::Fnox::none(),
+                None => {
+                    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+                    fnox::Fnox::load("fnox", &cwd, fnox::global_config().as_deref())?
+                }
+            };
+            docker.connections = gateway_connections(login::github_writer_token(&writer, &paths.creds()));
+            if docker.connections.is_empty() {
+                tracing::warn!(
+                    "no GitHub writer token (GITHUB_WRITER_TOKEN or `trailhead factory login github-writer`): Docker sandboxes can't publish"
+                );
+            }
+            if opts.claude_oauth_token.is_none() {
+                tracing::warn!(
+                    "no Claude subscription token: Docker sandboxes have no model access until the gateway holds a credential for it"
+                );
+            }
             let compute = DockerCompute::new(docker).map_err(|e| e.to_string())?;
             let launch = Launch { dir: format!("{HOME}/.trailhead"), workdir: format!("{HOME}/work"), ..launch };
             Ok((Arc::new(compute), launch))
@@ -352,6 +370,23 @@ fn compute(
             Err("Docker compute needs trailhead-factory built with `--features docker`".into())
         }
     }
+}
+
+/// What the Docker gateway may forward to. GitHub only: subscription mode reaches the model API with the sandbox's
+/// own token, through the gateway's proxy (TRAIL-487).
+#[cfg(feature = "docker")]
+fn gateway_connections(github_writer: Option<String>) -> Vec<trailhead_factory::GatewayConnection> {
+    use trailhead_factory::{AuthScheme, GATEWAY_GITHUB_ID, GatewayConnection, Secret};
+    github_writer
+        .map(|token| GatewayConnection {
+            provider: "github".into(),
+            id: GATEWAY_GITHUB_ID.into(),
+            upstream: trailhead_codehost_github::API_URL.into(),
+            auth: AuthScheme::Bearer,
+            credential: Secret::new(token),
+        })
+        .into_iter()
+        .collect()
 }
 
 fn compute_name(config: &ComputeConfig) -> &'static str {

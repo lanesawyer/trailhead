@@ -5,12 +5,13 @@
 //! feature adds the iroh transport: [`net::DaemonProtocol`] in the sandbox and [`net::RemoteDaemon`] in the control
 //! plane.
 
-pub mod gateway;
 mod runner;
 mod workspace;
 
 #[cfg(feature = "net")]
 pub mod awake;
+#[cfg(feature = "net")]
+pub mod gateway;
 #[cfg(feature = "net")]
 pub mod net;
 #[cfg(feature = "net")]

@@ -36,6 +36,10 @@ struct State {
     starts: BTreeMap<(String, String), String>,
     prs: Vec<FakePr>,
     conflicts: bool,
+    /// Updates the host accepted but hasn't made yet, like GitHub's 202.
+    queue_updates: bool,
+    /// How many times `update_branch` was asked to do something.
+    update_requests: usize,
     refuse_publish: Option<String>,
     refuse_merge: Option<String>,
 }
@@ -83,6 +87,25 @@ impl FakeCodeHost {
     /// Makes every later merge report a conflict.
     pub fn set_conflicts(&self, on: bool) {
         self.state.lock().unwrap().conflicts = on;
+    }
+
+    /// Makes `update_branch` queue the merge like GitHub's 202: it answers `Updated` and the head stays put, the PR
+    /// still behind, until `land_updates` runs.
+    pub fn queue_updates(&self, on: bool) {
+        self.state.lock().unwrap().queue_updates = on;
+    }
+
+    /// Makes the host do the updates it queued: later `update_branch` calls act at once again.
+    pub async fn land_updates(&self, pr: &PrRef) {
+        let queued = std::mem::replace(&mut self.state.lock().unwrap().queue_updates, false);
+        if queued {
+            self.update_branch(pr).await.unwrap();
+        }
+    }
+
+    /// How many times `update_branch` was called on a PR that was behind.
+    pub fn update_requests(&self) -> usize {
+        self.state.lock().unwrap().update_requests
     }
 
     /// Closes a PR without merging it, as a person would on GitHub.
@@ -237,6 +260,13 @@ impl CodeHost for FakeCodeHost {
         }
         if self.state.lock().unwrap().conflicts {
             return Ok(BranchUpdate::Conflict);
+        }
+        {
+            let mut s = self.state.lock().unwrap();
+            s.update_requests += 1;
+            if s.queue_updates {
+                return Ok(BranchUpdate::Updated);
+            }
         }
         let branch = self.find(pr, |p, _| {
             p.behind = false;

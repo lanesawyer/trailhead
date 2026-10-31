@@ -9,11 +9,13 @@
 //! - A checkpoint is a `docker commit` of the container, and restoring recreates the container from that image.
 //! - Programs are supervised by `supervise.sh`, the container's main process, which restarts them when they exit
 //!   and starts them again when the container restarts (it runs with `restart: unless-stopped`).
-//! - Egress is all or nothing for now: none disconnects the container from every network, and anything else
-//!   connects it to the sandbox network unfiltered. The filtering proxy is its own task.
+//! - A sandbox's way out is the gateway (`gateway.rs`): each sandbox has its own `--internal` network shared only
+//!   with the gateway's container, and egress is the gateway's allowlist for it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -21,8 +23,7 @@ use bollard::Docker;
 use bollard::errors::Error as DockerError;
 use bollard::exec::{StartExecOptions, StartExecResults};
 use bollard::models::{
-    ContainerConfig, ContainerCreateBody, ExecConfig, HostConfig, NetworkConnectRequest, NetworkCreateRequest,
-    NetworkDisconnectRequest, RestartPolicy, RestartPolicyNameEnum,
+    ContainerConfig, ContainerCreateBody, ExecConfig, HostConfig, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CommitContainerOptions, CreateContainerOptions, InspectContainerOptions, ListContainersOptions, ListImagesOptions,
@@ -30,10 +31,14 @@ use bollard::query_parameters::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::OnceCell;
 use trailhead_factory::{
-    CheckpointId, Compute, Egress, Error, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec,
+    CheckpointId, Compute, Egress, Error, GATEWAY_HOST, GatewayConnection, GatewayRequest, Labels, Program, Result,
+    Sandbox, SandboxId, SandboxSpec,
 };
+
+mod gateway;
+
+pub use gateway::{GATEWAY_BIN, GATEWAY_LABEL, sandbox_network};
 
 /// The label every sandbox container carries, set to its name.
 pub const MARKER: &str = "dev.trailhead.sandbox";
@@ -43,7 +48,8 @@ pub const CHECKPOINT_OF: &str = "dev.trailhead.checkpoint-of";
 pub const CHECKPOINT_REPO: &str = "trailhead-checkpoint";
 /// The sandbox image built by `mise run docker-image`.
 pub const DEFAULT_IMAGE: &str = "trailhead-sandbox:latest";
-pub const DEFAULT_NETWORK: &str = "trailhead-sandboxes";
+/// The ordinary bridge network the gateway gets out on. Sandboxes are never on it.
+pub const DEFAULT_NETWORK: &str = "trailhead-gateway-out";
 /// Where the daemon lives in [`DEFAULT_IMAGE`], whose user is `trailhead`.
 pub const HOME: &str = "/home/trailhead";
 
@@ -55,30 +61,49 @@ const START_WATCH: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct DockerConfig {
+    /// The sandboxes' image, which the gateway's container also runs from.
     pub image: String,
+    /// The ordinary bridge network the gateway gets out on.
     pub network: String,
     /// The OCI runtime, such as `runsc` for gVisor. Docker's default (`runc`) when unset.
     pub runtime: Option<String>,
     /// Where sandboxes' labels and egress are kept.
     pub state_dir: PathBuf,
+    /// The gateway's container name. Sandboxes reach it as [`GATEWAY_HOST`] whatever this is.
+    pub gateway: String,
+    /// The `trailhead-daemon` binary, which the gateway runs as.
+    pub daemon: Arc<Vec<u8>>,
+    /// What the gateway may forward to. Sent to it on stdin, never kept on disk.
+    pub connections: Vec<GatewayConnection>,
 }
 
 impl DockerConfig {
-    pub fn new(state_dir: impl Into<PathBuf>) -> DockerConfig {
+    pub fn new(state_dir: impl Into<PathBuf>, daemon: Arc<Vec<u8>>) -> DockerConfig {
         DockerConfig {
             image: DEFAULT_IMAGE.into(),
             network: DEFAULT_NETWORK.into(),
             runtime: None,
             state_dir: state_dir.into(),
+            gateway: GATEWAY_HOST.into(),
+            daemon,
+            connections: Vec::new(),
         }
     }
+}
+
+/// Held while changing a sandbox's state and pushing it to the gateway.
+#[derive(Debug, Default)]
+pub(crate) struct Link {
+    /// The start time of the gateway run that has the full state.
+    synced: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct DockerCompute {
     docker: Docker,
     config: DockerConfig,
-    network: std::sync::Arc<OnceCell<()>>,
+    link: Arc<tokio::sync::Mutex<Link>>,
+    watching: Arc<AtomicBool>,
 }
 
 /// What Docker can't hold for a sandbox.
@@ -96,7 +121,7 @@ impl DockerCompute {
     }
 
     pub fn with_client(docker: Docker, config: DockerConfig) -> DockerCompute {
-        DockerCompute { docker, config, network: Default::default() }
+        DockerCompute { docker, config, link: Default::default(), watching: Default::default() }
     }
 
     /// The recent output of a program started with `start`.
@@ -128,29 +153,11 @@ impl DockerCompute {
         tokio::fs::rename(&tmp, &path).await.map_err(|e| io_err(&path, e))
     }
 
-    async fn ensure_network(&self) -> Result<()> {
-        self.network
-            .get_or_try_init(|| async {
-                match self.docker.inspect_network(&self.config.network, None).await {
-                    Ok(_) => return Ok(()),
-                    Err(e) if status(&e) == Some(404) => {}
-                    Err(e) => return Err(docker_err(e)),
-                }
-                let req = NetworkCreateRequest {
-                    name: self.config.network.clone(),
-                    driver: Some("bridge".into()),
-                    labels: Some(HashMap::from([(MARKER.to_string(), "network".to_string())])),
-                    ..Default::default()
-                };
-                match self.docker.create_network(req).await {
-                    Ok(_) => Ok(()),
-                    // Another control plane made it first.
-                    Err(e) if status(&e) == Some(409) => Ok(()),
-                    Err(e) => Err(docker_err(e)),
-                }
-            })
-            .await
-            .copied()
+    async fn remove_state(&self, name: &str) -> Result<()> {
+        match tokio::fs::remove_file(self.state_path(name)).await {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_err(&self.state_path(name), e)),
+            _ => Ok(()),
+        }
     }
 
     /// Whether a container exists, by name.
@@ -165,15 +172,16 @@ impl DockerCompute {
     /// Creates and starts the sandbox's container from `image`. A fresh image gets the supervisor first; a checkpoint
     /// already has it.
     async fn run_container(&self, name: &str, image: &str, fresh: bool) -> Result<()> {
-        self.ensure_network().await?;
         let body = ContainerCreateBody {
             image: Some(image.into()),
             cmd: Some(vec![SUPERVISE_PATH.into()]),
             entrypoint: Some(vec![]),
+            env: Some(gateway::proxy_env()),
             labels: Some(HashMap::from([(MARKER.to_string(), name.to_string())])),
             host_config: Some(HostConfig {
                 init: Some(true),
-                network_mode: Some(self.config.network.clone()),
+                network_mode: Some(sandbox_network(name)),
+                cap_drop: Some(vec!["NET_RAW".into(), "NET_ADMIN".into()]),
                 restart_policy: Some(RestartPolicy {
                     name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
                     maximum_retry_count: None,
@@ -231,45 +239,29 @@ impl DockerCompute {
         let state = self.read_state(name).await?;
         Ok(Sandbox { id: SandboxId(name.into()), name: name.into(), labels: state.labels })
     }
-
-    async fn apply_egress(&self, name: &str, egress: &Egress) -> Result<()> {
-        self.ensure_network().await?;
-        let info = self.docker.inspect_container(name, None::<InspectContainerOptions>).await.map_err(docker_err)?;
-        let connected =
-            info.network_settings.and_then(|n| n.networks).is_some_and(|nets| nets.contains_key(&self.config.network));
-        let network = &self.config.network;
-        if egress.domains.is_empty() && connected {
-            let req = NetworkDisconnectRequest { container: name.into(), force: Some(true) };
-            self.docker.disconnect_network(network, req).await.map_err(docker_err)?;
-        } else if !egress.domains.is_empty() && !connected {
-            let req = NetworkConnectRequest { container: name.into(), endpoint_config: None };
-            self.docker.connect_network(network, req).await.map_err(docker_err)?;
-        }
-        if !egress.domains.is_empty() {
-            tracing::warn!(sandbox = name, domains = ?egress.domains, "docker egress isn't filtered yet: the sandbox can reach anything");
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
 impl Compute for DockerCompute {
     async fn create(&self, spec: &SandboxSpec) -> Result<Sandbox> {
+        let _link = self.gateway().await?;
         if self.exists(&spec.name).await? {
             return self.sandbox(&spec.name).await;
         }
         let state = State { labels: spec.labels.clone(), egress: spec.egress.clone() };
         self.write_state(&spec.name, &state).await?;
+        self.attach(&spec.name, &state).await?;
         match self.run_container(&spec.name, &self.config.image, true).await {
             // Lost a race with another create of the same name.
-            Err(Error::Conflict(_)) => return self.sandbox(&spec.name).await,
+            Err(Error::Conflict(_)) => {}
             other => other?,
         }
-        self.apply_egress(&spec.name, &spec.egress).await?;
         self.sandbox(&spec.name).await
     }
 
     async fn list(&self, labels: &Labels) -> Result<Vec<Sandbox>> {
+        // The first thing a restarted control plane calls, with sandboxes that may be waiting on the gateway.
+        self.watch();
         let opts = ListContainersOptions {
             all: true,
             filters: Some(HashMap::from([("label".to_string(), vec![MARKER.to_string()])])),
@@ -308,14 +300,15 @@ impl Compute for DockerCompute {
     /// again from the image.
     async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()> {
         self.docker.inspect_image(&cp.0).await.map_err(docker_err)?;
+        let _link = self.gateway().await?;
         let state = self.read_state(&id.0).await?;
         let opts = RemoveContainerOptions { force: true, ..Default::default() };
         match self.docker.remove_container(&id.0, Some(opts)).await {
             Err(e) if status(&e) != Some(404) => return Err(docker_err(e)),
             _ => {}
         }
-        self.run_container(&id.0, &cp.0, false).await?;
-        self.apply_egress(&id.0, &state.egress).await
+        self.attach(&id.0, &state).await?;
+        self.run_container(&id.0, &cp.0, false).await
     }
 
     /// Writes the files as the container's user (each beside its target, then renamed over it, so a running binary
@@ -374,29 +367,40 @@ impl Compute for DockerCompute {
         self.docker.start_container(&id.0, None).await.map_err(docker_err)
     }
 
+    /// Returns once the gateway has the new list and has closed the tunnels it no longer allows.
     async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()> {
+        let _link = self.gateway().await?;
+        if !self.exists(&id.0).await? {
+            return Err(Error::NotFound(format!("sandbox {}", id.0)));
+        }
         let mut state = self.read_state(&id.0).await?;
         state.egress = egress.clone();
         self.write_state(&id.0, &state).await?;
-        self.apply_egress(&id.0, egress).await
+        self.attach(&id.0, &state).await
     }
 
     async fn set_labels(&self, id: &SandboxId, labels: &Labels) -> Result<()> {
+        let _link = self.gateway().await?;
         if !self.exists(&id.0).await? {
             return Err(Error::NotFound(format!("sandbox {}", id.0)));
         }
         let mut state = self.read_state(&id.0).await?;
         state.labels = labels.clone();
-        self.write_state(&id.0, &state).await
+        self.write_state(&id.0, &state).await?;
+        self.attach(&id.0, &state).await
     }
 
-    /// Removes the container, its checkpoint images and its state file.
+    /// Removes the container, its network, its checkpoint images and its state file. The state file goes last, so a
+    /// teardown that stops partway is finished by the next resync.
     async fn destroy(&self, id: &SandboxId) -> Result<()> {
+        let _link = self.gateway().await?;
+        self.ctl_ok(&GatewayRequest::Unregister { name: id.0.clone() }).await?;
         let opts = RemoveContainerOptions { force: true, ..Default::default() };
         match self.docker.remove_container(&id.0, Some(opts)).await {
             Err(e) if status(&e) != Some(404) => return Err(docker_err(e)),
             _ => {}
         }
+        self.detach(&id.0).await?;
         let filter = format!("{CHECKPOINT_OF}={}", id.0);
         let opts = ListImagesOptions {
             filters: Some(HashMap::from([("label".to_string(), vec![filter])])),
@@ -409,10 +413,7 @@ impl Compute for DockerCompute {
                 _ => {}
             }
         }
-        match tokio::fs::remove_file(self.state_path(&id.0)).await {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_err(&self.state_path(&id.0), e)),
-            _ => Ok(()),
-        }
+        self.remove_state(&id.0).await
     }
 }
 
@@ -488,6 +489,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sandboxes_go_through_the_gateway_but_not_to_it() {
+        let env = gateway::proxy_env();
+        for proxy in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
+            assert!(env.contains(&format!("{proxy}=http://trailhead-gateway:8080")), "{env:?}");
+        }
+        assert!(env.contains(&"NO_PROXY=trailhead-gateway,localhost,127.0.0.1,::1".to_string()), "{env:?}");
+    }
+
+    #[test]
     fn run_scripts_quote_every_word() {
         let args = vec!["--secrets".into(), "/home/trailhead/it's.json".into()];
         assert_eq!(
@@ -531,7 +541,8 @@ mod tests {
     async fn state_round_trips_and_defaults_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let docker = Docker::connect_with_http("http://127.0.0.1:1", 1, bollard::API_DEFAULT_VERSION).unwrap();
-        let compute = DockerCompute::with_client(docker, DockerConfig::new(dir.path().join("state")));
+        let config = DockerConfig::new(dir.path().join("state"), Default::default());
+        let compute = DockerCompute::with_client(docker, config);
         assert_eq!(compute.read_state("trail-1-a1").await.unwrap(), State::default());
         let state = State {
             labels: Labels::from([("role".into(), "worker".into())]),
