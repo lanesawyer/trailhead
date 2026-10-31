@@ -11,7 +11,9 @@
 //! scratch repo in `TRAILHEAD_LIVE_REPO` (`owner/name`, with a `main` branch), `GITHUB_TOKEN`, `GITHUB_WRITER_TOKEN`
 //! (which can push and open PRs there) and `CLAUDE_CODE_OAUTH_TOKEN`, plus `TRAILHEAD_DAEMON_BIN` and
 //! `TRAILHEAD_BIN` (the `trailhead` CLI). It spends real model calls and closes its PR and deletes its branch at the
-//! end. It shares the engine's `trailhead-gateway` with any other factory, so it refuses to start beside one.
+//! end (and at the start, for what a dead run left). The label probe cuts the worker's GitHub for a few seconds
+//! mid-run, so a push in that window can fail; a worker that fails once with a 403 isn't necessarily a gateway bug.
+//! It shares the engine's `trailhead-gateway` with any other factory, so it refuses to start beside one.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -19,16 +21,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use trailhead_compute_docker::{DockerCompute, DockerConfig, GATEWAY_BIN};
+use trailhead_compute_docker::{DockerCompute, DockerConfig, GATEWAY_BIN, MARKER, sandbox_network};
 use trailhead_factory::{
     AuthScheme, Compute, GATEWAY_GITHUB_ID, GATEWAY_HOST, GATEWAY_PORT, GatewayConnection, GatewayResponse,
     GatewayState, Labels, SandboxId, Secret,
 };
 
-/// The Docker label on every sandbox container.
-const MARKER: &str = "dev.trailhead.sandbox";
 const PROJECT: &str = "LIVE";
 const TASK: &str = "LIVE-1";
+/// The branch the factory opens the task's PR from.
+const BRANCH: &str = "factory/live-1";
 const DEADLINE: Duration = Duration::from_secs(45 * 60);
 
 #[derive(Clone)]
@@ -113,21 +115,29 @@ async fn github(token: &str, method: reqwest::Method, repo: &str, path: &str, bo
     (status, resp.json().await.unwrap_or(Value::Null))
 }
 
-/// The scratch repo's PR for the task, by the key in its title.
-async fn task_pr(env: &Env) -> Option<Value> {
-    let (_, prs) = github(&env.read, reqwest::Method::GET, &env.repo, "/pulls?state=all&per_page=30", None).await;
-    prs.as_array()?.iter().find(|p| p["title"].as_str().is_some_and(|t| t.contains(TASK))).cloned()
+/// The scratch repo's open PRs from the task's branch. Closed ones from earlier runs don't count, and the branch
+/// (not the key in a title) is matched so `LIVE-10` isn't taken for `LIVE-1`.
+async fn task_prs(env: &Env, token: &str) -> Vec<Value> {
+    let (_, prs) = github(token, reqwest::Method::GET, &env.repo, "/pulls?state=open&per_page=50", None).await;
+    let open = prs.as_array().cloned().unwrap_or_default();
+    open.into_iter().filter(|p| p["head"]["ref"].as_str() == Some(BRANCH)).collect()
 }
 
-/// Whether anything has reviewed or commented on PR `number`: the reviewer publishes through the gateway.
-async fn reviewed(env: &Env, number: u64) -> bool {
-    for path in [format!("/pulls/{number}/reviews"), format!("/issues/{number}/comments")] {
-        let (_, found) = github(&env.read, reqwest::Method::GET, &env.repo, &path, None).await;
-        if found.as_array().is_some_and(|a| !a.is_empty()) {
-            return true;
-        }
+/// Closes every open PR from the task's branch and deletes the branch.
+async fn close_task_prs(env: &Env) {
+    for pr in task_prs(env, &env.writer).await {
+        let path = format!("/pulls/{}", pr["number"]);
+        github(&env.writer, reqwest::Method::PATCH, &env.repo, &path, Some(json!({"state": "closed"}))).await;
     }
-    false
+    github(&env.writer, reqwest::Method::DELETE, &env.repo, &format!("/git/refs/heads/{BRANCH}"), None).await;
+}
+
+/// Whether the reviewer has published a review on PR `number`, through the gateway. Comments don't count: the
+/// control plane posts those too.
+async fn reviewed(env: &Env, number: u64) -> bool {
+    let path = format!("/pulls/{number}/reviews");
+    let (_, found) = github(&env.read, reqwest::Method::GET, &env.repo, &path, None).await;
+    found.as_array().is_some_and(|a| !a.is_empty())
 }
 
 /// The checks that go with one agent working in `sandbox`.
@@ -233,7 +243,7 @@ async fn run(env: &Env, dir: &Path, factory: &mut tokio::process::Child) {
             }
         }
         if pr.is_none()
-            && let Some(p) = task_pr(env).await
+            && let Some(p) = task_prs(env, &env.read).await.into_iter().next()
         {
             println!("PR #{} {}", p["number"], p["title"]);
             pr = p["number"].as_u64();
@@ -284,23 +294,10 @@ impl Drop for Cleanup {
 async fn cleanup(env: &Env) {
     for name in sandbox_containers().await {
         docker_quiet(&["rm", "-f", &name]).await;
-        docker_quiet(&["network", "rm", &format!("trailhead-sb-{name}")]).await;
+        docker_quiet(&["network", "rm", &sandbox_network(&name)]).await;
     }
     docker_quiet(&["rm", "-f", GATEWAY_HOST]).await;
-    if let Some(pr) = task_pr(env).await {
-        let number = pr["number"].as_u64().unwrap();
-        github(
-            &env.writer,
-            reqwest::Method::PATCH,
-            &env.repo,
-            &format!("/pulls/{number}"),
-            Some(json!({"state": "closed"})),
-        )
-        .await;
-        if let Some(branch) = pr["head"]["ref"].as_str() {
-            github(&env.writer, reqwest::Method::DELETE, &env.repo, &format!("/git/refs/heads/{branch}"), None).await;
-        }
-    }
+    close_task_prs(env).await;
 }
 
 #[tokio::test]
@@ -320,6 +317,8 @@ async fn a_task_runs_on_docker_through_the_gateway() {
         "sandboxes or a gateway are already on this engine; stop that factory first"
     );
     let _cleanup = Cleanup(env.clone());
+    // A run that died before its cleanup leaves the branch and PR behind, and the key is always LIVE-1.
+    close_task_prs(&env).await;
 
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
