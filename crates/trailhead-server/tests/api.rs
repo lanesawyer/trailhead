@@ -658,3 +658,28 @@ async fn an_agent_cant_set_a_first_grade_or_lower_one() {
     let r = api.as_human("GET", "/v1/tasks/AUTH-1", None).await;
     assert!(r.body["task"]["grade"].is_null(), "{}", r.body);
 }
+
+#[tokio::test]
+async fn creating_a_task_lists_possible_duplicates_among_open_tasks() {
+    let api = Api::new().await;
+    api.seed().await;
+    let create =
+        |title: &'static str| api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": title})));
+    let first = create("Rotate signing keys").await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    assert!(first.body.get("possible_duplicates").is_none(), "{}", first.body);
+
+    let dup = create("Rotate the signing keys").await;
+    assert_eq!(dup.status, StatusCode::CREATED, "{}", dup.body);
+    assert_eq!(dup.body["possible_duplicates"], json!(["AUTH-1"]));
+
+    let unrelated = create("Write onboarding docs").await;
+    assert_eq!(unrelated.status, StatusCode::CREATED, "{}", unrelated.body);
+    assert!(unrelated.body.get("possible_duplicates").is_none(), "{}", unrelated.body);
+
+    // A finished task is no longer a candidate.
+    api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"status": "done"}))).await;
+    api.as_human("PATCH", "/v1/tasks/AUTH-2", Some(json!({"status": "done"}))).await;
+    let again = create("Rotate signing keys").await;
+    assert!(again.body.get("possible_duplicates").is_none(), "{}", again.body);
+}

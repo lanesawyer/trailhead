@@ -14,7 +14,7 @@ use trailhead_daemon::net::{
     ALPN, API_ALPN, ApiTunnel, DaemonProtocol, Launch, RemoteDaemon, build_id, open_api_tunnel, parse_endpoint_id,
     parse_secret_key,
 };
-use trailhead_daemon::{Connect, RENEW_EVERY, RestTracker, Runner};
+use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{
     Commit, Credential, DaemonSecrets, Error, FactoryConfig, FileChange, FollowUp, Role, RunOutcome, SandboxId, Status,
     TaskKey, Tracker, VerdictKind,
@@ -141,6 +141,7 @@ impl Rig {
             workspace: Arc::new(FakeWorkspace::default()),
             connect,
             renew_every: RENEW_EVERY,
+            heartbeat_every: HEARTBEAT_EVERY,
         };
         let protocol = DaemonProtocol::new(Arc::new(runner), control_plane).build(build_id(b"daemon"));
         self.routers.push(Router::builder(ep).accept(ALPN, protocol).spawn());

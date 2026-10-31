@@ -25,6 +25,6 @@ Read this index first, then open only the file the work in front of you needs.
 | [open-questions.md](open-questions.md) | Undecided questions and hands-on tests still to run |
 | [naming.md](naming.md) | Name ideas for the factory and its parts |
 
-Each file marks its statements as **Decided**, **Leaning** or **Proposal**. Decided items change only with Lane's sign-off; update the file and the decisions table in [overview.md](overview.md) together.
+Each file marks its statements as **Decided**, **Leaning** or **Proposal**. Decided items change only with the maintainer's sign-off; update the file and the decisions table in [overview.md](overview.md) together.
 
 Sandbox and connector facts were checked against the Sprites docs on 2026-10-25. The factory docs were brought up to date with the code on 2026-10-28 (TRAIL-146).

@@ -421,7 +421,7 @@ fn prompt_carries_answers_and_notes_and_stays_bounded() {
     use trailhead_factory::{Answered, TaskNote};
     let r = rig();
     let plain = prompt(&ctx(&r, Role::Worker, 0), None);
-    assert!(!plain.contains("Lane's answers") && !plain.contains("Decisions and notes"), "{plain}");
+    assert!(!plain.contains("the answers you got") && !plain.contains("Decisions and notes"), "{plain}");
 
     let mut c = ctx(&r, Role::Worker, 0);
     c.task.context.answers.push(Answered {
