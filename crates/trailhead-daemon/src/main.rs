@@ -10,7 +10,7 @@ use iroh::Endpoint;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use trailhead_codehost_github::{GitHub, Identity};
-use trailhead_daemon::awake::{SPRITE_API_SOCKET, SpriteHolds};
+use trailhead_daemon::awake::SpriteHolds;
 use trailhead_daemon::net::{
     ALPN, DaemonProtocol, build_id, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
 };
@@ -69,6 +69,10 @@ struct Args {
     /// A `tracing` filter; `RUST_LOG` wins if set.
     #[arg(long, default_value = "info")]
     log: String,
+    /// The compute's socket for holding the sandbox awake, used when it exists (the control plane passes it for
+    /// computes that pause idle sandboxes).
+    #[arg(long)]
+    hold_socket: Option<PathBuf>,
 }
 
 /// Stands in for a code host when the sandbox has no GitHub connector, so runs fail with the reason.
@@ -245,8 +249,8 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     };
     tracing::info!(version = env!("CARGO_PKG_VERSION"), %build, "trailhead-daemon build");
     let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone()).build(build);
-    if std::path::Path::new(SPRITE_API_SOCKET).exists() {
-        protocol = protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET));
+    if let Some(socket) = args.hold_socket.filter(|s| s.exists()) {
+        protocol = protocol.holding(SpriteHolds::new(socket));
     }
     let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
     tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;

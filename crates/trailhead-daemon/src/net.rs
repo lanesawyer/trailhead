@@ -25,7 +25,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, watch};
 use trailhead_factory::{
     Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, PrepareRequest, Program, Result,
-    RunEvent, RunReport, RunRequest, SPRITES_GATEWAY_LIST, SandboxFile, SandboxId, ToDaemon,
+    RunEvent, RunReport, RunRequest, SandboxFile, SandboxId, Target, ToDaemon,
 };
 
 use crate::Runner;
@@ -588,19 +588,22 @@ pub struct Launch {
     pub log: Option<String>,
     /// Subscription mode: the Claude Code OAuth token handed to each daemon in its secrets file.
     pub claude_oauth_token: Option<String>,
-    /// The connector list URL for each daemon's secrets; `None` is Fly's.
-    pub gateway_list: Option<String>,
+    /// The connector list URL for each daemon's secrets.
+    pub gateway_list: String,
+    /// The socket each daemon holds its sandbox awake through, if the compute pauses idle ones.
+    pub hold_socket: Option<String>,
 }
 
 impl Launch {
-    pub fn new(binary: Vec<u8>) -> Launch {
+    pub fn new(binary: impl Into<Arc<Vec<u8>>>, target: &Target) -> Launch {
         Launch {
-            binary: Arc::new(binary),
-            dir: "/home/sprite/.trailhead".into(),
-            workdir: "/home/sprite/work".into(),
+            binary: binary.into(),
+            dir: target.dir.clone(),
+            workdir: target.workdir.clone(),
             log: None,
             claude_oauth_token: None,
-            gateway_list: None,
+            gateway_list: target.gateway_list.clone(),
+            hold_socket: target.hold_socket.clone(),
         }
     }
 }
@@ -648,7 +651,7 @@ impl RemoteDaemon {
             secret_key: hex::encode(sandbox_key(&self.master, sandbox).to_bytes()),
             control_plane: self.endpoint.id().to_string(),
             claude_oauth_token: self.launch.claude_oauth_token.clone(),
-            gateway_list: self.launch.gateway_list.clone().unwrap_or_else(|| SPRITES_GATEWAY_LIST.into()),
+            gateway_list: self.launch.gateway_list.clone(),
         };
         let dir = &self.launch.dir;
         let bin = format!("{dir}/trailhead-daemon");
@@ -668,6 +671,9 @@ impl RemoteDaemon {
                 let mut args = vec!["--secrets".into(), secrets_path, "--workdir".into(), self.launch.workdir.clone()];
                 if let Some(log) = &self.launch.log {
                     args.extend(["--log".into(), log.clone()]);
+                }
+                if let Some(socket) = &self.launch.hold_socket {
+                    args.extend(["--hold-socket".into(), socket.clone()]);
                 }
                 args
             },

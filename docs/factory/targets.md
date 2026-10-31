@@ -32,7 +32,7 @@ usd_per_gb_hour = 0.021875
 
 `[factory.compute]` keeps working and means one target, so existing files don't change. Setting both is an error. Listing only `local` is how a factory stays local.
 
-Today `Factory` and `RemoteDaemon` each hold one `Compute`, and these are set once per process: the daemon's directories (`Launch`), the connector list URL, and the model endpoint. They move into a `Target` that also carries its name, priority and limits. The `Compute` trait doesn't change.
+Today `Factory` and `RemoteDaemon` each hold one `Compute`, and these are set once per process: the daemon's directories (`Launch`), the connector list URL, and the model endpoint. TRAIL-522 gathered those into a `Target` (`trailhead_factory::Target`, one `target()` function per compute crate); TRAIL-505 extends it. It also gains that also carries its name, priority and limits. The `Compute` trait doesn't change.
 
 **Placement.** For each ready task, in order, take the first target that is available, under its `max_sandboxes` and under its spend cap. If none qualifies, the task waits. Reviews are placed the same way, on their own.
 

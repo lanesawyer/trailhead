@@ -108,7 +108,7 @@ impl Rig {
             control.clone(),
             MASTER,
             Arc::new(compute.clone()),
-            Launch::new(b"daemon".to_vec()),
+            Launch::new(b"daemon".to_vec(), &target()),
         ));
         Rig { tracker, compute, codehost, harness, lookup, control, remote, local, routers: Vec::new() }
     }
@@ -444,7 +444,8 @@ async fn daemons_refuse_other_peers() {
 #[tokio::test]
 async fn subscription_token_goes_in_the_secrets_file_only() {
     let control = endpoint(SecretKey::generate(), None).await;
-    let launch = Launch { claude_oauth_token: Some("sk-ant-oat-test".into()), ..Launch::new(b"daemon".to_vec()) };
+    let launch =
+        Launch { claude_oauth_token: Some("sk-ant-oat-test".into()), ..Launch::new(b"daemon".to_vec(), &target()) };
     let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
     let program = remote.program(&SandboxId("s".into()));
     let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
@@ -457,12 +458,16 @@ async fn subscription_token_goes_in_the_secrets_file_only() {
 #[tokio::test]
 async fn daemon_log_filter_goes_on_the_command_line_when_set() {
     let control = endpoint(SecretKey::generate(), None).await;
-    let remote =
-        RemoteDaemon::new(control.clone(), MASTER, Arc::new(FakeCompute::new()), Launch::new(b"daemon".to_vec()));
+    let remote = RemoteDaemon::new(
+        control.clone(),
+        MASTER,
+        Arc::new(FakeCompute::new()),
+        Launch::new(b"daemon".to_vec(), &target()),
+    );
     let program = remote.program(&SandboxId("s".into()));
     assert!(!program.args.iter().any(|a| a == "--log"));
 
-    let launch = Launch { log: Some("info,iroh=debug".into()), ..Launch::new(b"daemon".to_vec()) };
+    let launch = Launch { log: Some("info,iroh=debug".into()), ..Launch::new(b"daemon".to_vec(), &target()) };
     let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
     let args = remote.program(&SandboxId("s".into())).args;
     let at = args.iter().position(|a| a == "--log").expect("--log is set");
@@ -550,4 +555,37 @@ async fn a_daemon_that_stays_stale_fails_the_prepare_loudly() {
     assert!(err.to_string().contains("not the current build"), "{err}");
     assert_eq!(r.compute.programs("stuck-old").len(), 1, "the daemon was started again, replacing the program");
     assert_eq!(r.local.prepares_started(), 0, "never prepared by a stale daemon");
+}
+
+/// A compute-neutral target: these tests don't depend on any real compute's paths.
+fn target() -> trailhead_factory::Target {
+    trailhead_factory::Target {
+        dir: "/sandbox/.trailhead".into(),
+        workdir: "/sandbox/work".into(),
+        gateway_list: "http://gateway.test/v1/gateway/list".into(),
+        model_endpoint: None,
+        hold_socket: None,
+    }
+}
+
+#[tokio::test]
+async fn the_target_decides_the_launch_dir_gateway_list_and_hold_socket() {
+    let control = endpoint(SecretKey::generate(), None).await;
+    let mut t = target();
+    t.hold_socket = Some("/run/hold.sock".into());
+    let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), Launch::new(b"daemon".to_vec(), &t));
+    let program = remote.program(&SandboxId("s".into()));
+    assert_eq!(program.cmd, "/sandbox/.trailhead/trailhead-daemon");
+    let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
+    assert_eq!(secrets.gateway_list, t.gateway_list);
+    let at = program.args.iter().position(|a| a == "--hold-socket").expect("--hold-socket is set");
+    assert_eq!(program.args[at + 1], "/run/hold.sock");
+    assert!(program.args.windows(2).any(|w| w == ["--workdir", "/sandbox/work"]));
+    let remote = RemoteDaemon::new(
+        endpoint(SecretKey::generate(), None).await,
+        MASTER,
+        Arc::new(FakeCompute::new()),
+        Launch::new(b"d".to_vec(), &target()),
+    );
+    assert!(!remote.program(&SandboxId("s".into())).args.iter().any(|a| a == "--hold-socket"));
 }
