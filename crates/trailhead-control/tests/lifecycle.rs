@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trailhead_control::{Factory, Outcome, Reconciled};
+use trailhead_control::{Factory, Host, Outcome, Reconciled};
 use trailhead_factory::{
     CiState, CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, MergedBy, RaiseGrade, Role,
     RunOutcome, SandboxSpec, Status, TaskKey, Tracker, Usd, VerdictKind, conventional_title, label, run_name,
@@ -68,6 +68,7 @@ fn rig_with(config: &str) -> Rig {
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
         daemon.clone(),
+        Host::new(None),
     );
     Rig { factory, tracker, compute, codehost, harness, daemon }
 }
