@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use trailhead_control::{CoreTracker, Factory, Outcome};
+use trailhead_control::{CoreTracker, Factory, Host, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, ProjectPatch, Store, TaskPatch};
 use trailhead_factory::{
     CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Role, RunOutcome, RunUpdate, Status, TaskKey,
@@ -90,6 +90,7 @@ async fn rig_paged(config: &str, page_size: Option<usize>) -> Rig {
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
         daemon.clone(),
+        Host::new(None),
     )
     .with_codehost(Arc::new(codehost.clone()));
     Rig { store, human, factory, tracker, compute, codehost, harness, daemon }
@@ -281,13 +282,13 @@ async fn a_task_with_malformed_factory_metadata_is_skipped_not_fatal() {
 
     let ready = r.tracker.ready("TRAIL", None, 10).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&good]);
-    assert!(r.tracker.in_flight("TRAIL").await.unwrap().is_empty());
+    assert!(r.tracker.in_flight("TRAIL", None).await.unwrap().is_empty());
     r.factory.reconcile().await.unwrap();
     assert!(r.tracker.show(&bad).await.is_err());
 
     // The task says why it was skipped, once however many passes see it.
     r.tracker.ready("TRAIL", None, 10).await.unwrap();
-    r.tracker.in_flight("TRAIL").await.unwrap();
+    r.tracker.in_flight("TRAIL", None).await.unwrap();
     let notes: Vec<_> = r.store.list_comments(&r.human, &bad.0).await.unwrap();
     assert_eq!(notes.len(), 1);
     assert!(notes[0].body.contains("attempt_base"), "{}", notes[0].body);

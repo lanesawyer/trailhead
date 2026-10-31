@@ -162,13 +162,16 @@ impl Tracker for RestTracker {
         Err(unsupported("read a task's comments"))
     }
 
-    async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
-        let query = [
+    async fn in_flight(&self, project: &str, queue: Option<&TaskKey>) -> Result<Vec<Task>> {
+        let mut query = vec![
             ("project", project),
             ("status", "open,in_progress,needs_input,in_review,approved"),
             ("include", "claim"),
             ("limit", "1000"),
         ];
+        if let Some(q) = queue {
+            query.push(("parent", q.0.as_str()));
+        }
         let tasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
         tasks
             .as_array()

@@ -17,6 +17,7 @@ use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::task::{self, JoinSet};
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use tokio::sync::mpsc;
 use trailhead_factory::harness::is_transient_api_error;
@@ -65,6 +66,24 @@ pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String
 pub type ServerCheck =
     Box<dyn Fn() -> futures_util::future::BoxFuture<'static, std::result::Result<(), String>> + Send + Sync>;
 
+/// State shared by every [`Factory`] on one host (one per repo): a usage reading from any repo's run pauses them all,
+/// and the sandbox cap can span repos.
+#[derive(Default)]
+pub struct Host {
+    /// The most sandboxes held for workers across all repos; `None` is no cross-repo cap.
+    max_sandboxes: Option<usize>,
+    /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
+    quota: Mutex<HashMap<String, (u32, i64)>>,
+    /// The reset a pause was last logged for, so a pause is logged once per host rather than on every poll.
+    pause_logged: Mutex<Option<i64>>,
+}
+
+impl Host {
+    pub fn new(max_sandboxes: Option<usize>) -> Arc<Host> {
+        Arc::new(Host { max_sandboxes, ..Host::default() })
+    }
+}
+
 pub struct Factory {
     pub config: FactoryConfig,
     pub compute: Arc<dyn Compute>,
@@ -92,12 +111,10 @@ pub struct Factory {
     /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
     /// (a 202), so until the head moves the PR is still behind and asking again would only queue another.
     updating: Mutex<HashMap<TaskKey, String>>,
-    /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
-    quota: Mutex<HashMap<String, (u32, i64)>>,
+    /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
+    host: Arc<Host>,
     /// Tasks already reported as ungraded, so a poll doesn't say it again.
     ungraded: Mutex<HashSet<TaskKey>>,
-    /// The reset a pause was last logged for, so a pause is logged once rather than on every poll.
-    pause_logged: Mutex<Option<i64>>,
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
     /// starting together never take the same sandbox.
     pool_pick: tokio::sync::Mutex<()>,
@@ -176,7 +193,33 @@ fn merged_by(task: &Task) -> MergedBy {
 /// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
 /// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for a person.` `merging` is whether the merger is on and will
 /// try to merge now; the message then says the merge happened, so it is only posted once it has.
-fn decision_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool, behind: bool) -> String {
+fn decision_message(
+    grade: &PrGrade,
+    d: &MergeDecision,
+    auto_merge: bool,
+    merging: bool,
+    behind: bool,
+    changes: Option<Rework>,
+) -> String {
+    let message = gate_message(grade, d, auto_merge, merging, behind);
+    match changes {
+        Some(Rework::Running) => format!("{message} The latest review asked for changes; a rework is running."),
+        Some(Rework::Pushed) => format!("{message} The latest review asked for changes; the rework has pushed."),
+        None => message,
+    }
+}
+
+/// Where the changes the latest review asked for stand, said on the PR at every grade, since a grade whose gate
+/// doesn't need the agent review would otherwise read as if nothing were wrong (TRAIL-388).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rework {
+    /// The review of the PR's current head asked for changes.
+    Running,
+    /// The PR's head has moved since the review that asked for changes, and no review has judged the new head.
+    Pushed,
+}
+
+fn gate_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool, behind: bool) -> String {
     fn join(items: Vec<String>) -> String {
         match items.as_slice() {
             [] => String::new(),
@@ -244,6 +287,7 @@ impl Factory {
         tracker: Arc<dyn Tracker>,
         provider: Arc<dyn ModelProvider>,
         daemon: Arc<dyn Daemon>,
+        host: Arc<Host>,
     ) -> Factory {
         let merge_mode = Mutex::new(config.merge.mode);
         Factory {
@@ -261,9 +305,8 @@ impl Factory {
             setbacks: Mutex::default(),
             fresh_pushes: Mutex::default(),
             updating: Mutex::default(),
-            quota: Mutex::default(),
+            host,
             ungraded: Mutex::default(),
-            pause_logged: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
         }
     }
@@ -424,7 +467,8 @@ impl Factory {
                         for (task, sandbox) in due.runs {
                             let key = task.key.clone();
                             let factory = self.clone();
-                            let handle = running.spawn(async move { factory.resume_run(&task, &sandbox).await });
+                            let handle = running
+                                .spawn(async move { factory.resume_run(&task, &sandbox).await }.in_current_span());
                             keys.insert(handle.id(), key);
                         }
                         // A review is a session on the same subscription window, so a pause holds them back too; the
@@ -433,7 +477,8 @@ impl Factory {
                         for task in reviews_due {
                             let key = task.key.clone();
                             let factory = self.clone();
-                            let handle = running.spawn(async move { factory.resume_review(&task).await });
+                            let handle =
+                                running.spawn(async move { factory.resume_review(&task).await }.in_current_span());
                             keys.insert(handle.id(), key);
                             reviews.insert(handle.id());
                         }
@@ -514,7 +559,7 @@ impl Factory {
             .into_iter()
             .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !busy.contains(&TaskKey(t.clone()))))
             .count();
-        let room = self.config.repo.max_sandboxes.saturating_sub(keys.len() - reviewing + others);
+        let room = self.room(keys.len() - reviewing + others).await?;
         if room == 0 {
             return Ok(());
         }
@@ -522,7 +567,7 @@ impl Factory {
         for task in ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)) {
             let key = task.key.clone();
             let factory = self.clone();
-            let handle = running.spawn(async move { factory.run_task(&task).await });
+            let handle = running.spawn(async move { factory.run_task(&task).await }.in_current_span());
             keys.insert(handle.id(), key);
         }
         Ok(())
@@ -594,6 +639,33 @@ impl Factory {
         Ok(out)
     }
 
+    /// Places left to start runs in, given how many this repo holds: the repo's cap, and the host's when it has one,
+    /// counted from the compute host's sandboxes in every repo so a restart sees the truth.
+    async fn room(&self, own: usize) -> Result<usize> {
+        let repo_room = self.config.repo.max_sandboxes.saturating_sub(own);
+        let Some(cap) = self.host.max_sandboxes else { return Ok(repo_room) };
+        let host_room = cap.saturating_sub(own + self.occupied_elsewhere().await?);
+        Ok(repo_room.min(host_room))
+    }
+
+    /// Worker sandboxes held by other repos' factories, which also take places under the host's cap.
+    async fn occupied_elsewhere(&self) -> Result<usize> {
+        let mine = self.config.repo.repo().slug();
+        let factory = Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into())]);
+        let mut workers = factory.clone();
+        workers.insert(label::ROLE.into(), Role::Worker.as_str().into());
+        let mut busy = factory;
+        busy.insert(label::POOL.into(), Role::Worker.as_str().into());
+        busy.insert(label::STATE.into(), label::BUSY.into());
+        let mut names = HashSet::new();
+        for s in self.compute.list(&workers).await?.into_iter().chain(self.compute.list(&busy).await?) {
+            if s.labels.get(label::REPO).is_some_and(|r| *r != mine) {
+                names.insert(s.name);
+            }
+        }
+        Ok(names.len())
+    }
+
     /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened, cancelled or finished are
     /// released. A parked task keeps its sandbox, so without this the place stays taken until the next reconcile
     /// (TRAIL-108, TRAIL-257). A reopened task's next attempt starts from a fresh checkout with the answer in its prompt.
@@ -639,8 +711,7 @@ impl Factory {
         if self.usage_paused() || !self.server_up().await {
             return Ok(Vec::new());
         }
-        let room =
-            self.config.repo.max_sandboxes.saturating_sub(self.occupied_after_release(&HashSet::new()).await?.len());
+        let room = self.room(self.occupied_after_release(&HashSet::new()).await?.len()).await?;
         if room == 0 {
             return Ok(Vec::new());
         }
@@ -1137,6 +1208,11 @@ impl Factory {
                     self.tracker
                         .report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() })
                         .await?;
+                    // While the task is still in review, so the PR says the review asked for changes at any grade.
+                    // Message only: a verdict that asks for changes mustn't approve, or merge on Lane's earlier approval.
+                    if let Err(e) = self.say_gates(&task.key).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
+                    }
                     self.request_rework(task, requested, round).await?;
                 } else if let Err(e) = self.evaluate_gates(&task.key).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
@@ -1180,6 +1256,16 @@ impl Factory {
     /// review. In shadow mode it says what it would do on the PR whenever that changes. In `on` mode it also squash-merges
     /// an approved task whose grade auto-merges, or that Lane approved, and closes it as done.
     pub async fn evaluate_gates(&self, key: &TaskKey) -> Result<()> {
+        self.evaluate(key, true).await
+    }
+
+    /// Like `evaluate_gates`, but only says on the PR where things stand: it neither approves nor merges. For when the
+    /// task must stay as it is, a review owed (TRAIL-263) or changes just asked for (TRAIL-388).
+    async fn say_gates(&self, key: &TaskKey) -> Result<()> {
+        self.evaluate(key, false).await
+    }
+
+    async fn evaluate(&self, key: &TaskKey, act: bool) -> Result<()> {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let task = self.tracker.show(key).await?;
         let Some(pr) = &task.run.pr else { return Ok(()) };
@@ -1284,7 +1370,7 @@ impl Factory {
             message: String::new(),
         };
         // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
-        if gates_pass && status == Status::InReview {
+        if act && gates_pass && status == Status::InReview {
             decision.approved_head = Some(head.clone());
             // The mark goes down before the approval so it can't pass for Lane's. Not again while approving is known
             // to fail, which would write the task every pass.
@@ -1311,14 +1397,16 @@ impl Factory {
             }
         }
         // Without the right to approve, the merger can't act, so it only says what it would do, as in shadow mode.
-        let merging = merge_mode == MergeMode::On
+        let merging = act
+            && merge_mode == MergeMode::On
             && gates_pass
             && decision.problem.is_none()
             && status == Status::Approved
             && (gate.auto_merge || decision.human_head.as_ref() == Some(&head));
         // Only the shadow merger's "would merge" says whether the PR is behind: it is the one that never acts on it.
         let behind = decision.would_merge && codehost.behind(pr).await?;
-        decision.message = decision_message(&grade, &decision, gate.auto_merge, merging, behind);
+        let changes = self.rework_state(&task, &head).await?;
+        decision.message = decision_message(&grade, &decision, gate.auto_merge, merging, behind, changes);
         // A refusal stands for the head it was given on, until a merge succeeds or the head moves.
         if merging {
             decision.refused = prev.as_ref().filter(|d| d.head == head).and_then(|d| d.refused.clone());
@@ -1342,6 +1430,18 @@ impl Factory {
             self.merge(&task, pr, &decision, &message).await?;
         }
         Ok(())
+    }
+
+    /// Whether the latest review asked for changes that the PR's `head` still hasn't answered.
+    async fn rework_state(&self, task: &Task, head: &str) -> Result<Option<Rework>> {
+        if task.run.reviewed_head.as_deref() == Some(head) {
+            let asked =
+                self.tracker.last_review(&task.key).await?.is_some_and(|v| v.kind == VerdictKind::RequestChanges);
+            return Ok(asked.then_some(Rework::Running));
+        }
+        let pushed =
+            task.run.pending_changes().is_some_and(|c| !c.conflict && c.head.as_deref().is_some_and(|h| h != head));
+        Ok(pushed.then_some(Rework::Pushed))
     }
 
     /// Merges an approved PR whose decision says to: brings it up to date with the base branch first, and sends a
@@ -1734,7 +1834,7 @@ impl Factory {
                 RunEvent::NeedsInput { question } => tracing::info!(task = %key, %question, "asked"),
                 RunEvent::Quota { window, used_percent, resets_at } => {
                     tracing::info!(%window, used_percent, resets_in = ?until(resets_at), "subscription usage");
-                    self.quota.lock().unwrap().insert(window, (used_percent, resets_at));
+                    self.host.quota.lock().unwrap().insert(window, (used_percent, resets_at));
                 }
                 _ => {}
             }
@@ -1829,8 +1929,13 @@ impl Factory {
         let mut done = Reconciled::default();
         let mut due = Due::default();
         let live = self.compute.list(&self.base_labels()).await?;
-        let tasks: Vec<Task> =
-            self.tracker.in_flight(self.project()).await?.into_iter().filter(|t| !running.contains(&t.key)).collect();
+        let tasks: Vec<Task> = self
+            .tracker
+            .in_flight(self.project(), self.queue().as_ref())
+            .await?
+            .into_iter()
+            .filter(|t| !running.contains(&t.key))
+            .collect();
 
         // Runs the daemon may still be working on, which are followed again rather than requeued (TRAIL-137).
         let live_runs: Vec<(&Task, &Sandbox)> =
@@ -2148,6 +2253,9 @@ impl Factory {
                 if !owed {
                     // CI may have finished, or Lane approved, since the gates were last looked at.
                     self.evaluate_gates(&task.key).await?;
+                } else if task.run.pending_changes().is_some_and(|c| !c.conflict) {
+                    // The rework has pushed and its head awaits review: say so, without approving.
+                    self.say_gates(&task.key).await?;
                 }
                 return Ok(due);
             }
@@ -2162,7 +2270,7 @@ impl Factory {
     /// whose window has since reset no longer counts.
     fn paused_until(&self) -> Option<(String, u32, i64)> {
         let now = unix_now();
-        let quota = self.quota.lock().unwrap();
+        let quota = self.host.quota.lock().unwrap();
         self.config
             .usage
             .pause_at
@@ -2177,7 +2285,7 @@ impl Factory {
     /// Whether to hold off starting runs because a usage window is nearly full. Running ones carry on.
     fn usage_paused(&self) -> bool {
         let paused = self.paused_until();
-        let mut logged = self.pause_logged.lock().unwrap();
+        let mut logged = self.host.pause_logged.lock().unwrap();
         match &paused {
             Some((window, used, resets_at)) if *logged != Some(*resets_at) => {
                 tracing::warn!(

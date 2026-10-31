@@ -509,15 +509,32 @@ fn parse_head(head: &[u8]) -> Result<Request, &'static str> {
     Ok(Request::Plain { host, port, head: out.into_bytes() })
 }
 
+/// Binds the control socket so only its owner can ever reach it: binds inside a fresh 0700
+/// directory next to `socket`, chmods it to 0600, then renames it into place (replacing a stale one).
+fn bind_private(socket: &Path) -> std::io::Result<UnixListener> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let parent = match socket.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let dir = parent.join(format!(".gateway-bind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    let result = (|| {
+        let tmp = dir.join("s");
+        let listener = UnixListener::bind(&tmp)?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&tmp, socket)?;
+        Ok(listener)
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
 /// Runs the gateway: the proxy on `listen`, the control socket at `socket`.
 pub async fn run(listen: SocketAddr, socket: &Path) -> std::io::Result<()> {
     let proxy = TcpListener::bind(listen).await?;
-    let _ = std::fs::remove_file(socket);
-    let control = UnixListener::bind(socket)?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
-    }
+    let control = bind_private(socket)?;
     tracing::info!(%listen, socket = %socket.display(), "trailhead-daemon gateway listening");
     let gw = Gateway::new();
     let p = tokio::spawn(gw.clone().serve_proxy(proxy));
@@ -549,6 +566,18 @@ pub async fn ctl(socket: &Path, req: &GatewayRequest) -> std::io::Result<Gateway
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn control_socket_is_bound_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("gw.sock");
+        std::fs::write(&socket, b"stale").unwrap();
+        let _l = bind_private(&socket).unwrap();
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     fn list(d: &[&str]) -> Vec<String> {
         d.iter().map(|s| s.to_string()).collect()

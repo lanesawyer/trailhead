@@ -63,6 +63,15 @@ run = [
   "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon fnox exec -- cargo test -j 4 -p trailhead-compute-docker --test live credentials -- --ignored --nocapture --test-threads=1",
 ]
 
+[tasks.test-live-docker-factory]
+description = "A task end to end on Docker sandboxes through the gateway, worker and reviewer, on a scratch repo in TRAILHEAD_LIVE_REPO (real model calls and a real PR; needs `mise run docker-image`, and no other factory on the engine)"
+env = { DOCKER_HOST = "{{vars.docker_host}}" }
+run = [
+  "cargo build -j 4 --release -p trailhead-daemon --bin trailhead-daemon",
+  "cargo build -j 4 -p trailhead",
+  "TRAILHEAD_BIN={{config_root}}/target/debug/trailhead TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon fnox exec -- cargo test -j 4 -p trailhead-factory-host --features docker --test live_docker -- --ignored --nocapture",
+]
+
 [tasks.install]
 description = "Reinstall the CLI, the factory and the daemon from this checkout (cargo install takes one --path at a time)"
 run = """
