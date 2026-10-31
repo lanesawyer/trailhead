@@ -354,11 +354,75 @@ impl Budget {
     }
 }
 
+/// One requirement of a grade's gate. It is written as a string in `.trailhead.toml` and in a task's stored
+/// `MergeDecision`: one of the five fixed names, or the name of a verifying check.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GateKind {
+    /// Every verifying check passed, which the worker ran before opening the PR.
+    Checks,
+    Ci,
+    AgentReview,
+    Human,
+    Quorum,
+    /// A verifying check the repo names; config validation rejects a name that isn't one.
+    Named(String),
+}
+
+impl GateKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            GateKind::Checks => "checks",
+            GateKind::Ci => "ci",
+            GateKind::AgentReview => "agent_review",
+            GateKind::Human => "human",
+            GateKind::Quorum => "quorum",
+            GateKind::Named(name) => name,
+        }
+    }
+}
+
+impl From<&str> for GateKind {
+    fn from(s: &str) -> Self {
+        match s {
+            "checks" => GateKind::Checks,
+            "ci" => GateKind::Ci,
+            "agent_review" => GateKind::AgentReview,
+            "human" => GateKind::Human,
+            "quorum" => GateKind::Quorum,
+            name => GateKind::Named(name.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for GateKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for GateKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl Serialize for GateKind {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GateKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(GateKind::from(String::deserialize(d)?.as_str()))
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Gate {
     #[serde(default)]
-    pub require: Vec<String>,
+    pub require: Vec<GateKind>,
     #[serde(default)]
     pub auto_merge: bool,
     pub quorum: Option<Quorum>,
@@ -451,18 +515,19 @@ impl FactoryConfig {
                 return Err(Error::Config(format!("[grades] has `{grade}`; path rules are for grades 2, 3 and 4")));
             }
         }
-        let known = ["checks", "ci", "agent_review", "human", "quorum"];
         let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
         for (grade, gate) in &self.gates {
             if !matches!(grade.as_str(), "1" | "2" | "3" | "4") {
                 return Err(Error::Config(format!("[gates.{grade}]: gates are per grade, 1 to 4")));
             }
             for r in &gate.require {
-                if !known.contains(&r.as_str()) && !checks.contains(&r.as_str()) {
+                if let GateKind::Named(name) = r
+                    && !checks.contains(&name.as_str())
+                {
                     return Err(Error::Config(format!("gate {grade} requires unknown {r}")));
                 }
             }
-            if gate.require.iter().any(|r| r == "quorum") && gate.quorum.is_none() {
+            if gate.require.contains(&GateKind::Quorum) && gate.quorum.is_none() {
                 return Err(Error::Config(format!("gate {grade} requires a quorum but doesn't define one")));
             }
         }
@@ -479,16 +544,17 @@ impl FactoryConfig {
 
     /// The gate a PR of this grade must pass: the repo's `[gates.N]`, or the table in `docs/factory/review.md#grades`.
     pub fn gate(&self, grade: u8) -> Gate {
+        use GateKind::{AgentReview, Checks, Ci, Human};
         if let Some(gate) = self.gates.get(&grade.to_string()) {
             return gate.clone();
         }
-        let (require, auto_merge): (&[&str], bool) = match grade {
-            0 | 1 => (&["checks", "ci"], true),
-            2 => (&["checks", "ci", "agent_review"], true),
-            3 => (&["checks", "ci", "agent_review", "human"], false),
-            _ => (&["checks", "ci", "human"], false),
+        let (require, auto_merge): (&[GateKind], bool) = match grade {
+            0 | 1 => (&[Checks, Ci], true),
+            2 => (&[Checks, Ci, AgentReview], true),
+            3 => (&[Checks, Ci, AgentReview, Human], false),
+            _ => (&[Checks, Ci, Human], false),
         };
-        Gate { require: require.iter().map(|r| r.to_string()).collect(), auto_merge, quorum: None }
+        Gate { require: require.to_vec(), auto_merge, quorum: None }
     }
 
     /// The checks a worker must pass before opening a PR: every verifying check the repo defines. The grade isn't
@@ -522,6 +588,22 @@ impl FactoryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_kinds_keep_their_string_form() {
+        let kinds = [
+            (GateKind::Checks, "checks"),
+            (GateKind::Ci, "ci"),
+            (GateKind::AgentReview, "agent_review"),
+            (GateKind::Human, "human"),
+            (GateKind::Quorum, "quorum"),
+            (GateKind::Named("lint".into()), "lint"),
+        ];
+        for (kind, text) in kinds {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{text}\""));
+            assert_eq!(serde_json::from_str::<GateKind>(&format!("\"{text}\"")).unwrap(), kind);
+        }
+    }
 
     fn parse(factory_src: &str) -> Result<FactoryConfig> {
         FactoryConfig::parse_table(factory_src, "TRAIL", None)

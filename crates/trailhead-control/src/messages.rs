@@ -1,27 +1,32 @@
-use trailhead_factory::{MergeDecision, PrGrade};
+use trailhead_factory::{GateKind, MergeDecision, PrGrade};
 
 use crate::merger::Rework;
+
+/// What the merger knows beyond the decision itself when it words the PR comment.
+#[derive(Clone, Copy)]
+pub(crate) struct Wording {
+    pub auto_merge: bool,
+    /// The merger is on and will try to merge now.
+    pub merging: bool,
+    /// The PR is behind its base branch.
+    pub behind: bool,
+    pub changes: Option<Rework>,
+}
 
 /// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
 /// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for a person.` `merging` is whether the merger is on and will
 /// try to merge now; the message then says the merge happened, so it is only posted once it has.
-pub(crate) fn decision_message(
-    grade: &PrGrade,
-    d: &MergeDecision,
-    auto_merge: bool,
-    merging: bool,
-    behind: bool,
-    changes: Option<Rework>,
-) -> String {
-    let message = gate_message(grade, d, auto_merge, merging, behind);
-    match changes {
+pub(crate) fn decision_message(grade: &PrGrade, d: &MergeDecision, said: Wording) -> String {
+    let message = gate_message(grade, d, &said);
+    match said.changes {
         Some(Rework::Running) => format!("{message} The latest review asked for changes; a rework is running."),
         Some(Rework::Pushed) => format!("{message} The latest review asked for changes; the rework has pushed."),
         None => message,
     }
 }
 
-fn gate_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: bool, behind: bool) -> String {
+fn gate_message(grade: &PrGrade, d: &MergeDecision, said: &Wording) -> String {
+    let Wording { auto_merge, merging, behind, .. } = *said;
     fn join(items: Vec<String>) -> String {
         match items.as_slice() {
             [] => String::new(),
@@ -34,12 +39,12 @@ fn gate_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: b
         let mut parts = Vec::new();
         let mut waiting = Vec::new();
         for gate in &d.waiting {
-            match gate.as_str() {
-                "ci" if !d.failing.is_empty() => parts.push(format!("CI failed ({})", d.failing.join(", "))),
-                "ci" => waiting.push("CI".to_string()),
-                "agent_review" => waiting.push("review".into()),
-                "human" => waiting.push("a person".into()),
-                other => waiting.push(other.to_string()),
+            match gate {
+                GateKind::Ci if !d.failing.is_empty() => parts.push(format!("CI failed ({})", d.failing.join(", "))),
+                GateKind::Ci => waiting.push("CI".to_string()),
+                GateKind::AgentReview => waiting.push("review".into()),
+                GateKind::Human => waiting.push("a person".into()),
+                GateKind::Checks | GateKind::Quorum | GateKind::Named(_) => waiting.push(gate.to_string()),
             }
         }
         if !waiting.is_empty() {
@@ -47,11 +52,11 @@ fn gate_message(grade: &PrGrade, d: &MergeDecision, auto_merge: bool, merging: b
         }
         return format!("{head}: {}.", parts.join("; "));
     }
-    let passed = d.passed.iter().map(|g| match g.as_str() {
-        "ci" => "CI".to_string(),
-        "agent_review" => "review".into(),
-        "human" => "a person's approval".into(),
-        other => other.to_string(),
+    let passed = d.passed.iter().map(|g| match g {
+        GateKind::Ci => "CI".to_string(),
+        GateKind::AgentReview => "review".into(),
+        GateKind::Human => "a person's approval".into(),
+        GateKind::Checks | GateKind::Quorum | GateKind::Named(_) => g.to_string(),
     });
     let passed = join(passed.collect());
     match (&d.problem, d.would_merge, auto_merge) {

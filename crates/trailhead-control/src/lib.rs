@@ -5,6 +5,7 @@
 
 mod core_tracker;
 pub mod daemon_binary;
+mod decide;
 mod lifecycle;
 mod merger;
 mod messages;
