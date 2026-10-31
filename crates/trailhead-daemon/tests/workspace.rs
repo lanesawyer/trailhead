@@ -47,6 +47,7 @@ async fn prepare_clones_runs_setup_and_resets() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        target_cap_bytes: None,
         setup: Some(check("setup", "touch .setup-ran")),
     };
 
@@ -93,6 +94,7 @@ async fn prepare_can_check_out_a_branchs_remote_head() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: false,
+        target_cap_bytes: None,
         setup: None,
     };
     ws.prepare(&req).await.unwrap();
@@ -190,6 +192,7 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        target_cap_bytes: None,
         setup: None,
     };
     ws.prepare(&req).await.unwrap();
@@ -255,6 +258,7 @@ async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        target_cap_bytes: None,
         setup: None,
     };
     let status = || {
@@ -274,4 +278,29 @@ async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
     assert_eq!(ws.merge_head().await.unwrap(), None);
     assert_eq!(ws.head().await.unwrap(), rev(&src, "main"));
     assert_eq!(status(), "");
+}
+
+#[tokio::test]
+async fn prepare_trims_target_to_the_cap_after_setup() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: Some(check(
+            "setup",
+            "mkdir -p target/debug/incremental && head -c 3000 /dev/zero > target/debug/incremental/x \
+             && mkdir -p target/debug/.fingerprint/x-1 target/debug/deps \
+             && touch target/debug/.fingerprint/x-1/invoked.timestamp \
+             && head -c 1000 /dev/zero > target/debug/deps/libx-1.rlib",
+        )),
+        target_cap_bytes: Some(2000),
+    };
+    ws.prepare(&req).await.unwrap();
+    assert!(!ws.dir().join("target/debug/incremental").exists());
+    assert!(ws.dir().join("target/debug/deps/libx-1.rlib").exists());
 }
