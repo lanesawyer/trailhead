@@ -5,6 +5,7 @@
 
 mod core_tracker;
 pub mod daemon_binary;
+mod decide;
 mod lifecycle;
 mod merger;
 mod messages;
@@ -92,7 +93,7 @@ pub struct Factory {
     server_down: Mutex<bool>,
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
-    setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
+    setbacks: Mutex<HashMap<TaskKey, (u32, u32, Instant)>>,
     /// Tasks whose PR a run just pushed to: the host's next `mergeable = false` for each may be a verdict on the head
     /// before the push, so it is read as not yet worked out, once (TRAIL-241).
     fresh_pushes: Mutex<HashSet<TaskKey>>,

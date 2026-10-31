@@ -47,6 +47,9 @@ async fn prepare_clones_runs_setup_and_resets() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: Some(check("setup", "touch .setup-ran")),
     };
 
@@ -93,6 +96,9 @@ async fn prepare_can_check_out_a_branchs_remote_head() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: None,
     };
     ws.prepare(&req).await.unwrap();
@@ -190,6 +196,9 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: None,
     };
     ws.prepare(&req).await.unwrap();
@@ -255,6 +264,9 @@ async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: None,
     };
     let status = || {
@@ -274,4 +286,49 @@ async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
     assert_eq!(ws.merge_head().await.unwrap(), None);
     assert_eq!(ws.head().await.unwrap(), rev(&src, "main"));
     assert_eq!(status(), "");
+}
+
+#[tokio::test]
+async fn prepare_runs_the_trim_check_after_setup_and_survives_its_failure() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: Some(check("setup", "mkdir -p cache && touch cache/big")),
+        trim: Some(check("trim", "rm -rf cache")),
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+    };
+    ws.prepare(&req).await.unwrap();
+    assert!(!ws.dir().join("cache").exists());
+
+    let failing = PrepareRequest { trim: Some(check("trim", "echo nope; exit 1")), ..req };
+    ws.prepare(&failing).await.unwrap();
+}
+
+#[tokio::test]
+async fn prepare_refuses_when_the_disk_is_over_the_limit() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: None,
+        trim: None,
+        disk_warn_bytes: Some(1),
+        disk_limit_bytes: Some(1),
+    };
+    let err = ws.prepare(&req).await.unwrap_err();
+    assert!(err.to_string().contains("disk_limit_bytes"), "{err}");
+    let ok = PrepareRequest { disk_limit_bytes: Some(u64::MAX), ..req };
+    ws.prepare(&ok).await.unwrap();
 }

@@ -4,7 +4,8 @@ use trailhead_factory::{
 };
 
 use crate::Factory;
-use crate::messages::decision_message;
+use crate::decide::{Facts, decide};
+use crate::messages::{Wording, decision_message};
 
 impl Factory {
     /// The merger (`docs/factory/review.md#the-merger`): evaluates the grade's gates on the PR's current head and
@@ -83,44 +84,31 @@ impl Factory {
             }
             _ => false,
         };
-        let (mut passed, mut waiting, mut failing) = (Vec::new(), Vec::new(), Vec::new());
-        for required in &gate.require {
-            let (name, ok) = match required.as_str() {
-                "ci" => match &ci.state {
-                    CiState::Passed => ("ci", true),
-                    CiState::Pending => ("ci", false),
-                    CiState::Failed { checks } => {
-                        failing = checks.clone();
-                        ("ci", false)
-                    }
-                },
-                "agent_review" => ("agent_review", verdict_approves),
-                "human" => ("human", status == Status::Approved && human_head.as_ref() == Some(&head)),
-                "quorum" => ("quorum", false),
-                // The PR exists because the worker ran every verifying check, and they passed, before opening it.
-                _ => ("checks", true),
-            };
-            let list = if ok { &mut passed } else { &mut waiting };
-            if !list.iter().any(|n: &String| n == name) {
-                list.push(name.to_string());
-            }
-        }
-        let gates_pass = waiting.is_empty();
-        // The control plane's own approval stands only while its gates pass: a grade raised to one that needs Lane, or
-        // a verdict that no longer approves, takes it back. CI running again on the head is waited for (a failure
-        // reworks the task). Lane's approval (no mark) is his to withdraw.
-        if status == Status::Approved && approved_head.is_some() && waiting.iter().any(|w| w != "ci") {
+        let facts = Facts {
+            act,
+            merge_mode,
+            require: &gate.require,
+            auto_merge: gate.auto_merge,
+            ci: &ci.state,
+            verdict_approves,
+            status,
+            head: &head,
+            approved_head: approved_head.as_deref(),
+            human_head: human_head.as_deref(),
+        };
+        let verdict = decide(&facts);
+        if verdict.withdraw {
             tracing::info!(task = %key.0, %head, "the gates no longer pass; withdrawing the approval");
             self.tracker.unapprove(key).await?;
-            (status, approved_head, human_head) = (Status::InReview, None, None);
+            (approved_head, human_head) = (None, None);
         }
         let mut decision = MergeDecision {
             grade: grade.grade,
             head: head.clone(),
-            passed,
-            waiting,
-            failing,
-            would_merge: gates_pass && gate.auto_merge && merge_mode == MergeMode::Shadow,
+            passed: verdict.passed,
+            waiting: verdict.waiting,
+            failing: verdict.failing,
+            would_merge: verdict.would_merge,
             approved_head,
             human_head,
             problem: None,
@@ -128,7 +116,7 @@ impl Factory {
             message: String::new(),
         };
         // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
-        if act && gates_pass && status == Status::InReview {
+        if verdict.approve {
             decision.approved_head = Some(head.clone());
             // The mark goes down before the approval so it can't pass for Lane's. Not again while approving is known
             // to fail, which would write the task every pass.
@@ -138,15 +126,9 @@ impl Factory {
             match self.tracker.approve(key).await {
                 Ok(()) => {
                     tracing::info!(task = %key.0, %head, "gates passed; approved");
-                    status = Status::Approved;
                 }
                 Err(Error::Forbidden(why)) => {
-                    let problem = format!(
-                        "the factory can't move the task to approved ({why}); a person has to list `{}` as a \
-                         reviewer of project {}",
-                        self.tracker.agent(),
-                        self.project()
-                    );
+                    let problem = format!("the factory can't move the task to approved ({why})");
                     tracing::warn!(task = %key.0, %problem, "gates passed");
                     decision.approved_head = None;
                     decision.problem = Some(problem);
@@ -155,16 +137,12 @@ impl Factory {
             }
         }
         // Without the right to approve, the merger can't act, so it only says what it would do, as in shadow mode.
-        let merging = act
-            && merge_mode == MergeMode::On
-            && gates_pass
-            && decision.problem.is_none()
-            && status == Status::Approved
-            && (gate.auto_merge || decision.human_head.as_ref() == Some(&head));
+        let merging = verdict.merge && decision.problem.is_none();
         // Only the shadow merger's "would merge" says whether the PR is behind: it is the one that never acts on it.
         let behind = decision.would_merge && codehost.behind(pr).await?;
         let changes = self.rework_state(&task, &head).await?;
-        decision.message = decision_message(&grade, &decision, gate.auto_merge, merging, behind, changes);
+        decision.message =
+            decision_message(&grade, &decision, Wording { auto_merge: gate.auto_merge, merging, behind, changes });
         // A refusal stands for the head it was given on, until a merge succeeds or the head moves.
         if merging {
             decision.refused = prev.as_ref().filter(|d| d.head == head).and_then(|d| d.refused.clone());

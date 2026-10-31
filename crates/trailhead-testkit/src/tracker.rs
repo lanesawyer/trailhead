@@ -362,7 +362,10 @@ impl Tracker for FakeTracker {
         let delegated = !self.state.lock().unwrap().undelegated.contains(&self.agent);
         self.write(task, |t, me| {
             if !delegated {
-                return Err(Error::Forbidden(format!("{me} can't approve {}: it isn't a delegated reviewer", t.key.0)));
+                return Err(Error::Forbidden(format!(
+                    "{me} can't approve {}: it isn't a delegated reviewer, so a person has to list it as one",
+                    t.key.0
+                )));
             }
             if t.status != Status::InReview {
                 return Err(Error::Conflict(format!("{} isn't in review", t.key.0)));

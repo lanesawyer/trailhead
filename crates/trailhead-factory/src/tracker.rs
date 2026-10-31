@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{PrGrade, PrRef, Result, Usd, Verdict};
+use crate::{GateKind, PrGrade, PrRef, Result, Usd, Verdict};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TaskKey(pub String);
@@ -123,9 +123,9 @@ pub struct MergeDecision {
     /// The head commit the gates were evaluated on.
     pub head: String,
     /// The gates that passed: `checks`, `ci`, `agent_review`, `human`.
-    pub passed: Vec<String>,
+    pub passed: Vec<GateKind>,
     /// The gates still to pass, and for CI that failed, the names of the failing checks.
-    pub waiting: Vec<String>,
+    pub waiting: Vec<GateKind>,
     #[serde(default)]
     pub failing: Vec<String>,
     /// Every gate passed and the grade auto-merges, so a merger that was on would merge now.

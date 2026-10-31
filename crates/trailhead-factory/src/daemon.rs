@@ -18,7 +18,7 @@ pub struct Check {
 }
 
 /// Gets a sandbox's checkout ready before any agent runs: clone or refresh the
-/// repo at the base branch, then run the repo's `setup` check. Runs while the
+/// repo at the base branch, then run the repo's `setup` and `trim` checks. Runs while the
 /// sandbox has install-phase egress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareRequest {
@@ -32,6 +32,16 @@ pub struct PrepareRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge_base: bool,
     pub setup: Option<Check>,
+    /// The repo's `trim` check, run after setup to cut build output and caches down so the warm checkpoint taken
+    /// next stays small. A failure is logged and the sandbox goes on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim: Option<Check>,
+    /// Log a warning when the checkout's filesystem uses more than this after setup and trim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_warn_bytes: Option<u64>,
+    /// Fail the prepare, so no warm checkpoint is taken, when the checkout's filesystem uses more than this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_limit_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,11 +162,12 @@ pub struct DaemonSecrets {
     pub gateway_list: String,
 }
 
-/// Where a Sprite lists its connectors.
-pub const SPRITES_GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
+/// Compatibility only: secrets files written before `gateway_list` existed were all Sprites', so they take its list.
+/// New files always carry the compute's own (`Target::gateway_list`).
+const LEGACY_GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
 
 fn default_gateway_list() -> String {
-    SPRITES_GATEWAY_LIST.into()
+    LEGACY_GATEWAY_LIST.into()
 }
 
 impl std::fmt::Debug for DaemonSecrets {
@@ -196,7 +207,7 @@ mod tests {
     #[test]
     fn secrets_parse_with_and_without_a_gateway_list() {
         let old: DaemonSecrets = serde_json::from_str(r#"{"secret_key":"aa","control_plane":"bb"}"#).unwrap();
-        assert_eq!(old.gateway_list, SPRITES_GATEWAY_LIST);
+        assert_eq!(old.gateway_list, LEGACY_GATEWAY_LIST);
         let new: DaemonSecrets =
             serde_json::from_str(r#"{"secret_key":"aa","control_plane":"bb","gateway_list":"http://g/list"}"#).unwrap();
         assert_eq!(new.gateway_list, "http://g/list");

@@ -12,6 +12,7 @@ pub mod harness;
 pub mod host;
 pub mod money;
 pub mod provider;
+pub mod target;
 pub mod tracker;
 
 pub use codehost::{
@@ -22,11 +23,11 @@ pub use compute::{
 };
 pub use config::{
     Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_GITHUB_ID, GATEWAY_HOST, GATEWAY_PORT,
-    Gate, GradesConfig, MergeConfig, MergeMode, Profile, Role, UsageConfig,
+    Gate, GateKind, GradesConfig, MergeConfig, MergeMode, Profile, Role, UsageConfig,
 };
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
-    RunResult, SPRITES_GATEWAY_LIST, ToDaemon,
+    RunResult, ToDaemon,
 };
 pub use gateway::{
     AuthScheme, GatewayConnection, GatewayConnectionInfo, GatewayRequest, GatewayResponse, GatewaySandbox,
@@ -40,6 +41,7 @@ pub use harness::{
 pub use host::HostConfig;
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
+pub use target::Target;
 pub use tracker::{
     Answered, ChangesRequested, Credential, HumanContext, MergeDecision, Merged, MergedBy, RunUpdate, Status, Task,
     TaskKey, TaskNote, Tracker, is_factory_agent,
@@ -59,6 +61,10 @@ pub enum Error {
     /// [`Error::Other`], which may be a blip worth retrying.
     #[error("rejected: {0}")]
     Rejected(String),
+    /// A resource the run needs is short right now (a full disk, say) and will be again only when something is
+    /// freed. The work is worth retrying later, and waiting doesn't count as a failure of the task or the sandbox.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]

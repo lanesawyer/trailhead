@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -35,8 +35,8 @@ use bollard::query_parameters::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use trailhead_factory::{
-    CheckpointId, Compute, Egress, Error, GATEWAY_HOST, GatewayConnection, GatewayRequest, Labels, Program, Result,
-    Sandbox, SandboxId, SandboxSpec,
+    CheckpointId, Compute, Egress, Error, GATEWAY_ANTHROPIC_ID, GATEWAY_HOST, GATEWAY_PORT, GatewayConnection,
+    GatewayRequest, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec, Target,
 };
 
 mod gateway;
@@ -63,11 +63,30 @@ pub const DEFAULT_NETWORK: &str = "trailhead-gateway-out";
 /// Where the daemon lives in [`DEFAULT_IMAGE`], whose user is `trailhead`.
 pub const HOME: &str = "/home/trailhead";
 
+/// A Docker sandbox's launch facts: connectors and model calls both go through the gateway container.
+pub fn target() -> Target {
+    let gateway = format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway");
+    Target {
+        dir: format!("{HOME}/.trailhead"),
+        workdir: format!("{HOME}/work"),
+        gateway_list: format!("{gateway}/list"),
+        model_endpoint: Some(format!("{gateway}/anthropic/{GATEWAY_ANTHROPIC_ID}")),
+        hold_socket: None,
+    }
+}
+
 const SUPERVISE: &str = include_str!("supervise.sh");
 const SUPERVISE_PATH: &str = "/opt/trailhead/supervise";
 
-/// The least free disk, in bytes, a run may start with (`DockerConfig::min_free_bytes`).
+/// The least free disk, in bytes, a run may start with (`DockerConfig::min_free_bytes`). A floor: a sandbox with a
+/// big filesystem needs more ([`disk_needed`]).
 pub const DEFAULT_MIN_FREE_BYTES: u64 = 10 << 30;
+
+/// How many times its size a checkpoint takes while it is imported: the containerd snapshotter keeps an import as a
+/// content blob and again as an unpacked snapshot (`docker system df` showed twice the sizes' sum).
+const IMPORT_COPIES: u64 = 2;
+/// How many sandboxes may be checkpointing at once, which the free disk has to cover.
+const CONCURRENT_CHECKPOINTS: u64 = 2;
 
 /// How long `start` watches a new program for an early exit.
 const START_WATCH: Duration = Duration::from_secs(3);
@@ -143,11 +162,19 @@ impl DockerCompute {
         DockerCompute { docker, config, link: Default::default(), daemon_digest, watching: Default::default() }
     }
 
-    /// The recent output of a program started with `start`.
-    pub async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
-        let log = format!("$HOME/.trailhead/programs/{}/log", shell_quote(program));
-        let (_, out) = self.exec(&id.0, None, &format!("tail -n 3000 {log}")).await?;
-        Ok(out)
+    /// Connects like [`DockerCompute::new`] for reading only (`list`, `logs`): it never starts, replaces or syncs the
+    /// gateway, so it's safe beside a running factory and needs no daemon binary. A sandbox it changed would have no
+    /// gateway behind it, so don't use it for that.
+    pub fn read_only(config: DockerConfig) -> Result<DockerCompute> {
+        let docker = Docker::connect_with_defaults().map_err(docker_err)?;
+        Ok(DockerCompute::read_only_with_client(docker, config))
+    }
+
+    pub fn read_only_with_client(docker: Docker, config: DockerConfig) -> DockerCompute {
+        let compute = DockerCompute::with_client(docker, config);
+        // The watcher is what starts and syncs the gateway; marking it started keeps it from ever running.
+        compute.watching.store(true, Ordering::SeqCst);
+        compute
     }
 
     fn state_path(&self, name: &str) -> PathBuf {
@@ -254,6 +281,20 @@ impl DockerCompute {
         self.docker.start_exec(&exec.id, Some(opts)).await.map_err(docker_err).map(drop)
     }
 
+    /// Removes the image tagged `image`, if there is one. Used for what a failed import left behind.
+    async fn remove_image_tag(&self, image: &str) {
+        match self
+            .docker
+            .remove_image(image, Some(RemoveImageOptions { force: true, ..Default::default() }), None)
+            .await
+        {
+            Err(e) if status(&e) != Some(404) => {
+                tracing::warn!(image, error = %e, "couldn't remove a checkpoint image; reconcile or destroy will");
+            }
+            _ => {}
+        }
+    }
+
     /// Streams the container's filesystem into a new image tagged `image`.
     async fn import_filesystem(&self, name: &str, image: &str, note: &str, changes: Vec<String>) -> Result<()> {
         // The export is read by a task of its own and passed through a channel, so the request body owns what it needs.
@@ -291,16 +332,20 @@ impl DockerCompute {
         result
     }
 
-    /// Removes the sandbox's warm checkpoints other than `keep` that none of its labels point at. A parked
-    /// sandbox's checkpoint is never one of them, nor is one a container still uses (Docker refuses).
-    async fn prune_checkpoints(&self, id: &SandboxId, keep: &CheckpointId) -> Result<()> {
+    /// Removes the sandbox's warm checkpoints other than `keep` that none of its labels point at, and those from before
+    /// checkpoints were noted (no note label). A parked sandbox's checkpoint is never one of them, nor is one a
+    /// container still uses (Docker refuses).
+    async fn prune_checkpoints(&self, id: &SandboxId, keep: Option<&CheckpointId>) -> Result<()> {
         let labels = self.read_state(&id.0).await?.labels;
-        let filter = vec![format!("{CHECKPOINT_OF}={}", id.0), format!("{CHECKPOINT_NOTE}={WARM_NOTE}")];
+        let filter = vec![format!("{CHECKPOINT_OF}={}", id.0)];
         let opts =
             ListImagesOptions { filters: Some(HashMap::from([("label".to_string(), filter)])), ..Default::default() };
         for image in self.docker.list_images(Some(opts)).await.map_err(docker_err)? {
+            if image.labels.get(CHECKPOINT_NOTE).is_some_and(|n| n != WARM_NOTE) {
+                continue;
+            }
             let tags: Vec<&String> = image.repo_tags.iter().filter(|t| t.starts_with(CHECKPOINT_REPO)).collect();
-            if tags.iter().any(|t| **t == keep.0 || labels.values().any(|v| v == *t)) {
+            if tags.iter().any(|t| keep.is_some_and(|k| **t == k.0) || labels.values().any(|v| v == *t)) {
                 continue;
             }
             for tag in tags {
@@ -372,12 +417,27 @@ impl Compute for DockerCompute {
         if pause {
             self.docker.pause_container(&id.0).await.map_err(docker_err)?;
         }
+        // Before the import, which needs the room: a failed one leaves its image behind, and so did earlier ones.
+        if let Err(e) = self.prune_checkpoints(id, None).await {
+            tracing::warn!(sandbox = %id.0, error = %e, "couldn't remove old checkpoints before the import");
+        }
         let imported = self.import_filesystem(&id.0, &cp.0, note, changes).await;
         if pause && let Err(e) = self.docker.unpause_container(&id.0).await {
             tracing::warn!(sandbox = %id.0, error = %e, "couldn't unpause the sandbox after checkpointing it");
         }
-        imported?;
-        if let Err(e) = self.prune_checkpoints(id, &cp).await {
+        if let Err(e) = imported {
+            // A failed import can leave a partial image of a few GB tagged; it must not stay to fill the disk.
+            self.remove_image_tag(&cp.0).await;
+            return Err(if full_disk(&e.to_string()) {
+                Error::Unavailable(format!(
+                    "sandbox {}: the Docker host's disk filled while checkpointing it ({e}); free up space on the host (docker system df, docker image prune)",
+                    id.0
+                ))
+            } else {
+                e
+            });
+        }
+        if let Err(e) = self.prune_checkpoints(id, Some(&cp)).await {
             tracing::warn!(sandbox = %id.0, error = %e, "couldn't remove old checkpoints");
         }
         Ok(cp)
@@ -477,8 +537,15 @@ impl Compute for DockerCompute {
         self.attach(&id.0, &state).await
     }
 
-    /// Fails when the sandbox's disk, which is the Docker engine's, has less than `min_free_bytes` free, so a run
-    /// doesn't start only to fail partway through a build.
+    async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
+        let log = format!("$HOME/.trailhead/programs/{}/log", shell_quote(program));
+        let (_, out) = self.exec(&id.0, None, &format!("tail -n 3000 {log}")).await?;
+        Ok(out)
+    }
+
+    /// Fails with [`Error::Unavailable`], for the control plane to wait out, when the sandbox's disk (the Docker
+    /// engine's) has less free than [`disk_needed`] for its filesystem, so a run doesn't start only to fail partway
+    /// through a build or a checkpoint.
     async fn preflight(&self, id: &SandboxId) -> Result<()> {
         let (code, out) = self.exec(&id.0, None, "df -Pk /").await?;
         let Some(free) = (code == 0).then(|| free_bytes(&out)).flatten() else {
@@ -488,12 +555,17 @@ impl Compute for DockerCompute {
                 out.trim()
             )));
         };
-        if free < self.config.min_free_bytes {
-            return Err(Error::Other(format!(
-                "sandbox {}: only {} MiB of disk free, below the {} MiB a task needs; free up space on the Docker host (docker system df)",
+        let opts = InspectContainerOptions { size: true };
+        let info = self.docker.inspect_container(&id.0, Some(opts)).await.map_err(docker_err)?;
+        let size = info.size_root_fs.unwrap_or(0).max(0) as u64;
+        let need = disk_needed(self.config.min_free_bytes, size);
+        if free < need {
+            return Err(Error::Unavailable(format!(
+                "sandbox {}: only {} MiB of disk free, below the {} MiB a task and its checkpoint need (filesystem {} MiB); free up space on the Docker host (docker system df)",
                 id.0,
                 free >> 20,
-                self.config.min_free_bytes >> 20
+                need >> 20,
+                size >> 20
             )));
         }
         Ok(())
@@ -556,6 +628,18 @@ fn image_changes(sandbox: &str, note: &str, config: Option<&ContainerConfig>) ->
         }
     }
     out
+}
+
+/// The free disk a sandbox whose filesystem is `size` bytes needs before a run: its checkpoint is imported as
+/// [`IMPORT_COPIES`] copies of it, for as many sandboxes as may checkpoint together, and never less than `floor`.
+fn disk_needed(floor: u64, size: u64) -> u64 {
+    floor.max(size.saturating_mul(IMPORT_COPIES * CONCURRENT_CHECKPOINTS))
+}
+
+/// Whether an error message says the disk is full.
+fn full_disk(msg: &str) -> bool {
+    let msg = msg.to_ascii_lowercase();
+    msg.contains("no space left on device") || msg.contains("disk quota exceeded")
 }
 
 /// The free bytes on the filesystem `df -Pk` reports last.
@@ -626,6 +710,65 @@ fn io_err(path: &Path, e: std::io::Error) -> Error {
 mod tests {
     use super::*;
 
+    /// A Docker API on a unix socket that answers every request with an empty list and records the paths asked for.
+    async fn recording_docker(dir: &Path) -> (Docker, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let sock = dir.join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut conn, _)) = listener.accept().await else { return };
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    while let Ok(n) = conn.read(&mut buf).await {
+                        if n == 0 {
+                            return;
+                        }
+                        let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        if let Some(path) = req.split_whitespace().nth(1) {
+                            log.lock().unwrap().push(path.to_string());
+                        }
+                        let reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]";
+                        if conn.write_all(reply.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let docker = Docker::connect_with_unix(sock.to_str().unwrap(), 5, bollard::API_DEFAULT_VERSION).unwrap();
+        (docker, seen)
+    }
+
+    #[tokio::test]
+    async fn listing_read_only_never_touches_the_gateway() {
+        let dir = tempfile::tempdir().unwrap();
+        let (docker, seen) = recording_docker(dir.path()).await;
+        let config = DockerConfig::new(dir.path().join("state"), Default::default());
+        let compute = DockerCompute::read_only_with_client(docker, config);
+        assert!(compute.list(&Labels::default()).await.unwrap().is_empty());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let paths = seen.lock().unwrap().clone();
+        assert!(!paths.is_empty());
+        assert!(paths.iter().all(|p| p.contains("/containers/json")), "{paths:?}");
+    }
+
+    #[tokio::test]
+    async fn listing_normally_watches_the_gateway() {
+        // The control for the test above: the same list without `read_only` does go looking for the gateway.
+        let dir = tempfile::tempdir().unwrap();
+        let (docker, seen) = recording_docker(dir.path()).await;
+        let config = DockerConfig::new(dir.path().join("state"), Default::default());
+        let compute = DockerCompute::with_client(docker, config);
+        compute.list(&Labels::default()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let paths = seen.lock().unwrap().clone();
+        assert!(paths.iter().any(|p| p.contains("trailhead-gateway")), "{paths:?}");
+    }
+
     #[test]
     fn sandboxes_go_through_the_gateway_but_not_to_it() {
         let env = gateway::proxy_env();
@@ -684,6 +827,20 @@ mod tests {
     }
 
     #[test]
+    fn the_disk_a_checkpoint_needs_follows_the_filesystem() {
+        let gib = 1u64 << 30;
+        assert_eq!(disk_needed(10 * gib, gib), 10 * gib, "the floor holds for a small filesystem");
+        assert_eq!(disk_needed(10 * gib, 14 * gib), 56 * gib, "twice over, for two sandboxes");
+        assert_eq!(disk_needed(10 * gib, u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn a_full_disk_is_recognised() {
+        assert!(full_disk("docker: write /var/lib/containerd/x: No space left on device"));
+        assert!(!full_disk("docker: connection reset"));
+    }
+
+    #[test]
     fn free_space_is_read_from_df() {
         let df = "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 60000000 50000000 1000 99% /\n";
         assert_eq!(free_bytes(df), Some(1000 * 1024));
@@ -725,5 +882,22 @@ mod tests {
         };
         compute.write_state("trail-1-a1", &state).await.unwrap();
         assert_eq!(compute.read_state("trail-1-a1").await.unwrap(), state);
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    #[test]
+    fn a_docker_target_uses_the_gateway_for_models_and_connectors() {
+        let t = target();
+        assert_eq!((t.dir.as_str(), t.workdir.as_str()), ("/home/trailhead/.trailhead", "/home/trailhead/work"));
+        assert_eq!(t.gateway_list, "http://trailhead-gateway:8080/v1/gateway/list");
+        assert_eq!(
+            t.model_endpoint("https://m.example"),
+            "http://trailhead-gateway:8080/v1/gateway/anthropic/anthropic"
+        );
+        assert_eq!(t.hold_socket, None);
     }
 }

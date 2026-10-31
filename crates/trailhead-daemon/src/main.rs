@@ -10,7 +10,7 @@ use iroh::Endpoint;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use trailhead_codehost_github::{GitHub, Identity};
-use trailhead_daemon::awake::{SPRITE_API_SOCKET, SpriteHolds};
+use trailhead_daemon::awake::SpriteHolds;
 use trailhead_daemon::net::{
     ALPN, DaemonProtocol, build_id, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
 };
@@ -43,6 +43,15 @@ enum Command {
         #[arg(long, default_value = "info")]
         log: String,
     },
+    /// Trims a cargo `target` directory to a size, for a repo's `trim` check (`"$TRAILHEAD_DAEMON" trim-cargo`).
+    TrimCargo {
+        /// The size to trim to, in bytes.
+        #[arg(long)]
+        cap: u64,
+        /// The directory to trim.
+        #[arg(long, default_value = "target")]
+        target: PathBuf,
+    },
     /// Sends the gateway one control message (JSON on stdin) and prints its response.
     GatewayCtl {
         #[arg(long, default_value = "/run/trailhead-gateway.sock")]
@@ -69,6 +78,10 @@ struct Args {
     /// A `tracing` filter; `RUST_LOG` wins if set.
     #[arg(long, default_value = "info")]
     log: String,
+    /// The compute's socket for holding the sandbox awake, used when it exists (the control plane passes it for
+    /// computes that pause idle sandboxes).
+    #[arg(long)]
+    hold_socket: Option<PathBuf>,
 }
 
 /// Stands in for a code host when the sandbox has no GitHub connector, so runs fail with the reason.
@@ -155,6 +168,18 @@ fn read_secrets(path: &PathBuf) -> std::result::Result<DaemonSecrets, String> {
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let args = match (cli.command, cli.daemon) {
+        (Some(Command::TrimCargo { cap, target }), _) => {
+            return match trailhead_daemon::trim::trim_target(&target, cap) {
+                Ok(t) => {
+                    println!("trimmed {} from {} to {} bytes (cap {cap})", target.display(), t.before, t.after);
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("trailhead-daemon: trim-cargo {}: {e}", target.display());
+                    std::process::ExitCode::FAILURE
+                }
+            };
+        }
         (Some(command), _) => return gateway_command(command).await,
         (None, Some(args)) => args,
         (None, None) => Cli::command()
@@ -184,6 +209,7 @@ async fn gateway_command(command: Command) -> std::process::ExitCode {
                 tracing_subscriber::fmt().with_env_filter(filter).init();
                 gateway::run(listen, &socket).await.map_err(|e| e.to_string())
             }
+            Command::TrimCargo { .. } => unreachable!("handled in main"),
             Command::GatewayCtl { socket } => {
                 let mut input = String::new();
                 std::io::stdin().read_to_string(&mut input).map_err(|e| e.to_string())?;
@@ -245,8 +271,8 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     };
     tracing::info!(version = env!("CARGO_PKG_VERSION"), %build, "trailhead-daemon build");
     let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone()).build(build);
-    if std::path::Path::new(SPRITE_API_SOCKET).exists() {
-        protocol = protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET));
+    if let Some(socket) = args.hold_socket.filter(|s| s.exists()) {
+        protocol = protocol.holding(SpriteHolds::new(socket));
     }
     let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
     tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
