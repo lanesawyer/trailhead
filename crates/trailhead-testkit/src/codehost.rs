@@ -40,6 +40,8 @@ struct State {
     queue_updates: bool,
     /// How many times `update_branch` was asked to do something.
     update_requests: usize,
+    /// How many times `files` was asked for a PR's file list.
+    file_listings: usize,
     refuse_publish: Option<String>,
     refuse_merge: Option<String>,
 }
@@ -101,6 +103,11 @@ impl FakeCodeHost {
         if queued {
             self.update_branch(pr).await.unwrap();
         }
+    }
+
+    /// How many times the host was asked to list a PR's files.
+    pub fn file_listings(&self) -> usize {
+        self.state.lock().unwrap().file_listings
     }
 
     /// How many times `update_branch` was called on a PR that was behind.
@@ -329,6 +336,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
+        self.state.lock().unwrap().file_listings += 1;
         self.find(pr, |p, s| {
             if let Some(files) = &p.files {
                 return files.clone();

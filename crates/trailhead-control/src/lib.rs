@@ -22,8 +22,8 @@ use tracing::Instrument;
 use tokio::sync::mpsc;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::{
-    BranchUpdate, ChangesRequested, CheckResult, CheckpointId, CiState, CodeHost, Compute, Daemon, Egress, Error,
-    FactoryConfig, Feedback, HumanContext, IROH_DOMAINS, Labels, MergeDecision, MergeMode, MergeOutcome, Merged,
+    BranchUpdate, ChangedFile, ChangesRequested, CheckResult, CheckpointId, CiState, CodeHost, Compute, Daemon, Egress,
+    Error, FactoryConfig, Feedback, HumanContext, IROH_DOMAINS, Labels, MergeDecision, MergeMode, MergeOutcome, Merged,
     MergedBy, ModelProvider, PrGrade, PrRef, PrState, PrepareRequest, Profile, Result, Role, RunEvent, RunReport,
     RunRequest, RunResult, RunUpdate, Sandbox, SandboxSpec, Status, Task, TaskKey, TaskSpec, Tracker, Usd, Verdict,
     VerdictKind, label, review_name, run_name,
@@ -108,6 +108,9 @@ pub struct Factory {
     /// Tasks whose PR a run just pushed to: the host's next `mergeable = false` for each may be a verdict on the head
     /// before the push, so it is read as not yet worked out, once (TRAIL-241).
     fresh_pushes: Mutex<HashSet<TaskKey>>,
+    /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
+    /// unchanged grades from them instead of asking the host again (TRAIL-266).
+    listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
     /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
     /// (a 202), so until the head moves the PR is still behind and asking again would only queue another.
     updating: Mutex<HashMap<TaskKey, String>>,
@@ -304,6 +307,7 @@ impl Factory {
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
             fresh_pushes: Mutex::default(),
+            listed: Mutex::default(),
             updating: Mutex::default(),
             host,
             ungraded: Mutex::default(),
@@ -1108,7 +1112,7 @@ impl Factory {
     pub async fn review(&self, task: &Task, pr: &PrRef, attempt: u32, checks: &[CheckResult]) -> Result<Outcome> {
         let shown = self.tracker.show(&task.key).await?;
         // Graded before anything starts, so a code host that fails here leaves the review to be tried again whole.
-        let grade = self.grade_pr(&shown, pr).await?;
+        let grade = self.grade_pr(&shown, pr, None).await?;
         if let Some(grade) = &grade {
             self.record_grade(&shown, grade).await?;
         }
@@ -1272,10 +1276,11 @@ impl Factory {
         if !matches!(task.status, Status::InReview | Status::Approved) {
             return Ok(());
         }
-        let Some(grade) = self.grade_pr(&task, pr).await? else { return Ok(()) };
-        self.record_grade(&task, &grade).await?;
+        // The head comes first and is shared with grading, which lists the files again only when it has moved.
         let ci = codehost.ci(pr).await?;
         let head = ci.head.clone();
+        let Some(grade) = self.grade_pr(&task, pr, Some(&head)).await? else { return Ok(()) };
+        self.record_grade(&task, &grade).await?;
         if let CiState::Failed { checks } = &ci.state {
             return self.rework_ci_failure(&task, pr, &head, checks).await;
         }
@@ -1520,11 +1525,24 @@ impl Factory {
 
     /// The PR's grade (`docs/factory/review.md#grades`): the task's, raised by what its files match and its size.
     /// Without a code host only the task's own grade is known, and a task with none has no grade.
-    async fn grade_pr(&self, task: &Task, pr: &PrRef) -> Result<Option<PrGrade>> {
+    /// Given the PR's `head`, the files listed for that same head last time are reused.
+    async fn grade_pr(&self, task: &Task, pr: &PrRef, head: Option<&str>) -> Result<Option<PrGrade>> {
         let Some(codehost) = &self.codehost else {
             return Ok(task.grade.map(|g| PrGrade { grade: g, task: Some(g), reasons: Vec::new() }));
         };
-        let files = codehost.files(pr).await?;
+        let cached = head.and_then(|h| {
+            self.listed.lock().unwrap().get(&task.key).filter(|(at, _)| at == h).map(|(_, files)| files.clone())
+        });
+        let files = match cached {
+            Some(files) => files,
+            None => {
+                let files = codehost.files(pr).await?;
+                if let Some(h) = head {
+                    self.listed.lock().unwrap().insert(task.key.clone(), (h.to_string(), files.clone()));
+                }
+                files
+            }
+        };
         // A task still at the grade an earlier review raised it to keeps the grade it started at, and that reasons.
         let recorded = task.run.grade.as_ref().filter(|r| task.grade == Some(r.grade));
         let started = recorded.map_or(task.grade, |r| r.task);

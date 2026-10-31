@@ -2772,6 +2772,18 @@ async fn a_pr_behind_its_base_is_updated_before_it_is_merged() {
 }
 
 #[tokio::test]
+async fn a_pr_whose_head_hasnt_moved_is_not_listed_again_for_grading() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (_key, _pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.factory.reconcile().await.unwrap();
+    let listed = r.codehost.file_listings();
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    assert_eq!(r.codehost.file_listings(), listed, "same head, same files");
+}
+
+#[tokio::test]
 async fn an_update_the_host_has_queued_is_not_asked_for_again() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
