@@ -233,3 +233,45 @@ async fn conflict_markers_added_since_the_start_are_found_in_any_file() {
     std::fs::write(dir.join("new.toml"), ">>>>>>> main\n").unwrap();
     assert_eq!(ws.conflict_markers(&start).await.unwrap(), ["a.md", "new.toml"]);
 }
+
+#[tokio::test]
+async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    let bare = root.path().join("remote/acme/widget.git");
+    git(&src, &["checkout", "--quiet", "-b", "factory/w-1"]);
+    std::fs::write(src.join("README.md"), "branch\n").unwrap();
+    git(&src, &["commit", "--quiet", "-am", "branch edit"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "factory/w-1"]);
+    git(&src, &["checkout", "--quiet", "main"]);
+    std::fs::write(src.join("README.md"), "main\n").unwrap();
+    git(&src, &["commit", "--quiet", "-am", "main edit"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "main"]);
+
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: Some("factory/w-1".into()),
+        merge_base: true,
+        setup: None,
+    };
+    let status = || {
+        let out = Command::new("git").args(["status", "--porcelain"]).current_dir(ws.dir()).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    ws.prepare(&req).await.unwrap();
+    // As a warm checkpoint would hold it: conflicted index, MERGE_HEAD and all.
+    assert!(ws.merge_head().await.unwrap().is_some());
+    assert!(status().contains("UU README.md"), "{}", status());
+
+    // Prepared again without aborting by hand: a fresh merge, not the old one.
+    ws.prepare(&req).await.unwrap();
+    assert!(ws.merge_head().await.unwrap().is_some());
+
+    ws.prepare(&PrepareRequest { branch: None, merge_base: false, ..req }).await.unwrap();
+    assert_eq!(ws.merge_head().await.unwrap(), None);
+    assert_eq!(ws.head().await.unwrap(), rev(&src, "main"));
+    assert_eq!(status(), "");
+}
