@@ -20,14 +20,17 @@ pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };
 pub use config::{
-    Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_HOST, GATEWAY_PORT, Gate, GradesConfig,
-    MergeConfig, MergeMode, Profile, Role, UsageConfig,
+    Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_GITHUB_ID, GATEWAY_HOST, GATEWAY_PORT,
+    Gate, GradesConfig, MergeConfig, MergeMode, Profile, Role, UsageConfig,
 };
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
     RunResult, SPRITES_GATEWAY_LIST, ToDaemon,
 };
-pub use gateway::{GatewayRequest, GatewayResponse, GatewaySandbox, GatewayState};
+pub use gateway::{
+    AuthScheme, GatewayConnection, GatewayConnectionInfo, GatewayRequest, GatewayResponse, GatewaySandbox,
+    GatewayState, Secret,
+};
 pub use grade::{ChangedFile, FileStatus, Grader, PrGrade, glob_match};
 pub use harness::{
     EventSink, Feedback, FollowUp, Harness, RaiseGrade, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict,

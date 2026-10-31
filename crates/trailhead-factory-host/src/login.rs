@@ -138,7 +138,7 @@ pub async fn github_writer(
 }
 
 /// The gateway's GitHub token, from `GITHUB_WRITER_TOKEN` or the saved one. Never falls back to the read token.
-#[allow(dead_code)] // The Docker wiring pushes it to the gateway.
+#[cfg_attr(not(feature = "docker"), allow(dead_code))]
 pub fn github_writer_token(creds: &CredStore) -> Option<String> {
     resolve(std::env::var("GITHUB_WRITER_TOKEN").ok(), creds, GITHUB_WRITER)
 }
