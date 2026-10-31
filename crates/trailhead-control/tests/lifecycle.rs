@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trailhead_control::{Factory, Outcome, Reconciled};
+use trailhead_control::{Factory, Host, Outcome, Reconciled};
 use trailhead_factory::{
     CiState, CodeHost, Commit, Compute, FactoryConfig, FileChange, FollowUp, MergeOutcome, MergedBy, RaiseGrade, Role,
     RunOutcome, SandboxSpec, Status, TaskKey, Tracker, Usd, VerdictKind, conventional_title, label, run_name,
@@ -68,6 +68,7 @@ fn rig_with(config: &str) -> Rig {
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
         daemon.clone(),
+        Host::new(None),
     );
     Rig { factory, tracker, compute, codehost, harness, daemon }
 }
@@ -2361,6 +2362,10 @@ async fn reviewed(r: &Rig, queue: &TaskKey, grade: u8, path: &str) -> (TaskKey, 
 }
 
 /// What was said on the PR after the review's own comment.
+fn said_count(r: &Rig) -> usize {
+    said(r).len()
+}
+
 fn said(r: &Rig) -> Vec<String> {
     r.codehost.prs()[0].comments.iter().skip(1).cloned().collect()
 }
@@ -2416,6 +2421,43 @@ async fn a_merge_the_merger_started_but_didnt_close_is_still_the_mergers() {
     assert_eq!(task.run.merged.expect("recorded").by, MergedBy::Merger);
     let handoff = r.tracker.comments(&key).into_iter().find(|c| c.kind == "handoff").expect("a handoff").body;
     assert!(handoff.contains("Grade 1; gates passed"), "{handoff}");
+}
+
+#[tokio::test]
+async fn the_pr_says_the_review_asked_for_changes_even_where_agent_review_is_advisory() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 4);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let said = said(&r);
+    assert!(
+        said.iter()
+            .any(|m| m.starts_with("Grade 4:")
+                && m.ends_with("The latest review asked for changes; a rework is running.")),
+        "{said:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_pr_says_the_rework_has_pushed_before_the_new_head_is_reviewed() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 4);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    let ran = r.factory.tick().await.unwrap();
+    let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+    // The rework pushes and the task is back in review, its new head not yet reviewed.
+    r.codehost.push_to(pr);
+    r.tracker.set_status(&key, Status::InReview);
+    r.factory.reconcile().await.unwrap();
+    let said = said(&r);
+    assert!(said.last().unwrap().ends_with("The latest review asked for changes; the rework has pushed."), "{said:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview, "saying it doesn't approve");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(said_count(&r), said.len(), "and is said once");
 }
 
 #[tokio::test]

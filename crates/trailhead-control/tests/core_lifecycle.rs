@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use trailhead_control::{CoreTracker, Factory, Outcome};
+use trailhead_control::{CoreTracker, Factory, Host, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, ProjectPatch, Store, TaskPatch};
 use trailhead_factory::{
     CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Role, RunOutcome, RunUpdate, Status, TaskKey,
@@ -90,6 +90,7 @@ async fn rig_paged(config: &str, page_size: Option<usize>) -> Rig {
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
         daemon.clone(),
+        Host::new(None),
     )
     .with_codehost(Arc::new(codehost.clone()));
     Rig { store, human, factory, tracker, compute, codehost, harness, daemon }

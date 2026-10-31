@@ -21,6 +21,7 @@
 - [Index of the factory design](factory/README.md)
   - [Seams](factory/seams.md)
   - [Sandbox](factory/sandbox.md)
+  - [Compute targets](factory/targets.md)
   - [Agents](factory/agents.md)
   - [State](factory/state.md)
   - [Budgets](factory/budgets.md)
