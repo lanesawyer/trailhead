@@ -104,7 +104,7 @@ pub struct Factory {
     server_down: Mutex<bool>,
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
-    setbacks: Mutex<HashMap<TaskKey, (u32, Instant)>>,
+    setbacks: Mutex<HashMap<TaskKey, (u32, u32, Instant)>>,
     /// Tasks whose PR a run just pushed to: the host's next `mergeable = false` for each may be a verdict on the head
     /// before the push, so it is read as not yet worked out, once (TRAIL-241).
     fresh_pushes: Mutex<HashSet<TaskKey>>,
@@ -1035,18 +1035,31 @@ impl Factory {
     ) -> Error {
         // The in-memory count too, so the backoff still grows when the tracker is what's failing and the persisted
         // count didn't get written.
-        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _)| *n);
+        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
         let failures = prior.unwrap_or(0).max(held) + 1;
         let max = self.config.repo.max_infra_failures.max(1);
-        let park = failures >= max;
-        tracing::warn!(task = %task.key.0, %error, failures, max, "infrastructure failure; the attempt doesn't count");
-        self.set_back(&task.key, failures);
+        // A host short of a resource (its disk) is waited out, not failed: the backoff grows but the task is never
+        // parked for it, and the count that parks isn't raised.
+        let waiting = matches!(error, Error::Unavailable(_));
+        let park = failures >= max && !waiting;
+        tracing::warn!(task = %task.key.0, %error, failures, max, waiting, "infrastructure failure; the attempt doesn't count");
+        if waiting {
+            self.set_back_waiting(&task.key, failures - 1);
+        } else {
+            self.set_back(&task.key, failures);
+        }
         // Before the release: the run's sub-agent holds the claim, so only it can report. A parked task starts its
         // count again when Lane reopens it.
         let update = RunUpdate {
             attempt: Some(task.run.attempt.unwrap_or(0)),
             retries: Some(task.run.retries.unwrap_or(0) + 1),
-            infra_failures: Some(if park { 0 } else { failures }),
+            infra_failures: Some(if park {
+                0
+            } else if waiting {
+                prior.unwrap_or(0)
+            } else {
+                failures
+            }),
             // Set only when this run's agent wrote text that isn't about the task (its API trouble): the failure the
             // task had before the run is put back, so the next attempt is still told what failed.
             failure,
@@ -1100,12 +1113,20 @@ impl Factory {
     /// Holds a task back for a backoff that grows with each infrastructure failure in a row.
     fn set_back(&self, key: &TaskKey, failures: u32) {
         let wait = backoff(failures, FIRST_INFRA_BACKOFF, MAX_INFRA_BACKOFF);
-        self.setbacks.lock().unwrap().insert(key.clone(), (failures, Instant::now() + wait));
+        self.setbacks.lock().unwrap().insert(key.clone(), (failures, 0, Instant::now() + wait));
     }
 
+    /// Holds a task back while its host lacks a resource: the backoff grows with the waits as well as the failures,
+    /// but the stored count, the one that parks, stays at `failures`.
+    fn set_back_waiting(&self, key: &TaskKey, failures: u32) {
+        let mut setbacks = self.setbacks.lock().unwrap();
+        let waits = setbacks.get(key).map_or(0, |(_, w, _)| *w) + 1;
+        let wait = backoff(failures.saturating_add(waits), FIRST_INFRA_BACKOFF, MAX_INFRA_BACKOFF);
+        setbacks.insert(key.clone(), (failures, waits, Instant::now() + wait));
+    }
     /// Whether a task that failed on the infrastructure has waited out its backoff.
     fn setback_over(&self, key: &TaskKey) -> bool {
-        self.setbacks.lock().unwrap().get(key).is_none_or(|(_, next_try)| Instant::now() >= *next_try)
+        self.setbacks.lock().unwrap().get(key).is_none_or(|(_, _, next_try)| Instant::now() >= *next_try)
     }
 
     /// Runs the reviewer on an open PR in its own fresh sandbox.
@@ -1591,7 +1612,7 @@ impl Factory {
         // A deliberate stop gives the round back like a failure, but isn't one: no count, no backoff, no parking.
         let cancelled = matches!(error, Error::Cancelled);
         // The persisted count survives a restart; the in-memory one covers a tracker that failed to write it.
-        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _)| *n);
+        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
         let failures = prior.unwrap_or(0).max(held) + 1;
         let max = self.config.repo.max_infra_failures.max(1);
         let park = !cancelled && failures >= max;
