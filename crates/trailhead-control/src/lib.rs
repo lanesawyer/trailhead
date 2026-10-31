@@ -1765,7 +1765,16 @@ impl Factory {
         }
         self.compute.preflight(&sandbox.id).await?;
         let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
-        self.daemon.prepare(&sandbox.id, prepare).await?;
+        if let Err(e) = self.daemon.prepare(&sandbox.id, prepare).await {
+            // A sandbox whose checkout won't prepare would fail the next task placed on it the same way, so it
+            // leaves the pool rather than going back with its warm checkpoint.
+            tracing::warn!(sandbox = %sandbox.name, error = %e, "prepare failed; destroying the sandbox");
+            self.daemon.forget(&sandbox.id).await;
+            if let Err(d) = self.compute.destroy(&sandbox.id).await {
+                tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
+            }
+            return Err(e);
+        }
         let cp = self.compute.checkpoint(&sandbox.id, "warm").await?;
         let labels = self.pooled(label::BUSY, Some(&cp.0), Some(task));
         self.compute.set_labels(&sandbox.id, &labels).await?;
