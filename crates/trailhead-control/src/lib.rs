@@ -1038,15 +1038,24 @@ impl Factory {
         let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _)| *n);
         let failures = prior.unwrap_or(0).max(held) + 1;
         let max = self.config.repo.max_infra_failures.max(1);
-        let park = failures >= max;
-        tracing::warn!(task = %task.key.0, %error, failures, max, "infrastructure failure; the attempt doesn't count");
+        // A host short of a resource (its disk) is waited out, not failed: the backoff grows but the task is never
+        // parked for it, and the count that parks isn't raised.
+        let waiting = matches!(error, Error::Unavailable(_));
+        let park = failures >= max && !waiting;
+        tracing::warn!(task = %task.key.0, %error, failures, max, waiting, "infrastructure failure; the attempt doesn't count");
         self.set_back(&task.key, failures);
         // Before the release: the run's sub-agent holds the claim, so only it can report. A parked task starts its
         // count again when Lane reopens it.
         let update = RunUpdate {
             attempt: Some(task.run.attempt.unwrap_or(0)),
             retries: Some(task.run.retries.unwrap_or(0) + 1),
-            infra_failures: Some(if park { 0 } else { failures }),
+            infra_failures: Some(if park {
+                0
+            } else if waiting {
+                prior.unwrap_or(0)
+            } else {
+                failures
+            }),
             // Set only when this run's agent wrote text that isn't about the task (its API trouble): the failure the
             // task had before the run is put back, so the next attempt is still told what failed.
             failure,

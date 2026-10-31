@@ -3019,3 +3019,18 @@ async fn a_sandbox_out_of_disk_is_reported_before_the_run_starts() {
     assert!(r.compute.checkpoints("trailhead-w1").is_empty(), "never prepared, so never warmed");
     assert_ne!(r.tracker.task(&key).status, Status::Done);
 }
+
+#[tokio::test]
+async fn a_host_out_of_disk_is_waited_out_never_parked() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
+    let key = r.tracker.add_task("TRAIL", "Waits for disk", "");
+    for n in 1..=4 {
+        r.compute.fail(&format!("trailhead-w{n}"), "preflight");
+        let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+        assert!(matches!(err, trailhead_factory::Error::Unavailable(_)), "{err}");
+    }
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open, "still waiting, not parked for a person");
+    assert_eq!(task.run.infra_failures.unwrap_or(0), 0, "waiting for disk isn't counted as a failure");
+    assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+}
