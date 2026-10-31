@@ -192,27 +192,6 @@ pub const GATEWAY_ANTHROPIC_ID: &str = "anthropic";
 /// The GitHub connection's id in the Docker gateway's list.
 pub const GATEWAY_GITHUB_ID: &str = "github";
 
-impl ComputeConfig {
-    /// The connector list URL for a daemon's secrets. `None` on Sprites, which have Fly's.
-    pub fn gateway_list(&self) -> Option<String> {
-        match self {
-            ComputeConfig::Sprites => None,
-            ComputeConfig::Docker { .. } => Some(format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway/list")),
-        }
-    }
-
-    /// Where runs send model calls: the Docker gateway's Anthropic connection, else `configured`
-    /// (`--model-endpoint`).
-    pub fn model_endpoint(&self, configured: &str) -> String {
-        match self {
-            ComputeConfig::Sprites => configured.into(),
-            ComputeConfig::Docker { .. } => {
-                format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway/anthropic/{GATEWAY_ANTHROPIC_ID}")
-            }
-        }
-    }
-}
-
 /// Subscription usage windows (`docs/factory/budgets.md`): at or past `pause_at[window]` percent, no new runs
 /// start until that window resets, leaving room for whatever else shares the subscription.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -379,11 +358,75 @@ impl Budget {
     }
 }
 
+/// One requirement of a grade's gate. It is written as a string in `.trailhead.toml` and in a task's stored
+/// `MergeDecision`: one of the five fixed names, or the name of a verifying check.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GateKind {
+    /// Every verifying check passed, which the worker ran before opening the PR.
+    Checks,
+    Ci,
+    AgentReview,
+    Human,
+    Quorum,
+    /// A verifying check the repo names; config validation rejects a name that isn't one.
+    Named(String),
+}
+
+impl GateKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            GateKind::Checks => "checks",
+            GateKind::Ci => "ci",
+            GateKind::AgentReview => "agent_review",
+            GateKind::Human => "human",
+            GateKind::Quorum => "quorum",
+            GateKind::Named(name) => name,
+        }
+    }
+}
+
+impl From<&str> for GateKind {
+    fn from(s: &str) -> Self {
+        match s {
+            "checks" => GateKind::Checks,
+            "ci" => GateKind::Ci,
+            "agent_review" => GateKind::AgentReview,
+            "human" => GateKind::Human,
+            "quorum" => GateKind::Quorum,
+            name => GateKind::Named(name.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for GateKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for GateKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl Serialize for GateKind {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GateKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(GateKind::from(String::deserialize(d)?.as_str()))
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Gate {
     #[serde(default)]
-    pub require: Vec<String>,
+    pub require: Vec<GateKind>,
     #[serde(default)]
     pub auto_merge: bool,
     pub quorum: Option<Quorum>,
@@ -476,18 +519,19 @@ impl FactoryConfig {
                 return Err(Error::Config(format!("[grades] has `{grade}`; path rules are for grades 2, 3 and 4")));
             }
         }
-        let known = ["checks", "ci", "agent_review", "human", "quorum"];
         let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
         for (grade, gate) in &self.gates {
             if !matches!(grade.as_str(), "1" | "2" | "3" | "4") {
                 return Err(Error::Config(format!("[gates.{grade}]: gates are per grade, 1 to 4")));
             }
             for r in &gate.require {
-                if !known.contains(&r.as_str()) && !checks.contains(&r.as_str()) {
+                if let GateKind::Named(name) = r
+                    && !checks.contains(&name.as_str())
+                {
                     return Err(Error::Config(format!("gate {grade} requires unknown {r}")));
                 }
             }
-            if gate.require.iter().any(|r| r == "quorum") && gate.quorum.is_none() {
+            if gate.require.contains(&GateKind::Quorum) && gate.quorum.is_none() {
                 return Err(Error::Config(format!("gate {grade} requires a quorum but doesn't define one")));
             }
         }
@@ -504,16 +548,17 @@ impl FactoryConfig {
 
     /// The gate a PR of this grade must pass: the repo's `[gates.N]`, or the table in `docs/factory/review.md#grades`.
     pub fn gate(&self, grade: u8) -> Gate {
+        use GateKind::{AgentReview, Checks, Ci, Human};
         if let Some(gate) = self.gates.get(&grade.to_string()) {
             return gate.clone();
         }
-        let (require, auto_merge): (&[&str], bool) = match grade {
-            0 | 1 => (&["checks", "ci"], true),
-            2 => (&["checks", "ci", "agent_review"], true),
-            3 => (&["checks", "ci", "agent_review", "human"], false),
-            _ => (&["checks", "ci", "human"], false),
+        let (require, auto_merge): (&[GateKind], bool) = match grade {
+            0 | 1 => (&[Checks, Ci], true),
+            2 => (&[Checks, Ci, AgentReview], true),
+            3 => (&[Checks, Ci, AgentReview, Human], false),
+            _ => (&[Checks, Ci, Human], false),
         };
-        Gate { require: require.iter().map(|r| r.to_string()).collect(), auto_merge, quorum: None }
+        Gate { require: require.to_vec(), auto_merge, quorum: None }
     }
 
     /// The checks a worker must pass before opening a PR: every verifying check the repo defines. The grade isn't
@@ -550,6 +595,22 @@ impl FactoryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_kinds_keep_their_string_form() {
+        let kinds = [
+            (GateKind::Checks, "checks"),
+            (GateKind::Ci, "ci"),
+            (GateKind::AgentReview, "agent_review"),
+            (GateKind::Human, "human"),
+            (GateKind::Quorum, "quorum"),
+            (GateKind::Named("lint".into()), "lint"),
+        ];
+        for (kind, text) in kinds {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{text}\""));
+            assert_eq!(serde_json::from_str::<GateKind>(&format!("\"{text}\"")).unwrap(), kind);
+        }
+    }
 
     fn parse(factory_src: &str) -> Result<FactoryConfig> {
         FactoryConfig::parse_table(factory_src, "TRAIL", None)
@@ -673,18 +734,6 @@ require = ["checks", "agent_review", "human"]
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
         let bad = SAMPLE.replace("\"agent_review\", \"human\"", "\"agent_review\", \"vibes\"");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
-    }
-
-    #[test]
-    fn docker_compute_uses_the_gateway_for_models_and_connectors() {
-        let docker = ComputeConfig::Docker { image: None, network: None, runtime: None };
-        assert_eq!(ComputeConfig::Sprites.gateway_list(), None);
-        assert_eq!(ComputeConfig::Sprites.model_endpoint("https://m.example"), "https://m.example");
-        assert_eq!(docker.gateway_list().unwrap(), "http://trailhead-gateway:8080/v1/gateway/list");
-        assert_eq!(
-            docker.model_endpoint("https://m.example"),
-            "http://trailhead-gateway:8080/v1/gateway/anthropic/anthropic"
-        );
     }
 
     #[test]

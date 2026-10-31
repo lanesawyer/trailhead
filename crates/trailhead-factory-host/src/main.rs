@@ -38,7 +38,7 @@ use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
-use trailhead_factory::{Compute, ComputeConfig, FactoryConfig};
+use trailhead_factory::{Compute, ComputeConfig, FactoryConfig, Target};
 use trailhead_provider_anthropic::Anthropic;
 use trailhead_server::creds::{Cred, CredStore};
 
@@ -296,12 +296,12 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
         .map_err(|e| format!("binding the iroh endpoint: {e}"))?;
     // `repos::validate` made the compute and daemon settings the same for every repo.
     let shared = &specs[0].config;
-    let (compute, launch) = compute(&shared.compute, opts, &paths, Launch::new(binary), false)?;
+    let binary = Arc::new(binary);
+    let (compute, target) = compute(&shared.compute, opts, &paths, binary.clone(), false)?;
     let launch = Launch {
         claude_oauth_token: opts.claude_oauth_token.clone(),
         log: shared.daemon.log.clone(),
-        gateway_list: shared.compute.gateway_list(),
-        ..launch
+        ..Launch::new(binary, &target)
     };
     let daemon = Arc::new(RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch));
     let tunnel =
@@ -313,7 +313,7 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     for spec in specs {
         let slug = spec.slug();
         let repos::RepoSpec { config_path, remote, config, .. } = spec;
-        let model_endpoint = config.compute.model_endpoint(&opts.model_endpoint);
+        let model_endpoint = target.model_endpoint(&opts.model_endpoint).to_string();
         let mut factory = Factory::new(
             config,
             compute.clone(),
@@ -395,21 +395,21 @@ fn compute(
     config: &ComputeConfig,
     opts: &Opts,
     paths: &trailhead_server::Paths,
-    launch: Launch,
+    binary: Arc<Vec<u8>>,
     read_only: bool,
-) -> Result<(Arc<dyn Compute>, Launch), String> {
+) -> Result<(Arc<dyn Compute>, Target), String> {
     match config {
         ComputeConfig::Sprites => {
             let token = opts
                 .sprites_token
                 .clone()
                 .ok_or("Sprites compute needs SPRITES_TOKEN or `trailhead factory login sprites`")?;
-            Ok((Arc::new(SpritesCompute::new(token).map_err(|e| e.to_string())?), launch))
+            Ok((Arc::new(SpritesCompute::new(token).map_err(|e| e.to_string())?), trailhead_compute_sprites::target()))
         }
         #[cfg(feature = "docker")]
         ComputeConfig::Docker { image, network, runtime } => {
-            use trailhead_compute_docker::{DockerCompute, DockerConfig, HOME};
-            let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), launch.binary.clone());
+            use trailhead_compute_docker::{DockerCompute, DockerConfig};
+            let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), binary);
             if let Some(image) = image {
                 docker.image = image.clone();
             }
@@ -430,8 +430,7 @@ fn compute(
             }
             let compute = if read_only { DockerCompute::read_only(docker) } else { DockerCompute::new(docker) }
                 .map_err(|e| e.to_string())?;
-            let launch = Launch { dir: format!("{HOME}/.trailhead"), workdir: format!("{HOME}/work"), ..launch };
-            Ok((Arc::new(compute), launch))
+            Ok((Arc::new(compute), trailhead_compute_docker::target()))
         }
         #[cfg(not(feature = "docker"))]
         ComputeConfig::Docker { .. } => {
