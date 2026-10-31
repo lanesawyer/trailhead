@@ -2120,8 +2120,11 @@ impl Factory {
                 {
                     stale = !codehost.carries_verdict(pr, reviewed).await?;
                 }
-                let due = task.run.pr.is_some() && stale && self.setback_over(&task.key);
-                if !due {
+                let owed = task.run.pr.is_some() && stale;
+                let due = owed && self.setback_over(&task.key);
+                // A review backed off after an infrastructure failure is still owed: approving now could pass a grade
+                // whose gate doesn't ask for agent_review, and nothing would schedule the review afterwards (TRAIL-263).
+                if !owed {
                     // CI may have finished, or Lane approved, since the gates were last looked at.
                     self.evaluate_gates(&task.key).await?;
                 }
