@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
-use trailhead_control::{CoreTracker, Factory, daemon_binary};
+use trailhead_control::{CoreTracker, Factory, Host, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
 use trailhead_factory::{Compute, ComputeConfig, FactoryConfig};
@@ -275,16 +275,21 @@ async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String
     tracing::info!(endpoint = %endpoint.id(), project = %config.repo.project, repo = %config.repo.repo().slug(), "factory ready");
 
     let model_endpoint = config.compute.model_endpoint(&opts.model_endpoint);
-    let mut factory =
-        Factory::new(config, compute, Arc::new(tracker), Arc::new(Anthropic::new(model_endpoint)), daemon)
-            .with_server_check(server_check(opts.server))
-            .with_merge_mode_source(Box::new(move || {
-                let src =
-                    std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
-                FactoryConfig::from_repo_file(&src, remote.clone())
-                    .map(|c| c.merge.mode)
-                    .map_err(|e| format!("{}: {e}", config_path.display()))
-            }));
+    let mut factory = Factory::new(
+        config,
+        compute,
+        Arc::new(tracker),
+        Arc::new(Anthropic::new(model_endpoint)),
+        daemon,
+        Host::new(None),
+    )
+    .with_server_check(server_check(opts.server))
+    .with_merge_mode_source(Box::new(move || {
+        let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+        FactoryConfig::from_repo_file(&src, remote.clone())
+            .map(|c| c.merge.mode)
+            .map_err(|e| format!("{}: {e}", config_path.display()))
+    }));
     match &opts.github_token {
         Some(token) => {
             factory =
