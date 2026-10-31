@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod gateway;
 pub mod grade;
 pub mod harness;
+pub mod host;
 pub mod money;
 pub mod provider;
 pub mod tracker;
@@ -36,6 +37,7 @@ pub use harness::{
     EventSink, Feedback, FollowUp, Harness, RaiseGrade, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict,
     VerdictKind, conventional_title, is_conventional,
 };
+pub use host::HostConfig;
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use tracker::{

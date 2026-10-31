@@ -14,6 +14,10 @@ pub struct UserConfig {
     /// The server to use when neither `--url` nor `TRAILHEAD_URL` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Host-wide factory settings. Kept unparsed: the CLI doesn't depend on the factory crates, and
+    /// `trailhead_factory::HostConfig` checks the keys when the factory reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub factory: Option<toml::Table>,
 }
 
 pub fn path(paths: &Paths) -> PathBuf {
@@ -44,7 +48,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths { data_dir: dir.path().join("data"), config_dir: dir.path().join("config") };
         assert!(load(&paths).unwrap().url.is_none());
-        save(&paths, &UserConfig { url: Some("http://127.0.0.1:7242".into()) }).unwrap();
+        save(&paths, &UserConfig { url: Some("http://127.0.0.1:7242".into()), factory: None }).unwrap();
         assert_eq!(load(&paths).unwrap().url.as_deref(), Some("http://127.0.0.1:7242"));
+    }
+
+    #[test]
+    fn accepts_a_factory_table_but_not_other_unknown_keys() {
+        let cfg: UserConfig = toml::from_str("url = \"http://x\"\n[factory]\nmax_sandboxes = 3\n").unwrap();
+        assert_eq!(cfg.factory.unwrap()["max_sandboxes"].as_integer(), Some(3));
+        assert!(toml::from_str::<UserConfig>("urll = \"http://x\"").is_err());
     }
 }
