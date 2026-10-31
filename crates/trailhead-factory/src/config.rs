@@ -161,6 +161,34 @@ pub enum ComputeConfig {
     },
 }
 
+/// The Docker gateway's name on each sandbox's network (`docs/factory/sandbox.md`).
+pub const GATEWAY_HOST: &str = "trailhead-gateway";
+/// The port the Docker gateway listens on.
+pub const GATEWAY_PORT: u16 = 8080;
+/// The Anthropic connection's id in the Docker gateway's list.
+pub const GATEWAY_ANTHROPIC_ID: &str = "anthropic";
+
+impl ComputeConfig {
+    /// The connector list URL for a daemon's secrets. `None` on Sprites, which have Fly's.
+    pub fn gateway_list(&self) -> Option<String> {
+        match self {
+            ComputeConfig::Sprites => None,
+            ComputeConfig::Docker { .. } => Some(format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway/list")),
+        }
+    }
+
+    /// Where runs send model calls: the Docker gateway's Anthropic connection, else `configured`
+    /// (`--model-endpoint`).
+    pub fn model_endpoint(&self, configured: &str) -> String {
+        match self {
+            ComputeConfig::Sprites => configured.into(),
+            ComputeConfig::Docker { .. } => {
+                format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway/anthropic/{GATEWAY_ANTHROPIC_ID}")
+            }
+        }
+    }
+}
+
 /// Subscription usage windows (`docs/factory/budgets.md`): at or past `pause_at[window]` percent, no new runs
 /// start until that window resets, leaving room for whatever else shares the subscription.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -609,6 +637,18 @@ require = ["checks", "agent_review", "human"]
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
         let bad = SAMPLE.replace("\"agent_review\", \"human\"", "\"agent_review\", \"vibes\"");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn docker_compute_uses_the_gateway_for_models_and_connectors() {
+        let docker = ComputeConfig::Docker { image: None, network: None, runtime: None };
+        assert_eq!(ComputeConfig::Sprites.gateway_list(), None);
+        assert_eq!(ComputeConfig::Sprites.model_endpoint("https://m.example"), "https://m.example");
+        assert_eq!(docker.gateway_list().unwrap(), "http://trailhead-gateway:8080/v1/gateway/list");
+        assert_eq!(
+            docker.model_endpoint("https://m.example"),
+            "http://trailhead-gateway:8080/v1/gateway/anthropic/anthropic"
+        );
     }
 
     #[test]

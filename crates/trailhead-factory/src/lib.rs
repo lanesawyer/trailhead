@@ -20,12 +20,12 @@ pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };
 pub use config::{
-    Budget, Checks, ComputeConfig, FactoryConfig, Gate, GradesConfig, MergeConfig, MergeMode, Profile, Role,
-    UsageConfig,
+    Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_HOST, GATEWAY_PORT, Gate, GradesConfig,
+    MergeConfig, MergeMode, Profile, Role, UsageConfig,
 };
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
-    RunResult, ToDaemon,
+    RunResult, SPRITES_GATEWAY_LIST, ToDaemon,
 };
 pub use gateway::{GatewayRequest, GatewayResponse, GatewaySandbox, GatewayState};
 pub use grade::{ChangedFile, FileStatus, Grader, PrGrade, glob_match};

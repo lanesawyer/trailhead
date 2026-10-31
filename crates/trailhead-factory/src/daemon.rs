@@ -146,6 +146,17 @@ pub struct DaemonSecrets {
     /// place of a model connector. The one exception to sandboxes holding no model credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_oauth_token: Option<String>,
+    /// Where the daemon lists its connectors: Fly's gateway on a Sprite, ours under Docker. Defaults to Fly's, so
+    /// secrets files written before this field still parse.
+    #[serde(default = "default_gateway_list")]
+    pub gateway_list: String,
+}
+
+/// Where a Sprite lists its connectors.
+pub const SPRITES_GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
+
+fn default_gateway_list() -> String {
+    SPRITES_GATEWAY_LIST.into()
 }
 
 impl std::fmt::Debug for DaemonSecrets {
@@ -176,4 +187,18 @@ pub trait Daemon: Send + Sync {
     /// Cancels every run in flight, because the control plane is stopping on purpose. Without this, a daemon would
     /// keep an unobserved run going while it waits for a reattach.
     async fn shutdown(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secrets_parse_with_and_without_a_gateway_list() {
+        let old: DaemonSecrets = serde_json::from_str(r#"{"secret_key":"aa","control_plane":"bb"}"#).unwrap();
+        assert_eq!(old.gateway_list, SPRITES_GATEWAY_LIST);
+        let new: DaemonSecrets =
+            serde_json::from_str(r#"{"secret_key":"aa","control_plane":"bb","gateway_list":"http://g/list"}"#).unwrap();
+        assert_eq!(new.gateway_list, "http://g/list");
+    }
 }
