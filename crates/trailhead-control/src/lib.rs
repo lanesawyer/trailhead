@@ -530,7 +530,7 @@ impl Factory {
             return self.tracker.ready(self.project(), None, room).await;
         }
         // Ungraded tasks mustn't crowd graded ones out of the limit.
-        let ready = self.tracker.ready(self.project(), queue.as_ref(), 1000).await?;
+        let ready = self.tracker.ready(self.project(), queue.as_ref(), usize::MAX).await?;
         let (graded, ungraded): (Vec<Task>, Vec<Task>) = ready.into_iter().partition(|t| t.grade.is_some());
         for task in ungraded {
             self.report_ungraded(&task).await;
@@ -1199,7 +1199,18 @@ impl Factory {
             if approved_head.is_none() && human_head.is_none() {
                 human_head = Some(head.clone());
             }
-            if approved_head.as_ref().or(human_head.as_ref()) != Some(&head) {
+            let given_on = approved_head.as_ref().or(human_head.as_ref()).cloned();
+            // A clean merge of the base branch the host made since (the merger's own update) keeps the approval, Lane's
+            // included, as it keeps the verdict; CI on the new head is the gate.
+            let carried = match &given_on {
+                Some(given) if *given != head => codehost.carries_verdict(pr, given).await?,
+                _ => false,
+            };
+            if carried {
+                tracing::info!(task = %key.0, %head, "the PR was only updated from its base; keeping the approval");
+                approved_head = approved_head.map(|_| head.clone());
+                human_head = human_head.map(|_| head.clone());
+            } else if given_on.as_ref() != Some(&head) {
                 tracing::info!(task = %key.0, %head, "the PR has a new head; sending the task back to review");
                 self.tracker.unapprove(key).await?;
                 (status, approved_head, human_head) = (Status::InReview, None, None);
@@ -1235,7 +1246,7 @@ impl Factory {
                 "agent_review" => ("agent_review", verdict_approves),
                 "human" => ("human", status == Status::Approved && human_head.as_ref() == Some(&head)),
                 "quorum" => ("quorum", false),
-                // The PR exists because the worker's checks passed before it was opened.
+                // The PR exists because the worker ran every verifying check, and they passed, before opening it.
                 _ => ("checks", true),
             };
             let list = if ok { &mut passed } else { &mut waiting };
@@ -1244,6 +1255,14 @@ impl Factory {
             }
         }
         let gates_pass = waiting.is_empty();
+        // The control plane's own approval stands only while its gates pass: a grade raised to one that needs Lane, or
+        // a verdict that no longer approves, takes it back. CI running again on the head is waited for (a failure
+        // reworks the task). Lane's approval (no mark) is his to withdraw.
+        if status == Status::Approved && approved_head.is_some() && waiting.iter().any(|w| w != "ci") {
+            tracing::info!(task = %key.0, %head, "the gates no longer pass; withdrawing the approval");
+            self.tracker.unapprove(key).await?;
+            (status, approved_head, human_head) = (Status::InReview, None, None);
+        }
         let mut decision = MergeDecision {
             grade: grade.grade,
             head: head.clone(),

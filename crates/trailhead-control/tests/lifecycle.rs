@@ -2474,6 +2474,27 @@ async fn an_approval_on_an_old_head_doesnt_count() {
 }
 
 #[tokio::test]
+async fn the_factory_withdraws_its_approval_when_gates_stop_passing_on_the_same_head() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+
+    // CI running again on the same head is waited for, not a reason to withdraw.
+    r.codehost.set_ci(&pr, CiState::Pending);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+
+    // Lane raises the grade to one that needs a person.
+    r.tracker.set_grade(&key, 3);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.merge.unwrap().approved_head, None);
+}
+
+#[tokio::test]
 async fn failed_ci_sends_the_task_back_for_a_rework_told_what_failed() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
@@ -2506,7 +2527,7 @@ async fn red_ci_after_a_branch_update_unapproves_and_reworks_saying_the_merge_br
     r.codehost.update_branch(&pr).await.unwrap();
     r.codehost.set_ci(&pr, CiState::Pending);
     r.factory.reconcile().await.unwrap();
-    assert_eq!(r.tracker.task(&key).status, Status::InReview, "pending CI is waited for");
+    assert_eq!(r.tracker.task(&key).status, Status::Approved, "the approval survives the update; CI is waited for");
     assert!(r.tracker.task(&key).run.changes_requested.is_none());
 
     r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
@@ -2780,6 +2801,24 @@ async fn lane_approving_a_grade_three_task_gets_it_merged() {
     assert!(!r.codehost.prs()[0].merged, "waits for Lane");
     r.tracker.approve_as_human(&key);
     r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_host_made_update_keeps_lanes_approval_of_a_grade_three_task() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.tracker.approve_as_human(&key);
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "updated, not merged, while CI starts over");
+
+    r.codehost.set_ci(&pr, CiState::Passed);
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
     assert!(r.codehost.prs()[0].merged);
     assert_eq!(r.tracker.task(&key).status, Status::Done);
 }

@@ -42,6 +42,7 @@ use trailhead_server::creds::{Cred, CredStore};
 
 mod find;
 mod login;
+mod ops;
 mod wake;
 
 /// The agent the control plane acts as; sandboxes get its sub-agents.
@@ -99,6 +100,10 @@ enum Cmd {
     Check(Opts),
     /// Run the control plane until Ctrl-C.
     Run(Opts),
+    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; runs beside `run`.
+    Status(Opts),
+    /// Print the daemon's service log from a task's sandbox.
+    Logs(ops::LogsOpts),
     /// Save a secret in the OS keyring (read from stdin), so `run` needs no environment variables.
     #[command(subcommand)]
     Login(login::Login),
@@ -181,25 +186,35 @@ struct Wake {
     project: String,
 }
 
-async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String> {
-    let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    // The environment wins; `trailhead factory login` saved the rest.
+/// `opts` with the secrets the environment didn't set filled in from what `trailhead factory login` saved.
+fn resolve_opts(opts: &Opts, paths: &trailhead_server::Paths) -> Opts {
     let creds = paths.creds();
-    let opts = &Opts {
+    Opts {
         sprites_token: login::resolve(opts.sprites_token.clone(), &creds, login::SPRITES),
         github_token: login::resolve(opts.github_token.clone(), &creds, login::GITHUB),
         claude_oauth_token: login::resolve(opts.claude_oauth_token.clone(), &creds, login::CLAUDE),
         ..opts.clone()
-    };
+    }
+}
+
+/// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
+fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig), String> {
     let config_path = match &opts.config {
         Some(path) => path.clone(),
         None => find::config(&std::env::current_dir().map_err(|e| e.to_string())?)?,
     };
-    let config = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
     let repo_dir = config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
     let remote = find::remote(&repo_dir);
-    let mut config = FactoryConfig::from_repo_file(&config, remote.clone())
-        .map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let config =
+        FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| format!("{}: {e}", config_path.display()))?;
+    Ok((config_path, remote, config))
+}
+
+async fn setup(opts: &Opts) -> Result<(Arc<Factory>, Router, File, Wake), String> {
+    let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+    let opts = &resolve_opts(opts, &paths);
+    let (config_path, remote, mut config) = load_config(opts)?;
     if opts.claude_oauth_token.is_some() {
         tracing::warn!("subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
         config.egress.always.push(ANTHROPIC_API_HOST.into());
@@ -375,6 +390,8 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
             tunnel.shutdown().await.map_err(|e| e.to_string())?;
             check_result(failed)
         }
+        Cmd::Status(opts) => ops::status(&opts).await,
+        Cmd::Logs(logs) => ops::logs(&logs).await,
         Cmd::Login(cmd) => {
             let paths =
                 trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;

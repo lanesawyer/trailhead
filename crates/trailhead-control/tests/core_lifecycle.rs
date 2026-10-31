@@ -52,6 +52,11 @@ async fn rig() -> Rig {
 }
 
 async fn rig_with(config: &str) -> Rig {
+    rig_paged(config, None).await
+}
+
+/// A rig whose tracker reads lists `page_size` tasks at a time, when given.
+async fn rig_paged(config: &str, page_size: Option<usize>) -> Rig {
     let store = Arc::new(Store::open_local(":memory:").await.unwrap());
     let (ws, user) = store.bootstrap_local("Lane").await.unwrap();
     let human = Ctx::user(ws.id, user.id);
@@ -61,7 +66,10 @@ async fn rig_with(config: &str) -> Rig {
         .unwrap();
     let agent = store.create_agent(&human, "factory").await.unwrap();
     let ctx = store.agent_ctx(ws.id, agent.id).await.unwrap();
-    let tracker = CoreTracker::new(store.clone(), ctx, "factory");
+    let mut tracker = CoreTracker::new(store.clone(), ctx, "factory");
+    if let Some(n) = page_size {
+        tracker = tracker.with_page_size(n);
+    }
 
     let compute = FakeCompute::new();
     let codehost = FakeCodeHost::new();
@@ -216,6 +224,24 @@ async fn sandbox_tokens_are_scoped_and_die_with_the_sub_agent() {
 
     r.tracker.revoke_sub_agent("trail-1-a1").await.unwrap();
     assert!(CoreTracker::authenticate(r.store.clone(), &cred).await.is_err());
+}
+
+#[tokio::test]
+async fn reconcile_reaches_a_factory_task_past_the_first_page_of_tasks() {
+    let r = rig_paged(CONFIG, Some(2)).await;
+    for i in 0..5 {
+        r.task(&format!("Filler {i}")).await;
+    }
+    let key = r.task("Crashed, far down the list").await;
+    r.tracker.create_sub_agent("trail-6-a1", "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
+    let sub = r.tracker.sub_agent("trail-6-a1");
+    sub.claim(&key).await.unwrap();
+    sub.report(&key, RunUpdate { attempt: Some(1), sandbox: Some("trail-6-a1".into()), ..Default::default() })
+        .await
+        .unwrap();
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.requeued, std::slice::from_ref(&key.0));
 }
 
 #[tokio::test]
