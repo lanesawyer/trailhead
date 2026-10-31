@@ -14,7 +14,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::oneshot;
-use trailhead_factory::{Egress, GatewayRequest, GatewayResponse, GatewaySandbox, GatewayState, Labels};
+use trailhead_factory::{
+    Egress, GatewayConnection, GatewayConnectionInfo, GatewayRequest, GatewayResponse, GatewaySandbox, GatewayState,
+    Labels,
+};
+
+mod api;
+mod policy;
 
 /// The longest request head the proxy reads.
 const MAX_HEAD: usize = 64 * 1024;
@@ -59,6 +65,8 @@ struct Inner {
     sandboxes: BTreeMap<String, Sandbox>,
     unregistered: BTreeMap<String, u64>,
     next_tunnel: u64,
+    /// By provider and id. Held in memory only; `Debug` redacts the credentials.
+    connections: BTreeMap<(String, String), GatewayConnection>,
 }
 
 /// What the tunnel task holds while it's open.
@@ -84,9 +92,23 @@ enum Verdict {
     Refused,
 }
 
-#[derive(Default)]
 pub struct Gateway {
     inner: Mutex<Inner>,
+    /// For forwarding to connections' upstreams: no proxy, no redirects, and no total timeout, so streams run
+    /// as long as the upstream keeps them.
+    http: reqwest::Client,
+}
+
+impl Default for Gateway {
+    fn default() -> Self {
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("an HTTP client with these options builds");
+        Gateway { inner: Mutex::default(), http }
+    }
 }
 
 impl Gateway {
@@ -181,6 +203,22 @@ impl Gateway {
                 wait_closed(doomed).await;
                 GatewayResponse::Ok
             }
+            GatewayRequest::SetConnection(conn) => {
+                let key = (conn.provider.clone(), conn.id.clone());
+                let clean = |s: &str| !s.is_empty() && !s.contains(['/', '?', '#', ' ']);
+                if !clean(&conn.provider) || !clean(&conn.id) {
+                    return GatewayResponse::Error { message: "provider and id must be plain path segments".into() };
+                }
+                if !(conn.upstream.starts_with("https://") || conn.upstream.starts_with("http://")) {
+                    return GatewayResponse::Error { message: "upstream must be an http(s) URL".into() };
+                }
+                self.inner().connections.insert(key, conn);
+                GatewayResponse::Ok
+            }
+            GatewayRequest::RemoveConnection { provider, id } => {
+                self.inner().connections.remove(&(provider, id));
+                GatewayResponse::Ok
+            }
             GatewayRequest::State => GatewayResponse::State(self.state()),
         }
     }
@@ -201,6 +239,15 @@ impl Gateway {
                 })
                 .collect(),
             unregistered_refusals: inner.unregistered.clone(),
+            connections: inner
+                .connections
+                .values()
+                .map(|c| GatewayConnectionInfo {
+                    provider: c.provider.clone(),
+                    id: c.id.clone(),
+                    upstream: c.upstream.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -268,6 +315,9 @@ impl Gateway {
             Some(h) => h,
             None => return Ok(()),
         };
+        if api::is_api_request(&head) {
+            return self.api(&mut client, &head, rest).await;
+        }
         let req = match parse_head(&head) {
             Ok(r) => r,
             Err(why) => return respond(&mut client, 400, why).await,
@@ -334,14 +384,23 @@ async fn pipe(mut lease: Lease, mut client: TcpStream, mut upstream: TcpStream) 
 }
 
 async fn respond(client: &mut TcpStream, status: u16, why: &str) -> std::io::Result<()> {
+    respond_with(client, status, "text/plain", why).await
+}
+
+async fn respond_with(client: &mut TcpStream, status: u16, content_type: &str, body: &str) -> std::io::Result<()> {
     let reason = match status {
+        200 => "OK",
         400 => "Bad Request",
         403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        411 => "Length Required",
+        413 => "Payload Too Large",
         _ => "Bad Gateway",
     };
     let msg = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{why}",
-        why.len()
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     );
     client.write_all(msg.as_bytes()).await?;
     client.shutdown().await

@@ -27,7 +27,10 @@ pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
     RunResult, SPRITES_GATEWAY_LIST, ToDaemon,
 };
-pub use gateway::{GatewayRequest, GatewayResponse, GatewaySandbox, GatewayState};
+pub use gateway::{
+    AuthScheme, GatewayConnection, GatewayConnectionInfo, GatewayRequest, GatewayResponse, GatewaySandbox,
+    GatewayState, Secret,
+};
 pub use grade::{ChangedFile, FileStatus, Grader, PrGrade, glob_match};
 pub use harness::{
     EventSink, Feedback, FollowUp, Harness, RaiseGrade, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict,
