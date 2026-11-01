@@ -207,3 +207,47 @@ async fn a_run_on_a_reachable_target_is_still_requeued_when_another_is_down() {
     assert_eq!(done.requeued, vec![lost.0.clone()], "the cloud answered and has no sandbox for it");
     assert!(done.unknown.is_empty());
 }
+
+#[tokio::test]
+async fn a_review_counts_on_its_own_target_and_the_worker_no_longer_on_its() {
+    // Cloud holds one place. Its worker is released before the review, so the review fits where the worker ran; had
+    // the worker's place been kept until the run ended, the review would find cloud full and wait.
+    let config = CONFIG.replace("name = \"trailhead\"\n", "name = \"trailhead\"\nmax_sandboxes = 3\n");
+    let targets = TARGETS.replace("priority = 2\n", "priority = 2\nmax_sandboxes = 1\n");
+    let config = FactoryConfig::parse_table(&format!("{config}{targets}"), "TRAIL", None).unwrap();
+    let tracker = FakeTracker::new("factory");
+    let codehost = FakeCodeHost::new();
+    let mut placed = Vec::new();
+    let mut harnesses = Vec::new();
+    for spec in config.target_specs() {
+        let harness = Arc::new(ScriptedHarness::new());
+        let heads = codehost.clone();
+        let daemon = Arc::new(
+            LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone())
+                .with_heads(move |repo, branch| heads.head(repo, branch)),
+        );
+        placed.push(Placed {
+            target: Target::default().listed(&spec),
+            compute: Arc::new(FakeCompute::new()),
+            daemon,
+            provider: Arc::new(FakeProvider::new(1)),
+        });
+        harnesses.push(harness);
+    }
+    let factory = Factory::with_targets(config, placed, Arc::new(tracker.clone()), Host::new(None));
+    let (local, cloud) = (&harnesses[0], &harnesses[1]);
+    // A parked task keeps local's one place, so the next worker goes to the cloud.
+    let parked = tracker.add_task("TRAIL", "Parked", "");
+    local.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    factory.tick().await.unwrap();
+    assert_eq!(tracker.task(&parked).status, Status::NeedsInput);
+    let next = tracker.add_task("TRAIL", "Next", "");
+    cloud.push(Role::Worker, Script::new(changes()));
+    cloud.push(Role::Reviewer, Script::new(approve()));
+    factory.tick().await.unwrap();
+    let ran_on = |h: &Arc<ScriptedHarness>, role| {
+        h.contexts().into_iter().filter(|c| c.role == role).map(|c| c.task.key.0).collect::<Vec<_>>()
+    };
+    assert_eq!(ran_on(cloud, Role::Worker), vec![next.0.clone()]);
+    assert_eq!(ran_on(cloud, Role::Reviewer), vec![next.0.clone()], "the worker's place was given up for the review");
+}

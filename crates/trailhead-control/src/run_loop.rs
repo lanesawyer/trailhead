@@ -183,14 +183,9 @@ impl Factory {
             };
             let key = task.key.clone();
             let factory = self.clone();
-            let (target, place) = (target.clone(), self.hold(&key, target));
-            let handle = running.spawn(
-                async move {
-                    let _place = place;
-                    factory.run_task_on(&task, &target).await
-                }
-                .in_current_span(),
-            );
+            let (target, place) = (target.clone(), self.hold(&key, Role::Worker, target));
+            let handle =
+                running.spawn(async move { factory.run_task_on(&task, &target, place).await }.in_current_span());
             keys.insert(handle.id(), key);
         }
         Ok(())
@@ -375,8 +370,8 @@ impl Factory {
                 tracing::info!("{}", messages::no_target_has_room(&task.key.0));
                 continue;
             };
-            let _place = self.hold(&task.key, target);
-            let outcome = self.run_task_on(&task, target).await?;
+            let place = self.hold(&task.key, Role::Worker, target);
+            let outcome = self.run_task_on(&task, target, place).await?;
             out.push((task, outcome));
         }
         Ok(out)

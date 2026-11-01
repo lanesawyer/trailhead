@@ -10,6 +10,7 @@ use trailhead_factory::{
     RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind, run_name,
 };
 
+use crate::place::Placement;
 use crate::reconcile::merged_by;
 use crate::timing::{backoff, unix_now, until};
 use crate::{CANCEL_GRACE, Factory, Outcome, Placed};
@@ -21,12 +22,13 @@ impl Factory {
         let Some(target) = self.place(&mut survey) else {
             return Err(Error::Unavailable(messages::no_target_has_room(&task.key.0)));
         };
-        let _place = self.hold(&task.key, target);
-        self.run_task_on(task, target).await
+        let place = self.hold(&task.key, Role::Worker, target);
+        self.run_task_on(task, target, place).await
     }
 
-    /// One attempt at a task on `target`: a fresh sandbox, the worker, then the reviewer.
-    pub(crate) async fn run_task_on(&self, task: &Task, target: &Placed) -> Result<Outcome> {
+    /// One attempt at a task on `target`: a fresh sandbox, the worker, then the reviewer. `place` is the worker's
+    /// place on `target`, given up when its sandbox is released, before the review is placed on its own.
+    pub(crate) async fn run_task_on(&self, task: &Task, target: &Placed, place: Placement) -> Result<Outcome> {
         // A rework on a PR that has merged or closed since the task was queued would push to a branch nobody wants
         // (TRAIL-304). The sub-agent isn't made yet, so the factory's own identity holds the task while it's settled.
         if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) {
@@ -147,7 +149,7 @@ impl Factory {
         let prior = task.run.spend.unwrap_or_default();
         let run =
             self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
-        self.conclude(task, &sub, &sandbox, &name, attempt, run).await
+        self.conclude(task, &sub, &sandbox, &name, attempt, run, Some(place)).await
     }
 
     /// Follows a worker run that was going when the last control plane stopped (TRAIL-137): the daemon replays the
@@ -170,10 +172,11 @@ impl Factory {
             .map_or(Duration::ZERO, |t| Duration::from_secs(u64::try_from(unix_now() - t).unwrap_or(0)));
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, ?elapsed, "reattaching to a run in flight");
         let run = self.run_metered(sandbox, Begin::Attach(name.clone()), &task.key, &profile, prior, elapsed).await;
-        self.conclude(task, &sub, sandbox, &name, attempt, run).await
+        self.conclude(task, &sub, sandbox, &name, attempt, run, None).await
     }
 
     /// What a worker's run came to: the report acted on, or the failure given back to the queue.
+    #[allow(clippy::too_many_arguments)]
     async fn conclude(
         &self,
         task: &Task,
@@ -182,6 +185,7 @@ impl Factory {
         name: &str,
         attempt: u32,
         run: Result<Run>,
+        place: Option<Placement>,
     ) -> Result<Outcome> {
         let infra_prior = task.run.infra_failures;
         let run = match run {
@@ -262,6 +266,8 @@ impl Factory {
                 if let Err(e) = self.release_worker(sandbox).await {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile will");
                 }
+                // The worker is done with its target; the review takes its own place.
+                drop(place);
                 if let Err(e) = self.tracker.revoke_sub_agent(name).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
                 }

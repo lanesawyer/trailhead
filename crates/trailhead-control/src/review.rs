@@ -18,6 +18,8 @@ impl Factory {
             tracing::info!(task = %task.key.0, "{}", messages::no_target_has_room(&task.key.0));
             return Ok(Outcome::AwaitingReview { pr: pr.clone() });
         };
+        // Held from here, so a survey taken while this review has no sandbox yet still counts it.
+        let _place = self.hold(&task.key, Role::Reviewer, target);
         let shown = self.tracker.show(&task.key).await?;
         // Graded before anything starts, so a code host that fails here leaves the review to be tried again whole.
         let grade = self.grade_pr(&shown, pr, None).await?;

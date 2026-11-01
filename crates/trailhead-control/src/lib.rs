@@ -138,9 +138,9 @@ pub struct Factory {
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
     /// starting together never take the same sandbox.
     pool_pick: tokio::sync::Mutex<()>,
-    /// The target each task being started has been placed on, until its run ends. Its sandbox may not exist yet, so
+    /// The target each worker or review being started has been placed on, until it ends. Its sandbox may not exist yet, so
     /// without this a target's limit would be passed by runs starting together.
-    placed: Arc<Mutex<HashMap<TaskKey, String>>>,
+    placed: Arc<Mutex<HashMap<(TaskKey, trailhead_factory::Role), String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

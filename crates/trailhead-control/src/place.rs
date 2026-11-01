@@ -16,11 +16,11 @@ pub(crate) struct Survey {
     pub(crate) down: HashSet<String>,
 }
 
-/// A task's place on a target, held from the moment it is chosen until its run ends, because its sandbox isn't there
-/// to count until the run gets that far.
+/// A worker's or review's place on a target, held from the moment it is chosen until it ends, because its sandbox
+/// isn't there to count until the run gets that far.
 pub(crate) struct Placement {
-    placed: Arc<Mutex<HashMap<TaskKey, String>>>,
-    key: TaskKey,
+    placed: Arc<Mutex<HashMap<(TaskKey, Role), String>>>,
+    key: (TaskKey, Role),
 }
 
 impl Drop for Placement {
@@ -106,7 +106,10 @@ impl Factory {
                 Ok(held) => {
                     let counted = held
                         .iter()
-                        .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !placed.contains_key(&TaskKey(t.clone()))))
+                        .filter(|s| {
+                            let task = s.labels.get(label::TASK).cloned().unwrap_or_default();
+                            !placed.contains_key(&(TaskKey(task), role_of(s)))
+                        })
                         .count();
                     loads.insert(p.target.name.clone(), counted);
                 }
@@ -133,10 +136,11 @@ impl Factory {
         Some(chosen)
     }
 
-    /// Holds `task`'s place on `target` until the guard drops.
-    pub(crate) fn hold(&self, task: &TaskKey, target: &Placed) -> Placement {
-        self.placed.lock().unwrap().insert(task.clone(), target.target.name.clone());
-        Placement { placed: self.placed.clone(), key: task.clone() }
+    /// Holds `task`'s place as `role` on `target` until the guard drops.
+    pub(crate) fn hold(&self, task: &TaskKey, role: Role, target: &Placed) -> Placement {
+        let key = (task.clone(), role);
+        self.placed.lock().unwrap().insert(key.clone(), target.target.name.clone());
+        Placement { placed: self.placed.clone(), key }
     }
 
     /// The target's name as a pooled sandbox's name carries it: nothing for the default target, whose sandboxes keep
@@ -144,5 +148,14 @@ impl Factory {
     pub(crate) fn pool_prefix(&self, p: &Placed) -> String {
         let repo = self.config.repo.name.to_ascii_lowercase();
         if p.target.name == trailhead_factory::DEFAULT_TARGET { repo } else { format!("{repo}-{}", p.target.name) }
+    }
+}
+
+/// The role a sandbox's label gives it; a sandbox with none is taken for a worker's.
+fn role_of(sandbox: &Sandbox) -> Role {
+    if sandbox.labels.get(label::ROLE).map(String::as_str) == Some(Role::Reviewer.as_str()) {
+        Role::Reviewer
+    } else {
+        Role::Worker
     }
 }

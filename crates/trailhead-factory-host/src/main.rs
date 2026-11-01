@@ -413,14 +413,14 @@ fn server_check(server: SocketAddr) -> trailhead_control::ServerCheck {
     })
 }
 
-/// A factory file's targets, each with its `Compute` and launch facts, in placement order. `read_only` is as for
-/// [`compute`].
 /// A target's `Compute` and launch facts.
 pub(crate) type Built = (Arc<dyn Compute>, Target);
 
 /// A target with its `Compute` and the daemon launched in its sandboxes.
 type Wired = (Target, Arc<dyn Compute>, Arc<dyn Daemon>);
 
+/// A factory file's targets, each with its `Compute` and launch facts, in placement order. `read_only` is as for
+/// [`compute`].
 fn computes(
     config: &FactoryConfig,
     opts: &Opts,
