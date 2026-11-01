@@ -214,6 +214,13 @@ impl Factory {
                 return Ok(Outcome::Parked { reason });
             }
             Run::Report(report, spend) => (report, spend),
+            Run::Lost(e, spend) => {
+                // What the run cost before it failed counts toward the budget across retries (TRAIL-447).
+                if let Err(re) = sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await {
+                    tracing::warn!(task = %task.key.0, error = %re, "couldn't record the failed run's spend");
+                }
+                return Err(self.infra_failed(task, sub, name, e, infra_prior, None).await);
+            }
         };
         // An agent that ends the run itself shows the infrastructure working again, unless what it ended with is its
         // API trouble.
@@ -517,12 +524,13 @@ impl Factory {
                 if grace_fired && let Err(e) = self.cut_off(sandbox).await {
                     tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't cut off a stalled sandbox");
                 }
-                Err(Error::Other(reason))
+                Ok(Run::Lost(Error::Other(reason), total))
             }
             (Err(Error::Cancelled), Some(reason)) => Ok(Run::Breach(reason, total)),
             // The step finished before the cancel landed; its result stands.
             (Ok(report), _) => Ok(Run::Report(report, total)),
-            (Err(e), _) => Err(e),
+            (Err(Error::Cancelled), None) => Err(Error::Cancelled),
+            (Err(e), _) => Ok(Run::Lost(e, total)),
         }
     }
 }
@@ -542,6 +550,8 @@ pub(crate) enum Begin {
 pub(crate) enum Run {
     Report(RunReport, Usd),
     Breach(String, Usd),
+    /// The run failed on the infrastructure (a stall, a lost daemon), having cost this much by then.
+    Lost(Error, Usd),
 }
 
 /// A worker run's name: the attempt's, with the count of retries that gave their attempt back.

@@ -450,6 +450,7 @@ async fn a_silent_agent_is_failed_as_a_stall_without_using_an_attempt() {
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Open, "not parked");
     assert_eq!(task.run.attempt, Some(0));
+    assert!(task.run.spend.is_some_and(|s| s > Usd::ZERO), "the stalled run's spend is recorded: {:?}", task.run.spend);
     assert_eq!(task.run.infra_failures, Some(1));
 }
 
