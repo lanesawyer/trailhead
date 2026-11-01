@@ -49,7 +49,8 @@ impl Factory {
             if (&mut shutdown).now_or_never().is_some() {
                 break;
             }
-            if draining && running.is_empty() {
+            // A run that just errored left `dirty` set: its daemon may still have it, so reconcile before concluding.
+            if draining && running.is_empty() && !dirty {
                 tracing::info!("drained; no runs left");
                 break;
             }
