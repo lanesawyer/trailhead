@@ -97,7 +97,10 @@ impl CodeHost for NoCodeHost {
     async fn diff(&self, _: &PrRef) -> Result<String> {
         Err(Error::Forbidden(self.0.clone()))
     }
-    async fn comment(&self, _: &PrRef, _: &str) -> Result<()> {
+    async fn comment(&self, _: &PrRef, _: &str) -> Result<u64> {
+        Err(Error::Forbidden(self.0.clone()))
+    }
+    async fn edit_comment(&self, _: &PrRef, _: u64, _: &str) -> Result<()> {
         Err(Error::Forbidden(self.0.clone()))
     }
     async fn merge(&self, _: &PrRef, _: &str) -> Result<MergeOutcome> {

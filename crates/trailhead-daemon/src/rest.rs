@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
-    Credential, Error, HumanContext, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict, VerdictKind,
+    Credential, Error, FollowUpTask, HumanContext, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict,
+    VerdictKind,
 };
 
 /// The metadata key the factory's run fields live under (`trailhead_control::METADATA_KEY`).
@@ -250,6 +251,10 @@ impl Tracker for RestTracker {
         let task = created.get("task").unwrap_or(&created);
         let key = task["key"].as_str().ok_or_else(|| Error::Other(format!("created task without a key: {created}")))?;
         Ok(TaskKey(key.to_string()))
+    }
+
+    async fn follow_ups(&self, _: &TaskKey) -> Result<Vec<FollowUpTask>> {
+        Err(unsupported("list a task's follow-ups"))
     }
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {

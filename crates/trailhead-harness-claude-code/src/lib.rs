@@ -263,6 +263,8 @@ pub fn schema(role: Role) -> Value {
 
 /// The most the human-context section of a prompt may take, in bytes.
 const HUMAN_CONTEXT_CAP: usize = 6000;
+/// How many open follow-ups a reviewer is shown.
+const FOLLOW_UPS_CAP: usize = 40;
 
 /// The most the answers may take of the human-context section, so notes keep the rest.
 const ANSWERS_CAP: usize = 4000;
@@ -270,6 +272,28 @@ const ANSWERS_CAP: usize = 4000;
 /// The answers and the task's decisions and notes, for after the description. Empty when there are none. Past
 /// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
 /// is always kept.
+/// The follow-ups earlier reviews of the task filed, so a reviewer doesn't file a reworded copy of one, or leave one
+/// open that the change has since fixed.
+fn follow_ups_section(task: &trailhead_factory::TaskSpec) -> String {
+    let follow_ups = &task.context.follow_ups;
+    if follow_ups.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\nFollow-ups that earlier reviews of this task already filed and that are still open. Don't put any of \
+         these in `follow_ups` again, even reworded. If the change under review fixes one, say so in your summary \
+         by its key:",
+    );
+    for f in follow_ups.iter().take(FOLLOW_UPS_CAP) {
+        out.push_str(&format!("\n- {}: {}", f.key.0, clip(&f.title, 200)));
+        let detail = f.description.lines().next().unwrap_or("").trim();
+        if !detail.is_empty() {
+            out.push_str(&format!(" ({})", clip(detail, 300)));
+        }
+    }
+    out
+}
+
 fn human_section(task: &trailhead_factory::TaskSpec) -> String {
     let ctx = &task.context;
     let mut budget = HUMAN_CONTEXT_CAP;
@@ -393,7 +417,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
     let mut p = match ctx.role {
         Role::Reviewer => format!(
             "You are reviewing a pull request for task {key}: {title}.\n\n\
-             Task:\n{desc}{human}\n\n\
+             Task:\n{desc}{human}{follow_ups}\n\n\
              The change under review:\n```diff\n{diff}\n```{checks}\n\n\
              Check it against the task and the repo's conventions (AGENTS.md). Read code in the checkout as needed, \
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
@@ -406,6 +430,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
             title = task.title,
             desc = task.description,
             human = human_section(task),
+            follow_ups = follow_ups_section(task),
             diff = ctx.diff.as_deref().map_or("(no diff)".into(), |d| capped_diff(
                 d,
                 DIFF_CAP,

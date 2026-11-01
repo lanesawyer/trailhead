@@ -226,8 +226,21 @@ async fn comment(
     Path((_, _, n)): Path<(String, String, u64)>,
     Json(b): Json<Value>,
 ) -> Response {
-    g.lock().unwrap().comments.push((n, b["body"].as_str().unwrap().into()));
-    (StatusCode::CREATED, Json(json!({}))).into_response()
+    let mut g = g.lock().unwrap();
+    g.comments.push((n, b["body"].as_str().unwrap().into()));
+    (StatusCode::CREATED, Json(json!({ "id": g.comments.len() }))).into_response()
+}
+
+async fn edit_comment(
+    State(g): State<Shared>,
+    Path((_, _, id)): Path<(String, String, u64)>,
+    Json(b): Json<Value>,
+) -> Response {
+    match g.lock().unwrap().comments.get_mut(id as usize - 1) {
+        Some(c) => c.1 = b["body"].as_str().unwrap().into(),
+        None => return not_found(),
+    }
+    Json(json!({})).into_response()
 }
 
 async fn get_pull(State(g): State<Shared>, Path((_, _, n)): Path<(String, String, u64)>) -> Response {
@@ -351,6 +364,7 @@ async fn serve() -> (Shared, String) {
         .route("/repos/{o}/{r}/pulls/{n}/update-branch", put(update_branch))
         .route("/repos/{o}/{r}/compare/{spec}", get(compare))
         .route("/repos/{o}/{r}/issues/{n}/comments", post(comment))
+        .route("/repos/{o}/{r}/issues/comments/{id}", axum::routing::patch(edit_comment))
         .with_state(git.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -498,8 +512,11 @@ async fn prs_open_once_and_take_reviews_and_merges() {
         previous_path: None,
     };
     assert_eq!(files, [a, old]);
-    gh.comment(&pr, "Looks right.").await.unwrap();
+    let id = gh.comment(&pr, "Looks right.").await.unwrap();
     assert_eq!(git.lock().unwrap().comments, [(1, "Looks right.".to_string())]);
+    gh.edit_comment(&pr, id, "Looks right, still.").await.unwrap();
+    assert_eq!(git.lock().unwrap().comments, [(1, "Looks right, still.".to_string())]);
+    assert!(matches!(gh.edit_comment(&pr, 99, "gone").await, Err(trailhead_factory::Error::NotFound(_))));
 
     // The merge is pinned to the head the caller saw: an older one is refused as moved, and nothing merges.
     let tip = head(&git, "factory/trail-1");

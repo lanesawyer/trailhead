@@ -369,9 +369,15 @@ impl CodeHost for GitHub {
         Ok(out)
     }
 
-    async fn comment(&self, pr: &PrRef, body: &str) -> Result<()> {
+    async fn comment(&self, pr: &PrRef, body: &str) -> Result<u64> {
         let path = format!("{}/issues/{}/comments", Self::repo_path(&pr.repo), pr.number);
-        self.call(self.request(Method::POST, &path).json(&json!({ "body": body }))).await.map(drop)
+        let made = self.call(self.request(Method::POST, &path).json(&json!({ "body": body }))).await?;
+        made["id"].as_u64().ok_or_else(|| Error::Other("github answered a comment without an id".into()))
+    }
+
+    async fn edit_comment(&self, pr: &PrRef, id: u64, body: &str) -> Result<()> {
+        let path = format!("{}/issues/comments/{id}", Self::repo_path(&pr.repo));
+        self.call(self.request(Method::PATCH, &path).json(&json!({ "body": body }))).await.map(drop)
     }
 
     async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome> {

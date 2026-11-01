@@ -180,6 +180,9 @@ pub enum ComputeConfig {
         network: Option<String>,
         /// The OCI runtime, such as `runsc` (gVisor).
         runtime: Option<String>,
+        /// Each sandbox's memory limit, in MiB, swap included. Without one, sandboxes share the engine's memory and
+        /// concurrent builds can OOM-kill each other. Also sets `CARGO_BUILD_JOBS` to one per GiB of it.
+        memory_mib: Option<u64>,
     },
 }
 
@@ -794,7 +797,12 @@ require = ["checks", "agent_review", "human"]
         let docker = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nruntime = \"runsc\"\n");
         assert_eq!(
             parse(&docker).unwrap().compute,
-            ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()) }
+            ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()), memory_mib: None }
+        );
+        let sized = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 1536\n");
+        assert_eq!(
+            parse(&sized).unwrap().compute,
+            ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: Some(1536) }
         );
         let bad = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nimgae = \"x\"\n");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
