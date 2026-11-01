@@ -44,6 +44,7 @@ impl HostConfig {
         if config.max_sandboxes == Some(0) {
             return Err(Error::Config("[factory] max_sandboxes must be at least 1".into()));
         }
+        crate::config::validate_pause_at(&config.pause_at, "[factory]")?;
         Ok(config)
     }
 
@@ -122,6 +123,9 @@ mod tests {
     fn typos_are_rejected() {
         assert!(HostConfig::from_user_config("[factory]\nmax_sandbox = 3\n").is_err());
         assert!(HostConfig::from_user_config("[factory]\nmax_sandboxes = 0\n").is_err());
+        assert!(HostConfig::from_user_config("[factory]\npause_at = { five_hours = 80 }\n").is_err());
+        assert!(HostConfig::from_user_config("[factory]\npause_at = { five_hour = 101 }\n").is_err());
+        assert!(HostConfig::from_user_config("[factory]\npause_at = { five_hour = 100 }\n").is_ok());
     }
 
     #[test]

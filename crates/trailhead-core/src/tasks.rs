@@ -207,6 +207,11 @@ async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
             Ok(())
         };
     }
+    if task.status == Status::Approved && to == Status::Done {
+        return Err(Error::Forbidden(
+            "this task is approved; only a human or a delegated reviewer can mark it done".into(),
+        ));
+    }
     if gated { Err(Error::ReviewRequired) } else { Ok(()) }
 }
 

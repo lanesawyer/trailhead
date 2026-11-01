@@ -204,6 +204,25 @@ pub struct UsageConfig {
     pub pause_at: BTreeMap<String, u32>,
 }
 
+/// The usage windows `pause_at` can name.
+pub const USAGE_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
+
+/// Reject `pause_at` windows that aren't known (a typo would never trigger) and percentages over 100.
+pub(crate) fn validate_pause_at(pause_at: &BTreeMap<String, u32>, table: &str) -> Result<()> {
+    for (window, percent) in pause_at {
+        if !USAGE_WINDOWS.contains(&window.as_str()) {
+            return Err(Error::Config(format!(
+                "{table} pause_at has unknown window `{window}`; the windows are {}",
+                USAGE_WINDOWS.join(" and ")
+            )));
+        }
+        if *percent > 100 {
+            return Err(Error::Config(format!("{table} pause_at for {window} is {percent}; it's a percent, 0 to 100")));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RepoConfig {
@@ -513,6 +532,7 @@ impl FactoryConfig {
     }
 
     fn validate(&self) -> Result<()> {
+        validate_pause_at(&self.usage.pause_at, "[factory.usage]")?;
         for (want, role) in [(&self.repo.worker, Role::Worker), (&self.repo.reviewer, Role::Reviewer)] {
             match self.profiles.get(want) {
                 None => return Err(Error::Config(format!("no profile named {want}"))),
@@ -742,6 +762,15 @@ require = ["checks", "agent_review", "human"]
         assert_eq!(c.worker().budget.usd(), Usd::dollars(5.0));
         let names: Vec<_> = c.required_checks().into_iter().map(|c| c.name).collect();
         assert_eq!(names, ["fmt", "lint", "test"]);
+    }
+
+    #[test]
+    fn repo_pause_at_rejects_unknown_windows_and_percents_over_100() {
+        for bad in ["five_hours = 80", "five_hour = 101"] {
+            let err = parse(&format!("{SAMPLE}\n[usage]\npause_at = {{ {bad} }}\n")).unwrap_err();
+            assert!(err.to_string().contains("pause_at"), "{err}");
+        }
+        assert!(parse(&format!("{SAMPLE}\n[usage]\npause_at = {{ seven_day = 100 }}\n")).is_ok());
     }
 
     #[test]
