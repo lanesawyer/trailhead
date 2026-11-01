@@ -192,7 +192,9 @@ impl Factory {
                 if let Err(e) = self.compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't checkpoint the breached sandbox");
                 }
-                if let Err(e) = self.cut_off(sandbox).await {
+                let cut = self.cut_off(sandbox).await;
+                let suspended = cut.is_ok();
+                if let Err(e) = &cut {
                     // Reconcile leaves a parked task's sandbox alone, so a sandbox that couldn't be cut off is
                     // destroyed: that loses the suspended state, which beats leaving it reachable.
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
@@ -201,7 +203,8 @@ impl Factory {
                         tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile will");
                     }
                 }
-                let asked = sub.ask(&task.key, &messages::budget_breach_question(&reason, &sandbox.name)).await;
+                let question = messages::budget_breach_question(&reason, &sandbox.name, suspended);
+                let asked = sub.ask(&task.key, &question).await;
                 recorded?;
                 asked?;
                 return Ok(Outcome::Parked { reason });

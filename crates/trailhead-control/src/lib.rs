@@ -104,6 +104,8 @@ pub struct Factory {
     updating: Mutex<HashMap<TaskKey, String>>,
     /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
     host: Arc<Host>,
+    /// The ready tasks last reported as starved by parked sandboxes, so a poll says it once per change.
+    starved: Mutex<Option<Vec<TaskKey>>>,
     /// Tasks already reported as ungraded, so a poll doesn't say it again.
     ungraded: Mutex<HashSet<TaskKey>>,
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
@@ -173,6 +175,7 @@ impl Factory {
             listed: Mutex::default(),
             updating: Mutex::default(),
             host,
+            starved: Mutex::default(),
             ungraded: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
         }

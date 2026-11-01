@@ -573,6 +573,24 @@ async fn a_host_made_update_keeps_lanes_approval_of_a_grade_three_task() {
 }
 
 #[tokio::test]
+async fn a_push_after_lanes_approval_of_a_grade_three_task_unapproves_it() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
+    r.tracker.approve_as_human(&key);
+    // CI is still running, so the first pass only marks the approval as Lane's, given on this head.
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+    r.codehost.push_to(&pr);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "Lane's approval was of the old head");
+    assert_eq!(task.run.merge.unwrap().human_head, None);
+}
+
+#[tokio::test]
 async fn merge_mode_on_without_reviewer_rights_falls_back_to_saying_what_it_would_do() {
     let (r, queue) = queued_rig_with(&merging());
     r.tracker.set_delegated("factory", false);
@@ -611,4 +629,20 @@ async fn a_deleted_status_comment_is_posted_again() {
     assert_ne!(new, id, "the new comment's id is recorded");
     assert_eq!(said(&r).last().unwrap(), "Grade 3: waiting for a person.");
     assert_eq!(said(&r)[0], "Grade 3: waiting for CI and a person.", "the deleted one is untouched");
+}
+
+#[tokio::test]
+async fn the_pr_says_the_task_is_parked_when_the_request_for_changes_hits_the_round_limit() {
+    let (r, queue) = queued_rig_rounds(SHADOW, Some(1));
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 4);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let said = said(&r);
+    assert!(
+        said.iter().any(|m| m.ends_with("The latest review asked for changes; the task is parked for Lane.")),
+        "{said:?}"
+    );
+    assert!(!said.iter().any(|m| m.contains("a rework is running")), "{said:?}");
 }

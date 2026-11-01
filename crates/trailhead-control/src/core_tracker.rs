@@ -12,8 +12,8 @@ use trailhead_core::{
 };
 use trailhead_factory::messages;
 use trailhead_factory::{
-    Answered, Credential, Error, HumanContext, ModelId, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker,
-    Verdict, VerdictKind, is_factory_agent,
+    Answered, Credential, Error, FollowUpTask, HumanContext, ModelId, Result, RunUpdate, Status, Task, TaskKey,
+    TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 use uuid::Uuid;
 
@@ -434,6 +434,18 @@ impl Tracker for CoreTracker {
         };
         let task = self.store.create_task(&ctx, new).await.map_err(map_err)?;
         Ok(TaskKey(task.key))
+    }
+
+    async fn follow_ups(&self, task: &TaskKey) -> Result<Vec<FollowUpTask>> {
+        let ctx = self.ctx().await?;
+        let project = task.0.rsplit_once('-').map_or(task.0.as_str(), |(p, _)| p);
+        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let tasks = self.list_all(&ctx, filter).await?;
+        Ok(tasks
+            .into_iter()
+            .filter(|t| is_raised_by(&t.description, task))
+            .map(|t| FollowUpTask { key: TaskKey(t.key), title: t.title, description: t.description })
+            .collect())
     }
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {

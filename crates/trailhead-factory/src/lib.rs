@@ -13,6 +13,7 @@ pub mod host;
 pub mod messages;
 pub mod money;
 pub mod provider;
+pub mod registry;
 pub mod target;
 pub mod tracker;
 
@@ -42,10 +43,11 @@ pub use harness::{
 pub use host::HostConfig;
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
+pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
 pub use target::Target;
 pub use tracker::{
-    Answered, ChangesRequested, Credential, HumanContext, MergeDecision, Merged, MergedBy, RunUpdate, Status, Task,
-    TaskKey, TaskNote, Tracker, is_factory_agent,
+    Answered, ChangesRequested, Credential, FollowUpTask, HumanContext, MergeDecision, Merged, MergedBy, RunUpdate,
+    Status, Task, TaskKey, TaskNote, Tracker, is_factory_agent, is_raised_by, raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]

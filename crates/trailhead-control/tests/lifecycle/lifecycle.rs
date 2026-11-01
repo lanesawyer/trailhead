@@ -91,7 +91,7 @@ async fn budget_breach_parks_the_task_and_suspends_its_sandbox() {
     assert_eq!(task.status, Status::NeedsInput);
     assert_eq!(task.holder.as_deref(), Some("factory/trail-1-a1"));
     assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
-    assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "question"));
+    assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "question" && c.body.contains("is suspended")));
 
     let sandbox = r.compute.get("trailhead-w1").expect("sandbox kept for resuming");
     assert!(!sandbox.labels.contains_key(label::ROLE), "connector access cut");
@@ -133,6 +133,9 @@ async fn a_breached_sandbox_that_cant_be_relabelled_is_still_cut_off_and_destroy
         let task = r.tracker.task(&key);
         assert_eq!(task.status, Status::NeedsInput);
         assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
+        let question = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap().body;
+        assert!(question.contains("fresh checkout"), "{question}");
+        assert!(!question.contains("is suspended"), "{question}");
         if destroy_fails {
             assert_eq!(
                 r.compute.egress("trailhead-w1"),
@@ -599,6 +602,29 @@ async fn a_sandbox_that_wont_release_after_the_agent_ends_the_run_doesnt_give_th
         assert_eq!(task.run.attempt, Some(1), "the agent ended the run, so the attempt counts");
         assert_eq!(task.run.infra_failures.unwrap_or(0), 0);
         assert_eq!(task.run.retries.unwrap_or(0), 0);
+    }
+}
+
+#[tokio::test]
+async fn a_worker_that_cant_record_its_failed_check_still_counts_the_attempt_and_releases_the_task() {
+    for op in ["note", "release"] {
+        let r = rig();
+        let key = r.tracker.add_task("TRAIL", "Lint me", "");
+        r.daemon.fail_check("lint", "warning: unused variable");
+        r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+        // Only the worker's own call fails; the control plane's go through.
+        r.tracker.fail_next("factory/trail-1-a1", op, 1);
+
+        let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+        let Ok(Outcome::Failed { reason }) = ran else { panic!("{op}: {ran:?}") };
+        assert!(reason.contains("finishing the run failed"), "{op}: {reason}");
+        let task = r.tracker.task(&key);
+        assert_eq!(task.status, Status::Open, "{op}: the daemon released the task");
+        assert_eq!(task.holder, None);
+        assert_eq!(task.run.attempt, Some(1), "{op}: the agent ended the run, so the attempt counts");
+        assert_eq!(task.run.infra_failures.unwrap_or(0), 0);
+        assert_eq!(task.run.retries.unwrap_or(0), 0);
+        assert!(r.codehost.prs().is_empty());
     }
 }
 

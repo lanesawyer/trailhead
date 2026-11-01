@@ -14,16 +14,17 @@ impl Factory {
     /// review. In shadow mode it says what it would do on the PR whenever that changes. In `on` mode it also squash-merges
     /// an approved task whose grade auto-merges, or that Lane approved, and closes it as done.
     pub async fn evaluate_gates(&self, key: &TaskKey) -> Result<()> {
-        self.evaluate(key, true).await
+        self.evaluate(key, true, false).await
     }
 
     /// Like `evaluate_gates`, but only says on the PR where things stand: it neither approves nor merges. For when the
     /// task must stay as it is, a review owed (TRAIL-263) or changes just asked for (TRAIL-388).
-    pub(crate) async fn say_gates(&self, key: &TaskKey) -> Result<()> {
-        self.evaluate(key, false).await
+    /// `parks` is for changes asked for that park the task for Lane instead of starting a rework.
+    pub(crate) async fn say_gates(&self, key: &TaskKey, parks: bool) -> Result<()> {
+        self.evaluate(key, false, parks).await
     }
 
-    async fn evaluate(&self, key: &TaskKey, act: bool) -> Result<()> {
+    async fn evaluate(&self, key: &TaskKey, act: bool, parks: bool) -> Result<()> {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let task = self.tracker.show(key).await?;
         let Some(pr) = &task.run.pr else { return Ok(()) };
@@ -141,7 +142,10 @@ impl Factory {
         let merging = verdict.merge && decision.problem.is_none();
         // Only the shadow merger's "would merge" says whether the PR is behind: it is the one that never acts on it.
         let behind = decision.would_merge && codehost.behind(pr).await?;
-        let changes = self.rework_state(&task, &head).await?;
+        let changes = match self.rework_state(&task, &head).await? {
+            Some(Rework::Running) if parks => Some(Rework::Parked),
+            changes => changes,
+        };
         decision.message =
             decision_message(&grade, &decision, Wording { auto_merge: gate.auto_merge, merging, behind, changes });
         // A refusal stands for the head it was given on, until a merge succeeds or the head moves.

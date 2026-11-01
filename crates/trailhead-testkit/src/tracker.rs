@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Answered, Credential, Error, HumanContext, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, Verdict,
-    VerdictKind, is_factory_agent,
+    Answered, Credential, Error, FollowUpTask, HumanContext, Result, RunUpdate, Status, Task, TaskKey, TaskNote,
+    Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +32,8 @@ struct State {
     context_fails: bool,
     /// Agents refused when they approve, as ones a human hasn't listed as the project's reviewers would be.
     undelegated: HashSet<String>,
+    /// Agent and operation (`note`, `report`, `release`) to how many more of that agent's calls fail.
+    failing: HashMap<(String, &'static str), usize>,
 }
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
@@ -92,6 +94,22 @@ impl FakeTracker {
     /// Makes reading a task's human context fail (or heals it), as a tracker outage would.
     pub fn fail_human_context(&self, fails: bool) {
         self.state.lock().unwrap().context_fails = fails;
+    }
+
+    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report` or `release`) fail, as a tracker outage would.
+    pub fn fail_next(&self, agent: &str, op: &'static str, times: usize) {
+        self.state.lock().unwrap().failing.insert((agent.to_string(), op), times);
+    }
+
+    fn inject(&self, op: &'static str) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        match s.failing.get_mut(&(self.agent.clone(), op)) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                Err(Error::Other(format!("injected {op} failure")))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// A human grades a task, which is what makes it the factory's work.
@@ -347,6 +365,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn release(&self, task: &TaskKey) -> Result<()> {
+        self.inject("release")?;
         self.write(task, |t, me| {
             held_by_me(t, me)?;
             t.holder = None;
@@ -356,6 +375,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()> {
+        self.inject("report")?;
         self.write(task, |t, me| {
             if t.holder.as_deref().is_some_and(|h| h != me) {
                 return Err(Error::Forbidden(format!("{} is held by another agent", t.key.0)));
@@ -449,6 +469,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn note(&self, task: &TaskKey, body: &str) -> Result<()> {
+        self.inject("note")?;
         self.check_live()?;
         self.comment(task, "note", body);
         Ok(())
@@ -485,6 +506,20 @@ impl Tracker for FakeTracker {
             self.state.lock().unwrap().priorities.insert(key.clone(), p);
         }
         Ok(key)
+    }
+
+    async fn follow_ups(&self, task: &TaskKey) -> Result<Vec<FollowUpTask>> {
+        self.check_live()?;
+        let s = self.state.lock().unwrap();
+        Ok(s.tasks
+            .values()
+            .filter(|t| {
+                !matches!(t.status, Status::Done | Status::Cancelled)
+                    && t.key != *task
+                    && is_raised_by(&t.description, task)
+            })
+            .map(|t| FollowUpTask { key: t.key.clone(), title: t.title.clone(), description: t.description.clone() })
+            .collect())
     }
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {

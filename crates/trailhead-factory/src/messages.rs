@@ -6,7 +6,9 @@
 //! The functions are grouped by who reads the text: the PR, the task's notes, the questions a parked task waits on,
 //! and the feedback a rework's worker is given.
 
-use crate::{CheckResult, GateKind, MergeDecision, MergedBy, ModelId, PrGrade, TaskKey, Usd, Verdict, VerdictKind};
+use crate::{
+    CheckResult, GateKind, MergeDecision, MergedBy, ModelId, PrGrade, TaskKey, Usd, Verdict, VerdictKind, raised_by,
+};
 
 // ---- On the PR ----
 
@@ -16,6 +18,8 @@ use crate::{CheckResult, GateKind, MergeDecision, MergedBy, ModelId, PrGrade, Ta
 pub enum Rework {
     /// The review of the PR's current head asked for changes.
     Running,
+    /// Like `Running`, but the round limit is reached: the task is parked for Lane and no rework follows.
+    Parked,
     /// The PR's head has moved since the review that asked for changes, and no review has judged the new head.
     Pushed,
 }
@@ -38,6 +42,7 @@ pub fn decision_message(grade: &PrGrade, d: &MergeDecision, said: Wording) -> St
     let message = gate_message(grade, d, &said);
     match said.changes {
         Some(Rework::Running) => format!("{message} The latest review asked for changes; a rework is running."),
+        Some(Rework::Parked) => format!("{message} The latest review asked for changes; the task is parked for Lane."),
         Some(Rework::Pushed) => format!("{message} The latest review asked for changes; the rework has pushed."),
         None => message,
     }
@@ -265,7 +270,7 @@ pub fn follow_up_description(written: &str, source: &TaskKey, pr_url: Option<&st
     if !description.is_empty() {
         description.push_str("\n\n");
     }
-    description.push_str(&format!("Raised by the reviewer of {}", source.0));
+    description.push_str(&raised_by(source));
     if let Some(url) = pr_url {
         description.push_str(&format!(" ({url})"));
     }
@@ -276,8 +281,15 @@ pub fn follow_up_description(written: &str, source: &TaskKey, pr_url: Option<&st
 // ---- Questions that park a task ----
 
 /// Why a task is parked when a run overran its budget. `reason` is one of the `*_breach` texts.
-pub fn budget_breach_question(reason: &str, sandbox: &str) -> String {
-    format!("Budget breached: {reason}. The sandbox {sandbox} is suspended; raise the budget or cancel.")
+/// `suspended` is whether the sandbox was kept; otherwise it could not be cut off and was destroyed.
+pub fn budget_breach_question(reason: &str, sandbox: &str, suspended: bool) -> String {
+    if suspended {
+        format!("Budget breached: {reason}. The sandbox {sandbox} is suspended; raise the budget or cancel.")
+    } else {
+        format!(
+            "Budget breached: {reason}. The sandbox {sandbox} couldn't be suspended and was destroyed, so the next run starts from a fresh checkout; raise the budget or cancel."
+        )
+    }
 }
 
 /// A run that spent more than its budget.
@@ -472,6 +484,10 @@ mod tests {
             decision_message(&grade(1), &d, Wording { behind: true, ..said() }),
             "Grade 1: checks, CI and review passed; would bring the branch up to date, then merge (shadow)."
         );
+        assert!(
+            decision_message(&grade(1), &d, Wording { changes: Some(Rework::Parked), ..said() })
+                .ends_with("the task is parked for Lane.")
+        );
         let waiting = MergeDecision {
             passed: vec![],
             waiting: vec![GateKind::Ci, GateKind::Human],
@@ -528,6 +544,7 @@ mod tests {
 
     #[test]
     fn questions_say_what_to_raise() {
+        assert!(budget_breach_question("r", "sb", false).contains("destroyed"));
         assert!(infra_question(3, 3, "boom").contains("`max_infra_failures`"));
         assert!(review_infra_question(3, 3, "boom").contains("while reviewing the PR"));
         assert!(conflict_rework_limit_question(2, 2).contains("`max_conflict_reworks`"));
@@ -535,7 +552,7 @@ mod tests {
         assert!(review_rework_limit_question(2, 2, "r", "b").contains("`max_review_rounds`"));
         assert!(gave_up_question(3, 3, "why", "last").contains("`max_attempts`"));
         assert_eq!(
-            budget_breach_question("took more than 5 steps", "trail-1-a1"),
+            budget_breach_question("took more than 5 steps", "trail-1-a1", true),
             "Budget breached: took more than 5 steps. The sandbox trail-1-a1 is suspended; raise the budget or cancel."
         );
     }
