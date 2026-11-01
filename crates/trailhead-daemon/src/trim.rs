@@ -1,6 +1,6 @@
 //! Keeps a cargo `target` directory under a size cap, so a warm checkpoint of the sandbox stays small.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -117,6 +117,7 @@ fn units_of(profile: &Path) -> io::Result<Vec<Unit>> {
     }
     let deps = profile.join("deps");
     if deps.is_dir() {
+        let links = outside_links(profile)?;
         for entry in fs::read_dir(&deps)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -128,9 +129,39 @@ fn units_of(profile: &Path) -> io::Result<Vec<Unit>> {
             let unit = units.entry(key).or_insert_with(fresh);
             unit.size += dir_size(&entry.path())?;
             unit.paths.push(entry.path());
+            // Deleting a `deps/` file frees nothing while another hard link survives, so those go with it.
+            let meta = entry.metadata()?;
+            if meta.is_file()
+                && meta.nlink() > 1
+                && let Some(paths) = links.get(&(meta.dev(), meta.ino()))
+            {
+                unit.paths.extend(paths.iter().cloned());
+            }
         }
     }
     Ok(units.into_values().collect())
+}
+
+/// The hard-linked files directly in the profile root and in `examples/`, by identity: where cargo links the artifacts
+/// of `deps/`.
+fn outside_links(profile: &Path) -> io::Result<HashMap<(u64, u64), Vec<PathBuf>>> {
+    let mut out: HashMap<(u64, u64), Vec<PathBuf>> = HashMap::new();
+    for dir in [profile.to_path_buf(), profile.join("examples")] {
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let meta = entry.metadata()?;
+            if meta.nlink() > 1 {
+                out.entry((meta.dev(), meta.ino())).or_default().push(entry.path());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `invoked.timestamp` when cargo wrote one, else the newest file in the fingerprint directory.
@@ -269,6 +300,26 @@ mod tests {
         trim_target(dir.path(), 800).unwrap();
         assert!(!p.join("deps/libstray-9.rlib").exists());
         assert_eq!(present(&p, "used-1"), [true; 3]);
+    }
+
+    #[test]
+    fn hard_links_outside_deps_go_with_the_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("debug");
+        unit(&p, "old-1", 300, 300);
+        unit(&p, "new-2", 300, 100);
+        fs::hard_link(p.join("deps/libold-1.rlib"), p.join("libold-1.rlib")).unwrap();
+        fs::create_dir_all(p.join("examples")).unwrap();
+        fs::hard_link(p.join("deps/libold-1.rlib"), p.join("examples/libold-1.rlib")).unwrap();
+        fs::hard_link(p.join("deps/libnew-2.rlib"), p.join("libnew-2.rlib")).unwrap();
+        let before = dir_size(dir.path()).unwrap();
+        // Dropping old-1 frees its 630 bytes only if its links go too.
+        let t = trim_target(dir.path(), before - 630).unwrap();
+        assert_eq!(t.after, before - 630);
+        assert!(!p.join("libold-1.rlib").exists());
+        assert!(!p.join("examples/libold-1.rlib").exists());
+        assert!(p.join("libnew-2.rlib").exists());
+        assert_eq!(present(&p, "new-2"), [true; 3]);
     }
 
     #[test]
