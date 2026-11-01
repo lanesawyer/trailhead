@@ -78,7 +78,7 @@ run = """
 set -e
 # -j 4: full parallelism has OOM-killed a dev machine.
 cargo install --locked -j 4 --path crates/trailhead
-cargo install --locked -j 4 --path crates/trailhead-factory-host
+cargo install --locked -j 4 --features docker --path crates/trailhead-factory-host
 cargo install --locked -j 4 --path crates/trailhead-daemon
 # Anchored so this script's own command line doesn't match.
 if pgrep -f "^$HOME/.cargo/bin/trailhead-factory run" >/dev/null; then

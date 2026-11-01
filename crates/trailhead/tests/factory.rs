@@ -37,5 +37,8 @@ fn factory_not_installed_says_how_to_install_it() {
     let out = common::output(th.command().env("PATH", "/nonexistent").args(["factory", "run"]));
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("trailhead-factory") && err.contains("cargo install --locked --path"), "{err}");
+    assert!(
+        err.contains("trailhead-factory") && err.contains("cargo install --locked --features docker --path"),
+        "{err}"
+    );
 }
