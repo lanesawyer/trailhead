@@ -139,25 +139,42 @@ impl CodeHost for NoCodeHost {
     }
 }
 
-/// GitHub through the Sprite's GitHub connector, found in the gateway's list.
-async fn codehost(author: Identity, gateway_list: &str) -> Arc<dyn CodeHost> {
-    let found = async {
-        let list: serde_json::Value = reqwest::get(gateway_list).await?.error_for_status()?.json().await?;
-        let conns = list["connections"].as_array().cloned().unwrap_or_default();
-        Ok::<_, reqwest::Error>(
-            conns
-                .into_iter()
-                .find(|c| c["provider"] == "github")
-                .and_then(|c| c["gateway_base_url"].as_str().map(str::to_string)),
-        )
-    };
-    match found.await {
-        Ok(Some(url)) => {
-            tracing::info!(%url, "using the GitHub connector");
-            Arc::new(GitHub::gateway(url).with_author(author))
-        }
-        Ok(None) => Arc::new(NoCodeHost("no GitHub connector is granted to this sandbox".into())),
+/// The base URL of the `provider` connection in the gateway's list, if this sandbox is granted one.
+fn connection_url(conns: &[serde_json::Value], provider: &str) -> Option<String> {
+    conns.iter().find(|c| c["provider"] == provider).and_then(|c| c["gateway_base_url"].as_str().map(str::to_string))
+}
+
+/// What this sandbox's connections are, found in the gateway's list: GitHub's API through the Sprite's GitHub
+/// connector or the Docker gateway's, and, on Docker, git over smart-HTTP for cloning private repos.
+async fn connections(gateway_list: &str) -> std::result::Result<Vec<serde_json::Value>, reqwest::Error> {
+    let list: serde_json::Value = reqwest::get(gateway_list).await?.error_for_status()?.json().await?;
+    Ok(list["connections"].as_array().cloned().unwrap_or_default())
+}
+
+fn codehost(
+    author: Identity,
+    conns: &std::result::Result<Vec<serde_json::Value>, reqwest::Error>,
+) -> Arc<dyn CodeHost> {
+    match conns {
+        Ok(conns) => match connection_url(conns, "github") {
+            Some(url) => {
+                tracing::info!(%url, "using the GitHub connector");
+                Arc::new(GitHub::gateway(url).with_author(author))
+            }
+            None => Arc::new(NoCodeHost("no GitHub connector is granted to this sandbox".into())),
+        },
         Err(e) => Arc::new(NoCodeHost(format!("couldn't list this sandbox's connectors: {e}"))),
+    }
+}
+
+/// Clones through the gateway's git connection when there is one, else anonymously from github.com.
+fn workspace(workdir: PathBuf, conns: &std::result::Result<Vec<serde_json::Value>, reqwest::Error>) -> GitWorkspace {
+    match conns.as_ref().ok().and_then(|c| connection_url(c, "git")) {
+        Some(url) => {
+            tracing::info!(%url, "cloning through the git connection");
+            GitWorkspace::with_remote(workdir, url)
+        }
+        None => GitWorkspace::new(workdir),
     }
 }
 
@@ -251,13 +268,14 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     let connect: Connect = Arc::new(move |cred| {
         Box::pin(async move { Ok(Arc::new(RestTracker::new(format!("http://{api}"), cred)) as Arc<dyn Tracker>) })
     });
+    let conns = connections(&secrets.gateway_list).await;
     let harness = (trailhead_daemon::plugins::harnesses().get(&secrets.harness).map_err(|e| e.to_string())?.build)(
         &HarnessSetup { executable: args.claude, secrets: secrets.harness_secrets.clone() },
     );
     let runner = Runner {
         harness,
-        codehost: codehost(Identity { name: args.author_name, email: args.author_email }, &secrets.gateway_list).await,
-        workspace: Arc::new(GitWorkspace::new(args.workdir)),
+        codehost: codehost(Identity { name: args.author_name, email: args.author_email }, &conns),
+        workspace: Arc::new(workspace(args.workdir, &conns)),
         connect,
         renew_every: RENEW_EVERY,
         heartbeat_every: HEARTBEAT_EVERY,

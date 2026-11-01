@@ -24,8 +24,8 @@ pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };
 pub use config::{
-    Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_GITHUB_ID, GATEWAY_HOST, GATEWAY_PORT,
-    Gate, GateKind, GradesConfig, MergeConfig, MergeMode, Profile, Role, UsageConfig,
+    Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_GIT_ID, GATEWAY_GITHUB_ID,
+    GATEWAY_HOST, GATEWAY_PORT, Gate, GateKind, GradesConfig, MergeConfig, MergeMode, Profile, Role, UsageConfig,
 };
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,

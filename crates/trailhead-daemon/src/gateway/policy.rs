@@ -56,6 +56,14 @@ fn rules(provider: &str, labels: &Labels) -> Vec<Rule> {
                 ]
             }
         }
+        // Smart-HTTP clone and fetch of the sandbox's own repo, read only: the ref advertisement and upload-pack.
+        // The writer token behind it could push, so receive-pack has no rule (and `api` refuses its discovery).
+        "git" => {
+            let Some(repo) = labels.get(label::REPO).filter(|r| valid_repo(r)) else {
+                return Vec::new();
+            };
+            vec![rule(READ, format!("{repo}.git/info/refs")), rule(&["POST"], format!("{repo}.git/git-upload-pack"))]
+        }
         // The Messages API (with token counting and batches) and the model list. Files, skills and admin paths
         // aren't here.
         "anthropic" => vec![rule(&["POST", "GET", "HEAD"], "/v1/messages"), rule(&["GET", "HEAD"], "/v1/models")],

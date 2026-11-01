@@ -125,6 +125,9 @@ impl Gateway {
         if let Err(why) = policy::check(provider, &labels, &req.method, &upstream_path) {
             return respond_with(client, 403, "text/plain", &why).await;
         }
+        if provider == "git" && query.is_some_and(|q| q != "service=git-upload-pack") {
+            return respond_with(client, 403, "text/plain", "only git-upload-pack is allowed").await;
+        }
         if header("transfer-encoding").is_some() {
             return respond_with(client, 411, "text/plain", "send a Content-Length instead of chunking").await;
         }
@@ -201,6 +204,12 @@ impl Gateway {
             }
             AuthScheme::XApiKey => {
                 HeaderValue::from_str(conn.credential.expose()).map(|v| (HeaderName::from_static("x-api-key"), v))
+            }
+            AuthScheme::GitBasic => {
+                use base64::Engine;
+                let pair = format!("x-access-token:{}", conn.credential.expose());
+                let encoded = base64::engine::general_purpose::STANDARD.encode(pair);
+                HeaderValue::from_str(&format!("Basic {encoded}")).map(|v| (AUTHORIZATION, v))
             }
         };
         let Ok((name, mut value)) = credential else {
@@ -478,6 +487,51 @@ mod tests {
         assert!(lower.contains("x-api-key: sk-real"), "{head}");
         assert!(lower.contains("anthropic-version: 2023-06-01"), "{head}");
         assert!(!lower.contains("authorization") && !lower.contains("placeholder"), "{head}");
+    }
+
+    #[tokio::test]
+    async fn clones_read_only_through_the_git_connection() {
+        let (url, mut seen) = upstream().await;
+        for labels in [worker(), reviewer()] {
+            let (gw, addr) = gateway(labels).await;
+            connect(&gw, "git", "github", &url, AuthScheme::GitBasic, "ghp_real").await;
+            let go = |method: &'static str, path: &'static str, body: &'static str| async move {
+                call(addr, method, &format!("/v1/gateway/git/github{path}"), &[], body).await
+            };
+
+            assert_eq!(go("GET", "/lane/trail.git/info/refs?service=git-upload-pack", "").await.0, 201);
+            let (head, _) = seen.recv().await.unwrap();
+            assert!(head.starts_with("GET /lane/trail.git/info/refs?service=git-upload-pack HTTP/1.1"), "{head}");
+            // base64("x-access-token:ghp_real")
+            assert!(head.contains("authorization: Basic eC1hY2Nlc3MtdG9rZW46Z2hwX3JlYWw="), "{head}");
+
+            assert_eq!(go("POST", "/lane/trail.git/git-upload-pack", "0000").await.0, 201);
+            assert_eq!(seen.recv().await.unwrap().1, b"0000");
+
+            for (m, p) in [
+                ("GET", "/lane/trail.git/info/refs?service=git-receive-pack"),
+                ("GET", "/lane/trail.git/info/refs?service=git-upload-pack&x=1"),
+                ("POST", "/lane/trail.git/git-receive-pack"),
+                ("GET", "/lane/other.git/info/refs?service=git-upload-pack"),
+                ("POST", "/lane/other.git/git-upload-pack"),
+                ("GET", "/lane/trail-evil.git/info/refs?service=git-upload-pack"),
+                ("PUT", "/lane/trail.git/git-upload-pack"),
+            ] {
+                assert_eq!(go(m, p, "").await.0, 403, "{m} {p}");
+            }
+        }
+        // A chunked POST (git's default past its post buffer) is refused rather than guessed at.
+        let (gw, addr) = gateway(worker()).await;
+        connect(&gw, "git", "github", &url, AuthScheme::GitBasic, "t").await;
+        let (status, _) = call(
+            addr,
+            "POST",
+            "/v1/gateway/git/github/lane/trail.git/git-upload-pack",
+            &["Transfer-Encoding: chunked"],
+            "",
+        )
+        .await;
+        assert_eq!(status, 411);
     }
 
     #[tokio::test]

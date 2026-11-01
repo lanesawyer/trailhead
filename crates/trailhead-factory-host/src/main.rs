@@ -455,21 +455,31 @@ fn compute(
     }
 }
 
-/// What the Docker gateway may forward to. GitHub only: subscription mode reaches the model API with the sandbox's
-/// own token, through the gateway's proxy (TRAIL-487).
+/// What the Docker gateway may forward to: GitHub's REST API for publishing, and `github.com` itself for cloning
+/// and fetching private repos, both with the writer token. Subscription mode reaches the model API with the
+/// sandbox's own token, through the gateway's proxy (TRAIL-487).
 #[cfg(feature = "docker")]
 fn gateway_connections(github_writer: Option<String>) -> Vec<trailhead_factory::GatewayConnection> {
-    use trailhead_factory::{AuthScheme, GATEWAY_GITHUB_ID, GatewayConnection, Secret};
-    github_writer
-        .map(|token| GatewayConnection {
+    use trailhead_factory::{AuthScheme, GATEWAY_GIT_ID, GATEWAY_GITHUB_ID, GatewayConnection, Secret};
+    let Some(token) = github_writer else {
+        return Vec::new();
+    };
+    vec![
+        GatewayConnection {
             provider: "github".into(),
             id: GATEWAY_GITHUB_ID.into(),
             upstream: trailhead_codehost_github::API_URL.into(),
             auth: AuthScheme::Bearer,
+            credential: Secret::new(token.clone()),
+        },
+        GatewayConnection {
+            provider: "git".into(),
+            id: GATEWAY_GIT_ID.into(),
+            upstream: "https://github.com".into(),
+            auth: AuthScheme::GitBasic,
             credential: Secret::new(token),
-        })
-        .into_iter()
-        .collect()
+        },
+    ]
 }
 
 fn compute_name(config: &ComputeConfig) -> &'static str {
