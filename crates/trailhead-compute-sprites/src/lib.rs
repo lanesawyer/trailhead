@@ -478,14 +478,23 @@ mod tests {
 
     #[tokio::test]
     async fn status_maps_to_error_variants() {
-        for (code, retried) in [(400, false), (408, true), (422, false), (429, true), (502, true)] {
+        type Is = fn(&Error) -> bool;
+        let table: [(u16, Is); 9] = [
+            (400, |e| matches!(e, Error::Rejected(_))),
+            (401, |e| matches!(e, Error::Forbidden(_))),
+            (403, |e| matches!(e, Error::Forbidden(_))),
+            (404, |e| matches!(e, Error::NotFound(_))),
+            (408, |e| matches!(e, Error::Other(_))),
+            (409, |e| matches!(e, Error::Conflict(_))),
+            (422, |e| matches!(e, Error::Rejected(_))),
+            (429, |e| matches!(e, Error::Other(_))),
+            (502, |e| matches!(e, Error::Other(_))),
+        ];
+        for (code, expected) in table {
             let res = Response::from(http::Response::builder().status(code).body("nope\n").unwrap());
             let err = ok(res).await.unwrap_err();
             assert!(err.to_string().contains("nope"), "{code}: {err}");
-            match (retried, &err) {
-                (false, Error::Rejected(_)) | (true, Error::Other(_)) => {}
-                _ => panic!("{code} mapped to {err:?}"),
-            }
+            assert!(expected(&err), "{code} mapped to {err:?}");
         }
     }
 
