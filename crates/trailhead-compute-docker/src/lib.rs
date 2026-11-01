@@ -35,8 +35,8 @@ use bollard::query_parameters::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use trailhead_factory::{
-    CheckpointId, Compute, Egress, Error, GATEWAY_HOST, GatewayConnection, GatewayRequest, Labels, Program, Result,
-    Sandbox, SandboxId, SandboxSpec,
+    CheckpointId, Compute, Egress, Error, GATEWAY_ANTHROPIC_ID, GATEWAY_HOST, GATEWAY_PORT, GatewayConnection,
+    GatewayRequest, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec, Target,
 };
 
 mod gateway;
@@ -62,6 +62,18 @@ pub const DEFAULT_IMAGE: &str = "trailhead-sandbox:latest";
 pub const DEFAULT_NETWORK: &str = "trailhead-gateway-out";
 /// Where the daemon lives in [`DEFAULT_IMAGE`], whose user is `trailhead`.
 pub const HOME: &str = "/home/trailhead";
+
+/// A Docker sandbox's launch facts: connectors and model calls both go through the gateway container.
+pub fn target() -> Target {
+    let gateway = format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway");
+    Target {
+        dir: format!("{HOME}/.trailhead"),
+        workdir: format!("{HOME}/work"),
+        gateway_list: format!("{gateway}/list"),
+        model_endpoint: Some(format!("{gateway}/anthropic/{GATEWAY_ANTHROPIC_ID}")),
+        hold_socket: None,
+    }
+}
 
 const SUPERVISE: &str = include_str!("supervise.sh");
 const SUPERVISE_PATH: &str = "/opt/trailhead/supervise";
@@ -97,6 +109,9 @@ pub struct DockerConfig {
     pub connections: Vec<GatewayConnection>,
     /// The least free space the Docker engine's disk may have when a run is about to start.
     pub min_free_bytes: u64,
+    /// Each sandbox's memory limit, swap included. None leaves sandboxes unlimited, so concurrent builds can take each
+    /// other's memory and the engine's OOM killer picks among them. Also sets `CARGO_BUILD_JOBS` ([`build_jobs`]).
+    pub memory_bytes: Option<u64>,
 }
 
 impl DockerConfig {
@@ -110,6 +125,7 @@ impl DockerConfig {
             daemon,
             connections: Vec::new(),
             min_free_bytes: DEFAULT_MIN_FREE_BYTES,
+            memory_bytes: None,
         }
     }
 }
@@ -165,13 +181,6 @@ impl DockerCompute {
         compute
     }
 
-    /// The recent output of a program started with `start`.
-    pub async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
-        let log = format!("$HOME/.trailhead/programs/{}/log", shell_quote(program));
-        let (_, out) = self.exec(&id.0, None, &format!("tail -n 3000 {log}")).await?;
-        Ok(out)
-    }
-
     fn state_path(&self, name: &str) -> PathBuf {
         self.config.state_dir.join(format!("{name}.json"))
     }
@@ -210,6 +219,15 @@ impl DockerCompute {
         }
     }
 
+    /// The environment of a new container: the proxy's, and cargo's parallelism when the memory is limited.
+    fn sandbox_env(&self) -> Vec<String> {
+        let mut env = gateway::proxy_env();
+        if let Some(bytes) = self.config.memory_bytes {
+            env.push(format!("CARGO_BUILD_JOBS={}", build_jobs(bytes)));
+        }
+        env
+    }
+
     /// Creates and starts the sandbox's container from `image`. A fresh image gets the supervisor first; a checkpoint
     /// already has it.
     async fn run_container(&self, name: &str, image: &str, fresh: bool) -> Result<()> {
@@ -217,7 +235,7 @@ impl DockerCompute {
             image: Some(image.into()),
             cmd: Some(vec![SUPERVISE_PATH.into()]),
             entrypoint: Some(vec![]),
-            env: Some(gateway::proxy_env()),
+            env: Some(self.sandbox_env()),
             labels: Some(HashMap::from([(MARKER.to_string(), name.to_string())])),
             host_config: Some(HostConfig {
                 init: Some(true),
@@ -228,6 +246,10 @@ impl DockerCompute {
                     maximum_retry_count: None,
                 }),
                 runtime: self.config.runtime.clone(),
+                // Memory equal to memory+swap means no swap, so a build over the limit is OOM-killed at once instead
+                // of thrashing.
+                memory: self.config.memory_bytes.map(|b| b as i64),
+                memory_swap: self.config.memory_bytes.map(|b| b as i64),
                 ..Default::default()
             }),
             ..Default::default()
@@ -532,6 +554,12 @@ impl Compute for DockerCompute {
         self.attach(&id.0, &state).await
     }
 
+    async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
+        let log = format!("$HOME/.trailhead/programs/{}/log", shell_quote(program));
+        let (_, out) = self.exec(&id.0, None, &format!("tail -n 3000 {log}")).await?;
+        Ok(out)
+    }
+
     /// Fails with [`Error::Unavailable`], for the control plane to wait out, when the sandbox's disk (the Docker
     /// engine's) has less free than [`disk_needed`] for its filesystem, so a run doesn't start only to fail partway
     /// through a build or a checkpoint.
@@ -623,6 +651,12 @@ fn image_changes(sandbox: &str, note: &str, config: Option<&ContainerConfig>) ->
 /// [`IMPORT_COPIES`] copies of it, for as many sandboxes as may checkpoint together, and never less than `floor`.
 fn disk_needed(floor: u64, size: u64) -> u64 {
     floor.max(size.saturating_mul(IMPORT_COPIES * CONCURRENT_CHECKPOINTS))
+}
+
+/// How many parallel build jobs fit in `memory_bytes`: one per GiB (a rust-lld link or rustc codegen unit can take that
+/// much), at least one.
+fn build_jobs(memory_bytes: u64) -> u64 {
+    (memory_bytes / (1 << 30)).max(1)
 }
 
 /// Whether an error message says the disk is full.
@@ -824,6 +858,14 @@ mod tests {
     }
 
     #[test]
+    fn build_parallelism_follows_the_memory_limit() {
+        let gib = 1u64 << 30;
+        assert_eq!(build_jobs(2 * gib), 2);
+        assert_eq!(build_jobs(3 * gib / 2), 1);
+        assert_eq!(build_jobs(gib / 4), 1, "never zero");
+    }
+
+    #[test]
     fn a_full_disk_is_recognised() {
         assert!(full_disk("docker: write /var/lib/containerd/x: No space left on device"));
         assert!(!full_disk("docker: connection reset"));
@@ -871,5 +913,22 @@ mod tests {
         };
         compute.write_state("trail-1-a1", &state).await.unwrap();
         assert_eq!(compute.read_state("trail-1-a1").await.unwrap(), state);
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    #[test]
+    fn a_docker_target_uses_the_gateway_for_models_and_connectors() {
+        let t = target();
+        assert_eq!((t.dir.as_str(), t.workdir.as_str()), ("/home/trailhead/.trailhead", "/home/trailhead/work"));
+        assert_eq!(t.gateway_list, "http://trailhead-gateway:8080/v1/gateway/list");
+        assert_eq!(
+            t.model_endpoint("https://m.example"),
+            "http://trailhead-gateway:8080/v1/gateway/anthropic/anthropic"
+        );
+        assert_eq!(t.hold_socket, None);
     }
 }

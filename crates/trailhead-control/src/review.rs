@@ -18,7 +18,14 @@ impl Factory {
             self.record_grade(&shown, grade).await?;
         }
         // Read before anything is created, so a tracker that fails here holds no sub-agent or sandbox.
-        let context = self.tracker.human_context(&task.key).await?;
+        let mut context = self.tracker.human_context(&task.key).await?;
+        // The follow-ups earlier rounds filed, so this one doesn't file a reworded copy. Not worth holding up the review.
+        match self.tracker.follow_ups(&task.key).await {
+            Ok(follow_ups) => context.follow_ups = follow_ups,
+            Err(e) => {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't list the task's follow-ups; reviewing without them")
+            }
+        }
         // The commit the review is of, so a verdict isn't counted for a head pushed after it.
         let head = match &self.codehost {
             Some(codehost) => Some(codehost.head(pr).await?),

@@ -139,6 +139,9 @@ pub struct MergeDecision {
     /// Why the code host last refused to merge this head, which is said once per reason and tried again each pass.
     #[serde(default)]
     pub refused: Option<String>,
+    /// The id of the merger's status comment on the PR, which is edited as the decision changes.
+    #[serde(default)]
+    pub comment: Option<u64>,
     /// What was last said on the PR about this, so it's said once per change.
     pub message: String,
 }
@@ -272,12 +275,37 @@ pub struct TaskNote {
 pub struct HumanContext {
     pub answers: Vec<Answered>,
     pub notes: Vec<TaskNote>,
+    /// For a reviewer: the unfinished follow-ups that earlier reviews of the task filed.
+    #[serde(default)]
+    pub follow_ups: Vec<FollowUpTask>,
 }
 
 impl HumanContext {
     pub fn is_empty(&self) -> bool {
-        self.answers.is_empty() && self.notes.is_empty()
+        self.answers.is_empty() && self.notes.is_empty() && self.follow_ups.is_empty()
     }
+}
+
+/// A follow-up task an earlier review of a task filed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUpTask {
+    pub key: TaskKey,
+    pub title: String,
+    pub description: String,
+}
+
+/// The line a follow-up's description carries to say which task's review raised it.
+pub fn raised_by(source: &TaskKey) -> String {
+    format!("Raised by the reviewer of {}", source.0)
+}
+
+/// Whether a task description says the review of `source` raised it. The key must end there (at the PR link's
+/// parenthesis or the full stop), so TRAIL-1 doesn't match TRAIL-12.
+pub fn is_raised_by(description: &str, source: &TaskKey) -> bool {
+    let marker = raised_by(source);
+    description.match_indices(&marker).any(|(i, _)| {
+        description[i + marker.len()..].chars().next().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '-'))
+    })
 }
 
 /// Whether an author is the factory itself or one of its run sub-agents.
@@ -306,18 +334,18 @@ pub trait Tracker: Send + Sync {
     /// A handle acting as one of this agent's sub-agents, by the part after the parent's name.
     fn sub_agent(&self, name: &str) -> Arc<dyn Tracker>;
 
-    /// Ready tasks in `project`; with `queue`, only the queue task's subtasks, which is how work is handed to the
-    /// factory.
-    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>>;
+    /// Ready tasks in `project`; with `queue`, only the direct subtasks of any of those tasks, best first across all of
+    /// them and each once, which is how work is handed to the factory.
+    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>>;
     async fn show(&self, task: &TaskKey) -> Result<Task>;
     /// The task's resolved questions with their answers, and its `decision` and `note` comments, oldest first,
     /// without the factory's own bookkeeping.
     async fn human_context(&self, task: &TaskKey) -> Result<HumanContext>;
     /// The task's latest `review` comment, whoever left it, if it has one.
     async fn last_review(&self, task: &TaskKey) -> Result<Option<Verdict>>;
-    /// Open, in-progress, parked or in-review tasks that carry factory metadata, limited to the queue's subtasks when
-    /// there is one, so repos sharing a project through different queues never see each other's runs.
-    async fn in_flight(&self, project: &str, queue: Option<&TaskKey>) -> Result<Vec<Task>>;
+    /// Open, in-progress, parked or in-review tasks that carry factory metadata, limited to the queues' subtasks when
+    /// there are any, so repos sharing a project through different queues never see each other's runs.
+    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>>;
 
     async fn claim(&self, task: &TaskKey) -> Result<()>;
     async fn renew(&self, task: &TaskKey) -> Result<()>;
@@ -346,6 +374,9 @@ pub trait Tracker: Send + Sync {
         description: &str,
         priority: Option<i64>,
     ) -> Result<TaskKey>;
+    /// The unfinished follow-ups that reviews of `task` filed: tasks in its project whose description says
+    /// ([`is_raised_by`]) that its review raised them.
+    async fn follow_ups(&self, task: &TaskKey) -> Result<Vec<FollowUpTask>>;
     /// An unfinished task in `project` with this title (ignoring case and surrounding space), if there is one.
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>>;
 
@@ -354,4 +385,18 @@ pub trait Tracker: Send + Sync {
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential>;
     /// Revokes a sub-agent and its tokens. Revoking one that's already gone is fine.
     async fn revoke_sub_agent(&self, name: &str) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raised_by_matches_whole_keys_only() {
+        let one = TaskKey("TRAIL-1".into());
+        assert!(is_raised_by("Why.\n\nRaised by the reviewer of TRAIL-1 (https://x/pull/1).", &one));
+        assert!(is_raised_by("Raised by the reviewer of TRAIL-1.", &one));
+        assert!(!is_raised_by("Raised by the reviewer of TRAIL-12.", &one));
+        assert!(!is_raised_by("Nothing to see.", &one));
+    }
 }

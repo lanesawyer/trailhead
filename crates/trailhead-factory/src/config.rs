@@ -180,6 +180,9 @@ pub enum ComputeConfig {
         network: Option<String>,
         /// The OCI runtime, such as `runsc` (gVisor).
         runtime: Option<String>,
+        /// Each sandbox's memory limit, in MiB, swap included. Without one, sandboxes share the engine's memory and
+        /// concurrent builds can OOM-kill each other. Also sets `CARGO_BUILD_JOBS` to one per GiB of it.
+        memory_mib: Option<u64>,
     },
 }
 
@@ -193,27 +196,6 @@ pub const GATEWAY_ANTHROPIC_ID: &str = "anthropic";
 pub const GATEWAY_GITHUB_ID: &str = "github";
 /// The git connection's id in the Docker gateway's list: smart-HTTP to `https://github.com`, read only.
 pub const GATEWAY_GIT_ID: &str = "github";
-
-impl ComputeConfig {
-    /// The connector list URL for a daemon's secrets. `None` on Sprites, which have Fly's.
-    pub fn gateway_list(&self) -> Option<String> {
-        match self {
-            ComputeConfig::Sprites => None,
-            ComputeConfig::Docker { .. } => Some(format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway/list")),
-        }
-    }
-
-    /// Where runs send model calls: the Docker gateway's Anthropic connection, else `configured`
-    /// (`--model-endpoint`).
-    pub fn model_endpoint(&self, configured: &str) -> String {
-        match self {
-            ComputeConfig::Sprites => configured.into(),
-            ComputeConfig::Docker { .. } => {
-                format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway/anthropic/{GATEWAY_ANTHROPIC_ID}")
-            }
-        }
-    }
-}
 
 /// Subscription usage windows (`docs/factory/budgets.md`): at or past `pause_at[window]` percent, no new runs
 /// start until that window resets, leaving room for whatever else shares the subscription.
@@ -238,8 +220,10 @@ pub struct RepoConfig {
     /// The profile tasks run on unless they name another.
     pub worker: String,
     pub reviewer: String,
-    /// A task whose subtasks are the factory's work. Without one, every ready task in the project is.
-    pub queue: Option<String>,
+    /// Tasks whose direct subtasks are the factory's work: one key or a list of them. Without any, every ready task in
+    /// the project is.
+    #[serde(deserialize_with = "string_or_list")]
+    pub queue: Vec<String>,
     /// Attempts a task gets before it's parked for a human instead of retried.
     pub max_attempts: u32,
     /// Infrastructure failures in a row (sandbox, daemon or API trouble, not the task) at which a task is parked for a
@@ -262,13 +246,27 @@ impl Default for RepoConfig {
             max_sandboxes: default_max_sandboxes(),
             worker: default_worker(),
             reviewer: default_reviewer(),
-            queue: None,
+            queue: Vec::new(),
             max_attempts: default_max_attempts(),
             max_infra_failures: default_max_infra_failures(),
             max_review_rounds: default_max_review_rounds(),
             max_conflict_reworks: default_max_conflict_reworks(),
         }
     }
+}
+
+/// A key as a string, or a list of them.
+fn string_or_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Keys {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Keys::deserialize(d)? {
+        Keys::One(s) => vec![s],
+        Keys::Many(v) => v,
+    })
 }
 
 fn default_base_branch() -> String {
@@ -672,6 +670,13 @@ mod tests {
     }
 
     #[test]
+    fn queue_is_a_key_or_a_list_of_them() {
+        let with = |q: &str| parse(&SAMPLE.replace("[repo]\n", &format!("[repo]\n{q}\n"))).unwrap().repo.queue;
+        assert!(parse(SAMPLE).unwrap().repo.queue.is_empty());
+        assert_eq!(with("queue = \"TRAIL-102\""), ["TRAIL-102"]);
+        assert_eq!(with("queue = [\"TRAIL-102\", \"TRAIL-167\"]"), ["TRAIL-102", "TRAIL-167"]);
+    }
+    #[test]
     fn grades_default_to_the_documented_rules_and_parse_from_the_file() {
         let base = SAMPLE;
         let config = parse(base).unwrap();
@@ -760,18 +765,6 @@ require = ["checks", "agent_review", "human"]
     }
 
     #[test]
-    fn docker_compute_uses_the_gateway_for_models_and_connectors() {
-        let docker = ComputeConfig::Docker { image: None, network: None, runtime: None };
-        assert_eq!(ComputeConfig::Sprites.gateway_list(), None);
-        assert_eq!(ComputeConfig::Sprites.model_endpoint("https://m.example"), "https://m.example");
-        assert_eq!(docker.gateway_list().unwrap(), "http://trailhead-gateway:8080/v1/gateway/list");
-        assert_eq!(
-            docker.model_endpoint("https://m.example"),
-            "http://trailhead-gateway:8080/v1/gateway/anthropic/anthropic"
-        );
-    }
-
-    #[test]
     fn gates_default_to_the_table_and_merge_mode_to_off() {
         let mut c =
             parse(&SAMPLE.replace("[gates.1]\nrequire = [\"checks\", \"agent_review\", \"human\"]", "")).unwrap();
@@ -806,7 +799,12 @@ require = ["checks", "agent_review", "human"]
         let docker = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nruntime = \"runsc\"\n");
         assert_eq!(
             parse(&docker).unwrap().compute,
-            ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()) }
+            ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()), memory_mib: None }
+        );
+        let sized = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 1536\n");
+        assert_eq!(
+            parse(&sized).unwrap().compute,
+            ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: Some(1536) }
         );
         let bad = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nimgae = \"x\"\n");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));

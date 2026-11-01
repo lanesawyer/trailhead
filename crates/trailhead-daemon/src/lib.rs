@@ -5,6 +5,8 @@
 //! feature adds the iroh transport: [`net::DaemonProtocol`] in the sandbox and [`net::RemoteDaemon`] in the control
 //! plane.
 
+#[cfg(feature = "net")]
+pub mod plugins;
 mod runner;
 pub mod trim;
 mod workspace;

@@ -133,12 +133,7 @@ async fn an_approval_files_its_follow_ups_as_unqueued_tasks_linked_to_the_source
         assert_eq!(t.status, Status::Open);
         assert!(t.description.contains(&key.0) && t.description.contains(&pr.url), "{}", t.description);
         assert!(
-            r.tracker
-                .ready("TRAIL", Some(&TaskKey("TRAIL-102".into())), 10)
-                .await
-                .unwrap()
-                .iter()
-                .all(|q| q.key != t.key)
+            r.tracker.ready("TRAIL", &[TaskKey("TRAIL-102".into())], 10).await.unwrap().iter().all(|q| q.key != t.key)
         );
     }
     let comment = r.codehost.prs()[0].comments.last().unwrap().clone();
@@ -575,4 +570,22 @@ async fn a_review_backed_off_after_an_infrastructure_failure_is_not_skipped_by_a
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).run.reviewed, Some(1), "the review ran once the backoff was over");
+}
+
+#[tokio::test]
+async fn a_reviewer_is_shown_the_open_follow_ups_earlier_reviews_filed() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Reviewed", "");
+    let other = r.tracker.add_task("TRAIL", "Another task", "");
+    let open = r.tracker.add_task("TRAIL", "Cover the edge", &format!("Raised by the reviewer of {}.", key.0));
+    let done = r.tracker.add_task("TRAIL", "Fixed already", &format!("Raised by the reviewer of {} (u).", key.0));
+    r.tracker.add_task("TRAIL", "Not ours", &format!("Raised by the reviewer of {}.", other.0));
+    r.tracker.set_status(&done, Status::Done);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+
+    let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
+    let shown: Vec<_> = review.task.context.follow_ups.iter().map(|f| f.key.clone()).collect();
+    assert_eq!(shown, [open], "only this task's open follow-ups");
 }

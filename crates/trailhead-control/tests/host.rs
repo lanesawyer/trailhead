@@ -242,8 +242,8 @@ async fn repos_sharing_a_project_through_different_queues_leave_each_others_in_f
     assert!(done.requeued.is_empty() && done.reviewed.is_empty(), "alpha touched beta's task: {done:?}");
     assert_eq!(tracker.task(&task).status, Status::InProgress);
     assert!(
-        tracker.in_flight("TRAIL", Some(&q1)).await.unwrap().is_empty(),
+        tracker.in_flight("TRAIL", std::slice::from_ref(&q1)).await.unwrap().is_empty(),
         "alpha's in-flight set holds only its own queue's tasks"
     );
-    assert_eq!(tracker.in_flight("TRAIL", Some(&q2)).await.unwrap().len(), 1);
+    assert_eq!(tracker.in_flight("TRAIL", std::slice::from_ref(&q2)).await.unwrap().len(), 1);
 }

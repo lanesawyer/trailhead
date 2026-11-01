@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Credential, Endpoint, Error, EventSink, Feedback, ModelId, PrGrade, PrRef, Repo, Result, Role, RunEvent, SandboxId,
-    TaskSpec, Usage, Verdict,
+    Credential, Endpoint, Error, EventSink, Feedback, HarnessSecrets, ModelId, PrGrade, PrRef, Repo, Result, Role,
+    RunEvent, SandboxId, TaskSpec, Usage, Verdict,
 };
 
 /// A named check and the shell command that runs it in the repo (`docs/factory/sandbox.md`).
@@ -146,34 +146,80 @@ pub enum FromDaemon {
 /// key, and the one peer it accepts. The file stays, because a supervised
 /// restart (a Sprite's cold wake) reads it again.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "RawSecrets")]
 pub struct DaemonSecrets {
     /// The daemon's iroh secret key, hex. Derived per sandbox by the control
     /// plane, so it can dial the daemon by id without being told it.
     pub secret_key: String,
     /// The control plane's iroh endpoint id, hex.
     pub control_plane: String,
-    /// Subscription mode (`docs/factory/sandbox.md`): a Claude Code OAuth token from `claude setup-token`, used in
-    /// place of a model connector. The one exception to sandboxes holding no model credential.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_oauth_token: Option<String>,
+    /// The `adapter` the daemon builds its harness from (`HarnessKind`). Secrets files written before this field
+    /// were all Claude Code's.
+    pub harness: String,
+    /// Credentials for that harness, by the harness's own keys. Subscription mode (`docs/factory/sandbox.md`) is
+    /// one: the one exception to sandboxes holding no model credential.
+    #[serde(skip_serializing_if = "HarnessSecrets::is_empty")]
+    pub harness_secrets: HarnessSecrets,
     /// Where the daemon lists its connectors: Fly's gateway on a Sprite, ours under Docker. Defaults to Fly's, so
     /// secrets files written before this field still parse.
-    #[serde(default = "default_gateway_list")]
     pub gateway_list: String,
 }
 
-/// Where a Sprite lists its connectors.
-pub const SPRITES_GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
+/// The wire form of [`DaemonSecrets`], which also reads the files older control planes wrote.
+#[derive(Deserialize)]
+struct RawSecrets {
+    secret_key: String,
+    control_plane: String,
+    #[serde(default = "legacy_harness")]
+    harness: String,
+    #[serde(default)]
+    harness_secrets: HarnessSecrets,
+    /// Before `harness_secrets`, the one harness's token had its own field.
+    #[serde(default)]
+    claude_oauth_token: Option<String>,
+    #[serde(default = "default_gateway_list")]
+    gateway_list: String,
+}
+
+impl From<RawSecrets> for DaemonSecrets {
+    fn from(raw: RawSecrets) -> DaemonSecrets {
+        let mut harness_secrets = raw.harness_secrets;
+        if let Some(token) = raw.claude_oauth_token {
+            harness_secrets.entry(LEGACY_TOKEN_KEY.into()).or_insert(token);
+        }
+        DaemonSecrets {
+            secret_key: raw.secret_key,
+            control_plane: raw.control_plane,
+            harness: raw.harness,
+            harness_secrets,
+            gateway_list: raw.gateway_list,
+        }
+    }
+}
+
+/// Compatibility only: secrets files written before `harness` existed were all Claude Code's, whose token key is
+/// the one its harness reads.
+const LEGACY_HARNESS: &str = "claude-code";
+const LEGACY_TOKEN_KEY: &str = "oauth_token";
+
+fn legacy_harness() -> String {
+    LEGACY_HARNESS.into()
+}
+
+/// Compatibility only: secrets files written before `gateway_list` existed were all Sprites', so they take its list.
+/// New files always carry the compute's own (`Target::gateway_list`).
+const LEGACY_GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
 
 fn default_gateway_list() -> String {
-    SPRITES_GATEWAY_LIST.into()
+    LEGACY_GATEWAY_LIST.into()
 }
 
 impl std::fmt::Debug for DaemonSecrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DaemonSecrets")
             .field("control_plane", &self.control_plane)
-            .field("subscription", &self.claude_oauth_token.is_some())
+            .field("harness", &self.harness)
+            .field("harness_secrets", &self.harness_secrets.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
 }
@@ -206,9 +252,21 @@ mod tests {
     #[test]
     fn secrets_parse_with_and_without_a_gateway_list() {
         let old: DaemonSecrets = serde_json::from_str(r#"{"secret_key":"aa","control_plane":"bb"}"#).unwrap();
-        assert_eq!(old.gateway_list, SPRITES_GATEWAY_LIST);
+        assert_eq!(old.gateway_list, LEGACY_GATEWAY_LIST);
         let new: DaemonSecrets =
             serde_json::from_str(r#"{"secret_key":"aa","control_plane":"bb","gateway_list":"http://g/list"}"#).unwrap();
         assert_eq!(new.gateway_list, "http://g/list");
+    }
+
+    #[test]
+    fn secrets_files_from_before_harness_secrets_migrate() {
+        let old: DaemonSecrets =
+            serde_json::from_str(r#"{"secret_key":"aa","control_plane":"bb","claude_oauth_token":"tok"}"#).unwrap();
+        assert_eq!(old.harness, "claude-code");
+        assert_eq!(old.harness_secrets.get("oauth_token").map(String::as_str), Some("tok"));
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("claude_oauth_token"), "{json}");
+        let back: DaemonSecrets = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.harness_secrets, old.harness_secrets);
     }
 }

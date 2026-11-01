@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SandboxId(pub String);
@@ -115,5 +115,10 @@ pub trait Compute: Send + Sync {
     /// of disk. Called before a run begins, so the trouble is reported then rather than found by the agent midway.
     async fn preflight(&self, _id: &SandboxId) -> Result<()> {
         Ok(())
+    }
+    /// The recent output of a program started with `start`, for diagnosing a sandbox. Computes that can't read it
+    /// say so.
+    async fn logs(&self, _id: &SandboxId, _program: &str) -> Result<String> {
+        Err(Error::Rejected("this compute can't read program logs".into()))
     }
 }

@@ -38,7 +38,8 @@ use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
-use trailhead_factory::{Compute, ComputeConfig, FactoryConfig};
+use trailhead_daemon::plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN};
+use trailhead_factory::{Compute, ComputeConfig, FactoryConfig, HarnessSecrets, ProviderKind, Registry, Target};
 use trailhead_provider_anthropic::Anthropic;
 use trailhead_server::creds::{Cred, CredStore};
 
@@ -52,8 +53,6 @@ mod wake;
 const AGENT: &str = "factory";
 /// Where the control plane's iroh key and daemon master key are kept.
 const KEYS: Cred<'static> = Cred::Secret("factory-keys");
-/// What subscription mode adds to agent egress.
-const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
 
 #[derive(Parser)]
 struct Cli {
@@ -249,15 +248,32 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let dirs = repos::dirs(&run.repo, opts.config.as_deref(), &host_config, home.as_deref(), &cwd)?;
     let mut specs = repos::load_all(&dirs, opts.config.as_deref())?;
+    let harnesses = trailhead_daemon::plugins::harnesses();
+    let providers = providers();
+    for spec in &specs {
+        spec.config
+            .check_plugins(&harnesses.names(), &providers.names())
+            .map_err(|e| format!("{}: {e}", spec.config_path.display()))?;
+    }
+    // `repos::validate` made the adapter the same for every repo.
+    let (adapter, _) = specs[0].config.plugins().ok_or("the worker profile is missing")?;
+    let adapter = adapter.to_string();
+    let mut harness_secrets = HarnessSecrets::new();
+    if let (Some(token), CLAUDE_CODE) = (&opts.claude_oauth_token, adapter.as_str()) {
+        harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+    }
 
     let (pause_at, warnings) =
         host_config.effective_pause_at(specs.iter().map(|s| (s.config.repo.project.as_str(), &s.config.usage)));
     warnings.iter().for_each(|w| tracing::warn!("{w}"));
     for spec in &mut specs {
         spec.config.usage.pause_at = pause_at.clone();
-        if opts.claude_oauth_token.is_some() {
-            tracing::warn!(repo = %spec.slug(), "subscription mode: sandboxes hold a Claude OAuth token and can reach api.anthropic.com");
-            spec.config.egress.always.push(ANTHROPIC_API_HOST.into());
+        if !harness_secrets.is_empty() {
+            tracing::warn!(repo = %spec.slug(), harness = %adapter, "subscription mode: sandboxes hold the harness's credential and can reach its API");
+            spec.config
+                .egress
+                .always
+                .extend((harnesses.get(&adapter).map_err(|e| e.to_string())?.egress)(&harness_secrets));
         }
     }
 
@@ -296,13 +312,10 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
         .map_err(|e| format!("binding the iroh endpoint: {e}"))?;
     // `repos::validate` made the compute and daemon settings the same for every repo.
     let shared = &specs[0].config;
-    let (compute, launch) = compute(&shared.compute, opts, &paths, Launch::new(binary), false)?;
-    let launch = Launch {
-        claude_oauth_token: opts.claude_oauth_token.clone(),
-        log: shared.daemon.log.clone(),
-        gateway_list: shared.compute.gateway_list(),
-        ..launch
-    };
+    let binary = Arc::new(binary);
+    let (compute, target) = compute(&shared.compute, opts, &paths, binary.clone(), false)?;
+    let launch =
+        Launch { harness: adapter, harness_secrets, log: shared.daemon.log.clone(), ..Launch::new(binary, &target) };
     let daemon = Arc::new(RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch));
     let tunnel =
         Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, daemon.peers())).spawn();
@@ -313,12 +326,14 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     for spec in specs {
         let slug = spec.slug();
         let repos::RepoSpec { config_path, remote, config, .. } = spec;
-        let model_endpoint = config.compute.model_endpoint(&opts.model_endpoint);
+        let (_, provider_name) = config.plugins().ok_or("the worker profile is missing")?;
+        let provider = *providers.get(provider_name).map_err(|e| e.to_string())?;
+        let model_endpoint = target.model_endpoint(&opts.model_endpoint).to_string();
         let mut factory = Factory::new(
             config,
             compute.clone(),
             tracker.clone(),
-            Arc::new(Anthropic::new(model_endpoint)),
+            provider(model_endpoint),
             daemon.clone(),
             host.clone(),
         )
@@ -395,21 +410,21 @@ fn compute(
     config: &ComputeConfig,
     opts: &Opts,
     paths: &trailhead_server::Paths,
-    launch: Launch,
+    binary: Arc<Vec<u8>>,
     read_only: bool,
-) -> Result<(Arc<dyn Compute>, Launch), String> {
+) -> Result<(Arc<dyn Compute>, Target), String> {
     match config {
         ComputeConfig::Sprites => {
             let token = opts
                 .sprites_token
                 .clone()
                 .ok_or("Sprites compute needs SPRITES_TOKEN or `trailhead factory login sprites`")?;
-            Ok((Arc::new(SpritesCompute::new(token).map_err(|e| e.to_string())?), launch))
+            Ok((Arc::new(SpritesCompute::new(token).map_err(|e| e.to_string())?), trailhead_compute_sprites::target()))
         }
         #[cfg(feature = "docker")]
-        ComputeConfig::Docker { image, network, runtime } => {
-            use trailhead_compute_docker::{DockerCompute, DockerConfig, HOME};
-            let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), launch.binary.clone());
+        ComputeConfig::Docker { image, network, runtime, memory_mib } => {
+            use trailhead_compute_docker::{DockerCompute, DockerConfig};
+            let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), binary);
             if let Some(image) = image {
                 docker.image = image.clone();
             }
@@ -417,6 +432,7 @@ fn compute(
                 docker.network = network.clone();
             }
             docker.runtime = runtime.clone();
+            docker.memory_bytes = memory_mib.map(|m| m * 1024 * 1024);
             docker.connections = gateway_connections(login::github_writer_token(&paths.creds()));
             if docker.connections.is_empty() {
                 tracing::warn!(
@@ -430,8 +446,7 @@ fn compute(
             }
             let compute = if read_only { DockerCompute::read_only(docker) } else { DockerCompute::new(docker) }
                 .map_err(|e| e.to_string())?;
-            let launch = Launch { dir: format!("{HOME}/.trailhead"), workdir: format!("{HOME}/work"), ..launch };
-            Ok((Arc::new(compute), launch))
+            Ok((Arc::new(compute), trailhead_compute_docker::target()))
         }
         #[cfg(not(feature = "docker"))]
         ComputeConfig::Docker { .. } => {
@@ -490,10 +505,15 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
             for entry in &setup.repos {
                 let factory = &entry.factory;
                 let project = &factory.config.repo.project;
-                let queue = factory.config.repo.queue.clone().map(trailhead_factory::TaskKey);
-                match factory.tracker.ready(project, queue.as_ref(), 10).await {
+                let queue: Vec<_> = factory.config.repo.queue.iter().cloned().map(trailhead_factory::TaskKey).collect();
+                match factory.tracker.ready(project, &queue, 10).await {
                     Ok(ready) => {
-                        let scope = queue.as_ref().map_or(project.clone(), |q| format!("{project}, under {}", q.0));
+                        let scope = if queue.is_empty() {
+                            project.clone()
+                        } else {
+                            let keys: Vec<_> = queue.iter().map(|q| q.0.as_str()).collect();
+                            format!("{project}, under {}", keys.join(", "))
+                        };
                         println!(
                             "{}: tracker: acting as {AGENT}; {} ready task(s) in {scope}",
                             entry.slug,
@@ -583,6 +603,11 @@ async fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// The model providers this build carries, by the `provider` name profiles give them.
+fn providers() -> Registry<ProviderKind> {
+    Registry::new("provider").with("anthropic", |endpoint| Arc::new(Anthropic::new(endpoint)))
 }
 
 #[cfg(test)]

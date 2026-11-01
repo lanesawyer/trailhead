@@ -247,6 +247,7 @@ impl Workspace for GitWorkspace {
     }
 
     async fn check(&self, check: &Check) -> CheckResult {
+        let ooms_before = oom_kills();
         let out = Command::new("sh")
             .arg("-c")
             .arg(format!("exec 2>&1\n{}", check.command))
@@ -260,7 +261,33 @@ impl Workspace for GitWorkspace {
             Ok(out) => (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()),
             Err(e) => (false, format!("couldn't run `{}`: {e}", check.command)),
         };
+        let output = if passed || !oom_killed(ooms_before, oom_kills(), &output) {
+            output
+        } else {
+            format!("{output}\n{OOM_NOTE}")
+        };
         CheckResult { name: check.name.clone(), passed, output: tail(output) }
+    }
+}
+
+/// Appended to a failed check's output when the kernel's OOM killer, not the check itself, probably ended it.
+const OOM_NOTE: &str = "The sandbox ran out of memory: the kernel's OOM killer ended a process of this check (the \
+\"signal 9\" above is its doing, not a bug in the code). Raise `memory_mib` in [factory.compute], or lower the build's \
+parallelism (CARGO_BUILD_JOBS) or the number of sandboxes (max_sandboxes).";
+
+/// How many processes the sandbox's memory cgroup has OOM-killed so far, when it can be read.
+fn oom_kills() -> Option<u64> {
+    let events = std::fs::read_to_string("/sys/fs/cgroup/memory.events").ok()?;
+    events.lines().find_map(|l| l.strip_prefix("oom_kill ")?.trim().parse().ok())
+}
+
+/// Whether a failed check was OOM-killed: the cgroup's count rose, or, where it can't be read, the output says a
+/// process died of SIGKILL.
+fn oom_killed(before: Option<u64>, after: Option<u64>, output: &str) -> bool {
+    match (before, after) {
+        (Some(before), Some(after)) if after > before => true,
+        (Some(_), Some(_)) => false,
+        _ => output.contains("terminated with signal 9") || output.contains("signal: 9"),
     }
 }
 
@@ -300,7 +327,16 @@ fn tail(mut s: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_df_used;
+    use super::{oom_killed, parse_df_used};
+
+    #[test]
+    fn an_oom_kill_is_told_apart_from_other_failures() {
+        assert!(oom_killed(Some(0), Some(1), "ld terminated with signal 9"));
+        assert!(!oom_killed(Some(2), Some(2), "ld terminated with signal 9"), "the cgroup's count is the truth");
+        assert!(oom_killed(None, None, "error: linking with `cc` failed\n  = note: ld terminated with signal 9"));
+        assert!(oom_killed(None, Some(1), "process didn't exit successfully (signal: 9, SIGKILL)"));
+        assert!(!oom_killed(None, None, "error[E0308]: mismatched types"));
+    }
 
     #[test]
     fn df_used_is_the_third_column_of_the_data_line() {

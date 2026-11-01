@@ -280,15 +280,15 @@ async fn a_task_with_malformed_factory_metadata_is_skipped_not_fatal() {
     };
     r.store.update_task(&r.human, &bad.0, patch, None).await.unwrap();
 
-    let ready = r.tracker.ready("TRAIL", None, 10).await.unwrap();
+    let ready = r.tracker.ready("TRAIL", &[], 10).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&good]);
-    assert!(r.tracker.in_flight("TRAIL", None).await.unwrap().is_empty());
+    assert!(r.tracker.in_flight("TRAIL", &[]).await.unwrap().is_empty());
     r.factory.reconcile().await.unwrap();
     assert!(r.tracker.show(&bad).await.is_err());
 
     // The task says why it was skipped, once however many passes see it.
-    r.tracker.ready("TRAIL", None, 10).await.unwrap();
-    r.tracker.in_flight("TRAIL", None).await.unwrap();
+    r.tracker.ready("TRAIL", &[], 10).await.unwrap();
+    r.tracker.in_flight("TRAIL", &[]).await.unwrap();
     let notes: Vec<_> = r.store.list_comments(&r.human, &bad.0).await.unwrap();
     assert_eq!(notes.len(), 1);
     assert!(notes[0].body.contains("attempt_base"), "{}", notes[0].body);
@@ -313,9 +313,9 @@ async fn with_a_queue_only_its_subtasks_run() {
         ..Default::default()
     };
     let handed = TaskKey(r.store.create_task(&r.human, sub).await.unwrap().key);
-    r.factory.config.repo.queue = Some(queue.0.clone());
+    r.factory.config.repo.queue = vec![queue.0.clone()];
 
-    let ready = r.tracker.ready("TRAIL", Some(&queue), 10).await.unwrap();
+    let ready = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 10).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&handed]);
 
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which greeting?".into() }));
@@ -325,6 +325,39 @@ async fn with_a_queue_only_its_subtasks_run() {
     assert_eq!(r.show(&queue).await.status, Status::Open, "and so is the queue itself");
 }
 
+#[tokio::test]
+async fn a_queue_list_reads_each_parents_direct_children_ordered_by_priority_and_once() {
+    let mut r = rig().await;
+    let q1 = r.task("Queue one").await;
+    let q2 = r.task("Queue two").await;
+    let nested = r.task("Nested parent").await;
+    let mk = |title: &str, parent: &TaskKey, priority: i64, grade: Option<i64>| NewTask {
+        project: "TRAIL".into(),
+        title: title.into(),
+        parent: Some(parent.0.clone()),
+        priority: Some(priority),
+        grade,
+        ..Default::default()
+    };
+    let low = TaskKey(r.store.create_task(&r.human, mk("low", &q1, 4, Some(1))).await.unwrap().key);
+    let high = TaskKey(r.store.create_task(&r.human, mk("high", &q2, 1, Some(1))).await.unwrap().key);
+    let ungraded = TaskKey(r.store.create_task(&r.human, mk("ungraded", &q2, 1, None)).await.unwrap().key);
+    let deep = TaskKey(r.store.create_task(&r.human, mk("deep", &nested, 1, Some(1))).await.unwrap().key);
+    let _grandchild = r.store.create_task(&r.human, mk("grandchild", &deep, 1, Some(1))).await.unwrap();
+    r.factory.config.repo.queue = vec![q1.0.clone(), q2.0.clone(), q2.0.clone()];
+
+    let ready = r.tracker.ready("TRAIL", &[q1.clone(), q2.clone(), q2.clone()], 10).await.unwrap();
+    let keys: Vec<_> = ready.iter().map(|t| &t.key).collect();
+    assert_eq!(keys.iter().filter(|k| ***k == high).count(), 1, "a task listed twice is read once");
+    assert!(!keys.contains(&&deep), "a queue reaches direct children only");
+    assert_eq!(keys.last(), Some(&&low), "priority orders across queues");
+
+    r.factory.config.repo.max_sandboxes = 1;
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.iter().map(|(t, _)| &t.key).collect::<Vec<_>>(), [&high], "the best graded task, under the cap");
+    assert_eq!(r.show(&ungraded).await.status, Status::Open, "an ungraded one waits for a grade");
+}
 #[tokio::test]
 async fn the_factory_can_raise_a_grade_a_human_set_but_not_lower_it() {
     let r = rig().await;

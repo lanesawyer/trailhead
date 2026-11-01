@@ -161,8 +161,14 @@ impl Factory {
             .count();
         let room = self.room(keys.len() - reviewing + others).await?;
         if room == 0 {
+            if keys.len() > reviewing {
+                *self.starved.lock().unwrap() = None;
+            } else if others > 0 {
+                self.warn_if_starved().await;
+            }
             return Ok(());
         }
+        *self.starved.lock().unwrap() = None;
         let ready = self.ready_graded(room).await?;
         for task in ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)) {
             let key = task.key.clone();
@@ -173,16 +179,43 @@ impl Factory {
         Ok(())
     }
 
+    /// With no place left and nothing running, parked tasks are holding the cap. If ready tasks are waiting, say so
+    /// loudly, once per change in who waits: the queue stalls until a person answers (TRAIL-538).
+    async fn warn_if_starved(&self) {
+        let mut waiting: Vec<TaskKey> = match self.ready_graded(usize::MAX).await {
+            Ok(ready) => ready.into_iter().map(|t| t.key).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't list the ready tasks to see whether parked ones starve them");
+                return;
+            }
+        };
+        waiting.sort();
+        let mut last = self.starved.lock().unwrap();
+        if waiting.is_empty() {
+            *last = None;
+        } else if last.as_ref() != Some(&waiting) {
+            let names: Vec<&str> = waiting.iter().map(|k| k.0.as_str()).collect();
+            tracing::warn!(
+                tasks = names.join(", "),
+                max_sandboxes = self.config.repo.max_sandboxes,
+                "{} ready tasks waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
+                waiting.len()
+            );
+            *last = Some(waiting);
+        }
+    }
+
     /// Up to `room` ready tasks that are the factory's work. Under a queue that means graded ones: grading a task is
     /// what queues it. An ungraded one is skipped and reported once, in the log and on the task, rather than on every
     /// poll (`docs/factory/review.md#grades`).
     async fn ready_graded(&self, room: usize) -> Result<Vec<Task>> {
         let queue = self.queue();
-        if queue.is_none() {
-            return self.tracker.ready(self.project(), None, room).await;
+        // With no queue the whole project is the factory's by configuration, so a grade is not what releases a task.
+        if queue.is_empty() {
+            return self.tracker.ready(self.project(), &[], room).await;
         }
         // Ungraded tasks mustn't crowd graded ones out of the limit.
-        let ready = self.tracker.ready(self.project(), queue.as_ref(), usize::MAX).await?;
+        let ready = self.tracker.ready(self.project(), &queue, usize::MAX).await?;
         let (graded, ungraded): (Vec<Task>, Vec<Task>) = ready.into_iter().partition(|t| t.grade.is_some());
         for task in ungraded {
             self.report_ungraded(&task).await;

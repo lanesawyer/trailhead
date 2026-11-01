@@ -10,16 +10,15 @@ use iroh::Endpoint;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use trailhead_codehost_github::{GitHub, Identity};
-use trailhead_daemon::awake::{SPRITE_API_SOCKET, SpriteHolds};
+use trailhead_daemon::awake::SpriteHolds;
 use trailhead_daemon::net::{
     ALPN, DaemonProtocol, build_id, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
 };
 use trailhead_daemon::{Connect, GitWorkspace, HEARTBEAT_EVERY, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{
-    BranchUpdate, ChangedFile, Ci, CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, PrState, Repo,
-    Result, Tracker,
+    BranchUpdate, ChangedFile, Ci, CodeHost, Commit, DaemonSecrets, Error, HarnessSetup, MergeOutcome, NewPr, PrRef,
+    PrState, Repo, Result, Tracker,
 };
-use trailhead_harness_claude_code::ClaudeCode;
 
 #[derive(Parser)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -78,6 +77,10 @@ struct Args {
     /// A `tracing` filter; `RUST_LOG` wins if set.
     #[arg(long, default_value = "info")]
     log: String,
+    /// The compute's socket for holding the sandbox awake, used when it exists (the control plane passes it for
+    /// computes that pause idle sandboxes).
+    #[arg(long)]
+    hold_socket: Option<PathBuf>,
 }
 
 /// Stands in for a code host when the sandbox has no GitHub connector, so runs fail with the reason.
@@ -94,7 +97,10 @@ impl CodeHost for NoCodeHost {
     async fn diff(&self, _: &PrRef) -> Result<String> {
         Err(Error::Forbidden(self.0.clone()))
     }
-    async fn comment(&self, _: &PrRef, _: &str) -> Result<()> {
+    async fn comment(&self, _: &PrRef, _: &str) -> Result<u64> {
+        Err(Error::Forbidden(self.0.clone()))
+    }
+    async fn edit_comment(&self, _: &PrRef, _: u64, _: &str) -> Result<()> {
         Err(Error::Forbidden(self.0.clone()))
     }
     async fn merge(&self, _: &PrRef, _: &str) -> Result<MergeOutcome> {
@@ -263,11 +269,11 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
         Box::pin(async move { Ok(Arc::new(RestTracker::new(format!("http://{api}"), cred)) as Arc<dyn Tracker>) })
     });
     let conns = connections(&secrets.gateway_list).await;
+    let harness = (trailhead_daemon::plugins::harnesses().get(&secrets.harness).map_err(|e| e.to_string())?.build)(
+        &HarnessSetup { executable: args.claude, secrets: secrets.harness_secrets.clone() },
+    );
     let runner = Runner {
-        harness: Arc::new(match secrets.claude_oauth_token.clone() {
-            Some(token) => ClaudeCode::new(args.claude).with_oauth_token(token),
-            None => ClaudeCode::new(args.claude),
-        }),
+        harness,
         codehost: codehost(Identity { name: args.author_name, email: args.author_email }, &conns),
         workspace: Arc::new(workspace(args.workdir, &conns)),
         connect,
@@ -285,8 +291,8 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     };
     tracing::info!(version = env!("CARGO_PKG_VERSION"), %build, "trailhead-daemon build");
     let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone()).build(build);
-    if std::path::Path::new(SPRITE_API_SOCKET).exists() {
-        protocol = protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET));
+    if let Some(socket) = args.hold_socket.filter(|s| s.exists()) {
+        protocol = protocol.holding(SpriteHolds::new(socket));
     }
     let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
     tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;

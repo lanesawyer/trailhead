@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
-    Credential, Error, HumanContext, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict, VerdictKind,
+    Credential, Error, FollowUpTask, HumanContext, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict,
+    VerdictKind,
 };
 
 /// The metadata key the factory's run fields live under (`trailhead_control::METADATA_KEY`).
@@ -120,30 +121,23 @@ impl Tracker for RestTracker {
         Arc::new(refused)
     }
 
-    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>> {
-        let fetch = if queue.is_some() { 1000 } else { limit };
+    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
+        let fetch = if queue.is_empty() { limit } else { 1000 };
         let req = self.request(Method::GET, "/ready").query(&[("project", project), ("limit", &fetch.to_string())]);
         let ready = self.send(req).await?;
-        let queued: Option<std::collections::HashSet<String>> = match queue {
-            None => None,
-            Some(q) => {
-                let query = [("project", project), ("parent", q.0.as_str()), ("limit", "1000")];
-                let subtasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
-                Some(
-                    subtasks
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|t| t["key"].as_str().map(str::to_string))
-                        .collect(),
-                )
-            }
-        };
+        let mut queued = std::collections::HashSet::new();
+        for q in queue {
+            let query = [("project", project), ("parent", q.0.as_str()), ("limit", "1000")];
+            let subtasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
+            queued.extend(
+                subtasks.as_array().into_iter().flatten().filter_map(|t| t["key"].as_str().map(str::to_string)),
+            );
+        }
         ready
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|t| queued.as_ref().is_none_or(|q| t["key"].as_str().is_some_and(|k| q.contains(k))))
+            .filter(|t| queue.is_empty() || t["key"].as_str().is_some_and(|k| queued.contains(k)))
             .take(limit)
             .map(|t| task(t, &Value::Null))
             .collect()
@@ -162,24 +156,29 @@ impl Tracker for RestTracker {
         Err(unsupported("read a task's comments"))
     }
 
-    async fn in_flight(&self, project: &str, queue: Option<&TaskKey>) -> Result<Vec<Task>> {
-        let mut query = vec![
-            ("project", project),
-            ("status", "open,in_progress,needs_input,in_review,approved"),
-            ("include", "claim"),
-            ("limit", "1000"),
-        ];
-        if let Some(q) = queue {
-            query.push(("parent", q.0.as_str()));
+    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
+        let parents: Vec<Option<&str>> =
+            if queue.is_empty() { vec![None] } else { queue.iter().map(|q| Some(q.0.as_str())).collect() };
+        let mut seen = std::collections::HashSet::new();
+        let mut found = Vec::new();
+        for parent in parents {
+            let mut query = vec![
+                ("project", project),
+                ("status", "open,in_progress,needs_input,in_review,approved"),
+                ("include", "claim"),
+                ("limit", "1000"),
+            ];
+            if let Some(p) = parent {
+                query.push(("parent", p));
+            }
+            let tasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
+            for t in tasks.as_array().into_iter().flatten() {
+                if t["metadata"].get(METADATA_KEY).is_some() && seen.insert(t["key"].as_str().map(str::to_string)) {
+                    found.push(task(t, &t["claim"])?);
+                }
+            }
         }
-        let tasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
-        tasks
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|t| t["metadata"].get(METADATA_KEY).is_some())
-            .map(|t| task(t, &t["claim"]))
-            .collect()
+        Ok(found)
     }
 
     async fn claim(&self, key: &TaskKey) -> Result<()> {
@@ -252,6 +251,10 @@ impl Tracker for RestTracker {
         let task = created.get("task").unwrap_or(&created);
         let key = task["key"].as_str().ok_or_else(|| Error::Other(format!("created task without a key: {created}")))?;
         Ok(TaskKey(key.to_string()))
+    }
+
+    async fn follow_ups(&self, _: &TaskKey) -> Result<Vec<FollowUpTask>> {
+        Err(unsupported("list a task's follow-ups"))
     }
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
