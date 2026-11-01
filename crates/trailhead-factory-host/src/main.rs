@@ -53,7 +53,6 @@ mod wake;
 const AGENT: &str = "factory";
 /// Where the control plane's iroh key and daemon master key are kept.
 const KEYS: Cred<'static> = Cred::Secret("factory-keys");
-/// What subscription mode adds to agent egress.
 
 #[derive(Parser)]
 struct Cli {

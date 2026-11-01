@@ -205,6 +205,15 @@ mod tests {
     }
 
     #[test]
+    fn repos_with_different_adapters_are_refused() {
+        let a = spec("/a", "o", "alpha", "ALPHA", &[]);
+        let mut b = spec("/b", "o", "beta", "BETA", &[]);
+        b.config.profiles.get_mut("worker").unwrap().adapter = "other-harness".into();
+        let err = validate(&[a, b]).unwrap_err();
+        assert!(err.contains("/a") && err.contains("/b") && err.contains("different profile adapters"), "{err}");
+    }
+
+    #[test]
     fn a_queueless_repo_overlaps_another_on_its_project() {
         let a = spec("/a", "o", "alpha", "TRAIL", &[]);
         let b = spec("/b", "o", "beta", "TRAIL", &["TRAIL-2"]);
