@@ -339,7 +339,7 @@ impl Gateway {
                 }
                 pipe(lease, client, upstream).await
             }
-            Request::Plain { host, port, head } => {
+            Request::Plain { host, port, head, body } => {
                 let mut lease = match self.admit(local, &host) {
                     Verdict::Allowed(l) => l,
                     Verdict::Refused => return respond(&mut client, 403, "refused by the gateway").await,
@@ -350,10 +350,7 @@ impl Gateway {
                     None => return Ok(()),
                 };
                 upstream.write_all(&head).await?;
-                if !rest.is_empty() {
-                    upstream.write_all(&rest).await?;
-                }
-                pipe(lease, client, upstream).await
+                pipe_plain(lease, client, upstream, body, rest).await
             }
         }
     }
@@ -379,6 +376,47 @@ async fn connect(host: &str, port: u16, lease: &mut Lease) -> Option<std::io::Re
 async fn pipe(mut lease: Lease, mut client: TcpStream, mut upstream: TcpStream) -> std::io::Result<()> {
     tokio::select! {
         r = tokio::io::copy_bidirectional(&mut client, &mut upstream) => r.map(|_| ()),
+        _ = &mut lease.kill => Ok(()),
+    }
+}
+
+/// Forwards one plain request and its response. The client was admitted on this request's host
+/// only, so past the end of its body nothing more is sent upstream (a pipelined request could
+/// name any other virtual host there); the upstream's write side is half-closed instead.
+async fn pipe_plain(
+    mut lease: Lease,
+    client: TcpStream,
+    upstream: TcpStream,
+    mut body: Body,
+    mut rest: Vec<u8>,
+) -> std::io::Result<()> {
+    let (mut client_r, mut client_w) = client.into_split();
+    let (mut upstream_r, mut upstream_w) = upstream.into_split();
+    let upload = async {
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = body.feed(&rest).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, why))?;
+            if n > 0 {
+                upstream_w.write_all(&rest[..n]).await?;
+            }
+            if body.done() {
+                break;
+            }
+            let got = client_r.read(&mut chunk).await?;
+            if got == 0 {
+                break;
+            }
+            rest.clear();
+            rest.extend_from_slice(&chunk[..got]);
+        }
+        upstream_w.shutdown().await
+    };
+    let download = async {
+        tokio::io::copy(&mut upstream_r, &mut client_w).await?;
+        client_w.shutdown().await
+    };
+    tokio::select! {
+        r = async { tokio::try_join!(upload, download).map(|_| ()) } => r,
         _ = &mut lease.kill => Ok(()),
     }
 }
@@ -440,7 +478,79 @@ enum Request {
         host: String,
         port: u16,
         head: Vec<u8>,
+        body: Body,
     },
+}
+
+/// How the body of a plain request is framed, so we know where the request ends.
+#[derive(Debug, PartialEq, Eq)]
+enum Body {
+    Length(u64),
+    Chunked(Chunked),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Chunked {
+    Size { n: u64, digits: bool, ext: bool },
+    SizeLf(u64),
+    Data(u64),
+    DataCr,
+    DataLf,
+    Trailer { len: usize },
+    TrailerLf { len: usize },
+    Done,
+}
+
+impl Body {
+    fn done(&self) -> bool {
+        matches!(self, Body::Length(0) | Body::Chunked(Chunked::Done))
+    }
+
+    /// Returns how many leading bytes of `buf` belong to the body (all of them unless it ends inside).
+    fn feed(&mut self, buf: &[u8]) -> Result<usize, &'static str> {
+        match self {
+            Body::Length(left) => {
+                let n = (*left).min(buf.len() as u64);
+                *left -= n;
+                Ok(n as usize)
+            }
+            Body::Chunked(st) => {
+                let mut i = 0;
+                while i < buf.len() && *st != Chunked::Done {
+                    let b = buf[i];
+                    *st = match *st {
+                        Chunked::Size { n, digits, ext } => match b {
+                            b'\r' if digits => Chunked::SizeLf(n),
+                            b';' if digits => Chunked::Size { n, digits, ext: true },
+                            _ if ext => Chunked::Size { n, digits, ext },
+                            _ => {
+                                let d = (b as char).to_digit(16).ok_or("bad chunk size")?;
+                                let n = n.checked_mul(16).ok_or("bad chunk size")? + u64::from(d);
+                                Chunked::Size { n, digits: true, ext }
+                            }
+                        },
+                        Chunked::SizeLf(0) if b == b'\n' => Chunked::Trailer { len: 0 },
+                        Chunked::SizeLf(n) if b == b'\n' => Chunked::Data(n),
+                        Chunked::Data(n) => {
+                            // Take as much of the chunk as this buffer holds in one go.
+                            let take = n.min((buf.len() - i) as u64);
+                            i += take as usize - 1;
+                            if n == take { Chunked::DataCr } else { Chunked::Data(n - take) }
+                        }
+                        Chunked::DataCr if b == b'\r' => Chunked::DataLf,
+                        Chunked::DataLf if b == b'\n' => Chunked::Size { n: 0, digits: false, ext: false },
+                        Chunked::Trailer { len } if b == b'\r' => Chunked::TrailerLf { len },
+                        Chunked::Trailer { len } => Chunked::Trailer { len: len + 1 },
+                        Chunked::TrailerLf { len: 0 } if b == b'\n' => Chunked::Done,
+                        Chunked::TrailerLf { .. } if b == b'\n' => Chunked::Trailer { len: 0 },
+                        _ => return Err("bad chunked body"),
+                    };
+                    i += 1;
+                }
+                Ok(i)
+            }
+        }
+    }
 }
 
 /// Splits `host[:port]`, with `[v6]` brackets removed.
@@ -493,12 +603,27 @@ fn parse_head(head: &[u8]) -> Result<Request, &'static str> {
     };
     let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
     let (host, port) = split_authority(authority, Some(80))?;
+    let mut body = None;
     let mut out = format!("{method} {path} {version}\r\nHost: {authority}\r\nConnection: close\r\n");
     for l in lines {
         if l.is_empty() {
             break;
         }
-        let name = l.split_once(':').ok_or("bad header")?.0.trim().to_ascii_lowercase();
+        let (name, value) = l.split_once(':').ok_or("bad header")?;
+        let name = name.trim().to_ascii_lowercase();
+        if name == "content-length" || name == "transfer-encoding" {
+            let value = value.trim();
+            let framing = if name == "content-length" {
+                Body::Length(value.parse().map_err(|_| "bad content-length")?)
+            } else if value.eq_ignore_ascii_case("chunked") {
+                Body::Chunked(Chunked::Size { n: 0, digits: false, ext: false })
+            } else {
+                return Err("unsupported transfer-encoding");
+            };
+            if body.replace(framing).is_some() {
+                return Err("conflicting body framing");
+            }
+        }
         if name.starts_with("proxy-") || matches!(name.as_str(), "host" | "connection" | "keep-alive") {
             continue;
         }
@@ -506,7 +631,7 @@ fn parse_head(head: &[u8]) -> Result<Request, &'static str> {
         out.push_str("\r\n");
     }
     out.push_str("\r\n");
-    Ok(Request::Plain { host, port, head: out.into_bytes() })
+    Ok(Request::Plain { host, port, head: out.into_bytes(), body: body.unwrap_or(Body::Length(0)) })
 }
 
 /// Binds the control socket so only its owner can ever reach it: binds inside a fresh 0700
@@ -609,7 +734,7 @@ mod tests {
             parse_head(b"CONNECT [::1]:8443 HTTP/1.1\r\n\r\n"),
             Ok(Request::Connect { host: "::1".into(), port: 8443 })
         );
-        let Ok(Request::Plain { host, port, head }) = parse_head(
+        let Ok(Request::Plain { host, port, head, .. }) = parse_head(
             b"GET http://example.com:8080/a?b=1 HTTP/1.1\r\nProxy-Authorization: x\r\nProxy-Connection: keep-alive\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
         ) else {
             panic!("didn't parse");
@@ -716,6 +841,74 @@ mod tests {
         assert!(out.starts_with("HTTP/1.1 200"), "{out}");
         assert!(out.contains("GET /x?y=1 HTTP/1.1"), "{out}");
         assert!(!out.to_ascii_lowercase().contains("proxy-authorization"), "{out}");
+    }
+
+    #[test]
+    fn body_framing_finds_the_end_of_the_request() {
+        let mut b = Body::Length(3);
+        assert_eq!(b.feed(b"abcGET /"), Ok(3));
+        assert!(b.done());
+
+        let msg = b"4;x=1\r\nwiki\r\n5\r\npedia\r\n0\r\nT: v\r\n\r\n";
+        let mut b = Body::Chunked(Chunked::Size { n: 0, digits: false, ext: false });
+        let mut both = msg.to_vec();
+        both.extend_from_slice(b"GET /next");
+        assert_eq!(b.feed(&both), Ok(msg.len()));
+        assert!(b.done());
+
+        // Fed a byte at a time, it ends in the same place.
+        let mut b = Body::Chunked(Chunked::Size { n: 0, digits: false, ext: false });
+        let fed: usize = both.chunks(1).map(|c| b.feed(c).unwrap()).sum();
+        assert_eq!(fed, msg.len());
+
+        let mut b = Body::Chunked(Chunked::Size { n: 0, digits: false, ext: false });
+        assert!(b.feed(b"zz\r\n").is_err());
+
+        assert!(
+            parse_head(b"POST http://a/ HTTP/1.1\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n").is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pipelined_second_request_never_reaches_the_upstream() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen = tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 1024];
+            // Reply once the first request's body is in, then read until the gateway half-closes.
+            while !got.ends_with(b"hello") {
+                let n = s.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                got.extend_from_slice(&buf[..n]);
+            }
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+            got
+        });
+        let (_gw, proxy) = setup(&["127.0.0.1"]).await;
+        let mut s = TcpStream::connect(proxy).await.unwrap();
+        s.write_all(
+            format!(
+                "POST http://127.0.0.1:{port}/a HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET http://127.0.0.1:{port}/b HTTP/1.1\r\nHost: other.example\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        let got = String::from_utf8(seen.await.unwrap()).unwrap();
+        assert!(got.starts_with("POST /a HTTP/1.1"), "{got}");
+        assert!(got.ends_with("hello"), "{got}");
+        assert!(!got.contains("other.example"), "{got}");
     }
 
     #[tokio::test]

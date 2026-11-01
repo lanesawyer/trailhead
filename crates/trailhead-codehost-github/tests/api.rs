@@ -226,8 +226,21 @@ async fn comment(
     Path((_, _, n)): Path<(String, String, u64)>,
     Json(b): Json<Value>,
 ) -> Response {
-    g.lock().unwrap().comments.push((n, b["body"].as_str().unwrap().into()));
-    (StatusCode::CREATED, Json(json!({}))).into_response()
+    let mut g = g.lock().unwrap();
+    g.comments.push((n, b["body"].as_str().unwrap().into()));
+    (StatusCode::CREATED, Json(json!({ "id": g.comments.len() }))).into_response()
+}
+
+async fn edit_comment(
+    State(g): State<Shared>,
+    Path((_, _, id)): Path<(String, String, u64)>,
+    Json(b): Json<Value>,
+) -> Response {
+    match g.lock().unwrap().comments.get_mut(id as usize - 1) {
+        Some(c) => c.1 = b["body"].as_str().unwrap().into(),
+        None => return not_found(),
+    }
+    Json(json!({})).into_response()
 }
 
 async fn get_pull(State(g): State<Shared>, Path((_, _, n)): Path<(String, String, u64)>) -> Response {
@@ -254,6 +267,9 @@ async fn compare(State(g): State<Shared>, Path((_, _, spec)): Path<(String, Stri
     let g = g.lock().unwrap();
     let (base, head) = spec.split_once("...").unwrap();
     let tip = g.refs.get(base).cloned().unwrap_or_else(|| base.to_string());
+    if !g.commits.contains_key(&tip) || !g.commits.contains_key(head) {
+        return (StatusCode::NOT_FOUND, Json(json!({ "message": "Not Found" }))).into_response();
+    }
     let (from, to) = (g.history(&tip), g.history(head));
     let commits: Vec<Value> =
         to.difference(&from).map(|sha| json!({ "sha": sha, "parents": parents(&g.commits[sha]) })).collect();
@@ -348,6 +364,7 @@ async fn serve() -> (Shared, String) {
         .route("/repos/{o}/{r}/pulls/{n}/update-branch", put(update_branch))
         .route("/repos/{o}/{r}/compare/{spec}", get(compare))
         .route("/repos/{o}/{r}/issues/{n}/comments", post(comment))
+        .route("/repos/{o}/{r}/issues/comments/{id}", axum::routing::patch(edit_comment))
         .with_state(git.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -495,8 +512,11 @@ async fn prs_open_once_and_take_reviews_and_merges() {
         previous_path: None,
     };
     assert_eq!(files, [a, old]);
-    gh.comment(&pr, "Looks right.").await.unwrap();
+    let id = gh.comment(&pr, "Looks right.").await.unwrap();
     assert_eq!(git.lock().unwrap().comments, [(1, "Looks right.".to_string())]);
+    gh.edit_comment(&pr, id, "Looks right, still.").await.unwrap();
+    assert_eq!(git.lock().unwrap().comments, [(1, "Looks right, still.".to_string())]);
+    assert!(matches!(gh.edit_comment(&pr, 99, "gone").await, Err(trailhead_factory::Error::NotFound(_))));
 
     // The merge is pinned to the head the caller saw: an older one is refused as moved, and nothing merges.
     let tip = head(&git, "factory/trail-1");
@@ -693,4 +713,19 @@ async fn a_verdict_carries_over_merges_of_the_base_but_not_other_commits() {
     let more = Commit { message: "more".into(), changes: vec![change("c.txt", Some(b"c"))], merges: vec![] };
     gh.publish(&repo(), &tip, "factory/trail-1", &[more]).await.unwrap();
     assert!(!gh.carries_verdict(&pr, &reviewed).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_verdict_does_not_carry_when_the_reviewed_sha_is_gone() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let started = head(&git, "main");
+    let work = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))], merges: vec![] };
+    gh.publish(&repo(), &started, "factory/trail-1", &[work]).await.unwrap();
+    let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };
+    let pr = gh.open_pr(&repo(), new).await.unwrap();
+
+    // A force push and GC: the compare 404s, which means stale, not an error.
+    let gone = "0123456789abcdef0123456789abcdef01234567";
+    assert!(!gh.carries_verdict(&pr, gone).await.unwrap());
 }

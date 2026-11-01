@@ -139,6 +139,9 @@ pub struct MergeDecision {
     /// Why the code host last refused to merge this head, which is said once per reason and tried again each pass.
     #[serde(default)]
     pub refused: Option<String>,
+    /// The id of the merger's status comment on the PR, which is edited as the decision changes.
+    #[serde(default)]
+    pub comment: Option<u64>,
     /// What was last said on the PR about this, so it's said once per change.
     pub message: String,
 }
