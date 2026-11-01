@@ -87,14 +87,21 @@ pub async fn sprites(
 }
 
 pub fn claude(creds: &CredStore, input: &mut impl BufRead, interactive: bool) -> Result<String, String> {
-    // A wrapped token spans lines, so take everything up to the end of input.
+    // A wrapped token spans lines, so keep reading: to the end of input, or on a terminal (which has none until
+    // Ctrl-D) until a blank line after the token's first line.
     if interactive {
-        eprint!("Claude token (from `claude setup-token`): ");
+        eprint!("Claude token (from `claude setup-token`; end with a blank line): ");
     }
     let mut all = String::new();
     if interactive {
-        // A terminal has no end of input until Ctrl-D; one line is the token.
-        input.read_line(&mut all).map_err(|e| format!("reading stdin: {e}"))?;
+        loop {
+            let mut line = String::new();
+            let n = input.read_line(&mut line).map_err(|e| format!("reading stdin: {e}"))?;
+            if n == 0 || (line.trim().is_empty() && !all.is_empty()) {
+                break;
+            }
+            all.push_str(&line);
+        }
     } else {
         input.read_to_string(&mut all).map_err(|e| format!("reading stdin: {e}"))?;
     }
@@ -102,7 +109,28 @@ pub fn claude(creds: &CredStore, input: &mut impl BufRead, interactive: bool) ->
     if token.is_empty() {
         return Err("no token on stdin".into());
     }
+    check_claude_shape(&token)?;
     saved("Claude token", creds, CLAUDE, &token)
+}
+
+const CLAUDE_PREFIX: &str = "sk-ant-oat";
+/// Real tokens run about 108 characters; a terminal wraps a pasted one at 80 or fewer.
+const CLAUDE_MIN_LEN: usize = 90;
+
+/// Rejects what can't be a `claude setup-token` token, such as one cut short by a paste that spanned lines.
+fn check_claude_shape(token: &str) -> Result<(), String> {
+    if !token.starts_with(CLAUDE_PREFIX) {
+        return Err(format!(
+            "that doesn't look like a Claude token from `claude setup-token` (it starts `{CLAUDE_PREFIX}`)"
+        ));
+    }
+    if token.len() < CLAUDE_MIN_LEN {
+        return Err(format!(
+            "the Claude token is only {} characters, so it looks truncated (a pasted token may have wrapped); nothing was saved",
+            token.len()
+        ));
+    }
+    Ok(())
 }
 
 pub async fn github(
@@ -197,15 +225,41 @@ mod tests {
         assert_eq!(resolve(Some("env".into()), &creds, SPRITES).as_deref(), Some("env"));
     }
 
+    const TOKEN: &str =
+        "sk-ant-oat01-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz";
+
     #[test]
     fn claude_tokens_lose_their_whitespace() {
         let dir = tempfile::tempdir().unwrap();
         let creds = store(&dir);
-        let mut input = "sk-ant-oat01-abc\n  def\r\nghi \n".as_bytes();
-        let msg = claude(&creds, &mut input, false).unwrap();
+        let (a, b) = TOKEN.split_at(40);
+        let wrapped = format!("{a}\n  {}\r\n{} \n", &b[..20], &b[20..]);
+        let msg = claude(&creds, &mut wrapped.as_bytes(), false).unwrap();
         assert!(!msg.contains("abc"), "{msg}");
-        assert_eq!(creds.read(CLAUDE).unwrap().0, "sk-ant-oat01-abcdefghi");
+        assert_eq!(creds.read(CLAUDE).unwrap().0, TOKEN);
         assert!(claude(&creds, &mut "  \n".as_bytes(), false).is_err());
+    }
+
+    #[test]
+    fn a_terminal_reads_a_wrapped_token_up_to_a_blank_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        let (a, b) = TOKEN.split_at(40);
+        let pasted = format!("{a}\n{b}\n\nignored\n");
+        claude(&creds, &mut pasted.as_bytes(), true).unwrap();
+        assert_eq!(creds.read(CLAUDE).unwrap().0, TOKEN);
+    }
+
+    #[test]
+    fn a_misshapen_claude_token_is_not_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        let cut = format!("{}\n", &TOKEN[..40]);
+        let err = claude(&creds, &mut cut.as_bytes(), false).unwrap_err();
+        assert!(err.contains("truncated") && !err.contains(&TOKEN[..40]), "{err}");
+        let err = claude(&creds, &mut format!("nope{TOKEN}\n").as_bytes(), false).unwrap_err();
+        assert!(err.contains("doesn't look like"), "{err}");
+        assert!(creds.read(CLAUDE).is_none());
     }
 
     #[tokio::test]
