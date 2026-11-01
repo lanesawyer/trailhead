@@ -91,7 +91,7 @@ async fn budget_breach_parks_the_task_and_suspends_its_sandbox() {
     assert_eq!(task.status, Status::NeedsInput);
     assert_eq!(task.holder.as_deref(), Some("factory/trail-1-a1"));
     assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
-    assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "question"));
+    assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "question" && c.body.contains("is suspended")));
 
     let sandbox = r.compute.get("trailhead-w1").expect("sandbox kept for resuming");
     assert!(!sandbox.labels.contains_key(label::ROLE), "connector access cut");
@@ -133,6 +133,9 @@ async fn a_breached_sandbox_that_cant_be_relabelled_is_still_cut_off_and_destroy
         let task = r.tracker.task(&key);
         assert_eq!(task.status, Status::NeedsInput);
         assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
+        let question = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap().body;
+        assert!(question.contains("fresh checkout"), "{question}");
+        assert!(!question.contains("is suspended"), "{question}");
         if destroy_fails {
             assert_eq!(
                 r.compute.egress("trailhead-w1"),
@@ -602,6 +605,29 @@ async fn a_sandbox_that_wont_release_after_the_agent_ends_the_run_doesnt_give_th
 }
 
 #[tokio::test]
+async fn a_worker_that_cant_record_its_failed_check_still_counts_the_attempt_and_releases_the_task() {
+    for op in ["note", "release"] {
+        let r = rig();
+        let key = r.tracker.add_task("TRAIL", "Lint me", "");
+        r.daemon.fail_check("lint", "warning: unused variable");
+        r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+        // Only the worker's own call fails; the control plane's go through.
+        r.tracker.fail_next("factory/trail-1-a1", op, 1);
+
+        let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+        let Ok(Outcome::Failed { reason }) = ran else { panic!("{op}: {ran:?}") };
+        assert!(reason.contains("finishing the run failed"), "{op}: {reason}");
+        let task = r.tracker.task(&key);
+        assert_eq!(task.status, Status::Open, "{op}: the daemon released the task");
+        assert_eq!(task.holder, None);
+        assert_eq!(task.run.attempt, Some(1), "{op}: the agent ended the run, so the attempt counts");
+        assert_eq!(task.run.infra_failures.unwrap_or(0), 0);
+        assert_eq!(task.run.retries.unwrap_or(0), 0);
+        assert!(r.codehost.prs().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_reopened() {
     let r = rig_with(
         &CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2\nmax_sandboxes = 2"),
@@ -638,4 +664,31 @@ async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_convent
     r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
     let opened = r.codehost.prs().pop().expect("a PR");
     assert_eq!(opened.spec.title, "chore: Add a greeting [TRAIL-1]");
+}
+
+#[tokio::test]
+async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a_fresh_one() {
+    let r = rig();
+    let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&first)).await.unwrap();
+    let idle = r.compute.get("trailhead-w1").expect("the first task leaves a warm sandbox");
+    assert_eq!(idle.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert!(idle.labels.contains_key(label::WARM));
+
+    let second = r.tracker.add_task("TRAIL", "Hits the broken checkout", "");
+    r.daemon.fail_prepares(1, "git clone failed");
+    let err = r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
+    assert!(err.to_string().contains("git clone failed"), "{err}");
+    assert!(r.compute.get("trailhead-w1").is_none(), "the sandbox is destroyed, not relabelled idle");
+    assert_eq!(r.tracker.task(&second).run.infra_failures, Some(1), "an infrastructure failure");
+    assert_eq!(r.tracker.task(&second).run.attempt.unwrap_or(0), 0, "no attempt was used");
+
+    let third = r.tracker.add_task("TRAIL", "Gets a fresh sandbox", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&third)).await.unwrap();
+    let fresh = r.compute.get("trailhead-w1").expect("a new sandbox took the freed name");
+    assert_eq!(r.compute.checkpoints("trailhead-w1").len(), 1, "built from scratch, not restored: {fresh:?}");
 }
