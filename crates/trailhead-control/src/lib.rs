@@ -8,6 +8,7 @@ pub mod daemon_binary;
 mod decide;
 mod lifecycle;
 mod merger;
+mod place;
 mod pool;
 mod reconcile;
 mod review;
@@ -23,7 +24,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use trailhead_factory::{
     ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, IROH_DOMAINS, Labels, MergeMode, ModelProvider,
-    PrRef, Task, TaskKey, Tracker, Verdict, label,
+    PrRef, Sandbox, Target, Task, TaskKey, Tracker, Verdict, label,
 };
 
 use crate::pool::Trouble;
@@ -76,12 +77,33 @@ impl Host {
     }
 }
 
+/// One of the factory's targets (`docs/factory/targets.md`): the compute behind it, the daemon launched in its
+/// sandboxes and the provider whose endpoint their runs call. A repo's factory holds them in placement order.
+#[derive(Clone)]
+pub struct Placed {
+    pub target: Target,
+    pub compute: Arc<dyn Compute>,
+    pub daemon: Arc<dyn Daemon>,
+    pub provider: Arc<dyn ModelProvider>,
+}
+
+impl Placed {
+    /// The sandboxes on this target that match `filter`, each carrying the target's name in its labels, so one listed
+    /// before targets existed still says where it is.
+    pub(crate) async fn list(&self, filter: &Labels) -> trailhead_factory::Result<Vec<Sandbox>> {
+        let mut found = self.compute.list(filter).await?;
+        for s in &mut found {
+            s.labels.entry(label::TARGET.into()).or_insert_with(|| self.target.name.clone());
+        }
+        Ok(found)
+    }
+}
+
 pub struct Factory {
     pub config: FactoryConfig,
-    pub compute: Arc<dyn Compute>,
+    /// Where sandboxes can run, in placement order: the lowest priority number first.
+    targets: Vec<Placed>,
     pub tracker: Arc<dyn Tracker>,
-    pub provider: Arc<dyn ModelProvider>,
-    pub daemon: Arc<dyn Daemon>,
     /// Reads PRs from the control plane, which sandboxes' own code host access can't serve. Without one, reconcile
     /// doesn't notice merges or closed PRs.
     pub codehost: Option<Arc<dyn CodeHost>>,
@@ -116,6 +138,9 @@ pub struct Factory {
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
     /// starting together never take the same sandbox.
     pool_pick: tokio::sync::Mutex<()>,
+    /// The target each worker or review being started has been placed on, until it ends. Its sandbox may not exist yet, so
+    /// without this a target's limit would be passed by runs starting together.
+    placed: Arc<Mutex<HashMap<(TaskKey, trailhead_factory::Role), String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -151,9 +176,12 @@ pub struct Reconciled {
     pub closed: Vec<String>,
     /// Pooled sandboxes that kept failing to release, now out of the pool.
     pub abandoned: Vec<String>,
+    /// In-progress tasks left alone because the target they ran on didn't answer.
+    pub unknown: Vec<String>,
 }
 
 impl Factory {
+    /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
     pub fn new(
         config: FactoryConfig,
         compute: Arc<dyn Compute>,
@@ -162,13 +190,26 @@ impl Factory {
         daemon: Arc<dyn Daemon>,
         host: Arc<Host>,
     ) -> Factory {
+        let one = Placed { target: Target::default(), compute, daemon, provider };
+        Factory::with_targets(config, vec![one], tracker, host)
+    }
+
+    /// A factory placing its runs on `targets`, preferring the lowest priority number (then the name that sorts
+    /// first). At least one is needed, and names must differ.
+    pub fn with_targets(
+        config: FactoryConfig,
+        mut targets: Vec<Placed>,
+        tracker: Arc<dyn Tracker>,
+        host: Arc<Host>,
+    ) -> Factory {
+        assert!(!targets.is_empty(), "a factory needs a target to run on");
+        targets.sort_by(|a, b| (a.target.priority, &a.target.name).cmp(&(b.target.priority, &b.target.name)));
+        assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
         let merge_mode = Mutex::new(config.merge.mode);
         Factory {
             config,
-            compute,
+            targets,
             tracker,
-            provider,
-            daemon,
             codehost: None,
             merge_mode_source: None,
             merge_mode,
@@ -183,6 +224,7 @@ impl Factory {
             starved: Mutex::default(),
             ungraded: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
+            placed: Arc::default(),
         }
     }
 

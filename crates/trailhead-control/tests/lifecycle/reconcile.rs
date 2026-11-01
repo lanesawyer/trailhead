@@ -51,6 +51,7 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
             conflicted: vec![],
             merged: vec![],
             closed: vec![],
+            unknown: vec![],
             abandoned: vec![],
         }
     );

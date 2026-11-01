@@ -10,13 +10,25 @@ use trailhead_factory::{
     RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind, run_name,
 };
 
+use crate::place::Placement;
 use crate::reconcile::merged_by;
 use crate::timing::{backoff, unix_now, until};
-use crate::{CANCEL_GRACE, Factory, Outcome};
+use crate::{CANCEL_GRACE, Factory, Outcome, Placed};
 
 impl Factory {
-    /// One attempt at a task: a fresh sandbox, the worker, then the reviewer.
+    /// One attempt at a task on the first target with room, or `Error::Unavailable` when none has any.
     pub async fn run_task(&self, task: &Task) -> Result<Outcome> {
+        let mut survey = self.survey().await;
+        let Some(target) = self.place(&mut survey) else {
+            return Err(Error::Unavailable(messages::no_target_has_room(&task.key.0)));
+        };
+        let place = self.hold(&task.key, Role::Worker, target);
+        self.run_task_on(task, target, place).await
+    }
+
+    /// One attempt at a task on `target`: a fresh sandbox, the worker, then the reviewer. `place` is the worker's
+    /// place on `target`, given up when its sandbox is released, before the review is placed on its own.
+    pub(crate) async fn run_task_on(&self, task: &Task, target: &Placed, place: Placement) -> Result<Outcome> {
         // A rework on a PR that has merged or closed since the task was queued would push to a branch nobody wants
         // (TRAIL-304). The sub-agent isn't made yet, so the factory's own identity holds the task while it's settled.
         if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) {
@@ -98,8 +110,16 @@ impl Factory {
                 None => None,
             };
             let merge_base = task.run.pending_changes().is_some_and(|c| c.conflict);
-            let sandbox = self.acquire_worker(task, rework.then(|| Self::branch(task)), merge_base).await?;
-            sub.report(&task.key, RunUpdate { host: Some(sandbox.name.clone()), ..RunUpdate::default() }).await?;
+            let sandbox = self.acquire_worker(target, task, rework.then(|| Self::branch(task)), merge_base).await?;
+            sub.report(
+                &task.key,
+                RunUpdate {
+                    host: Some(sandbox.name.clone()),
+                    target: Some(target.target.name.clone()),
+                    ..RunUpdate::default()
+                },
+            )
+            .await?;
             Ok::<_, Error>((sandbox, context, feedback))
         };
         let (sandbox, context, feedback) = match prepared.await {
@@ -117,8 +137,8 @@ impl Factory {
             grade: None,
             pr: task.run.pr.clone(),
             feedback,
-            model: self.provider.resolve(profile.model),
-            endpoint: self.provider.endpoint(),
+            model: target.provider.resolve(profile.model),
+            endpoint: target.provider.endpoint(),
             max_steps: profile.budget.steps,
             required_checks: self.config.required_checks(),
             worker_checks: Vec::new(),
@@ -129,7 +149,7 @@ impl Factory {
         let prior = task.run.spend.unwrap_or_default();
         let run =
             self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
-        self.conclude(task, &sub, &sandbox, &name, attempt, run).await
+        self.conclude(task, &sub, &sandbox, &name, attempt, run, Some(place)).await
     }
 
     /// Follows a worker run that was going when the last control plane stopped (TRAIL-137): the daemon replays the
@@ -152,10 +172,11 @@ impl Factory {
             .map_or(Duration::ZERO, |t| Duration::from_secs(u64::try_from(unix_now() - t).unwrap_or(0)));
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, ?elapsed, "reattaching to a run in flight");
         let run = self.run_metered(sandbox, Begin::Attach(name.clone()), &task.key, &profile, prior, elapsed).await;
-        self.conclude(task, &sub, sandbox, &name, attempt, run).await
+        self.conclude(task, &sub, sandbox, &name, attempt, run, None).await
     }
 
     /// What a worker's run came to: the report acted on, or the failure given back to the queue.
+    #[allow(clippy::too_many_arguments)]
     async fn conclude(
         &self,
         task: &Task,
@@ -164,6 +185,7 @@ impl Factory {
         name: &str,
         attempt: u32,
         run: Result<Run>,
+        place: Option<Placement>,
     ) -> Result<Outcome> {
         let infra_prior = task.run.infra_failures;
         let run = match run {
@@ -189,7 +211,9 @@ impl Factory {
                 if let Err(e) = &recorded {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't record the breach's spend; cutting off anyway");
                 }
-                if let Err(e) = self.compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await {
+                if let Err(e) =
+                    self.target_of(sandbox).compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await
+                {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't checkpoint the breached sandbox");
                 }
                 let cut = self.cut_off(sandbox).await;
@@ -198,8 +222,8 @@ impl Factory {
                     // Reconcile leaves a parked task's sandbox alone, so a sandbox that couldn't be cut off is
                     // destroyed: that loses the suspended state, which beats leaving it reachable.
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
-                    self.daemon.forget(&sandbox.id).await;
-                    if let Err(e) = self.compute.destroy(&sandbox.id).await {
+                    self.daemon_of(sandbox).forget(&sandbox.id).await;
+                    if let Err(e) = self.target_of(sandbox).compute.destroy(&sandbox.id).await {
                         tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile will");
                     }
                 }
@@ -242,6 +266,8 @@ impl Factory {
                 if let Err(e) = self.release_worker(sandbox).await {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile will");
                 }
+                // The worker is done with its target; the review takes its own place.
+                drop(place);
                 if let Err(e) = self.tracker.revoke_sub_agent(name).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
                 }
@@ -427,8 +453,8 @@ impl Factory {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let run = async {
             match begin {
-                Begin::Start(req) => self.daemon.run(&sandbox.id, *req, tx).await,
-                Begin::Attach(run) => self.daemon.attach(&sandbox.id, &run, tx).await,
+                Begin::Start(req) => self.daemon_of(sandbox).run(&sandbox.id, *req, tx).await,
+                Begin::Attach(run) => self.daemon_of(sandbox).attach(&sandbox.id, &run, tx).await,
             }
         };
         tokio::pin!(run);
@@ -441,7 +467,7 @@ impl Factory {
         let mut grace_fired = false;
         let mut on_event = |ev: RunEvent, spent: &mut Usd| -> Option<String> {
             match ev {
-                RunEvent::Usage { model, usage } => *spent += self.provider.price(&model, &usage),
+                RunEvent::Usage { model, usage } => *spent += self.provider_of(sandbox).price(&model, &usage),
                 RunEvent::StepStarted { step } => {
                     steps += 1;
                     tracing::info!(task = %key, step, spent = %(prior + *spent), "step");
@@ -489,7 +515,7 @@ impl Factory {
                 }
             };
             if let Some(reason) = new_breach {
-                if let Err(e) = self.daemon.cancel(&sandbox.id).await {
+                if let Err(e) = self.daemon_of(sandbox).cancel(&sandbox.id).await {
                     tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't cancel; relying on the kill switch");
                 }
                 grace.as_mut().reset(tokio::time::Instant::now() + CANCEL_GRACE);

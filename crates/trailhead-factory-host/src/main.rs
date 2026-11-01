@@ -35,11 +35,13 @@ use tokio::sync::Notify;
 use tracing::Instrument;
 use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
-use trailhead_control::{CoreTracker, Factory, Host, daemon_binary};
+use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
 use trailhead_daemon::plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN};
-use trailhead_factory::{Compute, ComputeConfig, FactoryConfig, HarnessSecrets, ProviderKind, Registry, Target};
+use trailhead_factory::{
+    Compute, ComputeConfig, Daemon, FactoryConfig, HarnessSecrets, ProviderKind, Registry, Target,
+};
 use trailhead_provider_anthropic::Anthropic;
 use trailhead_server::creds::{Cred, CredStore};
 
@@ -313,12 +315,19 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     // `repos::validate` made the compute and daemon settings the same for every repo.
     let shared = &specs[0].config;
     let binary = Arc::new(binary);
-    let (compute, target) = compute(&shared.compute, opts, &paths, binary.clone(), false)?;
-    let launch =
-        Launch { harness: adapter, harness_secrets, log: shared.daemon.log.clone(), ..Launch::new(binary, &target) };
-    let daemon = Arc::new(RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch));
-    let tunnel =
-        Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, daemon.peers())).spawn();
+    let peers = trailhead_daemon::net::Peers::default();
+    let mut targets: Vec<Wired> = Vec::new();
+    for (compute, target) in computes(shared, opts, &paths, binary.clone(), false)? {
+        let launch = Launch {
+            harness: adapter.clone(),
+            harness_secrets: harness_secrets.clone(),
+            log: shared.daemon.log.clone(),
+            ..Launch::new(binary.clone(), &target)
+        };
+        let daemon = RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch).with_peers(peers.clone());
+        targets.push((target, compute, Arc::new(daemon)));
+    }
+    let tunnel = Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, peers)).spawn();
     tracing::info!(endpoint = %endpoint.id(), repos = %slugs.join(", "), "factory ready");
 
     let host = Host::new(host_config.max_sandboxes);
@@ -328,22 +337,24 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
         let repos::RepoSpec { config_path, remote, config, .. } = spec;
         let (_, provider_name) = config.plugins().ok_or("the worker profile is missing")?;
         let provider = *providers.get(provider_name).map_err(|e| e.to_string())?;
-        let model_endpoint = target.model_endpoint(&opts.model_endpoint).to_string();
-        let mut factory = Factory::new(
-            config,
-            compute.clone(),
-            tracker.clone(),
-            provider(model_endpoint),
-            daemon.clone(),
-            host.clone(),
-        )
-        .with_server_check(server_check(opts.server))
-        .with_merge_mode_source(Box::new(move || {
-            let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
-            FactoryConfig::from_repo_file(&src, remote.clone())
-                .map(|c| c.merge.mode)
-                .map_err(|e| format!("{}: {e}", config_path.display()))
-        }));
+        let placed = targets
+            .iter()
+            .map(|(target, compute, daemon)| Placed {
+                target: target.clone(),
+                compute: compute.clone(),
+                daemon: daemon.clone(),
+                provider: provider(target.model_endpoint(&opts.model_endpoint).to_string()),
+            })
+            .collect();
+        let mut factory = Factory::with_targets(config, placed, tracker.clone(), host.clone())
+            .with_server_check(server_check(opts.server))
+            .with_merge_mode_source(Box::new(move || {
+                let src =
+                    std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+                FactoryConfig::from_repo_file(&src, remote.clone())
+                    .map(|c| c.merge.mode)
+                    .map_err(|e| format!("{}: {e}", config_path.display()))
+            }));
         match &opts.github_token {
             Some(token) => {
                 factory = factory
@@ -400,6 +411,32 @@ fn server_check(server: SocketAddr) -> trailhead_control::ServerCheck {
             }
         })
     })
+}
+
+/// A target's `Compute` and launch facts.
+pub(crate) type Built = (Arc<dyn Compute>, Target);
+
+/// A target with its `Compute` and the daemon launched in its sandboxes.
+type Wired = (Target, Arc<dyn Compute>, Arc<dyn Daemon>);
+
+/// A factory file's targets, each with its `Compute` and launch facts, in placement order. `read_only` is as for
+/// [`compute`].
+fn computes(
+    config: &FactoryConfig,
+    opts: &Opts,
+    paths: &trailhead_server::Paths,
+    binary: Arc<Vec<u8>>,
+    read_only: bool,
+) -> Result<Vec<Built>, String> {
+    config
+        .target_specs()
+        .into_iter()
+        .map(|spec| {
+            let (compute, target) = compute(&spec.compute, opts, paths, binary.clone(), read_only)
+                .map_err(|e| format!("target {}: {e}", spec.name))?;
+            Ok((compute, target.listed(&spec)))
+        })
+        .collect()
 }
 
 /// The sandboxes' `Compute`, and where the daemon lives in them.
@@ -530,15 +567,19 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
                 }
             }
             let first = &setup.repos[0].factory;
-            match first.compute.list(&Default::default()).await {
-                Ok(live) => println!(
-                    "compute: {} reachable; {} sandbox(es) visible",
-                    compute_name(&first.config.compute),
-                    live.len()
-                ),
-                Err(e) => {
-                    failed += 1;
-                    println!("compute: {e}");
+            let specs = first.config.target_specs();
+            for (p, spec) in first.targets().iter().zip(specs.iter().map(|s| compute_name(&s.compute))) {
+                match p.compute.list(&Default::default()).await {
+                    Ok(live) => println!(
+                        "compute: {} ({spec}, priority {}) reachable; {} sandbox(es) visible",
+                        p.target.name,
+                        p.target.priority,
+                        live.len()
+                    ),
+                    Err(e) => {
+                        failed += 1;
+                        println!("compute: {} ({spec}): {e}", p.target.name);
+                    }
                 }
             }
             println!("endpoint: {}", setup.tunnel.endpoint().id());

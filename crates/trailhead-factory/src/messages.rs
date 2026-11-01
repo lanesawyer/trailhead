@@ -157,6 +157,11 @@ pub fn grade_raised_note(grade: u8, was: u8, why: &str) -> String {
     format!("Raised to grade {grade} (task was {was}): {why}")
 }
 
+/// Why a task waits: every target is full, over its limit or unreachable (`docs/factory/targets.md`).
+pub fn no_target_has_room(task: &str) -> String {
+    format!("no target has room for {task}; it waits")
+}
+
 /// The note on a task the factory skips until someone grades it.
 pub fn ungraded_note() -> String {
     "no grade; set one to queue it".to_string()
@@ -540,6 +545,7 @@ mod tests {
             "The factory's checks failed, so nothing was published.\n\n`fmt` failed; the end of its output:\n```\nbad\n```\n"
         );
         assert_eq!(flaky_checks(&["a".into()]), "\n\n⚠️ Check `a` failed, then passed when rerun.");
+        assert!(no_target_has_room("TRAIL-1").contains("TRAIL-1"));
     }
 
     #[test]

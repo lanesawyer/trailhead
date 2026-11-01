@@ -40,7 +40,8 @@ impl Factory {
     pub(crate) async fn reconcile_deferring(&self, running: &HashSet<TaskKey>) -> Result<(Reconciled, Due)> {
         let mut done = Reconciled::default();
         let mut due = Due::default();
-        let live = self.compute.list(&self.base_labels()).await?;
+        // A target that can't be reached is unknown, not empty: what ran there is left as it is until it answers.
+        let (live, down) = self.list_all(&self.base_labels()).await?;
         let tasks: Vec<Task> = self
             .tracker
             .in_flight(self.project(), &self.queue())
@@ -72,7 +73,7 @@ impl Factory {
                 self.reconcile_pooled(sandbox, &mut done).await;
                 continue;
             }
-            match self.compute.destroy(&sandbox.id).await {
+            match self.target_of(sandbox).compute.destroy(&sandbox.id).await {
                 Ok(()) => done.destroyed.push(sandbox.name.clone()),
                 Err(e) => tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't destroy an orphaned sandbox"),
             }
@@ -84,6 +85,11 @@ impl Factory {
             due.runs.push(((*task).clone(), (*sandbox).clone()));
         }
         for task in tasks.iter().filter(|t| !live_runs.iter().any(|(r, _)| r.key == t.key)) {
+            if task.status == Status::InProgress && Self::on_unreachable(task, &down) {
+                tracing::warn!(task = %task.key.0, target = ?task.run.target, "its target can't be reached; leaving the run as it is");
+                done.unknown.push(task.key.0.clone());
+                continue;
+            }
             match self.reconcile_task(task, &mut done).await {
                 Ok(true) => due.reviews.push(task.clone()),
                 Ok(false) => {}
@@ -93,6 +99,15 @@ impl Factory {
             }
         }
         Ok((done, due))
+    }
+
+    /// Whether a task's run may be on a target that didn't answer: the target it recorded, or, for a task that
+    /// recorded none, any of them.
+    fn on_unreachable(task: &Task, down: &HashSet<String>) -> bool {
+        match &task.run.target {
+            Some(target) => down.contains(target),
+            None => !down.is_empty(),
+        }
     }
 
     /// The pooled sandbox a task's worker run is on, if the run may still be going there: the task is in progress
