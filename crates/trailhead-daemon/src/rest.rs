@@ -9,11 +9,9 @@ use async_trait::async_trait;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
-    Credential, Error, HumanContext, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict, VerdictKind,
+    Credential, Error, HumanContext, METADATA_KEY, Result, RunUpdate, Status, Task, TaskKey, Tracker, Verdict,
+    VerdictKind,
 };
-
-/// The metadata key the factory's run fields live under (`trailhead_control::METADATA_KEY`).
-const METADATA_KEY: &str = "factory";
 
 #[derive(Clone)]
 pub struct RestTracker {
@@ -68,16 +66,7 @@ impl RestTracker {
 }
 
 fn status(s: &str) -> Result<Status> {
-    Ok(match s {
-        "open" => Status::Open,
-        "in_progress" => Status::InProgress,
-        "needs_input" => Status::NeedsInput,
-        "in_review" => Status::InReview,
-        "approved" => Status::Approved,
-        "done" => Status::Done,
-        "cancelled" => Status::Cancelled,
-        other => return Err(Error::Other(format!("unknown status {other}"))),
-    })
+    Status::parse(s).ok_or_else(|| Error::Other(format!("unknown status {s}")))
 }
 
 /// A task from the API's JSON. `holder` is the claim holder's name when the response includes it (`include=claim`
@@ -197,19 +186,19 @@ impl Tracker for RestTracker {
     }
 
     async fn request_review(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": "in_review" })).await
+        self.patch(key, json!({ "status": Status::InReview.as_str() })).await
     }
 
     async fn approve(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": "approved" })).await
+        self.patch(key, json!({ "status": Status::Approved.as_str() })).await
     }
 
     async fn unapprove(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": "in_review" })).await
+        self.patch(key, json!({ "status": Status::InReview.as_str() })).await
     }
 
     async fn reopen(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": "open" })).await
+        self.patch(key, json!({ "status": Status::Open.as_str() })).await
     }
 
     async fn raise_grade(&self, key: &TaskKey, grade: u8) -> Result<()> {
@@ -235,7 +224,7 @@ impl Tracker for RestTracker {
 
     async fn finish(&self, key: &TaskKey, handoff: &str) -> Result<()> {
         self.comment(key, json!({ "kind": "handoff", "body": handoff })).await?;
-        self.patch(key, json!({ "status": "done" })).await
+        self.patch(key, json!({ "status": Status::Done.as_str() })).await
     }
 
     async fn create_task(

@@ -154,7 +154,7 @@ fn render_status(sandboxes: &[Sandbox], tasks: &[Task]) -> String {
 
 fn task_line(t: &Task) -> String {
     let run = &t.run;
-    let mut line = format!("{} [{}]", t.key.0, status_name(t.status));
+    let mut line = format!("{} [{}]", t.key.0, t.status.label());
     line.push_str(&format!(" attempt {}", run.attempt.unwrap_or(0)));
     line.push_str(&format!(", spend {}", run.spend.unwrap_or_default()));
     if let Some(pr) = &run.pr {
@@ -169,18 +169,6 @@ fn task_line(t: &Task) -> String {
     }
     line.push_str(&format!("\n      {}", t.title));
     line
-}
-
-fn status_name(s: Status) -> &'static str {
-    match s {
-        Status::Open => "open",
-        Status::InProgress => "in progress",
-        Status::NeedsInput => "needs input",
-        Status::InReview => "in review",
-        Status::Approved => "approved",
-        Status::Done => "done",
-        Status::Cancelled => "cancelled",
-    }
 }
 
 #[cfg(test)]

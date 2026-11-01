@@ -11,13 +11,10 @@ use trailhead_core::{
     CommentKind, Ctx, GradeFilter, NewComment, Principal, Store, TaskFilter, TaskPatch, TokenOptions,
 };
 use trailhead_factory::{
-    Answered, Credential, Error, HumanContext, ModelId, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker,
-    Verdict, VerdictKind, is_factory_agent,
+    Answered, Credential, Error, HumanContext, METADATA_KEY, ModelId, Result, RunUpdate, Status, Task, TaskKey,
+    TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent,
 };
 use uuid::Uuid;
-
-/// The metadata key the factory's run fields live under.
-pub const METADATA_KEY: &str = "factory";
 
 const PAGE_SIZE: i64 = 1000;
 
