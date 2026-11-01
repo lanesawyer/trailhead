@@ -352,7 +352,7 @@ impl Runner {
                     if !description.is_empty() {
                         description.push_str("\n\n");
                     }
-                    description.push_str(&format!("Raised by the reviewer of {}", source.0));
+                    description.push_str(&trailhead_factory::raised_by(source));
                     if let Some(pr) = pr {
                         description.push_str(&format!(" ({})", pr.url));
                     }
