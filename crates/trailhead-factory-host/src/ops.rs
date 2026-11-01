@@ -45,7 +45,13 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
         .in_flight(&config.repo.project, &config.repo.queue.iter().cloned().map(TaskKey).collect::<Vec<_>>())
         .await
         .map_err(|e| e.to_string())?;
-    print!("{}", render_status(&sandboxes, &tasks));
+    let queue: Vec<TaskKey> = config.repo.queue.iter().cloned().map(TaskKey).collect();
+    let mut waiting = tracker.ready(&config.repo.project, &queue, usize::MAX).await.map_err(|e| e.to_string())?;
+    // Under a queue only graded tasks are the factory's to start.
+    if !queue.is_empty() {
+        waiting.retain(|t| t.grade.is_some());
+    }
+    print!("{}", render_status(&sandboxes, &tasks, &waiting, config.repo.max_sandboxes));
     Ok(())
 }
 
@@ -109,7 +115,8 @@ fn new_output<'a>(printed: &str, log: &'a str) -> &'a str {
     if log == printed { "" } else { log }
 }
 
-fn render_status(sandboxes: &[Sandbox], tasks: &[Task]) -> String {
+/// `waiting` is the ready tasks the factory could start; `max_sandboxes` the repo's cap.
+fn render_status(sandboxes: &[Sandbox], tasks: &[Task], waiting: &[Task], max_sandboxes: usize) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let none = "-";
@@ -134,6 +141,20 @@ fn render_status(sandboxes: &[Sandbox], tasks: &[Task]) -> String {
             get(label::ROLE),
             get(label::TASK),
             get(label::WARM)
+        );
+    }
+
+    // A parked task keeps its sandbox in the cap, so enough of them leave ready tasks waiting on a person's answer.
+    let parked = tasks
+        .iter()
+        .filter(|t| t.status == Status::NeedsInput)
+        .filter(|t| sandboxes.iter().any(|s| s.labels.get(label::TASK) == Some(&t.key.0)))
+        .count();
+    if !waiting.is_empty() && parked > 0 && parked >= max_sandboxes {
+        let _ = writeln!(
+            out,
+            "\n{} ready tasks waiting; all {max_sandboxes} sandboxes held by parked tasks (answer or cancel them)",
+            waiting.len()
         );
     }
 
@@ -266,6 +287,8 @@ mod tests {
         let out = render_status(
             &boxes,
             &[task("TRAIL-7", Status::InProgress, running), task("TRAIL-5", Status::InReview, reviewed)],
+            &[],
+            2,
         );
         let w1 = out.find("trailhead-w1 ").unwrap();
         assert!(w1 < out.find("trailhead-w2 ").unwrap(), "{out}");
@@ -278,8 +301,25 @@ mod tests {
     }
 
     #[test]
+    fn status_warns_when_parked_tasks_hold_every_place_and_ready_tasks_wait() {
+        let boxes = [
+            sandbox("trailhead-w1", &[("state", "busy"), ("task", "TRAIL-1")]),
+            sandbox("trailhead-w2", &[("state", "busy"), ("task", "TRAIL-2")]),
+        ];
+        let parked = [
+            task("TRAIL-1", Status::NeedsInput, Default::default()),
+            task("TRAIL-2", Status::NeedsInput, Default::default()),
+        ];
+        let waiting = [task("TRAIL-3", Status::Open, Default::default())];
+        let out = render_status(&boxes, &parked, &waiting, 2);
+        assert!(out.contains("1 ready tasks waiting; all 2 sandboxes held by parked tasks"), "{out}");
+        assert!(!render_status(&boxes, &parked, &[], 2).contains("waiting;"));
+        assert!(!render_status(&boxes, &parked, &waiting, 3).contains("waiting;"));
+    }
+
+    #[test]
     fn an_empty_factory_says_so() {
-        let out = render_status(&[], &[]);
+        let out = render_status(&[], &[], &[], 2);
         assert!(out.contains("Sandboxes (0)\n  none"), "{out}");
     }
 }
