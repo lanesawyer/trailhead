@@ -47,6 +47,8 @@ pub struct FakeWorkspace {
     /// Files the agent leaves conflict markers in.
     markers: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
+    /// Errors the next prepares fail with, before they change anything.
+    prepare_errors: Mutex<Vec<String>>,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
 
@@ -61,6 +63,9 @@ impl Workspace for FakeWorkspace {
         let gate = self.prepare_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.notified().await;
+        }
+        if let Some(error) = self.prepare_errors.lock().unwrap().pop() {
+            return Err(Error::Other(error));
         }
         *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
         *self.merging.lock().unwrap() = req.merge_base && !self.agent_merges.load(Ordering::SeqCst);
@@ -236,6 +241,14 @@ impl LocalDaemon {
         let mut errors = self.run_errors.lock().unwrap();
         for _ in 0..times {
             errors.push(trailhead_factory::Error::Other(error.to_string()));
+        }
+    }
+
+    /// Makes the next `times` prepares fail with this error, as a checkout that won't clone or build would.
+    pub fn fail_prepares(&self, times: usize, error: &str) {
+        let mut errors = self.workspace.prepare_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push(error.to_string());
         }
     }
 
