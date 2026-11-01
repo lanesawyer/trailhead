@@ -182,7 +182,13 @@ pub fn queued_rig() -> (Rig, TaskKey) {
 }
 
 pub fn queued_rig_with(extra: &str) -> (Rig, TaskKey) {
-    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nqueue = \"TRAIL-1\"");
+    queued_rig_rounds(extra, None)
+}
+
+/// Like `queued_rig_with`, with the repo's `max_review_rounds` set.
+pub fn queued_rig_rounds(extra: &str, rounds: Option<u32>) -> (Rig, TaskKey) {
+    let limit = rounds.map(|n| format!("\nmax_review_rounds = {n}")).unwrap_or_default();
+    let config = CONFIG.replace("name = \"trailhead\"", &format!("name = \"trailhead\"\nqueue = \"TRAIL-1\"{limit}"));
     let mut r = rig_with(&format!("{config}\n{extra}"));
     let queue = r.tracker.add_task("TRAIL", "Factory queue", "");
     let codehost = Arc::new(r.codehost.clone());
