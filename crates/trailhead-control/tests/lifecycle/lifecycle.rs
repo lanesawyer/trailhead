@@ -454,6 +454,7 @@ async fn a_silent_agent_is_failed_as_a_stall_without_using_an_attempt() {
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Open, "not parked");
     assert_eq!(task.run.attempt, Some(0));
+    assert!(task.run.spend.is_some_and(|s| s > Usd::ZERO), "the stalled run's spend is recorded: {:?}", task.run.spend);
     assert_eq!(task.run.infra_failures, Some(1));
 }
 
@@ -665,4 +666,31 @@ async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_convent
     r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
     let opened = r.codehost.prs().pop().expect("a PR");
     assert_eq!(opened.spec.title, "chore: Add a greeting [TRAIL-1]");
+}
+
+#[tokio::test]
+async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a_fresh_one() {
+    let r = rig();
+    let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&first)).await.unwrap();
+    let idle = r.compute.get("trailhead-w1").expect("the first task leaves a warm sandbox");
+    assert_eq!(idle.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert!(idle.labels.contains_key(label::WARM));
+
+    let second = r.tracker.add_task("TRAIL", "Hits the broken checkout", "");
+    r.daemon.fail_prepares(1, "git clone failed");
+    let err = r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
+    assert!(err.to_string().contains("git clone failed"), "{err}");
+    assert!(r.compute.get("trailhead-w1").is_none(), "the sandbox is destroyed, not relabelled idle");
+    assert_eq!(r.tracker.task(&second).run.infra_failures, Some(1), "an infrastructure failure");
+    assert_eq!(r.tracker.task(&second).run.attempt.unwrap_or(0), 0, "no attempt was used");
+
+    let third = r.tracker.add_task("TRAIL", "Gets a fresh sandbox", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&third)).await.unwrap();
+    let fresh = r.compute.get("trailhead-w1").expect("a new sandbox took the freed name");
+    assert_eq!(r.compute.checkpoints("trailhead-w1").len(), 1, "built from scratch, not restored: {fresh:?}");
 }

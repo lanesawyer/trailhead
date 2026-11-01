@@ -46,8 +46,8 @@ pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
 pub use target::Target;
 pub use tracker::{
-    Answered, ChangesRequested, Credential, FollowUpTask, HumanContext, MergeDecision, Merged, MergedBy, RunUpdate,
-    Status, Task, TaskKey, TaskNote, Tracker, is_factory_agent, is_raised_by, raised_by,
+    Answered, ChangesRequested, Credential, FollowUpTask, HumanContext, METADATA_KEY, MergeDecision, Merged, MergedBy,
+    RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, is_factory_agent, is_raised_by, raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]

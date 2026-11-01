@@ -628,7 +628,12 @@ pub fn shell_quote(s: &str) -> String {
 /// The Dockerfile instructions that give an imported filesystem the container's identity: its checkpoint labels,
 /// user, working directory and environment. (Its command and entrypoint are set again when it is restored.)
 fn image_changes(sandbox: &str, note: &str, config: Option<&ContainerConfig>) -> Vec<String> {
-    let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('$', "\\$"));
+    // Docker joins the changes with newlines and parses them as a Dockerfile, so a line break would end the
+    // instruction early; turn each into a space.
+    let quote = |s: &str| {
+        let s = s.replace(['\r', '\n'], " ");
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('$', "\\$"))
+    };
     let mut out =
         vec![format!("LABEL {CHECKPOINT_OF}={}", quote(sandbox)), format!("LABEL {CHECKPOINT_NOTE}={}", quote(note))];
     if let Some(config) = config {
@@ -847,6 +852,13 @@ mod tests {
             ]
         );
         assert_eq!(image_changes("t-w1", "warm", None).len(), 2);
+    }
+
+    #[test]
+    fn a_multi_line_note_stays_on_one_line() {
+        let changes = image_changes("t-w1", "parked: first\nsecond\r\nthird", None);
+        assert_eq!(changes[1], "LABEL dev.trailhead.checkpoint-note=\"parked: first second  third\"");
+        assert!(changes.iter().all(|c| !c.contains(['\n', '\r'])));
     }
 
     #[test]

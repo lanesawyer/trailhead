@@ -79,6 +79,13 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't destroy the reviewer's sandbox; reconcile will");
         }
         let run = match run {
+            Ok(Run::Lost(e, spend)) => {
+                // What the run cost before it failed counts toward the budget across retries (TRAIL-447).
+                if let Err(re) = sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await {
+                    tracing::warn!(task = %task.key.0, error = %re, "couldn't record the failed review's spend");
+                }
+                return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await);
+            }
             Ok(run) => run,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await),
         };
@@ -89,7 +96,7 @@ impl Factory {
             Run::Report(RunReport { result: RunResult::Reviewed(v), .. }, s) => {
                 (*s, (v.kind != VerdictKind::RequestChanges).then_some(attempt), head)
             }
-            Run::Report(_, s) | Run::Breach(_, s) => (*s, None, None),
+            Run::Report(_, s) | Run::Breach(_, s) | Run::Lost(_, s) => (*s, None, None),
         };
         // A reviewer that finished (a verdict, or a breach that is the task's doing) ends the run of infrastructure failures.
         let finished =
@@ -141,6 +148,7 @@ impl Factory {
                 self.review_infra_failed(task, &name, error, before, retries, infra_prior).await;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
+            Run::Lost(..) => unreachable!("a lost run returns before the verdict is recorded"),
             Run::Breach(reason, _) => {
                 // A breach is the task's doing, like a worker's: the round counts, and the task parks for a human
                 // rather than being reviewed again on the next reconcile (TRAIL-319). The reviewer's sandbox is
