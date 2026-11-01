@@ -128,12 +128,7 @@ impl Factory {
                     tracing::info!(task = %key.0, %head, "gates passed; approved");
                 }
                 Err(Error::Forbidden(why)) => {
-                    let problem = format!(
-                        "the factory can't move the task to approved ({why}); a person has to list `{}` as a \
-                         reviewer of project {}",
-                        self.tracker.agent(),
-                        self.project()
-                    );
+                    let problem = format!("the factory can't move the task to approved ({why})");
                     tracing::warn!(task = %key.0, %problem, "gates passed");
                     decision.approved_head = None;
                     decision.problem = Some(problem);
