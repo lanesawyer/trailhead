@@ -3,6 +3,8 @@ use trailhead_factory::{
     Result, RunUpdate, Status, Task, TaskKey, VerdictKind,
 };
 
+use tokio::time::Instant;
+
 use crate::Factory;
 use crate::decide::{Facts, decide};
 use crate::messages::{Wording, decision_message};
@@ -215,9 +217,15 @@ impl Factory {
         }
         if codehost.behind(pr).await? {
             // An update asked for on this head is still queued: the head moves when it lands.
-            if self.updating.lock().unwrap().get(&task.key) == Some(&decision.head) {
-                tracing::debug!(task = %task.key.0, pr = %pr.url, "the branch update is still queued; waiting");
-                return Ok(());
+            let queued = self.updating.lock().unwrap().get(&task.key).cloned();
+            if let Some((head, since)) = queued
+                && head == decision.head
+            {
+                if since.elapsed() < crate::UPDATE_PATIENCE {
+                    tracing::debug!(task = %task.key.0, pr = %pr.url, "the branch update is still queued; waiting");
+                    return Ok(());
+                }
+                tracing::warn!(task = %task.key.0, pr = %pr.url, "the branch update never landed; asking again");
             }
             match codehost.update_branch(pr).await? {
                 BranchUpdate::Conflict => {
@@ -226,7 +234,7 @@ impl Factory {
                 }
                 // CI starts over on the new head; the next pass looks at it again.
                 BranchUpdate::Updated => {
-                    self.updating.lock().unwrap().insert(task.key.clone(), decision.head.clone());
+                    self.updating.lock().unwrap().insert(task.key.clone(), (decision.head.clone(), Instant::now()));
                 }
                 BranchUpdate::UpToDate => {}
             }
