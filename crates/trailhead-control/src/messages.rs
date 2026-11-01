@@ -20,6 +20,7 @@ pub(crate) fn decision_message(grade: &PrGrade, d: &MergeDecision, said: Wording
     let message = gate_message(grade, d, &said);
     match said.changes {
         Some(Rework::Running) => format!("{message} The latest review asked for changes; a rework is running."),
+        Some(Rework::Parked) => format!("{message} The latest review asked for changes; the task is parked for Lane."),
         Some(Rework::Pushed) => format!("{message} The latest review asked for changes; the rework has pushed."),
         None => message,
     }
