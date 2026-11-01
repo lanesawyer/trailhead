@@ -7,6 +7,7 @@ use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::task::{self, JoinSet};
 use tracing::Instrument;
+use trailhead_factory::messages;
 use trailhead_factory::{Labels, Result, Role, RunUpdate, Sandbox, Status, Task, TaskKey, label};
 
 use crate::timing::{unix_now, until};
@@ -49,10 +50,6 @@ impl Factory {
             if (&mut shutdown).now_or_never().is_some() {
                 break;
             }
-            if draining && running.is_empty() {
-                tracing::info!("drained; no runs left");
-                break;
-            }
             if dirty {
                 dirty = false;
                 match self.reconcile_deferring(&keys.values().cloned().collect()).await {
@@ -88,6 +85,12 @@ impl Factory {
                 if (&mut shutdown).now_or_never().is_some() {
                     break;
                 }
+            }
+            // A run that just errored set `dirty`: its daemon may still have it, so the reconcile above runs first and
+            // a drain concludes only if that found nothing. A poll re-dirtying an idle loop mustn't hold it open.
+            if draining && running.is_empty() {
+                tracing::info!("drained; no runs left");
+                break;
             }
             if !draining && let Err(e) = self.start_ready(&mut running, &mut keys, reviews.len()).await {
                 tracing::warn!(error = %e, "couldn't start ready tasks");
@@ -163,7 +166,7 @@ impl Factory {
         if room == 0 {
             if keys.len() > reviewing {
                 *self.starved.lock().unwrap() = None;
-            } else if others > 0 {
+            } else if parked_fill_repo_cap(others, self.config.repo.max_sandboxes) {
                 self.warn_if_starved().await;
             }
             return Ok(());
@@ -248,7 +251,7 @@ impl Factory {
         }
         tracing::info!(task = %task.key.0, "no grade; skipping it until a human sets one");
         let told = async {
-            self.tracker.note(&task.key, "no grade; set one to queue it").await?;
+            self.tracker.note(&task.key, &messages::ungraded_note()).await?;
             self.tracker.report(&task.key, RunUpdate { ungraded: Some(true), ..RunUpdate::default() }).await
         };
         if let Err(e) = told.await {
@@ -401,4 +404,22 @@ pub(crate) struct Due {
     pub(crate) reviews: Vec<Task>,
     /// Worker runs still going in their sandboxes, to follow again.
     pub(crate) runs: Vec<(Task, Sandbox)>,
+}
+
+/// Whether the sandboxes held beyond running work fill the repo's own cap. With nothing running they are parked
+/// tasks'; a full host cap alone isn't their doing, since the other repos' runs free their places unaided.
+fn parked_fill_repo_cap(others: usize, max_sandboxes: usize) -> bool {
+    others > 0 && others >= max_sandboxes
+}
+
+#[cfg(test)]
+mod starvation_tests {
+    use super::parked_fill_repo_cap;
+
+    #[test]
+    fn only_a_full_repo_cap_counts_as_starved_by_parked_tasks() {
+        assert!(parked_fill_repo_cap(2, 2));
+        assert!(!parked_fill_repo_cap(1, 2), "the host's cap is what's full, and other repos' runs will free it");
+        assert!(!parked_fill_repo_cap(0, 2));
+    }
 }

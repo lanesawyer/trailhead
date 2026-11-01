@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use trailhead_factory::messages;
 use trailhead_factory::{
     ChangesRequested, Error, Merged, MergedBy, PrRef, PrState, Result, RunUpdate, Sandbox, Status, Task, TaskKey, label,
 };
@@ -135,21 +136,11 @@ impl Factory {
     /// `CodeHost::merge` (`docs/factory/lifecycle.md`). Metadata first, so a handoff that failed to land is retried
     /// with the record already there.
     pub async fn close_merged(&self, task: &Task, merged: Merged) -> Result<()> {
-        let who = match merged.by {
-            MergedBy::Human => "Merged by a person on the code host",
-            MergedBy::Merger => "Merged by the factory's merger",
+        let decision = match merged.by {
+            MergedBy::Merger => self.tracker.show(&task.key).await?.run.merge,
+            MergedBy::Human => None,
         };
-        let commit = merged.commit.as_deref().map_or_else(String::new, |c| format!(", as commit {c}"));
-        let mut handoff = format!("{who}: {}{commit}.", merged.pr.url);
-        if merged.by == MergedBy::Merger
-            && let Some(d) = self.tracker.show(&task.key).await?.run.merge
-        {
-            handoff.push_str(&format!(
-                " Grade {}; gates passed: {}.",
-                d.grade,
-                d.passed.iter().map(|g| g.as_str()).collect::<Vec<_>>().join(", ")
-            ));
-        }
+        let handoff = messages::merged_handoff(merged.by, &merged.pr.url, merged.commit.as_deref(), decision.as_ref());
         self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
         // A parked task can't be finished from where it is: it goes back to open and is claimed first.
         if task.status == Status::NeedsInput {
@@ -170,11 +161,7 @@ impl Factory {
             self.tracker.reopen(&task.key).await?;
         }
         self.tracker.claim(&task.key).await?;
-        let question = format!(
-            "The PR {} was closed without being merged. If the work is abandoned, cancel this task. To carry on, \
-             reopen the PR on the code host and then reopen this task, and the next run continues on the PR's branch.",
-            pr.url
-        );
+        let question = messages::pr_closed_question(&pr.url);
         self.tracker.ask(&task.key, &question).await
     }
 
@@ -185,13 +172,7 @@ impl Factory {
         let round = task.run.conflict_reworks.unwrap_or(0) + 1;
         self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
         let base = &self.config.repo.base_branch;
-        let body = format!(
-            "{} no longer merges cleanly with `{base}`, which has moved on since the branch was cut. The base \
-             branch is already being merged into your checkout, uncommitted and with conflict markers where it \
-             clashes. Resolve every conflict, keeping what both sides intended; don't discard either side's changes \
-             or rebase. Then run the checks and finish.",
-            pr.url
-        );
+        let body = messages::conflict_feedback(&pr.url, base);
         tracing::warn!(task = %task.key.0, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
         let head = match &self.codehost {
             Some(codehost) => codehost.head(pr).await.ok(),
@@ -220,22 +201,8 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't read the logs of the failed checks");
             Vec::new()
         });
-        let mut body = format!("CI failed on {} at {head}: {}.", pr.url, checks.join(", "));
-        if after_update {
-            body.push_str(
-                " It passed before the base branch was merged into the PR, so the failure came in with that merge: \
-                 something that landed on the base branch clashes with this change.",
-            );
-        }
-        for (check, log) in &logs {
-            body.push_str(&format!("\n\nEnd of the log of {check}:\n\n```\n{}\n```", log.trim_end()));
-        }
-        body.push_str(&format!(
-            "\n\nThe base branch `{}` is already being merged into your checkout, uncommitted, so the changes you see \
-             staged beyond your own are that merge: keep them, and don't discard or rebase them. Reproduce the \
-             failure, fix it, run the checks and finish.",
-            self.config.repo.base_branch
-        ));
+        let base = &self.config.repo.base_branch;
+        let body = messages::ci_failure_feedback(&pr.url, head, checks, after_update, &logs, base);
         if task.status == Status::Approved {
             self.tracker.unapprove(&task.key).await?;
         }
@@ -375,7 +342,7 @@ impl Factory {
                     self.evaluate_gates(&task.key).await?;
                 } else if task.run.pending_changes().is_some_and(|c| !c.conflict) {
                     // The rework has pushed and its head awaits review: say so, without approving.
-                    self.say_gates(&task.key).await?;
+                    self.say_gates(&task.key, false).await?;
                 }
                 return Ok(due);
             }

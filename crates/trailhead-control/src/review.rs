@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use trailhead_factory::messages;
 use trailhead_factory::{
     ChangesRequested, CheckResult, Error, PrRef, Result, Role, RunReport, RunRequest, RunResult, RunUpdate, Task,
     TaskKey, VerdictKind, review_name,
@@ -78,6 +79,13 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't destroy the reviewer's sandbox; reconcile will");
         }
         let run = match run {
+            Ok(Run::Lost(e, spend)) => {
+                // What the run cost before it failed counts toward the budget across retries (TRAIL-447).
+                if let Err(re) = sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await {
+                    tracing::warn!(task = %task.key.0, error = %re, "couldn't record the failed review's spend");
+                }
+                return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await);
+            }
             Ok(run) => run,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await),
         };
@@ -88,7 +96,7 @@ impl Factory {
             Run::Report(RunReport { result: RunResult::Reviewed(v), .. }, s) => {
                 (*s, (v.kind != VerdictKind::RequestChanges).then_some(attempt), head)
             }
-            Run::Report(_, s) | Run::Breach(_, s) => (*s, None, None),
+            Run::Report(_, s) | Run::Breach(_, s) | Run::Lost(_, s) => (*s, None, None),
         };
         // A reviewer that finished (a verdict, or a breach that is the task's doing) ends the run of infrastructure failures.
         let finished =
@@ -122,7 +130,8 @@ impl Factory {
                         .await?;
                     // While the task is still in review, so the PR says the review asked for changes at any grade.
                     // Message only: a verdict that asks for changes mustn't approve, or merge on Lane's earlier approval.
-                    if let Err(e) = self.say_gates(&task.key).await {
+                    let parks = round >= self.config.repo.max_review_rounds;
+                    if let Err(e) = self.say_gates(&task.key, parks).await {
                         tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
                     }
                     self.request_rework(task, requested, round).await?;
@@ -135,10 +144,11 @@ impl Factory {
                 tracing::warn!(task = %task.key.0, result = ?report.result, "review didn't produce a verdict");
                 // No verdict, no round: handled like an infrastructure failure, so it backs off and is capped
                 // rather than being reviewed again on every pass (TRAIL-267).
-                let error = Error::Other(format!("the reviewer ended without a verdict: {:?}", report.result));
+                let error = Error::Other(messages::review_without_verdict(&report.result));
                 self.review_infra_failed(task, &name, error, before, retries, infra_prior).await;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
+            Run::Lost(..) => unreachable!("a lost run returns before the verdict is recorded"),
             Run::Breach(reason, _) => {
                 // A breach is the task's doing, like a worker's: the round counts, and the task parks for a human
                 // rather than being reviewed again on the next reconcile (TRAIL-319). The reviewer's sandbox is
@@ -147,10 +157,7 @@ impl Factory {
                 tracing::warn!(task = %task.key.0, %reason, "reviewer breached its budget; parking");
                 self.tracker.reopen(&task.key).await?;
                 self.tracker.claim(&task.key).await?;
-                let question = format!(
-                    "The reviewer breached its budget in review round {round}: {reason}. The PR may be too big to \
-                     review within the reviewer's budget; split it or raise the reviewer budget, then reopen the task."
-                );
+                let question = messages::review_breach_question(round, &reason);
                 self.tracker.ask(&task.key, &question).await?;
                 // A fresh count for when a human reopens the task, last like `request_rework`'s.
                 let fresh = RunUpdate { review_rounds: Some(0), ..RunUpdate::default() };
@@ -202,11 +209,7 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the reviewer's sub-agent; reconcile will");
         }
         if park {
-            let question = format!(
-                "The infrastructure failed {failures} times in a row while reviewing the PR (the limit is {max}); \
-                 it's not the task. The last error: {error}\n\nFix the cause, then reopen the task; raise \
-                 `max_infra_failures` to allow more tries."
-            );
+            let question = messages::review_infra_question(failures, max, &error.to_string());
             let parked = async {
                 self.tracker.reopen(&task.key).await?;
                 self.tracker.claim(&task.key).await?;
@@ -250,23 +253,11 @@ impl Factory {
             self.tracker.reopen(&task.key).await?;
             self.tracker.claim(&task.key).await?;
             let question = if conflict && reviewer == CI_REVIEWER {
-                format!(
-                    "CI keeps failing on the PR: {round} conflict reworks so far (the limit is {max}). The last \
-                     failure:\n\n{body}\n\nFix the PR or settle what's landing, then reopen the task; raise \
-                     `max_conflict_reworks` to allow more."
-                )
+                messages::ci_rework_limit_question(round, max, &body)
             } else if conflict {
-                format!(
-                    "The PR keeps conflicting with the base branch: {round} conflict reworks so far \
-                     (the limit is {max}). Merge the base branch into the PR yourself or settle what's landing, then \
-                     reopen the task; raise `max_conflict_reworks` to allow more."
-                )
+                messages::conflict_rework_limit_question(round, max)
             } else {
-                format!(
-                    "The reviewer still wants changes after {round} review rounds (the limit is {max}). The last \
-                     review, by {reviewer}:\n\n{body}\n\nFix the PR or settle the disagreement, then reopen the \
-                     task; raise `max_review_rounds` to allow more rounds."
-                )
+                messages::review_rework_limit_question(round, max, &reviewer, &body)
             };
             self.tracker.ask(&task.key, &question).await?;
             // A fresh count for when a human reopens the task after sorting it out. Last, so a reconcile that finishes

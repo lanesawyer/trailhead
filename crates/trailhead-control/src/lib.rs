@@ -8,14 +8,13 @@ pub mod daemon_binary;
 mod decide;
 mod lifecycle;
 mod merger;
-mod messages;
 mod pool;
 mod reconcile;
 mod review;
 mod run_loop;
 mod timing;
 
-pub use core_tracker::{CoreTracker, METADATA_KEY};
+pub use core_tracker::CoreTracker;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -44,6 +43,10 @@ pub const RELEASE_ATTEMPTS: u32 = 5;
 /// How long a pooled sandbox may go on failing to release before the factory gives up on it, however few tries
 /// that took.
 pub const RELEASE_PATIENCE: Duration = Duration::from_secs(10 * 60);
+
+/// How long the merger waits for a branch update the host queued before it asks again: the host may have dropped it,
+/// or found a conflict after answering.
+pub const UPDATE_PATIENCE: Duration = Duration::from_secs(10 * 60);
 
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
@@ -101,8 +104,9 @@ pub struct Factory {
     /// unchanged grades from them instead of asking the host again (TRAIL-266).
     listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
     /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
-    /// (a 202), so until the head moves the PR is still behind and asking again would only queue another.
-    updating: Mutex<HashMap<TaskKey, String>>,
+    /// (a 202), so until the head moves the PR is still behind and asking again would only queue another, unless the
+    /// update never lands: after `UPDATE_PATIENCE` the merger asks again (TRAIL-490).
+    updating: Mutex<HashMap<TaskKey, (String, Instant)>>,
     /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
     host: Arc<Host>,
     /// The ready tasks last reported as starved by parked sandboxes, so a poll says it once per change.

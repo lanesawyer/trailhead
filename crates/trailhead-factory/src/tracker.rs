@@ -22,6 +22,50 @@ pub enum Status {
     Cancelled,
 }
 
+impl Status {
+    /// Every status, in lifecycle order.
+    pub const ALL: [Status; 7] = [
+        Status::Open,
+        Status::InProgress,
+        Status::NeedsInput,
+        Status::InReview,
+        Status::Approved,
+        Status::Done,
+        Status::Cancelled,
+    ];
+
+    /// The name the Trailhead API uses (the serde form).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Open => "open",
+            Status::InProgress => "in_progress",
+            Status::NeedsInput => "needs_input",
+            Status::InReview => "in_review",
+            Status::Approved => "approved",
+            Status::Done => "done",
+            Status::Cancelled => "cancelled",
+        }
+    }
+
+    /// The status for an API name, or `None` if it isn't one.
+    pub fn parse(s: &str) -> Option<Status> {
+        Status::ALL.into_iter().find(|status| status.as_str() == s)
+    }
+
+    /// The name for people to read: the API name with spaces for underscores.
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::InProgress => "in progress",
+            Status::NeedsInput => "needs input",
+            Status::InReview => "in review",
+            other => other.as_str(),
+        }
+    }
+}
+
+/// The key in task metadata that the factory's run fields ([`RunUpdate`]) live under.
+pub const METADATA_KEY: &str = "factory";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     pub key: TaskKey,
@@ -385,6 +429,21 @@ pub trait Tracker: Send + Sync {
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential>;
     /// Revokes a sub-agent and its tokens. Revoking one that's already gone is fine.
     async fn revoke_sub_agent(&self, name: &str) -> Result<()>;
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn every_status_round_trips_through_its_name() {
+        for status in Status::ALL {
+            assert_eq!(Status::parse(status.as_str()), Some(status));
+            assert_eq!(serde_json::to_value(status).unwrap(), serde_json::json!(status.as_str()));
+            assert_eq!(status.label(), status.as_str().replace('_', " "));
+        }
+        assert_eq!(Status::parse("nope"), None);
+    }
 }
 
 #[cfg(test)]

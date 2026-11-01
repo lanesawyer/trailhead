@@ -278,6 +278,42 @@ async fn a_drain_keeps_following_a_live_run_reconcile_finds() {
 }
 
 #[tokio::test]
+async fn a_drain_follows_the_last_run_when_it_errors_but_the_daemon_keeps_it() {
+    let mut r = rig();
+    r.tracker.add_task("TRAIL", "First", "");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    r.daemon.gate_prepare(gate.clone());
+    let factory = Arc::new(std::mem::replace(&mut r.factory, rig().factory));
+    let (drain, draining) = tokio::sync::oneshot::channel::<()>();
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(factory.run_draining(
+        Arc::new(tokio::sync::Notify::new()),
+        std::time::Duration::from_secs(60),
+        async {
+            let _ = draining.await;
+        },
+        async {
+            let _ = cancelled.await;
+        },
+    ));
+    let daemon = r.daemon.clone();
+    until("the run to be preparing", || daemon.prepares_started() == 1).await;
+    drain.send(()).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // The run's stream drops on the control plane's side while the daemon still has a run reconcile hasn't seen.
+    r.daemon.fail_runs(1, "stream dropped");
+    let live = going_on(&r, Usd::ZERO, 60, "trailhead-w9").await;
+    r.daemon.ongoing_hung(&run_name(&live, 1), vec![spent(1_000)]);
+    gate.notify_one();
+    until("the live run to be followed", || daemon.attached() == [run_name(&live, 1)]).await;
+    assert!(!handle.is_finished(), "the drain waits for the run reconcile found");
+
+    cancel.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle).await.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn a_second_signal_during_a_drain_cancels_the_run() {
     let d = drain_one_in_flight(rig()).await;
 
@@ -429,4 +465,31 @@ async fn no_runs_start_while_the_server_is_down() {
     assert!(r.compute.list(&Default::default()).await.unwrap().is_empty(), "no sandbox was acquired");
     up.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(r.factory.tick().await.unwrap().len(), 1, "runs start once it is back");
+}
+
+#[tokio::test]
+async fn a_drain_ends_when_the_last_run_errors_and_the_daemon_no_longer_has_it() {
+    let mut r = rig();
+    r.tracker.add_task("TRAIL", "First", "");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    r.daemon.gate_prepare(gate.clone());
+    let factory = Arc::new(std::mem::replace(&mut r.factory, rig().factory));
+    let (drain, draining) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(factory.run_draining(
+        Arc::new(tokio::sync::Notify::new()),
+        std::time::Duration::from_millis(20),
+        async {
+            let _ = draining.await;
+        },
+        std::future::pending::<()>(),
+    ));
+    let daemon = r.daemon.clone();
+    until("the run to be preparing", || daemon.prepares_started() == 1).await;
+    drain.send(()).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // The run's stream drops and the daemon has nothing left, so reconcile finds nothing and the drain is over.
+    r.daemon.fail_runs(1, "stream dropped");
+    gate.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle).await.unwrap().unwrap().unwrap();
 }
