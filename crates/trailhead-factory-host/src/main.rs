@@ -407,7 +407,7 @@ fn compute(
             Ok((Arc::new(SpritesCompute::new(token).map_err(|e| e.to_string())?), trailhead_compute_sprites::target()))
         }
         #[cfg(feature = "docker")]
-        ComputeConfig::Docker { image, network, runtime } => {
+        ComputeConfig::Docker { image, network, runtime, memory_mib } => {
             use trailhead_compute_docker::{DockerCompute, DockerConfig};
             let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), binary);
             if let Some(image) = image {
@@ -417,6 +417,7 @@ fn compute(
                 docker.network = network.clone();
             }
             docker.runtime = runtime.clone();
+            docker.memory_bytes = memory_mib.map(|m| m * 1024 * 1024);
             docker.connections = gateway_connections(login::github_writer_token(&paths.creds()));
             if docker.connections.is_empty() {
                 tracing::warn!(

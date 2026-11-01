@@ -109,6 +109,9 @@ pub struct DockerConfig {
     pub connections: Vec<GatewayConnection>,
     /// The least free space the Docker engine's disk may have when a run is about to start.
     pub min_free_bytes: u64,
+    /// Each sandbox's memory limit, swap included. None leaves sandboxes unlimited, so concurrent builds can take each
+    /// other's memory and the engine's OOM killer picks among them. Also sets `CARGO_BUILD_JOBS` ([`build_jobs`]).
+    pub memory_bytes: Option<u64>,
 }
 
 impl DockerConfig {
@@ -122,6 +125,7 @@ impl DockerConfig {
             daemon,
             connections: Vec::new(),
             min_free_bytes: DEFAULT_MIN_FREE_BYTES,
+            memory_bytes: None,
         }
     }
 }
@@ -215,6 +219,15 @@ impl DockerCompute {
         }
     }
 
+    /// The environment of a new container: the proxy's, and cargo's parallelism when the memory is limited.
+    fn sandbox_env(&self) -> Vec<String> {
+        let mut env = gateway::proxy_env();
+        if let Some(bytes) = self.config.memory_bytes {
+            env.push(format!("CARGO_BUILD_JOBS={}", build_jobs(bytes)));
+        }
+        env
+    }
+
     /// Creates and starts the sandbox's container from `image`. A fresh image gets the supervisor first; a checkpoint
     /// already has it.
     async fn run_container(&self, name: &str, image: &str, fresh: bool) -> Result<()> {
@@ -222,7 +235,7 @@ impl DockerCompute {
             image: Some(image.into()),
             cmd: Some(vec![SUPERVISE_PATH.into()]),
             entrypoint: Some(vec![]),
-            env: Some(gateway::proxy_env()),
+            env: Some(self.sandbox_env()),
             labels: Some(HashMap::from([(MARKER.to_string(), name.to_string())])),
             host_config: Some(HostConfig {
                 init: Some(true),
@@ -233,6 +246,10 @@ impl DockerCompute {
                     maximum_retry_count: None,
                 }),
                 runtime: self.config.runtime.clone(),
+                // Memory equal to memory+swap means no swap, so a build over the limit is OOM-killed at once instead
+                // of thrashing.
+                memory: self.config.memory_bytes.map(|b| b as i64),
+                memory_swap: self.config.memory_bytes.map(|b| b as i64),
                 ..Default::default()
             }),
             ..Default::default()
@@ -636,6 +653,12 @@ fn disk_needed(floor: u64, size: u64) -> u64 {
     floor.max(size.saturating_mul(IMPORT_COPIES * CONCURRENT_CHECKPOINTS))
 }
 
+/// How many parallel build jobs fit in `memory_bytes`: one per GiB (a rust-lld link or rustc codegen unit can take that
+/// much), at least one.
+fn build_jobs(memory_bytes: u64) -> u64 {
+    (memory_bytes / (1 << 30)).max(1)
+}
+
 /// Whether an error message says the disk is full.
 fn full_disk(msg: &str) -> bool {
     let msg = msg.to_ascii_lowercase();
@@ -832,6 +855,14 @@ mod tests {
         assert_eq!(disk_needed(10 * gib, gib), 10 * gib, "the floor holds for a small filesystem");
         assert_eq!(disk_needed(10 * gib, 14 * gib), 56 * gib, "twice over, for two sandboxes");
         assert_eq!(disk_needed(10 * gib, u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn build_parallelism_follows_the_memory_limit() {
+        let gib = 1u64 << 30;
+        assert_eq!(build_jobs(2 * gib), 2);
+        assert_eq!(build_jobs(3 * gib / 2), 1);
+        assert_eq!(build_jobs(gib / 4), 1, "never zero");
     }
 
     #[test]
