@@ -2,7 +2,8 @@
 //!
 //! `--daemon` wins when given. Then a local `trailhead-daemon` (next to the control plane's binary or on PATH, found
 //! by the caller): a dev build whose version wasn't bumped would otherwise fetch an older release daemon over the
-//! fresh local one, a protocol mismatch. Last, the control plane downloads the release asset that matches its own
+//! fresh local one, a protocol mismatch. A local daemon that isn't an x86_64 Linux ELF (a macOS build left by
+//! `cargo install`) wouldn't start in a sandbox, so it is skipped with a warning. Last, the control plane downloads the release asset that matches its own
 //! version, checks it against the published SHA-256 and caches it in the data dir. A failed download or a checksum
 //! mismatch is an error, so a corrupted or truncated binary never reaches a sandbox.
 
@@ -54,8 +55,15 @@ pub async fn resolve(
         return read_local(path);
     }
     if let Some(path) = local {
-        tracing::info!(path = %path.display(), "using the local daemon");
-        return read_local(path);
+        let binary = read_local(path)?;
+        if is_x86_64_linux(&binary) {
+            tracing::info!(path = %path.display(), "using the local daemon");
+            return Ok(binary);
+        }
+        tracing::warn!(
+            path = %path.display(),
+            "the local daemon isn't an x86_64 Linux executable, so it wouldn't start in a sandbox; using the release"
+        );
     }
     match fetch(release, cache_dir).await {
         Ok(binary) => Ok(binary),
@@ -71,6 +79,14 @@ pub async fn resolve(
 /// A `trailhead-daemon` in `beside` (the control plane's own directory), else in one of the `path` directories.
 pub fn find_local(beside: Option<&Path>, path: &[PathBuf]) -> Option<PathBuf> {
     beside.into_iter().chain(path.iter().map(PathBuf::as_path)).map(|d| d.join(DAEMON)).find(|p| p.is_file())
+}
+
+/// Whether `binary` is a 64-bit little-endian ELF for x86_64 (machine 0x3e), which is what sandboxes run.
+fn is_x86_64_linux(binary: &[u8]) -> bool {
+    binary.starts_with(b"\x7fELF")
+        && binary.get(4) == Some(&2)
+        && binary.get(5) == Some(&1)
+        && binary.get(18..20) == Some(&[0x3e, 0][..])
 }
 
 fn read_local(path: &Path) -> Result<Vec<u8>, String> {
@@ -168,6 +184,15 @@ mod tests {
 
     const BINARY: &[u8] = b"\x7fELF pretend daemon";
 
+    /// A minimal 64-bit little-endian ELF header for `machine`, followed by a marker.
+    fn elf(machine: u8) -> Vec<u8> {
+        let mut h = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0];
+        h.resize(18, 0);
+        h.extend([machine, 0]);
+        h.extend(b"local build");
+        h
+    }
+
     /// Serves the asset and its checksum (`sum`) for 0.2.0, counting requests.
     async fn serve(sum: String, binary: &'static [u8]) -> (String, Arc<AtomicUsize>) {
         let hits = Arc::new(AtomicUsize::new(0));
@@ -252,12 +277,27 @@ mod tests {
         let (url, hits) = serve(sha256sum(BINARY), BINARY).await;
         let dir = tempfile::tempdir().unwrap();
         let local = dir.path().join("local");
-        std::fs::write(&local, b"local build").unwrap();
+        std::fs::write(&local, elf(0x3e)).unwrap();
         let cache = tempfile::tempdir().unwrap();
 
-        assert_eq!(resolve(None, Some(&local), &release(url, "0.2.0"), cache.path()).await.unwrap(), b"local build");
+        assert_eq!(resolve(None, Some(&local), &release(url, "0.2.0"), cache.path()).await.unwrap(), elf(0x3e));
         assert_eq!(hits.load(Ordering::SeqCst), 0, "the release is never fetched");
         assert!(std::fs::read_dir(cache.path()).unwrap().next().is_none(), "nothing is cached");
+    }
+
+    #[tokio::test]
+    async fn a_local_daemon_for_another_platform_falls_through_to_the_release() {
+        let (url, hits) = serve(sha256sum(BINARY), BINARY).await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        // An aarch64 ELF, then a Mach-O header.
+        for bytes in [elf(0xb7), vec![0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1]] {
+            let local = dir.path().join("local");
+            std::fs::write(&local, bytes).unwrap();
+            let got = resolve(None, Some(&local), &release(url.clone(), "0.2.0"), cache.path()).await.unwrap();
+            assert_eq!(got, BINARY);
+        }
+        assert!(hits.load(Ordering::SeqCst) > 0, "the release is fetched");
     }
 
     #[test]
