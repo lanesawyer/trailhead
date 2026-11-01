@@ -72,6 +72,7 @@ pub fn target() -> Target {
         gateway_list: format!("{gateway}/list"),
         model_endpoint: Some(format!("{gateway}/anthropic/{GATEWAY_ANTHROPIC_ID}")),
         hold_socket: None,
+        ..Target::default()
     }
 }
 

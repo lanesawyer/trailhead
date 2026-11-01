@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Check, Error, Grader, ModelAlias, PrepareRequest, Repo, Result, Usd};
+use crate::{Check, DEFAULT_TARGET, Error, Grader, ModelAlias, PrepareRequest, Repo, Result, Usd};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,6 +46,9 @@ pub struct FactoryConfig {
     pub usage: UsageConfig,
     #[serde(default)]
     pub compute: ComputeConfig,
+    /// `[factory.targets.<name>]`: several computes at once. Not with `[factory.compute]`, which means one target.
+    #[serde(default)]
+    pub targets: BTreeMap<String, TargetConfig>,
     #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
@@ -186,6 +189,70 @@ pub enum ComputeConfig {
     },
 }
 
+/// `[factory.targets.<name>]`: one place sandboxes can run, with its compute's settings and its limits
+/// (`docs/factory/targets.md`). `kind` and the compute's own keys are those of `[factory.compute]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawTarget")]
+pub struct TargetConfig {
+    #[serde(flatten)]
+    pub compute: ComputeConfig,
+    /// Lower is preferred; ties go to the name that sorts first.
+    pub priority: u32,
+    /// The most sandboxes the repo holds here at once; without one only the repo's own cap applies.
+    pub max_sandboxes: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTarget {
+    kind: String,
+    #[serde(default)]
+    priority: u32,
+    max_sandboxes: Option<usize>,
+    image: Option<String>,
+    network: Option<String>,
+    runtime: Option<String>,
+    memory_mib: Option<u64>,
+}
+
+impl TryFrom<RawTarget> for TargetConfig {
+    type Error = String;
+
+    fn try_from(raw: RawTarget) -> std::result::Result<TargetConfig, String> {
+        let compute = match raw.kind.as_str() {
+            "sprites" => {
+                let docker_only = [
+                    ("image", raw.image.is_some()),
+                    ("network", raw.network.is_some()),
+                    ("runtime", raw.runtime.is_some()),
+                    ("memory_mib", raw.memory_mib.is_some()),
+                ];
+                if let Some((key, _)) = docker_only.iter().find(|(_, set)| *set) {
+                    return Err(format!("`{key}` is a setting of kind = \"docker\", not \"sprites\""));
+                }
+                ComputeConfig::Sprites
+            }
+            "docker" => ComputeConfig::Docker {
+                image: raw.image,
+                network: raw.network,
+                runtime: raw.runtime,
+                memory_mib: raw.memory_mib,
+            },
+            other => return Err(format!("unknown kind `{other}`; the kinds are sprites and docker")),
+        };
+        Ok(TargetConfig { compute, priority: raw.priority, max_sandboxes: raw.max_sandboxes })
+    }
+}
+
+/// A target as the factory runs it: [`TargetConfig`] with its name. [`FactoryConfig::target_specs`] lists them in
+/// placement order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetSpec {
+    pub name: String,
+    pub compute: ComputeConfig,
+    pub priority: u32,
+    pub max_sandboxes: Option<usize>,
+}
 /// The Docker gateway's name on each sandbox's network (`docs/factory/sandbox.md`).
 pub const GATEWAY_HOST: &str = "trailhead-gateway";
 /// The port the Docker gateway listens on.
@@ -510,14 +577,50 @@ impl FactoryConfig {
         let file: File = toml::from_str(toml_src).map_err(|e| Error::Config(e.to_string()))?;
         let table = file.factory.ok_or_else(|| Error::Config("no [factory] table".into()))?;
         let project = file.project.ok_or_else(|| Error::Config("no top-level `project`".into()))?;
-        let config = FactoryConfig::deserialize(table).map_err(|e| Error::Config(e.to_string()))?;
+        let config = Self::read(table)?;
         config.finish(project, remote)
     }
 
     /// The contents of the `[factory]` table alone, for `project`.
     pub fn parse_table(factory_src: &str, project: &str, remote: Option<Repo>) -> Result<FactoryConfig> {
-        let config: FactoryConfig = toml::from_str(factory_src).map_err(|e| Error::Config(e.to_string()))?;
+        let table: toml::Table = toml::from_str(factory_src).map_err(|e| Error::Config(e.to_string()))?;
+        let config = Self::read(table)?;
         config.finish(project.to_string(), remote)
+    }
+
+    /// The settings in `table`, refusing a file that lists both `[factory.compute]` and `[factory.targets]`.
+    fn read(table: toml::Table) -> Result<FactoryConfig> {
+        if table.contains_key("compute") && table.contains_key("targets") {
+            return Err(Error::Config(
+                "[factory.compute] and [factory.targets] are both set; [factory.compute] means one target, so use one or the other".into(),
+            ));
+        }
+        FactoryConfig::deserialize(table).map_err(|e| Error::Config(e.to_string()))
+    }
+
+    /// Where sandboxes can run, in placement order: lowest priority number first, then by name. A file with
+    /// `[factory.compute]` (or neither) has the one target, [`DEFAULT_TARGET`].
+    pub fn target_specs(&self) -> Vec<TargetSpec> {
+        if self.targets.is_empty() {
+            return vec![TargetSpec {
+                name: DEFAULT_TARGET.into(),
+                compute: self.compute.clone(),
+                priority: 0,
+                max_sandboxes: None,
+            }];
+        }
+        let mut specs: Vec<TargetSpec> = self
+            .targets
+            .iter()
+            .map(|(name, t)| TargetSpec {
+                name: name.clone(),
+                compute: t.compute.clone(),
+                priority: t.priority,
+                max_sandboxes: t.max_sandboxes,
+            })
+            .collect();
+        specs.sort_by(|a, b| (a.priority, &a.name).cmp(&(b.priority, &b.name)));
+        specs
     }
 
     fn finish(mut self, project: String, remote: Option<Repo>) -> Result<FactoryConfig> {
@@ -538,6 +641,22 @@ impl FactoryConfig {
 
     fn validate(&self) -> Result<()> {
         validate_pause_at(&self.usage.pause_at, "[factory.usage]")?;
+        for (name, target) in &self.targets {
+            // Names go into sandbox names and labels.
+            let ok = !name.is_empty()
+                && name.split('-').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric()))
+                && !name.chars().any(|c| c.is_ascii_uppercase());
+            if !ok || name == DEFAULT_TARGET {
+                return Err(Error::Config(format!(
+                    "[factory.targets.{name}]: a target's name is lowercase letters, digits and single hyphens, and not `{DEFAULT_TARGET}`"
+                )));
+            }
+            if target.max_sandboxes == Some(0) {
+                return Err(Error::Config(format!(
+                    "[factory.targets.{name}] max_sandboxes is 0, so no run could go there"
+                )));
+            }
+        }
         for (want, role) in [(&self.repo.worker, Role::Worker), (&self.repo.reviewer, Role::Reviewer)] {
             match self.profiles.get(want) {
                 None => return Err(Error::Config(format!("no profile named {want}"))),
@@ -824,6 +943,60 @@ require = ["checks", "agent_review", "human"]
         for bad in ["[merge]\nmode = \"yes\"", "[gates.t1]\nrequire = []", "[gates.5]\nrequire = []"] {
             let err = parse(&format!("{SAMPLE}\n{bad}\n")).unwrap_err();
             assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_compute_table_is_one_default_target() {
+        let c = parse(SAMPLE).unwrap();
+        assert!(c.targets.is_empty());
+        let specs = c.target_specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!((specs[0].name.as_str(), &specs[0].compute, specs[0].max_sandboxes), ("default", &c.compute, None));
+        let docker = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\n");
+        assert_eq!(parse(&docker).unwrap().target_specs()[0].name, DEFAULT_TARGET);
+    }
+
+    #[test]
+    fn targets_are_listed_by_priority_then_name() {
+        let src = format!(
+            "{SAMPLE}\n[targets.sprites]\nkind = \"sprites\"\npriority = 2\nmax_sandboxes = 4\n\n\
+             [targets.local]\nkind = \"docker\"\npriority = 1\nmax_sandboxes = 2\nmemory_mib = 4096\n\n\
+             [targets.also-local]\nkind = \"docker\"\npriority = 1\n"
+        );
+        let specs = parse(&src).unwrap().target_specs();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["also-local", "local", "sprites"]);
+        assert_eq!(specs[1].max_sandboxes, Some(2));
+        assert_eq!(
+            specs[1].compute,
+            ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: Some(4096) }
+        );
+        assert_eq!((specs[2].compute.clone(), specs[2].max_sandboxes), (ComputeConfig::Sprites, Some(4)));
+    }
+
+    #[test]
+    fn targets_and_compute_together_are_refused() {
+        let src = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\n\n[targets.local]\nkind = \"docker\"\n");
+        let Err(Error::Config(m)) = parse(&src) else { panic!("expected a config error") };
+        assert!(m.contains("[factory.compute]") && m.contains("[factory.targets]"), "{m}");
+    }
+
+    #[test]
+    fn bad_targets_are_refused() {
+        for (bad, says) in [
+            ("[targets.local]\nkind = \"vm\"", "unknown kind"),
+            ("[targets.local]\nkind = \"sprites\"\nimage = \"x\"", "image"),
+            ("[targets.local]\nkind = \"docker\"\nimgae = \"x\"", "imgae"),
+            ("[targets.local]\nkind = \"docker\"\nmax_sandboxes = 0", "max_sandboxes"),
+            ("[targets.Local]\nkind = \"docker\"", "name"),
+            ("[targets.default]\nkind = \"docker\"", "default"),
+            ("[targets.a_b]\nkind = \"docker\"", "name"),
+        ] {
+            let Err(Error::Config(m)) = parse(&format!("{SAMPLE}\n{bad}\n")) else {
+                panic!("{bad}: expected a config error")
+            };
+            assert!(m.contains(says), "{bad}: {m}");
         }
     }
 

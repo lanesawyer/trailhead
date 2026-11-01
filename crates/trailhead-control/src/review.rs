@@ -12,6 +12,12 @@ use crate::{Factory, Outcome};
 impl Factory {
     /// Runs the reviewer on an open PR in its own fresh sandbox.
     pub async fn review(&self, task: &Task, pr: &PrRef, attempt: u32, checks: &[CheckResult]) -> Result<Outcome> {
+        // Placed first: a review with nowhere to run waits, and starts nothing. Reconcile finds it due again.
+        let mut survey = self.survey().await;
+        let Some(target) = self.place(&mut survey) else {
+            tracing::info!(task = %task.key.0, "{}", messages::no_target_has_room(&task.key.0));
+            return Ok(Outcome::AwaitingReview { pr: pr.clone() });
+        };
         let shown = self.tracker.show(&task.key).await?;
         // Graded before anything starts, so a code host that fails here leaves the review to be tried again whole.
         let grade = self.grade_pr(&shown, pr, None).await?;
@@ -46,7 +52,7 @@ impl Factory {
             Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await),
         };
         let sub = self.tracker.sub_agent(&name);
-        let sandbox = match self.create_sandbox(&name, task, Role::Reviewer, Some(Self::branch(task))).await {
+        let sandbox = match self.create_sandbox(target, &name, task, Role::Reviewer, Some(Self::branch(task))).await {
             Ok(sandbox) => sandbox,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await),
         };
@@ -61,8 +67,8 @@ impl Factory {
             grade: grade.clone(),
             pr: Some(pr.clone()),
             feedback: None,
-            model: self.provider.resolve(profile.model),
-            endpoint: self.provider.endpoint(),
+            model: target.provider.resolve(profile.model),
+            endpoint: target.provider.endpoint(),
             max_steps: profile.budget.steps,
             required_checks: Vec::new(),
             worker_checks: checks.to_vec(),
@@ -75,7 +81,7 @@ impl Factory {
             self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
         // A sandbox that won't go doesn't undo the review: the verdict and spend are still recorded, and reconcile
         // destroys the orphan.
-        if let Err(e) = self.compute.destroy(&sandbox.id).await {
+        if let Err(e) = target.compute.destroy(&sandbox.id).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't destroy the reviewer's sandbox; reconcile will");
         }
         let run = match run {
