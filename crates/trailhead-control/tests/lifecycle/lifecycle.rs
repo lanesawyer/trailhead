@@ -602,6 +602,29 @@ async fn a_sandbox_that_wont_release_after_the_agent_ends_the_run_doesnt_give_th
 }
 
 #[tokio::test]
+async fn a_worker_that_cant_record_its_failed_check_still_counts_the_attempt_and_releases_the_task() {
+    for op in ["note", "release"] {
+        let r = rig();
+        let key = r.tracker.add_task("TRAIL", "Lint me", "");
+        r.daemon.fail_check("lint", "warning: unused variable");
+        r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+        // Only the worker's own call fails; the control plane's go through.
+        r.tracker.fail_next("factory/trail-1-a1", op, 1);
+
+        let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+        let Ok(Outcome::Failed { reason }) = ran else { panic!("{op}: {ran:?}") };
+        assert!(reason.contains("finishing the run failed"), "{op}: {reason}");
+        let task = r.tracker.task(&key);
+        assert_eq!(task.status, Status::Open, "{op}: the daemon released the task");
+        assert_eq!(task.holder, None);
+        assert_eq!(task.run.attempt, Some(1), "{op}: the agent ended the run, so the attempt counts");
+        assert_eq!(task.run.infra_failures.unwrap_or(0), 0);
+        assert_eq!(task.run.retries.unwrap_or(0), 0);
+        assert!(r.codehost.prs().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_reopened() {
     let r = rig_with(
         &CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2\nmax_sandboxes = 2"),
