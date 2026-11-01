@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Answered, Credential, Error, HumanContext, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, Verdict,
-    VerdictKind, is_factory_agent,
+    Answered, Credential, Error, FollowUpTask, HumanContext, Result, RunUpdate, Status, Task, TaskKey, TaskNote,
+    Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -485,6 +485,20 @@ impl Tracker for FakeTracker {
             self.state.lock().unwrap().priorities.insert(key.clone(), p);
         }
         Ok(key)
+    }
+
+    async fn follow_ups(&self, task: &TaskKey) -> Result<Vec<FollowUpTask>> {
+        self.check_live()?;
+        let s = self.state.lock().unwrap();
+        Ok(s.tasks
+            .values()
+            .filter(|t| {
+                !matches!(t.status, Status::Done | Status::Cancelled)
+                    && t.key != *task
+                    && is_raised_by(&t.description, task)
+            })
+            .map(|t| FollowUpTask { key: t.key.clone(), title: t.title.clone(), description: t.description.clone() })
+            .collect())
     }
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
