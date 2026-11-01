@@ -5,7 +5,7 @@ use trailhead_factory::{
 
 use crate::Factory;
 use crate::decide::{Facts, decide};
-use crate::messages::{Wording, decision_message};
+use trailhead_factory::messages::{self, Rework, Wording, decision_message};
 
 impl Factory {
     /// The merger (`docs/factory/review.md#the-merger`): evaluates the grade's gates on the PR's current head and
@@ -129,7 +129,7 @@ impl Factory {
                     tracing::info!(task = %key.0, %head, "gates passed; approved");
                 }
                 Err(Error::Forbidden(why)) => {
-                    let problem = format!("the factory can't move the task to approved ({why})");
+                    let problem = messages::cannot_approve(&why);
                     tracing::warn!(task = %key.0, %problem, "gates passed");
                     decision.approved_head = None;
                     decision.problem = Some(problem);
@@ -267,7 +267,7 @@ impl Factory {
                     return Ok(());
                 }
                 tracing::warn!(task = %task.key.0, pr = %pr.url, %why, "the code host refused the merge; trying again each pass");
-                let note = format!("The code host refused to merge: {why}. The merger tries again each pass.");
+                let note = messages::merge_refused(&why);
                 let codehost = self.codehost.as_ref().expect("checked above");
                 codehost.comment(pr, &note).await?;
                 self.tracker.note(&task.key, &note).await?;
@@ -307,7 +307,7 @@ impl Factory {
         // A person may have raised the task since.
         if let Some(g) = task.grade.filter(|g| *g > grade.grade) {
             grade.grade = g;
-            grade.reasons.push(format!("the task was raised to {g}"));
+            grade.reasons.push(messages::task_raised_reason(g));
         }
         Ok(Some(grade))
     }
@@ -319,7 +319,7 @@ impl Factory {
         if let Some(have) = current.grade.filter(|have| grade.grade > *have) {
             self.tracker.raise_grade(&task.key, grade.grade).await?;
             let why = grade.reasons.join("; ");
-            let note = format!("Raised to grade {} (task was {have}): {why}", grade.grade);
+            let note = messages::grade_raised_note(grade.grade, have, &why);
             tracing::info!(task = %task.key.0, "{note}");
             self.tracker.note(&task.key, &note).await?;
         }
@@ -328,14 +328,4 @@ impl Factory {
         }
         Ok(())
     }
-}
-
-/// Where the changes the latest review asked for stand, said on the PR at every grade, since a grade whose gate
-/// doesn't need the agent review would otherwise read as if nothing were wrong (TRAIL-388).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Rework {
-    /// The review of the PR's current head asked for changes.
-    Running,
-    /// The PR's head has moved since the review that asked for changes, and no review has judged the new head.
-    Pushed,
 }

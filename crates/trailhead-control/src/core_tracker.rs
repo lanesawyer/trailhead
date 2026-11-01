@@ -10,6 +10,7 @@ use serde_json::json;
 use trailhead_core::{
     CommentKind, Ctx, GradeFilter, NewComment, Principal, Store, TaskFilter, TaskPatch, TokenOptions,
 };
+use trailhead_factory::messages;
 use trailhead_factory::{
     Answered, Credential, Error, HumanContext, ModelId, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker,
     Verdict, VerdictKind, is_factory_agent,
@@ -128,11 +129,7 @@ impl CoreTracker {
     /// Notes on the task, and logs, that its factory metadata is skipped, unless this note is already there.
     async fn flag_bad_metadata(&self, ctx: &Ctx, t: &trailhead_core::Task, error: &str) {
         let fields = bad_fields(t);
-        let fields = if fields.is_empty() { String::new() } else { format!(" in {}", fields.join(", ")) };
-        let body = format!(
-            "The factory is skipping this task: its `{METADATA_KEY}` metadata is malformed{fields} ({error}). \
-             Fix or remove that field and the factory will pick the task up again."
-        );
+        let body = messages::bad_metadata_note(METADATA_KEY, &fields, error);
         if self.flagged.lock().unwrap().get(&t.key) == Some(&body) {
             return;
         }

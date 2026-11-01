@@ -74,7 +74,7 @@ async fn a_merge_the_merger_started_but_didnt_close_is_still_the_mergers() {
     assert_eq!(task.status, Status::Done);
     assert_eq!(task.run.merged.expect("recorded").by, MergedBy::Merger);
     let handoff = r.tracker.comments(&key).into_iter().find(|c| c.kind == "handoff").expect("a handoff").body;
-    assert!(handoff.contains("Grade 1; gates passed"), "{handoff}");
+    assert!(handoff.contains(" Grade 1; gates passed: "), "{handoff}");
 }
 
 #[tokio::test]
@@ -331,10 +331,7 @@ async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
     let merged = task.run.merged.expect("recorded");
     assert_eq!((merged.by, merged.pr), (MergedBy::Merger, pr.clone()));
     let handoff = r.tracker.comments(&key).into_iter().find(|c| c.kind == "handoff").expect("a handoff").body;
-    assert!(
-        handoff.contains(&pr.url) && handoff.contains("Grade 1; gates passed: checks, ci, agent_review"),
-        "{handoff}"
-    );
+    assert!(handoff.contains(&pr.url) && handoff.contains("gates passed: checks, ci, agent_review"), "{handoff}");
 }
 
 #[tokio::test]

@@ -7,6 +7,7 @@ use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::task::{self, JoinSet};
 use tracing::Instrument;
+use trailhead_factory::messages;
 use trailhead_factory::{Labels, Result, Role, RunUpdate, Sandbox, Status, Task, TaskKey, label};
 
 use crate::timing::{unix_now, until};
@@ -216,7 +217,7 @@ impl Factory {
         }
         tracing::info!(task = %task.key.0, "no grade; skipping it until a human sets one");
         let told = async {
-            self.tracker.note(&task.key, "no grade; set one to queue it").await?;
+            self.tracker.note(&task.key, &messages::ungraded_note()).await?;
             self.tracker.report(&task.key, RunUpdate { ungraded: Some(true), ..RunUpdate::default() }).await
         };
         if let Err(e) = told.await {

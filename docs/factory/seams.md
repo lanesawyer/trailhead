@@ -37,7 +37,7 @@ The code in `crates/trailhead-factory` is authoritative; this is what each trait
 | `trailhead-core` | Task engine: schema, claims, events, undo |
 | `trailhead-server` | REST, MCP, SSE, webhooks |
 | `trailhead` | CLI; gains `trailhead factory` commands later (TRAIL-116) |
-| `trailhead-factory` | Factory domain types, daemon protocol, the five traits, the `[factory]` settings |
+| `trailhead-factory` | Factory domain types, daemon protocol, the five traits, the `[factory]` settings, and `messages`: every PR comment, task note and park question, as pure functions the control plane and the daemon share (no i18n framework; logs and prompts stay out) |
 | `trailhead-control` | Control plane: run loop, sandbox pool, budget metering, usage-window pauses, reviews, reconcile; `CoreTracker` |
 | `trailhead-factory-host` | The `trailhead-factory` binary: runs the control plane beside the server, sharing its database, and forwards the daemons' API tunnel to it. Moving the control plane into the server is TRAIL-164 |
 | `trailhead-daemon` | In-sandbox daemon: harness host, checks, publishing; the iroh transport (`RemoteDaemon`, `DaemonProtocol`) and `RestTracker` |
