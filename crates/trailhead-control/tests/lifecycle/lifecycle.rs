@@ -91,7 +91,7 @@ async fn budget_breach_parks_the_task_and_suspends_its_sandbox() {
     assert_eq!(task.status, Status::NeedsInput);
     assert_eq!(task.holder.as_deref(), Some("factory/trail-1-a1"));
     assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
-    assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "question"));
+    assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "question" && c.body.contains("is suspended")));
 
     let sandbox = r.compute.get("trailhead-w1").expect("sandbox kept for resuming");
     assert!(!sandbox.labels.contains_key(label::ROLE), "connector access cut");
@@ -133,6 +133,9 @@ async fn a_breached_sandbox_that_cant_be_relabelled_is_still_cut_off_and_destroy
         let task = r.tracker.task(&key);
         assert_eq!(task.status, Status::NeedsInput);
         assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
+        let question = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap().body;
+        assert!(question.contains("fresh checkout"), "{question}");
+        assert!(!question.contains("is suspended"), "{question}");
         if destroy_fails {
             assert_eq!(
                 r.compute.egress("trailhead-w1"),
