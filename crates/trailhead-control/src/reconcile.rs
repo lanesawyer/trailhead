@@ -375,7 +375,7 @@ impl Factory {
                     self.evaluate_gates(&task.key).await?;
                 } else if task.run.pending_changes().is_some_and(|c| !c.conflict) {
                     // The rework has pushed and its head awaits review: say so, without approving.
-                    self.say_gates(&task.key).await?;
+                    self.say_gates(&task.key, false).await?;
                 }
                 return Ok(due);
             }
