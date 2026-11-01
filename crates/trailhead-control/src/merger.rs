@@ -113,6 +113,7 @@ impl Factory {
             human_head,
             problem: None,
             refused: None,
+            comment: prev.as_ref().and_then(|d| d.comment),
             message: String::new(),
         };
         // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
@@ -155,7 +156,7 @@ impl Factory {
         });
         if prev.as_ref() != Some(&decision) {
             if !merging && merge_mode != MergeMode::Off && prev.as_ref().is_none_or(|d| d.message != decision.message) {
-                codehost.comment(pr, &decision.message).await?;
+                decision.comment = Some(self.say(pr, decision.comment, &decision.message).await?);
             }
             if decision.problem.is_some() && prev.as_ref().is_none_or(|d| d.problem != decision.problem) {
                 self.tracker.note(key, decision.problem.as_deref().unwrap_or_default()).await?;
@@ -166,6 +167,22 @@ impl Factory {
             self.merge(&task, pr, &decision, &message).await?;
         }
         Ok(())
+    }
+
+    /// Says `body` on the PR in the merger's one status comment: edits comment `id` when there is one, and posts a
+    /// new one (returning its id) when there isn't or someone deleted it.
+    async fn say(&self, pr: &PrRef, id: Option<u64>, body: &str) -> Result<u64> {
+        let codehost = self.codehost.as_ref().expect("only called with a code host");
+        if let Some(id) = id {
+            match codehost.edit_comment(pr, id, body).await {
+                Ok(()) => return Ok(id),
+                Err(Error::NotFound(_)) => {
+                    tracing::info!(pr = %pr.url, id, "the status comment is gone; posting a new one");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        codehost.comment(pr, body).await
     }
 
     /// Whether the latest review asked for changes that the PR's `head` still hasn't answered.
@@ -227,7 +244,7 @@ impl Factory {
         }
         match outcome? {
             MergeOutcome::Merged => {
-                if let Err(e) = codehost.comment(pr, merged_message).await {
+                if let Err(e) = self.say(pr, decision.comment, merged_message).await {
                     tracing::warn!(task = %task.key.0, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
                 }
                 let commit = match codehost.pr_state(pr).await? {

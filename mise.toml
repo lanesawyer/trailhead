@@ -34,7 +34,7 @@ run = """
 if limactl list -q | grep -qx trailhead; then
   limactl start --tty=false trailhead
 else
-  limactl start --tty=false --name=trailhead --cpus=4 --memory=4 --disk=60 --mount-none template:docker
+  limactl start --tty=false --name=trailhead --cpus=4 --memory=6 --disk=60 --mount-none template:docker
 fi
 """
 

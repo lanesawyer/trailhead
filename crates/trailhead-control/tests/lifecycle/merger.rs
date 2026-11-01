@@ -38,7 +38,7 @@ async fn shadow_mode_waits_for_ci_then_approves_and_says_each_change_once() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     r.factory.reconcile().await.unwrap();
-    assert_eq!(said(&r)[1..], ["Grade 1: checks, CI and review passed; would merge (shadow)."]);
+    assert_eq!(said(&r), ["Grade 1: checks, CI and review passed; would merge (shadow)."], "edited in place");
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Approved);
     let decision = task.run.merge.expect("recorded");
@@ -122,10 +122,8 @@ async fn a_grade_three_pr_waits_for_lane_who_approves_it() {
     r.factory.reconcile().await.unwrap();
     assert_eq!(
         said(&r),
-        [
-            "Grade 3 (task was 1; Cargo.lock changed): waiting for CI and a person.",
-            "Grade 3 (task was 1; Cargo.lock changed): waiting for a person."
-        ]
+        ["Grade 3 (task was 1; Cargo.lock changed): waiting for a person."],
+        "one comment, edited as the decision changed"
     );
     assert_eq!(r.tracker.task(&key).status, Status::InReview, "the factory doesn't approve for Lane");
 
@@ -135,7 +133,7 @@ async fn a_grade_three_pr_waits_for_lane_who_approves_it() {
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Approved);
     assert_eq!(
-        said(&r)[2..],
+        said(&r),
         [
             "Grade 3 (task was 1; Cargo.lock changed): checks, CI, review and a person's approval passed; not auto-merged at this grade, so a person merges."
         ]
@@ -166,7 +164,11 @@ async fn an_approval_on_an_old_head_doesnt_count() {
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
     assert_eq!(r.tracker.task(&key).status, Status::Approved);
-    assert_eq!(said(&r).last().unwrap(), "Grade 1: checks, CI and review passed; would merge (shadow).");
+    assert!(
+        said(&r).iter().any(|m| m == "Grade 1: checks, CI and review passed; would merge (shadow)."),
+        "{:?}",
+        said(&r)
+    );
 }
 
 #[tokio::test]
@@ -206,6 +208,7 @@ async fn failed_ci_sends_the_task_back_for_a_rework_told_what_failed() {
         "{wanted:?}"
     );
     assert!(!wanted.body.contains("base branch was merged"), "{wanted:?}");
+    assert!(wanted.body.contains("is already being merged into your checkout, uncommitted"), "{wanted:?}");
     assert_eq!(task.run.conflict_reworks, Some(1));
     assert_eq!(task.run.review_rounds, Some(1), "review rounds are left alone");
 }
@@ -321,7 +324,7 @@ async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
-    assert_eq!(said(&r)[1..], ["Grade 1: checks, CI and review passed; merged."]);
+    assert_eq!(said(&r), ["Grade 1: checks, CI and review passed; merged."]);
     assert!(r.codehost.prs()[0].merged);
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Done);
@@ -583,4 +586,32 @@ async fn merge_mode_on_without_reviewer_rights_falls_back_to_saying_what_it_woul
     assert!(!r.codehost.prs()[0].merged);
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
     assert!(said(&r).last().unwrap().contains("passed, but the factory can't move the task to approved"));
+}
+
+#[tokio::test]
+async fn the_merger_keeps_one_status_comment_and_edits_it() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    assert_eq!(said(&r), ["Grade 3: waiting for CI and a person."]);
+    let id = r.tracker.task(&key).run.merge.unwrap().comment.expect("the comment id is recorded");
+
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(said(&r), ["Grade 3: waiting for a person."], "two changes, one comment, edited");
+    assert_eq!(r.tracker.task(&key).run.merge.unwrap().comment, Some(id));
+}
+
+#[tokio::test]
+async fn a_deleted_status_comment_is_posted_again() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    let id = r.tracker.task(&key).run.merge.unwrap().comment.unwrap();
+    r.codehost.delete_comment(&pr, id);
+
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    let new = r.tracker.task(&key).run.merge.unwrap().comment.unwrap();
+    assert_ne!(new, id, "the new comment's id is recorded");
+    assert_eq!(said(&r).last().unwrap(), "Grade 3: waiting for a person.");
+    assert_eq!(said(&r)[0], "Grade 3: waiting for CI and a person.", "the deleted one is untouched");
 }
