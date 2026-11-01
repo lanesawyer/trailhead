@@ -20,6 +20,15 @@ use trailhead_factory::{
     RunContext, RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
 };
 
+/// The `adapter` name profiles use for this harness.
+pub const NAME: &str = "claude-code";
+
+/// The `HarnessSecrets` key for subscription mode: a token from `claude setup-token`.
+pub const OAUTH_TOKEN: &str = "oauth_token";
+
+/// The host Claude Code reaches directly in subscription mode.
+pub const API_HOST: &str = "api.anthropic.com";
+
 /// What `ANTHROPIC_API_KEY` is set to. The gateway replaces credentials, so this only has to be non-empty.
 pub const PLACEHOLDER_KEY: &str = "sprites-connector";
 

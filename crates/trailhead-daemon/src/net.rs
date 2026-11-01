@@ -24,8 +24,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, watch};
 use trailhead_factory::{
-    Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, PrepareRequest, Program, Result,
-    RunEvent, RunReport, RunRequest, SandboxFile, SandboxId, Target, ToDaemon,
+    Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, HarnessSecrets, PrepareRequest,
+    Program, Result, RunEvent, RunReport, RunRequest, SandboxFile, SandboxId, Target, ToDaemon,
 };
 
 use crate::Runner;
@@ -586,8 +586,10 @@ pub struct Launch {
     pub workdir: String,
     /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`.
     pub log: Option<String>,
-    /// Subscription mode: the Claude Code OAuth token handed to each daemon in its secrets file.
-    pub claude_oauth_token: Option<String>,
+    /// The `adapter` each daemon builds its harness from.
+    pub harness: String,
+    /// That harness's credentials (subscription mode's token, say), handed to each daemon in its secrets file.
+    pub harness_secrets: HarnessSecrets,
     /// The connector list URL for each daemon's secrets.
     pub gateway_list: String,
     /// The socket each daemon holds its sandbox awake through, if the compute pauses idle ones.
@@ -601,7 +603,8 @@ impl Launch {
             dir: target.dir.clone(),
             workdir: target.workdir.clone(),
             log: None,
-            claude_oauth_token: None,
+            harness: crate::plugins::CLAUDE_CODE.into(),
+            harness_secrets: HarnessSecrets::new(),
             gateway_list: target.gateway_list.clone(),
             hold_socket: target.hold_socket.clone(),
         }
@@ -650,7 +653,8 @@ impl RemoteDaemon {
         let secrets = DaemonSecrets {
             secret_key: hex::encode(sandbox_key(&self.master, sandbox).to_bytes()),
             control_plane: self.endpoint.id().to_string(),
-            claude_oauth_token: self.launch.claude_oauth_token.clone(),
+            harness: self.launch.harness.clone(),
+            harness_secrets: self.launch.harness_secrets.clone(),
             gateway_list: self.launch.gateway_list.clone(),
         };
         let dir = &self.launch.dir;

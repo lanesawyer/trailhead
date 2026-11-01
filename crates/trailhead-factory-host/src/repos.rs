@@ -81,6 +81,17 @@ pub fn validate(specs: &[RepoSpec]) -> Result<(), String> {
                 spec.slug(),
             ));
         }
+        if let Some(first) =
+            specs.first().filter(|f| f.config.plugins().map(|p| p.0) != spec.config.plugins().map(|p| p.0))
+        {
+            return Err(format!(
+                "{} ({}) and {} ({}) use different profile adapters; repos in one process share the daemon launch, which builds one harness",
+                first.dir.display(),
+                first.slug(),
+                spec.dir.display(),
+                spec.slug(),
+            ));
+        }
         let repo = &spec.config.repo;
         let slug = spec.slug();
         let keys = [
