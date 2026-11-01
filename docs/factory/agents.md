@@ -79,5 +79,5 @@ Decided: specs come from humans, written together with an AI, and enter through 
 - **Spec stage.** A human starts a spec; a planner agent drafts, asks questions and revises; the human approves. The approved spec is the source of acceptance criteria.
 - **Task spec.** Goal, acceptance criteria, link to the parent spec, profile, grade hint, budget.
 - **Repo context.** `AGENTS.md` for conventions, plus the factory file for stack, checks, profiles and policy.
-- **Per-profile context.** Each profile names its instruction files and skills. Reviewers get the task, diff and check results, never the author's transcript.
+- **Per-profile context.** Each profile names its instruction files and skills. Reviewers get the task, diff and check results, never the author's transcript. A reviewer's checkout is the PR's head branch with `origin/<base>` fetched, so it can read the diff against the base.
 - **Typed model decisions.** Where a model makes a decision the factory acts on (grade raise, is it done, review verdict), it returns structured output against a schema. A dedicated decision model such as Jev (TypeSafeAI, which has a Sprites connector) could handle some yes/no and score calls; evaluate once the decision points are known.

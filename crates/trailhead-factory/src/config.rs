@@ -616,8 +616,8 @@ impl FactoryConfig {
             .collect()
     }
 
-    /// Readies a checkout, on `branch` when given (a rework). Only workers build: a reviewer reads the diff, so it
-    /// skips `setup`.
+    /// Readies a checkout, on `branch` when given: a worker's rework, or a reviewer's look at the PR's head. Only
+    /// workers build: a reviewer reads the diff, so it skips `setup`.
     pub fn prepare_request(&self, role: Role, branch: Option<String>) -> PrepareRequest {
         let named = |name: &str, c: &Option<String>| {
             c.as_ref().filter(|_| role == Role::Worker).map(|c| Check { name: name.into(), command: c.clone() })
