@@ -95,7 +95,7 @@ async fn daemon_in_a_sprite() {
         compute.clone(),
         Launch {
             log: std::env::var("LIVE_DAEMON_LOG").ok(),
-            claude_oauth_token: subscription(),
+            harness_secrets: subscription().map(|t| ("oauth_token".to_string(), t)).into_iter().collect(),
             ..Launch::new(binary, &trailhead_compute_sprites::target())
         },
     ));
