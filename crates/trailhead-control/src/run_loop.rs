@@ -49,11 +49,6 @@ impl Factory {
             if (&mut shutdown).now_or_never().is_some() {
                 break;
             }
-            // A run that just errored left `dirty` set: its daemon may still have it, so reconcile before concluding.
-            if draining && running.is_empty() && !dirty {
-                tracing::info!("drained; no runs left");
-                break;
-            }
             if dirty {
                 dirty = false;
                 match self.reconcile_deferring(&keys.values().cloned().collect()).await {
@@ -89,6 +84,12 @@ impl Factory {
                 if (&mut shutdown).now_or_never().is_some() {
                     break;
                 }
+            }
+            // A run that just errored set `dirty`: its daemon may still have it, so the reconcile above runs first and
+            // a drain concludes only if that found nothing. A poll re-dirtying an idle loop mustn't hold it open.
+            if draining && running.is_empty() {
+                tracing::info!("drained; no runs left");
+                break;
             }
             if !draining && let Err(e) = self.start_ready(&mut running, &mut keys, reviews.len()).await {
                 tracing::warn!(error = %e, "couldn't start ready tasks");
