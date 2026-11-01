@@ -1265,13 +1265,13 @@ async fn agents_cannot_undo_or_revert_a_humans_grade_change() {
     env.store.undo_batch(&env.human.next_batch(), own.batch_id).await.unwrap();
     assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(3));
 
-    // Reverting an agent's work: a human can, another agent can't lower the grade.
+    // Reverting an agent's work: a human can, another agent's revert is refused with Forbidden, not skipped.
     let b = env.agent("b").await;
     let other = env.task_with(NewTask { title: "other".into(), grade: Some(2), ..Default::default() }).await;
     let since = env.now() - jiff::SignedDuration::from_secs(60);
     env.store.update_task(&a.next_batch(), &other.key, patch(Some(4)), None).await.unwrap();
     let report = env.store.revert_actor(&b.next_batch(), a.actor_id(), since).await;
-    assert!(report.is_err() || report.unwrap().reverted.is_empty());
+    assert!(matches!(report, Err(Error::Forbidden(_))), "lowering a grade aborts the whole revert: {report:?}");
     assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(4));
     env.store.revert_actor(&env.human.next_batch(), a.actor_id(), since).await.unwrap();
     assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(2));
