@@ -230,7 +230,12 @@ impl Factory {
         for (check, log) in &logs {
             body.push_str(&format!("\n\nEnd of the log of {check}:\n\n```\n{}\n```", log.trim_end()));
         }
-        body.push_str("\n\nReproduce the failure, fix it, run the checks and finish.");
+        body.push_str(&format!(
+            "\n\nThe base branch `{}` is already being merged into your checkout, uncommitted, so the changes you see \
+             staged beyond your own are that merge: keep them, and don't discard or rebase them. Reproduce the \
+             failure, fix it, run the checks and finish.",
+            self.config.repo.base_branch
+        ));
         if task.status == Status::Approved {
             self.tracker.unapprove(&task.key).await?;
         }
