@@ -214,3 +214,23 @@ async fn a_rework_request_cut_short_is_finished_by_reconcile() {
     assert_eq!(r.tracker.task(&key).status, Status::Open);
     assert!(r.factory.reconcile().await.unwrap().reworked.is_empty());
 }
+
+#[tokio::test]
+async fn a_parked_task_whose_pr_is_merged_is_finished() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    r.codehost.close(&pr);
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.merged, std::slice::from_ref(&key.0));
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}

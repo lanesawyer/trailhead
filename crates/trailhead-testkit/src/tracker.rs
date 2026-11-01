@@ -217,6 +217,22 @@ fn push_comment(s: &mut State, key: &TaskKey, author: &str, kind: &str, body: &s
     });
 }
 
+/// Core's `Status::can_transition_to`, which the fake must agree with.
+fn can_transition(from: Status, to: Status) -> bool {
+    use Status::*;
+    if from == to {
+        return true;
+    }
+    match from {
+        Open => matches!(to, InProgress | NeedsInput | InReview | Done | Cancelled),
+        InProgress => matches!(to, Open | NeedsInput | InReview | Done | Cancelled),
+        NeedsInput => matches!(to, Open | InProgress | InReview | Cancelled),
+        InReview => matches!(to, Open | InProgress | NeedsInput | Approved | Done | Cancelled),
+        Approved => matches!(to, Open | InReview | Done | Cancelled),
+        Done | Cancelled => matches!(to, Open),
+    }
+}
+
 fn held_by_me(t: &Task, me: &str) -> Result<()> {
     match &t.holder {
         Some(h) if h == me => Ok(()),
@@ -387,8 +403,8 @@ impl Tracker for FakeTracker {
 
     async fn reopen(&self, task: &TaskKey) -> Result<()> {
         self.write(task, |t, _| {
-            if !matches!(t.status, Status::InReview | Status::Approved) {
-                return Err(Error::Conflict(format!("{} isn't in review", t.key.0)));
+            if !can_transition(t.status, Status::Open) {
+                return Err(Error::Conflict(format!("{} can't be reopened from {:?}", t.key.0, t.status)));
             }
             t.holder = None;
             t.status = Status::Open;
@@ -440,8 +456,13 @@ impl Tracker for FakeTracker {
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
         self.write(task, |t, me| {
-            if !matches!(t.status, Status::InReview | Status::Approved) {
+            // Like core: review states need no claim, and an unclaimed task can be finished by anyone, but
+            // not one another agent holds.
+            if !matches!(t.status, Status::InReview | Status::Approved) && t.holder.is_some() {
                 held_by_me(t, me)?;
+            }
+            if !can_transition(t.status, Status::Done) {
+                return Err(Error::Conflict(format!("{} can't be finished from {:?}", t.key.0, t.status)));
             }
             t.holder = None;
             t.status = Status::Done;
