@@ -11,7 +11,7 @@ The control plane enforces budgets. Token and dollar counts come from the daemon
 | Task | `max_attempts`, `max_review_rounds` | Park the task for a human |
 | Global | Dollars per day, concurrent sandboxes | Stop starting new runs; running ones finish their step |
 
-- **Per run, not per task.** Dollar, wall-clock and step budgets are checked against one run's own spend, not the task's running total across attempts, reworks and reviews. A task's total is bounded by `max_attempts` and `max_review_rounds` times the per-run budgets. A task-level dollar cap (say `[repo] max_task_usd`, checked against prior plus current spend) is not built; adding one is a policy decision for a human.
+- **Per run, not per task.** Dollar, wall-clock and step budgets are checked against one run's own spend, not the task's running total across attempts, reworks and reviews. A task's total is bounded by `max_attempts` and `max_review_rounds` times the per-run budgets. A task-level dollar cap (say `[factory.repo] max_task_usd`, checked against prior plus current spend) is not built; adding one is a policy decision for a human.
 - **Stall detection.** No progress event for a set window counts as a breach.
 - **Suspend, don't destroy.** A breached run keeps its sandbox and checkpoint so a human can resume it.
 - **Numbers TBD.** Start conservative and record real spend per task type before loosening. Raising a budget is a policy loosening and needs a human ([review.md](review.md)).
