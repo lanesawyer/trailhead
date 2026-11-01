@@ -11,7 +11,10 @@ use trailhead_factory::{
 pub struct FakePr {
     pub pr: PrRef,
     pub spec: NewPr,
+    /// Comments in the order made; a comment's id is its position plus one.
     pub comments: Vec<String>,
+    /// Ids of comments a person deleted (they stay listed, so the other ids hold).
+    pub deleted: Vec<u64>,
     pub merged: bool,
     /// Closed without merging.
     pub closed: bool,
@@ -126,6 +129,11 @@ impl FakeCodeHost {
     }
 
     /// Sets whether the PR's branch is behind its base.
+    /// A person deletes the PR's comment with this id.
+    pub fn delete_comment(&self, pr: &PrRef, id: u64) {
+        self.find(pr, |p, _| p.deleted.push(id)).unwrap();
+    }
+
     pub fn set_behind(&self, pr: &PrRef, behind: bool) {
         self.find(pr, |p, _| p.behind = behind).unwrap();
     }
@@ -203,6 +211,7 @@ impl CodeHost for FakeCodeHost {
             pr: r.clone(),
             spec: pr,
             comments: Vec::new(),
+            deleted: Vec::new(),
             merged: false,
             closed: false,
             mergeable: Some(true),
@@ -232,8 +241,25 @@ impl CodeHost for FakeCodeHost {
         })
     }
 
-    async fn comment(&self, pr: &PrRef, body: &str) -> Result<()> {
-        self.find(pr, |p, _| p.comments.push(body.to_string()))
+    async fn comment(&self, pr: &PrRef, body: &str) -> Result<u64> {
+        self.find(pr, |p, _| {
+            p.comments.push(body.to_string());
+            p.comments.len() as u64
+        })
+    }
+
+    async fn edit_comment(&self, pr: &PrRef, id: u64, body: &str) -> Result<()> {
+        let edited = self.find(pr, |p, _| {
+            let slot = (id as usize).checked_sub(1).and_then(|i| p.comments.get_mut(i));
+            match slot {
+                Some(c) if !p.deleted.contains(&id) => {
+                    *c = body.to_string();
+                    true
+                }
+                _ => false,
+            }
+        })?;
+        if edited { Ok(()) } else { Err(Error::NotFound(format!("comment {id}"))) }
     }
 
     async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome> {

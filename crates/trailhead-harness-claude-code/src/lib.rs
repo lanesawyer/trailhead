@@ -673,4 +673,36 @@ mod tests {
         let events = stream.read(&result);
         assert!(matches!(events.as_slice(), [RunEvent::ToolResult]), "{events:?}");
     }
+
+    #[test]
+    fn a_task_subagents_nested_calls_balance() {
+        let mut stream = Stream::new(ModelId("sonnet".into()), 0);
+        let call = |id: &str, tool: &str, parent: Value| {
+            json!({"type": "assistant", "parent_tool_use_id": parent, "message": {"id": format!("m-{id}"),
+                "model": "sonnet", "usage": {},
+                "content": [{"type": "tool_use", "id": id, "name": tool, "input": {"description": "work"}}]}})
+        };
+        let result = |id: &str, parent: Value| {
+            json!({"type": "user", "parent_tool_use_id": parent, "message": {"content": [
+                {"type": "tool_result", "tool_use_id": id, "content": "ok"}]}})
+        };
+        let (mut calls, mut results) = (0, 0);
+        for msg in [
+            call("task1", "Task", Value::Null),
+            call("n1", "Bash", json!("task1")),
+            result("n1", json!("task1")),
+            call("n2", "Read", json!("task1")),
+            result("n2", json!("task1")),
+            result("task1", Value::Null),
+        ] {
+            for e in stream.read(&msg) {
+                match e {
+                    RunEvent::ToolCall { .. } => calls += 1,
+                    RunEvent::ToolResult => results += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!((calls, results), (3, 3));
+    }
 }
