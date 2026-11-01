@@ -914,6 +914,36 @@ async fn the_factory_approves_again_after_it_sent_the_task_back_for_a_new_head()
 }
 
 #[tokio::test]
+async fn the_factory_cant_approve_work_it_did_and_says_so_without_asking_for_a_reviewer() {
+    let config = format!(
+        "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
+    );
+    let r = rig_with(&config).await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let new = NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(1), ..Default::default() };
+    let key = TaskKey(r.store.create_task(&r.human, new).await.unwrap().key);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let pr = r.show(&key).await.run.pr.unwrap();
+
+    // The factory itself takes the task and sends it to review again, so it did the work.
+    let back = TaskPatch { status: Some(trailhead_core::Status::Open), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, back, None).await.unwrap();
+    r.tracker.claim(&key).await.unwrap();
+    r.tracker.request_review(&key).await.unwrap();
+
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview, "{:?}", task.run.merge);
+    let problem = task.run.merge.unwrap().problem.expect("the approval was refused");
+    assert!(problem.contains("can't approve or finish work it did"), "{problem}");
+    assert!(!problem.contains("list it as one") && !problem.contains("delegated reviewer, so"), "{problem}");
+}
+
+#[tokio::test]
 async fn an_approved_pr_that_starts_conflicting_is_unapproved_and_reworked() {
     let config = format!(
         "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
