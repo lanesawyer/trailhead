@@ -280,10 +280,13 @@ fn string_or_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>,
         One(String),
         Many(Vec<String>),
     }
-    Ok(match Keys::deserialize(d)? {
-        Keys::One(s) => vec![s],
-        Keys::Many(v) => v,
-    })
+    match Keys::deserialize(d)? {
+        Keys::One(s) => Ok(vec![s]),
+        Keys::Many(v) if v.is_empty() => Err(serde::de::Error::custom(
+            "queue = [] is empty: list at least one task key, or leave `queue` out to make every ready task in the project the factory's",
+        )),
+        Keys::Many(v) => Ok(v),
+    }
 }
 
 fn default_base_branch() -> String {
@@ -693,6 +696,8 @@ mod tests {
         assert!(parse(SAMPLE).unwrap().repo.queue.is_empty());
         assert_eq!(with("queue = \"TRAIL-102\""), ["TRAIL-102"]);
         assert_eq!(with("queue = [\"TRAIL-102\", \"TRAIL-167\"]"), ["TRAIL-102", "TRAIL-167"]);
+        let err = parse(&SAMPLE.replace("[repo]\n", "[repo]\nqueue = []\n")).unwrap_err();
+        assert!(err.to_string().contains("queue = [] is empty"), "{err}");
     }
     #[test]
     fn grades_default_to_the_documented_rules_and_parse_from_the_file() {
