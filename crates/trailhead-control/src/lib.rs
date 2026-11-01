@@ -8,7 +8,6 @@ pub mod daemon_binary;
 mod decide;
 mod lifecycle;
 mod merger;
-mod messages;
 mod pool;
 mod reconcile;
 mod review;

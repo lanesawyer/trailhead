@@ -391,7 +391,9 @@ async fn a_rework_posts_a_flaky_check_as_a_pr_comment() {
     let pr = &r.codehost.prs()[0];
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
     assert!(
-        pr.comments.iter().any(|c| c.contains("⚠️ Check `test` failed, then passed when rerun.")),
+        pr.comments
+            .iter()
+            .any(|c| c.contains(trailhead_factory::messages::flaky_checks(&["test".into()]).trim_start())),
         "{:?}",
         pr.comments
     );

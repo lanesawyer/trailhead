@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{Notify, mpsc};
+use trailhead_factory::messages::{self, Filed};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, NewPr, PrGrade, PrRef,
-    PrepareRequest, Result, Role, RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, RunUpdate,
-    TaskKey, Tracker, Usage, Verdict, VerdictKind,
+    Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, NewPr, PrRef, PrepareRequest,
+    Result, Role, RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, RunUpdate, TaskKey, Tracker,
+    Usage, Verdict, VerdictKind,
 };
 
 /// Turns a run's credential into a tracker handle acting as the sandbox's sub-agent.
@@ -50,10 +51,8 @@ pub const RENEW_EVERY: Duration = Duration::from_secs(10 * 60);
 /// How often the daemon tells the control plane how quiet the agent has been, while a run is going.
 pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
 
-/// Everything the factory posts goes out under the connector's account (Lane's, until TRAIL-95), so posts say which
-/// agent and model wrote them.
 fn pr_footer(req: &RunRequest, agent: &str) -> String {
-    format!("\n\n---\n🤖 Opened by the Trailhead factory · worker `{agent}` · `{}` · {}", req.model.0, req.task.key.0)
+    messages::pr_footer(agent, &req.model, &req.task.key)
 }
 
 /// How long an agent has been quiet.
@@ -78,52 +77,8 @@ impl Quiet {
     }
 }
 
-/// A follow-up that is now a task: newly filed, or already open under that title.
-struct Filed {
-    key: TaskKey,
-    title: String,
-    existing: bool,
-}
-
-fn review_comment(v: &Verdict, grade: Option<&PrGrade>, filed: &[Filed]) -> String {
-    let verdict = match v.kind {
-        trailhead_factory::VerdictKind::Approve => "Approve",
-        trailhead_factory::VerdictKind::RequestChanges => "Request changes",
-    };
-    let model = v.model.as_ref().map(|m| format!(" (`{}`)", m.0)).unwrap_or_default();
-    let mut comment = format!("🔍 **Review by `{}`{model} · Verdict: {verdict}**\n\n{}", v.reviewer, v.body);
-    if let Some(grade) = grade {
-        comment.push_str(&format!("\n\n{}", grade.describe()));
-    }
-    if !filed.is_empty() {
-        comment.push_str("\n\nFollow-ups filed in Trailhead:");
-        for f in filed {
-            let already = if f.existing { " (already open)" } else { "" };
-            comment.push_str(&format!("\n- `{}` {}{already}", f.key.0, f.title));
-        }
-    }
-    comment
-}
-
 /// The most follow-ups one review may file, so a runaway reviewer can't flood the project.
 const MAX_FOLLOW_UPS: usize = 10;
-
-/// How much of a failed check's output goes on the task.
-const NOTE_TAIL: usize = 4000;
-
-/// Why an attempt's checks failed, for the task, so a person or the next attempt can see it.
-fn failure_note(checks: &[CheckResult]) -> String {
-    let mut note = String::from("The factory's checks failed, so nothing was published.\n");
-    for c in checks.iter().filter(|c| !c.passed) {
-        let out = c.output.trim_end();
-        let mut start = out.len().saturating_sub(NOTE_TAIL);
-        while !out.is_char_boundary(start) {
-            start += 1;
-        }
-        note.push_str(&format!("\n`{}` failed; the end of its output:\n```\n{}\n```\n", c.name, &out[start..]));
-    }
-    note
-}
 
 /// The daemon's duties for one run: claim, run the harness, run checks, publish and open the PR, or review it,
 /// and record the result in the tracker as the sandbox's sub-agent.
@@ -305,8 +260,7 @@ impl Runner {
             })
             .map(str::to_string);
         self.codehost.publish(&req.repo, start, &req.branch, &commits).await?;
-        let flaky: String =
-            retried.iter().map(|name| format!("\n\n⚠️ Check `{name}` failed, then passed when rerun.")).collect();
+        let flaky: String = messages::flaky_checks(retried);
         match &req.pr {
             Some(pr) => {
                 // The PR is already open, so a note on a flaky check goes on it as a comment.
@@ -348,15 +302,8 @@ impl Runner {
             let result = match tracker.find_open_by_title(project, &title).await {
                 Ok(Some(key)) => Ok(Filed { key, title: title.clone(), existing: true }),
                 Ok(None) => {
-                    let mut description = f.description.trim().to_string();
-                    if !description.is_empty() {
-                        description.push_str("\n\n");
-                    }
-                    description.push_str(&trailhead_factory::raised_by(source));
-                    if let Some(pr) = pr {
-                        description.push_str(&format!(" ({})", pr.url));
-                    }
-                    description.push('.');
+                    let description =
+                        messages::follow_up_description(&f.description, source, pr.map(|p| p.url.as_str()));
                     tracker.create_task(project, &title, &description, f.priority).await.map(|key| Filed {
                         key,
                         title: title.clone(),
@@ -405,11 +352,7 @@ impl Runner {
         match outcome {
             RunOutcome::Changes { commits, summary } => {
                 if let Merge::Lost(base) = &merge {
-                    let reason = format!("the merge of the base branch ({base}) was abandoned");
-                    let note = format!(
-                        "The merge of the base branch ({base}) was abandoned (aborted or rebased away), so the changes \
-                         don't include what landed there. Nothing was published; finish the merge and commit it.\n"
-                    );
+                    let (reason, note) = messages::merge_abandoned(base);
                     tracker.note(key, &note).await?;
                     tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
                     tracker.release(key).await?;
@@ -418,11 +361,7 @@ impl Runner {
                 // A rebase rewrites the agent's commits, so the checkout no longer builds on `start`, which is what
                 // the commits are published on top of. Publishing would drop or duplicate what the branch had.
                 if !self.workspace.contains(start).await? {
-                    let reason = format!("the branch was rewritten ({start} is no longer in its history)");
-                    let note = format!(
-                        "The branch was rewritten (rebased or reset), so it no longer builds on {start}, where the run \
-                         started. Nothing was published; merge the base branch instead of rebasing.\n"
-                    );
+                    let (reason, note) = messages::branch_rewritten(start);
                     tracker.note(key, &note).await?;
                     tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
                     tracker.release(key).await?;
@@ -432,12 +371,7 @@ impl Runner {
                 if merge == Merge::Merged {
                     let files = self.workspace.conflict_markers(start).await?;
                     if !files.is_empty() {
-                        let reason = format!("conflict markers left in {}", files.join(", "));
-                        let note = format!(
-                            "The merge of the base branch still has conflict markers (`<<<<<<<`/`>>>>>>>` lines) in: {}. \
-                             Nothing was published.\n",
-                            files.join(", ")
-                        );
+                        let (reason, note) = messages::conflict_markers_left(&files);
                         tracker.note(key, &note).await?;
                         tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
                         tracker.release(key).await?;
@@ -450,8 +384,8 @@ impl Runner {
                     done = self.checks(&req.required_checks) => done,
                 };
                 if let Some(failed) = checks.iter().find(|c| !c.passed) {
-                    let reason = format!("check {} failed", failed.name);
-                    let note = failure_note(&checks);
+                    let reason = messages::check_failed_reason(&failed.name);
+                    let note = messages::checks_failed_note(&checks);
                     tracker.note(key, &note).await?;
                     tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
                     tracker.release(key).await?;
@@ -462,10 +396,7 @@ impl Runner {
                     // The agent's work is done and checked; retrying the whole run would only hit the same wall, so
                     // park the task with the reason instead, keeping the sandbox and its checkout.
                     Err(e) => {
-                        let question = format!(
-                            "The agent finished and the checks passed, but publishing to GitHub failed: {e}. Fix the \
-                             cause, then reopen the task."
-                        );
+                        let question = messages::publish_failed_question(&e);
                         tracker.ask(key, &question).await?;
                         return Ok((RunResult::NeedsInput(question), checks));
                     }
@@ -496,7 +427,7 @@ impl Runner {
                     if let (Some(g), Some(raise)) = (&mut grade, &verdict.raise_grade) {
                         g.raise(raise.grade, &raise.reason);
                     }
-                    self.codehost.comment(pr, &review_comment(&verdict, grade.as_ref(), &filed)).await?;
+                    self.codehost.comment(pr, &messages::review_comment(&verdict, grade.as_ref(), &filed)).await?;
                 }
                 Ok((RunResult::Reviewed(verdict), Vec::new()))
             }
@@ -506,7 +437,7 @@ impl Runner {
             }
             RunOutcome::Failed { reason } => {
                 if req.role == Role::Worker {
-                    let failure = Some(format!("The agent gave up: {reason}"));
+                    let failure = Some(messages::agent_gave_up(&reason));
                     tracker.report(key, RunUpdate { failure, ..Default::default() }).await?;
                     tracker.release(key).await?;
                 }

@@ -4,6 +4,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
+use trailhead_factory::messages;
 use trailhead_factory::{
     Error, Feedback, HumanContext, Merged, PrState, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult,
     RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind, run_name,
@@ -24,11 +25,11 @@ impl Factory {
                     self.tracker.claim(&task.key).await?;
                     let by = merged_by(task);
                     self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
-                    return Ok(Outcome::Settled { reason: format!("{} was merged", pr.url) });
+                    return Ok(Outcome::Settled { reason: messages::settled_merged(&pr.url) });
                 }
                 PrState::Closed => {
                     self.park_closed(task, pr).await?;
-                    return Ok(Outcome::Settled { reason: format!("{} was closed", pr.url) });
+                    return Ok(Outcome::Settled { reason: messages::settled_closed(&pr.url) });
                 }
                 PrState::Open { .. } => {}
             }
@@ -87,10 +88,10 @@ impl Factory {
             // A review that never went through request_rework (an older one, or a task reopened by hand) left no
             // changes_requested; the review comment is the feedback then (TRAIL-218).
             let feedback = match task.run.pending_changes().filter(|_| rework) {
-                Some(c) => Some(Feedback { body: format!("Review by {}:\n\n{}", c.reviewer, c.body) }),
+                Some(c) => Some(Feedback { body: messages::review_feedback(&c.reviewer, &c.body) }),
                 None if rework => match self.tracker.last_review(&task.key).await? {
                     Some(v) if v.kind == VerdictKind::RequestChanges => {
-                        Some(Feedback { body: format!("Review by {}:\n\n{}", v.reviewer, v.body) })
+                        Some(Feedback { body: messages::review_feedback(&v.reviewer, &v.body) })
                     }
                     _ => None,
                 },
@@ -202,17 +203,7 @@ impl Factory {
                         tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile will");
                     }
                 }
-                let question = if suspended {
-                    format!(
-                        "Budget breached: {reason}. The sandbox {} is suspended; raise the budget or cancel.",
-                        sandbox.name
-                    )
-                } else {
-                    format!(
-                        "Budget breached: {reason}. The sandbox {} couldn't be suspended and was destroyed, so the next run starts from a fresh checkout; raise the budget or cancel.",
-                        sandbox.name
-                    )
-                };
+                let question = messages::budget_breach_question(&reason, &sandbox.name, suspended);
                 let asked = sub.ask(&task.key, &question).await;
                 recorded?;
                 asked?;
@@ -299,15 +290,7 @@ impl Factory {
                     // Recorded before the question, so a task that is parked has the marker; reopening it is all a
                     // human has to do.
                     sub.report(&task.key, RunUpdate { gave_up: Some(attempt), ..RunUpdate::default() }).await?;
-                    sub.ask(
-                        &task.key,
-                        &format!(
-                            "Gave up after {failed} failed attempts (the limit is {max}). The last failure: \
-                             {reason}\n\n{last}\n\nFix the cause, then reopen the task; the attempt count starts again from \
-                             here. Or raise `max_attempts` to allow more tries."
-                        ),
-                    )
-                    .await?;
+                    sub.ask(&task.key, &messages::gave_up_question(failed, max, &reason, &last)).await?;
                     self.tracker.revoke_sub_agent(name).await?;
                     return Ok(Outcome::Parked { reason });
                 }
@@ -367,11 +350,7 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
         }
         if park {
-            let question = format!(
-                "The infrastructure failed {failures} times in a row (the limit is {max}); it's not the task. The \
-                 last error: {error}\n\nFix the cause, then reopen the task; raise `max_infra_failures` to allow \
-                 more tries."
-            );
+            let question = messages::infra_question(failures, max, &error.to_string());
             match sub.ask(&task.key, &question).await {
                 // Reopened by Lane, it starts again with no wait, as its count does.
                 Ok(()) => {
@@ -478,9 +457,9 @@ impl Factory {
                 _ => {}
             }
             if *spent > limit {
-                Some(format!("spent {spent} of a {limit} budget"))
+                Some(messages::spend_breach(*spent, limit))
             } else if steps > max_steps {
-                Some(format!("took more than {max_steps} steps"))
+                Some(messages::steps_breach(max_steps))
             } else {
                 None
             }
@@ -496,13 +475,13 @@ impl Factory {
                     // time spent disconnected isn't counted (no heartbeat arrives then).
                     RunEvent::Heartbeat { quiet_secs } if breach.is_none() && Duration::from_secs(quiet_secs) >= stall_after => {
                         stalled = true;
-                        Some(format!("stalled: no activity from the agent for {quiet_secs} s"))
+                        Some(messages::stall_breach(quiet_secs))
                     }
                     ev if breach.is_none() => on_event(ev, &mut spent),
                     _ => None,
                 },
                 r = &mut run => break r,
-                _ = &mut deadline, if breach.is_none() => Some(format!("ran past {} minutes", profile.budget.minutes)),
+                _ = &mut deadline, if breach.is_none() => Some(messages::time_breach(profile.budget.minutes.into())),
                 _ = &mut grace, if breach.is_some() => {
                     tracing::warn!(sandbox = %sandbox.name, "daemon ignored cancel; cutting it off");
                     grace_fired = true;

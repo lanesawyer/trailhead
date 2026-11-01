@@ -213,7 +213,8 @@ async fn check_that_passes_on_rerun_still_opens_the_pr_with_a_note() {
     assert!(matches!(&ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
     let prs = r.codehost.prs();
     assert_eq!(prs.len(), 1);
-    assert!(prs[0].spec.body.contains("Check `lint` failed, then passed when rerun."), "{}", prs[0].spec.body);
+    let flaky = trailhead_factory::messages::flaky_checks(&["lint".into()]);
+    assert!(prs[0].spec.body.contains(flaky.trim_start()), "{}", prs[0].spec.body);
 }
 
 #[tokio::test]

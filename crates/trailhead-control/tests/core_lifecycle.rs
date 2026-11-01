@@ -576,7 +576,7 @@ async fn a_pr_closed_without_merging_parks_its_task_for_lane() {
     assert_eq!(task.run.merged, None);
     let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
     let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
-    assert!(question.body.contains(&pr.url) && question.body.contains("closed without being merged"));
+    assert_eq!(question.body, trailhead_factory::messages::pr_closed_question(&pr.url));
     assert!(!question.body.contains("  "), "no stray runs of spaces: {}", question.body);
     assert!(r.factory.reconcile().await.unwrap().closed.is_empty(), "asked once");
 }
