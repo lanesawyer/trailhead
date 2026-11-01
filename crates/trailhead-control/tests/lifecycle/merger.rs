@@ -576,6 +576,24 @@ async fn a_host_made_update_keeps_lanes_approval_of_a_grade_three_task() {
 }
 
 #[tokio::test]
+async fn a_push_after_lanes_approval_of_a_grade_three_task_unapproves_it() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
+    r.tracker.approve_as_human(&key);
+    // CI is still running, so the first pass only marks the approval as Lane's, given on this head.
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+    r.codehost.push_to(&pr);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "Lane's approval was of the old head");
+    assert_eq!(task.run.merge.unwrap().human_head, None);
+}
+
+#[tokio::test]
 async fn merge_mode_on_without_reviewer_rights_falls_back_to_saying_what_it_would_do() {
     let (r, queue) = queued_rig_with(&merging());
     r.tracker.set_delegated("factory", false);
