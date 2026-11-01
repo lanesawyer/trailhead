@@ -208,6 +208,7 @@ async fn failed_ci_sends_the_task_back_for_a_rework_told_what_failed() {
         "{wanted:?}"
     );
     assert!(!wanted.body.contains("base branch was merged"), "{wanted:?}");
+    assert!(wanted.body.contains("is already being merged into your checkout, uncommitted"), "{wanted:?}");
     assert_eq!(task.run.conflict_reworks, Some(1));
     assert_eq!(task.run.review_rounds, Some(1), "review rounds are left alone");
 }
