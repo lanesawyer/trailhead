@@ -969,3 +969,32 @@ async fn an_approved_pr_that_starts_conflicting_is_unapproved_and_reworked() {
     let wanted = task.run.changes_requested.expect("the rework is told why");
     assert!(wanted.conflict && wanted.body.contains(&pr.url), "{wanted:?}");
 }
+
+#[tokio::test]
+async fn approve_is_refused_when_the_factory_isnt_a_delegated_reviewer() {
+    let r = rig().await;
+    let key = r.task("Add a greeting").await;
+    r.tracker.claim(&key).await.unwrap();
+    r.tracker.request_review(&key).await.unwrap();
+
+    let err = r.tracker.approve(&key).await.expect_err("the factory isn't in the project's reviewers");
+    let trailhead_factory::Error::Forbidden(why) = err else { panic!("expected Forbidden, got {err:?}") };
+    assert!(why.contains("isn't a delegated reviewer, so a person has to list it as one"), "{why}");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+}
+
+#[tokio::test]
+async fn approve_is_refused_for_work_the_factory_did_without_asking_for_a_reviewer() {
+    let r = rig().await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let key = r.task("Add a greeting").await;
+    r.tracker.claim(&key).await.unwrap();
+    r.tracker.request_review(&key).await.unwrap();
+
+    let err = r.tracker.approve(&key).await.expect_err("the factory sent this task to review");
+    let trailhead_factory::Error::Forbidden(why) = err else { panic!("expected Forbidden, got {err:?}") };
+    assert!(why.contains("can't approve or finish work it did"), "{why}");
+    assert!(!why.contains("list it as one") && !why.contains("delegated reviewer, so"), "{why}");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+}
