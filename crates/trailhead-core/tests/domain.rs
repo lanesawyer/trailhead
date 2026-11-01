@@ -898,11 +898,11 @@ async fn approved_sits_between_review_and_done() {
     assert!(env.ready_keys().await.is_empty());
     let listed = TaskFilter { statuses: vec![Status::Approved], ..Default::default() };
     assert_eq!(env.store.list_tasks(&env.human, listed).await.unwrap().len(), 1);
-    // Finishing needs the same rights as finishing from review.
-    assert!(matches!(
-        env.store.update_task(&worker, &t.key, status(Status::Done), None).await,
-        Err(Error::ReviewRequired)
-    ));
+    // Finishing needs the same rights as finishing from review, but the refusal says the task is approved.
+    match env.store.update_task(&worker, &t.key, status(Status::Done), None).await {
+        Err(Error::Forbidden(why)) => assert!(why.contains("approved"), "{why}"),
+        other => panic!("expected Forbidden, got {other:?}"),
+    }
     // Changes needed: back to review, then approved again, then done by a human.
     let back = env.store.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
     assert_eq!(back.status, Status::InReview);

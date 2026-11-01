@@ -122,7 +122,8 @@ impl Factory {
                         .await?;
                     // While the task is still in review, so the PR says the review asked for changes at any grade.
                     // Message only: a verdict that asks for changes mustn't approve, or merge on Lane's earlier approval.
-                    if let Err(e) = self.say_gates(&task.key).await {
+                    let parks = round >= self.config.repo.max_review_rounds;
+                    if let Err(e) = self.say_gates(&task.key, parks).await {
                         tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
                     }
                     self.request_rework(task, requested, round).await?;

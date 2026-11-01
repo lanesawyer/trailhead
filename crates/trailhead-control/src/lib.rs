@@ -15,7 +15,7 @@ mod review;
 mod run_loop;
 mod timing;
 
-pub use core_tracker::{CoreTracker, METADATA_KEY};
+pub use core_tracker::CoreTracker;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
