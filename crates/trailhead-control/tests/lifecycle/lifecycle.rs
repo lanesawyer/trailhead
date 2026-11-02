@@ -694,3 +694,48 @@ async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a
     let fresh = r.compute.get("trailhead-w1").expect("a new sandbox took the freed name");
     assert_eq!(r.compute.checkpoints("trailhead-w1").len(), 1, "built from scratch, not restored: {fresh:?}");
 }
+
+fn with_setup() -> Rig {
+    rig_with(&CONFIG.replace("[checks]\n", "[checks]\nsetup = \"cargo build --all-targets\"\n"))
+}
+
+#[tokio::test]
+async fn a_rework_whose_setup_fails_starts_the_agent_and_keeps_the_sandbox() {
+    let mut r = with_setup();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
+    r.factory.tick().await.unwrap();
+
+    r.daemon.fail_setups(1, "error[E0063]: missing field `spend` in initializer of `RunUpdate`");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.infra_failures, None, "not an infrastructure failure");
+    assert_eq!(task.run.attempt, Some(2));
+    let reqs = r.daemon.requests();
+    let rework = reqs.iter().rfind(|q| q.role == Role::Worker).unwrap();
+    let body = &rework.feedback.as_ref().expect("the rework is told").body;
+    assert!(body.contains("Add a test for `hi()`.") && body.contains("E0063"), "{body}");
+    let sandbox = r.compute.get("trailhead-w1").expect("the sandbox is kept");
+    assert_eq!(sandbox.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    let prepared = r.daemon.prepared();
+    assert!(prepared.last().is_some_and(|(_, p)| p.setup.is_none()), "finished without the failing setup");
+}
+
+#[tokio::test]
+async fn a_fresh_run_whose_setup_fails_is_still_an_infrastructure_failure() {
+    let r = with_setup();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.daemon.fail_setups(1, "error[E0063]: broken base");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("setup failed") && err.to_string().contains("E0063"), "{err}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.infra_failures, Some(1));
+    assert_eq!(task.run.attempt.unwrap_or(0), 0, "no attempt was used");
+    assert!(r.daemon.requests().is_empty(), "no agent started");
+}

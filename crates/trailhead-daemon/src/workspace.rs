@@ -160,7 +160,7 @@ impl Workspace for GitWorkspace {
         if let Some(setup) = &req.setup {
             let result = self.check(setup).await;
             if !result.passed {
-                return Err(Error::Other(format!("setup failed: {}", result.output.trim())));
+                return Err(Error::SetupFailed(result.output.trim().to_string()));
             }
         }
         if let Some(trim) = &req.trim {

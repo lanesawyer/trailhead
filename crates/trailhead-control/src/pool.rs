@@ -65,13 +65,14 @@ impl Factory {
     /// A worker sandbox for `task` from the repo's pool (`docs/factory/sandbox.md`): an idle one restored to its warm
     /// checkpoint, or a new one when none is idle. The tick's room check keeps the pool within `max_sandboxes`.
     /// The prepared checkout becomes the new warm checkpoint, so the next task starts from it.
+    /// A rework whose `setup` fails still gets its sandbox, with the failure output returned beside it.
     pub(crate) async fn acquire_worker(
         &self,
         p: &Placed,
         task: &Task,
         branch: Option<String>,
         merge_base: bool,
-    ) -> Result<Sandbox> {
+    ) -> Result<(Sandbox, Option<String>)> {
         let pick = self.pool_pick.lock().await;
         let idle = p.list(&self.pooled(None, label::IDLE, None, None)).await?;
         let (sandbox, warm) = match idle.into_iter().find(|s| !self.abandoned(&s.name)) {
@@ -97,12 +98,35 @@ impl Factory {
             p.daemon.forget(&sandbox.id).await;
         }
         p.compute.preflight(&sandbox.id).await?;
+        let rework = branch.is_some();
         let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
-        if let Err(e) = p.daemon.prepare(&sandbox.id, prepare).await {
+        let mut prepared = p.daemon.prepare(&sandbox.id, prepare.clone()).await;
+        let mut setup_failure = None;
+        // On a rework the failed `setup` is the code's doing, probably what the worker is there to fix, so the agent
+        // starts anyway: the checkout is otherwise ready, and prepares again without `setup` to finish it (TRAIL-649).
+        if let Err(Error::SetupFailed(output)) = &prepared
+            && rework
+        {
+            tracing::warn!(sandbox = %sandbox.name, "setup failed on a rework; starting the agent with the output");
+            setup_failure = Some(output.clone());
+            prepared = p.daemon.prepare(&sandbox.id, PrepareRequest { setup: None, ..prepare }).await;
+        }
+        if let Err(e) = prepared {
+            p.daemon.forget(&sandbox.id).await;
+            if matches!(e, Error::SetupFailed(_)) {
+                // The code failed, not the sandbox, and the same error would come from any other: it goes back to
+                // the pool rather than being destroyed for a cold build to replace.
+                tracing::warn!(sandbox = %sandbox.name, error = %e, "setup failed on a fresh run; returning the sandbox");
+                let held =
+                    Sandbox { labels: self.pooled(Some(p), label::BUSY, warm.as_deref(), Some(task)), ..sandbox };
+                if let Err(r) = self.release_worker(&held).await {
+                    tracing::warn!(sandbox = %held.name, error = %r, "couldn't return the sandbox to the pool; reconcile will");
+                }
+                return Err(e);
+            }
             // A sandbox whose checkout won't prepare would fail the next task placed on it the same way, so it
             // leaves the pool rather than going back with its warm checkpoint.
             tracing::warn!(sandbox = %sandbox.name, error = %e, "prepare failed; destroying the sandbox");
-            p.daemon.forget(&sandbox.id).await;
             if let Err(d) = p.compute.destroy(&sandbox.id).await {
                 tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
             }
@@ -112,7 +136,7 @@ impl Factory {
         let labels = self.pooled(Some(p), label::BUSY, Some(&cp.0), Some(task));
         p.compute.set_labels(&sandbox.id, &labels).await?;
         p.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
-        Ok(Sandbox { labels, ..sandbox })
+        Ok((Sandbox { labels, ..sandbox }, setup_failure))
     }
 
     /// Returns a worker sandbox to the pool: restored to its warm checkpoint, which wipes everything the task did,

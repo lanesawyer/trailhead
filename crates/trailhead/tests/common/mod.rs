@@ -9,9 +9,25 @@ pub struct Instance {
     exe: PathBuf,
 }
 
+/// A free port that no other instance in this process has been given. The OS can
+/// hand the same port to two `bind(0)` calls once the first listener is dropped but
+/// before its server has started, and then one test reaches the other's server and
+/// gets `unauthorized`.
+fn free_port() -> u16 {
+    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    let mut given = GIVEN.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        if !given.contains(&port) {
+            given.push(port);
+            return port;
+        }
+    }
+}
+
 impl Instance {
     pub fn new() -> Instance {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = free_port();
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("trailhead");
         let th = Instance { dir, url: format!("http://127.0.0.1:{port}"), exe };

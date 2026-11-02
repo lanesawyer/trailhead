@@ -43,6 +43,8 @@ flowchart TD
 
 The loops back to `queued` start a fresh sandbox from the PR branch. A conflict rework doesn't use a review round (it has `max_conflict_reworks`). The [merger](review.md#the-merger) page has the detail of the gates and the merge.
 
+A rework (a review's changes, a failed CI, a conflict) whose `setup` check fails while its sandbox is prepared does not count as an infrastructure failure: the branch is what is broken (CI red from a merged main, say), and the worker is the one who can fix it. The sandbox is kept, prepared again without `setup`, and the agent starts with the `setup` output after the review's feedback. A fresh attempt on the base branch whose `setup` fails is still an infrastructure failure, but its sandbox is returned to the pool, not destroyed, since the same error would come from any other. A sandbox is destroyed on a failed prepare only when it is itself broken, such as a checkout that cannot be reset.
+
 ## Mapping
 
 | Factory step | Trailhead | Fit |
