@@ -10,14 +10,12 @@ use serde_json::json;
 use trailhead_core::{
     CommentKind, Ctx, GradeFilter, NewComment, Principal, Store, TaskFilter, TaskPatch, TokenOptions,
 };
+use trailhead_factory::messages;
 use trailhead_factory::{
-    Answered, Credential, Error, HumanContext, ModelId, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker,
-    Verdict, VerdictKind, is_factory_agent,
+    Answered, Credential, Error, FollowUpTask, HumanContext, METADATA_KEY, ModelId, Result, RunUpdate, Status, Task,
+    TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 use uuid::Uuid;
-
-/// The metadata key the factory's run fields live under.
-pub const METADATA_KEY: &str = "factory";
 
 const PAGE_SIZE: i64 = 1000;
 
@@ -116,7 +114,7 @@ impl CoreTracker {
     async fn tasks(&self, ctx: &Ctx, tasks: impl IntoIterator<Item = trailhead_core::Task>) -> Result<Vec<Task>> {
         let mut out = Vec::new();
         for t in tasks {
-            if let Err(e) = run_update(&t) {
+            if let Err(e) = parse_run_update(&t) {
                 self.flag_bad_metadata(ctx, &t, &e.to_string()).await;
                 continue;
             }
@@ -128,11 +126,7 @@ impl CoreTracker {
     /// Notes on the task, and logs, that its factory metadata is skipped, unless this note is already there.
     async fn flag_bad_metadata(&self, ctx: &Ctx, t: &trailhead_core::Task, error: &str) {
         let fields = bad_fields(t);
-        let fields = if fields.is_empty() { String::new() } else { format!(" in {}", fields.join(", ")) };
-        let body = format!(
-            "The factory is skipping this task: its `{METADATA_KEY}` metadata is malformed{fields} ({error}). \
-             Fix or remove that field and the factory will pick the task up again."
-        );
+        let body = messages::bad_metadata_note(METADATA_KEY, &fields, error);
         if self.flagged.lock().unwrap().get(&t.key) == Some(&body) {
             return;
         }
@@ -165,10 +159,12 @@ impl CoreTracker {
 }
 
 fn run_update(t: &trailhead_core::Task) -> Result<RunUpdate> {
+    parse_run_update(t).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", t.key)))
+}
+
+fn parse_run_update(t: &trailhead_core::Task) -> serde_json::Result<RunUpdate> {
     match t.metadata.get(METADATA_KEY) {
-        Some(v) => {
-            serde_json::from_value(v.clone()).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", t.key)))
-        }
+        Some(v) => serde_json::from_value(v.clone()),
         None => Ok(RunUpdate::default()),
     }
 }
@@ -232,20 +228,22 @@ impl Tracker for CoreTracker {
         Arc::new(sub)
     }
 
-    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>> {
+    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
         let tasks = match queue {
-            None => {
-                self.store.ready(&ctx, Some(project), Some(limit as i64), GradeFilter::Any).await.map_err(map_err)?
-            }
-            Some(queue) => {
-                let filter = TaskFilter {
-                    project: Some(project.to_string()),
-                    parent: Some(queue.0.clone()),
-                    ..TaskFilter::default()
-                };
-                let queued: std::collections::HashSet<_> =
-                    self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id).collect();
+            [] => self.store.ready(&ctx, Some(project), Some(limit as i64), GradeFilter::Any).await.map_err(map_err)?,
+            queue => {
+                // The store orders ready tasks by priority, so filtering its one list orders across every queue and
+                // lists a task once even if it is under two of them.
+                let mut queued = std::collections::HashSet::new();
+                for q in queue {
+                    let filter = TaskFilter {
+                        project: Some(project.to_string()),
+                        parent: Some(q.0.clone()),
+                        ..TaskFilter::default()
+                    };
+                    queued.extend(self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id));
+                }
                 // Unlimited: a cap here would hide queued tasks behind other ready ones.
                 let ready = self.store.ready(&ctx, Some(project), Some(-1), GradeFilter::Any).await.map_err(map_err)?;
                 ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
@@ -319,10 +317,16 @@ impl Tracker for CoreTracker {
         }))
     }
 
-    async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
+    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
-        let tasks = self.list_all(&ctx, filter).await?;
+        let parents: Vec<Option<String>> =
+            if queue.is_empty() { vec![None] } else { queue.iter().map(|q| Some(q.0.clone())).collect() };
+        let mut tasks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for parent in parents {
+            let filter = TaskFilter { project: Some(project.to_string()), parent, ..TaskFilter::default() };
+            tasks.extend(self.list_all(&ctx, filter).await?.into_iter().filter(|t| seen.insert(t.id)));
+        }
         self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
     }
 
@@ -358,11 +362,11 @@ impl Tracker for CoreTracker {
 
     async fn approve(&self, task: &TaskKey) -> Result<()> {
         match self.set_status(task, trailhead_core::Status::Approved).await {
-            // Core's only refusal here is that the caller may not approve: it isn't a human or a delegated reviewer, or
-            // it did the work in review.
+            // Core's `ReviewRequired` here means the caller is neither a human nor a delegated reviewer. A reviewer
+            // that did the work in review is refused with its own `Forbidden`, which passes through.
             Err(Error::Conflict(why)) if why == trailhead_core::Error::ReviewRequired.to_string() => {
                 Err(Error::Forbidden(format!(
-                    "{} can't approve {}: it isn't a delegated reviewer, or it did the work",
+                    "{} can't approve {}: it isn't a delegated reviewer, so a person has to list it as one",
                     self.agent, task.0
                 )))
             }
@@ -429,6 +433,18 @@ impl Tracker for CoreTracker {
         };
         let task = self.store.create_task(&ctx, new).await.map_err(map_err)?;
         Ok(TaskKey(task.key))
+    }
+
+    async fn follow_ups(&self, task: &TaskKey) -> Result<Vec<FollowUpTask>> {
+        let ctx = self.ctx().await?;
+        let project = task.0.rsplit_once('-').map_or(task.0.as_str(), |(p, _)| p);
+        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let tasks = self.list_all(&ctx, filter).await?;
+        Ok(tasks
+            .into_iter()
+            .filter(|t| is_raised_by(&t.description, task))
+            .map(|t| FollowUpTask { key: TaskKey(t.key), title: t.title, description: t.description })
+            .collect())
     }
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {

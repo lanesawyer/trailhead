@@ -40,3 +40,9 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 axum.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["process"] }
+
+[[test]]
+name = "live_docker"
+required-features = ["docker"]

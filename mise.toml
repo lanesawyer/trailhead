@@ -7,7 +7,7 @@ docker-cli = "latest"
 fnox = { version = "latest", workflow = "release.yml" }
 lima = "latest"
 mdbook = "0.5.4"
-# Not in the mise registry; the preprocessor ships prebuilt binaries on GitHub (0.16+ supports mdBook 0.5).
+# Not in the mise registry; the preprocessor ships prebuilt binaries on GitHub (0.16 can't act as an mdBook 0.5 preprocessor, so only its bundled mermaid.min.js is used; see the docs tasks).
 "github:badboy/mdbook-mermaid" = "0.16"
 rust = "latest"
 
@@ -36,7 +36,7 @@ run = """
 if limactl list -q | grep -qx trailhead; then
   limactl start --tty=false trailhead
 else
-  limactl start --tty=false --name=trailhead --cpus=4 --memory=4 --disk=60 --mount-none template:docker
+  limactl start --tty=false --name=trailhead --cpus=4 --memory=6 --disk=60 --mount-none template:docker
 fi
 """
 
@@ -50,9 +50,29 @@ env = { DOCKER_HOST = "{{vars.docker_host}}" }
 run = "docker build -t trailhead-sandbox:latest crates/trailhead-compute-docker/image"
 
 [tasks.test-live-docker]
-description = "Run the Docker Compute test against the lima VM's engine (creates and destroys one container)"
+description = "Run the Docker Compute and gateway tests against the lima VM's engine (creates and destroys small containers and their gateway; needs `mise run docker-image`)"
 env = { DOCKER_HOST = "{{vars.docker_host}}" }
-run = "cargo test -p trailhead-compute-docker --test live -- --ignored --nocapture"
+run = [
+  "cargo build -j 4 --release -p trailhead-daemon --bin trailhead-daemon",
+  "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon cargo test -j 4 -p trailhead-compute-docker --test live -- --ignored --nocapture --test-threads=1 --skip credentials",
+]
+
+[tasks.test-live-docker-credentials]
+description = "With real credentials from fnox, in the lima VM: one small model call on the subscription through the gateway's proxy, and one read-only GitHub call through its connection"
+env = { DOCKER_HOST = "{{vars.docker_host}}" }
+run = [
+  "cargo build -j 4 --release -p trailhead-daemon --bin trailhead-daemon",
+  "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon fnox exec -- cargo test -j 4 -p trailhead-compute-docker --test live credentials -- --ignored --nocapture --test-threads=1",
+]
+
+[tasks.test-live-docker-factory]
+description = "A task end to end on Docker sandboxes through the gateway, worker and reviewer, on a scratch repo in TRAILHEAD_LIVE_REPO (real model calls and a real PR; needs `mise run docker-image`, and no other factory on the engine)"
+env = { DOCKER_HOST = "{{vars.docker_host}}" }
+run = [
+  "cargo build -j 4 --release -p trailhead-daemon --bin trailhead-daemon",
+  "cargo build -j 4 -p trailhead",
+  "TRAILHEAD_BIN={{config_root}}/target/debug/trailhead TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon fnox exec -- cargo test -j 4 -p trailhead-factory-host --features docker --test live_docker -- --ignored --nocapture",
+]
 
 [tasks.install]
 description = "Reinstall the CLI, the factory and the daemon from this checkout (cargo install takes one --path at a time)"
@@ -60,7 +80,7 @@ run = """
 set -e
 # -j 4: full parallelism has OOM-killed a dev machine.
 cargo install --locked -j 4 --path crates/trailhead
-cargo install --locked -j 4 --path crates/trailhead-factory-host
+cargo install --locked -j 4 --features docker --path crates/trailhead-factory-host
 cargo install --locked -j 4 --path crates/trailhead-daemon
 # Anchored so this script's own command line doesn't match.
 if pgrep -f "^$HOME/.cargo/bin/trailhead-factory run" >/dev/null; then
@@ -69,12 +89,19 @@ if pgrep -f "^$HOME/.cargo/bin/trailhead-factory run" >/dev/null; then
 fi
 """
 
+[tasks.docs-mermaid]
+description = "Unpack mermaid.min.js (git-ignored), which book.toml loads as additional-js"
+# mermaid.min.js is bundled in the mdbook-mermaid binary; `install` unpacks it. It runs in a scratch directory because
+# mdbook-mermaid 0.16 can't read mdBook 0.5's preprocessor input, so book.toml must not register it as a preprocessor.
+# mermaid-render.js turns the ```mermaid blocks into diagrams in the browser, so they render offline.
+run = "d=$(mktemp -d) && printf '[book]\\ntitle = \"x\"\\n' > \"$d/book.toml\" && mdbook-mermaid install \"$d\" && cp \"$d/mermaid.min.js\" . && rm -r \"$d\""
+
 [tasks.docs]
-description = "Build the docs (docs/) into a book with mdBook; `mdbook serve` previews it"
-# mermaid.min.js is bundled in the mdbook-mermaid binary (git-ignored); `install` unpacks it. It runs in a scratch directory
-# because mdbook-mermaid 0.16 can't read mdBook 0.5's preprocessor input, so book.toml must not register it as a
-# preprocessor. mermaid-render.js turns the ```mermaid blocks into diagrams in the browser, so they render offline.
-run = [
-  "d=$(mktemp -d) && printf '[book]\\ntitle = \"x\"\\n' > \"$d/book.toml\" && mdbook-mermaid install \"$d\" && cp \"$d/mermaid.min.js\" . && rm -r \"$d\"",
-  "mdbook build",
-]
+description = "Build the docs (docs/) into a book with mdBook; `mise run docs-serve` previews it"
+depends = ["docs-mermaid"]
+run = "mdbook build"
+
+[tasks.docs-serve]
+description = "Preview the docs with `mdbook serve`, unpacking mermaid.min.js first so a fresh checkout works"
+depends = ["docs-mermaid"]
+run = "mdbook serve"

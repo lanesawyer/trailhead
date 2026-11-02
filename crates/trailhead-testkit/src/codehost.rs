@@ -11,7 +11,10 @@ use trailhead_factory::{
 pub struct FakePr {
     pub pr: PrRef,
     pub spec: NewPr,
+    /// Comments in the order made; a comment's id is its position plus one.
     pub comments: Vec<String>,
+    /// Ids of comments a person deleted (they stay listed, so the other ids hold).
+    pub deleted: Vec<u64>,
     pub merged: bool,
     /// Closed without merging.
     pub closed: bool,
@@ -36,6 +39,12 @@ struct State {
     starts: BTreeMap<(String, String), String>,
     prs: Vec<FakePr>,
     conflicts: bool,
+    /// Updates the host accepted but hasn't made yet, like GitHub's 202.
+    queue_updates: bool,
+    /// How many times `update_branch` was asked to do something.
+    update_requests: usize,
+    /// How many times `files` was asked for a PR's file list.
+    file_listings: usize,
     refuse_publish: Option<String>,
     refuse_merge: Option<String>,
 }
@@ -85,6 +94,30 @@ impl FakeCodeHost {
         self.state.lock().unwrap().conflicts = on;
     }
 
+    /// Makes `update_branch` queue the merge like GitHub's 202: it answers `Updated` and the head stays put, the PR
+    /// still behind, until `land_updates` runs.
+    pub fn queue_updates(&self, on: bool) {
+        self.state.lock().unwrap().queue_updates = on;
+    }
+
+    /// Makes the host do the updates it queued: later `update_branch` calls act at once again.
+    pub async fn land_updates(&self, pr: &PrRef) {
+        let queued = std::mem::replace(&mut self.state.lock().unwrap().queue_updates, false);
+        if queued {
+            self.update_branch(pr).await.unwrap();
+        }
+    }
+
+    /// How many times the host was asked to list a PR's files.
+    pub fn file_listings(&self) -> usize {
+        self.state.lock().unwrap().file_listings
+    }
+
+    /// How many times `update_branch` was called on a PR that was behind.
+    pub fn update_requests(&self) -> usize {
+        self.state.lock().unwrap().update_requests
+    }
+
     /// Closes a PR without merging it, as a person would on GitHub.
     pub fn close(&self, pr: &PrRef) {
         self.find(pr, |p, _| p.closed = true).unwrap();
@@ -96,6 +129,11 @@ impl FakeCodeHost {
     }
 
     /// Sets whether the PR's branch is behind its base.
+    /// A person deletes the PR's comment with this id.
+    pub fn delete_comment(&self, pr: &PrRef, id: u64) {
+        self.find(pr, |p, _| p.deleted.push(id)).unwrap();
+    }
+
     pub fn set_behind(&self, pr: &PrRef, behind: bool) {
         self.find(pr, |p, _| p.behind = behind).unwrap();
     }
@@ -173,6 +211,7 @@ impl CodeHost for FakeCodeHost {
             pr: r.clone(),
             spec: pr,
             comments: Vec::new(),
+            deleted: Vec::new(),
             merged: false,
             closed: false,
             mergeable: Some(true),
@@ -202,8 +241,25 @@ impl CodeHost for FakeCodeHost {
         })
     }
 
-    async fn comment(&self, pr: &PrRef, body: &str) -> Result<()> {
-        self.find(pr, |p, _| p.comments.push(body.to_string()))
+    async fn comment(&self, pr: &PrRef, body: &str) -> Result<u64> {
+        self.find(pr, |p, _| {
+            p.comments.push(body.to_string());
+            p.comments.len() as u64
+        })
+    }
+
+    async fn edit_comment(&self, pr: &PrRef, id: u64, body: &str) -> Result<()> {
+        let edited = self.find(pr, |p, _| {
+            let slot = (id as usize).checked_sub(1).and_then(|i| p.comments.get_mut(i));
+            match slot {
+                Some(c) if !p.deleted.contains(&id) => {
+                    *c = body.to_string();
+                    true
+                }
+                _ => false,
+            }
+        })?;
+        if edited { Ok(()) } else { Err(Error::NotFound(format!("comment {id}"))) }
     }
 
     async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome> {
@@ -237,6 +293,13 @@ impl CodeHost for FakeCodeHost {
         }
         if self.state.lock().unwrap().conflicts {
             return Ok(BranchUpdate::Conflict);
+        }
+        {
+            let mut s = self.state.lock().unwrap();
+            s.update_requests += 1;
+            if s.queue_updates {
+                return Ok(BranchUpdate::Updated);
+            }
         }
         let branch = self.find(pr, |p, _| {
             p.behind = false;
@@ -299,6 +362,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
+        self.state.lock().unwrap().file_listings += 1;
         self.find(pr, |p, s| {
             if let Some(files) = &p.files {
                 return files.clone();

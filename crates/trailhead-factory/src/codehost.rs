@@ -110,7 +110,10 @@ pub trait CodeHost: Send + Sync {
     async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()>;
     async fn open_pr(&self, repo: &Repo, pr: NewPr) -> Result<PrRef>;
     async fn diff(&self, pr: &PrRef) -> Result<String>;
-    async fn comment(&self, pr: &PrRef, body: &str) -> Result<()>;
+    /// Comments on the PR and returns the new comment's id.
+    async fn comment(&self, pr: &PrRef, body: &str) -> Result<u64>;
+    /// Replaces the body of a comment made with `comment`. `NotFound` if it has since been deleted.
+    async fn edit_comment(&self, pr: &PrRef, id: u64, body: &str) -> Result<()>;
     /// Squash-merges the PR, but only while its head is still `head`, the commit the gates passed on.
     async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome>;
     /// Whether the PR is still open (and if it merges cleanly), was merged (by anyone), or was closed without

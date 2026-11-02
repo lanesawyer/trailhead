@@ -16,13 +16,33 @@ use reqwest::{Method, RequestBuilder, Response, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use trailhead_factory::{
-    CheckpointId, Compute, Egress, Error, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec,
+    CheckpointId, Compute, Egress, Error, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec, Target,
 };
 
 pub const API_URL: &str = "https://api.sprites.dev";
 
 /// Where connectors are reached from inside a Sprite (`/v1/gateway/...`).
 pub const GATEWAY_DOMAIN: &str = "api.sprites.dev";
+
+/// Where a Sprite lists its connectors.
+pub const GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
+
+/// Where the daemon lives in a Sprite, whose user is `sprite`.
+pub const HOME: &str = "/home/sprite";
+
+/// The Sprite management socket a daemon holds its Sprite awake through.
+pub const API_SOCKET: &str = "/.sprite/api.sock";
+
+/// A Sprite's launch facts: Fly's connector list, model calls to the configured endpoint, and a hold socket.
+pub fn target() -> Target {
+    Target {
+        dir: format!("{HOME}/.trailhead"),
+        workdir: format!("{HOME}/work"),
+        gateway_list: GATEWAY_LIST.into(),
+        model_endpoint: None,
+        hold_socket: Some(API_SOCKET.into()),
+    }
+}
 
 const PAGE_SIZE: u32 = 500;
 
@@ -67,25 +87,6 @@ impl SpritesCompute {
         url.query_pairs_mut().append_pair("max_results", "1");
         ok(send_idempotent(self.quick_request(Method::GET, url)).await?).await?;
         Ok(())
-    }
-
-    /// The recent output of a program started with `start`, for diagnosing a sandbox.
-    pub async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
-        let mut url = self.url(&[&id.0, "services", program, "logs"]);
-        url.query_pairs_mut().append_pair("lines", "3000");
-        let body = ok(send_idempotent(self.request(Method::GET, url)).await?).await?.text().await.map_err(http_err)?;
-        let mut out = String::new();
-        for line in body.lines().filter(|l| !l.trim().is_empty()) {
-            match serde_json::from_str::<Value>(line) {
-                Ok(ev) if ev["data"].is_string() => out.push_str(ev["data"].as_str().unwrap_or_default()),
-                Ok(ev) => out.push_str(&format!("[{}]\n", ev["type"].as_str().unwrap_or("?"))),
-                Err(_) => {
-                    out.push_str(line);
-                    out.push('\n');
-                }
-            }
-        }
-        Ok(out)
     }
 
     fn url(&self, segments: &[&str]) -> Url {
@@ -301,6 +302,24 @@ impl Compute for SpritesCompute {
         }
         ok(res).await.map(drop)
     }
+
+    async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
+        let mut url = self.url(&[&id.0, "services", program, "logs"]);
+        url.query_pairs_mut().append_pair("lines", "3000");
+        let body = ok(send_idempotent(self.request(Method::GET, url)).await?).await?.text().await.map_err(http_err)?;
+        let mut out = String::new();
+        for line in body.lines().filter(|l| !l.trim().is_empty()) {
+            match serde_json::from_str::<Value>(line) {
+                Ok(ev) if ev["data"].is_string() => out.push_str(ev["data"].as_str().unwrap_or_default()),
+                Ok(ev) => out.push_str(&format!("[{}]\n", ev["type"].as_str().unwrap_or("?"))),
+                Err(_) => {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Reads a service start's NDJSON log: an `error` event or an `exit` fails it, with the output seen so far.
@@ -459,14 +478,23 @@ mod tests {
 
     #[tokio::test]
     async fn status_maps_to_error_variants() {
-        for (code, retried) in [(400, false), (408, true), (422, false), (429, true), (502, true)] {
+        type Is = fn(&Error) -> bool;
+        let table: [(u16, Is); 9] = [
+            (400, |e| matches!(e, Error::Rejected(_))),
+            (401, |e| matches!(e, Error::Forbidden(_))),
+            (403, |e| matches!(e, Error::Forbidden(_))),
+            (404, |e| matches!(e, Error::NotFound(_))),
+            (408, |e| matches!(e, Error::Other(_))),
+            (409, |e| matches!(e, Error::Conflict(_))),
+            (422, |e| matches!(e, Error::Rejected(_))),
+            (429, |e| matches!(e, Error::Other(_))),
+            (502, |e| matches!(e, Error::Other(_))),
+        ];
+        for (code, expected) in table {
             let res = Response::from(http::Response::builder().status(code).body("nope\n").unwrap());
             let err = ok(res).await.unwrap_err();
             assert!(err.to_string().contains("nope"), "{code}: {err}");
-            match (retried, &err) {
-                (false, Error::Rejected(_)) | (true, Error::Other(_)) => {}
-                _ => panic!("{code} mapped to {err:?}"),
-            }
+            assert!(expected(&err), "{code} mapped to {err:?}");
         }
     }
 
@@ -491,5 +519,19 @@ mod tests {
                 json!({ "domain": "*.iroh.link", "action": "allow" }),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    #[test]
+    fn a_sprites_target_has_flys_paths_and_connector_list() {
+        let t = target();
+        assert_eq!((t.dir.as_str(), t.workdir.as_str()), ("/home/sprite/.trailhead", "/home/sprite/work"));
+        assert_eq!(t.gateway_list, "https://api.sprites.dev/v1/gateway/list");
+        assert_eq!(t.model_endpoint("https://m.example"), "https://m.example");
+        assert_eq!(t.hold_socket.as_deref(), Some("/.sprite/api.sock"));
     }
 }

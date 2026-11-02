@@ -10,7 +10,7 @@ Decided: the control plane keeps no database of its own. Run state lives in Trai
 | --- | --- |
 | Task status, ownership, lease | Trailhead claims and statuses |
 | Sandbox name, PR URL, profile, grade, attempt and escalation count, spend so far | Trailhead task `metadata` |
-| Live sandboxes, per-repo concurrency count | Sprites API, by labels (`repo`, `task`, `role`) |
+| Live sandboxes, per-repo concurrency count (and the host-wide `max_sandboxes` across repos) | Sprites API, by labels (`repo`, `task`, `role`) |
 | Pooled worker Sprites and their warm checkpoints | Sprites API, labels (`pool`, `state`, `warm`) |
 | Spend within the current step | The daemon, re-reported on reconnect |
 | Sub-agent to revoke when a task ends | Trailhead (agent named after the task) |

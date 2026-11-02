@@ -20,6 +20,15 @@ use trailhead_factory::{
     RunContext, RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
 };
 
+/// The `adapter` name profiles use for this harness.
+pub const NAME: &str = "claude-code";
+
+/// The `HarnessSecrets` key for subscription mode: a token from `claude setup-token`.
+pub const OAUTH_TOKEN: &str = "oauth_token";
+
+/// The host Claude Code reaches directly in subscription mode.
+pub const API_HOST: &str = "api.anthropic.com";
+
 /// What `ANTHROPIC_API_KEY` is set to. The gateway replaces credentials, so this only has to be non-empty.
 pub const PLACEHOLDER_KEY: &str = "sprites-connector";
 
@@ -254,6 +263,8 @@ pub fn schema(role: Role) -> Value {
 
 /// The most the human-context section of a prompt may take, in bytes.
 const HUMAN_CONTEXT_CAP: usize = 6000;
+/// How many open follow-ups a reviewer is shown.
+const FOLLOW_UPS_CAP: usize = 40;
 
 /// The most the answers may take of the human-context section, so notes keep the rest.
 const ANSWERS_CAP: usize = 4000;
@@ -261,6 +272,28 @@ const ANSWERS_CAP: usize = 4000;
 /// The answers and the task's decisions and notes, for after the description. Empty when there are none. Past
 /// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
 /// is always kept.
+/// The follow-ups earlier reviews of the task filed, so a reviewer doesn't file a reworded copy of one, or leave one
+/// open that the change has since fixed.
+fn follow_ups_section(task: &trailhead_factory::TaskSpec) -> String {
+    let follow_ups = &task.context.follow_ups;
+    if follow_ups.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\nFollow-ups that earlier reviews of this task already filed and that are still open. Don't put any of \
+         these in `follow_ups` again, even reworded. If the change under review fixes one, say so in your summary \
+         by its key:",
+    );
+    for f in follow_ups.iter().take(FOLLOW_UPS_CAP) {
+        out.push_str(&format!("\n- {}: {}", f.key.0, clip(&f.title, 200)));
+        let detail = f.description.lines().next().unwrap_or("").trim();
+        if !detail.is_empty() {
+            out.push_str(&format!(" ({})", clip(detail, 300)));
+        }
+    }
+    out
+}
+
 fn human_section(task: &trailhead_factory::TaskSpec) -> String {
     let ctx = &task.context;
     let mut budget = HUMAN_CONTEXT_CAP;
@@ -384,7 +417,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
     let mut p = match ctx.role {
         Role::Reviewer => format!(
             "You are reviewing a pull request for task {key}: {title}.\n\n\
-             Task:\n{desc}{human}\n\n\
+             Task:\n{desc}{human}{follow_ups}\n\n\
              The change under review:\n```diff\n{diff}\n```{checks}\n\n\
              Check it against the task and the repo's conventions (AGENTS.md). Read code in the checkout as needed, \
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
@@ -397,6 +430,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
             title = task.title,
             desc = task.description,
             human = human_section(task),
+            follow_ups = follow_ups_section(task),
             diff = ctx.diff.as_deref().map_or("(no diff)".into(), |d| capped_diff(
                 d,
                 DIFF_CAP,
@@ -647,5 +681,37 @@ mod tests {
             {"type": "text", "text": "not a result"}]}});
         let events = stream.read(&result);
         assert!(matches!(events.as_slice(), [RunEvent::ToolResult]), "{events:?}");
+    }
+
+    #[test]
+    fn a_task_subagents_nested_calls_balance() {
+        let mut stream = Stream::new(ModelId("sonnet".into()), 0);
+        let call = |id: &str, tool: &str, parent: Value| {
+            json!({"type": "assistant", "parent_tool_use_id": parent, "message": {"id": format!("m-{id}"),
+                "model": "sonnet", "usage": {},
+                "content": [{"type": "tool_use", "id": id, "name": tool, "input": {"description": "work"}}]}})
+        };
+        let result = |id: &str, parent: Value| {
+            json!({"type": "user", "parent_tool_use_id": parent, "message": {"content": [
+                {"type": "tool_result", "tool_use_id": id, "content": "ok"}]}})
+        };
+        let (mut calls, mut results) = (0, 0);
+        for msg in [
+            call("task1", "Task", Value::Null),
+            call("n1", "Bash", json!("task1")),
+            result("n1", json!("task1")),
+            call("n2", "Read", json!("task1")),
+            result("n2", json!("task1")),
+            result("task1", Value::Null),
+        ] {
+            for e in stream.read(&msg) {
+                match e {
+                    RunEvent::ToolCall { .. } => calls += 1,
+                    RunEvent::ToolResult => results += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!((calls, results), (3, 3));
     }
 }

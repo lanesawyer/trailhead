@@ -27,7 +27,7 @@ The code in `crates/trailhead-factory` is authoritative; this is what each trait
 ## Rules
 
 - **Vendor features map onto neutral concepts.** Sprites connectors become a sandbox's `role` label plus an `Egress` list; another compute host might grant the same role with injected env or a proxy. Checkpoints are required of every `Compute`, since the pool and rollback depend on them.
-- **Static plugins.** Implementations are crates compiled into the `trailhead-factory` binary, which wires them up in `trailhead-factory-host`. No dynamic loading or hot swapping. Today there's one of each, so nothing chooses between them; once there's a second, `.trailhead.toml` picks by name (profiles already name an `adapter` and `provider`) and Cargo features may keep the binary slim.
+- **Static plugins.** Implementations are crates compiled into the `trailhead-factory` binary, which wires them up in `trailhead-factory-host`. No dynamic loading or hot swapping. Compute has two implementations (Sprites and Docker), picked by `[factory.compute]`. Harnesses and providers are picked by name: a profile's `adapter` and `provider` look up a `HarnessKind` (`trailhead_daemon::plugins::harnesses`) and a `ProviderKind` (`providers()` in the host) in a `Registry`, and an unknown name fails at config load. Today each registry holds one entry, and a repo's worker and reviewer profiles must agree, as must all repos in one process. A harness takes its credentials from `DaemonSecrets.harness_secrets`, a name-to-value map only that harness reads, and declares the egress it needs for them (Claude Code in subscription mode: `api.anthropic.com`). Cargo features may keep the binary slim.
 - **Fakes for testing.** `trailhead-testkit` has an in-memory `Compute`, a scripted `Harness`, and fake `Tracker`, `CodeHost` and `ModelProvider`, so the whole lifecycle runs in `cargo test` with no network or spend. No external emulator.
 
 ## Crates
@@ -37,7 +37,7 @@ The code in `crates/trailhead-factory` is authoritative; this is what each trait
 | `trailhead-core` | Task engine: schema, claims, events, undo |
 | `trailhead-server` | REST, MCP, SSE, webhooks |
 | `trailhead` | CLI; gains `trailhead factory` commands later (TRAIL-116) |
-| `trailhead-factory` | Factory domain types, daemon protocol, the five traits, the `[factory]` settings |
+| `trailhead-factory` | Factory domain types, daemon protocol, the five traits, the `[factory]` settings, and `messages`: every PR comment, task note and park question, as pure functions the control plane and the daemon share (no i18n framework; logs and prompts stay out) |
 | `trailhead-control` | Control plane: run loop, sandbox pool, budget metering, usage-window pauses, reviews, reconcile; `CoreTracker` |
 | `trailhead-factory-host` | The `trailhead-factory` binary: runs the control plane beside the server, sharing its database, and forwards the daemons' API tunnel to it. Moving the control plane into the server is TRAIL-164 |
 | `trailhead-daemon` | In-sandbox daemon: harness host, checks, publishing; the iroh transport (`RemoteDaemon`, `DaemonProtocol`) and `RestTracker` |

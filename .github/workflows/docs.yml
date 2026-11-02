@@ -2,10 +2,10 @@ name: Docs
 
 on:
   pull_request:
-    paths: [docs/**, book.toml, mise.toml, .github/workflows/docs.yml]
+    paths: [docs/**, book.toml, mermaid-render.js, mise.toml, .github/workflows/docs.yml]
   push:
     branches: [main]
-    paths: [docs/**, book.toml, mise.toml, .github/workflows/docs.yml]
+    paths: [docs/**, book.toml, mermaid-render.js, mise.toml, .github/workflows/docs.yml]
 
 permissions:
   contents: read

@@ -5,23 +5,60 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use trailhead_codehost_github::{GitHub, Identity};
-use trailhead_daemon::awake::{SPRITE_API_SOCKET, SpriteHolds};
+use trailhead_daemon::awake::SpriteHolds;
 use trailhead_daemon::net::{
     ALPN, DaemonProtocol, build_id, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
 };
 use trailhead_daemon::{Connect, GitWorkspace, HEARTBEAT_EVERY, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{
-    BranchUpdate, ChangedFile, Ci, CodeHost, Commit, DaemonSecrets, Error, MergeOutcome, NewPr, PrRef, PrState, Repo,
-    Result, Tracker,
+    BranchUpdate, ChangedFile, Ci, CodeHost, Commit, DaemonSecrets, Error, HarnessSetup, MergeOutcome, NewPr, PrRef,
+    PrState, Repo, Result, Tracker,
 };
-use trailhead_harness_claude_code::ClaudeCode;
 
 #[derive(Parser)]
+#[command(args_conflicts_with_subcommands = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    daemon: Option<Args>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// The Docker sandboxes' gateway: an allowlisting HTTP proxy and its control socket.
+    Gateway {
+        /// Where the proxy listens.
+        #[arg(long, default_value = "0.0.0.0:3128")]
+        listen: std::net::SocketAddr,
+        /// The control socket's path.
+        #[arg(long, default_value = "/run/trailhead-gateway.sock")]
+        socket: PathBuf,
+        #[arg(long, default_value = "info")]
+        log: String,
+    },
+    /// Trims a cargo `target` directory to a size, for a repo's `trim` check (`"$TRAILHEAD_DAEMON" trim-cargo`).
+    TrimCargo {
+        /// The size to trim to, in bytes.
+        #[arg(long)]
+        cap: u64,
+        /// The directory to trim.
+        #[arg(long, default_value = "target")]
+        target: PathBuf,
+    },
+    /// Sends the gateway one control message (JSON on stdin) and prints its response.
+    GatewayCtl {
+        #[arg(long, default_value = "/run/trailhead-gateway.sock")]
+        socket: PathBuf,
+    },
+}
+
+#[derive(clap::Args)]
 struct Args {
     /// A JSON `DaemonSecrets` file (0600). It stays, because the Sprite restarts the daemon after a cold wake.
     #[arg(long)]
@@ -40,10 +77,11 @@ struct Args {
     /// A `tracing` filter; `RUST_LOG` wins if set.
     #[arg(long, default_value = "info")]
     log: String,
+    /// The compute's socket for holding the sandbox awake, used when it exists (the control plane passes it for
+    /// computes that pause idle sandboxes).
+    #[arg(long)]
+    hold_socket: Option<PathBuf>,
 }
-
-/// Where connectors are listed from inside a Sprite.
-const GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
 
 /// Stands in for a code host when the sandbox has no GitHub connector, so runs fail with the reason.
 struct NoCodeHost(String);
@@ -59,7 +97,10 @@ impl CodeHost for NoCodeHost {
     async fn diff(&self, _: &PrRef) -> Result<String> {
         Err(Error::Forbidden(self.0.clone()))
     }
-    async fn comment(&self, _: &PrRef, _: &str) -> Result<()> {
+    async fn comment(&self, _: &PrRef, _: &str) -> Result<u64> {
+        Err(Error::Forbidden(self.0.clone()))
+    }
+    async fn edit_comment(&self, _: &PrRef, _: u64, _: &str) -> Result<()> {
         Err(Error::Forbidden(self.0.clone()))
     }
     async fn merge(&self, _: &PrRef, _: &str) -> Result<MergeOutcome> {
@@ -98,25 +139,42 @@ impl CodeHost for NoCodeHost {
     }
 }
 
-/// GitHub through the Sprite's GitHub connector, found in the gateway's list.
-async fn codehost(author: Identity) -> Arc<dyn CodeHost> {
-    let found = async {
-        let list: serde_json::Value = reqwest::get(GATEWAY_LIST).await?.error_for_status()?.json().await?;
-        let conns = list["connections"].as_array().cloned().unwrap_or_default();
-        Ok::<_, reqwest::Error>(
-            conns
-                .into_iter()
-                .find(|c| c["provider"] == "github")
-                .and_then(|c| c["gateway_base_url"].as_str().map(str::to_string)),
-        )
-    };
-    match found.await {
-        Ok(Some(url)) => {
-            tracing::info!(%url, "using the GitHub connector");
-            Arc::new(GitHub::gateway(url).with_author(author))
-        }
-        Ok(None) => Arc::new(NoCodeHost("no GitHub connector is granted to this sandbox".into())),
+/// The base URL of the `provider` connection in the gateway's list, if this sandbox is granted one.
+fn connection_url(conns: &[serde_json::Value], provider: &str) -> Option<String> {
+    conns.iter().find(|c| c["provider"] == provider).and_then(|c| c["gateway_base_url"].as_str().map(str::to_string))
+}
+
+/// What this sandbox's connections are, found in the gateway's list: GitHub's API through the Sprite's GitHub
+/// connector or the Docker gateway's, and, on Docker, git over smart-HTTP for cloning private repos.
+async fn connections(gateway_list: &str) -> std::result::Result<Vec<serde_json::Value>, reqwest::Error> {
+    let list: serde_json::Value = reqwest::get(gateway_list).await?.error_for_status()?.json().await?;
+    Ok(list["connections"].as_array().cloned().unwrap_or_default())
+}
+
+fn codehost(
+    author: Identity,
+    conns: &std::result::Result<Vec<serde_json::Value>, reqwest::Error>,
+) -> Arc<dyn CodeHost> {
+    match conns {
+        Ok(conns) => match connection_url(conns, "github") {
+            Some(url) => {
+                tracing::info!(%url, "using the GitHub connector");
+                Arc::new(GitHub::gateway(url).with_author(author))
+            }
+            None => Arc::new(NoCodeHost("no GitHub connector is granted to this sandbox".into())),
+        },
         Err(e) => Arc::new(NoCodeHost(format!("couldn't list this sandbox's connectors: {e}"))),
+    }
+}
+
+/// Clones through the gateway's git connection when there is one, else anonymously from github.com.
+fn workspace(workdir: PathBuf, conns: &std::result::Result<Vec<serde_json::Value>, reqwest::Error>) -> GitWorkspace {
+    match conns.as_ref().ok().and_then(|c| connection_url(c, "git")) {
+        Some(url) => {
+            tracing::info!(%url, "cloning through the git connection");
+            GitWorkspace::with_remote(workdir, url)
+        }
+        None => GitWorkspace::new(workdir),
     }
 }
 
@@ -127,10 +185,65 @@ fn read_secrets(path: &PathBuf) -> std::result::Result<DaemonSecrets, String> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let args = Args::parse();
+    let cli = Cli::parse();
+    let args = match (cli.command, cli.daemon) {
+        (Some(Command::TrimCargo { cap, target }), _) => {
+            return match trailhead_daemon::trim::trim_target(&target, cap) {
+                Ok(t) => {
+                    println!("trimmed {} from {} to {} bytes (cap {cap})", target.display(), t.before, t.after);
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("trailhead-daemon: trim-cargo {}: {e}", target.display());
+                    std::process::ExitCode::FAILURE
+                }
+            };
+        }
+        (Some(command), _) => return gateway_command(command).await,
+        (None, Some(args)) => args,
+        (None, None) => Cli::command()
+            .error(clap::error::ErrorKind::MissingRequiredArgument, "--secrets and --workdir are required")
+            .exit(),
+    };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| args.log.as_str().into());
     tracing_subscriber::fmt().with_env_filter(filter).init();
     match serve(args).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("trailhead-daemon: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn gateway_command(command: Command) -> std::process::ExitCode {
+    use std::io::Read;
+    use trailhead_daemon::gateway;
+    use trailhead_factory::{GatewayRequest, GatewayResponse};
+    let result: std::result::Result<(), String> = async {
+        match command {
+            Command::Gateway { listen, socket, log } => {
+                let filter =
+                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| log.as_str().into());
+                tracing_subscriber::fmt().with_env_filter(filter).init();
+                gateway::run(listen, &socket).await.map_err(|e| e.to_string())
+            }
+            Command::TrimCargo { .. } => unreachable!("handled in main"),
+            Command::GatewayCtl { socket } => {
+                let mut input = String::new();
+                std::io::stdin().read_to_string(&mut input).map_err(|e| e.to_string())?;
+                let req: GatewayRequest = serde_json::from_str(&input).map_err(|e| format!("bad message: {e}"))?;
+                let resp = gateway::ctl(&socket, &req).await.map_err(|e| format!("{}: {e}", socket.display()))?;
+                println!("{}", serde_json::to_string(&resp).map_err(|e| e.to_string())?);
+                match resp {
+                    GatewayResponse::Error { message } => Err(message),
+                    _ => Ok(()),
+                }
+            }
+        }
+    }
+    .await;
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("trailhead-daemon: {e}");
@@ -145,6 +258,7 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     let control_plane = parse_endpoint_id(&secrets.control_plane).map_err(|e| e.to_string())?;
 
     let endpoint = Endpoint::builder(presets::N0)
+        .proxy_from_env()
         .secret_key(key)
         .alpns(vec![ALPN.to_vec()])
         .bind()
@@ -154,13 +268,14 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     let connect: Connect = Arc::new(move |cred| {
         Box::pin(async move { Ok(Arc::new(RestTracker::new(format!("http://{api}"), cred)) as Arc<dyn Tracker>) })
     });
+    let conns = connections(&secrets.gateway_list).await;
+    let harness = (trailhead_daemon::plugins::harnesses().get(&secrets.harness).map_err(|e| e.to_string())?.build)(
+        &HarnessSetup { executable: args.claude, secrets: secrets.harness_secrets.clone() },
+    );
     let runner = Runner {
-        harness: Arc::new(match secrets.claude_oauth_token.clone() {
-            Some(token) => ClaudeCode::new(args.claude).with_oauth_token(token),
-            None => ClaudeCode::new(args.claude),
-        }),
-        codehost: codehost(Identity { name: args.author_name, email: args.author_email }).await,
-        workspace: Arc::new(GitWorkspace::new(args.workdir)),
+        harness,
+        codehost: codehost(Identity { name: args.author_name, email: args.author_email }, &conns),
+        workspace: Arc::new(workspace(args.workdir, &conns)),
         connect,
         renew_every: RENEW_EVERY,
         heartbeat_every: HEARTBEAT_EVERY,
@@ -176,8 +291,8 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     };
     tracing::info!(version = env!("CARGO_PKG_VERSION"), %build, "trailhead-daemon build");
     let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone()).build(build);
-    if std::path::Path::new(SPRITE_API_SOCKET).exists() {
-        protocol = protocol.holding(SpriteHolds::new(SPRITE_API_SOCKET));
+    if let Some(socket) = args.hold_socket.filter(|s| s.exists()) {
+        protocol = protocol.holding(SpriteHolds::new(socket));
     }
     let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
     tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;

@@ -241,6 +241,10 @@ impl Compute for FakeCompute {
         })
     }
 
+    async fn preflight(&self, id: &SandboxId) -> Result<()> {
+        self.check(id, "preflight").map_err(|_| Error::Unavailable("out of disk".into()))
+    }
+
     async fn destroy(&self, id: &SandboxId) -> Result<()> {
         self.check(id, "destroy")?;
         self.live.lock().unwrap().remove(id);

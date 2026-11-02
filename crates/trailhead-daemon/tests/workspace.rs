@@ -47,6 +47,9 @@ async fn prepare_clones_runs_setup_and_resets() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: Some(check("setup", "touch .setup-ran")),
     };
 
@@ -93,6 +96,9 @@ async fn prepare_can_check_out_a_branchs_remote_head() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: None,
     };
     ws.prepare(&req).await.unwrap();
@@ -190,6 +196,9 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: None,
     };
     ws.prepare(&req).await.unwrap();
@@ -232,4 +241,94 @@ async fn conflict_markers_added_since_the_start_are_found_in_any_file() {
     std::fs::write(dir.join("a.md"), "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> main\n").unwrap();
     std::fs::write(dir.join("new.toml"), ">>>>>>> main\n").unwrap();
     assert_eq!(ws.conflict_markers(&start).await.unwrap(), ["a.md", "new.toml"]);
+}
+
+#[tokio::test]
+async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    let bare = root.path().join("remote/acme/widget.git");
+    git(&src, &["checkout", "--quiet", "-b", "factory/w-1"]);
+    std::fs::write(src.join("README.md"), "branch\n").unwrap();
+    git(&src, &["commit", "--quiet", "-am", "branch edit"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "factory/w-1"]);
+    git(&src, &["checkout", "--quiet", "main"]);
+    std::fs::write(src.join("README.md"), "main\n").unwrap();
+    git(&src, &["commit", "--quiet", "-am", "main edit"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "main"]);
+
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: Some("factory/w-1".into()),
+        merge_base: true,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        setup: None,
+    };
+    let status = || {
+        let out = Command::new("git").args(["status", "--porcelain"]).current_dir(ws.dir()).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    ws.prepare(&req).await.unwrap();
+    // As a warm checkpoint would hold it: conflicted index, MERGE_HEAD and all.
+    assert!(ws.merge_head().await.unwrap().is_some());
+    assert!(status().contains("UU README.md"), "{}", status());
+
+    // Prepared again without aborting by hand: a fresh merge, not the old one.
+    ws.prepare(&req).await.unwrap();
+    assert!(ws.merge_head().await.unwrap().is_some());
+
+    ws.prepare(&PrepareRequest { branch: None, merge_base: false, ..req }).await.unwrap();
+    assert_eq!(ws.merge_head().await.unwrap(), None);
+    assert_eq!(ws.head().await.unwrap(), rev(&src, "main"));
+    assert_eq!(status(), "");
+}
+
+#[tokio::test]
+async fn prepare_runs_the_trim_check_after_setup_and_survives_its_failure() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: Some(check("setup", "mkdir -p cache && touch cache/big")),
+        trim: Some(check("trim", "rm -rf cache")),
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+    };
+    ws.prepare(&req).await.unwrap();
+    assert!(!ws.dir().join("cache").exists());
+
+    let failing = PrepareRequest { trim: Some(check("trim", "echo nope; exit 1")), ..req };
+    ws.prepare(&failing).await.unwrap();
+}
+
+#[tokio::test]
+async fn prepare_refuses_when_the_disk_is_over_the_limit() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: None,
+        trim: None,
+        disk_warn_bytes: Some(1),
+        disk_limit_bytes: Some(1),
+    };
+    let err = ws.prepare(&req).await.unwrap_err();
+    assert!(err.to_string().contains("disk_limit_bytes"), "{err}");
+    let ok = PrepareRequest { disk_limit_bytes: Some(u64::MAX), ..req };
+    ws.prepare(&ok).await.unwrap();
 }

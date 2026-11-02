@@ -20,7 +20,7 @@ Goal: one real task goes from a Trailhead spec to a merged PR in one repo, with 
 
 ## Out of scope
 
-- Suspend during review: requested changes reopen the task and a new run starts a fresh sandbox from the PR branch, with the review in its prompt, so resume affinity isn't needed yet. Reworks are capped by `max_review_rounds` (`[repo]`, default 3); past it the task is parked with a question.
+- Suspend during review: requested changes reopen the task and a new run starts a fresh sandbox from the PR branch, with the review in its prompt, so resume affinity isn't needed yet. Reworks are capped by `max_review_rounds` (`[factory.repo]`, default 3); past it the task is parked with a question.
 - Grades (risk tiers), quorums, auto-merge, the merger. (Typed verdicts shipped anyway, as TRAIL-84; grades, gates and the merger were built after the MVP, see [review.md](review.md). Quorums weren't.)
 - Planner agent and spec collaboration: a person writes the task spec by hand.
 - Provider usage API, daily cap, workspace spend limit.
