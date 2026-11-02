@@ -151,6 +151,8 @@ impl Factory {
     /// `CodeHost::merge` (`docs/factory/lifecycle.md`). Metadata first, so a handoff that failed to land is retried
     /// with the record already there.
     pub async fn close_merged(&self, task: &Task, merged: Merged) -> Result<()> {
+        // The task has left the merge path, so a queued branch update is no longer waited on (TRAIL-491).
+        self.updating.lock().unwrap().remove(&task.key);
         let decision = match merged.by {
             MergedBy::Merger => self.tracker.show(&task.key).await?.run.merge,
             MergedBy::Human => None,
@@ -171,6 +173,7 @@ impl Factory {
     /// rework would push to a PR nobody is going to merge. Reopening it after reopening the PR resumes as a rework.
     pub(crate) async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
         tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
+        self.updating.lock().unwrap().remove(&task.key);
         // Already open when it's found before a run starts (TRAIL-304); there's nothing in review to reopen.
         if task.status != Status::Open {
             self.tracker.reopen(&task.key).await?;

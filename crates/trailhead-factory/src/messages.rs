@@ -440,8 +440,8 @@ pub fn conflict_feedback(pr_url: &str, base: &str) -> String {
     )
 }
 
-/// What a worker is told when CI failed on its PR: the checks, the end of their logs, and `after_update` when it
-/// passed until the base branch was merged in.
+/// What a worker is told when CI failed on its PR: the checks, the end of their logs, and `after_update` when the
+/// base branch was merged in after the review (CI is not known to have passed before).
 pub fn ci_failure_feedback(
     pr_url: &str,
     head: &str,
@@ -453,8 +453,9 @@ pub fn ci_failure_feedback(
     let mut body = format!("CI failed on {pr_url} at {head}: {}.", checks.join(", "));
     if after_update {
         body.push_str(
-            " It passed before the base branch was merged into the PR, so the failure came in with that merge: \
-             something that landed on the base branch clashes with this change.",
+            " The base branch was merged into the PR after it was reviewed, so the failure may have come in with \
+             that merge: something that landed on the base branch may clash with this change. CI wasn't seen to \
+             pass before the merge, so check whether the failure is your change's own too.",
         );
     }
     for (check, log) in logs {
@@ -471,6 +472,15 @@ pub fn ci_failure_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ci_failure_feedback_does_not_claim_ci_passed_before_an_update() {
+        let plain = ci_failure_feedback("url", "abc", &["test".to_string()], false, &[], "main");
+        assert!(!plain.contains("merged into the PR after"), "{plain}");
+        let updated = ci_failure_feedback("url", "abc", &["test".to_string()], true, &[], "main");
+        assert!(updated.contains("merged into the PR after it was reviewed"), "{updated}");
+        assert!(!updated.contains("It passed"), "{updated}");
+    }
 
     #[test]
     fn bad_metadata_note_names_the_fix_for_the_fields_or_the_whole_value() {
