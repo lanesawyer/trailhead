@@ -748,3 +748,36 @@ async fn a_grade_raise_leaves_lanes_own_approval_in_place() {
     assert_eq!(decision.approved_head, None);
     assert!(!decision.waiting.is_empty(), "the raised grade's gates don't pass");
 }
+
+#[tokio::test]
+async fn a_queued_update_is_forgotten_when_a_person_merges_the_pr() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.queue_updates(true);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.factory.awaiting_branch_update(&key));
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+    assert!(!r.factory.awaiting_branch_update(&key));
+}
+
+#[tokio::test]
+async fn a_queued_update_is_forgotten_when_a_person_closes_the_pr() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.queue_updates(true);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.factory.awaiting_branch_update(&key));
+
+    r.codehost.close(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    assert!(!r.factory.awaiting_branch_update(&key));
+}
