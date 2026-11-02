@@ -50,6 +50,29 @@ build     = "cargo build"
 
 This lives in the per-repo factory file, with agent profiles ([agents.md](agents.md)) and gate policy ([review.md](review.md)).
 
+### A TypeScript repo
+
+On Docker, the image (see [Docker](#docker)) has Node and corepack. A repo's `packageManager` field (`"packageManager": "pnpm@10.20.0"`) picks pnpm or yarn, and corepack fetches it on first use.
+
+```toml
+[factory.checks]
+setup     = "pnpm install --frozen-lockfile"
+trim      = "rm -rf node_modules/.cache && pnpm store prune"
+fmt       = "pnpm exec prettier --check ."
+fmt_fix   = "pnpm exec prettier --write ."
+lint      = "pnpm exec eslint ."
+typecheck = "pnpm exec tsc --noEmit"
+test      = "pnpm test"
+build     = "pnpm build"
+
+[factory.egress]
+install = ["registry.npmjs.org"]
+```
+
+- **Corepack needs egress.** It downloads the package manager during install, so `registry.npmjs.org` must be in `install`, or a repo whose `packageManager` differs from the baked-in pnpm fails on its first command.
+- **The agent phase has no registry access.** Egress narrows before the agent starts, so `setup` must install everything the checks need (dev dependencies, generated code, browsers). A check that wants the network at run time fails.
+- **`trim`** keeps `node_modules` and drops regenerable caches (see "Keeping warm images small" below).
+
 ## Bootstrap and checkpoints
 
 Decided 2026-10-27, replacing a fresh Sprite per task (decided 2026-10-26): workers run in a lazy per-repo pool of warm Sprites, each restored to its own checkpoint before every task. A cold build of Trailhead took about 6½ minutes in the first real run (TRAIL-103), too long to pay on every task.
@@ -107,7 +130,7 @@ Decided 2026-10-28 (TRAIL-119): `trailhead-compute-docker` runs sandboxes as con
 - **Wake** starts a stopped container; containers don't pause.
 - **Egress and networks.** Built (TRAIL-419). Each sandbox has its own `--internal` network, `trailhead-sb-<name>`, shared only with the gateway's container, and egress is the gateway's allowlist for it. Sandboxes get `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and their lowercase forms (curl reads only the lowercase `http_proxy`), and run without `NET_RAW` or `NET_ADMIN`. The `network` setting is now the ordinary bridge network the gateway gets out on (default `trailhead-gateway-out`); sandboxes are never on it. Docker's default address pools hold about 31 networks, which caps sandboxes on one engine at about 30 (TRAIL-499). The gateway's container is labelled with the SHA-256 of the daemon binary it was made with, and a gateway with a different (or no) label is removed and recreated, so a new daemon binary takes effect (TRAIL-500); sandboxes are re-attached by the resync that follows.
 - **Credentials.** `DockerCompute` pushes connections to the gateway on an exec's stdin. Today that's GitHub, from `GITHUB_WRITER_TOKEN` or `trailhead factory login github-writer`, and never the read token. With no writer token, the control plane warns and sandboxes can't publish. Model access is subscription mode only: the OAuth token is in the sandbox, and Claude Code reaches `api.anthropic.com` through the proxy, so a run can't yet meet "no key in the sandbox" (TRAIL-487). There's no API key handling.
-- **The image.** `mise run docker-image` builds `trailhead-sandbox:latest` from `crates/trailhead-compute-docker/image`: Ubuntu 26.04 with git, a C toolchain, rustup and Claude Code, as the user `trailhead`. The daemon lives in `/home/trailhead/.trailhead` and checks out into `/home/trailhead/work`. It's the same Ubuntu as the stock Sprite, so a daemon built on the maintainer's machine runs in both.
+- **The image.** `mise run docker-image` builds `trailhead-sandbox:latest` from `crates/trailhead-compute-docker/image`: Ubuntu 26.04 with git, a C toolchain, rustup, Node 24 (pinned by `NODE_VERSION` in the Dockerfile) with corepack enabled, and Claude Code, as the user `trailhead`. pnpm 10 is baked in so `pnpm --version` works anywhere; a repo's `packageManager` field (pnpm or yarn) takes over in its checkout (TRAIL-650, the small route for a first TypeScript repo; TRAIL-334's mise plan is unchanged). An image built before this has no Node: rerun `mise run docker-image` after pulling, and again whenever the pinned versions change. The daemon lives in `/home/trailhead/.trailhead` and checks out into `/home/trailhead/work`. It's the same Ubuntu as the stock Sprite, so a daemon built on the maintainer's machine runs in both.
 - **Isolation.** Containers share the engine's kernel. On a dev machine that's the lima VM's; on a bare Docker host, prefer gVisor (`runtime = "runsc"`) or rootless Docker (TRAIL-177).
 - **Tests.** `mise run test-live-docker` runs the lifecycle and the gateway against the engine, on `trailhead-sandbox:latest`, with a gateway of their own: egress refused off the allowlist and allowed on it, no route or DNS around the proxy, dropped capabilities, narrowing (open tunnels too), one sandbox unable to reach another, the GitHub connection listed only with a `role`, and recovery from a gateway restart, a removed gateway and a new control plane. Their GitHub credential is a dummy that's only listed, never sent upstream. `mise run test-live-docker-credentials` uses real tokens from fnox: one Claude Code call through the proxy, and one read-only GitHub call through the gateway, where the sandbox sends a junk credential and the gateway replaces it. `mise run test-live-docker-factory` (TRAIL-413) runs the whole factory on a small task in a scratch repo (`TRAILHEAD_LIVE_REPO`, public, with real fnox tokens): the worker opens a PR through the gateway, a reviewer reviews it, and during each agent's work the test checks that `example.com` is refused (and logged by the gateway), that neither GitHub token is in the sandbox's environment or git config though the gateway answers GitHub for it, and, for the worker, that removing the `role` label turns its GitHub calls into 403s until the label is back. Subscription mode, so no model-key check until TRAIL-487. It shares the engine's `trailhead-gateway`, so it refuses to start beside another factory. Written in a factory sandbox, which has no Docker engine: it compiles and lints (CI lints it with `--features docker`) but has not been run, so nothing surprising is recorded yet. A person must run it against the lima VM and replace this sentence with what it shows before it is trusted. The label probe changes the labels at the gateway only (not through a second `DockerCompute`, whose resync could delete a sandbox the factory is creating), and cuts the worker's GitHub for a few seconds mid-run, so a push in that window can fail.
 
