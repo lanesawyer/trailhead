@@ -560,13 +560,15 @@ impl FactoryConfig {
         }
         for grade in self.grades.rules.keys() {
             if !matches!(grade.as_str(), "2" | "3" | "4") {
-                return Err(Error::Config(format!("[grades] has `{grade}`; path rules are for grades 2, 3 and 4")));
+                return Err(Error::Config(format!(
+                    "[factory.grades] has `{grade}`; path rules are for grades 2, 3 and 4"
+                )));
             }
         }
         let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
         for (grade, gate) in &self.gates {
             if !matches!(grade.as_str(), "1" | "2" | "3" | "4") {
-                return Err(Error::Config(format!("[gates.{grade}]: gates are per grade, 1 to 4")));
+                return Err(Error::Config(format!("[factory.gates.{grade}]: gates are per grade, 1 to 4")));
             }
             for r in &gate.require {
                 if let GateKind::Named(name) = r
@@ -590,7 +592,7 @@ impl FactoryConfig {
         &self.profiles[&self.repo.reviewer]
     }
 
-    /// The gate a PR of this grade must pass: the repo's `[gates.N]`, or the table in `docs/factory/review.md#grades`.
+    /// The gate a PR of this grade must pass: the repo's `[factory.gates.N]`, or the table in `docs/factory/review.md#grades`.
     pub fn gate(&self, grade: u8) -> Gate {
         use GateKind::{AgentReview, Checks, Ci, Human};
         if let Some(gate) = self.gates.get(&grade.to_string()) {
@@ -720,6 +722,8 @@ mod tests {
             let err = parse(&format!("{base}\n[grades]\n{bad}\n")).unwrap_err();
             assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
         }
+        let err = parse(&format!("{base}\n[grades]\n5 = [\"a\"]\n")).unwrap_err();
+        assert!(err.to_string().contains("[factory.grades] has `5`"), "{err}");
     }
 
     const SAMPLE: &str = r#"
@@ -825,6 +829,8 @@ require = ["checks", "agent_review", "human"]
             let err = parse(&format!("{SAMPLE}\n{bad}\n")).unwrap_err();
             assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
         }
+        let err = parse(&format!("{SAMPLE}\n[gates.5]\nrequire = []\n")).unwrap_err();
+        assert!(err.to_string().contains("[factory.gates.5]: gates are per grade"), "{err}");
     }
 
     #[test]
