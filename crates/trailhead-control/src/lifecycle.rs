@@ -269,7 +269,21 @@ impl Factory {
         match report.result {
             RunResult::PrOpened(pr) => {
                 if task.run.pending_changes().is_some_and(|c| c.conflict) {
-                    self.fresh_pushes.lock().unwrap().insert(task.key.clone());
+                    // Recorded so the host's `mergeable` is trusted only for this head, across a restart too. A host
+                    // that can't say leaves the mark off, and the reading is taken as it comes.
+                    if let Some(codehost) = &self.codehost {
+                        match codehost.head(&pr).await {
+                            Ok(head) => {
+                                let update = RunUpdate { published_head: Some(head), ..RunUpdate::default() };
+                                if let Err(e) = sub.report(&task.key, update).await {
+                                    tracing::warn!(task = %task.key.0, error = %e, "couldn't record the published head");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(task = %task.key.0, error = %e, "couldn't read the published head");
+                            }
+                        }
+                    }
                 }
                 // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
                 // starts from the PR branch.

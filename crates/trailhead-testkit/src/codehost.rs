@@ -20,6 +20,8 @@ pub struct FakePr {
     pub closed: bool,
     /// What the host says of whether it merges cleanly: `None` while it is still working it out.
     pub mergeable: Option<bool>,
+    /// The head `pr_state` reports instead of the real one, as a slow host does right after a push.
+    pub lagging_head: Option<String>,
     /// The base branch has commits the PR's branch lacks.
     pub behind: bool,
     /// What the host lists as changed, when a test sets it; otherwise it follows the published commits.
@@ -128,6 +130,12 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.mergeable = mergeable).unwrap();
     }
 
+    /// Makes `pr_state` report `head` as the PR's head (`None`: the real one), as a host that hasn't caught up with a
+    /// push yet does.
+    pub fn set_lagging_head(&self, pr: &PrRef, head: Option<&str>) {
+        self.find(pr, |p, _| p.lagging_head = head.map(str::to_string)).unwrap();
+    }
+
     /// Sets whether the PR's branch is behind its base.
     /// A person deletes the PR's comment with this id.
     pub fn delete_comment(&self, pr: &PrRef, id: u64) {
@@ -215,6 +223,7 @@ impl CodeHost for FakeCodeHost {
             merged: false,
             closed: false,
             mergeable: Some(true),
+            lagging_head: None,
             behind: false,
             files: None,
             ci: CiState::Pending,
@@ -337,10 +346,13 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
-        self.find(pr, |p, _| match (p.merged, p.closed) {
+        self.find(pr, |p, s| match (p.merged, p.closed) {
             (true, _) => PrState::Merged { commit: Some(FakeCodeHost::merge_commit(&p.pr)) },
             (false, true) => PrState::Closed,
-            _ => PrState::Open { mergeable: p.mergeable },
+            _ => PrState::Open {
+                mergeable: p.mergeable,
+                head: p.lagging_head.clone().or_else(|| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned()),
+            },
         })
     }
 

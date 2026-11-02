@@ -248,12 +248,21 @@ impl Factory {
                 done.closed.push(task.key.0.clone());
                 Ok(None)
             }
-            PrState::Open { mergeable } => {
-                // GitHub works `mergeable` out after a push, so right after one a `false` may be the old head's. Read
-                // the first answer as unknown if it's a `false`; a `None` (still being worked out) isn't an answer, so
-                // the mark waits for one, and the next reconcile asks again and gets the settled reading.
-                let stale = mergeable.is_some() && self.fresh_pushes.lock().unwrap().remove(&task.key);
-                Ok(Some(if stale && mergeable == Some(false) { None } else { mergeable }))
+            PrState::Open { mergeable, head } => {
+                // GitHub works `mergeable` out after a push, so right after a conflict rework a `false` may be the old
+                // head's. Until the PR shows the head the rework published, and the host has given an answer for it,
+                // the reading is unknown (TRAIL-446).
+                let Some(published) = task.run.published_head.as_deref().filter(|h| !h.is_empty()) else {
+                    return Ok(Some(mergeable));
+                };
+                if head.as_deref() != Some(published) || mergeable.is_none() {
+                    return Ok(Some(None));
+                }
+                let settled = RunUpdate { published_head: Some(String::new()), ..RunUpdate::default() };
+                if let Err(e) = self.tracker.report(&task.key, settled).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the published head; reading it again");
+                }
+                Ok(Some(mergeable))
             }
         }
     }

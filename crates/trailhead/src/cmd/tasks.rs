@@ -224,6 +224,7 @@ const FACTORY_FIELDS: &[(&str, Kind)] = &[
     ("failure", Kind::String),
     ("reviewed_head", Kind::String),
     ("merging", Kind::String),
+    ("published_head", Kind::String),
     ("concluded", Kind::String),
     ("ungraded", Kind::Bool),
 ];
@@ -392,6 +393,7 @@ mod tests {
                 .unwrap(),
             ),
             merging: Some("x".into()),
+            published_head: Some("x".into()),
         };
         let Value::Object(map) = serde_json::to_value(&full).unwrap() else { panic!("RunUpdate isn't an object") };
         for key in map.keys() {

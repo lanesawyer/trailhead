@@ -390,7 +390,7 @@ impl CodeHost for GitHub {
             StatusCode::CONFLICT => Ok(MergeOutcome::HeadMoved),
             // GitHub says 405 for a conflict and for a merge its rules refuse (a required check, say) alike.
             StatusCode::METHOD_NOT_ALLOWED => match self.pr_state(pr).await? {
-                PrState::Open { mergeable: Some(false) } => Ok(MergeOutcome::Conflict),
+                PrState::Open { mergeable: Some(false), .. } => Ok(MergeOutcome::Conflict),
                 _ => Ok(MergeOutcome::Refused(message)),
             },
             s => Err(Error::from_status(s.as_u16(), format!("github {s}: {message}"))),
@@ -481,7 +481,7 @@ impl CodeHost for GitHub {
             PrState::Closed
         } else {
             // Null while GitHub is still working it out; asking again later gets the answer.
-            PrState::Open { mergeable: p["mergeable"].as_bool() }
+            PrState::Open { mergeable: p["mergeable"].as_bool(), head: p["head"]["sha"].as_str().map(str::to_string) }
         })
     }
 
