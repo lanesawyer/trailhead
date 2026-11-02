@@ -96,7 +96,7 @@ impl FakeTracker {
         self.state.lock().unwrap().context_fails = fails;
     }
 
-    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report` or `release`) fail, as a tracker outage would.
+    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report`, `release` or `ask`) fail, as a tracker outage would.
     pub fn fail_next(&self, agent: &str, op: &'static str, times: usize) {
         self.state.lock().unwrap().failing.insert((agent.to_string(), op), times);
     }
@@ -459,6 +459,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn ask(&self, task: &TaskKey, question: &str) -> Result<()> {
+        self.inject("ask")?;
         self.write(task, |t, me| {
             held_by_me(t, me)?;
             t.status = Status::NeedsInput;

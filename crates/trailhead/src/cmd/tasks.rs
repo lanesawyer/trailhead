@@ -352,7 +352,7 @@ mod tests {
     }
 
     /// Fields of `RunUpdate` that hold objects, which `FACTORY_FIELDS` leaves to the factory to read.
-    const STRUCTURED: &[&str] = &["pr", "spend", "changes_requested", "merged", "grade", "merge"];
+    const STRUCTURED: &[&str] = &["pr", "spend", "changes_requested", "merged", "grade", "merge", "review_breach"];
 
     /// A new scalar field on `RunUpdate` must be added to `FACTORY_FIELDS`, or to `STRUCTURED` if it isn't a scalar.
     /// The struct literal has no `..`, so a new field also fails to compile here until it is populated.
@@ -377,6 +377,7 @@ mod tests {
             changes_requested: Some(
                 serde_json::from_value(json!({ "reviewer": "r", "body": "b", "attempt": 1 })).unwrap(),
             ),
+            review_breach: Some(trailhead_factory::ReviewBreach { round: 1, reason: "x".into(), parked: false }),
             conflict_reworks: Some(1),
             attempt_base: Some(1),
             gave_up: Some(1),

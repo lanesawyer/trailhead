@@ -130,6 +130,10 @@ pub struct RunUpdate {
     /// The review that last asked for changes, which the rework on the PR branch is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_requested: Option<ChangesRequested>,
+    /// A reviewer breach the task is to be parked for, written before the task is reopened so that reconcile can
+    /// finish a park that was cut short (TRAIL-366).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_breach: Option<ReviewBreach>,
     /// Conflict reworks of the task's PR (TRAIL-221). They don't count as review rounds; `max_conflict_reworks` caps them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_reworks: Option<u32>,
@@ -228,6 +232,17 @@ pub struct ChangesRequested {
     pub head: Option<String>,
 }
 
+/// A reviewer that overran its budget, and whether the task was parked for it yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewBreach {
+    /// The review round the breach happened in.
+    pub round: u32,
+    pub reason: String,
+    /// The task was parked with the question; until then, reconcile finishes the park.
+    #[serde(default)]
+    pub parked: bool,
+}
+
 impl RunUpdate {
     pub fn merge(&mut self, update: RunUpdate) {
         let RunUpdate {
@@ -247,6 +262,7 @@ impl RunUpdate {
             retries,
             infra_failures,
             changes_requested,
+            review_breach,
             attempt_base,
             gave_up,
             merged,
@@ -272,6 +288,7 @@ impl RunUpdate {
         self.retries = retries.or(self.retries.take());
         self.infra_failures = infra_failures.or(self.infra_failures.take());
         self.changes_requested = changes_requested.or(self.changes_requested.take());
+        self.review_breach = review_breach.or(self.review_breach.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
         self.gave_up = gave_up.or(self.gave_up.take());
         self.merged = merged.or(self.merged.take());

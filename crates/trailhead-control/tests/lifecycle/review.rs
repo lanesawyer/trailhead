@@ -591,3 +591,32 @@ async fn a_reviewer_is_shown_the_open_follow_ups_earlier_reviews_filed() {
     let shown: Vec<_> = review.task.context.follow_ups.iter().map(|f| f.key.clone()).collect();
     assert_eq!(shown, [open], "only this task's open follow-ups");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_breach_park_cut_short_is_finished_by_reconcile_without_a_rerun() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Big diff", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+
+    // The tracker fails to ask after the task was reopened and claimed.
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
+    r.tracker.fail_next("factory", "ask", 1);
+    let _ = r.factory.reconcile().await;
+    let task = r.tracker.task(&key);
+    assert_ne!(task.status, Status::NeedsInput);
+    let breach = task.run.review_breach.expect("the breach is recorded before the park");
+    assert!(!breach.parked);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert!(task.run.review_breach.unwrap().parked);
+    assert_eq!(task.run.review_rounds, Some(0));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("steps"), "{}", questions[0].body);
+}
