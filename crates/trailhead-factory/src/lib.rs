@@ -69,6 +69,10 @@ pub enum Error {
     /// freed. The work is worth retrying later, and waiting doesn't count as a failure of the task or the sandbox.
     #[error("unavailable: {0}")]
     Unavailable(String),
+    /// The repo's `setup` check failed during a prepare. The checkout is otherwise ready (cloned, on its branch), so
+    /// this points at the repo's code, not the sandbox: a rework can go on from it with the output as context.
+    #[error("setup failed: {0}")]
+    SetupFailed(String),
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]

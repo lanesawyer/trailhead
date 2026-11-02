@@ -110,7 +110,17 @@ impl Factory {
                 None => None,
             };
             let merge_base = task.run.pending_changes().is_some_and(|c| c.conflict);
-            let sandbox = self.acquire_worker(target, task, rework.then(|| Self::branch(task)), merge_base).await?;
+            let (sandbox, setup_failure) =
+                self.acquire_worker(target, task, rework.then(|| Self::branch(task)), merge_base).await?;
+            // The agent starts with the output so it can fix what broke, after whatever the review asked for.
+            let feedback = match (feedback, setup_failure) {
+                (feedback, Some(output)) => {
+                    let setup = messages::setup_failed_feedback(&output);
+                    let body = feedback.map_or(setup.clone(), |f| format!("{}\n\n{setup}", f.body));
+                    Some(Feedback { body })
+                }
+                (feedback, None) => feedback,
+            };
             sub.report(
                 &task.key,
                 RunUpdate {
