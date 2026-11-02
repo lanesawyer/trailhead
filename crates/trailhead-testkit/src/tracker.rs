@@ -36,6 +36,8 @@ struct State {
     failing: HashMap<(String, &'static str), usize>,
     /// Whether every `report`, by any agent, fails.
     reports_fail: bool,
+    /// Whether `create_sub_agent` fails with a plain error, not `Forbidden`.
+    sub_agents_fail: bool,
 }
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
@@ -106,6 +108,11 @@ impl FakeTracker {
     /// Makes every `report`, whichever agent makes it, fail (or heal), as the tracker write outage of 2026-10-28 did.
     pub fn fail_reports(&self, fails: bool) {
         self.state.lock().unwrap().reports_fail = fails;
+    }
+
+    /// Makes `create_sub_agent` fail (or heal) with an error that isn't `Forbidden`, as a whole-tracker outage does.
+    pub fn fail_sub_agents(&self, fails: bool) {
+        self.state.lock().unwrap().sub_agents_fail = fails;
     }
 
     fn inject(&self, op: &'static str) -> Result<()> {
@@ -552,6 +559,9 @@ impl Tracker for FakeTracker {
         self.check_live()?;
         let full = format!("{}/{name}", self.agent);
         let mut s = self.state.lock().unwrap();
+        if s.sub_agents_fail {
+            return Err(Error::Other("injected sub-agent failure".into()));
+        }
         let agent = s.agents.entry(full.clone()).or_default();
         if agent.revoked {
             return Err(Error::Forbidden(format!("{full} has been revoked")));

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use trailhead_control::Outcome;
 use trailhead_factory::{
-    CodeHost, Commit, FileChange, MergeOutcome, Role, RunOutcome, Status, Tracker, Usd, VerdictKind, label,
+    CodeHost, Commit, FileChange, MergeOutcome, Role, RunOutcome, Status, TaskKey, Tracker, Usd, VerdictKind, label,
 };
 use trailhead_testkit::{FAKE_BASE, Script};
 
@@ -543,16 +543,32 @@ async fn infrastructure_retries_wait_longer_each_time_up_to_a_cap() {
     assert_eq!(r.tracker.task(&key).status, Status::Open, "under the cap of 10");
 }
 
+/// Reports and sub-agent creation both fail, so `infra_failed` runs every time with no persisted count.
 #[tokio::test(start_paused = true)]
-async fn infrastructure_retries_still_back_off_longer_when_the_tracker_wont_take_reports() {
+async fn infrastructure_retries_back_off_longer_when_the_tracker_is_down_entirely() {
     let r = rig();
-    let key = r.tracker.add_task("TRAIL", "Tracker down too", "");
+    let key = r.tracker.add_task("TRAIL", "Tracker down", "");
     r.tracker.fail_reports(true);
+    r.tracker.fail_sub_agents(true);
+    backs_off_1_2_4_minutes(&r, &key).await;
+}
+
+/// Only reports fail: failure 1 comes from the lost `started` report, and 2 and 3 are skips past the revoked run name,
+/// which grow the wait too.
+#[tokio::test(start_paused = true)]
+async fn infrastructure_retries_back_off_longer_when_the_tracker_wont_take_reports() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Reports down", "");
+    r.tracker.fail_reports(true);
+    backs_off_1_2_4_minutes(&r, &key).await;
+}
+
+async fn backs_off_1_2_4_minutes(r: &Rig, key: &TaskKey) {
     let secs = std::time::Duration::from_secs;
     // 1, 2, 4 minutes, though no failure count ever reaches the tracker.
     for (n, wait) in [60, 120, 240].into_iter().enumerate() {
         assert!(r.factory.tick().await.is_err(), "failure {}", n + 1);
-        assert_eq!(r.tracker.task(&key).run.infra_failures.unwrap_or(0), 0, "the write was lost");
+        assert_eq!(r.tracker.task(key).run.infra_failures.unwrap_or(0), 0, "the write was lost");
         r.factory.reconcile().await.unwrap();
         assert!(r.factory.tick().await.unwrap().is_empty(), "backing off for {wait}s");
         tokio::time::advance(secs(wait - 1)).await;
