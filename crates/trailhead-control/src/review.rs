@@ -74,7 +74,7 @@ impl Factory {
             max_steps: profile.budget.steps,
             required_checks: Vec::new(),
             worker_checks: checks.to_vec(),
-            blocked_hosts: self.blocked_hosts(),
+            blocked_hosts: self.blocked_hosts(&sandbox),
             allowed_hosts: self.allowed_hosts(),
             credential,
         };

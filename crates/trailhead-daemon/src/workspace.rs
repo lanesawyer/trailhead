@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::process::Command;
-use trailhead_factory::{Check, CheckResult, Error, PrepareRequest, Result};
+use trailhead_factory::{Check, CheckResult, Error, InstallHost, PrepareRequest, Result};
 
-use crate::Workspace;
+use crate::{Mise, Workspace};
 
 /// Keep the end of a check's output, where failures usually are.
 const OUTPUT_TAIL: usize = 16 * 1024;
@@ -27,6 +27,7 @@ pub struct GitWorkspace {
     block_patience: Duration,
     /// Extra environment for git; tests use it to hide the machine's git config.
     git_env: Vec<(String, String)>,
+    mise: Mise,
 }
 
 impl GitWorkspace {
@@ -40,11 +41,18 @@ impl GitWorkspace {
             remote_base: remote_base.into(),
             block_patience: BLOCK_PATIENCE,
             git_env: Vec::new(),
+            mise: Mise::new(),
         }
     }
 
     pub fn with_block_patience(mut self, patience: Duration) -> GitWorkspace {
         self.block_patience = patience;
+        self
+    }
+
+    /// A different mise binary and config directory; tests use it to stand in for the real thing.
+    pub fn with_mise(mut self, mise: Mise) -> GitWorkspace {
+        self.mise = mise;
         self
     }
 
@@ -128,6 +136,10 @@ impl Workspace for GitWorkspace {
         self.dir.clone()
     }
 
+    async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        self.mise.install_hosts(&req.tools, &req.tool_hosts)
+    }
+
     /// Clones the base branch, or resets an existing checkout to it, then moves to the request's branch if it has one.
     /// Ignored files such as build output stay, so a sandbox reused for another round keeps its caches.
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
@@ -157,6 +169,8 @@ impl Workspace for GitWorkspace {
             self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await?;
             self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")]).await?;
         }
+        // Before setup, so the repo's own build runs with the pinned tools.
+        self.mise.bootstrap(&req.tools).await?;
         if let Some(setup) = &req.setup {
             let result = self.check(setup).await;
             if !result.passed {
@@ -199,6 +213,10 @@ impl Workspace for GitWorkspace {
             }
         }
         Ok(())
+    }
+
+    async fn agent_env(&self) -> std::collections::BTreeMap<String, String> {
+        self.mise.env(&self.dir).await
     }
 
     async fn merge_head(&self) -> Result<Option<String>> {
@@ -248,8 +266,9 @@ impl Workspace for GitWorkspace {
 
     async fn check(&self, check: &Check) -> CheckResult {
         let ooms_before = oom_kills();
-        let out = Command::new("sh")
-            .arg("-c")
+        let out = self
+            .mise
+            .shell(&self.dir)
             .arg(format!("exec 2>&1\n{}", check.command))
             .current_dir(&self.dir)
             .stdin(Stdio::null())

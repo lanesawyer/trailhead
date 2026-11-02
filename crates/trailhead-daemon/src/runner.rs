@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -8,9 +9,9 @@ use async_trait::async_trait;
 use tokio::sync::{Notify, mpsc};
 use trailhead_factory::messages::{self, Filed};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, NewPr, PrRef, PrepareRequest,
-    Result, Role, RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, RunUpdate, TaskKey, Tracker,
-    Usage, Verdict, VerdictKind,
+    Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, InstallHost, NewPr, PrRef,
+    PrepareRequest, Result, Role, RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, RunUpdate,
+    TaskKey, Tracker, Usage, Verdict, VerdictKind,
 };
 
 /// Turns a run's credential into a tracker handle acting as the sandbox's sub-agent.
@@ -21,8 +22,16 @@ pub type Connect =
 #[async_trait]
 pub trait Workspace: Send + Sync {
     fn dir(&self) -> PathBuf;
+    /// Which hosts installing `req`'s tools needs, worked out offline.
+    async fn install_hosts(&self, _req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        Ok(Vec::new())
+    }
     async fn prepare(&self, req: &PrepareRequest) -> Result<()>;
     async fn check(&self, check: &Check) -> CheckResult;
+    /// Environment for the agent on top of the daemon's: the `[stack]` tools' mise environment, when there are any.
+    async fn agent_env(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
     /// Returns once none of `hosts` resolve, or fails if they still do after a while.
     async fn confirm_blocked(&self, hosts: &[String]) -> Result<()>;
     /// The commit sha the checkout is at.
@@ -92,6 +101,10 @@ pub struct Runner {
 }
 
 impl Runner {
+    pub async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        self.workspace.install_hosts(req).await
+    }
+
     pub async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
         self.workspace.prepare(req).await
     }
@@ -132,6 +145,7 @@ impl Runner {
             checks: req.worker_checks.clone(),
             title,
             base_branch: (req.role == Role::Reviewer).then(|| req.base_branch.clone()),
+            env: self.workspace.agent_env().await,
         };
         tracing::info!(task = %key, "agent starting");
         // Where the agent's work starts, which is what it's published on top of.
