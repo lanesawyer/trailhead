@@ -2,6 +2,8 @@
 //! [`Daemon`] trait and the messages it exchanges with the daemon in a sandbox.
 //! `trailhead-daemon` carries them over iroh; the testkit runs a daemon in-process.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +34,13 @@ pub struct PrepareRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge_base: bool,
     pub setup: Option<Check>,
+    /// The repo's `[stack]` tools (`rust = "stable"`, `node = "26"`), which the daemon installs with mise before
+    /// `setup` (`docs/factory/sandbox.md`). Empty for a repo that asks for none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, String>,
+    /// `[factory.egress.tools]`: download hosts per mise tool, for tools the daemon has no hosts for.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_hosts: BTreeMap<String, Vec<String>>,
     /// The repo's `trim` check, run after setup to cut build output and caches down so the warm checkpoint taken
     /// next stays small. A failure is logged and the sandbox goes on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,6 +51,15 @@ pub struct PrepareRequest {
     /// Fail the prepare, so no warm checkpoint is taken, when the checkout's filesystem uses more than this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_limit_bytes: Option<u64>,
+}
+
+/// A host the install step needs open, and the tool that needs it (`docs/factory/sandbox.md`). The daemon works these
+/// out from the `[stack]`; the control plane opens each and logs who asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallHost {
+    pub host: String,
+    /// The mise tool that needs the host (`node`, `npm:prettier`), or `mise` for its own installer and version lists.
+    pub tool: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +128,8 @@ pub struct RunReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToDaemon {
     Prepare(PrepareRequest),
+    /// Asks which hosts installing the request's tools needs (`FromDaemon::InstallHosts`). The daemon installs nothing.
+    InstallHosts(PrepareRequest),
     Run(Box<RunRequest>),
     /// Resumes following a run after a dropped connection: the daemon sends the events after the first `seen`,
     /// then the rest of the run as usual. A run the daemon doesn't know ends with `Failed(NotFound)`.
@@ -137,6 +157,7 @@ pub struct DaemonVersion {
 pub enum FromDaemon {
     Event(RunEvent),
     Prepared,
+    InstallHosts(Vec<InstallHost>),
     Version(DaemonVersion),
     Report(RunReport),
     Failed(Error),
@@ -226,6 +247,12 @@ impl std::fmt::Debug for DaemonSecrets {
 
 #[async_trait]
 pub trait Daemon: Send + Sync {
+    /// Starts the sandbox's daemon if needed and says which hosts `prepare` needs open to
+    /// install the request's tools, each with the tool that asked. Fails if a `[stack]` tool has no known hosts. The
+    /// control plane opens them before `prepare` and closes them after.
+    async fn install_hosts(&self, _sandbox: &SandboxId, _req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        Ok(Vec::new())
+    }
     /// Starts the sandbox's daemon if needed and readies its checkout.
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()>;
     /// Drops any connection to the sandbox's daemon, after something (a restore) restarted it.

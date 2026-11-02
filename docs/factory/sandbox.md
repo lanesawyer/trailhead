@@ -27,7 +27,7 @@ Assumed to work, not yet tested (TRAIL-97): Claude Code's exact setup (likely `A
 
 ## Standard checks
 
-Decided: repos describe their stack and a fixed set of named checks. mise is an implementation detail the user never touches.
+Decided; the stack is built (TRAIL-334), the checks still run as written. Repos describe their stack and a fixed set of named checks. mise is an implementation detail the user never touches.
 
 ```toml
 [factory.stack]
@@ -44,7 +44,10 @@ build     = "cargo build"
 
 - **Fixed names, optional entries.** `setup`, `trim`, `fmt`, `fmt_fix`, `lint`, `typecheck`, `test`, `build`. A repo leaves out what it doesn't have.
 - **Contract.** Exit code 0 is a pass. Structured output (JUnit, SARIF) can come later.
-- **Generated, not hand-written.** The factory turns `[factory.stack]` and `[factory.checks]` into mise tools and tasks when it bootstraps a sandbox. A repo with its own `mise.toml` keeps it, with the factory's tasks merged in.
+- **Generated, not hand-written.** Built (TRAIL-334): the daemon turns `[factory.stack]` tools into a mise config and installs them when it prepares a worker's checkout, before `setup`. The checks stay plain commands from `.trailhead.toml`, not generated mise tasks, since they'd add nothing; they run through `mise exec` so they see the pinned tools.
+- **How it installs.** In the prepare step, with install egress open: install mise to `~/.local/bin` if it's missing (the stock image doesn't ship it); write the `[factory.stack]` tools to mise's global `conf.d` (`~/.config/mise/conf.d/trailhead-factory.toml`); run `mise bootstrap --only tools` from there, away from the checkout. The allowlist keeps out the parts that fight the sandbox (firewall, accounts, user, systemd units, services, dotfiles, remote), since the factory owns egress and the daemon's user, and a part a later mise adds isn't picked up by surprise. A failure fails the prepare. Reviewers prepare without `setup` but get the same tools.
+- **A repo's own `mise.toml`** isn't read for now: mise runs with the checkout in `MISE_IGNORED_CONFIG_PATHS`, so a tool pinned there can't fail `mise exec`, which would otherwise try to install it and stop.
+- **The agent's environment.** The daemon starts the agent with `mise env --json` applied, so its `cargo`, `node` and `python` are the pinned ones, and runs every check through `mise exec` with `MISE_OFFLINE=1`, so checks don't stall resolving versions with egress closed. A repo with no `[factory.stack]` gets the stock environment.
 - **Policy refers to names.** Gates say which checks must pass (`require = ["fmt", "lint", "test"]`), so policy reads the same across stacks.
 - **Onboarding.** An agent can inspect a new repo and propose `[factory.stack]` and `[factory.checks]` for a human to confirm.
 
@@ -61,6 +64,7 @@ Decided 2026-10-27, replacing a fresh Sprite per task (decided 2026-10-26): work
 - **Reconcile.** Pooled Sprites are never destroyed at boot; one an interrupted run left busy goes back to idle.
 - **Broken Sprites.** A pooled Sprite that keeps failing to release (TRAIL-135: Sprites answered `503 Storage not ready` for 25 minutes) is retried with backoff from 30 s up to 5 min. After five failures or ten minutes, the factory gives up on it. It destroys the Sprite if the API allows, and otherwise labels it `state=broken` with no `role`, then destroys it on a later reconcile once the API recovers. A broken Sprite doesn't count toward `max_sandboxes`, so the next task gets a new one. If even the labels can't be changed, the control plane leaves it out in memory until it restarts. The failure counts are in memory too.
 - **Reviewers** get a fresh Sprite each and skip `setup`, since they only read the diff.
+- **Tools.** A pooled Sprite installs its `[stack]` once and keeps it in the warm checkpoint; later tasks only re-run the idempotent bootstrap. Sprites carry a `stack` label, a hash of the `[stack]` tools next to `warm`; an idle Sprite whose label differs from the repo's current stack is destroyed rather than reused, so a changed `[stack]` reinstalls on a fresh one.
 - **Bootstrap.** The stock image (Ubuntu 26.04, glibc 2.43) ships rustup/cargo, node, python, go, `gh`, git and Claude Code, but not mise. Uploading and starting the daemon and cloning takes about 11 s.
 - **Later:** deleting Sprites idle for N days, and a shared build cache in object storage for big pools, behind the same `Compute` seam.
 
@@ -70,9 +74,23 @@ Sprites egress is a DNS-based allowlist set from outside through the API. Change
 
 | Phase | Allowed domains |
 | --- | --- |
-| Install | Iroh relay and discovery, connector gateway, the repo's package registries and mise tool sources; `github.com` and `codeload.github.com` at bootstrap for public repos |
+| Install | Iroh relay and discovery, connector gateway, the repo's package registries (`[factory.egress] install`); `github.com` and `codeload.github.com` at bootstrap for public repos; and exactly the hosts of the tools being installed (below) |
 | Agent work | Iroh relay and discovery, connector gateway |
-| Install requested mid-task | Install set, opened by the control plane on the daemon's request and closed after; each request logged |
+| Install requested mid-task | Hosts the daemon asks for, opened by the control plane on top of the install set and closed after. Built for the tool installs: the daemon works out the tool list offline and the control plane opens those hosts, logging each with the tool that asked (`opening install egress host=nodejs.org tool=node`) |
+
+**Tool hosts.** The daemon knows whether mise is already there, so it names the hosts. Before `prepare`, it asks the daemon which hosts the install needs (`install_hosts`). The daemon maps the `[stack]` tools to hosts with one table (`hosts_for` in `crates/trailhead-daemon/src/mise.rs`, keyed by mise tool or backend) and replies with each host and the tool that needs it. The control plane opens those on top of the install set, logs them, runs `prepare`, and confirms them blocked again before the agent starts. mise's installer (`mise.run` and its GitHub release) is included only when mise is missing; its version lists (`mise.jdx.dev`, `mise-versions.jdx.dev`) whenever there is a tool to install. No tools, no extra hosts.
+
+| Tool or backend | Hosts |
+| --- | --- |
+| `node` | `nodejs.org` |
+| `rust` | `static.rust-lang.org` |
+| `go` | `go.dev`, `dl.google.com` |
+| `python` | GitHub, PyPI |
+| `pnpm`, `github:`, `aqua:`, `ubi:` | GitHub: `github.com`, `api.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` |
+| `npm:` | `registry.npmjs.org` |
+| `pipx:`, `pypi:` | `pypi.org`, `files.pythonhosted.org` |
+
+A tool the table doesn't know takes an entry in `.trailhead.toml`: `[factory.egress.tools]` maps a tool to its download hosts (`zig = ["ziglang.org"]`). The control plane sends the map in the prepare request, an entry wins over the table, and the hosts open only while that tool installs, logged with the tool that asked. A `[stack]` tool in neither fails the prepare, naming the tool and pointing at `[factory.egress.tools]`.
 
 Decided: registry egress only during install phases. The risk isn't secrets, since the sandbox holds none; it's a malicious or typosquatted package whose install script acts with the sandbox's connector identity. Mitigations:
 

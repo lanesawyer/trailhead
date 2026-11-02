@@ -10,6 +10,32 @@ use crate::timing::backoff;
 use crate::{Factory, Placed, RELEASE_ATTEMPTS, RELEASE_PATIENCE, Reconciled};
 
 impl Factory {
+    /// Prepares `sandbox`'s checkout under install egress. The control plane can't see the checkout, so the daemon
+    /// first says which hosts the `[stack]` tools it will install need; exactly
+    /// those are opened on top of the install set for the prepare, each logged with the tool that asked, and
+    /// confirmed closed again before any agent runs.
+    async fn prepare_sandbox(&self, p: &Placed, sandbox: &Sandbox, req: PrepareRequest) -> Result<()> {
+        let needs = p.daemon.install_hosts(&sandbox.id, &req).await?;
+        if !needs.is_empty() {
+            let mut egress = self.install_egress();
+            let mut opened = Vec::new();
+            for need in &needs {
+                tracing::info!(sandbox = %sandbox.name, host = %need.host, tool = %need.tool, "opening install egress");
+                if !egress.domains.contains(&need.host) {
+                    egress.domains.push(need.host.clone());
+                }
+                opened.push(need.host.clone());
+            }
+            p.compute.set_egress(&sandbox.id, &egress).await?;
+            self.install_opened.lock().unwrap().insert(sandbox.id.clone(), opened);
+        }
+        p.daemon.prepare(&sandbox.id, req).await
+    }
+
+    fn forget_install_opened(&self, sandbox: &Sandbox) {
+        self.install_opened.lock().unwrap().remove(&sandbox.id);
+    }
+
     /// A sandbox for `task`, its checkout prepared on `branch` when given (a reviewer's is the PR's head).
     pub(crate) async fn create_sandbox(
         &self,
@@ -27,10 +53,11 @@ impl Factory {
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = p.compute.create(&spec).await?;
         let ready = async {
-            p.daemon.prepare(&sandbox.id, self.config.prepare_request(role, branch)).await?;
+            self.prepare_sandbox(p, &sandbox, self.config.prepare_request(role, branch)).await?;
             p.compute.set_egress(&sandbox.id, &self.agent_egress()).await
         };
         if let Err(e) = ready.await {
+            self.forget_install_opened(&sandbox);
             // Not handed out, so nothing else would clean it up before reconcile.
             if let Err(d) = p.compute.destroy(&sandbox.id).await {
                 tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
@@ -54,6 +81,10 @@ impl Factory {
         }
         if let Some(warm) = warm {
             labels.insert(label::WARM.into(), warm.into());
+            let stack = self.config.stack.tag();
+            if !stack.is_empty() {
+                labels.insert(label::STACK.into(), stack);
+            }
         }
         if let Some(task) = task {
             labels.insert(label::TASK.into(), task.key.0.clone());
@@ -75,7 +106,20 @@ impl Factory {
     ) -> Result<(Sandbox, Option<String>)> {
         let pick = self.pool_pick.lock().await;
         let idle = p.list(&self.pooled(None, label::IDLE, None, None)).await?;
-        let (sandbox, warm) = match idle.into_iter().find(|s| !self.abandoned(&s.name)) {
+        let stack = self.config.stack.tag();
+        let mut current = Vec::new();
+        for s in idle {
+            if s.labels.get(label::STACK).map(String::as_str).unwrap_or("") == stack {
+                current.push(s);
+                continue;
+            }
+            // Built for another stack: reinstalling on top would keep the old tools, so start over.
+            tracing::info!(sandbox = %s.name, "[stack] changed; destroying the pooled sandbox to reinstall");
+            if let Err(e) = p.compute.destroy(&s.id).await {
+                tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack");
+            }
+        }
+        let (sandbox, warm) = match current.into_iter().find(|s| !self.abandoned(&s.name)) {
             Some(s) => {
                 let warm = s.labels.get(label::WARM).cloned();
                 (s, warm)
@@ -100,7 +144,7 @@ impl Factory {
         p.compute.preflight(&sandbox.id).await?;
         let rework = branch.is_some();
         let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
-        let mut prepared = p.daemon.prepare(&sandbox.id, prepare.clone()).await;
+        let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone()).await;
         let mut setup_failure = None;
         // On a rework the failed `setup` is the code's doing, probably what the worker is there to fix, so the agent
         // starts anyway: the checkout is otherwise ready, and prepares again without `setup` to finish it (TRAIL-649).
@@ -112,6 +156,7 @@ impl Factory {
             prepared = p.daemon.prepare(&sandbox.id, PrepareRequest { setup: None, ..prepare }).await;
         }
         if let Err(e) = prepared {
+            self.forget_install_opened(&sandbox);
             p.daemon.forget(&sandbox.id).await;
             if matches!(e, Error::SetupFailed(_)) {
                 // The code failed, not the sandbox, and the same error would come from any other: it goes back to
@@ -132,11 +177,21 @@ impl Factory {
             }
             return Err(e);
         }
-        let cp = p.compute.checkpoint(&sandbox.id, "warm").await?;
-        let labels = self.pooled(Some(p), label::BUSY, Some(&cp.0), Some(task));
-        p.compute.set_labels(&sandbox.id, &labels).await?;
-        p.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
-        Ok((Sandbox { labels, ..sandbox }, setup_failure))
+        let warmed = async {
+            let cp = p.compute.checkpoint(&sandbox.id, "warm").await?;
+            let labels = self.pooled(Some(p), label::BUSY, Some(&cp.0), Some(task));
+            p.compute.set_labels(&sandbox.id, &labels).await?;
+            p.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+            Ok::<_, Error>(labels)
+        }
+        .await;
+        match warmed {
+            Ok(labels) => Ok((Sandbox { labels, ..sandbox }, setup_failure)),
+            Err(e) => {
+                self.forget_install_opened(&sandbox);
+                Err(e)
+            }
+        }
     }
 
     /// Returns a worker sandbox to the pool: restored to its warm checkpoint, which wipes everything the task did,

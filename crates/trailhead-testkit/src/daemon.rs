@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 use trailhead_daemon::{HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, PrepareRequest, Repo, Result, RunEvent, RunReport,
-    RunRequest, SandboxId, Tracker,
+    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, InstallHost, PrepareRequest, Repo, Result,
+    RunEvent, RunReport, RunRequest, SandboxId, Tracker,
 };
 
 pub use trailhead_daemon::Connect;
@@ -58,6 +58,11 @@ pub struct FakeWorkspace {
 impl Workspace for FakeWorkspace {
     fn dir(&self) -> PathBuf {
         PathBuf::from("/work")
+    }
+
+    async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        let stack: Vec<String> = req.tools.keys().cloned().collect();
+        trailhead_daemon::install_hosts_for(&stack, &req.tool_hosts, false)
     }
 
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
@@ -329,6 +334,10 @@ impl LocalDaemon {
 
 #[async_trait]
 impl Daemon for LocalDaemon {
+    async fn install_hosts(&self, _sandbox: &SandboxId, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        self.runner.install_hosts(req).await
+    }
+
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
         self.runner.prepare(&req).await?;
         self.prepared.lock().unwrap().push((sandbox.clone(), req));
