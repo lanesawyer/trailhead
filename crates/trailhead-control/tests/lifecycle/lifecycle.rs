@@ -91,6 +91,8 @@ async fn budget_breach_parks_the_task_and_suspends_its_sandbox() {
     assert_eq!(task.status, Status::NeedsInput);
     assert_eq!(task.holder.as_deref(), Some("factory/trail-1-a1"));
     assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
+    // Concluded with the spend, so a restart before the park lands can't have reconcile count the run twice.
+    assert_eq!(task.run.concluded.as_deref(), Some("trail-1-a1"));
     assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "question" && c.body.contains("is suspended")));
 
     let sandbox = r.compute.get("trailhead-w1").expect("sandbox kept for resuming");

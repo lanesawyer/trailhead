@@ -216,8 +216,11 @@ impl Factory {
             Run::Breach(reason, spend) => {
                 tracing::warn!(task = %task.key.0, %reason, "budget breached; parking");
                 // The spend is recorded before any teardown. A record that fails doesn't skip the kill switch or the
-                // park; its error is returned after them.
-                let recorded = sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await;
+                // park; its error is returned after them. The report marks the run concluded, so a restart before the
+                // park lands doesn't have reconcile reattach to it and price its replayed events a second time.
+                let update =
+                    RunUpdate { spend: Some(spend), concluded: Some(name.to_string()), ..RunUpdate::default() };
+                let recorded = sub.report(&task.key, update).await;
                 if let Err(e) = &recorded {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't record the breach's spend; cutting off anyway");
                 }
