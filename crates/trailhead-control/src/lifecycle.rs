@@ -337,10 +337,14 @@ impl Factory {
                     // human has to do.
                     sub.report(&task.key, RunUpdate { gave_up: Some(attempt), ..RunUpdate::default() }).await?;
                     sub.ask(&task.key, &messages::gave_up_question(failed, max, &reason, &last)).await?;
-                    self.tracker.revoke_sub_agent(name).await?;
+                    if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
+                    }
                     return Ok(Outcome::Parked { reason });
                 }
-                self.tracker.revoke_sub_agent(name).await?;
+                if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
+                }
                 Ok(Outcome::Failed { reason })
             }
             RunResult::Reviewed(_) => Err(Error::Other("a worker returned a review".into())),

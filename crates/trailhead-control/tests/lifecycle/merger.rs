@@ -335,6 +335,24 @@ async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
 }
 
 #[tokio::test]
+async fn a_merge_whose_close_failed_is_closed_by_the_next_pass_as_the_mergers() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.tracker.fail_next("factory", "finish", 1);
+    // The merger writes its intent and the host merges, but closing the task fails.
+    let _ = r.factory.reconcile().await;
+    assert!(r.codehost.prs()[0].merged);
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+    assert!(r.tracker.task(&key).run.merging.as_deref().is_some_and(|h| !h.is_empty()), "the intent is kept");
+
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Done);
+    assert_eq!(task.run.merged.expect("recorded").by, MergedBy::Merger);
+}
+
+#[tokio::test]
 async fn switching_merge_mode_off_in_the_source_stops_the_merger_without_a_restart() {
     let (mut r, queue) = queued_rig_with(&merging());
     let mode = Arc::new(std::sync::Mutex::new(Ok(trailhead_factory::MergeMode::On)));
@@ -389,10 +407,53 @@ async fn a_merge_the_host_refuses_is_tried_again_not_reworked() {
     r.factory.reconcile().await.unwrap();
     assert_eq!((said(&r), noted(&r)), (1, 1));
 
+    // A different reason is said again, and is the one the decision remembers.
+    let other = "Changes must be made through a merge queue.";
+    r.codehost.refuse_merge(Some(other));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!((said(&r), noted(&r)), (2, 2));
+    assert_eq!(r.tracker.task(&key).run.merge.as_ref().and_then(|d| d.refused.as_deref()), Some(other));
+
     r.codehost.refuse_merge(None);
     r.factory.reconcile().await.unwrap();
     assert!(r.codehost.prs()[0].merged);
     assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_refusal_stands_for_the_head_it_was_given_on() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let why = "Required status check \"test\" is expected.";
+    r.codehost.refuse_merge(Some(why));
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    let decision = |r: &Rig| r.tracker.task(&key).run.merge.expect("a merge decision");
+    let said = |r: &Rig| r.codehost.prs()[0].comments.iter().filter(|c| c.contains("refused to merge")).count();
+    let noted = |r: &Rig| r.tracker.comments(&key).iter().filter(|c| c.body.contains("refused to merge")).count();
+    let first = decision(&r);
+    assert_eq!(first.refused.as_deref(), Some(why));
+    assert_eq!((said(&r), noted(&r)), (1, 1));
+
+    // The merger's own branch update moves the head but keeps the approval, so it is still merging on the new
+    // head. The refusal was for the old one, so the same reason is said again once the host refuses again.
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    let second = decision(&r);
+    assert_ne!(second.head, first.head, "the update moved the head");
+    assert_eq!(second.refused.as_deref(), Some(why));
+    assert_eq!((said(&r), noted(&r)), (2, 2));
+    assert!(!r.codehost.prs()[0].merged);
+
+    // A push isn't the merger's update: it doesn't carry the verdict, so the task goes back to review and
+    // there is no refusal left to remember.
+    r.codehost.push_to(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).run.merge.and_then(|d| d.refused), None);
+    assert!(!r.codehost.prs()[0].merged);
 }
 
 #[tokio::test]
