@@ -96,7 +96,7 @@ impl FakeTracker {
         self.state.lock().unwrap().context_fails = fails;
     }
 
-    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report`, `release` or `ask`) fail, as a tracker outage would.
+    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report`, `release`, `ask` or `finish`) fail, as a tracker outage would.
     pub fn fail_next(&self, agent: &str, op: &'static str, times: usize) {
         self.state.lock().unwrap().failing.insert((agent.to_string(), op), times);
     }
@@ -479,6 +479,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
+        self.inject("finish")?;
         self.write(task, |t, me| {
             // Like core: review states need no claim, and an unclaimed task can be finished by anyone, but
             // not one another agent holds.
