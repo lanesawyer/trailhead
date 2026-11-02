@@ -41,6 +41,7 @@ pub fn target() -> Target {
         gateway_list: GATEWAY_LIST.into(),
         model_endpoint: None,
         hold_socket: Some(API_SOCKET.into()),
+        ..Target::default()
     }
 }
 

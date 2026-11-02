@@ -25,7 +25,8 @@ pub use compute::{
 };
 pub use config::{
     Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_GIT_ID, GATEWAY_GITHUB_ID,
-    GATEWAY_HOST, GATEWAY_PORT, Gate, GateKind, GradesConfig, MergeConfig, MergeMode, Profile, Role, UsageConfig,
+    GATEWAY_HOST, GATEWAY_PORT, Gate, GateKind, GradesConfig, MergeConfig, MergeMode, Profile, Role, TargetConfig,
+    TargetSpec, UsageConfig,
 };
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
@@ -44,7 +45,7 @@ pub use host::HostConfig;
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
-pub use target::Target;
+pub use target::{DEFAULT_TARGET, Target};
 pub use tracker::{
     Answered, ChangesRequested, Credential, FollowUpTask, HumanContext, METADATA_KEY, MergeDecision, Merged, MergedBy,
     RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, is_factory_agent, is_raised_by, raised_by,

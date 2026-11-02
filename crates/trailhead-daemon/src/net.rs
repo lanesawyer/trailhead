@@ -663,6 +663,12 @@ impl RemoteDaemon {
         }
     }
 
+    /// Lets through the same peers as another target's daemon, so one [`ApiTunnel`] serves them all.
+    pub fn with_peers(mut self, peers: Peers) -> RemoteDaemon {
+        self.peers = peers;
+        self
+    }
+
     pub fn daemon_id(&self, sandbox: &SandboxId) -> EndpointId {
         sandbox_key(&self.master, sandbox).public()
     }

@@ -136,7 +136,9 @@ impl Factory {
         // case the control plane reattaches, and a stop on purpose mustn't leave it working unobserved (TRAIL-142).
         if !running.is_empty() {
             tracing::info!(runs = running.len(), "cancelling runs in flight");
-            self.daemon.shutdown().await;
+            for p in self.targets() {
+                p.daemon.shutdown().await;
+            }
             let drained = tokio::time::timeout(SHUTDOWN_GRACE, async { while running.join_next().await.is_some() {} });
             if drained.await.is_err() {
                 tracing::warn!(runs = running.len(), "runs didn't stop in time; abandoning them");
@@ -173,10 +175,17 @@ impl Factory {
         }
         *self.starved.lock().unwrap() = None;
         let ready = self.ready_graded(room).await?;
+        let mut survey = self.survey().await;
         for task in ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)) {
+            let Some(target) = self.place(&mut survey) else {
+                tracing::info!("{}", messages::no_target_has_room(&task.key.0));
+                continue;
+            };
             let key = task.key.clone();
             let factory = self.clone();
-            let handle = running.spawn(async move { factory.run_task(&task).await }.in_current_span());
+            let (target, place) = (target.clone(), self.hold(&key, Role::Worker, target));
+            let handle =
+                running.spawn(async move { factory.run_task_on(&task, &target, place).await }.in_current_span());
             keys.insert(handle.id(), key);
         }
         Ok(())
@@ -267,7 +276,8 @@ impl Factory {
         let mut busy = self.pool_labels();
         busy.insert(label::STATE.into(), label::BUSY.into());
         let mut out: Vec<Sandbox> = Vec::new();
-        for s in self.compute.list(&workers).await?.into_iter().chain(self.compute.list(&busy).await?) {
+        let listed = self.list_all(&workers).await?.0.into_iter().chain(self.list_all(&busy).await?.0);
+        for s in listed {
             if !self.abandoned(&s.name) && !out.iter().any(|o| o.name == s.name) {
                 out.push(s);
             }
@@ -294,7 +304,8 @@ impl Factory {
         busy.insert(label::POOL.into(), Role::Worker.as_str().into());
         busy.insert(label::STATE.into(), label::BUSY.into());
         let mut names = HashSet::new();
-        for s in self.compute.list(&workers).await?.into_iter().chain(self.compute.list(&busy).await?) {
+        let listed = self.list_all(&workers).await?.0.into_iter().chain(self.list_all(&busy).await?.0);
+        for s in listed {
             if s.labels.get(label::REPO).is_some_and(|r| *r != mine) {
                 names.insert(s.name);
             }
@@ -353,8 +364,14 @@ impl Factory {
         }
         let mut out = Vec::new();
         let ready = self.ready_graded(room).await?;
+        let mut survey = self.survey().await;
         for task in ready.into_iter().filter(|t| self.setback_over(&t.key)) {
-            let outcome = self.run_task(&task).await?;
+            let Some(target) = self.place(&mut survey) else {
+                tracing::info!("{}", messages::no_target_has_room(&task.key.0));
+                continue;
+            };
+            let place = self.hold(&task.key, Role::Worker, target);
+            let outcome = self.run_task_on(&task, target, place).await?;
             out.push((task, outcome));
         }
         Ok(out)

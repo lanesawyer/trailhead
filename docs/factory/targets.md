@@ -1,6 +1,6 @@
 # Compute targets: local first, Sprites as overflow
 
-Proposal (2026-10-31, TRAIL-504), for review, with the choices below marked **Decided** made by Lane the same day. Today a factory runs on one compute. This page lets it run on several at once, prefer the free one, and give the local machine back when Lane needs it. Docker on the local machine and Sprites are the first two targets; any later `Compute` is one more.
+Proposal (2026-10-31, TRAIL-504; config, placement, pools and reconcile built in TRAIL-505), for review, with the choices below marked **Decided** made by Lane the same day. Today a factory runs on one compute. This page lets it run on several at once, prefer the free one, and give the local machine back when Lane needs it. Docker on the local machine and Sprites are the first two targets; any later `Compute` is one more.
 
 ## What's decided
 
@@ -13,7 +13,7 @@ Proposal (2026-10-31, TRAIL-504), for review, with the choices below marked **De
 
 ## Targets
 
-Proposal. A repo lists its targets in `.trailhead.toml`:
+Built (TRAIL-505). A repo lists its targets in `.trailhead.toml`:
 
 ```toml
 [factory.targets.local]
@@ -30,17 +30,19 @@ usd_per_vcpu_hour = 0.0385
 usd_per_gb_hour = 0.021875
 ```
 
+`daily_usd` and the two rates are the spend cap (TRAIL-506); until it lands they are rejected as unknown keys. `kind = "docker"` targets take `image`, `network`, `runtime` and `memory_mib` as `[factory.compute]` does. `priority` defaults to 0.
+
 `[factory.compute]` keeps working and means one target, so existing files don't change. Setting both is an error. Listing only `local` is how a factory stays local.
 
-Today `Factory` and `RemoteDaemon` each hold one `Compute`, and these are set once per process: the daemon's directories (`Launch`), the connector list URL, and the model endpoint. TRAIL-522 gathered those into a `Target` (`trailhead_factory::Target`, one `target()` function per compute crate); TRAIL-505 extends it with a name, priority and limits. The `Compute` trait needs nothing more for targets (TRAIL-522 added `logs`).
+A `Factory` holds a `Placed` per target: its `Target`, `Compute`, daemon and provider (the model endpoint differs by target). Set once per process, per target, are the daemon's directories (`Launch`), the connector list URL, and the model endpoint. TRAIL-522 gathered those into a `Target` (`trailhead_factory::Target`, one `target()` function per compute crate); TRAIL-505 extends it with a name, priority and limits. The `Compute` trait needs nothing more for targets (TRAIL-522 added `logs`).
 
-**Placement.** For each ready task, in order, take the first target that is available, under its `max_sandboxes` and under its spend cap. If none qualifies, the task waits. Reviews are placed the same way, on their own.
+**Placement.** For each ready task, in order, take the first target that is available, under its `max_sandboxes` and under its spend cap. If none qualifies, the task waits. Reviews are placed the same way, on their own. Built so far: reachable and under `max_sandboxes`, which counts the repo's worker and reviewer sandboxes on the target (idle pooled ones don't count). Targets are tried by `priority`, lowest first, then by name; `available` and the spend cap arrive with TRAIL-507 and TRAIL-506. A review that finds no room is left due, and reconcile starts it when a place frees up.
 
 **What stays put.** A parked or reworked task whose sandbox still exists stays on that target, because the sandbox holds its state. The task's `factory` metadata records the target beside `host`.
 
-**Pools.** Each target has its own pool. Names carry the target, because `trailhead-w1` could otherwise exist on both.
+**Pools.** Each target has its own pool. Names carry the target, because `trailhead-w1` could otherwise exist on both: `<repo>-<target>-w<n>`. The one target of a `[factory.compute]` file is called `default` and keeps `<repo>-w<n>`, so its existing sandboxes aren't orphaned. Every sandbox also carries a `target` label, and a name must be lowercase letters, digits and single hyphens, and not `default`.
 
-**Reconcile.** It lists every target. A target that can't be reached is unknown, not empty: its sandboxes aren't gone and its tasks aren't requeued. Without this, a frozen VM or a stopped engine would look like every local run had died.
+**Reconcile.** It lists every target. A target that can't be reached is unknown, not empty: its sandboxes aren't gone and its tasks aren't requeued. Built: an in-progress task whose recorded `target` didn't answer (or that recorded none, while any target is down) is left alone and reported as `unknown`; with no target answering, reconcile fails and is retried. Placement skips an unreachable target. Without this, a frozen VM or a stopped engine would look like every local run had died.
 
 **The subscription.** Usage pause applies across targets, because they share one plan. That's the shared host state in TRAIL-168, which comes first. TRAIL-167's many repos reshape the same `Factory` code, so targets should be built to sit under a per-repo `Factory` and leave host-wide state to TRAIL-168.
 

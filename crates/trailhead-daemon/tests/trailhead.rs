@@ -324,5 +324,6 @@ fn target() -> trailhead_factory::Target {
         gateway_list: "http://gateway.test/v1/gateway/list".into(),
         model_endpoint: None,
         hold_socket: None,
+        ..Default::default()
     }
 }

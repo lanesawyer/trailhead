@@ -30,6 +30,8 @@ pub mod label {
     /// Kept failing to release and couldn't be destroyed: out of the pool and the sandbox cap, destroyed when the
     /// compute host lets it.
     pub const BROKEN: &str = "broken";
+    /// The target a sandbox runs on (`docs/factory/targets.md`).
+    pub const TARGET: &str = "target";
     /// The checkpoint a pooled sandbox is restored to before and after each task.
     pub const WARM: &str = "warm";
 }

@@ -70,11 +70,12 @@ pub fn validate(specs: &[RepoSpec]) -> Result<(), String> {
     let mut slugs: HashMap<String, &RepoSpec> = HashMap::new();
     let mut names: HashMap<String, &RepoSpec> = HashMap::new();
     for (i, spec) in specs.iter().enumerate() {
-        if let Some(first) =
-            specs.first().filter(|f| f.config.compute != spec.config.compute || f.config.daemon != spec.config.daemon)
+        if let Some(first) = specs
+            .first()
+            .filter(|f| f.config.target_specs() != spec.config.target_specs() || f.config.daemon != spec.config.daemon)
         {
             return Err(format!(
-                "{} ({}) and {} ({}) differ in [factory.compute] or [factory.daemon]; repos in one process share the sandbox provider and daemon launch",
+                "{} ({}) and {} ({}) differ in [factory.compute], [factory.targets] or [factory.daemon]; repos in one process share the sandbox providers and daemon launch",
                 first.dir.display(),
                 first.slug(),
                 spec.dir.display(),
@@ -203,6 +204,22 @@ mod tests {
             trailhead_factory::ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: None };
         let err = validate(&[a, b]).unwrap_err();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("[factory.compute]"), "{err}");
+    }
+
+    #[test]
+    fn repos_with_different_targets_are_refused() {
+        let mut a = spec("/a", "o", "alpha", "ALPHA", &[]);
+        let b = spec("/b", "o", "beta", "BETA", &[]);
+        a.config.targets.insert(
+            "local".into(),
+            trailhead_factory::TargetConfig {
+                compute: trailhead_factory::ComputeConfig::Sprites,
+                priority: 1,
+                max_sandboxes: None,
+            },
+        );
+        let err = validate(&[a, b]).unwrap_err();
+        assert!(err.contains("/a") && err.contains("/b") && err.contains("[factory.targets]"), "{err}");
     }
 
     #[test]

@@ -31,6 +31,8 @@ pub struct FakeCompute {
     hung_wakes: Arc<Mutex<BTreeSet<String>>>,
     rejected_wakes: Arc<Mutex<BTreeSet<String>>>,
     wake_attempts: Arc<Mutex<BTreeMap<String, usize>>>,
+    /// Whether the compute's API is down: listing fails, while its sandboxes carry on.
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeCompute {
@@ -114,6 +116,11 @@ impl FakeCompute {
         self.failing_after.lock().unwrap().insert((name.to_string(), op), calls);
     }
 
+    /// Makes `list` fail, or work again, like a stopped engine or a frozen VM. Its sandboxes stay as they are.
+    pub fn set_unreachable(&self, down: bool) {
+        self.unreachable.store(down, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn heal(&self, name: &str) {
         self.failing.lock().unwrap().retain(|(n, _)| n != name);
         self.failing_after.lock().unwrap().retain(|(n, _), _| n != name);
@@ -158,6 +165,9 @@ impl Compute for FakeCompute {
     }
 
     async fn list(&self, labels: &Labels) -> Result<Vec<Sandbox>> {
+        if self.unreachable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::Other("connection refused".into()));
+        }
         let found: Vec<Sandbox> = self
             .live
             .lock()

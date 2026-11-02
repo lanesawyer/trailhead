@@ -9,7 +9,7 @@ use trailhead_core::Store;
 use trailhead_factory::compute::label;
 use trailhead_factory::{Labels, Sandbox, Status, Task, TaskKey, Tracker};
 
-use crate::{AGENT, Opts, compute, factory_ctx, load_config, resolve_opts};
+use crate::{AGENT, Opts, computes, factory_ctx, load_config, resolve_opts};
 
 /// The program the control plane starts the daemon as, whose service log `logs` prints.
 const DAEMON_PROGRAM: &str = "trailhead-daemon";
@@ -33,14 +33,18 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = resolve_opts(opts, &paths);
     let (_, _, config) = load_config(&opts)?;
-    let (compute, _) = compute(&config.compute, &opts, &paths, Default::default(), true)?;
+    let computes = computes(&config, &opts, &paths, Default::default(), true)?;
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
     let tracker = CoreTracker::new(store, ctx, AGENT);
 
     let labels =
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
-    let sandboxes = compute.list(&labels).await.map_err(|e| format!("listing sandboxes: {e}"))?;
+    let (sandboxes, unreachable) = list_everywhere(&computes, &labels).await?;
+    for name in &unreachable {
+        eprintln!("target {name} can't be reached; its sandboxes aren't listed");
+    }
+    let sandboxes: Vec<Sandbox> = sandboxes.into_iter().map(|(_, s)| s).collect();
     let tasks = tracker
         .in_flight(&config.repo.project, &config.repo.queue.iter().cloned().map(TaskKey).collect::<Vec<_>>())
         .await
@@ -59,7 +63,7 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = resolve_opts(&logs.opts, &paths);
     let (_, _, config) = load_config(&opts)?;
-    let (compute, _) = compute(&config.compute, &opts, &paths, Default::default(), true)?;
+    let computes = computes(&config, &opts, &paths, Default::default(), true)?;
 
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
@@ -69,10 +73,20 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
 
     let wanted =
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
-    let sandboxes = compute.list(&wanted).await.map_err(|e| format!("listing sandboxes: {e}"))?;
+    let (found, unreachable) = list_everywhere(&computes, &wanted).await?;
+    let sandboxes: Vec<Sandbox> = found.iter().map(|(_, s)| s.clone()).collect();
     let sandbox = find_sandbox(&task, &sandboxes).ok_or_else(|| {
-        format!("{} has no sandbox right now (it isn't running, or its sandbox was released or destroyed)", key.0)
+        let unknown = if unreachable.is_empty() {
+            String::new()
+        } else {
+            format!("; target(s) {} couldn't be reached, so it may be there", unreachable.join(", "))
+        };
+        format!(
+            "{} has no sandbox right now (it isn't running, or its sandbox was released or destroyed){unknown}",
+            key.0
+        )
     })?;
+    let compute = &computes[found.iter().find(|(_, s)| s.name == sandbox.name).map_or(0, |(i, _)| *i)].0;
 
     let mut printed = String::new();
     loop {
@@ -190,6 +204,27 @@ fn task_line(t: &Task) -> String {
     }
     line.push_str(&format!("\n      {}", t.title));
     line
+}
+
+/// The sandboxes matching `labels` on every target, each with the index of the target it is on, and the names of the
+/// targets that couldn't be reached. An error only when none could.
+async fn list_everywhere(
+    computes: &[crate::Built],
+    labels: &Labels,
+) -> Result<(Vec<(usize, Sandbox)>, Vec<String>), String> {
+    let mut found = Vec::new();
+    let mut unreachable = Vec::new();
+    let mut last = String::new();
+    for (i, (compute, target)) in computes.iter().enumerate() {
+        match compute.list(labels).await {
+            Ok(listed) => found.extend(listed.into_iter().map(|s| (i, s))),
+            Err(e) => {
+                last = format!("listing sandboxes on {}: {e}", target.name);
+                unreachable.push(target.name.clone());
+            }
+        }
+    }
+    if unreachable.len() == computes.len() { Err(last) } else { Ok((found, unreachable)) }
 }
 
 #[cfg(test)]
