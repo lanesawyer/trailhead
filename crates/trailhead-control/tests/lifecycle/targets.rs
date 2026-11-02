@@ -36,8 +36,13 @@ struct Two {
 }
 
 fn two() -> Two {
+    two_with(TARGETS, None)
+}
+
+/// `two` with the given target tables, and the file its factory keeps the day's spend in.
+fn two_with(targets: &str, spend_file: Option<std::path::PathBuf>) -> Two {
     let config = CONFIG.replace("name = \"trailhead\"\n", "name = \"trailhead\"\nmax_sandboxes = 3\n");
-    let config = FactoryConfig::parse_table(&format!("{config}{TARGETS}"), "TRAIL", None).unwrap();
+    let config = FactoryConfig::parse_table(&format!("{config}{targets}"), "TRAIL", None).unwrap();
     let tracker = FakeTracker::new("factory");
     let codehost = FakeCodeHost::new();
     let mut placed = Vec::new();
@@ -58,7 +63,10 @@ fn two() -> Two {
         });
         sides.push(Side { compute, harness });
     }
-    let factory = Factory::with_targets(config, placed, Arc::new(tracker.clone()), Host::new(None));
+    let mut factory = Factory::with_targets(config, placed, Arc::new(tracker.clone()), Host::new(None));
+    if let Some(path) = spend_file {
+        factory = factory.with_spend_file(path);
+    }
     let cloud = sides.pop().unwrap();
     let local = sides.pop().unwrap();
     Two { factory, tracker, local, cloud }
@@ -250,4 +258,56 @@ async fn a_review_counts_on_its_own_target_and_the_worker_no_longer_on_its() {
     };
     assert_eq!(ran_on(cloud, Role::Worker), vec![next.0.clone()]);
     assert_eq!(ran_on(cloud, Role::Reviewer), vec![next.0.clone()], "the worker's place was given up for the review");
+}
+
+const CAPPED: &str = r#"
+[targets.local]
+kind = "docker"
+priority = 1
+max_sandboxes = 1
+
+[targets.cloud]
+kind = "sprites"
+priority = 2
+daily_usd = 5
+"#;
+
+fn spend_file(dir: &tempfile::TempDir, cloud_micros: u64, day: &str) -> std::path::PathBuf {
+    let path = dir.path().join("spend.json");
+    std::fs::write(&path, format!(r#"{{"day":"{day}","spent":{{"cloud":{cloud_micros}}}}}"#)).unwrap();
+    path
+}
+
+fn today() -> String {
+    jiff::Zoned::now().date().to_string()
+}
+
+#[tokio::test]
+async fn a_target_at_its_daily_cap_takes_no_new_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    // The cap was reached before this process started.
+    let t = two_with(CAPPED, Some(spend_file(&dir, 5_000_000, &today())));
+    let (first, second) = (t.tracker.add_task("TRAIL", "First", ""), t.tracker.add_task("TRAIL", "Second", ""));
+    t.local.harness.push(Role::Worker, Script::new(changes()));
+    t.local.harness.push(Role::Reviewer, Script::new(approve()));
+    t.factory.tick().await.unwrap();
+    assert_eq!(ran(&t.local, Role::Worker), vec![first.0.clone()]);
+    assert!(ran(&t.cloud, Role::Worker).is_empty(), "the cap kept the second task off the cloud");
+    assert_eq!(t.tracker.task(&second).status, Status::Open);
+}
+
+#[tokio::test]
+async fn a_target_under_its_cap_or_with_yesterdays_spend_still_takes_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    for (micros, day) in [(4_000_000, today()), (9_000_000, "2000-01-01".to_string())] {
+        let t = two_with(CAPPED, Some(spend_file(&dir, micros, &day)));
+        t.tracker.add_task("TRAIL", "First", "");
+        let second = t.tracker.add_task("TRAIL", "Second", "");
+        for side in [&t.local, &t.cloud] {
+            side.harness.push(Role::Worker, Script::new(changes()));
+            side.harness.push(Role::Reviewer, Script::new(approve()));
+        }
+        t.factory.tick().await.unwrap();
+        assert_eq!(ran(&t.cloud, Role::Worker), vec![second.0.clone()]);
+    }
 }

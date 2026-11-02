@@ -216,6 +216,7 @@ mod tests {
                 compute: trailhead_factory::ComputeConfig::Sprites,
                 priority: 1,
                 max_sandboxes: None,
+                spend: None,
             },
         );
         let err = validate(&[a, b]).unwrap_err();

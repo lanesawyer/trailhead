@@ -347,6 +347,7 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
             })
             .collect();
         let mut factory = Factory::with_targets(config, placed, tracker.clone(), host.clone())
+            .with_spend_file(paths.data_dir.join("factory").join(format!("spend-{}.json", slug.replace('/', "-"))))
             .with_server_check(server_check(opts.server))
             .with_merge_mode_source(Box::new(move || {
                 let src =

@@ -411,6 +411,14 @@ pub fn review_feedback(reviewer: &str, body: &str) -> String {
     format!("Review by {reviewer}:\n\n{body}")
 }
 
+/// What a worker is told when the repo's `setup` failed on its checkout of the PR branch, so it can fix what broke.
+pub fn setup_failed_feedback(output: &str) -> String {
+    format!(
+        "The repo's `setup` check failed on your checkout before you started, so the build is broken as it \
+         stands. Fixing it is part of this task. The output:\n\n{output}"
+    )
+}
+
 /// What a worker is told when its PR no longer merges cleanly with the base branch.
 pub fn conflict_feedback(pr_url: &str, base: &str) -> String {
     format!(

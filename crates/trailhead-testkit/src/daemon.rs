@@ -49,6 +49,8 @@ pub struct FakeWorkspace {
     prepares_started: AtomicUsize,
     /// Errors the next prepares fail with, before they change anything.
     prepare_errors: Mutex<Vec<String>>,
+    /// Outputs the next prepares that run a `setup` check fail it with, after the checkout is otherwise ready.
+    setup_errors: Mutex<Vec<String>>,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
 
@@ -66,6 +68,12 @@ impl Workspace for FakeWorkspace {
         }
         if let Some(error) = self.prepare_errors.lock().unwrap().pop() {
             return Err(Error::Other(error));
+        }
+        if req.setup.is_some()
+            && let Some(output) = self.setup_errors.lock().unwrap().pop()
+        {
+            *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
+            return Err(Error::SetupFailed(output));
         }
         *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
         *self.merging.lock().unwrap() = req.merge_base && !self.agent_merges.load(Ordering::SeqCst);
@@ -249,6 +257,15 @@ impl LocalDaemon {
         let mut errors = self.workspace.prepare_errors.lock().unwrap();
         for _ in 0..times {
             errors.push(error.to_string());
+        }
+    }
+
+    /// Makes the next `times` prepares that run a `setup` check fail it with this output, as a build that no longer
+    /// compiles would.
+    pub fn fail_setups(&self, times: usize, output: &str) {
+        let mut errors = self.workspace.setup_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push(output.to_string());
         }
     }
 

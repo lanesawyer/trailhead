@@ -3,9 +3,35 @@
 //! neutral code holds none of these facts. A target also has a name, a priority and limits (`docs/factory/targets.md`),
 //! which the factory file gives it.
 
+use crate::Usd;
+
 /// The name of the one target a `[factory.compute]` file means, and of the one a test factory has. Its pooled
 /// sandboxes keep the names they had before targets: `<repo>-w<n>`.
 pub const DEFAULT_TARGET: &str = "default";
+
+/// A paid target's daily cap (`docs/factory/targets.md`). Its cost is estimated from sandbox time, priced as if each
+/// sandbox ran flat out at [`Spend::VCPUS`] and [`Spend::GB`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Spend {
+    /// The most the target may cost in a local day before it takes no new runs.
+    pub daily: Usd,
+    pub per_vcpu_hour: Usd,
+    pub per_gb_hour: Usd,
+}
+
+impl Spend {
+    /// The size a Sprite can grow to.
+    pub const VCPUS: u64 = 8;
+    pub const GB: u64 = 4;
+    /// Fly's rates on 2026-10-31, used when the file gives none.
+    pub const VCPU_HOUR: Usd = Usd(38_500);
+    pub const GB_HOUR: Usd = Usd(21_875);
+
+    /// What one sandbox costs an hour at full size.
+    pub fn hourly(&self) -> Usd {
+        Usd(Self::VCPUS * self.per_vcpu_hour.0 + Self::GB * self.per_gb_hour.0)
+    }
+}
 
 /// One compute's launch facts, and where it stands among a factory's targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +43,8 @@ pub struct Target {
     /// The most sandboxes the repo holds on this target at once, workers and reviewers together. `None` leaves the
     /// repo's own cap to decide.
     pub max_sandboxes: Option<usize>,
+    /// The daily spend cap, for a target that costs money.
+    pub spend: Option<Spend>,
     /// The directory in a sandbox that holds the daemon binary and its secrets file.
     pub dir: String,
     /// Where the repo is checked out in a sandbox.
@@ -35,6 +63,7 @@ impl Default for Target {
             name: DEFAULT_TARGET.into(),
             priority: 0,
             max_sandboxes: None,
+            spend: None,
             dir: String::new(),
             workdir: String::new(),
             gateway_list: String::new(),
@@ -52,6 +81,12 @@ impl Target {
 
     /// This target as the factory file lists it: the file's name, priority and limit over the compute's launch facts.
     pub fn listed(self, spec: &crate::TargetSpec) -> Target {
-        Target { name: spec.name.clone(), priority: spec.priority, max_sandboxes: spec.max_sandboxes, ..self }
+        Target {
+            name: spec.name.clone(),
+            priority: spec.priority,
+            max_sandboxes: spec.max_sandboxes,
+            spend: spec.spend,
+            ..self
+        }
     }
 }
