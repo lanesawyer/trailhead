@@ -45,7 +45,7 @@ pub use host::HostConfig;
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
-pub use target::{DEFAULT_TARGET, Target};
+pub use target::{DEFAULT_TARGET, Spend, Target};
 pub use tracker::{
     Answered, ChangesRequested, Credential, FollowUpTask, HumanContext, METADATA_KEY, MergeDecision, Merged, MergedBy,
     RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, is_factory_agent, is_raised_by, raised_by,
