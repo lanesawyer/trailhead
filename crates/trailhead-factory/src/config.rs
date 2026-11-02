@@ -200,6 +200,8 @@ pub struct TargetConfig {
     pub priority: u32,
     /// The most sandboxes the repo holds here at once; without one only the repo's own cap applies.
     pub max_sandboxes: Option<usize>,
+    /// The daily spend cap and the rates it is priced at.
+    pub spend: Option<crate::Spend>,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +211,9 @@ struct RawTarget {
     #[serde(default)]
     priority: u32,
     max_sandboxes: Option<usize>,
+    daily_usd: Option<f64>,
+    usd_per_vcpu_hour: Option<f64>,
+    usd_per_gb_hour: Option<f64>,
     image: Option<String>,
     network: Option<String>,
     runtime: Option<String>,
@@ -219,6 +224,7 @@ impl TryFrom<RawTarget> for TargetConfig {
     type Error = String;
 
     fn try_from(raw: RawTarget) -> std::result::Result<TargetConfig, String> {
+        let spend = raw_spend(&raw)?;
         let compute = match raw.kind.as_str() {
             "sprites" => {
                 let docker_only = [
@@ -240,8 +246,31 @@ impl TryFrom<RawTarget> for TargetConfig {
             },
             other => return Err(format!("unknown kind `{other}`; the kinds are sprites and docker")),
         };
-        Ok(TargetConfig { compute, priority: raw.priority, max_sandboxes: raw.max_sandboxes })
+        Ok(TargetConfig { compute, priority: raw.priority, max_sandboxes: raw.max_sandboxes, spend })
     }
+}
+
+/// The spend cap a target's keys set, with Fly's rates for any left out.
+fn raw_spend(raw: &RawTarget) -> std::result::Result<Option<crate::Spend>, String> {
+    let amount = |key: &str, v: f64, least: f64| {
+        if v.is_finite() && v >= least {
+            Ok(crate::Usd::dollars(v))
+        } else {
+            Err(format!("`{key}` is not a usable amount: {v}"))
+        }
+    };
+    let Some(daily) = raw.daily_usd else {
+        if raw.usd_per_vcpu_hour.is_some() || raw.usd_per_gb_hour.is_some() {
+            return Err("`usd_per_vcpu_hour` and `usd_per_gb_hour` price a spend cap, so they need `daily_usd`".into());
+        }
+        return Ok(None);
+    };
+    let rate = |key: &str, v: Option<f64>, default: crate::Usd| v.map_or(Ok(default), |v| amount(key, v, 0.0));
+    Ok(Some(crate::Spend {
+        daily: amount("daily_usd", daily, 0.000_001)?,
+        per_vcpu_hour: rate("usd_per_vcpu_hour", raw.usd_per_vcpu_hour, crate::Spend::VCPU_HOUR)?,
+        per_gb_hour: rate("usd_per_gb_hour", raw.usd_per_gb_hour, crate::Spend::GB_HOUR)?,
+    }))
 }
 
 /// A target as the factory runs it: [`TargetConfig`] with its name. [`FactoryConfig::target_specs`] lists them in
@@ -252,6 +281,7 @@ pub struct TargetSpec {
     pub compute: ComputeConfig,
     pub priority: u32,
     pub max_sandboxes: Option<usize>,
+    pub spend: Option<crate::Spend>,
 }
 /// The Docker gateway's name on each sandbox's network (`docs/factory/sandbox.md`).
 pub const GATEWAY_HOST: &str = "trailhead-gateway";
@@ -607,6 +637,7 @@ impl FactoryConfig {
                 compute: self.compute.clone(),
                 priority: 0,
                 max_sandboxes: None,
+                spend: None,
             }];
         }
         let mut specs: Vec<TargetSpec> = self
@@ -617,6 +648,7 @@ impl FactoryConfig {
                 compute: t.compute.clone(),
                 priority: t.priority,
                 max_sandboxes: t.max_sandboxes,
+                spend: t.spend,
             })
             .collect();
         specs.sort_by(|a, b| (a.priority, &a.name).cmp(&(b.priority, &b.name)));
@@ -996,6 +1028,25 @@ require = ["checks", "agent_review", "human"]
     }
 
     #[test]
+    fn a_spend_cap_defaults_to_flys_rates() {
+        let src = format!(
+            "{SAMPLE}\n[targets.sprites]\nkind = \"sprites\"\ndaily_usd = 5\n\n\
+             [targets.dear]\nkind = \"sprites\"\ndaily_usd = 2.5\nusd_per_vcpu_hour = 0.05\nusd_per_gb_hour = 0.03\n"
+        );
+        let specs = parse(&src).unwrap().target_specs();
+        let (dear, sprites) = (specs[0].spend.unwrap(), specs[1].spend.unwrap());
+        assert_eq!(
+            (sprites.daily, sprites.per_vcpu_hour, sprites.per_gb_hour),
+            (crate::Usd::dollars(5.0), crate::Spend::VCPU_HOUR, crate::Spend::GB_HOUR)
+        );
+        // 8 vCPUs and 4 GB: about $0.40 an hour at Fly's rates.
+        assert_eq!(sprites.hourly(), crate::Usd::micros(395_500));
+        assert_eq!((dear.daily, dear.hourly()), (crate::Usd::dollars(2.5), crate::Usd::micros(520_000)));
+        let plain = format!("{SAMPLE}\n[targets.a]\nkind = \"docker\"\n");
+        assert!(parse(&plain).unwrap().target_specs()[0].spend.is_none());
+    }
+
+    #[test]
     fn targets_and_compute_together_are_refused() {
         let src = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\n\n[targets.local]\nkind = \"docker\"\n");
         let Err(Error::Config(m)) = parse(&src) else { panic!("expected a config error") };
@@ -1009,6 +1060,8 @@ require = ["checks", "agent_review", "human"]
             ("[targets.local]\nkind = \"sprites\"\nimage = \"x\"", "image"),
             ("[targets.local]\nkind = \"docker\"\nimgae = \"x\"", "imgae"),
             ("[targets.local]\nkind = \"docker\"\nmax_sandboxes = 0", "max_sandboxes"),
+            ("[targets.local]\nkind = \"docker\"\ndaily_usd = 0", "daily_usd"),
+            ("[targets.local]\nkind = \"docker\"\nusd_per_gb_hour = 0.02", "daily_usd"),
             ("[targets.Local]\nkind = \"docker\"", "name"),
             ("[targets.default]\nkind = \"docker\"", "default"),
             ("[targets.a_b]\nkind = \"docker\"", "name"),

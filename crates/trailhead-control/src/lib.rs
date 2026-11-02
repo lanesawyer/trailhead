@@ -13,6 +13,7 @@ mod pool;
 mod reconcile;
 mod review;
 mod run_loop;
+mod spend;
 mod timing;
 
 pub use core_tracker::CoreTracker;
@@ -141,6 +142,10 @@ pub struct Factory {
     /// The target each worker or review being started has been placed on, until it ends. Its sandbox may not exist yet, so
     /// without this a target's limit would be passed by runs starting together.
     placed: Arc<Mutex<HashMap<(TaskKey, trailhead_factory::Role), String>>>,
+    /// What each paid target has cost today, kept in a file when the factory is given one.
+    ledger: Arc<spend::Ledger>,
+    /// The targets last reported as at their daily cap, so reaching it and leaving it are each logged once.
+    capped: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -225,6 +230,8 @@ impl Factory {
             ungraded: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
             placed: Arc::default(),
+            ledger: Arc::default(),
+            capped: Mutex::default(),
         }
     }
 
@@ -232,6 +239,12 @@ impl Factory {
     /// takes effect on the next pass. A failed read keeps the last mode read and is logged.
     pub fn with_merge_mode_source(mut self, source: MergeModeSource) -> Factory {
         self.merge_mode_source = Some(source);
+        self
+    }
+
+    /// Keeps the day's spend on paid targets in `path`, so a restart doesn't reset it.
+    pub fn with_spend_file(mut self, path: std::path::PathBuf) -> Factory {
+        self.ledger = Arc::new(spend::Ledger::kept_in(path, &spend::today()));
         self
     }
 

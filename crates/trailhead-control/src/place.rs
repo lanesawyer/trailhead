@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use trailhead_factory::{Daemon, Labels, ModelProvider, Role, Sandbox, TaskKey, label};
 
+use tokio::time::Instant;
+
+use crate::spend::{self, Ledger};
 use crate::{Factory, Placed};
 
 /// How full each target is, read once and then added to as tasks are placed.
@@ -14,6 +17,8 @@ pub(crate) struct Survey {
     loads: HashMap<String, usize>,
     /// Targets whose compute didn't answer: nothing is placed there, and nothing is assumed about what is.
     pub(crate) down: HashSet<String>,
+    /// Targets that have cost their daily cap: they take no new runs, and those running finish.
+    capped: HashSet<String>,
 }
 
 /// A worker's or review's place on a target, held from the moment it is chosen until it ends, because its sandbox
@@ -21,11 +26,13 @@ pub(crate) struct Survey {
 pub(crate) struct Placement {
     placed: Arc<Mutex<HashMap<(TaskKey, Role), String>>>,
     key: (TaskKey, Role),
+    ledger: Arc<Ledger>,
 }
 
 impl Drop for Placement {
     fn drop(&mut self) {
         self.placed.lock().unwrap().remove(&self.key);
+        self.ledger.end(&self.key, Instant::now(), &spend::today());
     }
 }
 
@@ -96,6 +103,28 @@ impl Factory {
         Ok(out)
     }
 
+    /// The targets that have cost their daily cap today. Reaching the cap and leaving it (a new day, or a raised cap)
+    /// are each logged once.
+    fn capped(&self) -> HashSet<String> {
+        let (now, today) = (Instant::now(), spend::today());
+        let mut capped = HashSet::new();
+        let mut logged = self.capped.lock().unwrap();
+        for p in &self.targets {
+            let Some(spend) = &p.target.spend else { continue };
+            let name = &p.target.name;
+            let spent = self.ledger.spent(name, now, &today);
+            if spent >= spend.daily {
+                if logged.insert(name.clone()) {
+                    tracing::warn!(target = %name, %spent, cap = %spend.daily, "the daily spend cap is reached; taking no new runs on this target, and running ones finish");
+                }
+                capped.insert(name.clone());
+            } else if logged.remove(name) {
+                tracing::info!(target = %name, %spent, cap = %spend.daily, "under the daily spend cap again; placing runs on this target");
+            }
+        }
+        capped
+    }
+
     /// How full each target is now.
     pub(crate) async fn survey(&self) -> Survey {
         let placed = self.placed.lock().unwrap().clone();
@@ -122,7 +151,8 @@ impl Factory {
         for target in placed.into_values() {
             *loads.entry(target).or_default() += 1;
         }
-        Survey { loads, down }
+        let capped = self.capped();
+        Survey { loads, down, capped }
     }
 
     /// The first target that is reachable and under its `max_sandboxes`, now one fuller. `None` when none has room.
@@ -130,6 +160,7 @@ impl Factory {
         let chosen = self.targets.iter().find(|p| {
             let name = &p.target.name;
             !survey.down.contains(name)
+                && !survey.capped.contains(name)
                 && p.target.max_sandboxes.is_none_or(|max| survey.loads.get(name).copied().unwrap_or(0) < max)
         })?;
         *survey.loads.entry(chosen.target.name.clone()).or_default() += 1;
@@ -140,7 +171,10 @@ impl Factory {
     pub(crate) fn hold(&self, task: &TaskKey, role: Role, target: &Placed) -> Placement {
         let key = (task.clone(), role);
         self.placed.lock().unwrap().insert(key.clone(), target.target.name.clone());
-        Placement { placed: self.placed.clone(), key }
+        if let Some(spend) = &target.target.spend {
+            self.ledger.begin(key.clone(), &target.target.name, spend.hourly(), Instant::now());
+        }
+        Placement { placed: self.placed.clone(), key, ledger: self.ledger.clone() }
     }
 
     /// The target's name as a pooled sandbox's name carries it: nothing for the default target, whose sandboxes keep

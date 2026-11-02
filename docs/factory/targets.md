@@ -30,7 +30,7 @@ usd_per_vcpu_hour = 0.0385
 usd_per_gb_hour = 0.021875
 ```
 
-`daily_usd` and the two rates are the spend cap (TRAIL-506); until it lands they are rejected as unknown keys. `kind = "docker"` targets take `image`, `network`, `runtime` and `memory_mib` as `[factory.compute]` does. `priority` defaults to 0.
+`daily_usd` and the two rates are the spend cap (TRAIL-506, below). The rates default to the ones shown, and need `daily_usd`. `kind = "docker"` targets take `image`, `network`, `runtime` and `memory_mib` as `[factory.compute]` does. `priority` defaults to 0.
 
 `[factory.compute]` keeps working and means one target, so existing files don't change. Setting both is an error. Listing only `local` is how a factory stays local.
 
@@ -48,13 +48,15 @@ A `Factory` holds a `Placed` per target: its `Target`, `Compute`, daemon and pro
 
 ## Spend
 
-Proposal. Sprites has a usage API: `GET /v1/usage` and `/v1/usage/{sprite}` return `cpu_time_sec` and `reserved_memory_byte_sec`, by time bucket and per Sprite, and need the `usage.read` scope. It reports usage, not dollars, so the rates are config, from [Fly's pricing](https://fly.io/sprites.md) ($0.0385 per vCPU hour and $0.021875 per GB hour on 2026-10-31).
+Built (TRAIL-506): `daily_usd`, the local estimate and the cap. The usage API poll isn't built yet, because the shape of its answer is unconfirmed (see the open questions). Sprites has a usage API: `GET /v1/usage` and `/v1/usage/{sprite}` return `cpu_time_sec` and `reserved_memory_byte_sec`, by time bucket and per Sprite, and need the `usage.read` scope. It reports usage, not dollars, so the rates are config, from [Fly's pricing](https://fly.io/sprites.md) ($0.0385 per vCPU hour and $0.021875 per GB hour on 2026-10-31).
 
 It can't be trusted alone. Checked 2026-10-31 with the factory's token: a 200 with `partial: false`, zero usage, `last_recorded_at: null`, and an empty `/v1/usage/filters/sprites`, for an organization whose Sprites had run the night before. An empty answer looks exactly like nothing spent, so a cap built on it alone would never trip.
 
 So the control plane also keeps its own estimate, and the cap uses the higher of the two: its sandbox time on the target, priced as if the Sprite ran flat out (the billing docs' 8 vCPUs and 4 GB, about $0.40 an hour, or about 12.6 Sprite-hours for $5). That over-counts an idle Sprite, which fails towards spending less. The estimate is kept in a file under the data dir, because the control plane has no database and a restart mustn't reset the day. A day is the machine's local day. Polls stay rare, at most once a minute, like the other usage polls.
 
 At the cap, the target takes no new runs, those running finish, and the log and `factory status` say so. So the cap can be passed by what's already running. It covers compute only: storage and a plan's included allowance aren't counted, so it can differ from the invoice.
+
+The estimate is in `<data dir>/factory/spend-<repo>.json`, as microdollars by target for one local day; a file from an earlier day, or one that can't be read, starts the day over. A run counts from the moment it is placed until it ends, so a parked task's idle sandbox, which Sprites pause, costs nothing. `factory status` doesn't show the spend yet; the control plane logs when a target reaches the cap and when it is under it again.
 
 The cap is per repo for now. A host-wide cap belongs with TRAIL-168 and TRAIL-169's user config.
 
