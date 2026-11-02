@@ -260,6 +260,23 @@ impl Factory {
     /// Puts one in-flight task right; true when its PR is due a review.
     pub(crate) async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
         let Some(name) = &task.run.sandbox else { return Ok(false) };
+        // A park for the reviewer's breach that was cut short: finish it rather than let a worker rerun the task.
+        if let Some(breach) =
+            task.run.review_breach.as_ref().filter(|b| !b.parked && b.attempt == task.run.attempt.unwrap_or(1))
+        {
+            let mine = task.holder.as_deref() == Some(self.tracker.agent());
+            let claim = match task.status {
+                Status::Open => Some(true),
+                Status::InProgress if mine => Some(false),
+                _ => None,
+            };
+            if let Some(claim) = claim {
+                tracing::warn!(task = %task.key.0, "finishing the park for the reviewer's breach");
+                self.park_review_breach(&task.key, breach.clone(), claim, task.run.retries.unwrap_or(0)).await?;
+                done.breached.push(task.key.0.clone());
+                return Ok(false);
+            }
+        }
         match task.status {
             Status::InProgress => {
                 let sub = self.tracker.sub_agent(name);

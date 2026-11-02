@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use trailhead_factory::messages;
 use trailhead_factory::{
-    ChangesRequested, CheckResult, Error, PrRef, Result, Role, RunReport, RunRequest, RunResult, RunUpdate, Task,
-    TaskKey, VerdictKind, review_name,
+    ChangesRequested, CheckResult, Error, PrRef, Result, ReviewBreach, Role, RunReport, RunRequest, RunResult,
+    RunUpdate, Task, TaskKey, VerdictKind, review_name,
 };
 
 use crate::lifecycle::{Begin, Run, spec, token_ttl};
@@ -110,9 +110,24 @@ impl Factory {
         let finished =
             matches!(run, Run::Breach(..) | Run::Report(RunReport { result: RunResult::Reviewed(_), .. }, _));
         let infra_failures = if finished { infra_prior.filter(|n| *n > 0).map(|_| 0) } else { None };
+        // A review that ran again after a breach park was cut short settles that breach in the same write, so a later
+        // rework reopening the task isn't parked for it.
+        let settled = shown
+            .run
+            .review_breach
+            .as_ref()
+            .filter(|b| !b.parked && !matches!(run, Run::Breach(..)))
+            .map(|b| ReviewBreach { parked: true, ..b.clone() });
         sub.report(
             &task.key,
-            RunUpdate { spend: Some(spend), reviewed, reviewed_head, infra_failures, ..RunUpdate::default() },
+            RunUpdate {
+                spend: Some(spend),
+                reviewed,
+                reviewed_head,
+                infra_failures,
+                review_breach: settled,
+                ..RunUpdate::default()
+            },
         )
         .await?;
         self.tracker.revoke_sub_agent(&name).await?;
@@ -163,19 +178,14 @@ impl Factory {
                 // already destroyed, so there's nothing to suspend.
                 self.setbacks.lock().unwrap().remove(&task.key);
                 tracing::warn!(task = %task.key.0, %reason, "reviewer breached its budget; parking");
-                self.tracker.reopen(&task.key).await?;
-                self.tracker.claim(&task.key).await?;
-                let question = messages::review_breach_question(round, &reason);
-                self.tracker.ask(&task.key, &question).await?;
-                // A fresh count and run name for when a human reopens the task, last like `request_rework`'s.
-                let fresh = RunUpdate {
-                    review_rounds: Some(0),
-                    retries: Some(task.run.retries.unwrap_or(0) + 1),
-                    ..RunUpdate::default()
-                };
-                if let Err(e) = self.tracker.report(&task.key, fresh).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't reset the review count");
+                // Recorded before the task is reopened, so a park cut short is finished by reconcile.
+                let breach = ReviewBreach { round, attempt, reason: reason.clone(), parked: false };
+                let pending = RunUpdate { review_breach: Some(breach.clone()), ..RunUpdate::default() };
+                if let Err(e) = self.tracker.report(&task.key, pending).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't record the reviewer's breach before parking");
                 }
+                self.tracker.reopen(&task.key).await?;
+                self.park_review_breach(&task.key, breach, true, task.run.retries.unwrap_or(0)).await?;
                 Ok(Outcome::Parked { reason })
             }
         }
@@ -249,6 +259,42 @@ impl Factory {
             }
         }
         error
+    }
+
+    /// Parks a task for its reviewer's breach: claims it if `claim`, marks the breach parked with a fresh review count
+    /// for when a human reopens the task, then asks the question. The mark comes first so that a question that was
+    /// asked can't be asked again once it's answered; it's taken back if the ask fails, so reconcile finishes the park.
+    pub(crate) async fn park_review_breach(
+        &self,
+        key: &TaskKey,
+        breach: ReviewBreach,
+        claim: bool,
+        retries: u32,
+    ) -> Result<()> {
+        if claim {
+            self.tracker.claim(key).await?;
+        }
+        let question = messages::review_breach_question(breach.round, &breach.reason);
+        let parked = RunUpdate {
+            review_breach: Some(ReviewBreach { parked: true, ..breach.clone() }),
+            review_rounds: Some(0),
+            retries: Some(retries + 1),
+            ..RunUpdate::default()
+        };
+        self.tracker.report(key, parked).await?;
+        if let Err(e) = self.tracker.ask(key, &question).await {
+            let undo = RunUpdate {
+                review_breach: Some(ReviewBreach { parked: false, ..breach.clone() }),
+                review_rounds: Some(breach.round),
+                retries: Some(retries),
+                ..RunUpdate::default()
+            };
+            if let Err(re) = self.tracker.report(key, undo).await {
+                tracing::warn!(task = %key.0, error = %re, "couldn't take back the breach's park mark");
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// A review asked for changes: the task goes back to the queue with the review in its metadata, so the next run
