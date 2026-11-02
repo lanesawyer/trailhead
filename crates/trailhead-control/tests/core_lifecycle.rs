@@ -1000,3 +1000,25 @@ async fn approve_is_refused_for_work_the_factory_did_without_asking_for_a_review
     assert!(!why.contains("list it as one") && !why.contains("delegated reviewer, so"), "{why}");
     assert_eq!(r.show(&key).await.status, Status::InReview);
 }
+
+#[tokio::test]
+async fn a_stale_conflict_after_a_rework_is_ignored_even_when_the_host_first_answers_not_yet() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+
+    // The first poll after the push has no answer yet, so it doesn't spend the mark; the stale `false` after it is
+    // still read as unknown.
+    r.codehost.set_mergeable(&pr, None);
+    assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
+    r.codehost.set_mergeable(&pr, Some(false));
+    assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty(), "a stale answer for the old head");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+    assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0), "a settled false counts");
+}

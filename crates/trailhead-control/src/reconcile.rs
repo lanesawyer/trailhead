@@ -250,9 +250,10 @@ impl Factory {
             }
             PrState::Open { mergeable } => {
                 // GitHub works `mergeable` out after a push, so right after one a `false` may be the old head's. Read
-                // it as unknown this once; the next reconcile asks again and gets the settled answer.
-                let fresh = self.fresh_pushes.lock().unwrap().remove(&task.key);
-                Ok(Some(if fresh && mergeable == Some(false) { None } else { mergeable }))
+                // the first answer as unknown if it's a `false`; a `None` (still being worked out) isn't an answer, so
+                // the mark waits for one, and the next reconcile asks again and gets the settled reading.
+                let stale = mergeable.is_some() && self.fresh_pushes.lock().unwrap().remove(&task.key);
+                Ok(Some(if stale && mergeable == Some(false) { None } else { mergeable }))
             }
         }
     }
