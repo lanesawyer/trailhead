@@ -237,6 +237,10 @@ pub struct ChangesRequested {
 pub struct ReviewBreach {
     /// The review round the breach happened in.
     pub round: u32,
+    /// The attempt whose PR was being reviewed. A breach only parks the task while it is still on that attempt; a
+    /// worker run that has started since has left the breach behind.
+    #[serde(default)]
+    pub attempt: u32,
     pub reason: String,
     /// The task was parked with the question; until then, reconcile finishes the park.
     #[serde(default)]

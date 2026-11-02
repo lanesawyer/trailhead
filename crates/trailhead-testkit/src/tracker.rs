@@ -349,6 +349,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn claim(&self, task: &TaskKey) -> Result<()> {
+        self.inject("claim")?;
         self.write(task, |t, me| match (&t.holder, t.status) {
             (Some(h), _) if h == me => Ok(()),
             (None, Status::Open) => {
@@ -422,6 +423,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn reopen(&self, task: &TaskKey) -> Result<()> {
+        self.inject("reopen")?;
         self.write(task, |t, _| {
             if !can_transition(t.status, Status::Open) {
                 return Err(Error::Conflict(format!("{} can't be reopened from {:?}", t.key.0, t.status)));

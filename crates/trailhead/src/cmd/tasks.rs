@@ -377,7 +377,12 @@ mod tests {
             changes_requested: Some(
                 serde_json::from_value(json!({ "reviewer": "r", "body": "b", "attempt": 1 })).unwrap(),
             ),
-            review_breach: Some(trailhead_factory::ReviewBreach { round: 1, reason: "x".into(), parked: false }),
+            review_breach: Some(trailhead_factory::ReviewBreach {
+                round: 1,
+                attempt: 1,
+                reason: "x".into(),
+                parked: false,
+            }),
             conflict_reworks: Some(1),
             attempt_base: Some(1),
             gave_up: Some(1),

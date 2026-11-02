@@ -261,7 +261,9 @@ impl Factory {
     pub(crate) async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
         let Some(name) = &task.run.sandbox else { return Ok(false) };
         // A park for the reviewer's breach that was cut short: finish it rather than let a worker rerun the task.
-        if let Some(breach) = task.run.review_breach.as_ref().filter(|b| !b.parked) {
+        if let Some(breach) =
+            task.run.review_breach.as_ref().filter(|b| !b.parked && b.attempt == task.run.attempt.unwrap_or(1))
+        {
             let mine = task.holder.as_deref() == Some(self.tracker.agent());
             let claim = match task.status {
                 Status::Open => Some(true),

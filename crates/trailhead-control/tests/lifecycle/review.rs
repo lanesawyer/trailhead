@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use trailhead_control::Outcome;
-use trailhead_factory::{CiState, FollowUp, Role, RunOutcome, Status, TaskKey, Tracker, VerdictKind, run_name};
+use trailhead_factory::{CiState, FollowUp, PrRef, Role, RunOutcome, Status, TaskKey, Tracker, VerdictKind, run_name};
 use trailhead_testkit::Script;
 
 use crate::common::*;
@@ -619,4 +619,77 @@ async fn a_breach_park_cut_short_is_finished_by_reconcile_without_a_rerun() {
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("steps"), "{}", questions[0].body);
+}
+
+/// A task in review whose first review will breach its step budget, and the PR.
+async fn breaching_rig() -> (Rig, TaskKey, PrRef) {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Big diff", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
+    (r, key, pr)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_breach_park_finished_from_open_claims_the_task_first() {
+    let (r, key, _) = breaching_rig().await;
+    // The claim fails after the reopen: the task is left Open.
+    r.tracker.fail_next("factory", "claim", 1);
+    let _ = r.factory.reconcile().await;
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open);
+    assert!(!task.run.review_breach.expect("recorded before the reopen").parked);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert!(task.run.review_breach.unwrap().parked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_breach_whose_reopen_failed_is_settled_by_the_next_review() {
+    let (r, key, _) = breaching_rig().await;
+    r.tracker.fail_next("factory", "reopen", 1);
+    let _ = r.factory.reconcile().await;
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    assert!(!task.run.review_breach.expect("recorded").parked);
+
+    // The review runs again and asks for changes, which reopens the task for a rework.
+    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+    r.harness.push(Role::Reviewer, Script::new(request_changes("tidy")));
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.task(&key).run.review_breach.unwrap().parked, "the review settled the breach");
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.breached.is_empty(), "{done:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "left for the rework, not parked for the old breach");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_answered_breach_question_is_not_asked_again_when_the_final_report_failed() {
+    let (r, key, _) = breaching_rig().await;
+    // The mark is written before the ask, so no later report is left to fail; the ask is what fails here.
+    r.tracker.fail_next("factory", "ask", 1);
+    let _ = r.factory.reconcile().await;
+    let breach = r.tracker.task(&key).run.review_breach.unwrap();
+    assert!(!breach.parked, "taken back when the ask failed");
+
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert!(task.run.review_breach.unwrap().parked);
+
+    // A person answers: the task reopens, and reconcile doesn't park it again.
+    r.tracker.set_status(&key, Status::Open);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.breached.is_empty(), "{done:?}");
+    let questions = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").count();
+    assert_eq!(questions, 1);
 }
