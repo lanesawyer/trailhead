@@ -678,8 +678,11 @@ async fn creating_a_task_lists_possible_duplicates_among_open_tasks() {
     assert!(unrelated.body.get("possible_duplicates").is_none(), "{}", unrelated.body);
 
     // A finished task is no longer a candidate.
-    api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"status": "done"}))).await;
-    api.as_human("PATCH", "/v1/tasks/AUTH-2", Some(json!({"status": "done"}))).await;
+    let done1 = api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"status": "done"}))).await;
+    assert_eq!(done1.status, StatusCode::OK, "{}", done1.body);
+    let done2 = api.as_human("PATCH", "/v1/tasks/AUTH-2", Some(json!({"status": "done"}))).await;
+    assert_eq!(done2.status, StatusCode::OK, "{}", done2.body);
     let again = create("Rotate signing keys").await;
+    assert_eq!(again.status, StatusCode::CREATED, "{}", again.body);
     assert!(again.body.get("possible_duplicates").is_none(), "{}", again.body);
 }
