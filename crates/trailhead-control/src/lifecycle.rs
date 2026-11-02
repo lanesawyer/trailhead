@@ -11,7 +11,6 @@ use trailhead_factory::{
 };
 
 use crate::place::Placement;
-use crate::reconcile::merged_by;
 use crate::timing::{backoff, unix_now, until};
 use crate::{CANCEL_GRACE, Factory, Outcome, Placed};
 
@@ -35,7 +34,7 @@ impl Factory {
             match codehost.pr_state(pr).await? {
                 PrState::Merged { commit } => {
                     self.tracker.claim(&task.key).await?;
-                    let by = merged_by(task);
+                    let by = self.merged_by(task, pr).await?;
                     self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
                     return Ok(Outcome::Settled { reason: messages::settled_merged(&pr.url) });
                 }
