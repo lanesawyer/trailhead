@@ -69,6 +69,18 @@ pub fn rig_with(config: &str) -> Rig {
     Rig { factory, tracker, compute, codehost, harness, daemon }
 }
 
+/// A control-plane restart: a new `Factory` over the rig's tracker, compute and daemon, with nothing held in memory.
+pub fn restart(r: &mut Rig, config: &str) {
+    r.factory = Factory::new(
+        FactoryConfig::parse_table(config, "TRAIL", None).unwrap(),
+        Arc::new(r.compute.clone()),
+        Arc::new(r.tracker.clone()),
+        Arc::new(FakeProvider::new(1)),
+        r.daemon.clone(),
+        Host::new(None),
+    );
+}
+
 pub fn changes() -> RunOutcome {
     RunOutcome::Changes {
         commits: vec![Commit {

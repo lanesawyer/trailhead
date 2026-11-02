@@ -523,6 +523,31 @@ async fn infrastructure_failures_past_the_cap_park_the_task_as_the_infrastructur
     assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
 }
 
+#[tokio::test]
+async fn worker_infrastructure_failures_keep_counting_across_a_control_plane_restart() {
+    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 3");
+    let mut r = rig_with(&config);
+    let key = r.tracker.add_task("TRAIL", "Lost daemon", "");
+    r.daemon.fail_runs(3, "not found: run trail-1 on this daemon");
+    for n in 1..=3u32 {
+        // Each failure is the first its factory has seen: only the tracker remembers the earlier ones.
+        restart(&mut r, &config);
+        let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+        assert!(err.to_string().contains("not found: run"), "{err}");
+        let task = r.tracker.task(&key);
+        if n < 3 {
+            assert_eq!(task.status, Status::Open, "failure {n} is retried");
+            assert_eq!(task.run.infra_failures, Some(n), "the count keeps growing");
+        }
+    }
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked at max_infra_failures");
+    assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("it's not the task"), "{}", questions[0].body);
+}
+
 #[tokio::test(start_paused = true)]
 async fn infrastructure_retries_wait_longer_each_time_up_to_a_cap() {
     let r = rig();
