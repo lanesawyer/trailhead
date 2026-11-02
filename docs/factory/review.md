@@ -85,7 +85,7 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 The control plane acts as the merger. It is the factory project's only delegated reviewer ([lifecycle.md](lifecycle.md)), and the only agent that moves a factory task to `approved` or `done`.
 
 1. After each pass that could change the answer (a verdict, a rework, CI finishing, you approving, a reconcile), it evaluates the PR's gates against its **current head**: the sandbox checks passed, the repo's CI is green on that commit, the latest verdict on that head approves, and, for grades whose gates require a human, you have approved.
-2. When they pass, it moves the task to `approved`. A push after that sends it back to `in_review`.
+2. When they pass, it moves the task to `approved`. A push after that sends it back to `in_review`. So does a gate other than CI that stops passing on the same head, for example when the grade is raised to one that needs `human`: the control plane withdraws its own approval (when `approved_head` is set) and the task goes back to `in_review` to wait for the missing gate (TRAIL-262). Your approval is left alone, and a CI failure still sends the task back to running for a rework.
 3. It records the decision in the task's `factory` metadata (`merge`: the grade, which gates passed, and what it's waiting on) and says it once on the PR when it changes: "Grade 1: checks, CI and review passed; merged." (said once the merge has happened, not before) or "Grade 3 (Cargo.lock changed): waiting for a person."
 4. What it does with an `approved` task depends on `[factory.merge] mode` and the grade's `auto_merge`:
    - **`off`:** nothing; you merge every PR.
