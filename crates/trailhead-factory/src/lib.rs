@@ -29,8 +29,8 @@ pub use config::{
     TargetSpec, UsageConfig,
 };
 pub use daemon::{
-    Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
-    RunResult, ToDaemon,
+    Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, InstallHost, PrepareRequest, RunReport,
+    RunRequest, RunResult, ToDaemon,
 };
 pub use gateway::{
     AuthScheme, GatewayConnection, GatewayConnectionInfo, GatewayRequest, GatewayResponse, GatewaySandbox,

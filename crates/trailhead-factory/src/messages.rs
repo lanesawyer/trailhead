@@ -348,6 +348,17 @@ pub fn review_infra_question(failures: u32, max: u32, error: &str) -> String {
     )
 }
 
+/// Why a task is parked when its reviewer kept ending without a verdict. The infrastructure ran; the reviewer
+/// didn't call for one, which points at the model, the review prompt or the PR.
+pub fn review_no_verdict_question(failures: u32, max: u32, error: &str) -> String {
+    format!(
+        "The reviewer ended without a verdict {failures} times in a row (the limit is {max}). The last \
+         result: {error}\n\nLook at the reviewer's transcript and the review prompt: the model may not be \
+         calling for a verdict, or the PR may be something the reviewer can't handle (too large, or \
+         unreadable). Fix the cause, then reopen the task; raise `max_infra_failures` to allow more tries."
+    )
+}
+
 /// The error recorded when a reviewer's run ended without a verdict. `result` is how it ended.
 pub fn review_without_verdict(result: &dyn std::fmt::Debug) -> String {
     format!("the reviewer ended without a verdict: {result:?}")
@@ -575,6 +586,8 @@ mod tests {
         assert!(budget_breach_question("r", "sb", false).contains("destroyed"));
         assert!(infra_question(3, 3, "boom").contains("`max_infra_failures`"));
         assert!(review_infra_question(3, 3, "boom").contains("while reviewing the PR"));
+        let q = review_no_verdict_question(3, 3, "boom");
+        assert!(q.contains("ended without a verdict") && !q.contains("infrastructure failed"));
         assert!(conflict_rework_limit_question(2, 2).contains("`max_conflict_reworks`"));
         assert!(ci_rework_limit_question(2, 2, "red").contains("CI keeps failing"));
         assert!(review_rework_limit_question(2, 2, "r", "b").contains("`max_review_rounds`"));

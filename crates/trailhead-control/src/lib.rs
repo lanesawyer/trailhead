@@ -25,7 +25,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use trailhead_factory::{
     ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, IROH_DOMAINS, Labels, MergeMode, ModelProvider,
-    PrRef, Sandbox, Target, Task, TaskKey, Tracker, Verdict, label,
+    PrRef, Sandbox, SandboxId, Target, Task, TaskKey, Tracker, Verdict, label,
 };
 
 use crate::pool::Trouble;
@@ -139,6 +139,9 @@ pub struct Factory {
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
     /// starting together never take the same sandbox.
     pool_pick: tokio::sync::Mutex<()>,
+    /// Hosts opened for a sandbox's install on top of the install set, until its run asks the daemon to confirm
+    /// they're blocked again.
+    install_opened: Mutex<HashMap<SandboxId, Vec<String>>>,
     /// The target each worker or review being started has been placed on, until it ends. Its sandbox may not exist yet, so
     /// without this a target's limit would be passed by runs starting together.
     placed: Arc<Mutex<HashMap<(TaskKey, trailhead_factory::Role), String>>>,
@@ -231,6 +234,7 @@ impl Factory {
             starved: Mutex::default(),
             ungraded: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
+            install_opened: Mutex::default(),
             placed: Arc::default(),
             ledger: Arc::default(),
             capped: Mutex::default(),
@@ -322,11 +326,18 @@ impl Factory {
     }
 
     /// Install-phase hosts the agent phase drops, which the daemon confirms are unreachable before the agent starts.
-    /// Wildcards can't be looked up, so they're left out.
-    fn blocked_hosts(&self) -> Vec<String> {
+    /// Wildcards can't be looked up, so they're left out. That includes the hosts opened for this sandbox's install.
+    fn blocked_hosts(&self, sandbox: &Sandbox) -> Vec<String> {
         let agent = self.agent_egress().domains;
-        let install = self.install_egress().domains;
-        install.into_iter().filter(|d| !d.contains('*') && !agent.contains(d)).collect()
+        let opened = self.install_opened.lock().unwrap().remove(&sandbox.id).unwrap_or_default();
+        let install = self.install_egress().domains.into_iter().chain(opened);
+        let mut blocked: Vec<String> = Vec::new();
+        for d in install.filter(|d| !d.contains('*') && !agent.contains(d)) {
+            if !blocked.contains(&d) {
+                blocked.push(d);
+            }
+        }
+        blocked
     }
 
     /// The agent phase's named hosts (wildcards can't be looked up), which the daemon keeps resolved.

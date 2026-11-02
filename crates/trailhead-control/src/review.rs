@@ -51,12 +51,12 @@ impl Factory {
         let profile = self.config.reviewer().clone();
         let credential = match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
             Ok(credential) => credential,
-            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await),
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await),
         };
         let sub = self.tracker.sub_agent(&name);
         let sandbox = match self.create_sandbox(target, &name, task, Role::Reviewer, Some(Self::branch(task))).await {
             Ok(sandbox) => sandbox,
-            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await),
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await),
         };
         tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
         let req = RunRequest {
@@ -74,7 +74,7 @@ impl Factory {
             max_steps: profile.budget.steps,
             required_checks: Vec::new(),
             worker_checks: checks.to_vec(),
-            blocked_hosts: self.blocked_hosts(),
+            blocked_hosts: self.blocked_hosts(&sandbox),
             allowed_hosts: self.allowed_hosts(),
             credential,
         };
@@ -92,10 +92,10 @@ impl Factory {
                 if let Err(re) = sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await {
                     tracing::warn!(task = %task.key.0, error = %re, "couldn't record the failed review's spend");
                 }
-                return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await);
+                return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await);
             }
             Ok(run) => run,
-            Err(e) => return Err(self.review_infra_failed(task, &name, e, before, retries, infra_prior).await),
+            Err(e) => return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await),
         };
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
@@ -168,7 +168,7 @@ impl Factory {
                 // No verdict, no round: handled like an infrastructure failure, so it backs off and is capped
                 // rather than being reviewed again on every pass (TRAIL-267).
                 let error = Error::Other(messages::review_without_verdict(&report.result));
-                self.review_infra_failed(task, &name, error, before, retries, infra_prior).await;
+                self.review_infra_failed(task, &name, error, true, before, retries, infra_prior).await;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
             Run::Lost(..) => unreachable!("a lost run returns before the verdict is recorded"),
@@ -193,13 +193,16 @@ impl Factory {
 
     /// A reviewer that failed on the infrastructure (TRAIL-213): the round doesn't count toward `max_review_rounds`,
     /// and the task waits out the same growing backoff as a worker's infrastructure failures before reconcile
-    /// reviews it again. At `max_infra_failures` in a row the task is parked instead, saying so. Returns the error to
-    /// surface.
+    /// reviews it again. At `max_infra_failures` in a row the task is parked instead, saying so. `no_verdict` is for
+    /// a reviewer that ended without calling for a verdict, which isn't the infrastructure's doing: the question
+    /// says so. Returns the error to surface.
+    #[allow(clippy::too_many_arguments)]
     async fn review_infra_failed(
         &self,
         task: &Task,
         name: &str,
         error: Error,
+        no_verdict: bool,
         rounds_before: u32,
         retries: u32,
         prior: Option<u32>,
@@ -231,7 +234,11 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the reviewer's sub-agent; reconcile will");
         }
         if park {
-            let question = messages::review_infra_question(failures, max, &error.to_string());
+            let question = if no_verdict {
+                messages::review_no_verdict_question(failures, max, &error.to_string())
+            } else {
+                messages::review_infra_question(failures, max, &error.to_string())
+            };
             let parked = async {
                 self.tracker.reopen(&task.key).await?;
                 self.tracker.claim(&task.key).await?;

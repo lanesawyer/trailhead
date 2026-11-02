@@ -135,6 +135,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
         checks: Vec::new(),
         title: None,
         base_branch: (role == Role::Reviewer).then(|| "main".into()),
+        env: Default::default(),
     }
 }
 

@@ -396,6 +396,46 @@ async fn docker_quiet(args: &[&str]) {
     let _ = tokio::process::Command::new("docker").args(args).output().await;
 }
 
+/// The hosts `hosts_for` opens for mise's installer and these tools. If this fails on a host, that table is wrong.
+const STACK_HOSTS: &[&str] = &[
+    "mise.run",
+    "github.com",
+    "api.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "mise.jdx.dev",
+    "mise-versions.jdx.dev",
+    "nodejs.org",
+    "static.rust-lang.org",
+];
+
+#[tokio::test]
+#[ignore = "needs a Docker engine, trailhead-sandbox:latest and the internet"]
+async fn the_stack_installs_with_mise_through_the_gateway() {
+    let env = live("mise");
+    let compute = env.compute.clone();
+    let name = format!("th-live-mise-{}", std::process::id());
+    compute.create(&spec(&name, worker(), STACK_HOSTS)).await.unwrap();
+
+    let n = name.clone();
+    let result = async move {
+        let install = "set -e; curl -fsSL https://mise.run | MISE_INSTALL_PATH=$HOME/.local/bin/mise sh; \
+             mkdir -p ~/.config/mise/conf.d ~/repo; cd ~/.config/mise/conf.d; \
+             printf '[tools]\\nnode = \"26\"\\nrust = \"stable\"\\n' > trailhead-factory.toml; \
+             MISE_YES=1 ~/.local/bin/mise bootstrap --only tools";
+        sh(&n, install).await;
+        let run = "cd ~/repo; printf '[tools]\\nnode = \"24\"\\n' > mise.toml; \
+             MISE_OFFLINE=1 MISE_IGNORED_CONFIG_PATHS=$HOME/repo ~/.local/bin/mise exec -- \
+             sh -c 'node --version; cargo --version'";
+        let out = sh(&n, run).await;
+        assert!(out.contains("v26.") && out.contains("cargo 1."), "{out}");
+    };
+    let outcome = tokio::spawn(result).await;
+    compute.destroy(&SandboxId(name)).await.unwrap();
+    env.finish().await;
+    outcome.unwrap();
+}
+
 /// The sandbox image from `mise run docker-image`: files land owned by its unprivileged user, and its programs run
 /// as that user.
 #[tokio::test]
