@@ -335,6 +335,24 @@ async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
 }
 
 #[tokio::test]
+async fn a_merge_whose_close_failed_is_closed_by_the_next_pass_as_the_mergers() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.tracker.fail_next("factory", "finish", 1);
+    // The merger writes its intent and the host merges, but closing the task fails.
+    let _ = r.factory.reconcile().await;
+    assert!(r.codehost.prs()[0].merged);
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+    assert!(r.tracker.task(&key).run.merging.as_deref().is_some_and(|h| !h.is_empty()), "the intent is kept");
+
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Done);
+    assert_eq!(task.run.merged.expect("recorded").by, MergedBy::Merger);
+}
+
+#[tokio::test]
 async fn switching_merge_mode_off_in_the_source_stops_the_merger_without_a_restart() {
     let (mut r, queue) = queued_rig_with(&merging());
     let mode = Arc::new(std::sync::Mutex::new(Ok(trailhead_factory::MergeMode::On)));
