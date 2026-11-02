@@ -20,11 +20,13 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 
   ```sh
   cargo install --locked --path crates/trailhead
-  cargo install --locked --path crates/trailhead-factory-host
+  cargo install --locked --features docker --path crates/trailhead-factory-host
   cargo install --locked --path crates/trailhead-daemon
   ```
 
-  Or all three in one go: `mise run install` (it uses `-j 4`, and says so if a factory is still running the old binary).
+  `docker` is not a default feature of `trailhead-factory-host`, so the install commands name it (TRAIL-541): without it a repo with `[factory.compute] kind = "docker"` fails at start. Drop it if you only use Sprites.
+
+  Or all three in one go: `mise run install` (it builds the factory with `--features docker`, uses `-j 4`, and says so if a factory is still running the old binary).
 
   Then `trailhead factory run` from anywhere in the repo runs the installed `trailhead-factory` with the same arguments (`check`, `--poll-secs`, ...), looking next to the `trailhead` executable first, then on PATH, like `cargo foo` runs `cargo-foo`. `--config` defaults to the nearest `.trailhead.toml` at or above the working directory, and secrets still come from the environment (`fnox exec -- trailhead factory run`) until `factory login` (TRAIL-117). **A reinstall needs a factory restart**: a running control plane keeps running the old binary. Drain with one Ctrl-C (below), then start again.
   **Many repos in one process (TRAIL-170).** `trailhead factory run --repo ~/Dev/a --repo ~/Dev/b` runs each repo's `[factory]` from its own `.trailhead.toml`; without `--repo` it runs the `repos` listed in `[factory]` of the user `config.toml`, and without those the repo at or above the working directory. They share one store, endpoint, compute and `Host`, with a run loop each; log lines carry `repo=owner/name`. The start is refused, naming both repos, if two share a repo slug, a lowercase repo name (pool sandboxes are `<name>-w<n>`) or a queue task in one project, or differ in `[factory.compute]` or `[factory.daemon]`. A repo that fails to parse fails the start. One loop erroring stops only that repo. `check` reports the tracker per repo, then compute and the endpoint once.
