@@ -552,6 +552,11 @@ impl FactoryConfig {
             }
         }
         for (name, profile) in &self.profiles {
+            if profile.stall_timeout == 0 {
+                return Err(Error::Config(format!(
+                    "[factory.profiles.{name}] stall_timeout is 0; it's minutes of silence, 1 or more"
+                )));
+            }
             if let Some(next) = &profile.escalate_to
                 && !self.profiles.contains_key(next)
             {
@@ -790,6 +795,15 @@ require = ["checks", "agent_review", "human"]
             .unwrap();
         let names: Vec<_> = c.required_checks().into_iter().map(|c| c.name).collect();
         assert_eq!(names, ["fmt", "lint", "test"]);
+    }
+
+    #[test]
+    fn rejects_zero_stall_timeout() {
+        let bad = SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"worker-opus\"\nstall_timeout = 0");
+        match parse(&bad) {
+            Err(Error::Config(m)) => assert!(m.contains("stall_timeout"), "{m}"),
+            other => panic!("expected a config error, got {other:?}"),
+        }
     }
 
     #[test]
