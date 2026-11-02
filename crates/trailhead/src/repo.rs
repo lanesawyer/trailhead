@@ -14,6 +14,10 @@ pub struct RepoConfig {
     pub agent: Option<String>,
     /// Default `-p` for `ready`, `ls` and `add`.
     pub project: Option<String>,
+    /// The factory's settings (`docs/factory/`). Accepted but not read: the factory parses them, so the CLI doesn't
+    /// depend on it (PLAN principle 10).
+    #[serde(rename = "factory")]
+    pub _factory: Option<toml::Value>,
     #[serde(skip)]
     pub path: PathBuf,
 }
@@ -43,6 +47,13 @@ mod tests {
         assert_eq!(cfg.agent.as_deref(), Some("claude"));
         assert_eq!(cfg.project.as_deref(), Some("TRAIL"));
         assert_eq!(cfg.path, dir.path().join(FILE));
+    }
+
+    #[test]
+    fn the_factory_table_is_accepted_without_being_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILE), "project = \"TRAIL\"\n[factory.repo]\nqueue = \"TRAIL-1\"\n").unwrap();
+        assert_eq!(find(dir.path()).unwrap().unwrap().project.as_deref(), Some("TRAIL"));
     }
 
     #[test]

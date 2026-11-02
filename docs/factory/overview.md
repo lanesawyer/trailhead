@@ -19,7 +19,7 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 - **One process for coordination.** With the factory feature on, the Trailhead server is the control plane. The orchestrator follows the events table in-process. Today the control plane is still a separate `trailhead-factory` process beside the server, sharing its database (TRAIL-164).
 - **One tunnel.** Trailhead already reaches other machines through an iroh tunnel to its loopback port (`dumbpipe`). Sandboxes use the same tunnel, and the factory's daemon protocol rides on it as server routes alongside REST and MCP.
 - **Keep the `Tracker` trait.** In-process inside the server, REST from the daemon. It keeps the engine/factory boundary clean, makes test fakes possible, and leaves other trackers open.
-- **Engine still usable alone.** Factory crates sit behind a Cargo feature, so `cargo install trailhead` without it stays a small task engine for existing users (OpenClaw, Lane's reader app). Today the factory is a separate binary built from this repo, so `cargo install trailhead` is the engine alone either way (TRAIL-116).
+- **Engine still usable alone.** Factory crates sit behind a Cargo feature, so `cargo install trailhead` without it stays a small task engine for existing users (OpenClaw, the maintainer's reader app). Today the factory is a separate binary built from this repo, so `cargo install trailhead` is the engine alone either way (TRAIL-116).
 - **Plan and license.** `docs/PLAN.md` was rewritten to match (TRAIL-87). Trailhead is AGPL-3.0, so the factory is too.
 
 ## Components
@@ -28,6 +28,23 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 - **Sandbox (Sprite).** The daemon, an agent adapter wrapping a CLI agent or an own loop, and the repo with its mise environment, bootstrapped from the stock image. Holds no raw keys.
 - **Connector gateway (Fly.io).** Injects credentials for the model provider and GitHub on the sandbox's behalf.
 - **Egress.** Sandboxes reach the Iroh relay and the connector gateway, plus package registries during install phases only. See [sandbox.md](sandbox.md).
+
+```mermaid
+flowchart LR
+    cli["CLI"] --> server
+    mcp["MCP"] --> server
+    subgraph trailhead["Task engine"]
+        server["Server"] --> core["Core"] --> db[("SQLite")]
+    end
+    cp["Control plane<br/>trailhead-factory"] --> core
+    cp -->|"Compute"| compute["Sandbox provider<br/>Sprites or Docker"]
+    cp <-->|"iroh"| daemon
+    cp -->|"CodeHost"| host["GitHub"]
+    subgraph sandbox["Sandbox"]
+        daemon["Daemon"] --> agent["Agent harness"]
+    end
+    compute -.->|"creates"| sandbox
+```
 
 ## Decisions
 
@@ -52,5 +69,6 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 | Trailhead access | Existing REST/MCP over Trailhead's iroh tunnel | One server, one SQLite file, wherever it runs; Turso deferred |
 | Protocol | Strongly typed | Shared Rust types over Iroh; daemon name TBD |
 | Specs | Human-led, written with AI, entered through Trailhead | Approved spec is the source of acceptance criteria |
-| Control plane location | Runs anywhere | Starts on Lane's machine |
+| Control plane location | Runs anywhere | Starts on the maintainer's machine |
+| Control planes and repos | One control plane per machine, many repos | Per-repo settings live in each repo's `.trailhead.toml`; host settings (cross-repo `max_sandboxes`, `pause_at`) and the repo list live in the user `config.toml` (TRAIL-167) |
 | Human interface | Native Bevy app with feathers ([ui.md](ui.md)) | In this repo outside the default build; a client of the API like any other |

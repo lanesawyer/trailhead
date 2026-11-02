@@ -10,7 +10,7 @@ use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, RelayMode, SecretKey};
 use tokio::sync::Notify;
-use trailhead_control::{Factory, Outcome};
+use trailhead_control::{Factory, Host, Outcome};
 use trailhead_daemon::net::{
     ALPN, DaemonProtocol, Launch, RemoteDaemon, build_id, read_frame, sandbox_key, write_frame,
 };
@@ -25,7 +25,6 @@ const CONFIG: &str = r#"
 [repo]
 owner = "lanesawyer"
 name = "trailhead"
-project = "TRAIL"
 
 [checks]
 fmt = "cargo fmt --check"
@@ -89,18 +88,27 @@ struct Rig {
 
 impl Rig {
     async fn new() -> Rig {
+        Rig::beating(None).await
+    }
+
+    /// A rig whose daemon heartbeats this often, if given.
+    async fn beating(every: Option<Duration>) -> Rig {
         let tracker = FakeTracker::new("factory");
         let compute = FakeCompute::new();
         let codehost = FakeCodeHost::new();
         let harness = Arc::new(ScriptedHarness::new());
-        let local = Arc::new(LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone()));
+        let mut local = LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone());
+        if let Some(every) = every {
+            local = local.heartbeat_every(every);
+        }
+        let local = Arc::new(local);
         let lookup = Arc::new(MemoryLookup::new());
         let control = endpoint(SecretKey::generate(), Some(lookup.clone())).await;
         let remote = Arc::new(RemoteDaemon::new(
             control.clone(),
             MASTER,
             Arc::new(compute.clone()),
-            Launch::new(b"daemon".to_vec()),
+            Launch::new(b"daemon".to_vec(), &target()),
         ));
         Rig { tracker, compute, codehost, harness, lookup, control, remote, local, routers: Vec::new() }
     }
@@ -128,11 +136,12 @@ impl Rig {
 
     fn factory(&self) -> Factory {
         Factory::new(
-            FactoryConfig::parse(CONFIG).unwrap(),
+            FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap(),
             Arc::new(self.compute.clone()),
             Arc::new(self.tracker.clone()),
             Arc::new(FakeProvider::new(1)),
             self.remote.clone(),
+            Host::new(None),
         )
     }
 }
@@ -274,6 +283,49 @@ async fn a_run_survives_a_dropped_connection() {
 }
 
 #[tokio::test]
+async fn a_reattach_isnt_replayed_stale_heartbeats() {
+    let mut r = Rig::beating(Some(Duration::from_millis(250))).await;
+    r.serve("quiet").await;
+    let sandbox = r.sandbox("quiet").await;
+    let key = r.tracker.add_task("TRAIL", "Quiet", "");
+    let gate = Arc::new(Notify::new());
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100).wait_for(gate.clone()));
+    let cred = r.tracker.create_sub_agent("quiet-a1", "TRAIL", Duration::from_secs(600)).await.unwrap();
+    let (events, mut first) = tokio::sync::mpsc::unbounded_channel();
+    let run = tokio::spawn({
+        let remote = r.remote.clone();
+        let sandbox = sandbox.clone();
+        let req = request("quiet-a1", key.clone(), cred);
+        async move { remote.run(&sandbox, req, events).await }
+    });
+    // The agent sits quiet through several heartbeats, as if the control plane were away.
+    let mut beats = 0;
+    while beats < 3 {
+        let ev = tokio::time::timeout(Duration::from_secs(10), first.recv()).await.unwrap().unwrap();
+        beats += usize::from(matches!(ev, RunEvent::Heartbeat { .. }));
+    }
+
+    // A control plane that attaches now (as after a restart) gets the run's events but none of those heartbeats.
+    let (events, mut second) = tokio::sync::mpsc::unbounded_channel();
+    let attach = tokio::spawn({
+        let remote = r.remote.clone();
+        let sandbox = sandbox.clone();
+        async move { remote.attach(&sandbox, "quiet-a1", events).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut replayed = Vec::new();
+    while let Ok(ev) = second.try_recv() {
+        replayed.push(ev);
+    }
+    assert!(replayed.iter().any(|e| matches!(e, RunEvent::StepStarted { .. })), "{replayed:?}");
+    assert!(!replayed.iter().any(|e| matches!(e, RunEvent::Heartbeat { .. })), "stale heartbeats: {replayed:?}");
+
+    gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(20), run).await.unwrap().unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(20), attach).await.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn a_run_survives_the_compute_api_failing_while_reattaching() {
     let mut r = Rig::new().await;
     r.serve("blip").await;
@@ -392,11 +444,15 @@ async fn daemons_refuse_other_peers() {
 #[tokio::test]
 async fn subscription_token_goes_in_the_secrets_file_only() {
     let control = endpoint(SecretKey::generate(), None).await;
-    let launch = Launch { claude_oauth_token: Some("sk-ant-oat-test".into()), ..Launch::new(b"daemon".to_vec()) };
+    let launch = Launch {
+        harness_secrets: [("oauth_token".to_string(), "sk-ant-oat-test".to_string())].into(),
+        ..Launch::new(b"daemon".to_vec(), &target())
+    };
     let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
     let program = remote.program(&SandboxId("s".into()));
     let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
-    assert_eq!(secrets.claude_oauth_token.as_deref(), Some("sk-ant-oat-test"));
+    assert_eq!(secrets.harness, "claude-code");
+    assert_eq!(secrets.harness_secrets.get("oauth_token").map(String::as_str), Some("sk-ant-oat-test"));
     assert_eq!(program.files[1].mode, 0o600);
     assert!(!format!("{secrets:?} {program:?}").contains("sk-ant-oat-test"), "never in debug output");
     assert!(!program.args.iter().any(|a| a.contains("sk-ant")), "never on the command line");
@@ -405,12 +461,16 @@ async fn subscription_token_goes_in_the_secrets_file_only() {
 #[tokio::test]
 async fn daemon_log_filter_goes_on_the_command_line_when_set() {
     let control = endpoint(SecretKey::generate(), None).await;
-    let remote =
-        RemoteDaemon::new(control.clone(), MASTER, Arc::new(FakeCompute::new()), Launch::new(b"daemon".to_vec()));
+    let remote = RemoteDaemon::new(
+        control.clone(),
+        MASTER,
+        Arc::new(FakeCompute::new()),
+        Launch::new(b"daemon".to_vec(), &target()),
+    );
     let program = remote.program(&SandboxId("s".into()));
     assert!(!program.args.iter().any(|a| a == "--log"));
 
-    let launch = Launch { log: Some("info,iroh=debug".into()), ..Launch::new(b"daemon".to_vec()) };
+    let launch = Launch { log: Some("info,iroh=debug".into()), ..Launch::new(b"daemon".to_vec(), &target()) };
     let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
     let args = remote.program(&SandboxId("s".into())).args;
     let at = args.iter().position(|a| a == "--log").expect("--log is set");
@@ -427,7 +487,7 @@ async fn a_hanging_wake_gives_up_at_the_deadline() {
     let started = tokio::time::Instant::now();
     let res = tokio::time::timeout(Duration::from_secs(300), r.remote.prepare(&sandbox, req)).await;
     let err = res.expect("wake is bounded by the connect deadline").unwrap_err();
-    assert!(matches!(&err, Error::Other(m) if m.contains("timed out")), "{err:?}");
+    assert!(matches!(&err, Error::Other(m) if m == "waking stuck timed out"), "{err:?}");
     assert!(started.elapsed() < Duration::from_secs(120), "{:?}", started.elapsed());
 }
 
@@ -498,4 +558,38 @@ async fn a_daemon_that_stays_stale_fails_the_prepare_loudly() {
     assert!(err.to_string().contains("not the current build"), "{err}");
     assert_eq!(r.compute.programs("stuck-old").len(), 1, "the daemon was started again, replacing the program");
     assert_eq!(r.local.prepares_started(), 0, "never prepared by a stale daemon");
+}
+
+/// A compute-neutral target: these tests don't depend on any real compute's paths.
+fn target() -> trailhead_factory::Target {
+    trailhead_factory::Target {
+        dir: "/sandbox/.trailhead".into(),
+        workdir: "/sandbox/work".into(),
+        gateway_list: "http://gateway.test/v1/gateway/list".into(),
+        model_endpoint: None,
+        hold_socket: None,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn the_target_decides_the_launch_dir_gateway_list_and_hold_socket() {
+    let control = endpoint(SecretKey::generate(), None).await;
+    let mut t = target();
+    t.hold_socket = Some("/run/hold.sock".into());
+    let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), Launch::new(b"daemon".to_vec(), &t));
+    let program = remote.program(&SandboxId("s".into()));
+    assert_eq!(program.cmd, "/sandbox/.trailhead/trailhead-daemon");
+    let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
+    assert_eq!(secrets.gateway_list, t.gateway_list);
+    let at = program.args.iter().position(|a| a == "--hold-socket").expect("--hold-socket is set");
+    assert_eq!(program.args[at + 1], "/run/hold.sock");
+    assert!(program.args.windows(2).any(|w| w == ["--workdir", "/sandbox/work"]));
+    let remote = RemoteDaemon::new(
+        endpoint(SecretKey::generate(), None).await,
+        MASTER,
+        Arc::new(FakeCompute::new()),
+        Launch::new(b"d".to_vec(), &target()),
+    );
+    assert!(!remote.program(&SandboxId("s".into())).args.iter().any(|a| a == "--hold-socket"));
 }

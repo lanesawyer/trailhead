@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{PrGrade, PrRef, Result, Usd, Verdict};
+use crate::{GateKind, PrGrade, PrRef, Result, Usd, Verdict};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TaskKey(pub String);
@@ -21,6 +21,50 @@ pub enum Status {
     Done,
     Cancelled,
 }
+
+impl Status {
+    /// Every status, in lifecycle order.
+    pub const ALL: [Status; 7] = [
+        Status::Open,
+        Status::InProgress,
+        Status::NeedsInput,
+        Status::InReview,
+        Status::Approved,
+        Status::Done,
+        Status::Cancelled,
+    ];
+
+    /// The name the Trailhead API uses (the serde form).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Open => "open",
+            Status::InProgress => "in_progress",
+            Status::NeedsInput => "needs_input",
+            Status::InReview => "in_review",
+            Status::Approved => "approved",
+            Status::Done => "done",
+            Status::Cancelled => "cancelled",
+        }
+    }
+
+    /// The status for an API name, or `None` if it isn't one.
+    pub fn parse(s: &str) -> Option<Status> {
+        Status::ALL.into_iter().find(|status| status.as_str() == s)
+    }
+
+    /// The name for people to read: the API name with spaces for underscores.
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::InProgress => "in progress",
+            Status::NeedsInput => "needs input",
+            Status::InReview => "in review",
+            other => other.as_str(),
+        }
+    }
+}
+
+/// The key in task metadata that the factory's run fields ([`RunUpdate`]) live under.
+pub const METADATA_KEY: &str = "factory";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
@@ -48,6 +92,9 @@ pub struct RunUpdate {
     /// The pooled sandbox the run is on, when it isn't one named after the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// The target the run's sandbox is on (`docs/factory/targets.md`), beside `host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     /// When the run's agent was started, in unix seconds, so a control plane that reattaches after a restart keeps
     /// the run's wall-clock budget honest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +112,10 @@ pub struct RunUpdate {
     /// Total spend across attempts and reviews.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend: Option<Usd>,
+    /// The run whose report was handled and its spend counted, so a control plane that restarts before the run's
+    /// sandbox is released doesn't reattach and count it again (TRAIL-255).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concluded: Option<String>,
     /// Why the last attempt failed, which the next attempt is told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
@@ -86,6 +137,10 @@ pub struct RunUpdate {
     /// the attempts of the task as a whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_base: Option<u32>,
+    /// The attempt at which the control plane parked the task for hitting `max_attempts`. A run that starts on the
+    /// reopened task counts from it (see `attempt_floor`), so a human only has to reopen it (TRAIL-308).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gave_up: Option<u32>,
     /// How the task's PR was merged, once it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
@@ -101,6 +156,10 @@ pub struct RunUpdate {
     /// The merger's last decision on the PR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeDecision>,
+    /// The head the merger is about to merge, written before `CodeHost::merge` so that a merge whose close failed is
+    /// still attributed to the merger. Empty once the host said the merge didn't happen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merging: Option<String>,
 }
 
 /// The merger's decision on a PR's current head (`docs/factory/review.md#the-merger`). Written whole, and its
@@ -111,9 +170,9 @@ pub struct MergeDecision {
     /// The head commit the gates were evaluated on.
     pub head: String,
     /// The gates that passed: `checks`, `ci`, `agent_review`, `human`.
-    pub passed: Vec<String>,
+    pub passed: Vec<GateKind>,
     /// The gates still to pass, and for CI that failed, the names of the failing checks.
-    pub waiting: Vec<String>,
+    pub waiting: Vec<GateKind>,
     #[serde(default)]
     pub failing: Vec<String>,
     /// Every gate passed and the grade auto-merges, so a merger that was on would merge now.
@@ -124,6 +183,12 @@ pub struct MergeDecision {
     pub human_head: Option<String>,
     /// Why the control plane couldn't act on the decision, such as not being a delegated reviewer.
     pub problem: Option<String>,
+    /// Why the code host last refused to merge this head, which is said once per reason and tried again each pass.
+    #[serde(default)]
+    pub refused: Option<String>,
+    /// The id of the merger's status comment on the PR, which is edited as the decision changes.
+    #[serde(default)]
+    pub comment: Option<u64>,
     /// What was last said on the PR about this, so it's said once per change.
     pub message: String,
 }
@@ -156,6 +221,11 @@ pub struct ChangesRequested {
     /// Not a review: the PR no longer merges cleanly with the base branch, and the rework merges it in (TRAIL-199).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub conflict: bool,
+    /// The PR's head when this was requested. A head that has moved since means someone pushed to the PR, so the
+    /// request is stale: a person settled it (TRAIL-338). Unknown for requests recorded before this, or when the
+    /// host couldn't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
 }
 
 impl RunUpdate {
@@ -164,6 +234,7 @@ impl RunUpdate {
             attempt,
             sandbox,
             host,
+            target,
             started,
             profile,
             pr,
@@ -171,20 +242,24 @@ impl RunUpdate {
             conflict_reworks,
             reviewed,
             spend,
+            concluded,
             failure,
             retries,
             infra_failures,
             changes_requested,
             attempt_base,
+            gave_up,
             merged,
             grade,
             ungraded,
             reviewed_head,
             merge,
+            merging,
         } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
         self.host = host.or(self.host.take());
+        self.target = target.or(self.target.take());
         self.started = started.or(self.started.take());
         self.profile = profile.or(self.profile.take());
         self.pr = pr.or(self.pr.take());
@@ -192,22 +267,31 @@ impl RunUpdate {
         self.conflict_reworks = conflict_reworks.or(self.conflict_reworks.take());
         self.reviewed = reviewed.or(self.reviewed.take());
         self.spend = spend.or(self.spend.take());
+        self.concluded = concluded.or(self.concluded.take());
         self.failure = failure.or(self.failure.take());
         self.retries = retries.or(self.retries.take());
         self.infra_failures = infra_failures.or(self.infra_failures.take());
         self.changes_requested = changes_requested.or(self.changes_requested.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
+        self.gave_up = gave_up.or(self.gave_up.take());
         self.merged = merged.or(self.merged.take());
         self.grade = grade.or(self.grade.take());
         self.ungraded = ungraded.or(self.ungraded.take());
         self.reviewed_head = reviewed_head.or(self.reviewed_head.take());
         self.merge = merge.or(self.merge.take());
+        self.merging = merging.or(self.merging.take());
     }
 
     /// The review the next run has to address: the last one that asked for changes, unless a later review has
     /// since finished on another attempt.
     pub fn pending_changes(&self) -> Option<&ChangesRequested> {
         self.changes_requested.as_ref().filter(|c| self.reviewed.is_none_or(|r| r == c.attempt))
+    }
+
+    /// The attempt `max_attempts` counts from: the last review that asked for changes, or the attempt the control
+    /// plane gave up at, whichever is later.
+    pub fn attempt_floor(&self) -> u32 {
+        self.attempt_base.unwrap_or(0).max(self.gave_up.unwrap_or(0))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -240,12 +324,37 @@ pub struct TaskNote {
 pub struct HumanContext {
     pub answers: Vec<Answered>,
     pub notes: Vec<TaskNote>,
+    /// For a reviewer: the unfinished follow-ups that earlier reviews of the task filed.
+    #[serde(default)]
+    pub follow_ups: Vec<FollowUpTask>,
 }
 
 impl HumanContext {
     pub fn is_empty(&self) -> bool {
-        self.answers.is_empty() && self.notes.is_empty()
+        self.answers.is_empty() && self.notes.is_empty() && self.follow_ups.is_empty()
     }
+}
+
+/// A follow-up task an earlier review of a task filed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUpTask {
+    pub key: TaskKey,
+    pub title: String,
+    pub description: String,
+}
+
+/// The line a follow-up's description carries to say which task's review raised it.
+pub fn raised_by(source: &TaskKey) -> String {
+    format!("Raised by the reviewer of {}", source.0)
+}
+
+/// Whether a task description says the review of `source` raised it. The key must end there (at the PR link's
+/// parenthesis or the full stop), so TRAIL-1 doesn't match TRAIL-12.
+pub fn is_raised_by(description: &str, source: &TaskKey) -> bool {
+    let marker = raised_by(source);
+    description.match_indices(&marker).any(|(i, _)| {
+        description[i + marker.len()..].chars().next().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '-'))
+    })
 }
 
 /// Whether an author is the factory itself or one of its run sub-agents.
@@ -274,17 +383,18 @@ pub trait Tracker: Send + Sync {
     /// A handle acting as one of this agent's sub-agents, by the part after the parent's name.
     fn sub_agent(&self, name: &str) -> Arc<dyn Tracker>;
 
-    /// Ready tasks in `project`; with `queue`, only the queue task's subtasks, which is how work is handed to the
-    /// factory.
-    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>>;
+    /// Ready tasks in `project`; with `queue`, only the direct subtasks of any of those tasks, best first across all of
+    /// them and each once, which is how work is handed to the factory.
+    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>>;
     async fn show(&self, task: &TaskKey) -> Result<Task>;
     /// The task's resolved questions with their answers, and its `decision` and `note` comments, oldest first,
     /// without the factory's own bookkeeping.
     async fn human_context(&self, task: &TaskKey) -> Result<HumanContext>;
     /// The task's latest `review` comment, whoever left it, if it has one.
     async fn last_review(&self, task: &TaskKey) -> Result<Option<Verdict>>;
-    /// Open, in-progress, parked or in-review tasks that carry factory metadata.
-    async fn in_flight(&self, project: &str) -> Result<Vec<Task>>;
+    /// Open, in-progress, parked or in-review tasks that carry factory metadata, limited to the queues' subtasks when
+    /// there are any, so repos sharing a project through different queues never see each other's runs.
+    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>>;
 
     async fn claim(&self, task: &TaskKey) -> Result<()>;
     async fn renew(&self, task: &TaskKey) -> Result<()>;
@@ -313,6 +423,9 @@ pub trait Tracker: Send + Sync {
         description: &str,
         priority: Option<i64>,
     ) -> Result<TaskKey>;
+    /// The unfinished follow-ups that reviews of `task` filed: tasks in its project whose description says
+    /// ([`is_raised_by`]) that its review raised them.
+    async fn follow_ups(&self, task: &TaskKey) -> Result<Vec<FollowUpTask>>;
     /// An unfinished task in `project` with this title (ignoring case and surrounding space), if there is one.
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>>;
 
@@ -321,4 +434,33 @@ pub trait Tracker: Send + Sync {
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential>;
     /// Revokes a sub-agent and its tokens. Revoking one that's already gone is fine.
     async fn revoke_sub_agent(&self, name: &str) -> Result<()>;
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn every_status_round_trips_through_its_name() {
+        for status in Status::ALL {
+            assert_eq!(Status::parse(status.as_str()), Some(status));
+            assert_eq!(serde_json::to_value(status).unwrap(), serde_json::json!(status.as_str()));
+            assert_eq!(status.label(), status.as_str().replace('_', " "));
+        }
+        assert_eq!(Status::parse("nope"), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raised_by_matches_whole_keys_only() {
+        let one = TaskKey("TRAIL-1".into());
+        assert!(is_raised_by("Why.\n\nRaised by the reviewer of TRAIL-1 (https://x/pull/1).", &one));
+        assert!(is_raised_by("Raised by the reviewer of TRAIL-1.", &one));
+        assert!(!is_raised_by("Raised by the reviewer of TRAIL-12.", &one));
+        assert!(!is_raised_by("Nothing to see.", &one));
+    }
 }

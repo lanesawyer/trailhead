@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SandboxId(pub String);
@@ -30,6 +30,8 @@ pub mod label {
     /// Kept failing to release and couldn't be destroyed: out of the pool and the sandbox cap, destroyed when the
     /// compute host lets it.
     pub const BROKEN: &str = "broken";
+    /// The target a sandbox runs on (`docs/factory/targets.md`).
+    pub const TARGET: &str = "target";
     /// The checkpoint a pooled sandbox is restored to before and after each task.
     pub const WARM: &str = "warm";
     /// A tag of the `[stack]` the warm checkpoint was built for. A sandbox whose tag differs from the repo's current
@@ -114,4 +116,14 @@ pub trait Compute: Send + Sync {
     async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()>;
     async fn set_labels(&self, id: &SandboxId, labels: &Labels) -> Result<()>;
     async fn destroy(&self, id: &SandboxId) -> Result<()>;
+    /// Fails, with a message saying why, when the sandbox is in no state to start a run, such as its host being out
+    /// of disk. Called before a run begins, so the trouble is reported then rather than found by the agent midway.
+    async fn preflight(&self, _id: &SandboxId) -> Result<()> {
+        Ok(())
+    }
+    /// The recent output of a program started with `start`, for diagnosing a sandbox. Computes that can't read it
+    /// say so.
+    async fn logs(&self, _id: &SandboxId, _program: &str) -> Result<String> {
+        Err(Error::Rejected("this compute can't read program logs".into()))
+    }
 }

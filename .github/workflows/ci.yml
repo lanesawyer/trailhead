@@ -34,6 +34,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked -- -D warnings
+      # The live Docker test builds only with this feature, and nothing else turns it on.
+      - run: cargo clippy -p trailhead-factory-host --features docker --all-targets --locked -- -D warnings
 
   test:
     runs-on: ubuntu-latest

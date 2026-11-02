@@ -1,9 +1,10 @@
 //! Where the control plane gets the daemon binary it uploads to sandboxes (`docs/factory/operating.md`).
 //!
-//! `--daemon` wins when given. Otherwise the control plane downloads the release asset that matches its own
-//! version, checks it against the published SHA-256 and caches it in the data dir. A version with no release (a dev
-//! build) falls back to a local build, [`LOCAL_BUILD`]. Only a missing release falls back: a
-//! failed download or a checksum mismatch is an error, so a corrupted or truncated binary never reaches a sandbox.
+//! `--daemon` wins when given. Then a local `trailhead-daemon` (next to the control plane's binary or on PATH, found
+//! by the caller): a dev build whose version wasn't bumped would otherwise fetch an older release daemon over the
+//! fresh local one, a protocol mismatch. Last, the control plane downloads the release asset that matches its own
+//! version, checks it against the published SHA-256 and caches it in the data dir. A failed download or a checksum
+//! mismatch is an error, so a corrupted or truncated binary never reaches a sandbox.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -12,8 +13,8 @@ use sha2::{Digest, Sha256};
 
 /// The target the release workflow builds the daemon for, which is what Sprites run.
 pub const TARGET: &str = "x86_64-unknown-linux-musl";
-/// Where `mise run factory` and `cargo build --release -p trailhead-daemon` leave a local build.
-pub const LOCAL_BUILD: &str = "target/release/trailhead-daemon";
+/// The daemon's file name, which is also what `cargo install` leaves.
+pub const DAEMON: &str = "trailhead-daemon";
 /// Where GitHub serves release assets from.
 pub const GITHUB: &str = "https://github.com";
 
@@ -40,26 +41,36 @@ impl Release {
     }
 }
 
-/// The daemon binary to upload to sandboxes. `cache_dir` is where downloads are kept.
+/// The daemon binary to upload to sandboxes. `local` is the installed or built daemon, if one was found
+/// ([`find_local`]); `cache_dir` is where downloads are kept.
 pub async fn resolve(
     over: Option<&Path>,
-    fallback: &Path,
+    local: Option<&Path>,
     release: &Release,
     cache_dir: &Path,
 ) -> Result<Vec<u8>, String> {
     if let Some(path) = over {
+        tracing::info!(path = %path.display(), "using the daemon from --daemon");
+        return read_local(path);
+    }
+    if let Some(path) = local {
+        tracing::info!(path = %path.display(), "using the local daemon");
         return read_local(path);
     }
     match fetch(release, cache_dir).await {
         Ok(binary) => Ok(binary),
-        Err(Fetch::NoRelease) => {
-            let asset = release.asset();
-            tracing::warn!("no release asset {asset}; using the local build {}", fallback.display());
-            read_local(fallback)
-                .map_err(|e| format!("no release asset {asset} for this version, and {e}; build one or pass --daemon"))
-        }
+        Err(Fetch::NoRelease) => Err(format!(
+            "no trailhead-daemon next to the control plane or on PATH, and no release asset {} for this version; \
+             install one with `cargo install --locked --path crates/trailhead-daemon` or pass --daemon",
+            release.asset()
+        )),
         Err(Fetch::Failed(e)) => Err(e),
     }
+}
+
+/// A `trailhead-daemon` in `beside` (the control plane's own directory), else in one of the `path` directories.
+pub fn find_local(beside: Option<&Path>, path: &[PathBuf]) -> Option<PathBuf> {
+    beside.into_iter().chain(path.iter().map(PathBuf::as_path)).map(|d| d.join(DAEMON)).find(|p| p.is_file())
 }
 
 fn read_local(path: &Path) -> Result<Vec<u8>, String> {
@@ -198,10 +209,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let release = release(url, "0.2.0");
 
-        assert_eq!(resolve(None, Path::new(LOCAL_BUILD), &release, dir.path()).await.unwrap(), BINARY);
+        assert_eq!(resolve(None, None, &release, dir.path()).await.unwrap(), BINARY);
         assert_eq!(hits.load(Ordering::SeqCst), 2);
         // The second start is a cache hit: nothing is fetched.
-        assert_eq!(resolve(None, Path::new(LOCAL_BUILD), &release, dir.path()).await.unwrap(), BINARY);
+        assert_eq!(resolve(None, None, &release, dir.path()).await.unwrap(), BINARY);
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
@@ -210,10 +221,10 @@ mod tests {
         let (url, hits) = serve(sha256sum(BINARY), BINARY).await;
         let dir = tempfile::tempdir().unwrap();
         let release = release(url, "0.2.0");
-        resolve(None, Path::new(LOCAL_BUILD), &release, dir.path()).await.unwrap();
+        resolve(None, None, &release, dir.path()).await.unwrap();
         std::fs::write(dir.path().join(release.asset()), b"tampered").unwrap();
 
-        assert_eq!(resolve(None, Path::new(LOCAL_BUILD), &release, dir.path()).await.unwrap(), BINARY);
+        assert_eq!(resolve(None, None, &release, dir.path()).await.unwrap(), BINARY);
         assert_eq!(hits.load(Ordering::SeqCst), 4);
     }
 
@@ -222,26 +233,45 @@ mod tests {
         let (url, _) = serve(sha256sum(b"something else"), BINARY).await;
         let dir = tempfile::tempdir().unwrap();
 
-        let err = resolve(None, Path::new(LOCAL_BUILD), &release(url, "0.2.0"), dir.path()).await.unwrap_err();
+        let err = resolve(None, None, &release(url, "0.2.0"), dir.path()).await.unwrap_err();
         assert!(err.contains("doesn't match its published checksum"), "{err}");
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none(), "nothing is cached");
     }
 
     #[tokio::test]
-    async fn a_version_with_no_release_falls_back_to_the_local_build_or_says_so() {
+    async fn a_version_with_no_release_and_no_local_daemon_says_how_to_get_one() {
         let (url, _) = serve(sha256sum(BINARY), BINARY).await;
         let dir = tempfile::tempdir().unwrap();
 
-        let err = resolve(None, &dir.path().join("missing"), &release(url.clone(), "0.3.0-dev"), dir.path())
-            .await
-            .unwrap_err();
+        let err = resolve(None, None, &release(url, "0.3.0-dev"), dir.path()).await.unwrap_err();
         assert!(err.contains("no release asset") && err.contains("--daemon"), "{err}");
+    }
 
+    #[tokio::test]
+    async fn a_local_daemon_beats_a_matching_release() {
+        let (url, hits) = serve(sha256sum(BINARY), BINARY).await;
+        let dir = tempfile::tempdir().unwrap();
         let local = dir.path().join("local");
         std::fs::write(&local, b"local build").unwrap();
         let cache = tempfile::tempdir().unwrap();
-        assert_eq!(resolve(None, &local, &release(url, "0.3.0-dev"), cache.path()).await.unwrap(), b"local build");
+
+        assert_eq!(resolve(None, Some(&local), &release(url, "0.2.0"), cache.path()).await.unwrap(), b"local build");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "the release is never fetched");
         assert!(std::fs::read_dir(cache.path()).unwrap().next().is_none(), "nothing is cached");
+    }
+
+    #[test]
+    fn finds_the_daemon_beside_the_binary_before_the_path() {
+        let (beside, on_path, empty) =
+            (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let path = vec![empty.path().to_path_buf(), on_path.path().to_path_buf()];
+        assert_eq!(find_local(Some(beside.path()), &path), None);
+
+        std::fs::write(on_path.path().join(DAEMON), b"d").unwrap();
+        assert_eq!(find_local(Some(beside.path()), &path), Some(on_path.path().join(DAEMON)));
+
+        std::fs::write(beside.path().join(DAEMON), b"d").unwrap();
+        assert_eq!(find_local(Some(beside.path()), &path), Some(beside.path().join(DAEMON)));
     }
 
     #[tokio::test]
@@ -252,7 +282,7 @@ mod tests {
 
         // The server is never contacted: nothing listens on this address.
         let release = release("http://127.0.0.1:1".into(), "0.2.0");
-        assert_eq!(resolve(Some(&local), Path::new(LOCAL_BUILD), &release, dir.path()).await.unwrap(), b"local build");
+        assert_eq!(resolve(Some(&local), None, &release, dir.path()).await.unwrap(), b"local build");
     }
 
     #[test]

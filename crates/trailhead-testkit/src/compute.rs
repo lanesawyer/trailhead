@@ -27,10 +27,14 @@ pub struct FakeCompute {
     on_start: Arc<Mutex<Option<StartHook>>>,
     live: Arc<Mutex<BTreeMap<SandboxId, Live>>>,
     failing: Arc<Mutex<BTreeSet<(String, &'static str)>>>,
+    /// Calls of an operation still allowed to succeed before it starts failing.
+    failing_after: Arc<Mutex<BTreeMap<(String, &'static str), usize>>>,
     wake_failures: Arc<Mutex<BTreeMap<String, usize>>>,
     hung_wakes: Arc<Mutex<BTreeSet<String>>>,
     rejected_wakes: Arc<Mutex<BTreeSet<String>>>,
     wake_attempts: Arc<Mutex<BTreeMap<String, usize>>>,
+    /// Whether the compute's API is down: listing fails, while its sandboxes carry on.
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeCompute {
@@ -108,17 +112,36 @@ impl FakeCompute {
         self.live.lock().unwrap().get(&SandboxId(name.into())).map_or(0, |l| l.wakes)
     }
 
-    /// Makes one operation (`restore`, `set_egress`, `set_labels` or `destroy`) fail on a sandbox until
+    /// Makes one operation (`restore`, `checkpoint` (any but the pool's "warm"), `set_egress`, `set_labels` or `destroy`) fail on a sandbox until
     /// [`FakeCompute::heal`], like a Sprite whose storage has gone bad.
     pub fn fail(&self, name: &str, op: &'static str) {
         self.failing.lock().unwrap().insert((name.to_string(), op));
     }
 
+    /// Like [`FakeCompute::fail`], once `calls` calls of the operation have succeeded: a sandbox that goes bad mid-run.
+    pub fn fail_after(&self, name: &str, op: &'static str, calls: usize) {
+        self.failing_after.lock().unwrap().insert((name.to_string(), op), calls);
+    }
+
+    /// Makes `list` fail, or work again, like a stopped engine or a frozen VM. Its sandboxes stay as they are.
+    pub fn set_unreachable(&self, down: bool) {
+        self.unreachable.store(down, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn heal(&self, name: &str) {
         self.failing.lock().unwrap().retain(|(n, _)| n != name);
+        self.failing_after.lock().unwrap().retain(|(n, _), _| n != name);
     }
 
     fn check(&self, id: &SandboxId, op: &'static str) -> Result<()> {
+        let mut after = self.failing_after.lock().unwrap();
+        if let Some(left) = after.get_mut(&(id.0.clone(), op)) {
+            if *left == 0 {
+                return Err(Error::Other(format!("sprites api 503 Service Unavailable: Storage not ready ({op})")));
+            }
+            *left -= 1;
+        }
+        drop(after);
         if self.failing.lock().unwrap().contains(&(id.0.clone(), op)) {
             return Err(Error::Other(format!("sprites api 503 Service Unavailable: Storage not ready ({op})")));
         }
@@ -150,6 +173,9 @@ impl Compute for FakeCompute {
     }
 
     async fn list(&self, labels: &Labels) -> Result<Vec<Sandbox>> {
+        if self.unreachable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::Other("connection refused".into()));
+        }
         let found: Vec<Sandbox> = self
             .live
             .lock()
@@ -164,6 +190,10 @@ impl Compute for FakeCompute {
     }
 
     async fn checkpoint(&self, id: &SandboxId, note: &str) -> Result<CheckpointId> {
+        // The pool's warm checkpoint is taken before a run starts, so a test can't fail only later ones through it.
+        if note != "warm" {
+            self.check(id, "checkpoint")?;
+        }
         self.with(id, |l| {
             let cp = CheckpointId(format!("{}-cp{}", id.0, l.checkpoints.len() + 1));
             l.checkpoints.push((cp.clone(), note.to_string()));
@@ -228,6 +258,10 @@ impl Compute for FakeCompute {
             l.sandbox.labels = labels.clone();
             Ok(())
         })
+    }
+
+    async fn preflight(&self, id: &SandboxId) -> Result<()> {
+        self.check(id, "preflight").map_err(|_| Error::Unavailable("out of disk".into()))
     }
 
     async fn destroy(&self, id: &SandboxId) -> Result<()> {

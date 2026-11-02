@@ -163,9 +163,10 @@ pub fn parse_grade(s: &str) -> Result<Option<i64>> {
     if s.eq_ignore_ascii_case("none") {
         return Ok(None);
     }
-    let g = s.parse::<i64>().map_err(|_| Error::Invalid("grade must be 1 to 4, or none".into()))?;
-    validate_grade(g)?;
-    Ok(Some(g))
+    match s.parse::<i64>() {
+        Ok(g) if (1..=4).contains(&g) => Ok(Some(g)),
+        _ => Err(Error::Invalid("grade must be 1 to 4, or none".into())),
+    }
 }
 
 /// A task's grade is a human's call: an agent can only raise an existing grade,
@@ -199,7 +200,18 @@ async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
     // A delegated reviewer approves like a human would, but not work it did: the
     // claim is released on the way to review, so the event log says who did it.
     if tx.ctx.agent_id.is_some_and(|a| project.reviewers.contains(&a)) {
-        return if in_review && did_work(tx, task).await? { Err(Error::ReviewRequired) } else { Ok(()) };
+        return if in_review && did_work(tx, task).await? {
+            Err(Error::Forbidden(
+                "a reviewer can't approve or finish work it did; another reviewer or a human has to".into(),
+            ))
+        } else {
+            Ok(())
+        };
+    }
+    if task.status == Status::Approved && to == Status::Done {
+        return Err(Error::Forbidden(
+            "this task is approved; only a human or a delegated reviewer can mark it done".into(),
+        ));
     }
     if gated { Err(Error::ReviewRequired) } else { Ok(()) }
 }
@@ -1028,5 +1040,24 @@ fn fts_query(input: &str) -> String {
             v.join(" ")
         }
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_grade_accepts_1_to_4_and_none() {
+        assert_eq!(parse_grade("3").unwrap(), Some(3));
+        assert_eq!(parse_grade(" None ").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_grade_errors_mention_none() {
+        for bad in ["5", "0", "-1", "abc", ""] {
+            let msg = parse_grade(bad).unwrap_err().to_string();
+            assert!(msg.contains("grade must be 1 to 4, or none"), "{bad}: {msg}");
+        }
     }
 }

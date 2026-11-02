@@ -11,6 +11,7 @@ Read this index first, then open only the file the work in front of you needs.
 | [overview.md](overview.md) | The big picture: principles, how the factory fits into Trailhead, the decisions table |
 | [seams.md](seams.md) | The five plugin traits (`Compute`, `Harness`, `ModelProvider`, `Tracker`, `CodeHost`), the daemon contract, crate layout, test fakes |
 | [sandbox.md](sandbox.md) | Sprites, connectors and credentials, egress, standard checks, bootstrap and checkpoints |
+| [targets.md](targets.md) | Running on several computes at once: local first, Sprites as overflow, spend caps, giving the machine back |
 | [agents.md](agents.md) | The in-sandbox daemon and its contract, agent profiles and models, specs and agent context |
 | [lifecycle.md](lifecycle.md) | How a task moves from spec to merged PR, mapped onto Trailhead statuses and claims |
 | [engine-changes.md](engine-changes.md) | Changes the task engine needs for the factory, with ready-to-file `TRAIL` tasks |
@@ -25,6 +26,6 @@ Read this index first, then open only the file the work in front of you needs.
 | [open-questions.md](open-questions.md) | Undecided questions and hands-on tests still to run |
 | [naming.md](naming.md) | Name ideas for the factory and its parts |
 
-Each file marks its statements as **Decided**, **Leaning** or **Proposal**. Decided items change only with Lane's sign-off; update the file and the decisions table in [overview.md](overview.md) together.
+Each file marks its statements as **Decided**, **Leaning** or **Proposal**. Decided items change only with the maintainer's sign-off; update the file and the decisions table in [overview.md](overview.md) together.
 
 Sandbox and connector facts were checked against the Sprites docs on 2026-10-25. The factory docs were brought up to date with the code on 2026-10-28 (TRAIL-146).

@@ -56,7 +56,7 @@ A `Connection` state: `Offline`, `Syncing`, `Live`. Every command system runs on
 
 ## Identity
 
-Nothing new. Tokens already have a `principal` of user or agent, and every write records the actor and the user it acted for, so the event log tells "Lane approved it" from "`factory/trail-42-a1` did it."
+Nothing new. Tokens already have a `principal` of user or agent, and every write records the actor and the user it acted for, so the event log tells "a person approved it" from "`factory/trail-42-a1` did it."
 
 - The UI reads the user token the CLI saved for this server (`<config dir>/servers/<instance>/`, or the keyring entry named after it), or runs the same `trailhead login` flow: paste a printed token, confirm with `/v1/me`.
 - It acts only as the user. No `--as <agent>` equivalent.

@@ -57,6 +57,30 @@ impl GitHub {
         self
     }
 
+    /// Checks the token: it must authenticate (`GET /user`) and read the repo's pulls. Returns the user's login.
+    pub async fn check_token(&self, repo: &Repo) -> Result<String> {
+        let user = self.call(self.request(Method::GET, "/user")).await?;
+        let pulls = format!("{}/pulls", Self::repo_path(repo));
+        self.call(self.request(Method::GET, &pulls).query(&[("per_page", "1")])).await?;
+        Ok(user["login"].as_str().unwrap_or("?").to_string())
+    }
+
+    /// Checks a token meant to write: it must authenticate and have push access to the repo (the `permissions`
+    /// GitHub reports for the token on `GET /repos/o/r`), which holds for classic and fine-grained tokens alike.
+    /// GitHub doesn't report pull request or issue write there, so those can't be checked without writing.
+    /// Returns the user's login.
+    pub async fn check_writer(&self, repo: &Repo) -> Result<String> {
+        let user = self.call(self.request(Method::GET, "/user")).await?;
+        let info = self.call(self.request(Method::GET, &Self::repo_path(repo))).await?;
+        if info["permissions"]["push"].as_bool() != Some(true) {
+            return Err(Error::Forbidden(format!(
+                "the token can't push to {}/{} (needs contents, pull requests and issues write)",
+                repo.owner, repo.name
+            )));
+        }
+        Ok(user["login"].as_str().unwrap_or("?").to_string())
+    }
+
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
         let req = self
             .http
@@ -116,7 +140,7 @@ impl GitHub {
             StatusCode::NOT_FOUND => Error::NotFound(msg),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Forbidden(msg),
             StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY => Error::Conflict(msg),
-            _ => Error::Other(msg),
+            s => Error::from_status(s.as_u16(), msg),
         })
     }
 
@@ -262,6 +286,19 @@ fn summarize_ci(runs: &[Value], statuses: &[Value]) -> CiState {
     }
 }
 
+/// The end of a job log: its last lines, within a size that fits in a prompt.
+fn log_tail(log: &str) -> String {
+    const LINES: usize = 80;
+    const BYTES: usize = 6000;
+    let lines: Vec<&str> = log.lines().collect();
+    let tail = lines[lines.len().saturating_sub(LINES)..].join("\n");
+    let mut start = tail.len().saturating_sub(BYTES);
+    while !tail.is_char_boundary(start) {
+        start += 1;
+    }
+    tail[start..].to_string()
+}
+
 fn pr_ref(repo: &Repo, p: &Value) -> PrRef {
     PrRef {
         repo: repo.clone(),
@@ -332,9 +369,15 @@ impl CodeHost for GitHub {
         Ok(out)
     }
 
-    async fn comment(&self, pr: &PrRef, body: &str) -> Result<()> {
+    async fn comment(&self, pr: &PrRef, body: &str) -> Result<u64> {
         let path = format!("{}/issues/{}/comments", Self::repo_path(&pr.repo), pr.number);
-        self.call(self.request(Method::POST, &path).json(&json!({ "body": body }))).await.map(drop)
+        let made = self.call(self.request(Method::POST, &path).json(&json!({ "body": body }))).await?;
+        made["id"].as_u64().ok_or_else(|| Error::Other("github answered a comment without an id".into()))
+    }
+
+    async fn edit_comment(&self, pr: &PrRef, id: u64, body: &str) -> Result<()> {
+        let path = format!("{}/issues/comments/{id}", Self::repo_path(&pr.repo));
+        self.call(self.request(Method::PATCH, &path).json(&json!({ "body": body }))).await.map(drop)
     }
 
     async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome> {
@@ -350,7 +393,7 @@ impl CodeHost for GitHub {
                 PrState::Open { mergeable: Some(false) } => Ok(MergeOutcome::Conflict),
                 _ => Ok(MergeOutcome::Refused(message)),
             },
-            s => Err(Error::Other(format!("github {s}: {message}"))),
+            s => Err(Error::from_status(s.as_u16(), format!("github {s}: {message}"))),
         }
     }
 
@@ -395,8 +438,38 @@ impl CodeHost for GitHub {
                     Err(Error::Other(format!("github {status}: {message}")))
                 }
             }
-            s => Err(Error::Other(format!("github {s}: {message}"))),
+            s => Err(Error::from_status(s.as_u16(), format!("github {s}: {message}"))),
         }
+    }
+
+    async fn carries_verdict(&self, pr: &PrRef, reviewed: &str) -> Result<bool> {
+        let r = Self::repo_path(&pr.repo);
+        let p = self.call(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
+        let (Some(base), Some(head)) = (p["base"]["ref"].as_str(), p["head"]["sha"].as_str()) else {
+            return Err(Error::Other(format!("github: PR {} has no base or head", pr.number)));
+        };
+        if head == reviewed {
+            return Ok(true);
+        }
+        // What the PR has that its base lacks: its own commits. A merge of the base brings in base commits, which
+        // aren't among them, so a commit since `reviewed` that is one of them must be a merge of the base itself.
+        let own = self.call(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
+        // A reviewed sha the host no longer has (a force push, then GC) 404s: it can't be vouched for.
+        let since = match self.call(self.request(Method::GET, &format!("{r}/compare/{reviewed}...{head}"))).await {
+            Ok(since) => since,
+            Err(Error::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        // `reviewed` must lead to the head, and a listing cut short can't be vouched for.
+        if since["status"].as_str() != Some("ahead") {
+            return Ok(false);
+        }
+        let (Some(own), Some(since)) = (complete_commits(&own), complete_commits(&since)) else { return Ok(false) };
+        let own_shas: Vec<&str> = own.iter().filter_map(|c| c["sha"].as_str()).collect();
+        Ok(since.iter().filter(|c| c["sha"].as_str().is_some_and(|s| own_shas.contains(&s))).all(|c| {
+            let parents = c["parents"].as_array().map(Vec::as_slice).unwrap_or_default();
+            parents.len() == 2 && parents[1]["sha"].as_str().is_some_and(|second| !own_shas.contains(&second))
+        }))
     }
 
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
@@ -444,6 +517,28 @@ impl CodeHost for GitHub {
         Ok(Ci { state: summarize_ci(&runs, statuses), head })
     }
 
+    async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {
+        let r = Self::repo_path(&pr.repo);
+        let head = CodeHost::head(self, pr).await?;
+        let req = self.request(Method::GET, &format!("{r}/commits/{head}/check-runs")).query(&[("per_page", "100")]);
+        let found = self.call(req).await?;
+        let mut out = Vec::new();
+        for run in found["check_runs"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            let name = run["name"].as_str().unwrap_or_default();
+            let (Some(id), true) = (run["id"].as_u64(), checks.iter().any(|c| c == name)) else { continue };
+            if out.iter().any(|(n, _): &(String, String)| n == name) {
+                continue;
+            }
+            // An Actions job's id is its check run's; a check from elsewhere has no such log, which is left out.
+            if let Ok(Value::String(log)) =
+                self.call(self.request(Method::GET, &format!("{r}/actions/jobs/{id}/logs"))).await
+            {
+                out.push((name.to_string(), log_tail(&log)));
+            }
+        }
+        Ok(out)
+    }
+
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
         let path = format!("{}/pulls/{}/files", Self::repo_path(&pr.repo), pr.number);
         let mut out = Vec::new();
@@ -458,6 +553,12 @@ impl CodeHost for GitHub {
         }
         Ok(out)
     }
+}
+
+/// The commits of a compare response, unless the host cut the list short (it lists at most 250).
+fn complete_commits(compare: &Value) -> Option<&Vec<Value>> {
+    let commits = compare["commits"].as_array()?;
+    (compare["total_commits"].as_u64()? == commits.len() as u64).then_some(commits)
 }
 
 #[cfg(test)]

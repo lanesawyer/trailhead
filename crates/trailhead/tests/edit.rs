@@ -27,6 +27,11 @@ fn edit_sets_and_removes_metadata() {
     let shown = th.stdout(&["show", "QA-1"]);
     assert!(!shown.contains("attempt") && shown.contains(r#""note":"hi""#), "{shown}");
     assert!(!th.run(&["edit", "QA-1", "--meta", "nonsense"]).status.success());
+    let bad = th.run(&["edit", "QA-1", "--meta", "factory.attempt_base=3x"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("factory.attempt_base"));
+    th.stdout(&["edit", "QA-1", "--meta", "factory.attempt_base=3", "--meta", "factory.sandbox=trail-1-a1"]);
+    th.stdout(&["edit", "QA-1", "--meta", "factory.attempt_base=null"]);
 }
 
 #[test]
@@ -37,4 +42,16 @@ fn edit_rejects_a_parent_that_would_make_a_cycle() {
     th.stdout(&["add", "b", "-p", "QA"]);
     th.stdout(&["edit", "QA-1", "--parent", "QA-2"]);
     assert!(!th.run(&["edit", "QA-2", "--parent", "QA-1"]).status.success());
+}
+
+#[test]
+fn add_prints_possible_duplicates() {
+    let th = Instance::new();
+    th.stdout(&["project", "add", "QA", "Queue"]);
+    let first = th.stdout(&["add", "Rotate signing keys", "-p", "QA"]);
+    assert!(!first.contains("possible duplicates"), "{first}");
+    let dup = th.stdout(&["add", "Rotate the signing keys", "-p", "QA"]);
+    assert!(dup.trim_end().ends_with("possible duplicates: QA-1"), "{dup}");
+    let other = th.stdout(&["add", "Write onboarding docs", "-p", "QA"]);
+    assert!(!other.contains("possible duplicates"), "{other}");
 }

@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
-use trailhead_daemon::{RENEW_EVERY, Runner, Workspace};
+use trailhead_daemon::{HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
     Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, InstallHost, PrepareRequest, Repo, Result,
     RunEvent, RunReport, RunRequest, SandboxId, Tracker,
@@ -39,11 +40,19 @@ pub struct FakeWorkspace {
     merge_head_calls: AtomicUsize,
     /// Whether the agent aborts the merge: `merge_head` sees none after prepare, and HEAD lacks the base.
     abandons_merge: AtomicBool,
+    /// Whether the agent commits the merge itself: `merge_head` sees none after prepare, but HEAD has the base.
+    commits_merge: AtomicBool,
+    /// Whether the agent rebases: the run's starting commit is no longer in HEAD's history.
+    rebases: AtomicBool,
     /// Files the agent leaves conflict markers in.
     markers: Mutex<Vec<String>>,
     /// Tools in the fake checkout's own mise config.
     repo_tools: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
+    /// Errors the next prepares fail with, before they change anything.
+    prepare_errors: Mutex<Vec<String>>,
+    /// Outputs the next prepares that run a `setup` check fail it with, after the checkout is otherwise ready.
+    setup_errors: Mutex<Vec<String>>,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
 
@@ -64,6 +73,15 @@ impl Workspace for FakeWorkspace {
         if let Some(gate) = gate {
             gate.notified().await;
         }
+        if let Some(error) = self.prepare_errors.lock().unwrap().pop() {
+            return Err(Error::Other(error));
+        }
+        if req.setup.is_some()
+            && let Some(output) = self.setup_errors.lock().unwrap().pop()
+        {
+            *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
+            return Err(Error::SetupFailed(output));
+        }
         *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
         *self.merging.lock().unwrap() = req.merge_base && !self.agent_merges.load(Ordering::SeqCst);
         self.merge_head_calls.store(0, Ordering::SeqCst);
@@ -77,14 +95,17 @@ impl Workspace for FakeWorkspace {
 
     async fn merge_head(&self) -> Result<Option<String>> {
         let call = self.merge_head_calls.fetch_add(1, Ordering::SeqCst);
-        if self.abandons_merge.load(Ordering::SeqCst) && call > 0 {
+        if (self.abandons_merge.load(Ordering::SeqCst) || self.commits_merge.load(Ordering::SeqCst)) && call > 0 {
             return Ok(None);
         }
         let merging = *self.merging.lock().unwrap() || (self.agent_merges.load(Ordering::SeqCst) && call > 0);
         Ok(merging.then(|| FAKE_BASE_MERGE.to_string()))
     }
 
-    async fn contains(&self, _commit: &str) -> Result<bool> {
+    async fn contains(&self, commit: &str) -> Result<bool> {
+        if self.rebases.load(Ordering::SeqCst) && commit != FAKE_BASE_MERGE {
+            return Ok(false);
+        }
         Ok(!self.abandons_merge.load(Ordering::SeqCst))
     }
 
@@ -152,7 +173,14 @@ impl LocalDaemon {
 
     pub fn connecting(harness: Arc<dyn Harness>, codehost: Arc<dyn CodeHost>, connect: Connect) -> LocalDaemon {
         let workspace = Arc::new(FakeWorkspace::default());
-        let runner = Runner { harness, codehost, workspace: workspace.clone(), connect, renew_every: RENEW_EVERY };
+        let runner = Runner {
+            harness,
+            codehost,
+            workspace: workspace.clone(),
+            connect,
+            renew_every: RENEW_EVERY,
+            heartbeat_every: HEARTBEAT_EVERY,
+        };
         LocalDaemon {
             runner: Arc::new(runner),
             workspace,
@@ -171,6 +199,12 @@ impl LocalDaemon {
         *self.workspace.repo_tools.lock().unwrap() = tools.iter().map(|t| t.to_string()).collect();
     }
 
+    /// Has the daemon send a heartbeat this often instead of every 30 seconds.
+    pub fn heartbeat_every(mut self, every: Duration) -> LocalDaemon {
+        Arc::get_mut(&mut self.runner).expect("the runner isn't shared yet").heartbeat_every = every;
+        self
+    }
+
     /// Has the agent leave conflict markers in these files.
     pub fn leave_conflict_markers(&self, files: &[&str]) {
         *self.workspace.markers.lock().unwrap() = files.iter().map(|f| f.to_string()).collect();
@@ -184,6 +218,16 @@ impl LocalDaemon {
     /// Has the agent abort the merge of the base branch that prepare started.
     pub fn agent_aborts_merge(&self) {
         self.workspace.abandons_merge.store(true, Ordering::SeqCst);
+    }
+
+    /// Has the agent rebase its commits, so the commit the run started at is no longer an ancestor of HEAD.
+    pub fn agent_rebases(&self) {
+        self.workspace.rebases.store(true, Ordering::SeqCst);
+    }
+
+    /// Has the agent run `git commit` to finish the merge of the base branch that prepare started.
+    pub fn agent_commits_merge(&self) {
+        self.workspace.commits_merge.store(true, Ordering::SeqCst);
     }
 
     /// Lets fake checkouts of a branch start at its head on the code host, as a rework's does.
@@ -217,6 +261,23 @@ impl LocalDaemon {
         let mut errors = self.run_errors.lock().unwrap();
         for _ in 0..times {
             errors.push(trailhead_factory::Error::Other(error.to_string()));
+        }
+    }
+
+    /// Makes the next `times` prepares fail with this error, as a checkout that won't clone or build would.
+    pub fn fail_prepares(&self, times: usize, error: &str) {
+        let mut errors = self.workspace.prepare_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push(error.to_string());
+        }
+    }
+
+    /// Makes the next `times` prepares that run a `setup` check fail it with this output, as a build that no longer
+    /// compiles would.
+    pub fn fail_setups(&self, times: usize, output: &str) {
+        let mut errors = self.workspace.setup_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push(output.to_string());
         }
     }
 

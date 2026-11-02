@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Check, Error, Grader, ModelAlias, PrepareRequest, Repo, Result, Usd};
+use crate::{Check, DEFAULT_TARGET, Error, Grader, ModelAlias, PrepareRequest, Repo, Result, Usd};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,6 +29,7 @@ impl Role {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FactoryConfig {
+    #[serde(default)]
     pub repo: RepoConfig,
     #[serde(default)]
     pub stack: Stack,
@@ -45,6 +46,9 @@ pub struct FactoryConfig {
     pub usage: UsageConfig,
     #[serde(default)]
     pub compute: ComputeConfig,
+    /// `[factory.targets.<name>]`: several computes at once. Not with `[factory.compute]`, which means one target.
+    #[serde(default)]
+    pub targets: BTreeMap<String, TargetConfig>,
     #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
@@ -68,7 +72,8 @@ pub enum MergeMode {
     /// Says on the PR what it would do, and doesn't merge.
     Shadow,
     /// Squash-merges approved PRs: grades with `auto_merge`, and any a person approved. Falls back to `Shadow` when
-    /// the factory isn't a delegated reviewer. Read at startup, so switching it takes effect on the next restart.
+    /// the factory isn't a delegated reviewer. Re-read from the file before each merge decision, so
+    /// switching it takes effect on the next pass.
     On,
 }
 
@@ -111,7 +116,6 @@ impl Default for GradesConfig {
                     "4".to_string(),
                     globs(&[
                         ".github/**",
-                        "factory.toml",
                         "fnox.toml",
                         "mise.toml",
                         "AGENTS.md",
@@ -137,11 +141,32 @@ impl GradesConfig {
 }
 
 /// How the daemon in each sandbox is started.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
     /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`. The daemon's default when unset.
     pub log: Option<String>,
+    /// Warn when the sandbox's filesystem uses more than this after setup and trim, before the warm checkpoint is
+    /// taken; 0 for no warning. Stack-neutral, so a new stack's caches can't fill the disk unnoticed.
+    #[serde(default = "default_disk_warn_bytes")]
+    pub disk_warn_bytes: u64,
+    /// Refuse to take the warm checkpoint (the prepare fails and the sandbox is destroyed) when the filesystem uses
+    /// more than this; 0 for no limit, the default.
+    #[serde(default)]
+    pub disk_limit_bytes: u64,
+}
+
+/// 16 GiB: a Trailhead sandbox with its cargo `target` trimmed to 6 GiB uses about 10 GiB (docs/factory/sandbox.md).
+pub const DEFAULT_DISK_WARN_BYTES: u64 = 16 << 30;
+
+fn default_disk_warn_bytes() -> u64 {
+    DEFAULT_DISK_WARN_BYTES
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        DaemonConfig { log: None, disk_warn_bytes: DEFAULT_DISK_WARN_BYTES, disk_limit_bytes: 0 }
+    }
 }
 
 /// Where sandboxes run. Sprites unless the factory file says otherwise.
@@ -154,11 +179,120 @@ pub enum ComputeConfig {
     /// defaults.
     Docker {
         image: Option<String>,
+        /// The bridge network the gateway gets out on. Sandboxes aren't on it.
         network: Option<String>,
         /// The OCI runtime, such as `runsc` (gVisor).
         runtime: Option<String>,
+        /// Each sandbox's memory limit, in MiB, swap included. Without one, sandboxes share the engine's memory and
+        /// concurrent builds can OOM-kill each other. Also sets `CARGO_BUILD_JOBS` to one per GiB of it.
+        memory_mib: Option<u64>,
     },
 }
+
+/// `[factory.targets.<name>]`: one place sandboxes can run, with its compute's settings and its limits
+/// (`docs/factory/targets.md`). `kind` and the compute's own keys are those of `[factory.compute]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawTarget")]
+pub struct TargetConfig {
+    #[serde(flatten)]
+    pub compute: ComputeConfig,
+    /// Lower is preferred; ties go to the name that sorts first.
+    pub priority: u32,
+    /// The most sandboxes the repo holds here at once; without one only the repo's own cap applies.
+    pub max_sandboxes: Option<usize>,
+    /// The daily spend cap and the rates it is priced at.
+    pub spend: Option<crate::Spend>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTarget {
+    kind: String,
+    #[serde(default)]
+    priority: u32,
+    max_sandboxes: Option<usize>,
+    daily_usd: Option<f64>,
+    usd_per_vcpu_hour: Option<f64>,
+    usd_per_gb_hour: Option<f64>,
+    image: Option<String>,
+    network: Option<String>,
+    runtime: Option<String>,
+    memory_mib: Option<u64>,
+}
+
+impl TryFrom<RawTarget> for TargetConfig {
+    type Error = String;
+
+    fn try_from(raw: RawTarget) -> std::result::Result<TargetConfig, String> {
+        let spend = raw_spend(&raw)?;
+        let compute = match raw.kind.as_str() {
+            "sprites" => {
+                let docker_only = [
+                    ("image", raw.image.is_some()),
+                    ("network", raw.network.is_some()),
+                    ("runtime", raw.runtime.is_some()),
+                    ("memory_mib", raw.memory_mib.is_some()),
+                ];
+                if let Some((key, _)) = docker_only.iter().find(|(_, set)| *set) {
+                    return Err(format!("`{key}` is a setting of kind = \"docker\", not \"sprites\""));
+                }
+                ComputeConfig::Sprites
+            }
+            "docker" => ComputeConfig::Docker {
+                image: raw.image,
+                network: raw.network,
+                runtime: raw.runtime,
+                memory_mib: raw.memory_mib,
+            },
+            other => return Err(format!("unknown kind `{other}`; the kinds are sprites and docker")),
+        };
+        Ok(TargetConfig { compute, priority: raw.priority, max_sandboxes: raw.max_sandboxes, spend })
+    }
+}
+
+/// The spend cap a target's keys set, with Fly's rates for any left out.
+fn raw_spend(raw: &RawTarget) -> std::result::Result<Option<crate::Spend>, String> {
+    let amount = |key: &str, v: f64, least: f64| {
+        if v.is_finite() && v >= least {
+            Ok(crate::Usd::dollars(v))
+        } else {
+            Err(format!("`{key}` is not a usable amount: {v}"))
+        }
+    };
+    let Some(daily) = raw.daily_usd else {
+        if raw.usd_per_vcpu_hour.is_some() || raw.usd_per_gb_hour.is_some() {
+            return Err("`usd_per_vcpu_hour` and `usd_per_gb_hour` price a spend cap, so they need `daily_usd`".into());
+        }
+        return Ok(None);
+    };
+    let rate = |key: &str, v: Option<f64>, default: crate::Usd| v.map_or(Ok(default), |v| amount(key, v, 0.0));
+    Ok(Some(crate::Spend {
+        daily: amount("daily_usd", daily, 0.000_001)?,
+        per_vcpu_hour: rate("usd_per_vcpu_hour", raw.usd_per_vcpu_hour, crate::Spend::VCPU_HOUR)?,
+        per_gb_hour: rate("usd_per_gb_hour", raw.usd_per_gb_hour, crate::Spend::GB_HOUR)?,
+    }))
+}
+
+/// A target as the factory runs it: [`TargetConfig`] with its name. [`FactoryConfig::target_specs`] lists them in
+/// placement order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetSpec {
+    pub name: String,
+    pub compute: ComputeConfig,
+    pub priority: u32,
+    pub max_sandboxes: Option<usize>,
+    pub spend: Option<crate::Spend>,
+}
+/// The Docker gateway's name on each sandbox's network (`docs/factory/sandbox.md`).
+pub const GATEWAY_HOST: &str = "trailhead-gateway";
+/// The port the Docker gateway listens on.
+pub const GATEWAY_PORT: u16 = 8080;
+/// The Anthropic connection's id in the Docker gateway's list.
+pub const GATEWAY_ANTHROPIC_ID: &str = "anthropic";
+/// The GitHub connection's id in the Docker gateway's list.
+pub const GATEWAY_GITHUB_ID: &str = "github";
+/// The git connection's id in the Docker gateway's list: smart-HTTP to `https://github.com`, read only.
+pub const GATEWAY_GIT_ID: &str = "github";
 
 /// Subscription usage windows (`docs/factory/budgets.md`): at or past `pause_at[window]` percent, no new runs
 /// start until that window resets, leaving room for whatever else shares the subscription.
@@ -169,39 +303,89 @@ pub struct UsageConfig {
     pub pause_at: BTreeMap<String, u32>,
 }
 
+/// The usage windows `pause_at` can name.
+pub const USAGE_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
+
+/// Reject `pause_at` windows that aren't known (a typo would never trigger) and percentages over 100.
+pub(crate) fn validate_pause_at(pause_at: &BTreeMap<String, u32>, table: &str) -> Result<()> {
+    for (window, percent) in pause_at {
+        if !USAGE_WINDOWS.contains(&window.as_str()) {
+            return Err(Error::Config(format!(
+                "{table} pause_at has unknown window `{window}`; the windows are {}",
+                USAGE_WINDOWS.join(" and ")
+            )));
+        }
+        if *percent > 100 {
+            return Err(Error::Config(format!("{table} pause_at for {window} is {percent}; it's a percent, 0 to 100")));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct RepoConfig {
+    /// Default to the git remote's.
     pub owner: String,
     pub name: String,
-    #[serde(default = "default_base_branch")]
     pub base_branch: String,
-    /// The Trailhead project whose tasks run against this repo.
+    /// The Trailhead project whose tasks run against this repo: the file's top-level `project`, shared with the CLI.
+    #[serde(skip_deserializing)]
     pub project: String,
-    #[serde(default = "default_max_sandboxes")]
     pub max_sandboxes: usize,
     /// The profile tasks run on unless they name another.
-    #[serde(default = "default_worker")]
     pub worker: String,
-    #[serde(default = "default_reviewer")]
     pub reviewer: String,
-    /// A task whose subtasks are the factory's work. Without one, every ready task in the project is.
-    #[serde(default)]
-    pub queue: Option<String>,
+    /// Tasks whose direct subtasks are the factory's work: one key or a list of them. Without any, every ready task in
+    /// the project is.
+    #[serde(deserialize_with = "string_or_list")]
+    pub queue: Vec<String>,
     /// Attempts a task gets before it's parked for a human instead of retried.
-    #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
     /// Infrastructure failures in a row (sandbox, daemon or API trouble, not the task) at which a task is parked for a
     /// human instead of retried after a backoff.
-    #[serde(default = "default_max_infra_failures")]
     pub max_infra_failures: u32,
     /// Reviews of one task that may ask for changes before it's parked for a human instead of reworked again.
-    #[serde(default = "default_max_review_rounds")]
     pub max_review_rounds: u32,
     /// Reworks for a PR that conflicts with the base branch before the task is parked for a human. They don't use up
     /// review rounds.
-    #[serde(default = "default_max_conflict_reworks")]
     pub max_conflict_reworks: u32,
+}
+
+impl Default for RepoConfig {
+    fn default() -> RepoConfig {
+        RepoConfig {
+            owner: String::new(),
+            name: String::new(),
+            base_branch: default_base_branch(),
+            project: String::new(),
+            max_sandboxes: default_max_sandboxes(),
+            worker: default_worker(),
+            reviewer: default_reviewer(),
+            queue: Vec::new(),
+            max_attempts: default_max_attempts(),
+            max_infra_failures: default_max_infra_failures(),
+            max_review_rounds: default_max_review_rounds(),
+            max_conflict_reworks: default_max_conflict_reworks(),
+        }
+    }
+}
+
+/// A key as a string, or a list of them.
+fn string_or_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Keys {
+        One(String),
+        Many(Vec<String>),
+    }
+    match Keys::deserialize(d)? {
+        Keys::One(s) => Ok(vec![s]),
+        Keys::Many(v) if v.is_empty() => Err(serde::de::Error::custom(
+            "queue = [] is empty: list at least one task key, or leave `queue` out to make every ready task in the project the factory's",
+        )),
+        Keys::Many(v) => Ok(v),
+    }
 }
 
 fn default_base_branch() -> String {
@@ -264,6 +448,10 @@ impl Stack {
 #[serde(deny_unknown_fields)]
 pub struct Checks {
     pub setup: Option<String>,
+    /// Runs after `setup` and before the warm checkpoint, to cut build output and caches down to a size worth
+    /// exporting on every task (`docs/factory/sandbox.md` has suggestions per stack). `$TRAILHEAD_DAEMON` is the
+    /// daemon binary, whose `trim-cargo` does it for cargo.
+    pub trim: Option<String>,
     pub fmt: Option<String>,
     pub fmt_fix: Option<String>,
     pub lint: Option<String>,
@@ -273,7 +461,7 @@ pub struct Checks {
 }
 
 impl Checks {
-    /// The verification checks, in the order they run. `setup` and `fmt_fix` change the tree, so they're left out.
+    /// The verification checks, in the order they run. `setup`, `trim` and `fmt_fix` change the tree, so they're left out.
     pub fn verifying(&self) -> Vec<(&'static str, &str)> {
         [
             ("fmt", &self.fmt),
@@ -297,6 +485,20 @@ pub struct Profile {
     pub model: ModelAlias,
     pub budget: Budget,
     pub escalate_to: Option<String>,
+    /// Minutes of silence from the agent (no steps, tool calls or output, not counting a tool call that's still
+    /// running) after which a run is stopped and fails as a stall.
+    #[serde(default = "default_stall_timeout")]
+    pub stall_timeout: u32,
+}
+
+fn default_stall_timeout() -> u32 {
+    5
+}
+
+impl Profile {
+    pub fn stall_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.stall_timeout) * 60)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -313,11 +515,75 @@ impl Budget {
     }
 }
 
+/// One requirement of a grade's gate. It is written as a string in `.trailhead.toml` and in a task's stored
+/// `MergeDecision`: one of the five fixed names, or the name of a verifying check.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GateKind {
+    /// Every verifying check passed, which the worker ran before opening the PR.
+    Checks,
+    Ci,
+    AgentReview,
+    Human,
+    Quorum,
+    /// A verifying check the repo names; config validation rejects a name that isn't one.
+    Named(String),
+}
+
+impl GateKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            GateKind::Checks => "checks",
+            GateKind::Ci => "ci",
+            GateKind::AgentReview => "agent_review",
+            GateKind::Human => "human",
+            GateKind::Quorum => "quorum",
+            GateKind::Named(name) => name,
+        }
+    }
+}
+
+impl From<&str> for GateKind {
+    fn from(s: &str) -> Self {
+        match s {
+            "checks" => GateKind::Checks,
+            "ci" => GateKind::Ci,
+            "agent_review" => GateKind::AgentReview,
+            "human" => GateKind::Human,
+            "quorum" => GateKind::Quorum,
+            name => GateKind::Named(name.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for GateKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for GateKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl Serialize for GateKind {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GateKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(GateKind::from(String::deserialize(d)?.as_str()))
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Gate {
     #[serde(default)]
-    pub require: Vec<String>,
+    pub require: Vec<GateKind>,
     #[serde(default)]
     pub auto_merge: bool,
     pub quorum: Option<Quorum>,
@@ -347,13 +613,103 @@ pub struct EgressConfig {
 }
 
 impl FactoryConfig {
-    pub fn parse(toml_src: &str) -> Result<FactoryConfig> {
-        let config: FactoryConfig = toml::from_str(toml_src).map_err(|e| Error::Config(e.to_string()))?;
-        config.validate()?;
-        Ok(config)
+    /// The factory's settings from a repo's `.trailhead.toml`: the top-level `project` and the `[factory]` table. The
+    /// CLI's own keys (`agent`) are left alone. `remote` is the git remote's owner and name, which `[factory.repo]`
+    /// falls back to.
+    pub fn from_repo_file(toml_src: &str, remote: Option<Repo>) -> Result<FactoryConfig> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct File {
+            project: Option<String>,
+            #[allow(dead_code)]
+            agent: Option<String>,
+            factory: Option<toml::Table>,
+        }
+        let file: File = toml::from_str(toml_src).map_err(|e| Error::Config(e.to_string()))?;
+        let table = file.factory.ok_or_else(|| Error::Config("no [factory] table".into()))?;
+        let project = file.project.ok_or_else(|| Error::Config("no top-level `project`".into()))?;
+        let config = Self::read(table)?;
+        config.finish(project, remote)
+    }
+
+    /// The contents of the `[factory]` table alone, for `project`.
+    pub fn parse_table(factory_src: &str, project: &str, remote: Option<Repo>) -> Result<FactoryConfig> {
+        let table: toml::Table = toml::from_str(factory_src).map_err(|e| Error::Config(e.to_string()))?;
+        let config = Self::read(table)?;
+        config.finish(project.to_string(), remote)
+    }
+
+    /// The settings in `table`, refusing a file that lists both `[factory.compute]` and `[factory.targets]`.
+    fn read(table: toml::Table) -> Result<FactoryConfig> {
+        if table.contains_key("compute") && table.contains_key("targets") {
+            return Err(Error::Config(
+                "[factory.compute] and [factory.targets] are both set; [factory.compute] means one target, so use one or the other".into(),
+            ));
+        }
+        FactoryConfig::deserialize(table).map_err(|e| Error::Config(e.to_string()))
+    }
+
+    /// Where sandboxes can run, in placement order: lowest priority number first, then by name. A file with
+    /// `[factory.compute]` (or neither) has the one target, [`DEFAULT_TARGET`].
+    pub fn target_specs(&self) -> Vec<TargetSpec> {
+        if self.targets.is_empty() {
+            return vec![TargetSpec {
+                name: DEFAULT_TARGET.into(),
+                compute: self.compute.clone(),
+                priority: 0,
+                max_sandboxes: None,
+                spend: None,
+            }];
+        }
+        let mut specs: Vec<TargetSpec> = self
+            .targets
+            .iter()
+            .map(|(name, t)| TargetSpec {
+                name: name.clone(),
+                compute: t.compute.clone(),
+                priority: t.priority,
+                max_sandboxes: t.max_sandboxes,
+                spend: t.spend,
+            })
+            .collect();
+        specs.sort_by(|a, b| (a.priority, &a.name).cmp(&(b.priority, &b.name)));
+        specs
+    }
+
+    fn finish(mut self, project: String, remote: Option<Repo>) -> Result<FactoryConfig> {
+        self.repo.project = project;
+        for (field, from_remote) in [
+            (&mut self.repo.owner, remote.as_ref().map(|r| &r.owner)),
+            (&mut self.repo.name, remote.as_ref().map(|r| &r.name)),
+        ] {
+            if field.is_empty() {
+                *field = from_remote.cloned().ok_or_else(|| {
+                    Error::Config("[factory.repo] needs owner and name: there's no git remote to read them from".into())
+                })?;
+            }
+        }
+        self.validate()?;
+        Ok(self)
     }
 
     fn validate(&self) -> Result<()> {
+        validate_pause_at(&self.usage.pause_at, "[factory.usage]")?;
+        for (name, target) in &self.targets {
+            // Names go into sandbox names and labels.
+            let ok = !name.is_empty()
+                && name.split('-').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric()))
+                && !name.chars().any(|c| c.is_ascii_uppercase());
+            if !ok || name == DEFAULT_TARGET {
+                return Err(Error::Config(format!(
+                    "[factory.targets.{name}]: a target's name is lowercase letters, digits and single hyphens, and not `{DEFAULT_TARGET}`"
+                )));
+            }
+            if target.max_sandboxes == Some(0) {
+                return Err(Error::Config(format!(
+                    "[factory.targets.{name}] max_sandboxes is 0, so no run could go there"
+                )));
+            }
+        }
         for (want, role) in [(&self.repo.worker, Role::Worker), (&self.repo.reviewer, Role::Reviewer)] {
             match self.profiles.get(want) {
                 None => return Err(Error::Config(format!("no profile named {want}"))),
@@ -368,6 +724,11 @@ impl FactoryConfig {
             }
         }
         for (name, profile) in &self.profiles {
+            if profile.stall_timeout == 0 {
+                return Err(Error::Config(format!(
+                    "[factory.profiles.{name}] stall_timeout is 0; it's minutes of silence, 1 or more"
+                )));
+            }
             if let Some(next) = &profile.escalate_to
                 && !self.profiles.contains_key(next)
             {
@@ -376,21 +737,24 @@ impl FactoryConfig {
         }
         for grade in self.grades.rules.keys() {
             if !matches!(grade.as_str(), "2" | "3" | "4") {
-                return Err(Error::Config(format!("[grades] has `{grade}`; path rules are for grades 2, 3 and 4")));
+                return Err(Error::Config(format!(
+                    "[factory.grades] has `{grade}`; path rules are for grades 2, 3 and 4"
+                )));
             }
         }
-        let known = ["checks", "ci", "agent_review", "human", "quorum"];
         let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
         for (grade, gate) in &self.gates {
             if !matches!(grade.as_str(), "1" | "2" | "3" | "4") {
-                return Err(Error::Config(format!("[gates.{grade}]: gates are per grade, 1 to 4")));
+                return Err(Error::Config(format!("[factory.gates.{grade}]: gates are per grade, 1 to 4")));
             }
             for r in &gate.require {
-                if !known.contains(&r.as_str()) && !checks.contains(&r.as_str()) {
+                if let GateKind::Named(name) = r
+                    && !checks.contains(&name.as_str())
+                {
                     return Err(Error::Config(format!("gate {grade} requires unknown {r}")));
                 }
             }
-            if gate.require.iter().any(|r| r == "quorum") && gate.quorum.is_none() {
+            if gate.require.contains(&GateKind::Quorum) && gate.quorum.is_none() {
                 return Err(Error::Config(format!("gate {grade} requires a quorum but doesn't define one")));
             }
         }
@@ -405,47 +769,48 @@ impl FactoryConfig {
         &self.profiles[&self.repo.reviewer]
     }
 
-    /// The gate a PR of this grade must pass: the repo's `[gates.N]`, or the table in `docs/factory/review.md#grades`.
+    /// The gate a PR of this grade must pass: the repo's `[factory.gates.N]`, or the table in `docs/factory/review.md#grades`.
     pub fn gate(&self, grade: u8) -> Gate {
+        use GateKind::{AgentReview, Checks, Ci, Human};
         if let Some(gate) = self.gates.get(&grade.to_string()) {
             return gate.clone();
         }
-        let (require, auto_merge): (&[&str], bool) = match grade {
-            0 | 1 => (&["checks", "ci"], true),
-            2 => (&["checks", "ci", "agent_review"], true),
-            3 => (&["checks", "ci", "agent_review", "human"], false),
-            _ => (&["checks", "ci", "human"], false),
+        let (require, auto_merge): (&[GateKind], bool) = match grade {
+            0 | 1 => (&[Checks, Ci], true),
+            2 => (&[Checks, Ci, AgentReview], true),
+            3 => (&[Checks, Ci, AgentReview, Human], false),
+            _ => (&[Checks, Ci, Human], false),
         };
-        Gate { require: require.iter().map(|r| r.to_string()).collect(), auto_merge, quorum: None }
+        Gate { require: require.to_vec(), auto_merge, quorum: None }
     }
 
-    /// The lowest grade's gate, which decides what a worker's checks must cover before it opens a PR.
-    pub fn default_gate(&self) -> Gate {
-        self.gate(1)
-    }
-
-    /// The checks a worker must pass before opening a PR under the default gate.
+    /// The checks a worker must pass before opening a PR: every verifying check the repo defines. The grade isn't
+    /// known until the PR exists, and any grade's gate may require `checks` or a named check, so the worker runs them
+    /// all and the merger can count a gate's check requirements as met.
     pub fn required_checks(&self) -> Vec<Check> {
-        let gate = self.default_gate();
-        let all =
-            self.checks.verifying().into_iter().map(|(n, c)| Check { name: n.to_string(), command: c.to_string() });
-        let everything = gate.require.iter().any(|r| r == "checks");
-        all.filter(|c| everything || gate.require.contains(&c.name)).collect()
+        self.checks
+            .verifying()
+            .into_iter()
+            .map(|(n, c)| Check { name: n.to_string(), command: c.to_string() })
+            .collect()
     }
 
-    /// Readies a checkout, on `branch` when given (a rework). Only workers build: a reviewer reads the diff, so it
-    /// skips `setup`.
+    /// Readies a checkout, on `branch` when given: a worker's rework, or a reviewer's look at the PR's head. Only
+    /// workers build: a reviewer reads the diff, so it skips `setup`.
     pub fn prepare_request(&self, role: Role, branch: Option<String>) -> PrepareRequest {
-        let setup = match role {
-            Role::Worker => self.checks.setup.as_ref().map(|c| Check { name: "setup".into(), command: c.clone() }),
-            _ => None,
+        let named = |name: &str, c: &Option<String>| {
+            c.as_ref().filter(|_| role == Role::Worker).map(|c| Check { name: name.into(), command: c.clone() })
         };
+        let some = |b: u64| Some(b).filter(|&b| b > 0);
         PrepareRequest {
             repo: self.repo.repo(),
             base_branch: self.repo.base_branch.clone(),
             branch,
             merge_base: false,
-            setup,
+            setup: named("setup", &self.checks.setup),
+            trim: named("trim", &self.checks.trim),
+            disk_warn_bytes: some(self.daemon.disk_warn_bytes),
+            disk_limit_bytes: some(self.daemon.disk_limit_bytes),
             tools: self.stack.tools.clone(),
             tool_hosts: self.egress.tools.clone(),
         }
@@ -469,13 +834,41 @@ mod tests {
     }
 
     #[test]
-    fn the_repos_own_factory_toml_parses() {
-        let config = FactoryConfig::parse(include_str!("../../../factory.toml")).unwrap();
+    fn gate_kinds_keep_their_string_form() {
+        let kinds = [
+            (GateKind::Checks, "checks"),
+            (GateKind::Ci, "ci"),
+            (GateKind::AgentReview, "agent_review"),
+            (GateKind::Human, "human"),
+            (GateKind::Quorum, "quorum"),
+            (GateKind::Named("lint".into()), "lint"),
+        ];
+        for (kind, text) in kinds {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{text}\""));
+            assert_eq!(serde_json::from_str::<GateKind>(&format!("\"{text}\"")).unwrap(), kind);
+        }
+    }
+
+    fn parse(factory_src: &str) -> Result<FactoryConfig> {
+        FactoryConfig::parse_table(factory_src, "TRAIL", None)
+    }
+
+    #[test]
+    fn the_repos_own_trailhead_toml_parses() {
+        let remote = Repo { owner: "lanesawyer".into(), name: "trailhead".into() };
+        let config = FactoryConfig::from_repo_file(include_str!("../../../.trailhead.toml"), Some(remote)).unwrap();
+        assert_eq!(config.repo.project, "TRAIL");
+        let prepare = config.prepare_request(Role::Worker, None);
+        assert!(prepare.trim.unwrap().command.contains("trim-cargo"));
+        assert_eq!(prepare.disk_warn_bytes, Some(DEFAULT_DISK_WARN_BYTES));
+        assert_eq!(prepare.disk_limit_bytes, None);
+        assert!(config.prepare_request(Role::Reviewer, None).trim.is_none(), "reviewers don't build");
         assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
         assert_eq!(config.grades, GradesConfig::default(), "this repo's rules are the documented example");
         assert_eq!(config.merge.mode, MergeMode::On);
         assert!(config.gate(1).auto_merge);
-        assert!(!config.gate(2).auto_merge, "only grade 1 auto-merges, to start");
+        assert!(config.gate(2).auto_merge);
+        assert!(!config.gate(3).auto_merge);
         assert_eq!(config.gate(3).require, ["checks", "ci", "agent_review", "human"]);
         let raised = |path: &str| {
             config
@@ -493,31 +886,41 @@ mod tests {
     }
 
     #[test]
+    fn queue_is_a_key_or_a_list_of_them() {
+        let with = |q: &str| parse(&SAMPLE.replace("[repo]\n", &format!("[repo]\n{q}\n"))).unwrap().repo.queue;
+        assert!(parse(SAMPLE).unwrap().repo.queue.is_empty());
+        assert_eq!(with("queue = \"TRAIL-102\""), ["TRAIL-102"]);
+        assert_eq!(with("queue = [\"TRAIL-102\", \"TRAIL-167\"]"), ["TRAIL-102", "TRAIL-167"]);
+        let err = parse(&SAMPLE.replace("[repo]\n", "[repo]\nqueue = []\n")).unwrap_err();
+        assert!(err.to_string().contains("queue = [] is empty"), "{err}");
+    }
+    #[test]
     fn grades_default_to_the_documented_rules_and_parse_from_the_file() {
         let base = SAMPLE;
-        let config = FactoryConfig::parse(base).unwrap();
+        let config = parse(base).unwrap();
         assert_eq!(config.grades, GradesConfig::default());
 
         let custom = format!("{base}\n[grades]\n3 = [\"Cargo.lock\"]\nmax_lines = 50\n");
-        let config = FactoryConfig::parse(&custom).unwrap();
+        let config = parse(&custom).unwrap();
         assert_eq!(config.grades.max_lines, 50);
         assert_eq!(config.grades.rules.keys().collect::<Vec<_>>(), ["3"]);
         assert_eq!(config.grades.grader().rules.len(), 1);
 
         let no_limit = format!("{base}\n[grades]\n2 = [\"src/**\"]\n");
-        assert_eq!(FactoryConfig::parse(&no_limit).unwrap().grades.max_lines, 600);
+        assert_eq!(parse(&no_limit).unwrap().grades.max_lines, 600);
 
         for bad in ["1 = [\"a\"]", "5 = [\"a\"]", "x = [\"a\"]", "max_line = 5"] {
-            let err = FactoryConfig::parse(&format!("{base}\n[grades]\n{bad}\n")).unwrap_err();
+            let err = parse(&format!("{base}\n[grades]\n{bad}\n")).unwrap_err();
             assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
         }
+        let err = parse(&format!("{base}\n[grades]\n5 = [\"a\"]\n")).unwrap_err();
+        assert!(err.to_string().contains("[factory.grades] has `5`"), "{err}");
     }
 
     const SAMPLE: &str = r#"
 [repo]
 owner = "lanesawyer"
 name = "trailhead"
-project = "TRAIL"
 
 [stack]
 tools = { rust = "stable" }
@@ -555,7 +958,7 @@ require = ["checks", "agent_review", "human"]
 
     #[test]
     fn parses_the_documented_shape() {
-        let c = FactoryConfig::parse(SAMPLE).unwrap();
+        let c = parse(SAMPLE).unwrap();
         assert_eq!(c.repo.base_branch, "main");
         assert_eq!(c.worker().model, ModelAlias::Sonnet);
         assert_eq!(c.worker().budget.usd(), Usd::dollars(5.0));
@@ -564,20 +967,45 @@ require = ["checks", "agent_review", "human"]
     }
 
     #[test]
+    fn repo_pause_at_rejects_unknown_windows_and_percents_over_100() {
+        for bad in ["five_hours = 80", "five_hour = 101"] {
+            let err = parse(&format!("{SAMPLE}\n[usage]\npause_at = {{ {bad} }}\n")).unwrap_err();
+            assert!(err.to_string().contains("pause_at"), "{err}");
+        }
+        assert!(parse(&format!("{SAMPLE}\n[usage]\npause_at = {{ seven_day = 100 }}\n")).is_ok());
+    }
+
+    #[test]
+    fn workers_run_every_check_whatever_the_gates_require() {
+        let c = parse(&SAMPLE.replace("require = [\"checks\", \"agent_review\", \"human\"]", "require = [\"ci\"]"))
+            .unwrap();
+        let names: Vec<_> = c.required_checks().into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["fmt", "lint", "test"]);
+    }
+
+    #[test]
+    fn rejects_zero_stall_timeout() {
+        let bad = SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"worker-opus\"\nstall_timeout = 0");
+        match parse(&bad) {
+            Err(Error::Config(m)) => assert!(m.contains("stall_timeout"), "{m}"),
+            other => panic!("expected a config error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_unknown_checks_and_profiles() {
         let bad = SAMPLE.replace("lint = ", "lnt = ");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
         let bad = SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"nope\"");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
         let bad = SAMPLE.replace("\"agent_review\", \"human\"", "\"agent_review\", \"vibes\"");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
     }
 
     #[test]
     fn gates_default_to_the_table_and_merge_mode_to_off() {
         let mut c =
-            FactoryConfig::parse(&SAMPLE.replace("[gates.1]\nrequire = [\"checks\", \"agent_review\", \"human\"]", ""))
-                .unwrap();
+            parse(&SAMPLE.replace("[gates.1]\nrequire = [\"checks\", \"agent_review\", \"human\"]", "")).unwrap();
         assert_eq!(c.merge.mode, MergeMode::Off);
         assert_eq!(c.gate(1).require, ["checks", "ci"]);
         assert!(c.gate(2).auto_merge);
@@ -587,7 +1015,7 @@ require = ["checks", "agent_review", "human"]
 
         let custom =
             format!("{SAMPLE}\n[gates.2]\nrequire = [\"ci\"]\nauto_merge = true\n[merge]\nmode = \"shadow\"\n");
-        c = FactoryConfig::parse(&custom).unwrap();
+        c = parse(&custom).unwrap();
         assert_eq!(c.gate(2).require, ["ci"]);
         assert_eq!(c.gate(1).require, ["checks", "agent_review", "human"]);
         assert_eq!(c.merge.mode, MergeMode::Shadow);
@@ -596,37 +1024,149 @@ require = ["checks", "agent_review", "human"]
     #[test]
     fn merge_mode_on_is_accepted_and_gates_for_unknown_grades_are_rejected() {
         let on = format!("{SAMPLE}\n[merge]\nmode = \"on\"\n");
-        assert_eq!(FactoryConfig::parse(&on).unwrap().merge.mode, MergeMode::On);
+        assert_eq!(parse(&on).unwrap().merge.mode, MergeMode::On);
         for bad in ["[merge]\nmode = \"yes\"", "[gates.t1]\nrequire = []", "[gates.5]\nrequire = []"] {
-            let err = FactoryConfig::parse(&format!("{SAMPLE}\n{bad}\n")).unwrap_err();
+            let err = parse(&format!("{SAMPLE}\n{bad}\n")).unwrap_err();
             assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
+        }
+        let err = parse(&format!("{SAMPLE}\n[gates.5]\nrequire = []\n")).unwrap_err();
+        assert!(err.to_string().contains("[factory.gates.5]: gates are per grade"), "{err}");
+    }
+
+    #[test]
+    fn a_compute_table_is_one_default_target() {
+        let c = parse(SAMPLE).unwrap();
+        assert!(c.targets.is_empty());
+        let specs = c.target_specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!((specs[0].name.as_str(), &specs[0].compute, specs[0].max_sandboxes), ("default", &c.compute, None));
+        let docker = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\n");
+        assert_eq!(parse(&docker).unwrap().target_specs()[0].name, DEFAULT_TARGET);
+    }
+
+    #[test]
+    fn targets_are_listed_by_priority_then_name() {
+        let src = format!(
+            "{SAMPLE}\n[targets.sprites]\nkind = \"sprites\"\npriority = 2\nmax_sandboxes = 4\n\n\
+             [targets.local]\nkind = \"docker\"\npriority = 1\nmax_sandboxes = 2\nmemory_mib = 4096\n\n\
+             [targets.also-local]\nkind = \"docker\"\npriority = 1\n"
+        );
+        let specs = parse(&src).unwrap().target_specs();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["also-local", "local", "sprites"]);
+        assert_eq!(specs[1].max_sandboxes, Some(2));
+        assert_eq!(
+            specs[1].compute,
+            ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: Some(4096) }
+        );
+        assert_eq!((specs[2].compute.clone(), specs[2].max_sandboxes), (ComputeConfig::Sprites, Some(4)));
+    }
+
+    #[test]
+    fn a_spend_cap_defaults_to_flys_rates() {
+        let src = format!(
+            "{SAMPLE}\n[targets.sprites]\nkind = \"sprites\"\ndaily_usd = 5\n\n\
+             [targets.dear]\nkind = \"sprites\"\ndaily_usd = 2.5\nusd_per_vcpu_hour = 0.05\nusd_per_gb_hour = 0.03\n"
+        );
+        let specs = parse(&src).unwrap().target_specs();
+        let (dear, sprites) = (specs[0].spend.unwrap(), specs[1].spend.unwrap());
+        assert_eq!(
+            (sprites.daily, sprites.per_vcpu_hour, sprites.per_gb_hour),
+            (crate::Usd::dollars(5.0), crate::Spend::VCPU_HOUR, crate::Spend::GB_HOUR)
+        );
+        // 8 vCPUs and 4 GB: about $0.40 an hour at Fly's rates.
+        assert_eq!(sprites.hourly(), crate::Usd::micros(395_500));
+        assert_eq!((dear.daily, dear.hourly()), (crate::Usd::dollars(2.5), crate::Usd::micros(520_000)));
+        let plain = format!("{SAMPLE}\n[targets.a]\nkind = \"docker\"\n");
+        assert!(parse(&plain).unwrap().target_specs()[0].spend.is_none());
+    }
+
+    #[test]
+    fn targets_and_compute_together_are_refused() {
+        let src = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\n\n[targets.local]\nkind = \"docker\"\n");
+        let Err(Error::Config(m)) = parse(&src) else { panic!("expected a config error") };
+        assert!(m.contains("[factory.compute]") && m.contains("[factory.targets]"), "{m}");
+    }
+
+    #[test]
+    fn bad_targets_are_refused() {
+        for (bad, says) in [
+            ("[targets.local]\nkind = \"vm\"", "unknown kind"),
+            ("[targets.local]\nkind = \"sprites\"\nimage = \"x\"", "image"),
+            ("[targets.local]\nkind = \"docker\"\nimgae = \"x\"", "imgae"),
+            ("[targets.local]\nkind = \"docker\"\nmax_sandboxes = 0", "max_sandboxes"),
+            ("[targets.local]\nkind = \"docker\"\ndaily_usd = 0", "daily_usd"),
+            ("[targets.local]\nkind = \"docker\"\nusd_per_gb_hour = 0.02", "daily_usd"),
+            ("[targets.Local]\nkind = \"docker\"", "name"),
+            ("[targets.default]\nkind = \"docker\"", "default"),
+            ("[targets.a_b]\nkind = \"docker\"", "name"),
+        ] {
+            let Err(Error::Config(m)) = parse(&format!("{SAMPLE}\n{bad}\n")) else {
+                panic!("{bad}: expected a config error")
+            };
+            assert!(m.contains(says), "{bad}: {m}");
         }
     }
 
     #[test]
     fn compute_defaults_to_sprites() {
-        assert_eq!(FactoryConfig::parse(SAMPLE).unwrap().compute, ComputeConfig::Sprites);
+        assert_eq!(parse(SAMPLE).unwrap().compute, ComputeConfig::Sprites);
         let docker = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nruntime = \"runsc\"\n");
         assert_eq!(
-            FactoryConfig::parse(&docker).unwrap().compute,
-            ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()) }
+            parse(&docker).unwrap().compute,
+            ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()), memory_mib: None }
+        );
+        let sized = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 1536\n");
+        assert_eq!(
+            parse(&sized).unwrap().compute,
+            ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: Some(1536) }
         );
         let bad = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nimgae = \"x\"\n");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
     }
 
     #[test]
     fn daemon_log_is_optional() {
-        assert_eq!(FactoryConfig::parse(SAMPLE).unwrap().daemon, DaemonConfig::default());
+        assert_eq!(parse(SAMPLE).unwrap().daemon, DaemonConfig::default());
         let with = format!("{SAMPLE}\n[daemon]\nlog = \"info,iroh=debug\"\n");
-        assert_eq!(FactoryConfig::parse(&with).unwrap().daemon.log.as_deref(), Some("info,iroh=debug"));
+        assert_eq!(parse(&with).unwrap().daemon.log.as_deref(), Some("info,iroh=debug"));
         let bad = format!("{SAMPLE}\n[daemon]\nlogg = \"x\"\n");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
     }
 
     #[test]
     fn worker_profile_must_have_worker_role() {
         let bad = SAMPLE.replace("[repo]\n", "[repo]\nworker = \"reviewer\"\n");
-        assert!(matches!(FactoryConfig::parse(&bad), Err(Error::Config(_))));
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn the_repo_file_shares_project_and_defaults_owner_and_name_from_the_remote() {
+        let file = format!("agent = \"claude\"\nproject = \"TRAIL\"\n{}", factory_table(SAMPLE));
+        let file = file.replace("owner = \"lanesawyer\"\nname = \"trailhead\"\n", "");
+        let remote = Repo { owner: "o".into(), name: "n".into() };
+        let c = FactoryConfig::from_repo_file(&file, Some(remote.clone())).unwrap();
+        assert_eq!((c.repo.project.as_str(), c.repo.repo()), ("TRAIL", remote.clone()));
+        assert!(matches!(FactoryConfig::from_repo_file(&file, None), Err(Error::Config(_))));
+
+        let err = |src: &str| match FactoryConfig::from_repo_file(src, Some(remote.clone())) {
+            Err(Error::Config(m)) => m,
+            other => panic!("expected a config error, got {other:?}"),
+        };
+        let no_project = file.replace("project = \"TRAIL\"\n", "");
+        assert!(err(&no_project).contains("project"), "{}", err(&no_project));
+        let repeated = file.replace("[factory.repo]\n", "[factory.repo]\nproject = \"TRAIL\"\n");
+        assert!(err(&repeated).contains("project"), "{}", err(&repeated));
+        let typo = file.replace("agent =", "agnt =");
+        assert!(err(&typo).contains("agnt"), "{}", err(&typo));
+    }
+
+    /// `src` (a bare factory table) with every table header under `[factory.`.
+    fn factory_table(src: &str) -> String {
+        let src = src.replace("\n[", "\n[factory.");
+        match src.strip_prefix('[') {
+            Some(rest) => format!("[factory.{rest}"),
+            None => src,
+        }
     }
 }

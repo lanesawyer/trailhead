@@ -27,13 +27,20 @@ async fn a_stack_asking_for_node_22_gets_node_22() {
     let sandbox = compute.create(&spec).await.unwrap();
 
     let control = Endpoint::builder(presets::N0).bind().await.unwrap();
-    let remote =
-        RemoteDaemon::new(control, iroh::SecretKey::generate().to_bytes(), compute.clone(), Launch::new(binary));
+    let remote = RemoteDaemon::new(
+        control,
+        iroh::SecretKey::generate().to_bytes(),
+        compute.clone(),
+        Launch::new(binary, &trailhead_compute_sprites::target()),
+    );
     let prepare = PrepareRequest {
         repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: Some(Check {
             name: "setup".into(),
             command: "node --version | tee /dev/stderr | grep -q '^v22\\.'".into(),

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use trailhead_control::{CoreTracker, Factory, Outcome};
+use trailhead_control::{CoreTracker, Factory, Host, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, ProjectPatch, Store, TaskPatch};
 use trailhead_factory::{
     CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Role, RunOutcome, RunUpdate, Status, TaskKey,
@@ -17,7 +17,6 @@ const CONFIG: &str = r#"
 [repo]
 owner = "lanesawyer"
 name = "trailhead"
-project = "TRAIL"
 
 [checks]
 test = "cargo test"
@@ -53,6 +52,11 @@ async fn rig() -> Rig {
 }
 
 async fn rig_with(config: &str) -> Rig {
+    rig_paged(config, None).await
+}
+
+/// A rig whose tracker reads lists `page_size` tasks at a time, when given.
+async fn rig_paged(config: &str, page_size: Option<usize>) -> Rig {
     let store = Arc::new(Store::open_local(":memory:").await.unwrap());
     let (ws, user) = store.bootstrap_local("Lane").await.unwrap();
     let human = Ctx::user(ws.id, user.id);
@@ -62,7 +66,10 @@ async fn rig_with(config: &str) -> Rig {
         .unwrap();
     let agent = store.create_agent(&human, "factory").await.unwrap();
     let ctx = store.agent_ctx(ws.id, agent.id).await.unwrap();
-    let tracker = CoreTracker::new(store.clone(), ctx, "factory");
+    let mut tracker = CoreTracker::new(store.clone(), ctx, "factory");
+    if let Some(n) = page_size {
+        tracker = tracker.with_page_size(n);
+    }
 
     let compute = FakeCompute::new();
     let codehost = FakeCodeHost::new();
@@ -78,11 +85,12 @@ async fn rig_with(config: &str) -> Rig {
             .with_heads(move |repo, branch| heads.head(repo, branch)),
     );
     let factory = Factory::new(
-        FactoryConfig::parse(config).unwrap(),
+        FactoryConfig::parse_table(config, "TRAIL", None).unwrap(),
         Arc::new(compute.clone()),
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
         daemon.clone(),
+        Host::new(None),
     )
     .with_codehost(Arc::new(codehost.clone()));
     Rig { store, human, factory, tracker, compute, codehost, harness, daemon }
@@ -220,6 +228,24 @@ async fn sandbox_tokens_are_scoped_and_die_with_the_sub_agent() {
 }
 
 #[tokio::test]
+async fn reconcile_reaches_a_factory_task_past_the_first_page_of_tasks() {
+    let r = rig_paged(CONFIG, Some(2)).await;
+    for i in 0..5 {
+        r.task(&format!("Filler {i}")).await;
+    }
+    let key = r.task("Crashed, far down the list").await;
+    r.tracker.create_sub_agent("trail-6-a1", "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
+    let sub = r.tracker.sub_agent("trail-6-a1");
+    sub.claim(&key).await.unwrap();
+    sub.report(&key, RunUpdate { attempt: Some(1), sandbox: Some("trail-6-a1".into()), ..Default::default() })
+        .await
+        .unwrap();
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.requeued, std::slice::from_ref(&key.0));
+}
+
+#[tokio::test]
 async fn reconcile_requeues_an_interrupted_run() {
     let r = rig().await;
     let key = r.task("Crashed").await;
@@ -244,6 +270,33 @@ async fn reconcile_requeues_an_interrupted_run() {
 }
 
 #[tokio::test]
+async fn a_task_with_malformed_factory_metadata_is_skipped_not_fatal() {
+    let r = rig().await;
+    let good = r.task("Good").await;
+    let bad = r.task("Bad").await;
+    let patch = TaskPatch {
+        metadata: Some(serde_json::json!({ "factory": { "attempt_base": "3x" } })),
+        ..TaskPatch::default()
+    };
+    r.store.update_task(&r.human, &bad.0, patch, None).await.unwrap();
+
+    let ready = r.tracker.ready("TRAIL", &[], 10).await.unwrap();
+    assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&good]);
+    assert!(r.tracker.in_flight("TRAIL", &[]).await.unwrap().is_empty());
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.show(&bad).await.is_err());
+
+    // The task says why it was skipped, once however many passes see it.
+    r.tracker.ready("TRAIL", &[], 10).await.unwrap();
+    r.tracker.in_flight("TRAIL", &[]).await.unwrap();
+    let notes: Vec<_> = r.store.list_comments(&r.human, &bad.0).await.unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].body.contains("attempt_base"), "{}", notes[0].body);
+    assert!(!notes[0].body.contains("bad factory metadata"), "{}", notes[0].body);
+    assert!(!notes[0].body.contains(&bad.0), "{}", notes[0].body);
+}
+
+#[tokio::test]
 async fn with_a_queue_only_its_subtasks_run() {
     let mut r = rig().await;
     let urgent = NewTask {
@@ -262,9 +315,9 @@ async fn with_a_queue_only_its_subtasks_run() {
         ..Default::default()
     };
     let handed = TaskKey(r.store.create_task(&r.human, sub).await.unwrap().key);
-    r.factory.config.repo.queue = Some(queue.0.clone());
+    r.factory.config.repo.queue = vec![queue.0.clone()];
 
-    let ready = r.tracker.ready("TRAIL", Some(&queue), 10).await.unwrap();
+    let ready = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 10).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&handed]);
 
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which greeting?".into() }));
@@ -274,6 +327,39 @@ async fn with_a_queue_only_its_subtasks_run() {
     assert_eq!(r.show(&queue).await.status, Status::Open, "and so is the queue itself");
 }
 
+#[tokio::test]
+async fn a_queue_list_reads_each_parents_direct_children_ordered_by_priority_and_once() {
+    let mut r = rig().await;
+    let q1 = r.task("Queue one").await;
+    let q2 = r.task("Queue two").await;
+    let nested = r.task("Nested parent").await;
+    let mk = |title: &str, parent: &TaskKey, priority: i64, grade: Option<i64>| NewTask {
+        project: "TRAIL".into(),
+        title: title.into(),
+        parent: Some(parent.0.clone()),
+        priority: Some(priority),
+        grade,
+        ..Default::default()
+    };
+    let low = TaskKey(r.store.create_task(&r.human, mk("low", &q1, 4, Some(1))).await.unwrap().key);
+    let high = TaskKey(r.store.create_task(&r.human, mk("high", &q2, 1, Some(1))).await.unwrap().key);
+    let ungraded = TaskKey(r.store.create_task(&r.human, mk("ungraded", &q2, 1, None)).await.unwrap().key);
+    let deep = TaskKey(r.store.create_task(&r.human, mk("deep", &nested, 1, Some(1))).await.unwrap().key);
+    let _grandchild = r.store.create_task(&r.human, mk("grandchild", &deep, 1, Some(1))).await.unwrap();
+    r.factory.config.repo.queue = vec![q1.0.clone(), q2.0.clone(), q2.0.clone()];
+
+    let ready = r.tracker.ready("TRAIL", &[q1.clone(), q2.clone(), q2.clone()], 10).await.unwrap();
+    let keys: Vec<_> = ready.iter().map(|t| &t.key).collect();
+    assert_eq!(keys.iter().filter(|k| ***k == high).count(), 1, "a task listed twice is read once");
+    assert!(!keys.contains(&&deep), "a queue reaches direct children only");
+    assert_eq!(keys.last(), Some(&&low), "priority orders across queues");
+
+    r.factory.config.repo.max_sandboxes = 1;
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.iter().map(|(t, _)| &t.key).collect::<Vec<_>>(), [&high], "the best graded task, under the cap");
+    assert_eq!(r.show(&ungraded).await.status, Status::Open, "an ungraded one waits for a grade");
+}
 #[tokio::test]
 async fn the_factory_can_raise_a_grade_a_human_set_but_not_lower_it() {
     let r = rig().await;
@@ -357,7 +443,7 @@ async fn requested_changes_reopen_then_rework_on_the_real_engine() {
 
 #[tokio::test]
 async fn requested_changes_past_the_cap_park_on_the_real_engine() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_review_rounds = 1")).await;
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 1")).await;
     let key = r.task("Add a greeting").await;
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Still wrong.")));
@@ -425,6 +511,61 @@ async fn a_merged_pr_finishes_its_task_and_unblocks_what_is_chained_behind_it() 
 }
 
 #[tokio::test]
+async fn a_parked_task_whose_pr_is_merged_is_finished_and_unblocks_what_is_chained_behind_it() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_conflict_reworks = 1")).await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::NeedsInput);
+    let next = r.task("Use the greeting").await;
+    r.store.add_dependency(&r.human, &key.0, &next.0).await.unwrap();
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.merged.is_empty() && done.closed.is_empty(), "an open PR leaves the task parked");
+    assert_eq!(r.show(&key).await.status, Status::NeedsInput);
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.merged, std::slice::from_ref(&key.0));
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Done);
+    assert_eq!(task.run.merged.expect("merge recorded").by, trailhead_factory::MergedBy::Human);
+    assert!(r.store.blockers(&r.human, &next.0).await.unwrap().is_empty(), "the chained task is unblocked");
+}
+
+#[tokio::test]
+async fn a_parked_task_whose_pr_was_closed_is_not_asked_about_again() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.close(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::NeedsInput);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.closed.is_empty() && done.merged.is_empty());
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    assert_eq!(comments.iter().filter(|c| c.kind == CommentKind::Question).count(), 1);
+}
+
+#[tokio::test]
+async fn an_open_task_waiting_for_a_rework_whose_pr_is_merged_is_finished() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::Open);
+    let next = r.task("Use the greeting").await;
+    r.store.add_dependency(&r.human, &key.0, &next.0).await.unwrap();
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.merged, std::slice::from_ref(&key.0));
+    assert_eq!(r.show(&key).await.status, Status::Done);
+    assert!(r.store.blockers(&r.human, &next.0).await.unwrap().is_empty(), "the chained task is unblocked");
+}
+
+#[tokio::test]
 async fn a_pr_closed_without_merging_parks_its_task_for_lane() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
@@ -437,7 +578,7 @@ async fn a_pr_closed_without_merging_parks_its_task_for_lane() {
     assert_eq!(task.run.merged, None);
     let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
     let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
-    assert!(question.body.contains(&pr.url) && question.body.contains("closed without being merged"));
+    assert_eq!(question.body, trailhead_factory::messages::pr_closed_question(&pr.url));
     assert!(!question.body.contains("  "), "no stray runs of spaces: {}", question.body);
     assert!(r.factory.reconcile().await.unwrap().closed.is_empty(), "asked once");
 }
@@ -488,7 +629,7 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
 
 #[tokio::test]
 async fn a_pr_that_keeps_conflicting_parks_for_lane_at_the_conflict_rework_cap() {
-    let r = rig_with(&CONFIG.replace("project = \"TRAIL\"", "project = \"TRAIL\"\nmax_conflict_reworks = 1")).await;
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_conflict_reworks = 1")).await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
     r.codehost.set_mergeable(&pr, Some(false));
     let done = r.factory.reconcile().await.unwrap();
@@ -516,7 +657,27 @@ async fn conflict_and_rework(r: &Rig, key: &TaskKey, pr: &trailhead_factory::PrR
         r.harness.push(Role::Reviewer, Script::new(approve()));
         r.factory.tick().await.unwrap();
         assert_eq!(r.show(key).await.status, Status::InReview);
+        // The host's answer for the pushed head is in: the one poll after a push is spent on it.
+        assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
     }
+}
+
+#[tokio::test]
+async fn a_stale_conflict_right_after_a_conflict_rework_is_read_once_as_unknown() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    // The host still says `false`, which is the head from before the push.
+    r.factory.tick().await.unwrap();
+    assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty(), "no second rework on the stale answer");
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.conflict_reworks, Some(1));
+    // Still `false` on the next poll, so it's real.
+    assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
 }
 
 #[tokio::test]
@@ -588,6 +749,25 @@ async fn a_merge_the_agent_started_itself_is_published_as_a_merge_commit() {
 }
 
 #[tokio::test]
+async fn a_merge_the_agent_committed_itself_is_still_published_as_a_merge_commit() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+
+    // Prepare left the merge uncommitted; the agent's `git commit` removes MERGE_HEAD, but HEAD now has the base.
+    r.daemon.agent_commits_merge();
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let commits = r.codehost.commits(&pr.repo, "factory/trail-1");
+    assert_eq!(commits.last().unwrap().merges, [FAKE_BASE_MERGE], "published as a merge commit");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+}
+
+#[tokio::test]
 async fn a_merge_the_agent_aborted_is_not_published() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
@@ -603,6 +783,24 @@ async fn a_merge_the_agent_aborted_is_not_published() {
     assert_eq!(r.codehost.commits(&pr.repo, "factory/trail-1").len(), before, "nothing published");
     let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
     assert!(comments.iter().any(|c| c.body.contains("abandoned")), "{comments:?}");
+}
+
+#[tokio::test]
+async fn a_branch_the_agent_rebased_is_not_published() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.daemon.agent_rebases();
+    let before = r.codehost.commits(&pr.repo, "factory/trail-1").len();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.codehost.commits(&pr.repo, "factory/trail-1").len(), before, "nothing published");
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    assert!(comments.iter().any(|c| c.body.contains("rewritten")), "{comments:?}");
 }
 
 #[tokio::test]
@@ -655,6 +853,34 @@ async fn last_review_reads_the_reviewers_verdict_and_the_latest_wins() {
 }
 
 #[tokio::test]
+async fn last_review_names_a_sibling_reviewer_when_read_from_a_sub_agent() {
+    let r = rig().await;
+    let key = r.task("Add a greeting").await;
+    let ttl = std::time::Duration::from_secs(3600);
+    let reviewer_cred = r.tracker.create_sub_agent("trail-1-a1-r1", "TRAIL", ttl).await.unwrap();
+    let reviewer = CoreTracker::authenticate(r.store.clone(), &reviewer_cred).await.unwrap();
+    let verdict = Verdict {
+        kind: VerdictKind::RequestChanges,
+        body: "Add a test.".into(),
+        reviewer: String::new(),
+        model: None,
+        raise_grade: None,
+    };
+    reviewer.record_verdict(&key, &verdict).await.unwrap();
+
+    // The worker's sandbox reads the review under its own sub-agent ctx, as a rework run does.
+    let worker_cred = r.tracker.create_sub_agent("trail-1-a2", "TRAIL", ttl).await.unwrap();
+    let worker = CoreTracker::authenticate(r.store.clone(), &worker_cred).await.unwrap();
+    let last = worker.last_review(&key).await.unwrap().expect("a review");
+    assert_eq!(last.reviewer, "factory/trail-1-a1-r1");
+    assert_eq!(last.body, "Add a test.");
+
+    // So does the parent's `sub_agent` handle.
+    let last = r.tracker.sub_agent("trail-1-a2").last_review(&key).await.unwrap().expect("a review");
+    assert_eq!(last.reviewer, "factory/trail-1-a1-r1");
+}
+
+#[tokio::test]
 async fn the_factory_approves_again_after_it_sent_the_task_back_for_a_new_head() {
     let config = format!(
         "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
@@ -690,6 +916,36 @@ async fn the_factory_approves_again_after_it_sent_the_task_back_for_a_new_head()
 }
 
 #[tokio::test]
+async fn the_factory_cant_approve_work_it_did_and_says_so_without_asking_for_a_reviewer() {
+    let config = format!(
+        "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
+    );
+    let r = rig_with(&config).await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let new = NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(1), ..Default::default() };
+    let key = TaskKey(r.store.create_task(&r.human, new).await.unwrap().key);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let pr = r.show(&key).await.run.pr.unwrap();
+
+    // The factory itself takes the task and sends it to review again, so it did the work.
+    let back = TaskPatch { status: Some(trailhead_core::Status::Open), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, back, None).await.unwrap();
+    r.tracker.claim(&key).await.unwrap();
+    r.tracker.request_review(&key).await.unwrap();
+
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview, "{:?}", task.run.merge);
+    let problem = task.run.merge.unwrap().problem.expect("the approval was refused");
+    assert!(problem.contains("can't approve or finish work it did"), "{problem}");
+    assert!(!problem.contains("list it as one") && !problem.contains("delegated reviewer, so"), "{problem}");
+}
+
+#[tokio::test]
 async fn an_approved_pr_that_starts_conflicting_is_unapproved_and_reworked() {
     let config = format!(
         "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
@@ -714,4 +970,33 @@ async fn an_approved_pr_that_starts_conflicting_is_unapproved_and_reworked() {
     assert_eq!(task.status, Status::Open, "back in the queue for a rework");
     let wanted = task.run.changes_requested.expect("the rework is told why");
     assert!(wanted.conflict && wanted.body.contains(&pr.url), "{wanted:?}");
+}
+
+#[tokio::test]
+async fn approve_is_refused_when_the_factory_isnt_a_delegated_reviewer() {
+    let r = rig().await;
+    let key = r.task("Add a greeting").await;
+    r.tracker.claim(&key).await.unwrap();
+    r.tracker.request_review(&key).await.unwrap();
+
+    let err = r.tracker.approve(&key).await.expect_err("the factory isn't in the project's reviewers");
+    let trailhead_factory::Error::Forbidden(why) = err else { panic!("expected Forbidden, got {err:?}") };
+    assert!(why.contains("isn't a delegated reviewer, so a person has to list it as one"), "{why}");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+}
+
+#[tokio::test]
+async fn approve_is_refused_for_work_the_factory_did_without_asking_for_a_reviewer() {
+    let r = rig().await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let key = r.task("Add a greeting").await;
+    r.tracker.claim(&key).await.unwrap();
+    r.tracker.request_review(&key).await.unwrap();
+
+    let err = r.tracker.approve(&key).await.expect_err("the factory sent this task to review");
+    let trailhead_factory::Error::Forbidden(why) = err else { panic!("expected Forbidden, got {err:?}") };
+    assert!(why.contains("can't approve or finish work it did"), "{why}");
+    assert!(!why.contains("list it as one") && !why.contains("delegated reviewer, so"), "{why}");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
 }

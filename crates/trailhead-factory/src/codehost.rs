@@ -110,7 +110,10 @@ pub trait CodeHost: Send + Sync {
     async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()>;
     async fn open_pr(&self, repo: &Repo, pr: NewPr) -> Result<PrRef>;
     async fn diff(&self, pr: &PrRef) -> Result<String>;
-    async fn comment(&self, pr: &PrRef, body: &str) -> Result<()>;
+    /// Comments on the PR and returns the new comment's id.
+    async fn comment(&self, pr: &PrRef, body: &str) -> Result<u64>;
+    /// Replaces the body of a comment made with `comment`. `NotFound` if it has since been deleted.
+    async fn edit_comment(&self, pr: &PrRef, id: u64, body: &str) -> Result<()>;
     /// Squash-merges the PR, but only while its head is still `head`, the commit the gates passed on.
     async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome>;
     /// Whether the PR is still open (and if it merges cleanly), was merged (by anyone), or was closed without
@@ -123,6 +126,16 @@ pub trait CodeHost: Send + Sync {
     /// verdict on the old head still describes the work. A failure that isn't a merge conflict (the head moved under
     /// the update, say) is an error, not `Conflict`, which costs a rework.
     async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate>;
+    /// Whether a reviewer's verdict on `reviewed`, a head the PR had earlier, still counts on its current head: the
+    /// only commits since are merges of the base branch, each a merge commit whose second parent is on the base
+    /// branch, which is what `update_branch` makes. Also true when `reviewed` is the head. False, not an error, when
+    /// the host can't tell.
+    ///
+    /// This is a check of the commits' shape, not of their content: a merge whose second parent is on the base passes
+    /// even if it changes the tree beyond a clean merge, so a conflict-resolving rework (which merges the base too)
+    /// or a person's hand-edited merge of the base looks like an update. The caller rules out reworks by only
+    /// carrying a verdict given on the current attempt; hand-made merges stay a known gap.
+    async fn carries_verdict(&self, pr: &PrRef, reviewed: &str) -> Result<bool>;
     /// The PR's current title, which a squash merge takes as its commit subject.
     async fn title(&self, pr: &PrRef) -> Result<String>;
     /// The files the PR changes, with how and by how many lines, for grading it.
@@ -132,4 +145,9 @@ pub trait CodeHost: Send + Sync {
     /// The repo's CI on the PR's current head: its check runs and commit statuses, which are pending until every one
     /// has finished and at least one exists, and failed with the names of those that failed as soon as any has.
     async fn ci(&self, pr: &PrRef) -> Result<Ci>;
+    /// The end of the log of each of the named failed checks on the PR's current head, as (check, log), for the
+    /// checks the host keeps a log of; a check without one is left out. Best effort: a host with no logs says none.
+    async fn ci_logs(&self, _pr: &PrRef, _checks: &[String]) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
 }

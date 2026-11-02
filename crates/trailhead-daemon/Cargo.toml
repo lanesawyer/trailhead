@@ -16,6 +16,7 @@ default = ["net"]
 net = ["dep:iroh", "dep:hmac", "dep:sha2", "dep:hex", "dep:clap", "dep:tracing-subscriber", "dep:trailhead-harness-claude-code", "dep:trailhead-codehost-github", "dep:reqwest"]
 
 [dependencies]
+base64 = "0.22"
 trailhead-factory.workspace = true
 async-trait.workspace = true
 serde.workspace = true

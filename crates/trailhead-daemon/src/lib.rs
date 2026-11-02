@@ -6,11 +6,16 @@
 //! plane.
 
 mod mise;
+#[cfg(feature = "net")]
+pub mod plugins;
 mod runner;
+pub mod trim;
 mod workspace;
 
 #[cfg(feature = "net")]
 pub mod awake;
+#[cfg(feature = "net")]
+pub mod gateway;
 #[cfg(feature = "net")]
 pub mod net;
 #[cfg(feature = "net")]
@@ -20,5 +25,5 @@ mod rest;
 pub use rest::RestTracker;
 
 pub use mise::{Mise, hosts_for, install_hosts_for};
-pub use runner::{Connect, RENEW_EVERY, Runner, Workspace};
+pub use runner::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 pub use workspace::GitWorkspace;

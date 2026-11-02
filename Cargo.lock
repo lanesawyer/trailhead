@@ -4999,6 +4999,7 @@ dependencies = [
  "toml",
  "tracing-subscriber",
  "trailhead-core",
+ "trailhead-factory",
  "trailhead-server",
  "uuid",
 ]
@@ -5023,9 +5024,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bollard",
+ "bytes",
  "futures-util",
  "serde",
  "serde_json",
+ "sha2",
  "tar",
  "tempfile",
  "tokio",
@@ -5059,6 +5062,7 @@ dependencies = [
  "hex",
  "jiff",
  "reqwest",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -5095,6 +5099,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "clap",
  "hex",
  "hmac",
@@ -5134,9 +5139,11 @@ dependencies = [
 name = "trailhead-factory-host"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
  "hex",
  "iroh",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

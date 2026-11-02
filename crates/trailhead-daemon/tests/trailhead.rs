@@ -8,13 +8,13 @@ use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
-use trailhead_control::{CoreTracker, Factory, Outcome};
+use trailhead_control::{CoreTracker, Factory, Host, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Store, TaskFilter};
 use trailhead_daemon::net::{
     ALPN, API_ALPN, ApiTunnel, DaemonProtocol, Launch, RemoteDaemon, build_id, open_api_tunnel, parse_endpoint_id,
     parse_secret_key,
 };
-use trailhead_daemon::{Connect, RENEW_EVERY, RestTracker, Runner};
+use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{
     Commit, Credential, DaemonSecrets, Error, FactoryConfig, FileChange, FollowUp, Role, RunOutcome, SandboxId, Status,
     TaskKey, Tracker, VerdictKind,
@@ -25,7 +25,6 @@ const CONFIG: &str = r#"
 [repo]
 owner = "lanesawyer"
 name = "trailhead"
-project = "TRAIL"
 
 [checks]
 test = "cargo test"
@@ -103,7 +102,7 @@ impl Rig {
             control_ep.clone(),
             MASTER,
             Arc::new(compute.clone()),
-            Launch::new(b"daemon".to_vec()),
+            Launch::new(b"daemon".to_vec(), &target()),
         ));
         let tunnel = Router::builder(control_ep).accept(API_ALPN, ApiTunnel::new(server, remote.peers())).spawn();
 
@@ -142,6 +141,7 @@ impl Rig {
             workspace: Arc::new(FakeWorkspace::default()),
             connect,
             renew_every: RENEW_EVERY,
+            heartbeat_every: HEARTBEAT_EVERY,
         };
         let protocol = DaemonProtocol::new(Arc::new(runner), control_plane).build(build_id(b"daemon"));
         self.routers.push(Router::builder(ep).accept(ALPN, protocol).spawn());
@@ -149,11 +149,12 @@ impl Rig {
 
     fn factory(&self) -> Factory {
         Factory::new(
-            FactoryConfig::parse(CONFIG).unwrap(),
+            FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap(),
             Arc::new(self.compute.clone()),
             Arc::new(self.tracker.clone()),
             Arc::new(FakeProvider::new(1)),
             self.remote.clone(),
+            Host::new(None),
         )
     }
 
@@ -313,4 +314,16 @@ async fn the_tunnel_refuses_strangers_and_bad_tokens() {
     .unwrap()
     .unwrap_err();
     assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+}
+
+/// A compute-neutral target: these tests don't depend on any real compute's paths.
+fn target() -> trailhead_factory::Target {
+    trailhead_factory::Target {
+        dir: "/sandbox/.trailhead".into(),
+        workdir: "/sandbox/work".into(),
+        gateway_list: "http://gateway.test/v1/gateway/list".into(),
+        model_endpoint: None,
+        hold_socket: None,
+        ..Default::default()
+    }
 }

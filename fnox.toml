@@ -13,3 +13,6 @@ CLAUDE_CODE_OAUTH_TOKEN = { provider = "bws", value = "CLAUDE_CODE_OAUTH_TOKEN" 
 # Lets trailhead-factory see merged and closed PRs (docs/factory/operating.md): a fine-grained token for
 # lanesawyer/trailhead with Pull requests: Read-only.
 GITHUB_TOKEN = { provider = "bws", value = "GITHUB_TOKEN" }
+# The Docker gateway's GitHub token (docs/factory/operating.md): a fine-grained token with Contents,
+# Pull requests and Issues: Read and write.
+GITHUB_WRITER_TOKEN = { provider = "bws", value = "GITHUB_TOKEN" }

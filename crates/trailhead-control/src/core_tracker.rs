@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,14 +10,14 @@ use serde_json::json;
 use trailhead_core::{
     CommentKind, Ctx, GradeFilter, NewComment, Principal, Store, TaskFilter, TaskPatch, TokenOptions,
 };
+use trailhead_factory::messages;
 use trailhead_factory::{
-    Answered, Credential, Error, HumanContext, ModelId, Result, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker,
-    Verdict, VerdictKind, is_factory_agent,
+    Answered, Credential, Error, FollowUpTask, HumanContext, METADATA_KEY, ModelId, Result, RunUpdate, Status, Task,
+    TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 use uuid::Uuid;
 
-/// The metadata key the factory's run fields live under.
-pub const METADATA_KEY: &str = "factory";
+const PAGE_SIZE: i64 = 1000;
 
 #[derive(Clone)]
 pub struct CoreTracker {
@@ -27,12 +27,36 @@ pub struct CoreTracker {
     /// Set when acting as one of `ctx`'s sub-agents, by the part after its name.
     sub: Option<String>,
     agent: String,
+    /// The bad factory metadata already noted on each task (key to note), so each is said once.
+    flagged: Arc<Mutex<HashMap<String, String>>>,
+    /// How many tasks one `list_tasks` call reads; longer lists are read a page at a time.
+    page_size: i64,
 }
 
 impl CoreTracker {
     /// A tracker acting as the agent behind `ctx`, whose full name is `agent`.
     pub fn new(store: Arc<Store>, ctx: Ctx, agent: &str) -> CoreTracker {
-        CoreTracker { store, ctx, sub: None, agent: agent.to_string() }
+        CoreTracker { store, ctx, sub: None, agent: agent.to_string(), flagged: Arc::default(), page_size: PAGE_SIZE }
+    }
+
+    /// Read lists `page_size` tasks at a time instead of the default, so a test needn't make a thousand tasks.
+    pub fn with_page_size(mut self, page_size: usize) -> CoreTracker {
+        self.page_size = page_size.max(1) as i64;
+        self
+    }
+
+    /// Every task matching `filter`, read a page at a time. `filter.limit` and `filter.offset` are ignored.
+    async fn list_all(&self, ctx: &Ctx, filter: TaskFilter) -> Result<Vec<trailhead_core::Task>> {
+        let mut all = Vec::new();
+        loop {
+            let page = TaskFilter { limit: Some(self.page_size), offset: Some(all.len() as i64), ..filter.clone() };
+            let tasks = self.store.list_tasks(ctx, page).await.map_err(map_err)?;
+            let full = tasks.len() as i64 >= self.page_size;
+            all.extend(tasks);
+            if !full {
+                return Ok(all);
+            }
+        }
     }
 
     /// A tracker for whoever holds this credential's token, as a daemon would connect.
@@ -71,11 +95,7 @@ impl CoreTracker {
 
     async fn task(&self, ctx: &Ctx, t: trailhead_core::Task) -> Result<Task> {
         let claims = self.store.live_claims(ctx, &[t.id]).await.map_err(map_err)?;
-        let run = match t.metadata.get(METADATA_KEY) {
-            Some(v) => serde_json::from_value(v.clone())
-                .map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", t.key)))?,
-            None => RunUpdate::default(),
-        };
+        let run = run_update(&t)?;
         let project = t.key.rsplit_once('-').map(|(p, _)| p.to_string()).unwrap_or_default();
         Ok(Task {
             key: TaskKey(t.key),
@@ -87,6 +107,40 @@ impl CoreTracker {
             holder: claims.get(&t.id).map(|c| c.holder.clone()),
             run,
         })
+    }
+
+    /// Converts the listed tasks, skipping any whose factory metadata won't parse, so one bad value doesn't
+    /// stop the factory for the whole project. A skipped task gets a note naming the problem, once.
+    async fn tasks(&self, ctx: &Ctx, tasks: impl IntoIterator<Item = trailhead_core::Task>) -> Result<Vec<Task>> {
+        let mut out = Vec::new();
+        for t in tasks {
+            if let Err(e) = parse_run_update(&t) {
+                self.flag_bad_metadata(ctx, &t, &e.to_string()).await;
+                continue;
+            }
+            out.push(self.task(ctx, t).await?);
+        }
+        Ok(out)
+    }
+
+    /// Notes on the task, and logs, that its factory metadata is skipped, unless this note is already there.
+    async fn flag_bad_metadata(&self, ctx: &Ctx, t: &trailhead_core::Task, error: &str) {
+        let fields = bad_fields(t);
+        let body = messages::bad_metadata_note(METADATA_KEY, &fields, error);
+        if self.flagged.lock().unwrap().get(&t.key) == Some(&body) {
+            return;
+        }
+        tracing::warn!(task = %t.key, error, "skipping a task with bad factory metadata");
+        // A note from before a restart counts, so a restart doesn't repeat it.
+        let posted = match self.store.list_comments(ctx, &t.key).await {
+            Ok(cs) if cs.iter().any(|c| c.kind == CommentKind::Note && c.body == body) => true,
+            _ => self.comment(&TaskKey(t.key.clone()), CommentKind::Note, &body).await.is_ok(),
+        };
+        if posted {
+            self.flagged.lock().unwrap().insert(t.key.clone(), body);
+        } else {
+            tracing::warn!(task = %t.key, "couldn't note the bad factory metadata on the task");
+        }
     }
 
     async fn set_status(&self, task: &TaskKey, to: trailhead_core::Status) -> Result<()> {
@@ -102,6 +156,25 @@ impl CoreTracker {
         self.store.add_comment(&ctx, &task.0, new).await.map_err(map_err)?;
         Ok(())
     }
+}
+
+fn run_update(t: &trailhead_core::Task) -> Result<RunUpdate> {
+    parse_run_update(t).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", t.key)))
+}
+
+fn parse_run_update(t: &trailhead_core::Task) -> serde_json::Result<RunUpdate> {
+    match t.metadata.get(METADATA_KEY) {
+        Some(v) => serde_json::from_value(v.clone()),
+        None => Ok(RunUpdate::default()),
+    }
+}
+
+/// The fields of the task's factory metadata that don't parse on their own.
+fn bad_fields(t: &trailhead_core::Task) -> Vec<String> {
+    let Some(serde_json::Value::Object(map)) = t.metadata.get(METADATA_KEY) else { return Vec::new() };
+    let bad =
+        |(k, v): &(&String, &serde_json::Value)| serde_json::from_value::<RunUpdate>(json!({ k.as_str(): v })).is_err();
+    map.iter().filter(bad).map(|(k, _)| format!("`{k}`")).collect()
 }
 
 fn same_title(a: &str, b: &str) -> bool {
@@ -155,31 +228,28 @@ impl Tracker for CoreTracker {
         Arc::new(sub)
     }
 
-    async fn ready(&self, project: &str, queue: Option<&TaskKey>, limit: usize) -> Result<Vec<Task>> {
+    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
         let tasks = match queue {
-            None => {
-                self.store.ready(&ctx, Some(project), Some(limit as i64), GradeFilter::Any).await.map_err(map_err)?
-            }
-            Some(queue) => {
-                let filter = TaskFilter {
-                    project: Some(project.to_string()),
-                    parent: Some(queue.0.clone()),
-                    limit: Some(1000),
-                    ..TaskFilter::default()
-                };
-                let queued: std::collections::HashSet<_> =
-                    self.store.list_tasks(&ctx, filter).await.map_err(map_err)?.into_iter().map(|t| t.id).collect();
-                let ready =
-                    self.store.ready(&ctx, Some(project), Some(1000), GradeFilter::Any).await.map_err(map_err)?;
+            [] => self.store.ready(&ctx, Some(project), Some(limit as i64), GradeFilter::Any).await.map_err(map_err)?,
+            queue => {
+                // The store orders ready tasks by priority, so filtering its one list orders across every queue and
+                // lists a task once even if it is under two of them.
+                let mut queued = std::collections::HashSet::new();
+                for q in queue {
+                    let filter = TaskFilter {
+                        project: Some(project.to_string()),
+                        parent: Some(q.0.clone()),
+                        ..TaskFilter::default()
+                    };
+                    queued.extend(self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id));
+                }
+                // Unlimited: a cap here would hide queued tasks behind other ready ones.
+                let ready = self.store.ready(&ctx, Some(project), Some(-1), GradeFilter::Any).await.map_err(map_err)?;
                 ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
             }
         };
-        let mut out = Vec::with_capacity(tasks.len());
-        for t in tasks {
-            out.push(self.task(&ctx, t).await?);
-        }
-        Ok(out)
+        self.tasks(&ctx, tasks).await
     }
 
     async fn show(&self, task: &TaskKey) -> Result<Task> {
@@ -247,15 +317,17 @@ impl Tracker for CoreTracker {
         }))
     }
 
-    async fn in_flight(&self, project: &str) -> Result<Vec<Task>> {
+    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter { project: Some(project.to_string()), limit: Some(1000), ..TaskFilter::default() };
-        let tasks = self.store.list_tasks(&ctx, filter).await.map_err(map_err)?;
-        let mut out = Vec::new();
-        for t in tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some()) {
-            out.push(self.task(&ctx, t).await?);
+        let parents: Vec<Option<String>> =
+            if queue.is_empty() { vec![None] } else { queue.iter().map(|q| Some(q.0.clone())).collect() };
+        let mut tasks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for parent in parents {
+            let filter = TaskFilter { project: Some(project.to_string()), parent, ..TaskFilter::default() };
+            tasks.extend(self.list_all(&ctx, filter).await?.into_iter().filter(|t| seen.insert(t.id)));
         }
-        Ok(out)
+        self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
     }
 
     async fn claim(&self, task: &TaskKey) -> Result<()> {
@@ -290,11 +362,11 @@ impl Tracker for CoreTracker {
 
     async fn approve(&self, task: &TaskKey) -> Result<()> {
         match self.set_status(task, trailhead_core::Status::Approved).await {
-            // Core's only refusal here is that the caller may not approve: it isn't a human or a delegated reviewer, or
-            // it did the work in review.
+            // Core's `ReviewRequired` here means the caller is neither a human nor a delegated reviewer. A reviewer
+            // that did the work in review is refused with its own `Forbidden`, which passes through.
             Err(Error::Conflict(why)) if why == trailhead_core::Error::ReviewRequired.to_string() => {
                 Err(Error::Forbidden(format!(
-                    "{} can't approve {}: it isn't a delegated reviewer, or it did the work",
+                    "{} can't approve {}: it isn't a delegated reviewer, so a person has to list it as one",
                     self.agent, task.0
                 )))
             }
@@ -363,10 +435,22 @@ impl Tracker for CoreTracker {
         Ok(TaskKey(task.key))
     }
 
+    async fn follow_ups(&self, task: &TaskKey) -> Result<Vec<FollowUpTask>> {
+        let ctx = self.ctx().await?;
+        let project = task.0.rsplit_once('-').map_or(task.0.as_str(), |(p, _)| p);
+        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let tasks = self.list_all(&ctx, filter).await?;
+        Ok(tasks
+            .into_iter()
+            .filter(|t| is_raised_by(&t.description, task))
+            .map(|t| FollowUpTask { key: TaskKey(t.key), title: t.title, description: t.description })
+            .collect())
+    }
+
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter { project: Some(project.to_string()), limit: Some(1000), ..TaskFilter::default() };
-        let tasks = self.store.list_tasks(&ctx, filter).await.map_err(map_err)?;
+        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let tasks = self.list_all(&ctx, filter).await?;
         Ok(tasks.into_iter().find(|t| same_title(&t.title, title)).map(|t| TaskKey(t.key)))
     }
 

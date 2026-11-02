@@ -24,8 +24,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, watch};
 use trailhead_factory::{
-    Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, InstallHost, PrepareRequest, Program,
-    Result, RunEvent, RunReport, RunRequest, SandboxFile, SandboxId, ToDaemon,
+    Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, HarnessSecrets, InstallHost,
+    PrepareRequest, Program, Result, RunEvent, RunReport, RunRequest, SandboxFile, SandboxId, Target, ToDaemon,
 };
 
 use crate::Runner;
@@ -141,6 +141,19 @@ const IROH_HOSTS: &[&str] = &[
 /// Other hosts runs need, such as the model API, kept resolved alongside iroh's (`RunRequest::allowed_hosts`).
 static KEEP_RESOLVED: Mutex<std::collections::BTreeSet<String>> = Mutex::new(std::collections::BTreeSet::new());
 
+/// Hosts whose last lookup failed, so a host that never resolves (Docker sandboxes have no DNS) is warned about once,
+/// not on every pass.
+static UNRESOLVED: Mutex<std::collections::BTreeSet<String>> = Mutex::new(std::collections::BTreeSet::new());
+
+/// Records a lookup's outcome in `unresolved` and says whether that is news: a host that starts failing or recovers.
+fn note_lookup_in(unresolved: &mut std::collections::BTreeSet<String>, host: &str, failed: bool) -> bool {
+    if failed { unresolved.insert(host.to_string()) } else { unresolved.remove(host) }
+}
+
+fn note_lookup(host: &str, failed: bool) -> bool {
+    note_lookup_in(&mut UNRESOLVED.lock().unwrap(), host, failed)
+}
+
 /// A Sprite lets a raw IP through only after its own DNS has resolved it from an allowed name, and a policy change
 /// resets that. iroh dials relays by IPs it resolved and cached earlier, so after a lockdown every relay reconnect
 /// was refused. Looking the names up again through the system resolver re-allows their IPs.
@@ -148,8 +161,19 @@ pub async fn resolve_iroh_hosts() {
     let extra: Vec<String> = KEEP_RESOLVED.lock().unwrap().iter().cloned().collect();
     for host in IROH_HOSTS.iter().map(|h| h.to_string()).chain(extra) {
         let host = host.trim_end_matches('.');
-        if let Err(e) = tokio::net::lookup_host((host, 443)).await {
-            tracing::warn!(%host, error = %e, "can't resolve an iroh host");
+        match tokio::net::lookup_host((host, 443)).await {
+            Err(e) => {
+                if note_lookup(host, true) {
+                    tracing::warn!(%host, error = %e, "can't resolve an iroh host; not warning again until it does");
+                } else {
+                    tracing::debug!(%host, error = %e, "can't resolve an iroh host");
+                }
+            }
+            Ok(_) => {
+                if note_lookup(host, false) {
+                    tracing::info!(%host, "an iroh host resolves again");
+                }
+            }
         }
     }
 }
@@ -192,6 +216,20 @@ struct LiveRun {
     cancel: Arc<Notify>,
     /// Counts the streams that have followed the run, so a detached stream's watchdog can tell if another came.
     followers: AtomicU64,
+    /// The latest heartbeat's quiet seconds. Heartbeats stay out of the replay log: one replayed after a reattach would
+    /// be stale, so the connected follower gets them live and a new follower waits for the next.
+    beat: watch::Sender<u64>,
+}
+
+impl LiveRun {
+    fn record(&self, ev: RunEvent) {
+        match ev {
+            RunEvent::Heartbeat { quiet_secs } => {
+                self.beat.send_replace(quiet_secs);
+            }
+            ev => self.log.send_modify(|l| l.events.push(ev)),
+        }
+    }
 }
 
 /// Everything a run has produced, kept so a control plane that reattaches can pick up where it lost the stream.
@@ -368,6 +406,7 @@ impl DaemonProtocol {
             log: watch::Sender::new(RunLog::default()),
             cancel: Arc::default(),
             followers: AtomicU64::new(0),
+            beat: watch::Sender::new(0),
         });
         {
             let mut runs = self.runs.lock().unwrap();
@@ -388,13 +427,15 @@ impl DaemonProtocol {
                 let _hold = hold;
                 let result = loop {
                     tokio::select! {
-                        Some(ev) = rx.recv() => live.log.send_modify(|l| l.events.push(ev)),
+                        Some(ev) = rx.recv() => live.record(ev),
                         done = &mut run => break done.unwrap_or_else(|e| Err(Error::Other(format!("run panicked: {e}")))),
                     }
                 };
                 live.log.send_modify(|l| {
                     while let Ok(ev) = rx.try_recv() {
-                        l.events.push(ev);
+                        if !matches!(ev, RunEvent::Heartbeat { .. }) {
+                            l.events.push(ev);
+                        }
                     }
                     l.result = Some(result);
                 });
@@ -414,6 +455,7 @@ impl DaemonProtocol {
     ) -> Result<Result<RunReport>> {
         let mut seen = usize::try_from(seen).unwrap_or(usize::MAX);
         let mut log = live.log.subscribe();
+        let mut beat = live.beat.subscribe();
         let mut incoming = frames::<ToDaemon>(recv);
         loop {
             let (new, result) = {
@@ -429,6 +471,10 @@ impl DaemonProtocol {
             }
             tokio::select! {
                 _ = log.changed() => {}
+                Ok(()) = beat.changed() => {
+                    let quiet_secs = *beat.borrow_and_update();
+                    write_frame(send, &FromDaemon::Event(RunEvent::Heartbeat { quiet_secs })).await?;
+                }
                 msg = incoming.recv() => match msg {
                     Some(Ok(ToDaemon::Cancel)) => live.cancel.notify_one(),
                     Some(Ok(other)) => tracing::warn!(?other, "unexpected message during a run"),
@@ -571,18 +617,27 @@ pub struct Launch {
     pub workdir: String,
     /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`.
     pub log: Option<String>,
-    /// Subscription mode: the Claude Code OAuth token handed to each daemon in its secrets file.
-    pub claude_oauth_token: Option<String>,
+    /// The `adapter` each daemon builds its harness from.
+    pub harness: String,
+    /// That harness's credentials (subscription mode's token, say), handed to each daemon in its secrets file.
+    pub harness_secrets: HarnessSecrets,
+    /// The connector list URL for each daemon's secrets.
+    pub gateway_list: String,
+    /// The socket each daemon holds its sandbox awake through, if the compute pauses idle ones.
+    pub hold_socket: Option<String>,
 }
 
 impl Launch {
-    pub fn new(binary: Vec<u8>) -> Launch {
+    pub fn new(binary: impl Into<Arc<Vec<u8>>>, target: &Target) -> Launch {
         Launch {
-            binary: Arc::new(binary),
-            dir: "/home/sprite/.trailhead".into(),
-            workdir: "/home/sprite/work".into(),
+            binary: binary.into(),
+            dir: target.dir.clone(),
+            workdir: target.workdir.clone(),
             log: None,
-            claude_oauth_token: None,
+            harness: crate::plugins::CLAUDE_CODE.into(),
+            harness_secrets: HarnessSecrets::new(),
+            gateway_list: target.gateway_list.clone(),
+            hold_socket: target.hold_socket.clone(),
         }
     }
 }
@@ -615,6 +670,12 @@ impl RemoteDaemon {
         }
     }
 
+    /// Lets through the same peers as another target's daemon, so one [`ApiTunnel`] serves them all.
+    pub fn with_peers(mut self, peers: Peers) -> RemoteDaemon {
+        self.peers = peers;
+        self
+    }
+
     pub fn daemon_id(&self, sandbox: &SandboxId) -> EndpointId {
         sandbox_key(&self.master, sandbox).public()
     }
@@ -629,7 +690,9 @@ impl RemoteDaemon {
         let secrets = DaemonSecrets {
             secret_key: hex::encode(sandbox_key(&self.master, sandbox).to_bytes()),
             control_plane: self.endpoint.id().to_string(),
-            claude_oauth_token: self.launch.claude_oauth_token.clone(),
+            harness: self.launch.harness.clone(),
+            harness_secrets: self.launch.harness_secrets.clone(),
+            gateway_list: self.launch.gateway_list.clone(),
         };
         let dir = &self.launch.dir;
         let bin = format!("{dir}/trailhead-daemon");
@@ -649,6 +712,9 @@ impl RemoteDaemon {
                 let mut args = vec!["--secrets".into(), secrets_path, "--workdir".into(), self.launch.workdir.clone()];
                 if let Some(log) = &self.launch.log {
                     args.extend(["--log".into(), log.clone()]);
+                }
+                if let Some(socket) = &self.launch.hold_socket {
+                    args.extend(["--hold-socket".into(), socket.clone()]);
                 }
                 args
             },
@@ -788,7 +854,10 @@ impl RemoteDaemon {
                             }
                             msg = incoming.recv() => match msg {
                                 Some(Ok(FromDaemon::Event(ev))) => {
-                                    seen += 1;
+                                    // Heartbeats aren't in the daemon's log, so they don't count towards `seen`.
+                                    if !matches!(ev, RunEvent::Heartbeat { .. }) {
+                                        seen += 1;
+                                    }
                                     let _ = events.send(ev);
                                 }
                                 Some(Ok(FromDaemon::Report(report))) => return Ok(report),
@@ -914,5 +983,20 @@ impl Daemon for RemoteDaemon {
         for tx in self.cancels.lock().unwrap().values() {
             let _ = tx.send(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failing_host_is_news_only_when_it_starts_or_stops_failing() {
+        let mut set = std::collections::BTreeSet::new();
+        assert!(note_lookup_in(&mut set, "relay", true));
+        assert!(!note_lookup_in(&mut set, "relay", true));
+        assert!(note_lookup_in(&mut set, "relay", false));
+        assert!(!note_lookup_in(&mut set, "relay", false));
+        assert!(note_lookup_in(&mut set, "relay", true));
     }
 }

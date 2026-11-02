@@ -192,6 +192,7 @@ fn meta_patch(pairs: &[String]) -> Result<Value> {
             .filter(|(p, _)| !p.is_empty() && p.split('.').all(|k| !k.is_empty()))
             .ok_or_else(|| anyhow::anyhow!("--meta takes key=value (dots nest), not {pair:?}"))?;
         let value = serde_json::from_str(raw).unwrap_or_else(|_| json!(raw));
+        check_factory_field(path, &value)?;
         let mut at = &mut patch;
         for key in path.split('.') {
             if !at.is_object() {
@@ -202,6 +203,73 @@ fn meta_patch(pairs: &[String]) -> Result<Value> {
         *at = value;
     }
     Ok(patch)
+}
+
+/// The JSON kind a scalar `factory.<field>` takes. The CLI can't depend on `trailhead-factory` (it isn't published),
+/// so a test checks this table against `RunUpdate`.
+const FACTORY_FIELDS: &[(&str, Kind)] = &[
+    ("attempt", Kind::Unsigned),
+    ("attempt_base", Kind::Unsigned),
+    ("gave_up", Kind::Unsigned),
+    ("review_rounds", Kind::Unsigned),
+    ("reviewed", Kind::Unsigned),
+    ("retries", Kind::Unsigned),
+    ("infra_failures", Kind::Unsigned),
+    ("conflict_reworks", Kind::Unsigned),
+    ("started", Kind::Integer),
+    ("sandbox", Kind::String),
+    ("host", Kind::String),
+    ("target", Kind::String),
+    ("profile", Kind::String),
+    ("failure", Kind::String),
+    ("reviewed_head", Kind::String),
+    ("merging", Kind::String),
+    ("concluded", Kind::String),
+    ("ungraded", Kind::Bool),
+];
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Unsigned,
+    Integer,
+    String,
+    Bool,
+}
+
+impl Kind {
+    fn accepts(self, v: &Value) -> bool {
+        match self {
+            Kind::Unsigned => v.as_u64().is_some_and(|n| u32::try_from(n).is_ok()),
+            Kind::Integer => v.as_i64().is_some(),
+            Kind::String => v.is_string(),
+            Kind::Bool => v.is_boolean(),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Unsigned => "a non-negative integer",
+            Kind::Integer => "an integer",
+            Kind::String => "a string",
+            Kind::Bool => "true or false",
+        }
+    }
+}
+
+/// Rejects a value for a scalar `factory.<field>` key of the wrong kind, such as `factory.attempt_base=3x`, which
+/// the factory couldn't read back. `null` removes a field, so it always passes; nested paths, structured fields and
+/// unknown keys are left alone.
+fn check_factory_field(path: &str, value: &Value) -> Result<()> {
+    let Some(("factory", field)) = path.split_once('.') else {
+        return Ok(());
+    };
+    let Some((_, kind)) = FACTORY_FIELDS.iter().find(|(f, _)| *f == field) else {
+        return Ok(());
+    };
+    if value.is_null() || kind.accepts(value) {
+        return Ok(());
+    }
+    anyhow::bail!("--meta {path} must be {}, not {value}", kind.name())
 }
 
 /// A grade is 1 to 4; "none" clears it. The rules live in core.
@@ -261,4 +329,77 @@ pub(crate) async fn search(cx: &Ctx, query: &[String], limit: Option<i64>) -> Re
         task_list(&v, "no matches")
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keeps `FACTORY_FIELDS` in step with `RunUpdate`: a sample of each kind must set that field.
+    #[test]
+    fn factory_fields_match_run_update() {
+        for (field, kind) in FACTORY_FIELDS {
+            let sample = match kind {
+                Kind::Unsigned | Kind::Integer => json!(3),
+                Kind::String => json!("x"),
+                Kind::Bool => json!(true),
+            };
+            assert!(kind.accepts(&sample), "{field}");
+            let run: trailhead_factory::RunUpdate = serde_json::from_value(json!({ *field: sample.clone() })).unwrap();
+            let back = serde_json::to_value(&run).unwrap();
+            assert_eq!(back, json!({ *field: sample }), "{field} isn't a {} on RunUpdate", kind.name());
+        }
+    }
+
+    /// Fields of `RunUpdate` that hold objects, which `FACTORY_FIELDS` leaves to the factory to read.
+    const STRUCTURED: &[&str] = &["pr", "spend", "changes_requested", "merged", "grade", "merge"];
+
+    /// A new scalar field on `RunUpdate` must be added to `FACTORY_FIELDS`, or to `STRUCTURED` if it isn't a scalar.
+    /// The struct literal has no `..`, so a new field also fails to compile here until it is populated.
+    #[test]
+    fn every_scalar_run_update_field_is_in_factory_fields() {
+        let pr = json!({ "repo": { "owner": "o", "name": "n" }, "number": 1, "url": "u" });
+        let full = trailhead_factory::RunUpdate {
+            attempt: Some(1),
+            sandbox: Some("x".into()),
+            host: Some("x".into()),
+            target: Some("x".into()),
+            started: Some(1),
+            profile: Some("x".into()),
+            pr: Some(serde_json::from_value(pr.clone()).unwrap()),
+            review_rounds: Some(1),
+            reviewed: Some(1),
+            spend: Some(trailhead_factory::Usd(1)),
+            concluded: Some("x".into()),
+            failure: Some("x".into()),
+            retries: Some(1),
+            infra_failures: Some(1),
+            changes_requested: Some(
+                serde_json::from_value(json!({ "reviewer": "r", "body": "b", "attempt": 1 })).unwrap(),
+            ),
+            conflict_reworks: Some(1),
+            attempt_base: Some(1),
+            gave_up: Some(1),
+            merged: Some(serde_json::from_value(json!({ "by": "human", "pr": pr })).unwrap()),
+            grade: Some(serde_json::from_value(json!({ "grade": 2 })).unwrap()),
+            ungraded: Some(true),
+            reviewed_head: Some("x".into()),
+            merge: Some(
+                serde_json::from_value(json!({
+                    "grade": 2, "head": "h", "passed": [], "waiting": [], "would_merge": false,
+                    "approved_head": null, "human_head": null, "problem": null, "message": "m"
+                }))
+                .unwrap(),
+            ),
+            merging: Some("x".into()),
+        };
+        let Value::Object(map) = serde_json::to_value(&full).unwrap() else { panic!("RunUpdate isn't an object") };
+        for key in map.keys() {
+            let known = FACTORY_FIELDS.iter().any(|(f, _)| f == key) || STRUCTURED.contains(&key.as_str());
+            assert!(known, "RunUpdate.{key} is in neither FACTORY_FIELDS nor STRUCTURED");
+        }
+        for key in STRUCTURED {
+            assert!(map.contains_key(*key), "STRUCTURED lists {key}, which RunUpdate doesn't serialize");
+        }
+    }
 }
