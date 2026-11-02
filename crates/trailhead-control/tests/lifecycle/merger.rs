@@ -662,3 +662,28 @@ async fn the_pr_says_the_task_is_parked_when_the_request_for_changes_hits_the_ro
     );
     assert!(!said.iter().any(|m| m.contains("a rework is running")), "{said:?}");
 }
+
+#[tokio::test]
+async fn a_grade_raise_leaves_lanes_own_approval_in_place() {
+    // Grade 3 here needs a gate that can't pass yet, so the raised grade fails a non-CI gate.
+    let config = merging().replace(
+        "require = [\"checks\", \"ci\", \"agent_review\", \"human\"]\nauto_merge = false",
+        "require = [\"checks\", \"ci\", \"quorum\"]\nauto_merge = false\nquorum = { reviewers = 3, agree = 3 }",
+    );
+    let (r, queue) = queued_rig_with(&config);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    // Lane approves with no mark of the control plane's, then raises the grade.
+    r.tracker.approve_as_human(&key);
+    r.tracker.set_grade(&key, 3);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Approved, "only the control plane's own approval is withdrawn");
+    assert!(!r.codehost.prs()[0].merged);
+    let decision = task.run.merge.unwrap();
+    assert_eq!(decision.grade, 3);
+    assert_eq!(decision.approved_head, None);
+    assert!(!decision.waiting.is_empty(), "the raised grade's gates don't pass");
+}
