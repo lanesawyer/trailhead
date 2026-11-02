@@ -67,7 +67,7 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 
 ## What counts as a review round
 
-`max_review_rounds` (`[repo]`, default 3) caps how many reviews may ask for changes. A reviewer run counts as a round unless it was not the PR's fault:
+`max_review_rounds` (`[repo]`, default 3) caps review rounds, approvals included: an approving review takes a round too, so if a review approves and a later push sends the task back to review, only two more requests for changes fit under the default cap of 3. A reviewer run counts as a round unless it was not the PR's fault:
 
 | Reviewer outcome | Round |
 |---|---|
