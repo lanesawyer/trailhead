@@ -552,6 +552,11 @@ impl FactoryConfig {
             }
         }
         for (name, profile) in &self.profiles {
+            if profile.stall_timeout == 0 {
+                return Err(Error::Config(format!(
+                    "[factory.profiles.{name}] stall_timeout is 0; it's minutes of silence, 1 or more"
+                )));
+            }
             if let Some(next) = &profile.escalate_to
                 && !self.profiles.contains_key(next)
             {
@@ -560,13 +565,15 @@ impl FactoryConfig {
         }
         for grade in self.grades.rules.keys() {
             if !matches!(grade.as_str(), "2" | "3" | "4") {
-                return Err(Error::Config(format!("[grades] has `{grade}`; path rules are for grades 2, 3 and 4")));
+                return Err(Error::Config(format!(
+                    "[factory.grades] has `{grade}`; path rules are for grades 2, 3 and 4"
+                )));
             }
         }
         let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
         for (grade, gate) in &self.gates {
             if !matches!(grade.as_str(), "1" | "2" | "3" | "4") {
-                return Err(Error::Config(format!("[gates.{grade}]: gates are per grade, 1 to 4")));
+                return Err(Error::Config(format!("[factory.gates.{grade}]: gates are per grade, 1 to 4")));
             }
             for r in &gate.require {
                 if let GateKind::Named(name) = r
@@ -590,7 +597,7 @@ impl FactoryConfig {
         &self.profiles[&self.repo.reviewer]
     }
 
-    /// The gate a PR of this grade must pass: the repo's `[gates.N]`, or the table in `docs/factory/review.md#grades`.
+    /// The gate a PR of this grade must pass: the repo's `[factory.gates.N]`, or the table in `docs/factory/review.md#grades`.
     pub fn gate(&self, grade: u8) -> Gate {
         use GateKind::{AgentReview, Checks, Ci, Human};
         if let Some(gate) = self.gates.get(&grade.to_string()) {
@@ -616,8 +623,8 @@ impl FactoryConfig {
             .collect()
     }
 
-    /// Readies a checkout, on `branch` when given (a rework). Only workers build: a reviewer reads the diff, so it
-    /// skips `setup`.
+    /// Readies a checkout, on `branch` when given: a worker's rework, or a reviewer's look at the PR's head. Only
+    /// workers build: a reviewer reads the diff, so it skips `setup`.
     pub fn prepare_request(&self, role: Role, branch: Option<String>) -> PrepareRequest {
         let named = |name: &str, c: &Option<String>| {
             c.as_ref().filter(|_| role == Role::Worker).map(|c| Check { name: name.into(), command: c.clone() })
@@ -720,6 +727,8 @@ mod tests {
             let err = parse(&format!("{base}\n[grades]\n{bad}\n")).unwrap_err();
             assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
         }
+        let err = parse(&format!("{base}\n[grades]\n5 = [\"a\"]\n")).unwrap_err();
+        assert!(err.to_string().contains("[factory.grades] has `5`"), "{err}");
     }
 
     const SAMPLE: &str = r#"
@@ -789,6 +798,15 @@ require = ["checks", "agent_review", "human"]
     }
 
     #[test]
+    fn rejects_zero_stall_timeout() {
+        let bad = SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"worker-opus\"\nstall_timeout = 0");
+        match parse(&bad) {
+            Err(Error::Config(m)) => assert!(m.contains("stall_timeout"), "{m}"),
+            other => panic!("expected a config error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_unknown_checks_and_profiles() {
         let bad = SAMPLE.replace("lint = ", "lnt = ");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
@@ -825,6 +843,8 @@ require = ["checks", "agent_review", "human"]
             let err = parse(&format!("{SAMPLE}\n{bad}\n")).unwrap_err();
             assert!(matches!(err, Error::Config(_)), "{bad}: {err}");
         }
+        let err = parse(&format!("{SAMPLE}\n[gates.5]\nrequire = []\n")).unwrap_err();
+        assert!(err.to_string().contains("[factory.gates.5]: gates are per grade"), "{err}");
     }
 
     #[test]
