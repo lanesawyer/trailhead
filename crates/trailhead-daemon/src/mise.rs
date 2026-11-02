@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::process::Command;
 use trailhead_factory::{Error, InstallHost, Result};
@@ -15,6 +16,11 @@ const GENERATED: &str = "trailhead-factory.toml";
 /// The one part of `mise bootstrap` the factory runs. An allowlist, so a part a later mise adds isn't picked up by
 /// surprise; the rest (firewall, accounts, user, systemd units, services, dotfiles, remote) fight the sandbox.
 const BOOTSTRAP_PARTS: &str = "tools";
+
+/// Hosts just opened on a Sprite can take tens of seconds to resolve (`docs/factory/sandbox.md`), so the first install
+/// can find them still closed.
+const INSTALL_ATTEMPTS: u32 = 7;
+const INSTALL_RETRY: Duration = Duration::from_secs(10);
 
 /// The mise config for the factory's tools.
 pub fn render(tools: &BTreeMap<String, String>) -> String {
@@ -97,17 +103,19 @@ pub struct Mise {
     bin: Option<PathBuf>,
     /// mise's global `conf.d`, where the generated config goes.
     conf_dir: PathBuf,
+    /// How long to wait between install attempts.
+    install_retry: Duration,
 }
 
 impl Mise {
     pub fn new() -> Mise {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/root"));
-        Mise { bin: None, conf_dir: home.join(".config/mise/conf.d") }
+        Mise { bin: None, conf_dir: home.join(".config/mise/conf.d"), install_retry: INSTALL_RETRY }
     }
 
     /// For tests: a given binary (never installed) and config directory.
     pub fn with(bin: impl Into<PathBuf>, conf_dir: impl Into<PathBuf>) -> Mise {
-        Mise { bin: Some(bin.into()), conf_dir: conf_dir.into() }
+        Mise { bin: Some(bin.into()), conf_dir: conf_dir.into(), install_retry: Duration::from_millis(10) }
     }
 
     fn generated(&self) -> PathBuf {
@@ -141,7 +149,7 @@ impl Mise {
         tracing::info!(target = %target.display(), "installing mise");
         let out = Command::new("sh")
             .arg("-c")
-            .arg("curl -fsSL https://mise.run | sh")
+            .arg("curl -fsSL --retry 45 --retry-delay 2 --retry-max-time 90 --retry-all-errors https://mise.run | sh")
             .env("MISE_INSTALL_PATH", &target)
             .stdin(Stdio::null())
             .output()
@@ -178,20 +186,38 @@ impl Mise {
         tokio::fs::write(self.generated(), render(tools))
             .await
             .map_err(|e| Error::Other(format!("{}: {e}", self.generated().display())))?;
-        let out = Command::new(&bin)
-            .args(["bootstrap", "--only", BOOTSTRAP_PARTS])
-            .current_dir(&self.conf_dir)
+        let out = self.install(&bin, &self.conf_dir, &["bootstrap", "--only", BOOTSTRAP_PARTS]).await?;
+        tracing::info!("mise bootstrap of [stack]:\n{}", out.trim());
+        Ok(())
+    }
+
+    /// Runs an install, trying again while egress that was just opened takes effect.
+    async fn install(&self, bin: &Path, dir: &Path, args: &[&str]) -> Result<String> {
+        let mut result = Mise::run(bin, dir, args).await;
+        for _ in 1..INSTALL_ATTEMPTS {
+            if result.is_ok() {
+                break;
+            }
+            tokio::time::sleep(self.install_retry).await;
+            result = Mise::run(bin, dir, args).await;
+        }
+        result
+    }
+
+    async fn run(bin: &Path, dir: &Path, args: &[&str]) -> Result<String> {
+        let out = Command::new(bin)
+            .args(args)
+            .current_dir(dir)
             .env("MISE_YES", "1")
             .stdin(Stdio::null())
             .output()
             .await
-            .map_err(|e| Error::Other(format!("mise bootstrap: {e}")))?;
+            .map_err(|e| Error::Other(format!("mise {}: {e}", args.join(" "))))?;
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        if !out.status.success() {
-            return Err(Error::Other(format!("mise bootstrap failed: {}", text.trim())));
+        if out.status.success() {
+            return Ok(text);
         }
-        tracing::info!("mise bootstrap of [stack]:\n{}", text.trim());
-        Ok(())
+        Err(Error::Other(format!("mise {} failed: {}", args.join(" "), text.trim())))
     }
 
     /// The environment mise gives a command in `dir`, with the pinned tools on PATH. Empty when mise isn't active.

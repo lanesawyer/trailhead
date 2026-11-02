@@ -296,6 +296,36 @@ async fn prepare_installs_the_stack_with_mise_and_checks_run_under_it() {
 }
 
 #[tokio::test]
+async fn the_stack_install_is_retried_while_egress_opens() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let tools = root.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let conf = root.path().join("conf.d");
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote)
+        .with_mise(Mise::with(fake_mise(&tools), &conf));
+    let script = std::fs::read_to_string(tools.join("mise")).unwrap();
+    let once =
+        format!("#!/bin/sh\nif [ ! -e {seen} ]; then touch {seen}; exit 1; fi\n", seen = tools.join("seen").display());
+    std::fs::write(tools.join("mise"), script.replacen("#!/bin/sh\n", &once, 1)).unwrap();
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: None,
+        tools: [("node".to_string(), "26".to_string())].into(),
+        tool_hosts: Default::default(),
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+    };
+    ws.prepare(&req).await.unwrap();
+    assert!(std::fs::read_to_string(tools.join("mise.log")).unwrap().contains("bootstrap --only tools"));
+}
+
+#[tokio::test]
 async fn conflict_markers_added_since_the_start_are_found_in_any_file() {
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("work");
