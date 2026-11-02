@@ -8,6 +8,41 @@ Proposal: the factory's lifecycle is Trailhead's existing one plus conventions, 
 
 Statuses: `open`, `in_progress`, `needs_input`, `in_review`, `approved`, `done`, `cancelled`, with `approved` between `in_review` and `done`. Claims are leases (agents 30 minutes by default, renewed by heartbeat; human claims don't expire). Moving a task to `in_review`, `approved`, `done` or `cancelled` releases its claim; `in_progress` and `needs_input` keep it. Delegated reviewers, agents a human lists on a project, can approve `in_review` → `approved` or `done`.
 
+## The flow for one task
+
+```mermaid
+flowchart TD
+    queued["Queued<br/>open, graded, under the queue task"] --> claimed["Claimed<br/>in_progress, sub-agent made"]
+    claimed --> sandbox["Sandbox prepared<br/>repo checked out, daemon started"]
+    sandbox --> worker["Worker run"]
+    worker -->|"asks a question"| parked["Parked<br/>needs_input"]
+    parked -->|"a person answers"| queued
+    worker -->|"budget breached"| parked
+    worker -->|"agent fails"| retry{"Attempts left?<br/>max_attempts"}
+    retry -->|"yes"| queued
+    retry -->|"no"| parked
+    worker -->|"agent done"| checks{"Checks pass?"}
+    checks -->|"no: run fails, nothing published"| retry
+    checks -->|"yes"| pr["PR opened<br/>in_review"]
+    pr --> review["Agent review"]
+    review -->|"requests changes"| rounds{"Rounds left?<br/>max_review_rounds"}
+    rounds -->|"yes: reopened with the review"| queued
+    rounds -->|"no"| parked
+    review -->|"approves"| gates{"Gates pass?<br/>checks, CI, human by grade"}
+    gates -->|"no: waiting on a person or a pending check"| gates
+    gates -->|"CI fails on the head"| reworks{"Reworks left?<br/>max_conflict_reworks"}
+    gates -->|"yes"| approved["approved"]
+    approved --> merge["Merge<br/>the merger or a person"]
+    merge -->|"conflict"| reworks
+    reworks -->|"yes: rework on top of main, or fix the CI failure"| queued
+    reworks -->|"no"| parked
+    merge -->|"merged"| done["done"]
+    pr -->|"PR conflicts: reconcile reopens"| reworks
+    pr -->|"PR closed unmerged"| parked
+```
+
+The loops back to `queued` start a fresh sandbox from the PR branch. A conflict rework doesn't use a review round (it has `max_conflict_reworks`). The [merger](review.md#the-merger) page has the detail of the gates and the merge.
+
 ## Mapping
 
 | Factory step | Trailhead | Fit |

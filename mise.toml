@@ -7,6 +7,8 @@ docker-cli = "latest"
 fnox = { version = "latest", workflow = "release.yml" }
 lima = "latest"
 mdbook = "0.5.4"
+# Not in the mise registry; the preprocessor ships prebuilt binaries on GitHub (0.16 can't act as an mdBook 0.5 preprocessor, so only its bundled mermaid.min.js is used; see the docs tasks).
+"github:badboy/mdbook-mermaid" = "0.16"
 rust = "latest"
 
 [tasks.test-live-sprites]
@@ -87,6 +89,19 @@ if pgrep -f "^$HOME/.cargo/bin/trailhead-factory run" >/dev/null; then
 fi
 """
 
+[tasks.docs-mermaid]
+description = "Unpack mermaid.min.js (git-ignored), which book.toml loads as additional-js"
+# mermaid.min.js is bundled in the mdbook-mermaid binary; `install` unpacks it. It runs in a scratch directory because
+# mdbook-mermaid 0.16 can't read mdBook 0.5's preprocessor input, so book.toml must not register it as a preprocessor.
+# mermaid-render.js turns the ```mermaid blocks into diagrams in the browser, so they render offline.
+run = "d=$(mktemp -d) && printf '[book]\\ntitle = \"x\"\\n' > \"$d/book.toml\" && mdbook-mermaid install \"$d\" && cp \"$d/mermaid.min.js\" . && rm -r \"$d\""
+
 [tasks.docs]
-description = "Build the docs (docs/) into a book with mdBook; `mdbook serve` previews it"
+description = "Build the docs (docs/) into a book with mdBook; `mise run docs-serve` previews it"
+depends = ["docs-mermaid"]
 run = "mdbook build"
+
+[tasks.docs-serve]
+description = "Preview the docs with `mdbook serve`, unpacking mermaid.min.js first so a fresh checkout works"
+depends = ["docs-mermaid"]
+run = "mdbook serve"
