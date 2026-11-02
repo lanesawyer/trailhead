@@ -764,3 +764,22 @@ async fn a_fresh_run_whose_setup_fails_is_still_an_infrastructure_failure() {
     assert_eq!(task.run.attempt.unwrap_or(0), 0, "no attempt was used");
     assert!(r.daemon.requests().is_empty(), "no agent started");
 }
+
+#[tokio::test]
+async fn a_failed_revoke_doesnt_undo_a_park_or_a_failure() {
+    for (max, parked) in [(1, true), (3, false)] {
+        let r =
+            rig_with(&CONFIG.replace("name = \"trailhead\"", &format!("name = \"trailhead\"\nmax_attempts = {max}")));
+        let key = r.tracker.add_task("TRAIL", "Fails", "");
+        r.tracker.fail_next("factory", "revoke_sub_agent", 1);
+        r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "no luck".into() }));
+        let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+        if parked {
+            assert!(matches!(ran, Ok(Outcome::Parked { .. })), "{ran:?}");
+            assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+        } else {
+            assert!(matches!(ran, Ok(Outcome::Failed { .. })), "{ran:?}");
+            assert_eq!(r.tracker.task(&key).status, Status::Open);
+        }
+    }
+}
