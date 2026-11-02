@@ -11,7 +11,7 @@ The control plane enforces budgets. Token and dollar counts come from the daemon
 | Task | `max_attempts`, `max_review_rounds` | Park the task for a human |
 | Global | Dollars per day, concurrent sandboxes | Stop starting new runs; running ones finish their step |
 
-- **Per run, not per task.** Dollar, wall-clock and step budgets are checked against one run's own spend, not the task's running total across attempts, reworks and reviews. A task's total is bounded by `max_attempts` and `max_review_rounds` times the per-run budgets. A task-level dollar cap (say `[factory.repo] max_task_usd`, checked against prior plus current spend) is not built; adding one is a policy decision for a human.
+- **Per run, not per task.** Dollar, wall-clock and step budgets are checked against one run's own spend, not the task's running total across attempts, reworks and reviews. A task's total is bounded by `max_attempts` and `max_review_rounds` times the per-run budgets, plus the runs that count toward neither limit: transient failures, reviewer infrastructure failures, and conflict reworks (bounded by `max_conflict_reworks`). A task-level dollar cap (say `[factory.repo] max_task_usd`, checked against prior plus current spend) is not built; adding one is a policy decision for a human.
 - **Stall detection.** No progress event for a set window counts as a breach.
 - **Suspend, don't destroy.** A breached run keeps its sandbox and checkpoint so a human can resume it.
 - **Numbers TBD.** Start conservative and record real spend per task type before loosening. Raising a budget is a policy loosening and needs a human ([review.md](review.md)).
@@ -27,7 +27,7 @@ The control plane enforces budgets. Token and dollar counts come from the daemon
 
 - **Anthropic.** The [Usage and Cost API](https://platform.claude.com/docs/en/build-with-claude/usage-cost-api) reports usage in 1-minute buckets, filterable by API key and workspace, typically within 5 minutes. The cost endpoint is daily only and omits Priority Tier, so minute-level dollars come from pricing usage tokens. It needs an Admin API key (or an OAuth token with `org:admin`), which can also manage the organization: the one powerful credential the control plane holds. The connector forwards only the Messages API, so this call goes from the control plane directly. Store the key in the OS keyring.
 - **Dedicated workspace and key.** The connector's key belongs to a factory-only workspace, so usage numbers are the factory's alone and that workspace's spend limit is the backstop. Confirm per-workspace spend limits in the Console.
-- **Lag means overshoot.** Five minutes of every running sandbox's spend can land after the daily cap is hit, which is why per-task budgets come from the daemon in real time.
+- **Lag means overshoot.** Five minutes of every running sandbox's spend can land after the daily cap is hit, which is why per-run budgets come from the daemon in real time.
 - **Provider-agnostic.** `ModelProvider::spend` ([seams.md](seams.md)) wraps each provider's usage API.
 
 ## Subscription usage windows
