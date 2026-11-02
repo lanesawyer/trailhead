@@ -54,7 +54,7 @@ provider = "anthropic"
 model    = "sonnet"             # resolved to a model id per provider
 budget   = { usd = 5, minutes = 60, steps = 40 }
 escalate_to = "worker-opus"     # after repeated failure
-stall_timeout = 5               # minutes of agent silence before the run fails as a stall (default 5)
+stall_timeout = 5               # minutes of agent silence before the run fails as a stall (default 5, at least 1; 0 is rejected when the config loads)
 
 [factory.profiles.utility]
 role     = "utility"
