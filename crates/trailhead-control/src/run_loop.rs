@@ -68,9 +68,12 @@ impl Factory {
                                 .spawn(async move { factory.resume_run(&task, &sandbox).await }.in_current_span());
                             keys.insert(handle.id(), key);
                         }
-                        // A review is a session on the same subscription window, so a pause holds them back too; the
-                        // next reconcile finds them due again (the resume below triggers one).
-                        let reviews_due = if self.usage_paused() { Vec::new() } else { due.reviews };
+                        // A review is a session on the same subscription window, so a pause holds them back too, and
+                        // it acquires a sandbox whose daemon needs the server, so an outage does. The next reconcile
+                        // finds them due again (the resume below triggers one, and so does the poll). Due runs aren't
+                        // held: the daemon already has them, and runs in flight carry on through an outage.
+                        let hold = !due.reviews.is_empty() && (self.usage_paused() || !self.server_up().await);
+                        let reviews_due = if hold { Vec::new() } else { due.reviews };
                         for task in reviews_due {
                             let key = task.key.clone();
                             let factory = self.clone();
