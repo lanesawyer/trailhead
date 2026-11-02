@@ -146,6 +146,8 @@ pub struct DockerCompute {
     /// The SHA-256 of `config.daemon`, hex.
     daemon_digest: Arc<str>,
     watching: Arc<AtomicBool>,
+    /// Set by [`DockerCompute::read_only`]: calls that change a sandbox are refused.
+    read_only: bool,
 }
 
 /// What Docker can't hold for a sandbox.
@@ -164,7 +166,14 @@ impl DockerCompute {
 
     pub fn with_client(docker: Docker, config: DockerConfig) -> DockerCompute {
         let daemon_digest = gateway::digest(&config.daemon).into();
-        DockerCompute { docker, config, link: Default::default(), daemon_digest, watching: Default::default() }
+        DockerCompute {
+            docker,
+            config,
+            link: Default::default(),
+            daemon_digest,
+            watching: Default::default(),
+            read_only: false,
+        }
     }
 
     /// Connects like [`DockerCompute::new`] for reading only (`list`, `logs`): it never starts, replaces or syncs the
@@ -176,7 +185,8 @@ impl DockerCompute {
     }
 
     pub fn read_only_with_client(docker: Docker, config: DockerConfig) -> DockerCompute {
-        let compute = DockerCompute::with_client(docker, config);
+        let mut compute = DockerCompute::with_client(docker, config);
+        compute.read_only = true;
         // The watcher is what starts and syncs the gateway; marking it started keeps it from ever running.
         compute.watching.store(true, Ordering::SeqCst);
         compute
@@ -783,6 +793,19 @@ mod tests {
         let paths = seen.lock().unwrap().clone();
         assert!(!paths.is_empty());
         assert!(paths.iter().all(|p| p.contains("/containers/json")), "{paths:?}");
+    }
+
+    #[tokio::test]
+    async fn changing_read_only_is_refused_before_the_gateway() {
+        let dir = tempfile::tempdir().unwrap();
+        let (docker, seen) = recording_docker(dir.path()).await;
+        let config = DockerConfig::new(dir.path().join("state"), Default::default());
+        let compute = DockerCompute::read_only_with_client(docker, config);
+        assert!(compute.gateway().await.is_err());
+        let err = compute.set_labels(&SandboxId("x".into()), &Labels::default()).await.unwrap_err();
+        assert!(err.to_string().contains("read-only"), "{err}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(seen.lock().unwrap().is_empty(), "{:?}", seen.lock().unwrap());
     }
 
     #[tokio::test]
