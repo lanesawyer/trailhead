@@ -114,7 +114,7 @@ impl CoreTracker {
     async fn tasks(&self, ctx: &Ctx, tasks: impl IntoIterator<Item = trailhead_core::Task>) -> Result<Vec<Task>> {
         let mut out = Vec::new();
         for t in tasks {
-            if let Err(e) = run_update(&t) {
+            if let Err(e) = parse_run_update(&t) {
                 self.flag_bad_metadata(ctx, &t, &e.to_string()).await;
                 continue;
             }
@@ -159,10 +159,12 @@ impl CoreTracker {
 }
 
 fn run_update(t: &trailhead_core::Task) -> Result<RunUpdate> {
+    parse_run_update(t).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", t.key)))
+}
+
+fn parse_run_update(t: &trailhead_core::Task) -> serde_json::Result<RunUpdate> {
     match t.metadata.get(METADATA_KEY) {
-        Some(v) => {
-            serde_json::from_value(v.clone()).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", t.key)))
-        }
+        Some(v) => serde_json::from_value(v.clone()),
         None => Ok(RunUpdate::default()),
     }
 }

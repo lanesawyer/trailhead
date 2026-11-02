@@ -165,10 +165,14 @@ pub fn ungraded_note() -> String {
 /// The note on a task the factory skips because its metadata doesn't parse. `fields` are the names of the offending
 /// fields, if they are known.
 pub fn bad_metadata_note(metadata_key: &str, fields: &[String], error: &str) -> String {
-    let fields = if fields.is_empty() { String::new() } else { format!(" in {}", fields.join(", ")) };
+    let (in_fields, fix) = if fields.is_empty() {
+        (String::new(), format!("fix or remove the `{metadata_key}` metadata"))
+    } else {
+        (format!(" in {}", fields.join(", ")), "fix or remove that field".to_string())
+    };
     format!(
-        "The factory is skipping this task: its `{metadata_key}` metadata is malformed{fields} ({error}). \
-         Fix or remove that field and the factory will pick the task up again."
+        "The factory is skipping this task: its `{metadata_key}` metadata is malformed{in_fields} ({error}). \
+         To have the factory pick the task up again, {fix}."
     )
 }
 
@@ -443,6 +447,16 @@ pub fn ci_failure_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bad_metadata_note_names_the_fix_for_the_fields_or_the_whole_value() {
+        let fields = bad_metadata_note("factory", &["`attempt_base`".to_string()], "oops");
+        assert!(fields.contains("malformed in `attempt_base` (oops)"), "{fields}");
+        assert!(fields.ends_with("fix or remove that field."), "{fields}");
+        let whole = bad_metadata_note("factory", &[], "oops");
+        assert!(whole.ends_with("fix or remove the `factory` metadata."), "{whole}");
+        assert!(!whole.contains("that field"), "{whole}");
+    }
 
     fn decision() -> MergeDecision {
         MergeDecision {
