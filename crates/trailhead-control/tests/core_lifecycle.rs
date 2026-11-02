@@ -292,6 +292,8 @@ async fn a_task_with_malformed_factory_metadata_is_skipped_not_fatal() {
     let notes: Vec<_> = r.store.list_comments(&r.human, &bad.0).await.unwrap();
     assert_eq!(notes.len(), 1);
     assert!(notes[0].body.contains("attempt_base"), "{}", notes[0].body);
+    assert!(!notes[0].body.contains("bad factory metadata"), "{}", notes[0].body);
+    assert!(!notes[0].body.contains(&bad.0), "{}", notes[0].body);
 }
 
 #[tokio::test]
