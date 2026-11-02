@@ -389,10 +389,34 @@ async fn a_merge_the_host_refuses_is_tried_again_not_reworked() {
     r.factory.reconcile().await.unwrap();
     assert_eq!((said(&r), noted(&r)), (1, 1));
 
+    // A different reason is said again, and is the one the decision remembers.
+    let other = "Changes must be made through a merge queue.";
+    r.codehost.refuse_merge(Some(other));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!((said(&r), noted(&r)), (2, 2));
+    assert_eq!(r.tracker.task(&key).run.merge.as_ref().and_then(|d| d.refused.as_deref()), Some(other));
+
     r.codehost.refuse_merge(None);
     r.factory.reconcile().await.unwrap();
     assert!(r.codehost.prs()[0].merged);
     assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn a_refusal_stands_for_the_head_it_was_given_on() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.refuse_merge(Some("Required status check \"test\" is expected."));
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    let refused = |r: &Rig| r.tracker.task(&key).run.merge.and_then(|d| d.refused);
+    assert!(refused(&r).is_some());
+
+    // The head moves: the refusal was for the old one, so the decision no longer carries it.
+    r.codehost.push_to(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(refused(&r), None);
+    assert!(!r.codehost.prs()[0].merged);
 }
 
 #[tokio::test]
