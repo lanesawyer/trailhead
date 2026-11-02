@@ -571,7 +571,7 @@ async fn reviews_that_end_without_a_verdict_back_off_and_park_at_the_cap() {
     assert_eq!(task.run.review_rounds, rounds, "the failed rounds are given back");
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
-    assert!(questions[0].body.contains("without a verdict"), "{}", questions[0].body);
+    assert!(questions[0].body.contains("ended without a verdict"), "{}", questions[0].body);
 }
 
 const NO_REVIEW_GATE: &str = r#"
