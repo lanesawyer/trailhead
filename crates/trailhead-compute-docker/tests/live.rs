@@ -396,6 +396,46 @@ async fn docker_quiet(args: &[&str]) {
     let _ = tokio::process::Command::new("docker").args(args).output().await;
 }
 
+/// The hosts `hosts_for` opens for mise's installer and these tools. If this fails on a host, that table is wrong.
+const STACK_HOSTS: &[&str] = &[
+    "mise.run",
+    "github.com",
+    "api.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "mise.jdx.dev",
+    "mise-versions.jdx.dev",
+    "nodejs.org",
+    "static.rust-lang.org",
+];
+
+#[tokio::test]
+#[ignore = "needs a Docker engine, trailhead-sandbox:latest and the internet"]
+async fn the_stack_installs_with_mise_through_the_gateway() {
+    let env = live("mise");
+    let compute = env.compute.clone();
+    let name = format!("th-live-mise-{}", std::process::id());
+    compute.create(&spec(&name, worker(), STACK_HOSTS)).await.unwrap();
+
+    let n = name.clone();
+    let result = async move {
+        let install = "set -e; curl -fsSL https://mise.run | MISE_INSTALL_PATH=$HOME/.local/bin/mise sh; \
+             mkdir -p ~/.config/mise/conf.d ~/repo; cd ~/.config/mise/conf.d; \
+             printf '[tools]\\nnode = \"26\"\\nrust = \"stable\"\\n' > trailhead-factory.toml; \
+             MISE_YES=1 ~/.local/bin/mise bootstrap --only tools";
+        sh(&n, install).await;
+        let run = "cd ~/repo; printf '[tools]\\nnode = \"24\"\\n' > mise.toml; \
+             MISE_OFFLINE=1 MISE_IGNORED_CONFIG_PATHS=$HOME/repo ~/.local/bin/mise exec -- \
+             sh -c 'node --version; cargo --version'";
+        let out = sh(&n, run).await;
+        assert!(out.contains("v26.") && out.contains("cargo 1."), "{out}");
+    };
+    let outcome = tokio::spawn(result).await;
+    compute.destroy(&SandboxId(name)).await.unwrap();
+    env.finish().await;
+    outcome.unwrap();
+}
+
 /// The sandbox image from `mise run docker-image`: files land owned by its unprivileged user, and its programs run
 /// as that user.
 #[tokio::test]
@@ -423,6 +463,49 @@ async fn programs_run_as_the_sandbox_user() {
         let log = c.logs(&sandbox.id, "whoami").await.unwrap();
         assert!(log.starts_with("trailhead\n{}"), "{log}");
         assert!(docker(&["exec", &n, "claude", "--version"]).await.contains("Claude Code"));
+    };
+    let outcome = tokio::spawn(result).await;
+    compute.destroy(&SandboxId(name)).await.unwrap();
+    env.finish().await;
+    outcome.unwrap();
+}
+
+/// A pooled worker checkpoints after every task, restored from the last: its images must stay one layer each and
+/// the old warm ones must go, however many tasks it runs (TRAIL-176).
+#[tokio::test]
+#[ignore = "needs a Docker engine and trailhead-sandbox:latest"]
+async fn warm_checkpoints_stay_flat_and_old_ones_go() {
+    let env = live("warm");
+    let compute = env.compute.clone();
+    let name = format!("th-live-warm-{}", std::process::id());
+    let spec = SandboxSpec { name: name.clone(), labels: Labels::new(), egress: Egress::none() };
+    let sandbox = compute.create(&spec).await.unwrap();
+
+    let (c, n) = (compute.clone(), name.clone());
+    let result = async move {
+        c.preflight(&sandbox.id).await.unwrap();
+        let filter = format!("label=dev.trailhead.checkpoint-of={n}");
+        let mut warm = None;
+        for task in 0..6 {
+            if let Some(cp) = &warm {
+                c.restore(&sandbox.id, cp).await.unwrap();
+            }
+            // Each task rewrites the same big file, as a build rewrites `target`.
+            sh(&n, "head -c 20000000 /dev/urandom > $HOME/target.bin; echo done >> $HOME/log").await;
+            let cp = c.checkpoint(&sandbox.id, "warm").await.unwrap();
+            // The control plane labels the sandbox with the new warm checkpoint after the checkpoint returns.
+            let labels = Labels::from([("warm".into(), cp.0.clone())]);
+            c.set_labels(&sandbox.id, &labels).await.unwrap();
+            let layers = docker(&["image", "inspect", "-f", "{{len .RootFS.Layers}}", &cp.0]).await;
+            assert_eq!(layers, "1", "task {task}");
+            let images = docker(&["images", "--filter", &filter, "--format", "{{.Repository}}:{{.Tag}}"]).await;
+            assert!(images.lines().count() <= 2, "task {task}: {images}");
+            warm = Some(cp);
+        }
+        let cp = warm.unwrap();
+        c.restore(&sandbox.id, &cp).await.unwrap();
+        assert_eq!(sh(&n, "wc -l < $HOME/log").await.trim(), "6");
+        assert_eq!(sh(&n, "id -un").await.trim(), "trailhead");
     };
     let outcome = tokio::spawn(result).await;
     compute.destroy(&SandboxId(name)).await.unwrap();

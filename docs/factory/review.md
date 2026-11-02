@@ -57,6 +57,8 @@ mode = "shadow"          # off | shadow | on
 
 Gates are keyed by grade (`[gates.1]` to `[gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[merge] mode = "on"` (TRAIL-205).
 
+`checks` in `require` gates the merge on the sandbox checks having passed; it doesn't choose which checks a worker runs. A worker runs every verifying check the repo defines (fmt, lint, typecheck, test, build) before it opens a PR, whatever the grade's gates require (TRAIL-265). Leaving `checks` out of a grade's `require` doesn't skip them in the sandbox; it only stops the merger waiting on their result.
+
 Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. The maintainer grades the queue once grades exist and widens auto-merge from there. With the rules above, code in `crates/*/src` raises a grade-1 task to 2, so docs and test-only PRs merge on their own (deleting or renaming a test is still at least grade 2). Files that steer the agents (`AGENTS.md`, `.claude/`, `.mcp.json`, `skills/`, `.trailhead.toml`) are grade 4 with CI and the factory's policy. Decided (2026-10-29): test-only PRs are grade 1; grade 2 auto-merge waits on TRAIL-260, TRAIL-298 and TRAIL-295 and a run of grade 2 shadow decisions you agree with. Decided (2026-10-29): grade 2 auto-merges too, now that those three have landed and the grade 2 decisions so far were right (TRAIL-314). TRAIL-390, reworking a PR whose CI fails after a branch update, follows rather than blocks it.
 
 Decided: quorum reviewers must be independent. Quorums are built after the merger, once a repo wants a grade with no human gate (TRAIL-204).
@@ -67,7 +69,7 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 
 ## What counts as a review round
 
-`max_review_rounds` (`[repo]`, default 3) caps how many reviews may ask for changes. A reviewer run counts as a round unless it was not the PR's fault:
+`max_review_rounds` (`[factory.repo]`, default 3) caps review rounds, approvals included: an approving review takes a round too, so if a review approves and a later push sends the task back to review, only two more requests for changes fit under the default cap of 3. A reviewer run counts as a round unless it was not the PR's fault:
 
 | Reviewer outcome | Round |
 |---|---|
@@ -82,8 +84,31 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 
 The control plane acts as the merger. It is the factory project's only delegated reviewer ([lifecycle.md](lifecycle.md)), and the only agent that moves a factory task to `approved` or `done`.
 
+```mermaid
+flowchart TD
+    task["PR in review"] --> grade["Grade<br/>the task's, raised by the diff"]
+    grade --> gates{"Grade's gates pass on the current head?<br/>sandbox checks, CI, agent review, human"}
+    gates -->|"no: waiting on a person, a verdict or a pending check"| wait["Record what it waits on; evaluate again<br/>after the next verdict, push, CI run or approval"]
+    gates -->|"CI fails on the head"| left{"Reworks left?<br/>max_conflict_reworks"}
+    gates -->|"yes"| approved["Task moves to approved"]
+    approved --> mode{"merge mode"}
+    mode -->|"off"| human["You merge"]
+    mode -->|"shadow"| shadow["Post what it would do"] --> human
+    mode -->|"on"| behind{"Behind main?"}
+    behind -->|"yes"| update["Merge main into the branch"]
+    update -->|"conflict"| left
+    update -->|"clean"| ci["Wait for CI on the new head"]
+    ci --> gates
+    behind -->|"no"| merge["Squash-merge, pinned to the head"]
+    merge -->|"conflict"| left
+    left -->|"yes: unapprove if approved"| rework["Back to running: rework on main or the failure"]
+    left -->|"no"| parked["Parked with a question"]
+    merge -->|"merged"| done["Task done"]
+    human --> done
+```
+
 1. After each pass that could change the answer (a verdict, a rework, CI finishing, you approving, a reconcile), it evaluates the PR's gates against its **current head**: the sandbox checks passed, the repo's CI is green on that commit, the latest verdict on that head approves, and, for grades whose gates require a human, you have approved.
-2. When they pass, it moves the task to `approved`. A push after that sends it back to `in_review`.
+2. When they pass, it moves the task to `approved`. A push after that sends it back to `in_review`. So does a gate other than CI that stops passing on the same head, for example when the grade is raised to one that needs `human`: the control plane withdraws its own approval (when `approved_head` is set) and the task goes back to `in_review` to wait for the missing gate (TRAIL-262). Your approval is left alone, and a CI failure still sends the task back to running for a rework.
 3. It records the decision in the task's `factory` metadata (`merge`: the grade, which gates passed, and what it's waiting on) and says it once on the PR when it changes: "Grade 1: checks, CI and review passed; merged." (said once the merge has happened, not before) or "Grade 3 (Cargo.lock changed): waiting for a person."
 4. What it does with an `approved` task depends on `[factory.merge] mode` and the grade's `auto_merge`:
    - **`off`:** nothing; you merge every PR.

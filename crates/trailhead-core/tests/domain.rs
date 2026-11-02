@@ -898,11 +898,11 @@ async fn approved_sits_between_review_and_done() {
     assert!(env.ready_keys().await.is_empty());
     let listed = TaskFilter { statuses: vec![Status::Approved], ..Default::default() };
     assert_eq!(env.store.list_tasks(&env.human, listed).await.unwrap().len(), 1);
-    // Finishing needs the same rights as finishing from review.
-    assert!(matches!(
-        env.store.update_task(&worker, &t.key, status(Status::Done), None).await,
-        Err(Error::ReviewRequired)
-    ));
+    // Finishing needs the same rights as finishing from review, but the refusal says the task is approved.
+    match env.store.update_task(&worker, &t.key, status(Status::Done), None).await {
+        Err(Error::Forbidden(why)) => assert!(why.contains("approved"), "{why}"),
+        other => panic!("expected Forbidden, got {other:?}"),
+    }
     // Changes needed: back to review, then approved again, then done by a human.
     let back = env.store.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
     assert_eq!(back.status, Status::InReview);
@@ -943,14 +943,11 @@ async fn reviewers_cannot_approve_their_own_work() {
     ));
     env.store.update_task(&lead, &t.key, status(Status::InReview), None).await.unwrap();
     for to in [Status::Approved, Status::Done] {
-        assert!(matches!(env.store.update_task(&lead, &t.key, status(to), None).await, Err(Error::ReviewRequired)));
+        assert!(matches!(env.store.update_task(&lead, &t.key, status(to), None).await, Err(Error::Forbidden(_))));
     }
     env.store.update_task(&other, &t.key, status(Status::Approved), None).await.unwrap();
     // Nor can it finish what another reviewer approved.
-    assert!(matches!(
-        env.store.update_task(&lead, &t.key, status(Status::Done), None).await,
-        Err(Error::ReviewRequired)
-    ));
+    assert!(matches!(env.store.update_task(&lead, &t.key, status(Status::Done), None).await, Err(Error::Forbidden(_))));
     let done = env.store.update_task(&other, &t.key, status(Status::Done), None).await.unwrap();
     assert_eq!(done.status, Status::Done);
 
@@ -959,7 +956,7 @@ async fn reviewers_cannot_approve_their_own_work() {
     env.store.update_task(&lead, &u.key, status(Status::InReview), None).await.unwrap();
     assert!(matches!(
         env.store.update_task(&lead, &u.key, status(Status::Approved), None).await,
-        Err(Error::ReviewRequired)
+        Err(Error::Forbidden(_))
     ));
 
     // A reviewer holding in-progress work still finishes it where the plan allows.
@@ -992,7 +989,7 @@ async fn a_reviewer_approves_work_it_only_parked_in_an_earlier_round() {
     env.store.update_task(&env.human, &u.key, status(Status::InReview), None).await.unwrap();
     assert!(matches!(
         env.store.update_task(&factory, &u.key, status(Status::Done), None).await,
-        Err(Error::ReviewRequired)
+        Err(Error::Forbidden(_))
     ));
 }
 
@@ -1268,13 +1265,13 @@ async fn agents_cannot_undo_or_revert_a_humans_grade_change() {
     env.store.undo_batch(&env.human.next_batch(), own.batch_id).await.unwrap();
     assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(3));
 
-    // Reverting an agent's work: a human can, another agent can't lower the grade.
+    // Reverting an agent's work: a human can, another agent's revert is refused with Forbidden, not skipped.
     let b = env.agent("b").await;
     let other = env.task_with(NewTask { title: "other".into(), grade: Some(2), ..Default::default() }).await;
     let since = env.now() - jiff::SignedDuration::from_secs(60);
     env.store.update_task(&a.next_batch(), &other.key, patch(Some(4)), None).await.unwrap();
     let report = env.store.revert_actor(&b.next_batch(), a.actor_id(), since).await;
-    assert!(report.is_err() || report.unwrap().reverted.is_empty());
+    assert!(matches!(report, Err(Error::Forbidden(_))), "lowering a grade aborts the whole revert: {report:?}");
     assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(4));
     env.store.revert_actor(&env.human.next_batch(), a.actor_id(), since).await.unwrap();
     assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(2));

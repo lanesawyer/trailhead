@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 use trailhead_daemon::{HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, PrepareRequest, Repo, Result, RunEvent, RunReport,
-    RunRequest, SandboxId, Tracker,
+    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, InstallHost, PrepareRequest, Repo, Result,
+    RunEvent, RunReport, RunRequest, SandboxId, Tracker,
 };
 
 pub use trailhead_daemon::Connect;
@@ -47,6 +47,10 @@ pub struct FakeWorkspace {
     /// Files the agent leaves conflict markers in.
     markers: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
+    /// Errors the next prepares fail with, before they change anything.
+    prepare_errors: Mutex<Vec<String>>,
+    /// Outputs the next prepares that run a `setup` check fail it with, after the checkout is otherwise ready.
+    setup_errors: Mutex<Vec<String>>,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
 }
 
@@ -56,11 +60,25 @@ impl Workspace for FakeWorkspace {
         PathBuf::from("/work")
     }
 
+    async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        let stack: Vec<String> = req.tools.keys().cloned().collect();
+        trailhead_daemon::install_hosts_for(&stack, &req.tool_hosts, false)
+    }
+
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
         self.prepares_started.fetch_add(1, Ordering::SeqCst);
         let gate = self.prepare_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.notified().await;
+        }
+        if let Some(error) = self.prepare_errors.lock().unwrap().pop() {
+            return Err(Error::Other(error));
+        }
+        if req.setup.is_some()
+            && let Some(output) = self.setup_errors.lock().unwrap().pop()
+        {
+            *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
+            return Err(Error::SetupFailed(output));
         }
         *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
         *self.merging.lock().unwrap() = req.merge_base && !self.agent_merges.load(Ordering::SeqCst);
@@ -239,6 +257,23 @@ impl LocalDaemon {
         }
     }
 
+    /// Makes the next `times` prepares fail with this error, as a checkout that won't clone or build would.
+    pub fn fail_prepares(&self, times: usize, error: &str) {
+        let mut errors = self.workspace.prepare_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push(error.to_string());
+        }
+    }
+
+    /// Makes the next `times` prepares that run a `setup` check fail it with this output, as a build that no longer
+    /// compiles would.
+    pub fn fail_setups(&self, times: usize, output: &str) {
+        let mut errors = self.workspace.setup_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push(output.to_string());
+        }
+    }
+
     /// Makes the next `times` runs end cancelled, as when the control plane is stopped on purpose.
     pub fn cancel_runs(&self, times: usize) {
         let mut errors = self.run_errors.lock().unwrap();
@@ -299,6 +334,10 @@ impl LocalDaemon {
 
 #[async_trait]
 impl Daemon for LocalDaemon {
+    async fn install_hosts(&self, _sandbox: &SandboxId, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        self.runner.install_hosts(req).await
+    }
+
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
         self.runner.prepare(&req).await?;
         self.prepared.lock().unwrap().push((sandbox.clone(), req));

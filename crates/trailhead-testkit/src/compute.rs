@@ -12,6 +12,8 @@ use trailhead_factory::{
 struct Live {
     sandbox: Sandbox,
     egress: Egress,
+    /// Every egress the sandbox has had, oldest first.
+    egress_log: Vec<Egress>,
     checkpoints: Vec<(CheckpointId, String)>,
     restores: Vec<CheckpointId>,
     programs: Vec<Program>,
@@ -31,6 +33,8 @@ pub struct FakeCompute {
     hung_wakes: Arc<Mutex<BTreeSet<String>>>,
     rejected_wakes: Arc<Mutex<BTreeSet<String>>>,
     wake_attempts: Arc<Mutex<BTreeMap<String, usize>>>,
+    /// Whether the compute's API is down: listing fails, while its sandboxes carry on.
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeCompute {
@@ -48,6 +52,11 @@ impl FakeCompute {
 
     pub fn egress(&self, name: &str) -> Option<Egress> {
         self.live.lock().unwrap().get(&SandboxId(name.into())).map(|l| l.egress.clone())
+    }
+
+    /// Every egress the sandbox has been given, oldest first.
+    pub fn egress_log(&self, name: &str) -> Vec<Egress> {
+        self.live.lock().unwrap().get(&SandboxId(name.into())).map(|l| l.egress_log.clone()).unwrap_or_default()
     }
 
     /// Checkpoint notes, oldest first.
@@ -114,6 +123,11 @@ impl FakeCompute {
         self.failing_after.lock().unwrap().insert((name.to_string(), op), calls);
     }
 
+    /// Makes `list` fail, or work again, like a stopped engine or a frozen VM. Its sandboxes stay as they are.
+    pub fn set_unreachable(&self, down: bool) {
+        self.unreachable.store(down, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn heal(&self, name: &str) {
         self.failing.lock().unwrap().retain(|(n, _)| n != name);
         self.failing_after.lock().unwrap().retain(|(n, _), _| n != name);
@@ -149,6 +163,7 @@ impl Compute for FakeCompute {
         let entry = live.entry(id.clone()).or_insert_with(|| Live {
             sandbox: Sandbox { id, name: spec.name.clone(), labels: spec.labels.clone() },
             egress: spec.egress.clone(),
+            egress_log: vec![spec.egress.clone()],
             checkpoints: Vec::new(),
             restores: Vec::new(),
             programs: Vec::new(),
@@ -158,6 +173,9 @@ impl Compute for FakeCompute {
     }
 
     async fn list(&self, labels: &Labels) -> Result<Vec<Sandbox>> {
+        if self.unreachable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::Other("connection refused".into()));
+        }
         let found: Vec<Sandbox> = self
             .live
             .lock()
@@ -229,6 +247,7 @@ impl Compute for FakeCompute {
         self.check(id, "set_egress")?;
         self.with(id, |l| {
             l.egress = egress.clone();
+            l.egress_log.push(egress.clone());
             Ok(())
         })
     }
@@ -239,6 +258,10 @@ impl Compute for FakeCompute {
             l.sandbox.labels = labels.clone();
             Ok(())
         })
+    }
+
+    async fn preflight(&self, id: &SandboxId) -> Result<()> {
+        self.check(id, "preflight").map_err(|_| Error::Unavailable("out of disk".into()))
     }
 
     async fn destroy(&self, id: &SandboxId) -> Result<()> {

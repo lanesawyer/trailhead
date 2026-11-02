@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use bollard::exec::{StartExecOptions, StartExecResults};
 use bollard::models::{
-    ContainerCreateBody, EndpointSettings, ExecConfig, HostConfig, NetworkConnectRequest, NetworkCreateRequest,
-    NetworkDisconnectRequest, RestartPolicy, RestartPolicyNameEnum,
+    ContainerCreateBody, ContainerInspectResponse, EndpointSettings, ExecConfig, HostConfig, NetworkConnectRequest,
+    NetworkCreateRequest, NetworkDisconnectRequest, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{CreateContainerOptions, InspectContainerOptions, RemoveContainerOptions};
 use futures_util::StreamExt;
@@ -26,6 +26,9 @@ use crate::{DockerCompute, Link, MARKER, State, docker_err, status, tar_of};
 
 /// The label on the gateway's container. It isn't [`MARKER`], so the gateway is never listed as a sandbox.
 pub const GATEWAY_LABEL: &str = "dev.trailhead.gateway";
+/// The label holding the SHA-256 of the daemon binary the gateway's container was made with, so a gateway running an
+/// older binary is replaced rather than reused.
+pub const GATEWAY_BIN_LABEL: &str = "dev.trailhead.gateway.daemon";
 /// Where the daemon binary is in the gateway's container.
 pub const GATEWAY_BIN: &str = "/opt/trailhead/trailhead-daemon";
 
@@ -33,6 +36,12 @@ pub const GATEWAY_BIN: &str = "/opt/trailhead/trailhead-daemon";
 const WATCH_EVERY: Duration = Duration::from_secs(5);
 /// How long a started gateway gets to open its control socket.
 const READY_WITHIN: Duration = Duration::from_secs(10);
+
+/// The hex SHA-256 of a daemon binary.
+pub(crate) fn digest(bin: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bin).iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// The sandbox's own `--internal` network.
 pub fn sandbox_network(name: &str) -> String {
@@ -75,12 +84,14 @@ impl DockerCompute {
         }
         let link = Arc::downgrade(&self.link);
         let (docker, config) = (self.docker.clone(), self.config.clone());
+        let daemon_digest = self.daemon_digest.clone();
         tokio::spawn(async move {
             while let Some(link) = link.upgrade() {
                 let compute = DockerCompute {
                     docker: docker.clone(),
                     config: config.clone(),
                     link,
+                    daemon_digest: daemon_digest.clone(),
                     watching: Default::default(),
                 };
                 if let Err(e) = compute.sync().await {
@@ -100,6 +111,20 @@ impl DockerCompute {
             Err(e) if status(&e) == Some(404) => None,
             Err(e) => return Err(docker_err(e)),
         };
+        // The container was made with another daemon binary: replace it. Its networks go with it, and the resync that
+        // follows the new start puts the sandboxes' back.
+        let info = match info {
+            Some(i) if !self.has_current_daemon(&i) => {
+                tracing::info!(gateway = %name, "the daemon binary changed: replacing the gateway's container");
+                let opts = RemoveContainerOptions { force: true, ..Default::default() };
+                match self.docker.remove_container(name, Some(opts)).await {
+                    Ok(()) => None,
+                    Err(e) if status(&e) == Some(404) => None,
+                    Err(e) => return Err(docker_err(e)),
+                }
+            }
+            other => other,
+        };
         let running = info.as_ref().and_then(|i| i.state.as_ref()).and_then(|s| s.running) == Some(true);
         if running && let Some(started) = info.and_then(|i| i.state).and_then(|s| s.started_at) {
             return Ok(started);
@@ -117,6 +142,11 @@ impl DockerCompute {
         info.state.and_then(|s| s.started_at).ok_or_else(|| Error::Other(format!("gateway {name} has no start time")))
     }
 
+    fn has_current_daemon(&self, info: &ContainerInspectResponse) -> bool {
+        let label = info.config.as_ref().and_then(|c| c.labels.as_ref()).and_then(|l| l.get(GATEWAY_BIN_LABEL));
+        label.map(String::as_str) == Some(&*self.daemon_digest)
+    }
+
     /// On the bridge network, so it's the one container with a route out. Root in the container, to own its control
     /// socket under `/run` whatever user the image has, but with no capabilities.
     async fn create_gateway(&self) -> Result<()> {
@@ -127,7 +157,10 @@ impl DockerCompute {
             cmd: Some(vec![GATEWAY_BIN.into(), "gateway".into(), "--listen".into(), format!("0.0.0.0:{GATEWAY_PORT}")]),
             entrypoint: Some(vec![]),
             user: Some("0".into()),
-            labels: Some(HashMap::from([(GATEWAY_LABEL.to_string(), "1".to_string())])),
+            labels: Some(HashMap::from([
+                (GATEWAY_LABEL.to_string(), "1".to_string()),
+                (GATEWAY_BIN_LABEL.to_string(), self.daemon_digest.to_string()),
+            ])),
             host_config: Some(HostConfig {
                 init: Some(true),
                 network_mode: Some(self.config.network.clone()),

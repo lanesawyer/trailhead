@@ -13,8 +13,6 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-pub const SPRITE_API_SOCKET: &str = "/.sprite/api.sock";
-
 const EXPIRE: &str = "5m";
 const HEARTBEAT: Duration = Duration::from_secs(60);
 const LINGER: &str = "90s";

@@ -10,8 +10,11 @@ pub mod gateway;
 pub mod grade;
 pub mod harness;
 pub mod host;
+pub mod messages;
 pub mod money;
 pub mod provider;
+pub mod registry;
+pub mod target;
 pub mod tracker;
 
 pub use codehost::{
@@ -21,12 +24,13 @@ pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
 };
 pub use config::{
-    Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_GITHUB_ID, GATEWAY_HOST, GATEWAY_PORT,
-    Gate, GradesConfig, MergeConfig, MergeMode, Profile, Role, UsageConfig,
+    Budget, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_GIT_ID, GATEWAY_GITHUB_ID,
+    GATEWAY_HOST, GATEWAY_PORT, Gate, GateKind, GradesConfig, MergeConfig, MergeMode, Profile, Role, TargetConfig,
+    TargetSpec, UsageConfig,
 };
 pub use daemon::{
-    Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, PrepareRequest, RunReport, RunRequest,
-    RunResult, SPRITES_GATEWAY_LIST, ToDaemon,
+    Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, InstallHost, PrepareRequest, RunReport,
+    RunRequest, RunResult, ToDaemon,
 };
 pub use gateway::{
     AuthScheme, GatewayConnection, GatewayConnectionInfo, GatewayRequest, GatewayResponse, GatewaySandbox,
@@ -40,9 +44,11 @@ pub use harness::{
 pub use host::HostConfig;
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
+pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
+pub use target::{DEFAULT_TARGET, Spend, Target};
 pub use tracker::{
-    Answered, ChangesRequested, Credential, HumanContext, MergeDecision, Merged, MergedBy, RunUpdate, Status, Task,
-    TaskKey, TaskNote, Tracker, is_factory_agent,
+    Answered, ChangesRequested, Credential, FollowUpTask, HumanContext, METADATA_KEY, MergeDecision, Merged, MergedBy,
+    ReviewBreach, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, is_factory_agent, is_raised_by, raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
@@ -59,6 +65,14 @@ pub enum Error {
     /// [`Error::Other`], which may be a blip worth retrying.
     #[error("rejected: {0}")]
     Rejected(String),
+    /// A resource the run needs is short right now (a full disk, say) and will be again only when something is
+    /// freed. The work is worth retrying later, and waiting doesn't count as a failure of the task or the sandbox.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+    /// The repo's `setup` check failed during a prepare. The checkout is otherwise ready (cloned, on its branch), so
+    /// this points at the repo's code, not the sandbox: a rework can go on from it with the output as context.
+    #[error("setup failed: {0}")]
+    SetupFailed(String),
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]

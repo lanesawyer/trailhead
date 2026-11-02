@@ -24,8 +24,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, watch};
 use trailhead_factory::{
-    Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, PrepareRequest, Program, Result,
-    RunEvent, RunReport, RunRequest, SPRITES_GATEWAY_LIST, SandboxFile, SandboxId, ToDaemon,
+    Compute, Daemon, DaemonSecrets, DaemonVersion, Error, EventSink, FromDaemon, HarnessSecrets, InstallHost,
+    PrepareRequest, Program, Result, RunEvent, RunReport, RunRequest, SandboxFile, SandboxId, Target, ToDaemon,
 };
 
 use crate::Runner;
@@ -141,6 +141,19 @@ const IROH_HOSTS: &[&str] = &[
 /// Other hosts runs need, such as the model API, kept resolved alongside iroh's (`RunRequest::allowed_hosts`).
 static KEEP_RESOLVED: Mutex<std::collections::BTreeSet<String>> = Mutex::new(std::collections::BTreeSet::new());
 
+/// Hosts whose last lookup failed, so a host that never resolves (Docker sandboxes have no DNS) is warned about once,
+/// not on every pass.
+static UNRESOLVED: Mutex<std::collections::BTreeSet<String>> = Mutex::new(std::collections::BTreeSet::new());
+
+/// Records a lookup's outcome in `unresolved` and says whether that is news: a host that starts failing or recovers.
+fn note_lookup_in(unresolved: &mut std::collections::BTreeSet<String>, host: &str, failed: bool) -> bool {
+    if failed { unresolved.insert(host.to_string()) } else { unresolved.remove(host) }
+}
+
+fn note_lookup(host: &str, failed: bool) -> bool {
+    note_lookup_in(&mut UNRESOLVED.lock().unwrap(), host, failed)
+}
+
 /// A Sprite lets a raw IP through only after its own DNS has resolved it from an allowed name, and a policy change
 /// resets that. iroh dials relays by IPs it resolved and cached earlier, so after a lockdown every relay reconnect
 /// was refused. Looking the names up again through the system resolver re-allows their IPs.
@@ -148,8 +161,19 @@ pub async fn resolve_iroh_hosts() {
     let extra: Vec<String> = KEEP_RESOLVED.lock().unwrap().iter().cloned().collect();
     for host in IROH_HOSTS.iter().map(|h| h.to_string()).chain(extra) {
         let host = host.trim_end_matches('.');
-        if let Err(e) = tokio::net::lookup_host((host, 443)).await {
-            tracing::warn!(%host, error = %e, "can't resolve an iroh host");
+        match tokio::net::lookup_host((host, 443)).await {
+            Err(e) => {
+                if note_lookup(host, true) {
+                    tracing::warn!(%host, error = %e, "can't resolve an iroh host; not warning again until it does");
+                } else {
+                    tracing::debug!(%host, error = %e, "can't resolve an iroh host");
+                }
+            }
+            Ok(_) => {
+                if note_lookup(host, false) {
+                    tracing::info!(%host, "an iroh host resolves again");
+                }
+            }
         }
     }
 }
@@ -286,6 +310,13 @@ impl DaemonProtocol {
             ToDaemon::Prepare(req) => {
                 let reply = match self.prepare(req).await {
                     Ok(()) => FromDaemon::Prepared,
+                    Err(e) => FromDaemon::Failed(e),
+                };
+                return reply_with(&mut send, &reply).await;
+            }
+            ToDaemon::InstallHosts(req) => {
+                let reply = match self.runner.install_hosts(&req).await {
+                    Ok(hosts) => FromDaemon::InstallHosts(hosts),
                     Err(e) => FromDaemon::Failed(e),
                 };
                 return reply_with(&mut send, &reply).await;
@@ -586,21 +617,27 @@ pub struct Launch {
     pub workdir: String,
     /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`.
     pub log: Option<String>,
-    /// Subscription mode: the Claude Code OAuth token handed to each daemon in its secrets file.
-    pub claude_oauth_token: Option<String>,
-    /// The connector list URL for each daemon's secrets; `None` is Fly's.
-    pub gateway_list: Option<String>,
+    /// The `adapter` each daemon builds its harness from.
+    pub harness: String,
+    /// That harness's credentials (subscription mode's token, say), handed to each daemon in its secrets file.
+    pub harness_secrets: HarnessSecrets,
+    /// The connector list URL for each daemon's secrets.
+    pub gateway_list: String,
+    /// The socket each daemon holds its sandbox awake through, if the compute pauses idle ones.
+    pub hold_socket: Option<String>,
 }
 
 impl Launch {
-    pub fn new(binary: Vec<u8>) -> Launch {
+    pub fn new(binary: impl Into<Arc<Vec<u8>>>, target: &Target) -> Launch {
         Launch {
-            binary: Arc::new(binary),
-            dir: "/home/sprite/.trailhead".into(),
-            workdir: "/home/sprite/work".into(),
+            binary: binary.into(),
+            dir: target.dir.clone(),
+            workdir: target.workdir.clone(),
             log: None,
-            claude_oauth_token: None,
-            gateway_list: None,
+            harness: crate::plugins::CLAUDE_CODE.into(),
+            harness_secrets: HarnessSecrets::new(),
+            gateway_list: target.gateway_list.clone(),
+            hold_socket: target.hold_socket.clone(),
         }
     }
 }
@@ -633,6 +670,12 @@ impl RemoteDaemon {
         }
     }
 
+    /// Lets through the same peers as another target's daemon, so one [`ApiTunnel`] serves them all.
+    pub fn with_peers(mut self, peers: Peers) -> RemoteDaemon {
+        self.peers = peers;
+        self
+    }
+
     pub fn daemon_id(&self, sandbox: &SandboxId) -> EndpointId {
         sandbox_key(&self.master, sandbox).public()
     }
@@ -647,8 +690,9 @@ impl RemoteDaemon {
         let secrets = DaemonSecrets {
             secret_key: hex::encode(sandbox_key(&self.master, sandbox).to_bytes()),
             control_plane: self.endpoint.id().to_string(),
-            claude_oauth_token: self.launch.claude_oauth_token.clone(),
-            gateway_list: self.launch.gateway_list.clone().unwrap_or_else(|| SPRITES_GATEWAY_LIST.into()),
+            harness: self.launch.harness.clone(),
+            harness_secrets: self.launch.harness_secrets.clone(),
+            gateway_list: self.launch.gateway_list.clone(),
         };
         let dir = &self.launch.dir;
         let bin = format!("{dir}/trailhead-daemon");
@@ -668,6 +712,9 @@ impl RemoteDaemon {
                 let mut args = vec!["--secrets".into(), secrets_path, "--workdir".into(), self.launch.workdir.clone()];
                 if let Some(log) = &self.launch.log {
                     args.extend(["--log".into(), log.clone()]);
+                }
+                if let Some(socket) = &self.launch.hold_socket {
+                    args.extend(["--hold-socket".into(), socket.clone()]);
                 }
                 args
             },
@@ -723,6 +770,16 @@ impl RemoteDaemon {
             Ok(Some(FromDaemon::Version(v))) => Some(v),
             _ => None,
         })
+    }
+
+    /// Starts the daemon unless this control plane already has a live connection to it, and makes sure it's the
+    /// current build.
+    async fn start_current(&self, sandbox: &SandboxId) -> Result<()> {
+        let connected = self.conns.lock().unwrap().get(sandbox).is_some_and(|c| c.close_reason().is_none());
+        if !connected {
+            self.compute.start(sandbox, &self.program(sandbox)).await?;
+        }
+        self.ensure_current(sandbox).await
     }
 
     /// Makes sure the daemon that runs is the binary this control plane uploads. A sandbox restored from a
@@ -805,7 +862,7 @@ impl RemoteDaemon {
                                 }
                                 Some(Ok(FromDaemon::Report(report))) => return Ok(report),
                                 Some(Ok(FromDaemon::Failed(e))) => return Err(e),
-                                Some(Ok(FromDaemon::Prepared | FromDaemon::Version(_))) => {
+                                Some(Ok(FromDaemon::Prepared | FromDaemon::InstallHosts(_) | FromDaemon::Version(_))) => {
                                     return Err(io_err("unexpected reply during a run"));
                                 }
                                 Some(Err(e)) => break e,
@@ -834,14 +891,38 @@ impl RemoteDaemon {
 
 #[async_trait]
 impl Daemon for RemoteDaemon {
-    /// Starts the daemon unless this control plane already has a live connection to it. A connection that drops
-    /// while the daemon prepares is redialed and the request sent again; the daemon joins the prepare in flight.
-    async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
-        let connected = self.conns.lock().unwrap().get(sandbox).is_some_and(|c| c.close_reason().is_none());
-        if !connected {
-            self.compute.start(sandbox, &self.program(sandbox)).await?;
+    /// Asks the daemon which hosts the install needs, starting it first as `prepare` does.
+    async fn install_hosts(&self, sandbox: &SandboxId, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        self.start_current(sandbox).await?;
+        let mut patience = CONNECT_PATIENCE;
+        let mut lost = 0;
+        loop {
+            let (mut send, mut recv) = self.open(sandbox, patience).await?;
+            let reply = match write_frame(&mut send, &ToDaemon::InstallHosts(req.clone())).await {
+                Ok(()) => read_frame::<FromDaemon>(&mut recv).await,
+                Err(e) => Err(e),
+            };
+            let error = match reply {
+                Ok(Some(FromDaemon::InstallHosts(hosts))) => return Ok(hosts),
+                Ok(Some(FromDaemon::Failed(e))) => return Err(e),
+                Ok(Some(other)) => return Err(io_err(format!("unexpected reply to install_hosts: {other:?}"))),
+                Ok(None) => io_err(format!("the daemon in {} went away", sandbox.0)),
+                Err(e) => e,
+            };
+            lost += 1;
+            if lost > MAX_REATTACH {
+                return Err(io_err(format!("lost the daemon in {} {MAX_REATTACH} times: {error}", sandbox.0)));
+            }
+            tracing::warn!(sandbox = %sandbox.0, %error, "lost the daemon while it listed install hosts; asking again");
+            self.disconnect(sandbox);
+            patience = RECONNECT_PATIENCE;
         }
-        self.ensure_current(sandbox).await?;
+    }
+
+    /// A connection that drops while the daemon prepares is redialed and the request sent again; the daemon joins the
+    /// prepare in flight.
+    async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
+        self.start_current(sandbox).await?;
         let mut patience = CONNECT_PATIENCE;
         let mut lost = 0;
         loop {
@@ -902,5 +983,20 @@ impl Daemon for RemoteDaemon {
         for tx in self.cancels.lock().unwrap().values() {
             let _ = tx.send(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failing_host_is_news_only_when_it_starts_or_stops_failing() {
+        let mut set = std::collections::BTreeSet::new();
+        assert!(note_lookup_in(&mut set, "relay", true));
+        assert!(!note_lookup_in(&mut set, "relay", true));
+        assert!(note_lookup_in(&mut set, "relay", false));
+        assert!(!note_lookup_in(&mut set, "relay", false));
+        assert!(note_lookup_in(&mut set, "relay", true));
     }
 }

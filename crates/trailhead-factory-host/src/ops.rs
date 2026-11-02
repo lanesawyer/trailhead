@@ -4,13 +4,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, FACTORY_LABEL};
 use trailhead_core::Store;
 use trailhead_factory::compute::label;
-use trailhead_factory::{ComputeConfig, Labels, Sandbox, Status, Task, TaskKey, Tracker};
+use trailhead_factory::{Labels, Sandbox, Status, Task, TaskKey, Tracker};
 
-use crate::{AGENT, Opts, compute, factory_ctx, load_config, resolve_opts};
+use crate::{AGENT, Opts, computes, factory_ctx, load_config, resolve_opts};
 
 /// The program the control plane starts the daemon as, whose service log `logs` prints.
 const DAEMON_PROGRAM: &str = "trailhead-daemon";
@@ -34,19 +33,29 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = resolve_opts(opts, &paths)?;
     let (_, _, config) = load_config(&opts)?;
-    let (compute, _) = compute(&config.compute, &opts, &paths, trailhead_daemon::net::Launch::new(Default::default()))?;
+    let computes = computes(&config, &opts, &paths, Default::default(), true)?;
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
     let tracker = CoreTracker::new(store, ctx, AGENT);
 
     let labels =
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
-    let sandboxes = compute.list(&labels).await.map_err(|e| format!("listing sandboxes: {e}"))?;
+    let (sandboxes, unreachable) = list_everywhere(&computes, &labels).await?;
+    for name in &unreachable {
+        eprintln!("target {name} can't be reached; its sandboxes aren't listed");
+    }
+    let sandboxes: Vec<Sandbox> = sandboxes.into_iter().map(|(_, s)| s).collect();
     let tasks = tracker
-        .in_flight(&config.repo.project, config.repo.queue.clone().map(TaskKey).as_ref())
+        .in_flight(&config.repo.project, &config.repo.queue.iter().cloned().map(TaskKey).collect::<Vec<_>>())
         .await
         .map_err(|e| e.to_string())?;
-    print!("{}", render_status(&sandboxes, &tasks));
+    let queue: Vec<TaskKey> = config.repo.queue.iter().cloned().map(TaskKey).collect();
+    let mut waiting = tracker.ready(&config.repo.project, &queue, usize::MAX).await.map_err(|e| e.to_string())?;
+    // Under a queue only graded tasks are the factory's to start.
+    if !queue.is_empty() {
+        waiting.retain(|t| t.grade.is_some());
+    }
+    print!("{}", render_status(&sandboxes, &tasks, &waiting, config.repo.max_sandboxes));
     Ok(())
 }
 
@@ -54,12 +63,7 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = resolve_opts(&logs.opts, &paths)?;
     let (_, _, config) = load_config(&opts)?;
-    if !matches!(config.compute, ComputeConfig::Sprites) {
-        return Err("`logs` reads Sprites services; Docker sandboxes' logs are `docker logs` on the container".into());
-    }
-    let token = opts.sprites_token.clone().ok_or("`logs` needs SPRITES_TOKEN or `trailhead factory login sprites`")?;
-    let sprites = SpritesCompute::new(token).map_err(|e| e.to_string())?;
-    let (compute, _) = compute(&config.compute, &opts, &paths, trailhead_daemon::net::Launch::new(Default::default()))?;
+    let computes = computes(&config, &opts, &paths, Default::default(), true)?;
 
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
@@ -69,14 +73,24 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
 
     let wanted =
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
-    let sandboxes = compute.list(&wanted).await.map_err(|e| format!("listing sandboxes: {e}"))?;
+    let (found, unreachable) = list_everywhere(&computes, &wanted).await?;
+    let sandboxes: Vec<Sandbox> = found.iter().map(|(_, s)| s.clone()).collect();
     let sandbox = find_sandbox(&task, &sandboxes).ok_or_else(|| {
-        format!("{} has no sandbox right now (it isn't running, or its sandbox was released or destroyed)", key.0)
+        let unknown = if unreachable.is_empty() {
+            String::new()
+        } else {
+            format!("; target(s) {} couldn't be reached, so it may be there", unreachable.join(", "))
+        };
+        format!(
+            "{} has no sandbox right now (it isn't running, or its sandbox was released or destroyed){unknown}",
+            key.0
+        )
     })?;
+    let compute = &computes[found.iter().find(|(_, s)| s.name == sandbox.name).map_or(0, |(i, _)| *i)].0;
 
     let mut printed = String::new();
     loop {
-        let log = sprites.logs(&sandbox.id, DAEMON_PROGRAM).await.map_err(|e| format!("{}: {e}", sandbox.name))?;
+        let log = compute.logs(&sandbox.id, DAEMON_PROGRAM).await.map_err(|e| format!("{}: {e}", sandbox.name))?;
         print!("{}", new_output(&printed, &log));
         printed = log;
         if !logs.follow {
@@ -115,7 +129,8 @@ fn new_output<'a>(printed: &str, log: &'a str) -> &'a str {
     if log == printed { "" } else { log }
 }
 
-fn render_status(sandboxes: &[Sandbox], tasks: &[Task]) -> String {
+/// `waiting` is the ready tasks the factory could start; `max_sandboxes` the repo's cap.
+fn render_status(sandboxes: &[Sandbox], tasks: &[Task], waiting: &[Task], max_sandboxes: usize) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let none = "-";
@@ -143,6 +158,20 @@ fn render_status(sandboxes: &[Sandbox], tasks: &[Task]) -> String {
         );
     }
 
+    // A parked task keeps its sandbox in the cap, so enough of them leave ready tasks waiting on a person's answer.
+    let parked = tasks
+        .iter()
+        .filter(|t| t.status == Status::NeedsInput)
+        .filter(|t| sandboxes.iter().any(|s| s.labels.get(label::TASK) == Some(&t.key.0)))
+        .count();
+    if !waiting.is_empty() && parked > 0 && parked >= max_sandboxes {
+        let _ = writeln!(
+            out,
+            "\n{} ready tasks waiting; all {max_sandboxes} sandboxes held by parked tasks (answer or cancel them)",
+            waiting.len()
+        );
+    }
+
     let running: Vec<&Task> = tasks.iter().filter(|t| t.status == Status::InProgress).collect();
     let _ = writeln!(out, "\nRunning ({})", running.len());
     for t in &running {
@@ -160,7 +189,7 @@ fn render_status(sandboxes: &[Sandbox], tasks: &[Task]) -> String {
 
 fn task_line(t: &Task) -> String {
     let run = &t.run;
-    let mut line = format!("{} [{}]", t.key.0, status_name(t.status));
+    let mut line = format!("{} [{}]", t.key.0, t.status.label());
     line.push_str(&format!(" attempt {}", run.attempt.unwrap_or(0)));
     line.push_str(&format!(", spend {}", run.spend.unwrap_or_default()));
     if let Some(pr) = &run.pr {
@@ -177,16 +206,25 @@ fn task_line(t: &Task) -> String {
     line
 }
 
-fn status_name(s: Status) -> &'static str {
-    match s {
-        Status::Open => "open",
-        Status::InProgress => "in progress",
-        Status::NeedsInput => "needs input",
-        Status::InReview => "in review",
-        Status::Approved => "approved",
-        Status::Done => "done",
-        Status::Cancelled => "cancelled",
+/// The sandboxes matching `labels` on every target, each with the index of the target it is on, and the names of the
+/// targets that couldn't be reached. An error only when none could.
+async fn list_everywhere(
+    computes: &[crate::Built],
+    labels: &Labels,
+) -> Result<(Vec<(usize, Sandbox)>, Vec<String>), String> {
+    let mut found = Vec::new();
+    let mut unreachable = Vec::new();
+    let mut last = String::new();
+    for (i, (compute, target)) in computes.iter().enumerate() {
+        match compute.list(labels).await {
+            Ok(listed) => found.extend(listed.into_iter().map(|s| (i, s))),
+            Err(e) => {
+                last = format!("listing sandboxes on {}: {e}", target.name);
+                unreachable.push(target.name.clone());
+            }
+        }
     }
+    if unreachable.len() == computes.len() { Err(last) } else { Ok((found, unreachable)) }
 }
 
 #[cfg(test)]
@@ -272,6 +310,8 @@ mod tests {
         let out = render_status(
             &boxes,
             &[task("TRAIL-7", Status::InProgress, running), task("TRAIL-5", Status::InReview, reviewed)],
+            &[],
+            2,
         );
         let w1 = out.find("trailhead-w1 ").unwrap();
         assert!(w1 < out.find("trailhead-w2 ").unwrap(), "{out}");
@@ -284,8 +324,25 @@ mod tests {
     }
 
     #[test]
+    fn status_warns_when_parked_tasks_hold_every_place_and_ready_tasks_wait() {
+        let boxes = [
+            sandbox("trailhead-w1", &[("state", "busy"), ("task", "TRAIL-1")]),
+            sandbox("trailhead-w2", &[("state", "busy"), ("task", "TRAIL-2")]),
+        ];
+        let parked = [
+            task("TRAIL-1", Status::NeedsInput, Default::default()),
+            task("TRAIL-2", Status::NeedsInput, Default::default()),
+        ];
+        let waiting = [task("TRAIL-3", Status::Open, Default::default())];
+        let out = render_status(&boxes, &parked, &waiting, 2);
+        assert!(out.contains("1 ready tasks waiting; all 2 sandboxes held by parked tasks"), "{out}");
+        assert!(!render_status(&boxes, &parked, &[], 2).contains("waiting;"));
+        assert!(!render_status(&boxes, &parked, &waiting, 3).contains("waiting;"));
+    }
+
+    #[test]
     fn an_empty_factory_says_so() {
-        let out = render_status(&[], &[]);
+        let out = render_status(&[], &[], &[], 2);
         assert!(out.contains("Sandboxes (0)\n  none"), "{out}");
     }
 }

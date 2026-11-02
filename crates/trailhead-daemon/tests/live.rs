@@ -95,8 +95,8 @@ async fn daemon_in_a_sprite() {
         compute.clone(),
         Launch {
             log: std::env::var("LIVE_DAEMON_LOG").ok(),
-            claude_oauth_token: subscription(),
-            ..Launch::new(binary)
+            harness_secrets: subscription().map(|t| ("oauth_token".to_string(), t)).into_iter().collect(),
+            ..Launch::new(binary, &trailhead_compute_sprites::target())
         },
     ));
     let _tunnel = Router::builder(control).accept(API_ALPN, ApiTunnel::new(server, remote.peers())).spawn();
@@ -108,8 +108,13 @@ async fn daemon_in_a_sprite() {
                 repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
                 base_branch: "main".into(),
                 merge_base: false,
+                trim: None,
+                disk_warn_bytes: None,
+                disk_limit_bytes: None,
                 branch: None,
                 setup: Some(Check { name: "setup".into(), command: "test -f Cargo.toml".into() }),
+                tools: Default::default(),
+                tool_hosts: Default::default(),
             };
             let t = Instant::now();
             remote.prepare(&sandbox.id, prepare.clone()).await.expect("first prepare");

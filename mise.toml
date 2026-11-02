@@ -7,6 +7,8 @@ docker-cli = "latest"
 fnox = { version = "latest", workflow = "release.yml" }
 lima = "latest"
 mdbook = "0.5.4"
+# Not in the mise registry; the preprocessor ships prebuilt binaries on GitHub (0.16 can't act as an mdBook 0.5 preprocessor, so only its bundled mermaid.min.js is used; see the docs tasks).
+"github:badboy/mdbook-mermaid" = "0.16"
 rust = "latest"
 
 [tasks.test-live-sprites]
@@ -34,7 +36,7 @@ run = """
 if limactl list -q | grep -qx trailhead; then
   limactl start --tty=false trailhead
 else
-  limactl start --tty=false --name=trailhead --cpus=4 --memory=4 --disk=60 --mount-none template:docker
+  limactl start --tty=false --name=trailhead --cpus=4 --memory=6 --disk=60 --mount-none template:docker
 fi
 """
 
@@ -46,6 +48,13 @@ run = "limactl stop trailhead"
 description = "Build the sandbox image the Docker Compute starts by default (trailhead-sandbox:latest)"
 env = { DOCKER_HOST = "{{vars.docker_host}}" }
 run = "docker build -t trailhead-sandbox:latest crates/trailhead-compute-docker/image"
+
+[tasks.test-live-mise]
+description = "Install a [stack] with mise in a real Sprite and check a repo asking for node 26 gets it (creates and destroys one Sprite)"
+run = [
+  "cargo build --release -p trailhead-daemon --bin trailhead-daemon",
+  "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon fnox exec -- cargo test -p trailhead-daemon --test live_mise -- --ignored --nocapture",
+]
 
 [tasks.test-live-docker]
 description = "Run the Docker Compute and gateway tests against the lima VM's engine (creates and destroys small containers and their gateway; needs `mise run docker-image`)"
@@ -78,7 +87,7 @@ run = """
 set -e
 # -j 4: full parallelism has OOM-killed a dev machine.
 cargo install --locked -j 4 --path crates/trailhead
-cargo install --locked -j 4 --path crates/trailhead-factory-host
+cargo install --locked -j 4 --features docker --path crates/trailhead-factory-host
 cargo install --locked -j 4 --path crates/trailhead-daemon
 # Anchored so this script's own command line doesn't match.
 if pgrep -f "^$HOME/.cargo/bin/trailhead-factory run" >/dev/null; then
@@ -87,6 +96,19 @@ if pgrep -f "^$HOME/.cargo/bin/trailhead-factory run" >/dev/null; then
 fi
 """
 
+[tasks.docs-mermaid]
+description = "Unpack mermaid.min.js (git-ignored), which book.toml loads as additional-js"
+# mermaid.min.js is bundled in the mdbook-mermaid binary; `install` unpacks it. It runs in a scratch directory because
+# mdbook-mermaid 0.16 can't read mdBook 0.5's preprocessor input, so book.toml must not register it as a preprocessor.
+# mermaid-render.js turns the ```mermaid blocks into diagrams in the browser, so they render offline.
+run = "d=$(mktemp -d) && printf '[book]\\ntitle = \"x\"\\n' > \"$d/book.toml\" && mdbook-mermaid install \"$d\" && cp \"$d/mermaid.min.js\" . && rm -r \"$d\""
+
 [tasks.docs]
-description = "Build the docs (docs/) into a book with mdBook; `mdbook serve` previews it"
+description = "Build the docs (docs/) into a book with mdBook; `mise run docs-serve` previews it"
+depends = ["docs-mermaid"]
 run = "mdbook build"
+
+[tasks.docs-serve]
+description = "Preview the docs with `mdbook serve`, unpacking mermaid.min.js first so a fresh checkout works"
+depends = ["docs-mermaid"]
+run = "mdbook serve"

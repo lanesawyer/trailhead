@@ -5,7 +5,11 @@
 //! feature adds the iroh transport: [`net::DaemonProtocol`] in the sandbox and [`net::RemoteDaemon`] in the control
 //! plane.
 
+mod mise;
+#[cfg(feature = "net")]
+pub mod plugins;
 mod runner;
+pub mod trim;
 mod workspace;
 
 #[cfg(feature = "net")]
@@ -20,5 +24,6 @@ mod rest;
 #[cfg(feature = "net")]
 pub use rest::RestTracker;
 
+pub use mise::{Mise, hosts_for, install_hosts_for};
 pub use runner::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 pub use workspace::GitWorkspace;

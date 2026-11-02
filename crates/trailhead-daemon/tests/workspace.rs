@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use trailhead_daemon::{GitWorkspace, Workspace};
+use trailhead_daemon::{GitWorkspace, Mise, Workspace};
 use trailhead_factory::{Check, PrepareRequest, Repo};
 
 fn git(dir: &Path, args: &[&str]) {
@@ -27,6 +27,14 @@ fn upstream(root: &Path) -> std::path::PathBuf {
     src
 }
 
+/// Adds a dev-machine `mise.toml` to the upstream repo.
+fn add_mise_toml(root: &Path, src: &Path) {
+    std::fs::write(src.join("mise.toml"), "[tools]\nlima = \"latest\"\n").unwrap();
+    git(src, &["add", "."]);
+    git(src, &["commit", "--quiet", "-m", "mise"]);
+    git(src, &["push", "--quiet", root.join("remote/acme/widget.git").to_str().unwrap(), "main"]);
+}
+
 fn rev(dir: &Path, rev: &str) -> String {
     let out = Command::new("git").args(["rev-parse", rev]).current_dir(dir).output().unwrap();
     String::from_utf8(out.stdout).unwrap().trim().to_string()
@@ -47,7 +55,12 @@ async fn prepare_clones_runs_setup_and_resets() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: Some(check("setup", "touch .setup-ran")),
+        tools: Default::default(),
+        tool_hosts: Default::default(),
     };
 
     ws.prepare(&req).await.unwrap();
@@ -93,7 +106,12 @@ async fn prepare_can_check_out_a_branchs_remote_head() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
     assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "the work starts from the PR head");
@@ -190,7 +208,12 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
         setup: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
     assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "still at the PR head, merge uncommitted");
@@ -210,6 +233,96 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
     ws.prepare(&PrepareRequest { branch: None, merge_base: false, ..req }).await.unwrap();
     assert_eq!(ws.merge_head().await.unwrap(), None);
     assert_eq!(ws.head().await.unwrap(), rev(&src, "main"));
+}
+
+/// A stand-in for mise that logs its arguments, and runs `exec -- sh -c` with a marker in the environment.
+fn fake_mise(dir: &Path) -> std::path::PathBuf {
+    let bin = dir.join("mise");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\necho \"$PWD: $*\" >> {log}\ncase \"$1\" in\n  env) echo '{{\"PATH\":\"/pinned/bin:/usr/bin\"}}' ;;\n  exec) shift 2; PINNED=1 exec \"$@\" ;;\nesac\n",
+            log = dir.join("mise.log").display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+#[tokio::test]
+async fn prepare_installs_the_stack_with_mise_and_checks_run_under_it() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    add_mise_toml(root.path(), &src);
+    let tools = root.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let conf = root.path().join("conf.d");
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote)
+        .with_mise(Mise::with(fake_mise(&tools), &conf));
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: Some(check("setup", "echo \"pinned=$PINNED\" > .setup-env")),
+        tools: [("node".to_string(), "26".to_string())].into(),
+        tool_hosts: Default::default(),
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+    };
+    ws.prepare(&req).await.unwrap();
+
+    let generated = std::fs::read_to_string(conf.join("trailhead-factory.toml")).unwrap();
+    assert!(generated.contains("node = \"26\""), "{generated}");
+    let log = std::fs::read_to_string(tools.join("mise.log")).unwrap();
+    assert!(log.contains("conf.d: bootstrap --only tools"), "installed from outside the checkout: {log}");
+    assert_eq!(
+        std::fs::read_to_string(ws.dir().join(".setup-env")).unwrap().trim(),
+        "pinned=1",
+        "setup runs under mise"
+    );
+    assert_eq!(ws.agent_env().await["PATH"], "/pinned/bin:/usr/bin");
+    let result = ws.check(&check("test", "echo $PINNED $MISE_IGNORED_CONFIG_PATHS")).await;
+    assert!(result.passed, "{result:?}");
+    assert_eq!(result.output.trim(), format!("1 {}", ws.dir().display()), "the repo's own mise config is ignored");
+
+    // Dropping the stack removes the factory's tools again.
+    ws.prepare(&PrepareRequest { tools: Default::default(), setup: None, ..req }).await.unwrap();
+    assert!(!conf.join("trailhead-factory.toml").exists());
+}
+
+#[tokio::test]
+async fn the_stack_install_is_retried_while_egress_opens() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let tools = root.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let conf = root.path().join("conf.d");
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote)
+        .with_mise(Mise::with(fake_mise(&tools), &conf));
+    let script = std::fs::read_to_string(tools.join("mise")).unwrap();
+    let once =
+        format!("#!/bin/sh\nif [ ! -e {seen} ]; then touch {seen}; exit 1; fi\n", seen = tools.join("seen").display());
+    std::fs::write(tools.join("mise"), script.replacen("#!/bin/sh\n", &once, 1)).unwrap();
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: None,
+        tools: [("node".to_string(), "26".to_string())].into(),
+        tool_hosts: Default::default(),
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+    };
+    ws.prepare(&req).await.unwrap();
+    assert!(std::fs::read_to_string(tools.join("mise.log")).unwrap().contains("bootstrap --only tools"));
 }
 
 #[tokio::test]
@@ -232,4 +345,100 @@ async fn conflict_markers_added_since_the_start_are_found_in_any_file() {
     std::fs::write(dir.join("a.md"), "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> main\n").unwrap();
     std::fs::write(dir.join("new.toml"), ">>>>>>> main\n").unwrap();
     assert_eq!(ws.conflict_markers(&start).await.unwrap(), ["a.md", "new.toml"]);
+}
+
+#[tokio::test]
+async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    let bare = root.path().join("remote/acme/widget.git");
+    git(&src, &["checkout", "--quiet", "-b", "factory/w-1"]);
+    std::fs::write(src.join("README.md"), "branch\n").unwrap();
+    git(&src, &["commit", "--quiet", "-am", "branch edit"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "factory/w-1"]);
+    git(&src, &["checkout", "--quiet", "main"]);
+    std::fs::write(src.join("README.md"), "main\n").unwrap();
+    git(&src, &["commit", "--quiet", "-am", "main edit"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "main"]);
+
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: Some("factory/w-1".into()),
+        merge_base: true,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        setup: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+    };
+    let status = || {
+        let out = Command::new("git").args(["status", "--porcelain"]).current_dir(ws.dir()).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    ws.prepare(&req).await.unwrap();
+    // As a warm checkpoint would hold it: conflicted index, MERGE_HEAD and all.
+    assert!(ws.merge_head().await.unwrap().is_some());
+    assert!(status().contains("UU README.md"), "{}", status());
+
+    // Prepared again without aborting by hand: a fresh merge, not the old one.
+    ws.prepare(&req).await.unwrap();
+    assert!(ws.merge_head().await.unwrap().is_some());
+
+    ws.prepare(&PrepareRequest { branch: None, merge_base: false, ..req }).await.unwrap();
+    assert_eq!(ws.merge_head().await.unwrap(), None);
+    assert_eq!(ws.head().await.unwrap(), rev(&src, "main"));
+    assert_eq!(status(), "");
+}
+
+#[tokio::test]
+async fn prepare_runs_the_trim_check_after_setup_and_survives_its_failure() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: Some(check("setup", "mkdir -p cache && touch cache/big")),
+        trim: Some(check("trim", "rm -rf cache")),
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+    };
+    ws.prepare(&req).await.unwrap();
+    assert!(!ws.dir().join("cache").exists());
+
+    let failing = PrepareRequest { trim: Some(check("trim", "echo nope; exit 1")), ..req };
+    ws.prepare(&failing).await.unwrap();
+}
+
+#[tokio::test]
+async fn prepare_refuses_when_the_disk_is_over_the_limit() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: None,
+        trim: None,
+        disk_warn_bytes: Some(1),
+        disk_limit_bytes: Some(1),
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+    };
+    let err = ws.prepare(&req).await.unwrap_err();
+    assert!(err.to_string().contains("disk_limit_bytes"), "{err}");
+    let ok = PrepareRequest { disk_limit_bytes: Some(u64::MAX), ..req };
+    ws.prepare(&ok).await.unwrap();
 }

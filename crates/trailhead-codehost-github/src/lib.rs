@@ -369,9 +369,15 @@ impl CodeHost for GitHub {
         Ok(out)
     }
 
-    async fn comment(&self, pr: &PrRef, body: &str) -> Result<()> {
+    async fn comment(&self, pr: &PrRef, body: &str) -> Result<u64> {
         let path = format!("{}/issues/{}/comments", Self::repo_path(&pr.repo), pr.number);
-        self.call(self.request(Method::POST, &path).json(&json!({ "body": body }))).await.map(drop)
+        let made = self.call(self.request(Method::POST, &path).json(&json!({ "body": body }))).await?;
+        made["id"].as_u64().ok_or_else(|| Error::Other("github answered a comment without an id".into()))
+    }
+
+    async fn edit_comment(&self, pr: &PrRef, id: u64, body: &str) -> Result<()> {
+        let path = format!("{}/issues/comments/{id}", Self::repo_path(&pr.repo));
+        self.call(self.request(Method::PATCH, &path).json(&json!({ "body": body }))).await.map(drop)
     }
 
     async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome> {
@@ -448,7 +454,12 @@ impl CodeHost for GitHub {
         // What the PR has that its base lacks: its own commits. A merge of the base brings in base commits, which
         // aren't among them, so a commit since `reviewed` that is one of them must be a merge of the base itself.
         let own = self.call(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
-        let since = self.call(self.request(Method::GET, &format!("{r}/compare/{reviewed}...{head}"))).await?;
+        // A reviewed sha the host no longer has (a force push, then GC) 404s: it can't be vouched for.
+        let since = match self.call(self.request(Method::GET, &format!("{r}/compare/{reviewed}...{head}"))).await {
+            Ok(since) => since,
+            Err(Error::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
         // `reviewed` must lead to the head, and a listing cut short can't be vouched for.
         if since["status"].as_str() != Some("ahead") {
             return Ok(false);

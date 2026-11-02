@@ -135,6 +135,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
         checks: Vec::new(),
         title: None,
         base_branch: (role == Role::Reviewer).then(|| "main".into()),
+        env: Default::default(),
     }
 }
 
@@ -492,4 +493,20 @@ fn several_short_answers_are_kept_oldest_first_up_to_the_cap() {
     for i in 0..5 {
         assert!(!p.contains(&format!("answer {i}:")), "answer {i} is past the cap, and so is everything older");
     }
+}
+
+#[test]
+fn a_reviewer_is_told_the_open_follow_ups_and_a_worker_isnt() {
+    let r = rig();
+    let mut c = ctx(&r, Role::Reviewer, 0);
+    c.task.context.follow_ups.push(trailhead_factory::FollowUpTask {
+        key: TaskKey("TRAIL-411".into()),
+        title: "Cover the empty case".into(),
+        description: "No test for empty input.\n\nRaised by the reviewer of TRAIL-173.".into(),
+    });
+    let p = prompt(&c, None);
+    assert!(p.contains("- TRAIL-411: Cover the empty case (No test for empty input.)"), "{p}");
+    assert!(p.contains("Don't put any of these in `follow_ups` again"), "{p}");
+    c.role = Role::Worker;
+    assert!(!prompt(&c, None).contains("TRAIL-411"));
 }
