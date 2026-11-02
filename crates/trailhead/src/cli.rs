@@ -231,7 +231,7 @@ pub(crate) enum Cmd {
     /// For MCP clients that launch a command, e.g. `trailhead --as claude mcp`.
     Mcp,
     /// Run the factory: passes its arguments to the `trailhead-factory` binary, found next to this one or on PATH.
-    /// Install it with `cargo install --locked --path crates/trailhead-factory-host`.
+    /// Install it with `cargo install --locked --features docker --path crates/trailhead-factory-host`.
     #[command(disable_help_flag = true)]
     Factory {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

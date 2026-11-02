@@ -163,9 +163,10 @@ pub fn parse_grade(s: &str) -> Result<Option<i64>> {
     if s.eq_ignore_ascii_case("none") {
         return Ok(None);
     }
-    let g = s.parse::<i64>().map_err(|_| Error::Invalid("grade must be 1 to 4, or none".into()))?;
-    validate_grade(g)?;
-    Ok(Some(g))
+    match s.parse::<i64>() {
+        Ok(g) if (1..=4).contains(&g) => Ok(Some(g)),
+        _ => Err(Error::Invalid("grade must be 1 to 4, or none".into())),
+    }
 }
 
 /// A task's grade is a human's call: an agent can only raise an existing grade,
@@ -1039,5 +1040,24 @@ fn fts_query(input: &str) -> String {
             v.join(" ")
         }
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_grade_accepts_1_to_4_and_none() {
+        assert_eq!(parse_grade("3").unwrap(), Some(3));
+        assert_eq!(parse_grade(" None ").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_grade_errors_mention_none() {
+        for bad in ["5", "0", "-1", "abc", ""] {
+            let msg = parse_grade(bad).unwrap_err().to_string();
+            assert!(msg.contains("grade must be 1 to 4, or none"), "{bad}: {msg}");
+        }
     }
 }
