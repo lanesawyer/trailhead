@@ -546,13 +546,19 @@ async fn a_reviewer_sandbox_that_wont_destroy_keeps_the_verdict() {
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
 
-    r.compute.fail(&format!("{}-1", trailhead_factory::review_name(&key, 1, 1)), "destroy");
+    let stubborn = format!("{}-1", trailhead_factory::review_name(&key, 1, 1));
+    r.compute.fail(&stubborn, "destroy");
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.reviewed.len(), 1, "the finished verdict isn't thrown away: {done:?}");
     let task = r.tracker.task(&key);
     assert_eq!(task.run.review_rounds, Some(1), "the round counts");
     assert_eq!(task.run.reviewed, task.run.attempt);
+    assert!(r.compute.get(&stubborn).is_some(), "the destroy failed, so the reviewer's sandbox is left for reconcile");
+
+    r.compute.heal(&stubborn);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.compute.get(&stubborn).is_none(), "a later reconcile destroys it");
 }
 
 #[tokio::test(start_paused = true)]
