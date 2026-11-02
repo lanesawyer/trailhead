@@ -528,7 +528,7 @@ async fn infrastructure_retries_wait_longer_each_time_up_to_a_cap() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Down for a while", "");
     r.daemon.fail_runs(7, "connection lost");
-    let secs = std::time::Duration::from_secs;
+    let secs = Duration::from_secs;
     // 1, 2, 4, 8, then 15 minutes at most.
     for (n, wait) in [60, 120, 240, 480, 900, 900, 900].into_iter().enumerate() {
         assert!(r.factory.tick().await.is_err(), "failure {}", n + 1);
@@ -564,7 +564,7 @@ async fn infrastructure_retries_back_off_longer_when_the_tracker_wont_take_repor
 }
 
 async fn backs_off_1_2_4_minutes(r: &Rig, key: &TaskKey) {
-    let secs = std::time::Duration::from_secs;
+    let secs = Duration::from_secs;
     // 1, 2, 4 minutes, though no failure count ever reaches the tracker.
     for (n, wait) in [60, 120, 240].into_iter().enumerate() {
         assert!(r.factory.tick().await.is_err(), "failure {}", n + 1);
