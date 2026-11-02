@@ -22,13 +22,13 @@ pub type Connect =
 #[async_trait]
 pub trait Workspace: Send + Sync {
     fn dir(&self) -> PathBuf;
-    /// Which hosts installing `req`'s tools needs, worked out offline.
+    /// Refreshes the checkout and works out which hosts installing `req`'s tools needs, offline.
     async fn install_hosts(&self, _req: &PrepareRequest) -> Result<Vec<InstallHost>> {
         Ok(Vec::new())
     }
     async fn prepare(&self, req: &PrepareRequest) -> Result<()>;
     async fn check(&self, check: &Check) -> CheckResult;
-    /// Environment for the agent on top of the daemon's: the `[stack]` tools' mise environment, when there are any.
+    /// Environment for the agent on top of the daemon's: the mise environment, when there is one.
     async fn agent_env(&self) -> BTreeMap<String, String> {
         BTreeMap::new()
     }

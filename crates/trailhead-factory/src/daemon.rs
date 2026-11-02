@@ -54,7 +54,7 @@ pub struct PrepareRequest {
 }
 
 /// A host the install step needs open, and the tool that needs it (`docs/factory/sandbox.md`). The daemon works these
-/// out from the `[stack]`; the control plane opens each and logs who asked.
+/// out from the `[stack]` and the checkout's own mise config; the control plane opens each and logs who asked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallHost {
     pub host: String,
@@ -128,7 +128,8 @@ pub struct RunReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToDaemon {
     Prepare(PrepareRequest),
-    /// Asks which hosts installing the request's tools needs (`FromDaemon::InstallHosts`). The daemon installs nothing.
+    /// Asks which hosts installing the request's tools needs (`FromDaemon::InstallHosts`). The daemon refreshes the
+    /// checkout first, since the repo's own mise config lives in it, and installs nothing.
     InstallHosts(PrepareRequest),
     Run(Box<RunRequest>),
     /// Resumes following a run after a dropped connection: the daemon sends the events after the first `seen`,
@@ -247,7 +248,7 @@ impl std::fmt::Debug for DaemonSecrets {
 
 #[async_trait]
 pub trait Daemon: Send + Sync {
-    /// Starts the sandbox's daemon if needed and says which hosts `prepare` needs open to
+    /// Starts the sandbox's daemon if needed, refreshes its checkout, and says which hosts `prepare` needs open to
     /// install the request's tools, each with the tool that asked. Fails if a `[stack]` tool has no known hosts. The
     /// control plane opens them before `prepare` and closes them after.
     async fn install_hosts(&self, _sandbox: &SandboxId, _req: &PrepareRequest) -> Result<Vec<InstallHost>> {

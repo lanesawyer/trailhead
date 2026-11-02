@@ -39,7 +39,7 @@ pub struct RunContext {
     /// For reviewers: the branch the PR targets, which `origin/<base>` names in the checkout.
     #[serde(default)]
     pub base_branch: Option<String>,
-    /// Environment the agent starts with on top of the daemon's: the `[stack]` tools' mise environment, so its `cargo`, `node`
+    /// Environment the agent starts with on top of the daemon's: the mise environment, so its `cargo`, `node`
     /// and `python` are the pinned ones.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,

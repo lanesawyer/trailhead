@@ -28,6 +28,8 @@ pub struct GitWorkspace {
     /// Extra environment for git; tests use it to hide the machine's git config.
     git_env: Vec<(String, String)>,
     mise: Mise,
+    /// The request `install_hosts` just checked out, so the `prepare` that follows doesn't fetch and reset again.
+    checked_out: std::sync::Mutex<Option<PrepareRequest>>,
 }
 
 impl GitWorkspace {
@@ -42,6 +44,7 @@ impl GitWorkspace {
             block_patience: BLOCK_PATIENCE,
             git_env: Vec::new(),
             mise: Mise::new(),
+            checked_out: std::sync::Mutex::default(),
         }
     }
 
@@ -130,19 +133,10 @@ impl GitWorkspace {
     }
 }
 
-#[async_trait]
-impl Workspace for GitWorkspace {
-    fn dir(&self) -> PathBuf {
-        self.dir.clone()
-    }
-
-    async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
-        self.mise.install_hosts(&req.tools, &req.tool_hosts)
-    }
-
+impl GitWorkspace {
     /// Clones the base branch, or resets an existing checkout to it, then moves to the request's branch if it has one.
     /// Ignored files such as build output stay, so a sandbox reused for another round keeps its caches.
-    async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
+    async fn checkout(&self, req: &PrepareRequest) -> Result<()> {
         let base = &req.base_branch;
         if self.dir.join(".git").exists() {
             // A merge left under way (a warm checkpoint taken mid-rework) would block the checkout. Abort it if
@@ -169,8 +163,30 @@ impl Workspace for GitWorkspace {
             self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await?;
             self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")]).await?;
         }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Workspace for GitWorkspace {
+    fn dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
+
+    async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
+        // The repo's own mise config is in the checkout, so the hosts can't be known before the clone.
+        self.checkout(req).await?;
+        *self.checked_out.lock().unwrap() = Some(req.clone());
+        self.mise.install_hosts(&self.dir, &req.tools, &req.tool_hosts)
+    }
+
+    async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
+        let fresh = self.checked_out.lock().unwrap().take().is_some_and(|done| done == *req);
+        if !fresh {
+            self.checkout(req).await?;
+        }
         // Before setup, so the repo's own build runs with the pinned tools.
-        self.mise.bootstrap(&req.tools).await?;
+        self.mise.bootstrap(&self.dir, &req.tools).await?;
         if let Some(setup) = &req.setup {
             let result = self.check(setup).await;
             if !result.passed {

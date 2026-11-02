@@ -310,6 +310,32 @@ async fn a_node_only_stack_opens_node_hosts_and_no_others_for_install() {
 }
 
 #[tokio::test]
+async fn a_repo_mise_config_asking_for_python_opens_the_python_hosts() {
+    let r = rig();
+    r.daemon.repo_mise_tools(&["python", "npm:prettier"]);
+    r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
+    r.factory.tick().await.unwrap();
+
+    let (opened, agent) = install_and_agent_egress(&r, "trailhead-w1");
+    for host in ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org"] {
+        assert!(opened.iter().any(|d| d == host), "{host} is opened for the repo's tools: {opened:?}");
+        assert!(!agent.iter().any(|d| d == host), "{host} is closed for the agent: {agent:?}");
+    }
+    assert!(!opened.iter().any(|d| d == "nodejs.org"), "{opened:?}");
+}
+
+#[tokio::test]
+async fn an_unknown_repo_tool_is_skipped() {
+    let r = rig();
+    r.daemon.repo_mise_tools(&["cargo:ripgrep"]);
+    r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.daemon.prepared().len(), 1, "the repo's own unknown tool doesn't stop the prepare");
+}
+
+#[tokio::test]
 async fn an_unknown_stack_tool_fails_the_prepare() {
     let r = rig_with(&with_stack(r#"zig = "0.13""#));
     r.tracker.add_task("TRAIL", "Add a greeting", "");
