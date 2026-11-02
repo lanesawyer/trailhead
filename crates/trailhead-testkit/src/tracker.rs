@@ -34,6 +34,8 @@ struct State {
     undelegated: HashSet<String>,
     /// Agent and operation (`note`, `report`, `release`) to how many more of that agent's calls fail.
     failing: HashMap<(String, &'static str), usize>,
+    /// Whether every `report`, by any agent, fails.
+    reports_fail: bool,
 }
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
@@ -101,8 +103,16 @@ impl FakeTracker {
         self.state.lock().unwrap().failing.insert((agent.to_string(), op), times);
     }
 
+    /// Makes every `report`, whichever agent makes it, fail (or heal), as the tracker write outage of 2026-10-28 did.
+    pub fn fail_reports(&self, fails: bool) {
+        self.state.lock().unwrap().reports_fail = fails;
+    }
+
     fn inject(&self, op: &'static str) -> Result<()> {
         let mut s = self.state.lock().unwrap();
+        if op == "report" && s.reports_fail {
+            return Err(Error::Other("injected report failure".into()));
+        }
         match s.failing.get_mut(&(self.agent.clone(), op)) {
             Some(left) if *left > 0 => {
                 *left -= 1;

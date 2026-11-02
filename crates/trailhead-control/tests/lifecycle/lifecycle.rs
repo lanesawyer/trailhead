@@ -543,6 +543,24 @@ async fn infrastructure_retries_wait_longer_each_time_up_to_a_cap() {
     assert_eq!(r.tracker.task(&key).status, Status::Open, "under the cap of 10");
 }
 
+#[tokio::test(start_paused = true)]
+async fn infrastructure_retries_still_back_off_longer_when_the_tracker_wont_take_reports() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Tracker down too", "");
+    r.tracker.fail_reports(true);
+    let secs = std::time::Duration::from_secs;
+    // 1, 2, 4 minutes, though no failure count ever reaches the tracker.
+    for (n, wait) in [60, 120, 240].into_iter().enumerate() {
+        assert!(r.factory.tick().await.is_err(), "failure {}", n + 1);
+        assert_eq!(r.tracker.task(&key).run.infra_failures.unwrap_or(0), 0, "the write was lost");
+        r.factory.reconcile().await.unwrap();
+        assert!(r.factory.tick().await.unwrap().is_empty(), "backing off for {wait}s");
+        tokio::time::advance(secs(wait - 1)).await;
+        assert!(r.factory.tick().await.unwrap().is_empty(), "still a second short of {wait}s");
+        tokio::time::advance(secs(2)).await;
+    }
+}
+
 #[tokio::test]
 async fn failures_that_are_the_agents_or_the_tasks_still_use_up_attempts() {
     let r = rig();
