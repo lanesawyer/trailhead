@@ -724,3 +724,26 @@ async fn an_answered_breach_question_is_not_asked_again_when_the_final_report_fa
     let questions = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").count();
     assert_eq!(questions, 1);
 }
+
+#[tokio::test]
+async fn a_request_from_an_earlier_attempt_costs_no_host_call() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
+    r.factory.tick().await.unwrap();
+    // The rework runs as attempt 2 but its review doesn't finish, so the attempt-1 request is still the pending one.
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.attempt, Some(2));
+    assert!(task.run.pending_changes().is_some_and(|c| c.attempt == 1), "{:?}", task.run);
+
+    r.tracker.set_status(&key, Status::InReview);
+    let before = r.codehost.head_lookups();
+    r.factory.reconcile().await.unwrap();
+    // Asked only for the review's staleness check, not for the old request's recorded head.
+    assert!(r.codehost.head_lookups() <= before + 1, "{} lookups", r.codehost.head_lookups() - before);
+}
