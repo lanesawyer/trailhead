@@ -57,6 +57,8 @@ mode = "shadow"          # off | shadow | on
 
 Gates are keyed by grade (`[gates.1]` to `[gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[merge] mode = "on"` (TRAIL-205).
 
+`checks` in `require` gates the merge on the sandbox checks having passed; it doesn't choose which checks a worker runs. A worker runs every verifying check the repo defines (fmt, lint, typecheck, test, build) before it opens a PR, whatever the grade's gates require (TRAIL-265). Leaving `checks` out of a grade's `require` doesn't skip them in the sandbox; it only stops the merger waiting on their result.
+
 Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. The maintainer grades the queue once grades exist and widens auto-merge from there. With the rules above, code in `crates/*/src` raises a grade-1 task to 2, so docs and test-only PRs merge on their own (deleting or renaming a test is still at least grade 2). Files that steer the agents (`AGENTS.md`, `.claude/`, `.mcp.json`, `skills/`, `.trailhead.toml`) are grade 4 with CI and the factory's policy. Decided (2026-10-29): test-only PRs are grade 1; grade 2 auto-merge waits on TRAIL-260, TRAIL-298 and TRAIL-295 and a run of grade 2 shadow decisions you agree with. Decided (2026-10-29): grade 2 auto-merges too, now that those three have landed and the grade 2 decisions so far were right (TRAIL-314). TRAIL-390, reworking a PR whose CI fails after a branch update, follows rather than blocks it.
 
 Decided: quorum reviewers must be independent. Quorums are built after the merger, once a repo wants a grade with no human gate (TRAIL-204).
