@@ -134,6 +134,10 @@ pub struct RunUpdate {
     /// finish a park that was cut short (TRAIL-366).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_breach: Option<ReviewBreach>,
+    /// A worker's budget breach the task is to be parked for, written with the run's spend so that reconcile can
+    /// finish a park that was cut short instead of requeueing the task on a fresh budget (TRAIL-451).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_breach: Option<WorkerBreach>,
     /// Conflict reworks of the task's PR (TRAIL-221). They don't count as review rounds; `max_conflict_reworks` caps them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_reworks: Option<u32>,
@@ -247,6 +251,15 @@ pub struct ReviewBreach {
     pub parked: bool,
 }
 
+/// A worker run that overran its budget. Whether the task was parked for it follows from its status: parked, it is
+/// waiting on a human; still in progress under the run's sub-agent, reconcile finishes the park.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerBreach {
+    /// The run that breached, by name; a breach only parks the task while that run is the task's current one.
+    pub run: String,
+    pub reason: String,
+}
+
 impl RunUpdate {
     pub fn merge(&mut self, update: RunUpdate) {
         let RunUpdate {
@@ -267,6 +280,7 @@ impl RunUpdate {
             infra_failures,
             changes_requested,
             review_breach,
+            worker_breach,
             attempt_base,
             gave_up,
             merged,
@@ -293,6 +307,7 @@ impl RunUpdate {
         self.infra_failures = infra_failures.or(self.infra_failures.take());
         self.changes_requested = changes_requested.or(self.changes_requested.take());
         self.review_breach = review_breach.or(self.review_breach.take());
+        self.worker_breach = worker_breach.or(self.worker_breach.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
         self.gave_up = gave_up.or(self.gave_up.take());
         self.merged = merged.or(self.merged.take());
