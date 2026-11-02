@@ -223,6 +223,7 @@ const FACTORY_FIELDS: &[(&str, Kind)] = &[
     ("failure", Kind::String),
     ("reviewed_head", Kind::String),
     ("merging", Kind::String),
+    ("concluded", Kind::String),
     ("ungraded", Kind::Bool),
 ];
 
@@ -346,6 +347,57 @@ mod tests {
             let run: trailhead_factory::RunUpdate = serde_json::from_value(json!({ *field: sample.clone() })).unwrap();
             let back = serde_json::to_value(&run).unwrap();
             assert_eq!(back, json!({ *field: sample }), "{field} isn't a {} on RunUpdate", kind.name());
+        }
+    }
+
+    /// Fields of `RunUpdate` that hold objects, which `FACTORY_FIELDS` leaves to the factory to read.
+    const STRUCTURED: &[&str] = &["pr", "spend", "changes_requested", "merged", "grade", "merge"];
+
+    /// A new scalar field on `RunUpdate` must be added to `FACTORY_FIELDS`, or to `STRUCTURED` if it isn't a scalar.
+    /// The struct literal has no `..`, so a new field also fails to compile here until it is populated.
+    #[test]
+    fn every_scalar_run_update_field_is_in_factory_fields() {
+        let pr = json!({ "repo": { "owner": "o", "name": "n" }, "number": 1, "url": "u" });
+        let full = trailhead_factory::RunUpdate {
+            attempt: Some(1),
+            sandbox: Some("x".into()),
+            host: Some("x".into()),
+            started: Some(1),
+            profile: Some("x".into()),
+            pr: Some(serde_json::from_value(pr.clone()).unwrap()),
+            review_rounds: Some(1),
+            reviewed: Some(1),
+            spend: Some(trailhead_factory::Usd(1)),
+            concluded: Some("x".into()),
+            failure: Some("x".into()),
+            retries: Some(1),
+            infra_failures: Some(1),
+            changes_requested: Some(
+                serde_json::from_value(json!({ "reviewer": "r", "body": "b", "attempt": 1 })).unwrap(),
+            ),
+            conflict_reworks: Some(1),
+            attempt_base: Some(1),
+            gave_up: Some(1),
+            merged: Some(serde_json::from_value(json!({ "by": "human", "pr": pr })).unwrap()),
+            grade: Some(serde_json::from_value(json!({ "grade": 2 })).unwrap()),
+            ungraded: Some(true),
+            reviewed_head: Some("x".into()),
+            merge: Some(
+                serde_json::from_value(json!({
+                    "grade": 2, "head": "h", "passed": [], "waiting": [], "would_merge": false,
+                    "approved_head": null, "human_head": null, "problem": null, "message": "m"
+                }))
+                .unwrap(),
+            ),
+            merging: Some("x".into()),
+        };
+        let Value::Object(map) = serde_json::to_value(&full).unwrap() else { panic!("RunUpdate isn't an object") };
+        for key in map.keys() {
+            let known = FACTORY_FIELDS.iter().any(|(f, _)| f == key) || STRUCTURED.contains(&key.as_str());
+            assert!(known, "RunUpdate.{key} is in neither FACTORY_FIELDS nor STRUCTURED");
+        }
+        for key in STRUCTURED {
+            assert!(map.contains_key(*key), "STRUCTURED lists {key}, which RunUpdate doesn't serialize");
         }
     }
 }

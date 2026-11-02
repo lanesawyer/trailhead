@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 const BIN: &str = "trailhead-factory";
-const INSTALL: &str = "cargo install --locked --path crates/trailhead-factory-host";
+const INSTALL: &str = "cargo install --locked --features docker --path crates/trailhead-factory-host";
 
 /// `beside` (this executable's directory) first, then each of `path`.
 fn find(name: &str, beside: Option<&Path>, path: &[PathBuf]) -> Option<PathBuf> {

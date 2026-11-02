@@ -54,7 +54,7 @@ provider = "anthropic"
 model    = "sonnet"             # resolved to a model id per provider
 budget   = { usd = 5, minutes = 60, steps = 40 }
 escalate_to = "worker-opus"     # after repeated failure
-stall_timeout = 5               # minutes of agent silence before the run fails as a stall (default 5)
+stall_timeout = 5               # minutes of agent silence before the run fails as a stall (default 5, at least 1; 0 is rejected when the config loads)
 
 [factory.profiles.utility]
 role     = "utility"
@@ -64,7 +64,7 @@ model    = "haiku"
 budget   = { usd = 0.25, minutes = 5, steps = 5 }
 ```
 
-- **Stalls (TRAIL-173).** The daemon sends a `Heartbeat` event every 30 seconds while connected, carrying how long the agent has been quiet: no steps, tool calls or output, not counting a tool call still running (the harness reports `ToolResult` when one ends) or the checks after the agent. When that reaches the profile's `stall_timeout`, the control plane cancels the run and fails it like an infrastructure failure, so the attempt is given back. Because the daemon keeps the count, a reattach doesn't restart it, Heartbeats are sent live to the connected control plane and kept out of the replay log, so a reattach never receives stale ones; a stalled run whose daemon ignores the cancel is cut off like any other breach.
+- **Stalls (TRAIL-173).** The daemon sends a `Heartbeat` event every 30 seconds while connected, carrying how long the agent has been quiet: no steps, tool calls or output, not counting a tool call still running (the harness reports `ToolResult` when one ends) or the checks after the agent. When that reaches the profile's `stall_timeout`, the control plane cancels the run and fails it like an infrastructure failure, so the attempt is given back. Because the daemon keeps the count, a reattach doesn't restart it. Heartbeats are sent live to the connected control plane and kept out of the replay log, so a reattach never receives stale ones; a stalled run whose daemon ignores the cancel is cut off like any other breach.
 - **Model aliases.** `opus`, `sonnet`, `haiku` resolve to concrete ids in one table per provider, so upgrading a model is one line and other providers map the same aliases.
 - **Escalation, not guessing.** A task starts on its profile; repeated failure or a stall escalates to `escalate_to`, and the escalation is logged.
 - **Different model for review** where possible, to avoid shared blind spots.
@@ -79,5 +79,5 @@ Decided: specs come from humans, written together with an AI, and enter through 
 - **Spec stage.** A human starts a spec; a planner agent drafts, asks questions and revises; the human approves. The approved spec is the source of acceptance criteria.
 - **Task spec.** Goal, acceptance criteria, link to the parent spec, profile, grade hint, budget.
 - **Repo context.** `AGENTS.md` for conventions, plus the factory file for stack, checks, profiles and policy.
-- **Per-profile context.** Each profile names its instruction files and skills. Reviewers get the task, diff and check results, never the author's transcript.
+- **Per-profile context.** Each profile names its instruction files and skills. Reviewers get the task, diff and check results, never the author's transcript. A reviewer's checkout is the PR's head branch with `origin/<base>` fetched, so it can read the diff against the base.
 - **Typed model decisions.** Where a model makes a decision the factory acts on (grade raise, is it done, review verdict), it returns structured output against a schema. A dedicated decision model such as Jev (TypeSafeAI, which has a Sprites connector) could handle some yes/no and score calls; evaluate once the decision points are known.
