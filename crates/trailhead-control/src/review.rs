@@ -167,8 +167,12 @@ impl Factory {
                 self.tracker.claim(&task.key).await?;
                 let question = messages::review_breach_question(round, &reason);
                 self.tracker.ask(&task.key, &question).await?;
-                // A fresh count for when a human reopens the task, last like `request_rework`'s.
-                let fresh = RunUpdate { review_rounds: Some(0), ..RunUpdate::default() };
+                // A fresh count and run name for when a human reopens the task, last like `request_rework`'s.
+                let fresh = RunUpdate {
+                    review_rounds: Some(0),
+                    retries: Some(task.run.retries.unwrap_or(0) + 1),
+                    ..RunUpdate::default()
+                };
                 if let Err(e) = self.tracker.report(&task.key, fresh).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't reset the review count");
                 }
@@ -268,9 +272,15 @@ impl Factory {
                 messages::review_rework_limit_question(round, max, &reviewer, &body)
             };
             self.tracker.ask(&task.key, &question).await?;
-            // A fresh count for when a human reopens the task after sorting it out. Last, so a reconcile that finishes
-            // a park cut short still sees the round that hit the limit.
-            let fresh = RunUpdate { review_rounds: Some(0), conflict_reworks: Some(0), ..RunUpdate::default() };
+            // A fresh count for when a human reopens the task after sorting it out, and a fresh run name: with the
+            // counts back at zero the next review would be named for a round whose reviewer is already revoked. Last,
+            // so a reconcile that finishes a park cut short still sees the round that hit the limit.
+            let fresh = RunUpdate {
+                review_rounds: Some(0),
+                conflict_reworks: Some(0),
+                retries: Some(task.run.retries.unwrap_or(0) + 1),
+                ..RunUpdate::default()
+            };
             if let Err(e) = self.tracker.report(&task.key, fresh).await {
                 tracing::warn!(task = %task.key.0, error = %e, "couldn't reset the review and conflict counts");
             }

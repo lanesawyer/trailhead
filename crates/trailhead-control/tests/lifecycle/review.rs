@@ -355,6 +355,37 @@ async fn a_parked_request_a_person_settled_is_not_reworked_by_reconcile() {
 }
 
 #[tokio::test]
+async fn a_parked_pr_a_person_fixed_gets_a_fresh_review() {
+    async fn parked(push: bool) -> (Rig, TaskKey) {
+        let mut r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 1"));
+        r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+        let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+        let ran = r.factory.tick().await.unwrap();
+        let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+        assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+        if push {
+            r.codehost.push_to(pr);
+        }
+        r.tracker.set_status(&key, Status::InReview);
+        (r, key)
+    }
+
+    // A person's fix is work no one reviewed.
+    let (r, key) = parked(true).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reworked.is_empty(), "{done:?}");
+    assert_eq!(done.reviewed, vec![key.0.clone()]);
+
+    // Moved back with the PR untouched: the review stands, and nothing new is due.
+    let (r, _) = parked(false).await;
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reworked.is_empty() && done.reviewed.is_empty(), "{done:?}");
+}
+
+#[tokio::test]
 async fn an_addressed_review_isnt_passed_to_later_runs() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
