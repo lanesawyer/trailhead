@@ -13,7 +13,7 @@ The control plane enforces budgets. Token and dollar counts come from the daemon
 
 - **Per run, not per task.** Dollar, wall-clock and step budgets are checked against one run's own spend, not the task's running total across attempts, reworks and reviews. A task's total is bounded by `max_attempts` and `max_review_rounds` times the per-run budgets, plus the runs that count toward neither limit: transient failures, reviewer infrastructure failures, and conflict reworks (bounded by `max_conflict_reworks`). A task-level dollar cap (say `[repo] max_task_usd`, checked against prior plus current spend) is not built; adding one is a policy decision for a human.
 - **Stall detection.** No progress event for a set window counts as a breach.
-- **Suspend, don't destroy.** A breached run keeps its sandbox and checkpoint so a human can resume it. The exception is a reviewer: its sandbox is destroyed before the run is matched, so a reviewer breach has nothing to resume. The task is parked with a question instead, and reopening it reviews the PR afresh ([review.md](review.md#what-counts-as-a-review-round)).
+- **Suspend, don't destroy.** A breached run keeps its sandbox and checkpoint so a human can resume it. The exception is a reviewer: its sandbox is destroyed before the run is matched, so a reviewer breach has nothing to resume. The task is parked with a question instead, and reopening it starts a worker rework on the PR branch; the next review starts a fresh review count ([review.md](review.md#what-counts-as-a-review-round)).
 - **Numbers TBD.** Start conservative and record real spend per task type before loosening. Raising a budget is a policy loosening and needs a human ([review.md](review.md)).
 
 ## Where spend numbers come from
