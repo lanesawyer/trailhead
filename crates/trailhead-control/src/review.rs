@@ -185,7 +185,7 @@ impl Factory {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't record the reviewer's breach before parking");
                 }
                 self.tracker.reopen(&task.key).await?;
-                self.park_review_breach(&task.key, breach, true).await?;
+                self.park_review_breach(&task.key, breach, true, task.run.retries.unwrap_or(0)).await?;
                 Ok(Outcome::Parked { reason })
             }
         }
@@ -257,7 +257,13 @@ impl Factory {
     /// Parks a task for its reviewer's breach: claims it if `claim`, marks the breach parked with a fresh review count
     /// for when a human reopens the task, then asks the question. The mark comes first so that a question that was
     /// asked can't be asked again once it's answered; it's taken back if the ask fails, so reconcile finishes the park.
-    pub(crate) async fn park_review_breach(&self, key: &TaskKey, breach: ReviewBreach, claim: bool) -> Result<()> {
+    pub(crate) async fn park_review_breach(
+        &self,
+        key: &TaskKey,
+        breach: ReviewBreach,
+        claim: bool,
+        retries: u32,
+    ) -> Result<()> {
         if claim {
             self.tracker.claim(key).await?;
         }
@@ -265,6 +271,7 @@ impl Factory {
         let parked = RunUpdate {
             review_breach: Some(ReviewBreach { parked: true, ..breach.clone() }),
             review_rounds: Some(0),
+            retries: Some(retries + 1),
             ..RunUpdate::default()
         };
         self.tracker.report(key, parked).await?;
@@ -272,6 +279,7 @@ impl Factory {
             let undo = RunUpdate {
                 review_breach: Some(ReviewBreach { parked: false, ..breach.clone() }),
                 review_rounds: Some(breach.round),
+                retries: Some(retries),
                 ..RunUpdate::default()
             };
             if let Err(re) = self.tracker.report(key, undo).await {
@@ -310,9 +318,15 @@ impl Factory {
                 messages::review_rework_limit_question(round, max, &reviewer, &body)
             };
             self.tracker.ask(&task.key, &question).await?;
-            // A fresh count for when a human reopens the task after sorting it out. Last, so a reconcile that finishes
-            // a park cut short still sees the round that hit the limit.
-            let fresh = RunUpdate { review_rounds: Some(0), conflict_reworks: Some(0), ..RunUpdate::default() };
+            // A fresh count for when a human reopens the task after sorting it out, and a fresh run name: with the
+            // counts back at zero the next review would be named for a round whose reviewer is already revoked. Last,
+            // so a reconcile that finishes a park cut short still sees the round that hit the limit.
+            let fresh = RunUpdate {
+                review_rounds: Some(0),
+                conflict_reworks: Some(0),
+                retries: Some(task.run.retries.unwrap_or(0) + 1),
+                ..RunUpdate::default()
+            };
             if let Err(e) = self.tracker.report(&task.key, fresh).await {
                 tracing::warn!(task = %task.key.0, error = %e, "couldn't reset the review and conflict counts");
             }
