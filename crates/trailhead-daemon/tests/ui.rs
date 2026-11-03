@@ -1,0 +1,158 @@
+//! `trailhead/ui/0`: who gets in, and that what is forwarded to the server (the event stream included) works.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use iroh::address_lookup::MemoryLookup;
+use iroh::endpoint::presets;
+use iroh::protocol::Router;
+use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+use trailhead_core::{Ctx, NewProject, NewTask, Principal, Store};
+use trailhead_daemon::net::{API_ALPN, ApiTunnel, Peers};
+use trailhead_daemon::ui::{UI_ALPN, UiAllowlist, UiProtocol, open_ui_tunnel};
+
+async fn endpoint(key: SecretKey, lookup: Arc<MemoryLookup>, alpns: Vec<Vec<u8>>) -> Endpoint {
+    Endpoint::builder(presets::Minimal)
+        .secret_key(key)
+        .relay_mode(RelayMode::Disabled)
+        .address_lookup(lookup)
+        .alpns(alpns)
+        .bind()
+        .await
+        .unwrap()
+}
+
+struct Rig {
+    _dir: tempfile::TempDir,
+    store: Store,
+    human: Ctx,
+    token: String,
+    control: EndpointAddr,
+    allowed: UiAllowlist,
+    peers: Peers,
+    _router: Router,
+}
+
+impl Rig {
+    async fn new() -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("trailhead.db");
+        let db = db.to_str().unwrap();
+        let server_store = Store::open_local(db).await.unwrap();
+        let (ws, user) = server_store.bootstrap_local("Lane").await.unwrap();
+        let human = Ctx::user(ws.id, user.id);
+        let project = NewProject { key: "TRAIL".into(), name: "Trailhead".into(), ..Default::default() };
+        server_store.create_project(&human, project).await.unwrap();
+        let (_, token) = server_store.create_token(&human, Principal::User(user.id), "ui").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = listener.local_addr().unwrap();
+        let app = trailhead_server::router(Arc::new(trailhead_server::AppState::new(server_store)));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let store = Store::open_local(db).await.unwrap();
+
+        let allowed = UiAllowlist::new(dir.path().join("ui-allowed"));
+        let peers = Peers::default();
+        let control_ep = endpoint(SecretKey::generate(), Arc::new(MemoryLookup::new()), vec![]).await;
+        let control = control_ep.addr();
+        let router = Router::builder(control_ep)
+            .accept(UI_ALPN, UiProtocol::new(server, allowed.clone()))
+            .accept(API_ALPN, ApiTunnel::new(server, peers.clone()))
+            .spawn();
+        Rig { _dir: dir, store, human, token, control, allowed, peers, _router: router }
+    }
+
+    /// An endpoint that knows how to find the control plane.
+    async fn client(&self, key: SecretKey) -> Endpoint {
+        let lookup = Arc::new(MemoryLookup::new());
+        lookup.add_endpoint_info(self.control.clone());
+        endpoint(key, lookup, vec![]).await
+    }
+}
+
+#[tokio::test]
+async fn an_allowed_endpoint_reaches_the_api_with_its_token() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let api = open_ui_tunnel(r.client(key).await, r.control.id).await.unwrap();
+    let http = reqwest::Client::new();
+
+    let me = http.get(format!("http://{api}/v1/me")).bearer_auth(&r.token).send().await.unwrap();
+    assert!(me.status().is_success(), "{}", me.status());
+    // The allowlist decides who connects; the server still decides what the token may do.
+    let anon = http.get(format!("http://{api}/v1/me")).send().await.unwrap();
+    assert_eq!(anon.status(), 401);
+    let bad = http.get(format!("http://{api}/v1/me")).bearer_auth("nope").send().await.unwrap();
+    assert_eq!(bad.status(), 401);
+}
+
+#[tokio::test]
+async fn an_endpoint_not_on_the_list_is_refused() {
+    let r = Rig::new().await;
+    r.allowed.add(SecretKey::generate().public()).unwrap();
+    let api = open_ui_tunnel(r.client(SecretKey::generate()).await, r.control.id).await.unwrap();
+    let sent = reqwest::Client::new().get(format!("http://{api}/v1/me")).bearer_auth(&r.token).send();
+    let result = tokio::time::timeout(Duration::from_secs(10), sent).await.unwrap();
+    assert!(result.is_err(), "no HTTP response for a stranger: {result:?}");
+}
+
+#[tokio::test]
+async fn allowing_and_removing_take_effect_without_a_restart() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    let client = r.client(key.clone()).await;
+    let denied = async {
+        let api = open_ui_tunnel(client.clone(), r.control.id).await.unwrap();
+        let get = reqwest::Client::new().get(format!("http://{api}/v1/me")).bearer_auth(&r.token).send();
+        tokio::time::timeout(Duration::from_secs(10), get).await.unwrap().is_err()
+    };
+    assert!(denied.await);
+    r.allowed.add(key.public()).unwrap();
+    let api = open_ui_tunnel(client.clone(), r.control.id).await.unwrap();
+    let get = reqwest::Client::new().get(format!("http://{api}/v1/me")).bearer_auth(&r.token).send();
+    assert!(tokio::time::timeout(Duration::from_secs(10), get).await.unwrap().unwrap().status().is_success());
+}
+
+#[tokio::test]
+async fn a_daemons_endpoint_cannot_use_it() {
+    let r = Rig::new().await;
+    // A daemon the control plane started is let through the API tunnel, but that doesn't make it a UI.
+    let daemon_key = SecretKey::generate();
+    r.peers.lock().unwrap().insert(daemon_key.public());
+    let daemon = r.client(daemon_key).await;
+    let api = open_ui_tunnel(daemon, r.control.id).await.unwrap();
+    let sent = reqwest::Client::new().get(format!("http://{api}/v1/me")).bearer_auth(&r.token).send();
+    let result = tokio::time::timeout(Duration::from_secs(10), sent).await.unwrap();
+    assert!(result.is_err(), "a daemon got an answer: {result:?}");
+}
+
+#[tokio::test]
+async fn the_event_stream_survives_being_forwarded() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let api = open_ui_tunnel(r.client(key).await, r.control.id).await.unwrap();
+    let mut stream = reqwest::Client::new()
+        .get(format!("http://{api}/v1/events/stream"))
+        .bearer_auth(&r.token)
+        .send()
+        .await
+        .unwrap();
+    assert!(stream.status().is_success(), "{}", stream.status());
+    assert!(stream.headers()["content-type"].to_str().unwrap().starts_with("text/event-stream"));
+
+    // Events written after the stream opened arrive on it, one after another, without it ending.
+    for title in ["first through the tunnel", "second through the tunnel"] {
+        let new = NewTask { project: "TRAIL".into(), title: title.into(), ..Default::default() };
+        r.store.create_task(&r.human, new).await.unwrap();
+        let mut seen = String::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !seen.contains(title) {
+                let chunk = stream.chunk().await.unwrap().expect("the stream ended");
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no event for {title:?}; got {seen:?}"));
+    }
+}
