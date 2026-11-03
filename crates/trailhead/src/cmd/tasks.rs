@@ -353,7 +353,8 @@ mod tests {
     }
 
     /// Fields of `RunUpdate` that hold objects, which `FACTORY_FIELDS` leaves to the factory to read.
-    const STRUCTURED: &[&str] = &["pr", "spend", "changes_requested", "merged", "grade", "merge", "review_breach"];
+    const STRUCTURED: &[&str] =
+        &["pr", "spend", "changes_requested", "merged", "grade", "merge", "review_breach", "worker_breach"];
 
     /// A new scalar field on `RunUpdate` must be added to `FACTORY_FIELDS`, or to `STRUCTURED` if it isn't a scalar.
     /// The struct literal has no `..`, so a new field also fails to compile here until it is populated.
@@ -384,6 +385,7 @@ mod tests {
                 reason: "x".into(),
                 parked: false,
             }),
+            worker_breach: Some(trailhead_factory::WorkerBreach { run: "x".into(), reason: "x".into(), parked: false }),
             conflict_reworks: Some(1),
             attempt_base: Some(1),
             gave_up: Some(1),

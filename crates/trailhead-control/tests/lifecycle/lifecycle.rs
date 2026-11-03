@@ -91,6 +91,8 @@ async fn budget_breach_parks_the_task_and_suspends_its_sandbox() {
     assert_eq!(task.status, Status::NeedsInput);
     assert_eq!(task.holder.as_deref(), Some("factory/trail-1-a1"));
     assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
+    // Concluded with the spend, so a restart before the park lands can't have reconcile count the run twice.
+    assert_eq!(task.run.concluded.as_deref(), Some("trail-1-a1"));
     assert!(r.tracker.comments(&key).iter().any(|c| c.kind == "question" && c.body.contains("is suspended")));
 
     let sandbox = r.compute.get("trailhead-w1").expect("sandbox kept for resuming");
@@ -763,6 +765,59 @@ async fn a_fresh_run_whose_setup_fails_is_still_an_infrastructure_failure() {
     assert_eq!(task.run.infra_failures, Some(1));
     assert_eq!(task.run.attempt.unwrap_or(0), 0, "no attempt was used");
     assert!(r.daemon.requests().is_empty(), "no agent started");
+}
+
+#[tokio::test]
+async fn a_breach_park_cut_short_is_finished_by_reconcile_without_a_rerun_or_a_second_count() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    // The control plane goes down after the breach was reported and the sandbox cut off, before the question lands.
+    r.tracker.fail_next("factory/trail-1-a1", "ask", 1);
+    assert!(r.factory.run_task(&r.tracker.task(&key)).await.is_err());
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InProgress);
+    assert_eq!(task.run.spend, Some(Usd::dollars(6.0)));
+    assert_eq!(task.run.concluded.as_deref(), Some("trail-1-a1"));
+    assert!(task.run.worker_breach.is_some(), "recorded with the spend");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    assert!(done.requeued.is_empty() && done.reattached.is_empty() && done.released.is_empty(), "{done:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.holder.as_deref(), Some("factory/trail-1-a1"));
+    assert_eq!(task.run.spend, Some(Usd::dollars(6.0)), "counted once");
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.starts_with("Budget breached") && questions[0].body.contains("is suspended"));
+
+    // The suspended sandbox stays as it was, not released to idle, and nothing is asked again.
+    let sandbox = r.compute.get("trailhead-w1").expect("the suspended sandbox is kept");
+    assert_eq!(sandbox.labels.get(label::STATE).map(String::as_str), Some(label::BUSY));
+    assert!(!sandbox.labels.contains_key(label::ROLE));
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.breached.is_empty() && done.released.is_empty(), "{done:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test]
+async fn an_answer_to_a_breach_within_the_lease_requeues_the_task_without_asking_again() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    assert!(matches!(r.factory.run_task(&r.tracker.task(&key)).await.unwrap(), Outcome::Parked { .. }));
+    assert!(r.tracker.task(&key).run.worker_breach.as_ref().is_some_and(|b| b.parked));
+
+    r.tracker.answer_within_lease(&key, "Raised the budget; carry on.");
+    let task = r.tracker.task(&key);
+    assert_eq!((task.status, task.holder.as_deref()), (Status::InProgress, Some("factory/trail-1-a1")));
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.breached.is_empty(), "the answered park isn't finished again: {done:?}");
+    assert_eq!(done.requeued, std::slice::from_ref(&key.0));
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    let questions = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").count();
+    assert_eq!(questions, 1, "asked once");
 }
 
 #[tokio::test]

@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use trailhead_factory::messages;
 use trailhead_factory::{
-    ChangesRequested, Error, Merged, MergedBy, PrRef, PrState, Result, RunUpdate, Sandbox, Status, Task, TaskKey, label,
+    ChangesRequested, Error, Merged, MergedBy, PrRef, PrState, Result, RunUpdate, Sandbox, Status, Task, TaskKey,
+    WorkerBreach, label,
 };
 
 use crate::lifecycle::worker_name;
@@ -61,8 +62,9 @@ impl Factory {
             if live_runs.iter().any(|(_, s)| s.name == sandbox.name) {
                 continue;
             }
+            // A run parked for its breach, or one whose park is yet to land, keeps its suspended sandbox.
             let parked = tasks.iter().any(|t| {
-                t.status == Status::NeedsInput
+                (t.status == Status::NeedsInput || self.unparked_breach(t).is_some())
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
             });
             if parked {
@@ -90,6 +92,10 @@ impl Factory {
                 done.unknown.push(task.key.0.clone());
                 continue;
             }
+            if let Some(breach) = self.unparked_breach(task) {
+                self.finish_worker_breach(task, breach, &live, &mut done).await;
+                continue;
+            }
             match self.reconcile_task(task, &mut done).await {
                 Ok(true) => due.reviews.push(task.clone()),
                 Ok(false) => {}
@@ -99,6 +105,36 @@ impl Factory {
             }
         }
         Ok((done, due))
+    }
+
+    /// A worker's breach the task wasn't parked for yet (TRAIL-451): never marked parked, the task still in progress
+    /// under the sub-agent of the run that breached, and that run its current one.
+    fn unparked_breach<'a>(&self, task: &'a Task) -> Option<&'a WorkerBreach> {
+        let breach = task.run.worker_breach.as_ref().filter(|b| !b.parked)?;
+        let current = task.run.sandbox.as_ref() == Some(&breach.run);
+        let held = task.holder.as_deref() == Some(self.tracker.sub_agent(&breach.run).agent());
+        (task.status == Status::InProgress && current && held).then_some(breach)
+    }
+
+    /// Finishes the park of a run that breached its budget, cut short by a restart: its sandbox is cut off (again, if
+    /// that was done) and the question is asked, rather than the task being requeued on a fresh budget. The spend
+    /// was recorded with the breach, so it isn't counted again. A failure is left for the next reconcile.
+    async fn finish_worker_breach(&self, task: &Task, breach: &WorkerBreach, live: &[Sandbox], done: &mut Reconciled) {
+        let reason = breach.reason.as_str();
+        let (Some(name), Some(host)) = (&task.run.sandbox, task.run.host.as_ref()) else { return };
+        tracing::warn!(task = %task.key.0, %reason, "finishing the park for a worker's budget breach");
+        // A sandbox that's gone was destroyed after the breach, so there's nothing suspended to point at.
+        let suspended = match live.iter().find(|s| s.name == *host) {
+            Some(sandbox) => self.cut_off_breached(task, sandbox).await,
+            None => false,
+        };
+        let question = messages::budget_breach_question(reason, host, suspended);
+        match self.park_worker_breach(&task.key, &self.tracker.sub_agent(name), breach, &question).await {
+            Ok(()) => done.breached.push(task.key.0.clone()),
+            Err(e) => {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't park the breached task; the next reconcile retries")
+            }
+        }
     }
 
     /// Whether a task's run may be on a target that didn't answer: the target it recorded, or, for a task that

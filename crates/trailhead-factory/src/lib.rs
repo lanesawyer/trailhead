@@ -48,7 +48,8 @@ pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Regi
 pub use target::{DEFAULT_TARGET, Spend, Target};
 pub use tracker::{
     Answered, ChangesRequested, Credential, FollowUpTask, HumanContext, METADATA_KEY, MergeDecision, Merged, MergedBy,
-    ReviewBreach, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, is_factory_agent, is_raised_by, raised_by,
+    ReviewBreach, RunUpdate, Status, Task, TaskKey, TaskNote, Tracker, WorkerBreach, is_factory_agent, is_raised_by,
+    raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
