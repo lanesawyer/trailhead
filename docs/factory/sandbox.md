@@ -92,9 +92,11 @@ Sprites egress is a DNS-based allowlist set from outside through the API. Change
 
 A tool the table doesn't know takes an entry in `.trailhead.toml`: `[factory.egress.tools]` maps a tool to its download hosts (`zig = ["ziglang.org"]`). The control plane sends the map in the prepare request, an entry wins over the table, and the hosts open only while that tool installs, logged with the tool that asked. A `[stack]` tool in neither fails the prepare, naming the tool and pointing at `[factory.egress.tools]`.
 
-Decided: registry egress only during install phases. The risk isn't secrets, since the sandbox holds none; it's a malicious or typosquatted package whose install script acts with the sandbox's connector identity. Mitigations:
+Decided: registry egress only during install phases, by default. The risk isn't secrets, since the sandbox holds none; it's a malicious or typosquatted package whose install script acts with the sandbox's connector identity. Mitigations:
 
-- **New dependency raises the grade.** Adding or upgrading a dependency is at least grade 3 by default, configurable per repo ([review.md](review.md#grades)).
+A repo can instead keep its package registry in `[factory.egress] always`, so the agent can fetch packages while it works (Trailhead keeps crates.io there, decided 2026-11-02, after a task burned five attempts unable to `cargo add`). That trades the rule above for convenience: an install script or build script a fetched package runs now executes during agent work, with the sandbox's connector identity, and nothing closes the registry afterwards. The sandbox contains it, and the lockfile grade is what pays for it: any new package shows up as a lockfile change, which is grade 4 by default and needs a person before it merges. A repo that opens a registry should keep those lockfile globs in grade 4.
+
+- **New dependency raises the grade.** Editing a manifest is at least grade 3 by default, and any lockfile change (`Cargo.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `uv.lock`, `poetry.lock`, `go.sum`, `Gemfile.lock`) is grade 4, so a person looks at every new or upgraded package, configurable per repo ([review.md](review.md#grades)).
 - **Supply-chain checks.** An audit tool per ecosystem (for example `cargo-deny` or `osv-scanner`) runs with the other checks.
 - **Narrow connector scopes.** An author sandbox's GitHub connector reaches only its own repo.
 
