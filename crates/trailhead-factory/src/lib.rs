@@ -36,7 +36,7 @@ pub use gateway::{
     AuthScheme, GatewayConnection, GatewayConnectionInfo, GatewayRequest, GatewayResponse, GatewaySandbox,
     GatewayState, Secret,
 };
-pub use grade::{ChangedFile, FileStatus, Grader, PrGrade, glob_match};
+pub use grade::{ChangedFile, FileStatus, Grader, PrGrade, compile_glob, glob_match};
 pub use harness::{
     EventSink, Feedback, FollowUp, Harness, RaiseGrade, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict,
     VerdictKind, conventional_title, is_conventional,
