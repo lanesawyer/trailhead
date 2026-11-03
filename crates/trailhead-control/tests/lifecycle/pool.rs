@@ -365,3 +365,24 @@ async fn a_pooled_sandbox_built_for_another_stack_is_replaced() {
     assert_ne!(fresh.labels.get(label::WARM), warm.as_ref(), "a new sandbox, with its own first checkpoint");
     assert_eq!(fresh.labels.get(label::STACK), old.get(label::STACK));
 }
+
+#[tokio::test]
+async fn releasing_a_busy_sandbox_keeps_the_stack_tag_its_checkpoint_was_built_for() {
+    let r = rig_with(&with_stack(r#"node = "26""#));
+    r.tracker.add_task("TRAIL", "First", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let id = r.compute.get("trailhead-w1").unwrap().id;
+
+    // Busy under a stack that has since changed, as after a restart with a new `[stack]`.
+    let mut busy = r.compute.get("trailhead-w1").unwrap().labels;
+    busy.insert(label::STATE.into(), label::BUSY.into());
+    busy.insert(label::STACK.into(), "old".into());
+    r.compute.set_labels(&id, &busy).await.unwrap();
+
+    r.factory.reconcile().await.unwrap();
+    let labels = r.compute.get("trailhead-w1").unwrap().labels;
+    assert_eq!(labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert_eq!(labels.get(label::STACK).map(String::as_str), Some("old"), "not recomputed from the current config");
+}

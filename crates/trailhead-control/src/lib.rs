@@ -191,6 +191,12 @@ pub struct Reconciled {
 }
 
 impl Factory {
+    /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).
+    #[doc(hidden)]
+    pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {
+        self.updating.lock().unwrap().contains_key(task)
+    }
+
     /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
     pub fn new(
         config: FactoryConfig,

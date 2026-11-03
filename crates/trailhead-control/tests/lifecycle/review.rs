@@ -487,6 +487,35 @@ async fn the_reviewers_infrastructure_failures_are_persisted_and_reset_by_a_fini
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_reviewers_infrastructure_failures_keep_counting_across_a_control_plane_restart() {
+    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 3");
+    let mut r = rig_with(&config);
+    let key = r.tracker.add_task("TRAIL", "Flaky review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    assert_eq!(r.tracker.task(&key).run.infra_failures, Some(1));
+
+    // A new factory has no backoff and no count in memory; the tracker's is what carries on.
+    restart(&mut r, &config);
+    r.daemon.fail_runs(1, "connection lost");
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "failure 2 is retried");
+    assert_eq!(task.run.infra_failures, Some(2), "the count keeps growing");
+
+    restart(&mut r, &config);
+    r.daemon.fail_runs(1, "connection lost");
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked at max_infra_failures");
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("it's not the task"), "{}", questions[0].body);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_review_cancelled_on_purpose_isnt_an_infrastructure_failure() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
     let key = r.tracker.add_task("TRAIL", "Stopped mid-review", "");
@@ -517,13 +546,19 @@ async fn a_reviewer_sandbox_that_wont_destroy_keeps_the_verdict() {
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
 
-    r.compute.fail(&format!("{}-1", trailhead_factory::review_name(&key, 1, 1)), "destroy");
+    let stubborn = format!("{}-1", trailhead_factory::review_name(&key, 1, 1));
+    r.compute.fail(&stubborn, "destroy");
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.reviewed.len(), 1, "the finished verdict isn't thrown away: {done:?}");
     let task = r.tracker.task(&key);
     assert_eq!(task.run.review_rounds, Some(1), "the round counts");
     assert_eq!(task.run.reviewed, task.run.attempt);
+    assert!(r.compute.get(&stubborn).is_some(), "the destroy failed, so the reviewer's sandbox is left for reconcile");
+
+    r.compute.heal(&stubborn);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.compute.get(&stubborn).is_none(), "a later reconcile destroys it");
 }
 
 #[tokio::test(start_paused = true)]
