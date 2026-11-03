@@ -151,6 +151,8 @@ impl Factory {
     /// `CodeHost::merge` (`docs/factory/lifecycle.md`). Metadata first, so a handoff that failed to land is retried
     /// with the record already there.
     pub async fn close_merged(&self, task: &Task, merged: Merged) -> Result<()> {
+        // The task has left the merge path, so a queued branch update is no longer waited on (TRAIL-491).
+        self.updating.lock().unwrap().remove(&task.key);
         let decision = match merged.by {
             MergedBy::Merger => self.tracker.show(&task.key).await?.run.merge,
             MergedBy::Human => None,
@@ -171,6 +173,7 @@ impl Factory {
     /// rework would push to a PR nobody is going to merge. Reopening it after reopening the PR resumes as a rework.
     pub(crate) async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
         tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
+        self.updating.lock().unwrap().remove(&task.key);
         // Already open when it's found before a run starts (TRAIL-304); there's nothing in review to reopen.
         if task.status != Status::Open {
             self.tracker.reopen(&task.key).await?;
@@ -238,7 +241,7 @@ impl Factory {
             PrState::Merged { commit } => {
                 // A merge the factory didn't make is a person's, outside the factory; one the merger started but
                 // didn't get to close (TRAIL-289) is still the merger's.
-                let by = merged_by(task);
+                let by = self.merged_by(task, pr).await?;
                 self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
                 done.merged.push(task.key.0.clone());
                 Ok(None)
@@ -331,14 +334,16 @@ impl Factory {
                 };
                 // The head recorded with the request is sturdier than the counts, whose reset can be lost: a PR that
                 // has moved since was pushed to by a person (TRAIL-338).
-                let moved =
-                    match (&task.run.pr, &self.codehost, task.run.pending_changes().and_then(|c| c.head.as_ref())) {
-                        (Some(pr), Some(codehost), Some(recorded)) => codehost.head(pr).await? != *recorded,
-                        _ => false,
-                    };
-                if let Some(requested) =
-                    task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c) && !moved)
+                // It's only fetched for a request that applies to this attempt: after a normal rework the old one
+                // lingers until the next review, and asking the host about it each reconcile would be wasted.
+                let mut applicable = task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c));
+                if let (Some(c), Some(pr), Some(codehost)) = (applicable, &task.run.pr, &self.codehost)
+                    && let Some(recorded) = &c.head
+                    && codehost.head(pr).await? != *recorded
                 {
+                    applicable = None;
+                }
+                if let Some(requested) = applicable {
                     let round = if requested.conflict {
                         task.run.conflict_reworks.unwrap_or(1)
                     } else {
@@ -384,7 +389,13 @@ impl Factory {
     }
 }
 
-/// Who merged a PR that is found merged: the merger when it recorded the intent before merging (TRAIL-289), else a person.
-pub(crate) fn merged_by(task: &Task) -> MergedBy {
-    if task.run.merging.as_deref().is_some_and(|h| !h.is_empty()) { MergedBy::Merger } else { MergedBy::Human }
+impl Factory {
+    /// Who merged a PR that is found merged: the merger when it recorded the intent to merge this very head
+    /// (TRAIL-289), else a person. An intent for another head is stale: the host didn't merge it, and the PR was
+    /// pushed to and merged by someone since (TRAIL-456).
+    pub(crate) async fn merged_by(&self, task: &Task, pr: &PrRef) -> Result<MergedBy> {
+        let Some(intent) = task.run.merging.as_deref().filter(|h| !h.is_empty()) else { return Ok(MergedBy::Human) };
+        let Some(codehost) = &self.codehost else { return Ok(MergedBy::Human) };
+        Ok(if codehost.head(pr).await? == intent { MergedBy::Merger } else { MergedBy::Human })
+    }
 }

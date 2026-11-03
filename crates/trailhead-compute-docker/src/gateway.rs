@@ -62,6 +62,9 @@ pub(crate) fn proxy_env() -> Vec<String> {
 impl DockerCompute {
     /// Takes the gateway lock, with the gateway up and holding the full state.
     pub(crate) async fn gateway(&self) -> Result<MutexGuard<'_, Link>> {
+        if self.read_only {
+            return Err(Error::Other("this compute is read-only: it can't change sandboxes or the gateway".into()));
+        }
         self.watch();
         self.sync().await
     }
@@ -93,6 +96,7 @@ impl DockerCompute {
                     link,
                     daemon_digest: daemon_digest.clone(),
                     watching: Default::default(),
+                    read_only: false,
                 };
                 if let Err(e) = compute.sync().await {
                     tracing::warn!(error = %e, "the docker gateway is out of sync");
