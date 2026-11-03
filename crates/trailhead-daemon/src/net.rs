@@ -79,7 +79,7 @@ pub fn build_id(binary: &[u8]) -> String {
     hex::encode(Sha256::digest(binary))
 }
 
-fn io_err(e: impl std::fmt::Display) -> Error {
+pub(crate) fn io_err(e: impl std::fmt::Display) -> Error {
     Error::Other(format!("daemon connection: {e}"))
 }
 
@@ -528,7 +528,7 @@ impl ProtocolHandler for DaemonProtocol {
 }
 
 /// Copies bytes both ways between an iroh stream and a TCP connection until both sides finish.
-async fn pipe(mut send: SendStream, mut recv: RecvStream, tcp: TcpStream) {
+pub(crate) async fn pipe(mut send: SendStream, mut recv: RecvStream, tcp: TcpStream) {
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
     let inbound = async {
         let _ = tokio::io::copy(&mut recv, &mut tcp_write).await;
