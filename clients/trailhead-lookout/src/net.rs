@@ -44,6 +44,8 @@ pub enum Reason {
     NeedsLogin,
     /// The server turned the token down.
     TokenRejected,
+    /// The token belongs to an agent: Lookout acts only as the user.
+    AgentToken,
     /// Confirming the token with `/v1/me`.
     SigningIn,
 }
@@ -63,6 +65,7 @@ impl std::fmt::Display for Reason {
             Reason::Unreachable(e) => write!(f, "can't reach the factory: {e}"),
             Reason::NeedsLogin => write!(f, "no saved token for this server: log in with a user token"),
             Reason::TokenRejected => write!(f, "the server rejected the token: log in again"),
+            Reason::AgentToken => write!(f, "that is an agent's token: log in with a user token"),
             Reason::SigningIn => write!(f, "signing in"),
         }
     }
@@ -366,6 +369,10 @@ impl Net {
         let saved = store.as_ref().and_then(|s| s.read(Cred::User)).map(|(t, _)| t);
         let pasted = self.pasted.take();
         let Some(token) = pasted.clone().or_else(|| self.token.clone()).or(saved) else {
+            // A refusal stays on show until a new login, rather than decaying into "needs login".
+            if matches!(&self.state, Some((_, Some(Reason::TokenRejected | Reason::AgentToken)))) {
+                return;
+            }
             return self.set(Link::Offline, Some(Reason::NeedsLogin));
         };
         self.set(Link::Syncing, Some(Reason::SigningIn));
@@ -385,7 +392,7 @@ impl Net {
         // The user token only: an agent's would let Lookout act as one.
         if me["agent"]["name"].as_str().is_some() {
             self.token = None;
-            return self.set(Link::Offline, Some(Reason::TokenRejected));
+            return self.set(Link::Offline, Some(Reason::AgentToken));
         }
         if pasted.is_some()
             && let Some(Err(e)) = store.map(|s| s.save(Cred::User, &token))

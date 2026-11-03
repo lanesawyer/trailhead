@@ -116,7 +116,8 @@ async fn connects_signs_in_and_goes_live() {
     until(&mut app, "token rejected", |a| reason(a) == Some(Reason::TokenRejected)).await;
     // An agent's token isn't a way in: Lookout acts only as the user.
     send(&mut app, NetCommand::Login(rig.agent_token.clone()));
-    until(&mut app, "agent token rejected", |a| reason(a) == Some(Reason::TokenRejected)).await;
+    until(&mut app, "agent token refused", |a| reason(a) == Some(Reason::AgentToken)).await;
+    assert!(app.world().get_resource::<Api>().is_none());
 
     send(&mut app, NetCommand::Login(rig.token.clone()));
     until(&mut app, "live", |a| state(a) == Connection::Live).await;
