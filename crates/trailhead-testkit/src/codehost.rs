@@ -45,6 +45,8 @@ struct State {
     update_requests: usize,
     /// How many times `files` was asked for a PR's file list.
     file_listings: usize,
+    /// How many times `head` was asked for a PR's head.
+    head_lookups: usize,
     refuse_publish: Option<String>,
     refuse_merge: Option<String>,
 }
@@ -116,6 +118,11 @@ impl FakeCodeHost {
     /// How many times `update_branch` was called on a PR that was behind.
     pub fn update_requests(&self) -> usize {
         self.state.lock().unwrap().update_requests
+    }
+
+    /// How many times the host was asked for a PR's head.
+    pub fn head_lookups(&self) -> usize {
+        self.state.lock().unwrap().head_lookups
     }
 
     /// Closes a PR without merging it, as a person would on GitHub.
@@ -349,6 +356,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn head(&self, pr: &PrRef) -> Result<String> {
+        self.state.lock().unwrap().head_lookups += 1;
         self.find(pr, |p, s| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default())
     }
 

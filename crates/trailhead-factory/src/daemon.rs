@@ -272,9 +272,102 @@ pub trait Daemon: Send + Sync {
     async fn shutdown(&self) {}
 }
 
+const GITHUB: &[&str] =
+    &["github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
+const PYPI: &[&str] = &["pypi.org", "files.pythonhosted.org"];
+pub const MISE_VERSION_HOSTS: &[&str] = &["mise.jdx.dev", "mise-versions.jdx.dev"];
+
+/// The hosts installing a mise tool needs, by tool or backend (`docs/factory/sandbox.md`): the one table, so what a
+/// sandbox opens for an install is reviewable in one place. `None` for a tool it doesn't know, which is never guessed.
+/// `tool` is a mise tool key: a name (`node`) or `backend:name` (`npm:prettier`, `core:node`).
+pub fn hosts_for(tool: &str) -> Option<Vec<&'static str>> {
+    let (backend, name) = match tool.split_once(':') {
+        Some(("core", name)) => ("", name),
+        Some((backend, _)) => (backend, ""),
+        None => ("", tool),
+    };
+    let hosts: &[&[&str]] = match (backend, name) {
+        ("npm", _) => &[&["registry.npmjs.org"]],
+        ("pipx" | "pypi", _) => &[PYPI],
+        ("github" | "aqua" | "ubi", _) => &[GITHUB],
+        ("", "node") => &[&["nodejs.org"]],
+        ("", "rust") => &[&["static.rust-lang.org"]],
+        ("", "go") => &[&["go.dev", "dl.google.com"]],
+        // Prebuilt interpreters are GitHub release assets; pip comes from PyPI.
+        ("", "python") => &[GITHUB, PYPI],
+        // aqua's registry fetches pnpm from its GitHub releases.
+        ("", "pnpm") => &[GITHUB],
+        _ => return None,
+    };
+    Some(hosts.concat())
+}
+
+pub const MISE_INSTALLER_HOSTS: &[&str] = &[
+    "mise.run",
+    "github.com",
+    "api.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+
+/// Whether the control plane accepts `need` for `req`, whatever the daemon says: a second line of defence, so a
+/// compromised or confused daemon can't widen install egress to arbitrary domains. Accepted are mise's own hosts for
+/// `mise`, and for a `[stack]` tool its `[factory.egress.tools]` hosts, else its row in `hosts_for`.
+pub fn install_host_allowed(req: &PrepareRequest, need: &InstallHost) -> bool {
+    if need.tool == "mise" {
+        let host = need.host.as_str();
+        return MISE_VERSION_HOSTS.contains(&host) || MISE_INSTALLER_HOSTS.contains(&host);
+    }
+    if !req.tools.contains_key(&need.tool) {
+        return false;
+    }
+    match req.tool_hosts.get(&need.tool) {
+        Some(hosts) => hosts.contains(&need.host),
+        None => hosts_for(&need.tool).is_some_and(|hosts| hosts.contains(&need.host.as_str())),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(tools: &[&str], hosts: &[(&str, &[&str])]) -> PrepareRequest {
+        PrepareRequest {
+            repo: Repo { owner: "o".into(), name: "r".into() },
+            base_branch: "main".into(),
+            branch: None,
+            merge_base: false,
+            setup: None,
+            tools: tools.iter().map(|t| (t.to_string(), "1".to_string())).collect(),
+            tool_hosts: hosts.iter().map(|(t, h)| (t.to_string(), h.iter().map(|h| h.to_string()).collect())).collect(),
+            trim: None,
+            disk_warn_bytes: None,
+            disk_limit_bytes: None,
+        }
+    }
+
+    fn need(host: &str, tool: &str) -> InstallHost {
+        InstallHost { host: host.into(), tool: tool.into() }
+    }
+
+    #[test]
+    fn install_hosts_come_only_from_the_table_the_config_or_mise() {
+        let req = request(&["node", "zig"], &[("zig", &["ziglang.org"])]);
+        assert!(install_host_allowed(&req, &need("nodejs.org", "node")));
+        assert!(install_host_allowed(&req, &need("ziglang.org", "zig")));
+        assert!(install_host_allowed(&req, &need("mise.run", "mise")));
+        assert!(install_host_allowed(&req, &need("mise-versions.jdx.dev", "mise")));
+        assert!(!install_host_allowed(&req, &need("evil.example", "node")));
+        assert!(!install_host_allowed(&req, &need("evil.example", "mise")));
+        assert!(!install_host_allowed(&req, &need("nodejs.org", "rust")), "a tool outside the stack");
+        assert!(!install_host_allowed(&req, &need("registry.npmjs.org", "node")), "another tool's host");
+    }
+
+    #[test]
+    fn configured_hosts_replace_the_table_row() {
+        let req = request(&["node"], &[("node", &["mirror.example"])]);
+        assert!(install_host_allowed(&req, &need("mirror.example", "node")));
+        assert!(!install_host_allowed(&req, &need("nodejs.org", "node")));
+    }
 
     #[test]
     fn secrets_parse_with_and_without_a_gateway_list() {
