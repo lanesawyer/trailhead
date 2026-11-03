@@ -209,7 +209,14 @@ impl Factory {
             return p.compute.destroy(&sandbox.id).await;
         }
         p.daemon.forget(&sandbox.id).await;
-        p.compute.set_labels(&sandbox.id, &self.pooled(Some(p), label::IDLE, Some(&warm), None)).await
+        // The warm checkpoint was built for the stack the sandbox is labelled with, which isn't the current
+        // `[stack]` if the config changed while it was busy: carry the label over rather than recompute it.
+        let mut labels = self.pooled(Some(p), label::IDLE, Some(&warm), None);
+        match sandbox.labels.get(label::STACK) {
+            Some(stack) => labels.insert(label::STACK.into(), stack.clone()),
+            None => labels.remove(label::STACK),
+        };
+        p.compute.set_labels(&sandbox.id, &labels).await
     }
 
     /// The first free `<repo>-w<n>` name.
