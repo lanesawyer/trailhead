@@ -46,6 +46,8 @@ pub struct FakeWorkspace {
     rebases: AtomicBool,
     /// Files the agent leaves conflict markers in.
     markers: Mutex<Vec<String>>,
+    /// Files the agent changes, for path-scoped checks.
+    changed: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
     /// Errors the next prepares fail with, before they change anything.
     prepare_errors: Mutex<Vec<String>>,
@@ -117,6 +119,10 @@ impl Workspace for FakeWorkspace {
         Ok(self.markers.lock().unwrap().clone())
     }
 
+    async fn changed_files(&self, _base: &str) -> Result<Vec<String>> {
+        Ok(self.changed.lock().unwrap().clone())
+    }
+
     async fn head(&self) -> Result<String> {
         let on = self.branch.lock().unwrap().clone();
         let heads = self.heads.lock().unwrap().clone();
@@ -141,8 +147,8 @@ impl Workspace for FakeWorkspace {
             None => None,
         };
         match output {
-            Some(output) => CheckResult { name: check.name.clone(), passed: false, output },
-            None => CheckResult { name: check.name.clone(), passed: true, output: String::new() },
+            Some(output) => CheckResult { name: check.name.clone(), passed: false, output, skipped: false },
+            None => CheckResult { name: check.name.clone(), passed: true, output: String::new(), skipped: false },
         }
     }
 }
@@ -202,6 +208,11 @@ impl LocalDaemon {
     pub fn heartbeat_every(mut self, every: Duration) -> LocalDaemon {
         Arc::get_mut(&mut self.runner).expect("the runner isn't shared yet").heartbeat_every = every;
         self
+    }
+
+    /// Has the agent change these files, which path-scoped checks match against.
+    pub fn change_files(&self, files: &[&str]) {
+        *self.workspace.changed.lock().unwrap() = files.iter().map(|f| f.to_string()).collect();
     }
 
     /// Has the agent leave conflict markers in these files.
