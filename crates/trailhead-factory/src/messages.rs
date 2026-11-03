@@ -348,6 +348,17 @@ pub fn review_infra_question(failures: u32, max: u32, error: &str) -> String {
     )
 }
 
+/// Why a task is parked when its reviewer kept ending without a verdict. The infrastructure ran; the reviewer
+/// didn't call for one, which points at the model, the review prompt or the PR.
+pub fn review_no_verdict_question(failures: u32, max: u32, error: &str) -> String {
+    format!(
+        "The reviewer ended without a verdict {failures} times in a row (the limit is {max}). The last \
+         result: {error}\n\nLook at the reviewer's transcript and the review prompt: the model may not be \
+         calling for a verdict, or the PR may be something the reviewer can't handle (too large, or \
+         unreadable). Fix the cause, then reopen the task; raise `max_infra_failures` to allow more tries."
+    )
+}
+
 /// The error recorded when a reviewer's run ended without a verdict. `result` is how it ended.
 pub fn review_without_verdict(result: &dyn std::fmt::Debug) -> String {
     format!("the reviewer ended without a verdict: {result:?}")
@@ -429,8 +440,8 @@ pub fn conflict_feedback(pr_url: &str, base: &str) -> String {
     )
 }
 
-/// What a worker is told when CI failed on its PR: the checks, the end of their logs, and `after_update` when it
-/// passed until the base branch was merged in.
+/// What a worker is told when CI failed on its PR: the checks, the end of their logs, and `after_update` when the
+/// base branch was merged in after the review (CI is not known to have passed before).
 pub fn ci_failure_feedback(
     pr_url: &str,
     head: &str,
@@ -442,8 +453,9 @@ pub fn ci_failure_feedback(
     let mut body = format!("CI failed on {pr_url} at {head}: {}.", checks.join(", "));
     if after_update {
         body.push_str(
-            " It passed before the base branch was merged into the PR, so the failure came in with that merge: \
-             something that landed on the base branch clashes with this change.",
+            " The base branch was merged into the PR after it was reviewed, so the failure may have come in with \
+             that merge: something that landed on the base branch may clash with this change. CI wasn't seen to \
+             pass before the merge, so check whether the failure is your change's own too.",
         );
     }
     for (check, log) in logs {
@@ -460,6 +472,15 @@ pub fn ci_failure_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ci_failure_feedback_does_not_claim_ci_passed_before_an_update() {
+        let plain = ci_failure_feedback("url", "abc", &["test".to_string()], false, &[], "main");
+        assert!(!plain.contains("merged into the PR after"), "{plain}");
+        let updated = ci_failure_feedback("url", "abc", &["test".to_string()], true, &[], "main");
+        assert!(updated.contains("merged into the PR after it was reviewed"), "{updated}");
+        assert!(!updated.contains("It passed"), "{updated}");
+    }
 
     #[test]
     fn bad_metadata_note_names_the_fix_for_the_fields_or_the_whole_value() {
@@ -575,6 +596,8 @@ mod tests {
         assert!(budget_breach_question("r", "sb", false).contains("destroyed"));
         assert!(infra_question(3, 3, "boom").contains("`max_infra_failures`"));
         assert!(review_infra_question(3, 3, "boom").contains("while reviewing the PR"));
+        let q = review_no_verdict_question(3, 3, "boom");
+        assert!(q.contains("ended without a verdict") && !q.contains("infrastructure failed"));
         assert!(conflict_rework_limit_question(2, 2).contains("`max_conflict_reworks`"));
         assert!(ci_rework_limit_question(2, 2, "red").contains("CI keeps failing"));
         assert!(review_rework_limit_question(2, 2, "r", "b").contains("`max_review_rounds`"));

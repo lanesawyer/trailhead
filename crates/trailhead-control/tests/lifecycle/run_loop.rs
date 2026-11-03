@@ -493,3 +493,35 @@ async fn a_drain_ends_when_the_last_run_errors_and_the_daemon_no_longer_has_it()
     gate.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(10), handle).await.unwrap().unwrap().unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_run_loop_holds_due_reviews_while_the_server_is_down() {
+    let mut r = rig();
+    let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = up.clone();
+    r.factory = r.factory.with_server_check(Box::new(move || {
+        let up = seen.load(std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move { if up { Ok(()) } else { Err("connection refused".to_string()) } })
+    }));
+    let key = r.tracker.add_task("TRAIL", "Unreviewed", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
+
+    let factory = Arc::new(r.factory);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle =
+        tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), std::time::Duration::from_millis(5), async {
+            let _ = stopped.await;
+        }));
+    let tracker = r.tracker.clone();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(tracker.task(&key).run.reviewed, None, "no reviewer starts while the server is down");
+    up.store(true, std::sync::atomic::Ordering::SeqCst);
+    until("the review to land once the server is back", || tracker.task(&key).run.reviewed == Some(1)).await;
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}

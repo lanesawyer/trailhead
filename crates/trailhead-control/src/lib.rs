@@ -173,6 +173,8 @@ pub struct Reconciled {
     pub reviewed: Vec<String>,
     /// Tasks whose review asked for changes but stayed in review, now reopened for a rework or parked.
     pub reworked: Vec<String>,
+    /// Tasks whose reviewer breached its budget and whose park was cut short, now parked for a human.
+    pub breached: Vec<String>,
     /// In-review tasks whose PR no longer merges cleanly, now reopened to merge the base branch in or parked.
     pub conflicted: Vec<String>,
     /// In-review tasks whose PR was merged, now done.
@@ -186,6 +188,12 @@ pub struct Reconciled {
 }
 
 impl Factory {
+    /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).
+    #[doc(hidden)]
+    pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {
+        self.updating.lock().unwrap().contains_key(task)
+    }
+
     /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
     pub fn new(
         config: FactoryConfig,

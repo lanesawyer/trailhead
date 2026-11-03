@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use trailhead_factory::{
-    CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, Sandbox, SandboxSpec, Task, label,
+    CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, Sandbox, SandboxSpec, Task,
+    install_host_allowed, label,
 };
 
 use crate::timing::backoff;
@@ -20,6 +21,13 @@ impl Factory {
             let mut egress = self.install_egress();
             let mut opened = Vec::new();
             for need in &needs {
+                if !install_host_allowed(&req, need) {
+                    tracing::warn!(sandbox = %sandbox.name, host = %need.host, tool = %need.tool, "refusing install egress the daemon asked for outside the tool table and [factory.egress.tools]");
+                    return Err(Error::Other(format!(
+                        "the daemon asked to open `{}` for `{}`, which isn't in the install host table or [factory.egress.tools]",
+                        need.host, need.tool
+                    )));
+                }
                 tracing::info!(sandbox = %sandbox.name, host = %need.host, tool = %need.tool, "opening install egress");
                 if !egress.domains.contains(&need.host) {
                     egress.domains.push(need.host.clone());
@@ -209,7 +217,14 @@ impl Factory {
             return p.compute.destroy(&sandbox.id).await;
         }
         p.daemon.forget(&sandbox.id).await;
-        p.compute.set_labels(&sandbox.id, &self.pooled(Some(p), label::IDLE, Some(&warm), None)).await
+        // The warm checkpoint was built for the stack the sandbox is labelled with, which isn't the current
+        // `[stack]` if the config changed while it was busy: carry the label over rather than recompute it.
+        let mut labels = self.pooled(Some(p), label::IDLE, Some(&warm), None);
+        match sandbox.labels.get(label::STACK) {
+            Some(stack) => labels.insert(label::STACK.into(), stack.clone()),
+            None => labels.remove(label::STACK),
+        };
+        p.compute.set_labels(&sandbox.id, &labels).await
     }
 
     /// The first free `<repo>-w<n>` name.

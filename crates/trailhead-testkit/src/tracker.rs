@@ -96,7 +96,7 @@ impl FakeTracker {
         self.state.lock().unwrap().context_fails = fails;
     }
 
-    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report` or `release`) fail, as a tracker outage would.
+    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report`, `release`, `ask`, `finish` or `revoke_sub_agent`) fail, as a tracker outage would.
     pub fn fail_next(&self, agent: &str, op: &'static str, times: usize) {
         self.state.lock().unwrap().failing.insert((agent.to_string(), op), times);
     }
@@ -349,6 +349,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn claim(&self, task: &TaskKey) -> Result<()> {
+        self.inject("claim")?;
         self.write(task, |t, me| match (&t.holder, t.status) {
             (Some(h), _) if h == me => Ok(()),
             (None, Status::Open) => {
@@ -422,6 +423,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn reopen(&self, task: &TaskKey) -> Result<()> {
+        self.inject("reopen")?;
         self.write(task, |t, _| {
             if !can_transition(t.status, Status::Open) {
                 return Err(Error::Conflict(format!("{} can't be reopened from {:?}", t.key.0, t.status)));
@@ -459,6 +461,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn ask(&self, task: &TaskKey, question: &str) -> Result<()> {
+        self.inject("ask")?;
         self.write(task, |t, me| {
             held_by_me(t, me)?;
             t.status = Status::NeedsInput;
@@ -476,6 +479,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
+        self.inject("finish")?;
         self.write(task, |t, me| {
             // Like core: review states need no claim, and an unclaimed task can be finished by anyone, but
             // not one another agent holds.
@@ -550,6 +554,7 @@ impl Tracker for FakeTracker {
 
     async fn revoke_sub_agent(&self, name: &str) -> Result<()> {
         self.check_live()?;
+        self.inject("revoke_sub_agent")?;
         let full = format!("{}/{name}", self.agent);
         let mut s = self.state.lock().unwrap();
         for (n, a) in s.agents.iter_mut() {

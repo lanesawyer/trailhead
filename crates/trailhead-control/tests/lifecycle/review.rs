@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use trailhead_control::Outcome;
-use trailhead_factory::{CiState, FollowUp, Role, RunOutcome, Status, TaskKey, Tracker, VerdictKind, run_name};
+use trailhead_factory::{CiState, FollowUp, PrRef, Role, RunOutcome, Status, TaskKey, Tracker, VerdictKind, run_name};
 use trailhead_testkit::Script;
 
 use crate::common::*;
@@ -487,6 +487,35 @@ async fn the_reviewers_infrastructure_failures_are_persisted_and_reset_by_a_fini
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_reviewers_infrastructure_failures_keep_counting_across_a_control_plane_restart() {
+    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 3");
+    let mut r = rig_with(&config);
+    let key = r.tracker.add_task("TRAIL", "Flaky review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    assert_eq!(r.tracker.task(&key).run.infra_failures, Some(1));
+
+    // A new factory has no backoff and no count in memory; the tracker's is what carries on.
+    restart(&mut r, &config);
+    r.daemon.fail_runs(1, "connection lost");
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "failure 2 is retried");
+    assert_eq!(task.run.infra_failures, Some(2), "the count keeps growing");
+
+    restart(&mut r, &config);
+    r.daemon.fail_runs(1, "connection lost");
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked at max_infra_failures");
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("it's not the task"), "{}", questions[0].body);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_review_cancelled_on_purpose_isnt_an_infrastructure_failure() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
     let key = r.tracker.add_task("TRAIL", "Stopped mid-review", "");
@@ -517,13 +546,19 @@ async fn a_reviewer_sandbox_that_wont_destroy_keeps_the_verdict() {
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
 
-    r.compute.fail(&format!("{}-1", trailhead_factory::review_name(&key, 1, 1)), "destroy");
+    let stubborn = format!("{}-1", trailhead_factory::review_name(&key, 1, 1));
+    r.compute.fail(&stubborn, "destroy");
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.reviewed.len(), 1, "the finished verdict isn't thrown away: {done:?}");
     let task = r.tracker.task(&key);
     assert_eq!(task.run.review_rounds, Some(1), "the round counts");
     assert_eq!(task.run.reviewed, task.run.attempt);
+    assert!(r.compute.get(&stubborn).is_some(), "the destroy failed, so the reviewer's sandbox is left for reconcile");
+
+    r.compute.heal(&stubborn);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.compute.get(&stubborn).is_none(), "a later reconcile destroys it");
 }
 
 #[tokio::test(start_paused = true)]
@@ -571,7 +606,7 @@ async fn reviews_that_end_without_a_verdict_back_off_and_park_at_the_cap() {
     assert_eq!(task.run.review_rounds, rounds, "the failed rounds are given back");
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
-    assert!(questions[0].body.contains("without a verdict"), "{}", questions[0].body);
+    assert!(questions[0].body.contains("ended without a verdict"), "{}", questions[0].body);
 }
 
 const NO_REVIEW_GATE: &str = r#"
@@ -621,4 +656,129 @@ async fn a_reviewer_is_shown_the_open_follow_ups_earlier_reviews_filed() {
     let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
     let shown: Vec<_> = review.task.context.follow_ups.iter().map(|f| f.key.clone()).collect();
     assert_eq!(shown, [open], "only this task's open follow-ups");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_breach_park_cut_short_is_finished_by_reconcile_without_a_rerun() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Big diff", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+
+    // The tracker fails to ask after the task was reopened and claimed.
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
+    r.tracker.fail_next("factory", "ask", 1);
+    let _ = r.factory.reconcile().await;
+    let task = r.tracker.task(&key);
+    assert_ne!(task.status, Status::NeedsInput);
+    let breach = task.run.review_breach.expect("the breach is recorded before the park");
+    assert!(!breach.parked);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert!(task.run.review_breach.unwrap().parked);
+    assert_eq!(task.run.review_rounds, Some(0));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("steps"), "{}", questions[0].body);
+}
+
+/// A task in review whose first review will breach its step budget, and the PR.
+async fn breaching_rig() -> (Rig, TaskKey, PrRef) {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Big diff", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
+    (r, key, pr)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_breach_park_finished_from_open_claims_the_task_first() {
+    let (r, key, _) = breaching_rig().await;
+    // The claim fails after the reopen: the task is left Open.
+    r.tracker.fail_next("factory", "claim", 1);
+    let _ = r.factory.reconcile().await;
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open);
+    assert!(!task.run.review_breach.expect("recorded before the reopen").parked);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert!(task.run.review_breach.unwrap().parked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_breach_whose_reopen_failed_is_settled_by_the_next_review() {
+    let (r, key, _) = breaching_rig().await;
+    r.tracker.fail_next("factory", "reopen", 1);
+    let _ = r.factory.reconcile().await;
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    assert!(!task.run.review_breach.expect("recorded").parked);
+
+    // The review runs again and asks for changes, which reopens the task for a rework.
+    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+    r.harness.push(Role::Reviewer, Script::new(request_changes("tidy")));
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.task(&key).run.review_breach.unwrap().parked, "the review settled the breach");
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.breached.is_empty(), "{done:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "left for the rework, not parked for the old breach");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_answered_breach_question_is_not_asked_again_when_the_final_report_failed() {
+    let (r, key, _) = breaching_rig().await;
+    // The mark is written before the ask, so no later report is left to fail; the ask is what fails here.
+    r.tracker.fail_next("factory", "ask", 1);
+    let _ = r.factory.reconcile().await;
+    let breach = r.tracker.task(&key).run.review_breach.unwrap();
+    assert!(!breach.parked, "taken back when the ask failed");
+
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert!(task.run.review_breach.unwrap().parked);
+
+    // A person answers: the task reopens, and reconcile doesn't park it again.
+    r.tracker.set_status(&key, Status::Open);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.breached.is_empty(), "{done:?}");
+    let questions = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").count();
+    assert_eq!(questions, 1);
+}
+
+#[tokio::test]
+async fn a_request_from_an_earlier_attempt_costs_no_host_call() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
+    r.factory.tick().await.unwrap();
+    // The rework runs as attempt 2 but its review doesn't finish, so the attempt-1 request is still the pending one.
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.attempt, Some(2));
+    assert!(task.run.pending_changes().is_some_and(|c| c.attempt == 1), "{:?}", task.run);
+
+    r.tracker.set_status(&key, Status::InReview);
+    let before = r.codehost.head_lookups();
+    r.factory.reconcile().await.unwrap();
+    // Asked only for the review's staleness check, not for the old request's recorded head.
+    assert!(r.codehost.head_lookups() <= before + 1, "{} lookups", r.codehost.head_lookups() - before);
 }
