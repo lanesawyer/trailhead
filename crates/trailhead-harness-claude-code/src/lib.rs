@@ -458,7 +458,8 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              you change in the checkout is published as one commit and a PR. If only a human can answer something \
              you need, stop and give needs_input with the question. A blocker in your environment (the network, a \
              missing tool, credentials) is needs_input, not failed: another attempt would meet the same blocker, \
-             so say what is missing. If the task can't be done for another reason, give failed and say why. When you finish, give `title`: a conventional commit title for the change, like \
+             so say what is missing. If the task can't be done for another reason, give failed and say \
+             why. When you finish, give `title`: a conventional commit title for the change, like \
              `fix(factory): send the prompt on stdin so big PRs can be reviewed`, with the type (feat, fix, \
              perf, refactor, docs, test, chore, ci or build) that fits what you did and the crate or area as \
              scope; the factory appends the task key. The factory tracks this task in Trailhead for you, so skip \

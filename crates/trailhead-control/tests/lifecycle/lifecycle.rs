@@ -979,3 +979,22 @@ async fn two_attempts_in_a_row_that_give_up_park_the_task_with_both_reasons() {
     assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
     assert_eq!(r.harness.contexts().len(), 2);
 }
+
+#[tokio::test]
+async fn a_give_up_after_failed_checks_is_retried_because_that_attempt_changed_the_checkout() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 4"));
+    let key = r.tracker.add_task("TRAIL", "Lint then give up", "");
+    r.daemon.fail_check("lint", "warning: unused variable");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "I couldn't make the build pass".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "only one attempt gave up");
+
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "still can't".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Parked { .. }), "{:?}", ran[0].1);
+}

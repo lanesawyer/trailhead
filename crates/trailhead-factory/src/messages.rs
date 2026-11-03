@@ -227,6 +227,12 @@ pub fn agent_gave_up(reason: &str) -> String {
     format!("The agent gave up: {reason}")
 }
 
+/// Whether a recorded failure is [`agent_gave_up`]'s, as opposed to failed checks, a lost merge or conflict markers,
+/// which all come from an attempt that changed the checkout.
+pub fn is_agent_gave_up(failure: &str) -> bool {
+    failure.starts_with(&agent_gave_up(""))
+}
+
 /// How much of a failed check's output goes on the task.
 const NOTE_TAIL: usize = 4000;
 

@@ -365,26 +365,28 @@ impl Factory {
                 let max = self.config.repo.max_attempts;
                 // Counted from the last review that asked for changes, so reworks get attempts of their own.
                 let failed = attempt.saturating_sub(task.run.attempt_floor());
-                // Two attempts in a row that gave up, the latest after one that did the same, say the cause is in the
-                // environment, not in a try that can improve: a failed run publishes nothing, so each starts from the
-                // same checkout; a run that failed its checks did change it, so it is left to try again. A human is asked now instead of after `max_attempts` (TRAIL-705).
+                // The failure the daemon just recorded for this attempt.
+                let last = match self.tracker.show(&task.key).await {
+                    Ok(shown) => shown.run.failure.filter(|f| !f.is_empty()),
+                    Err(e) => {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't read the last failure; parking without it");
+                        None
+                    }
+                };
+                // Two attempts in a row that gave up say the cause is in the environment, not in a try that can
+                // improve: a give-up publishes nothing, so each starts from the same checkout. Failed checks, a lost
+                // merge and conflict markers come from runs that changed it, so those are left to try again. A human
+                // is asked now instead of after `max_attempts` (TRAIL-705).
                 let repeated = task
                     .run
                     .failure
                     .clone()
-                    .filter(|f| !f.is_empty())
-                    .filter(|_| failed >= 2 && report.checks.is_empty());
+                    .filter(|before| messages::is_agent_gave_up(before))
+                    .filter(|_| failed >= 2 && last.as_deref().is_some_and(messages::is_agent_gave_up));
                 if failed >= max || repeated.is_some() {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
                     // A task that can't be read still parks, with this attempt's reason alone.
-                    let last = match self.tracker.show(&task.key).await {
-                        Ok(shown) => shown.run.failure.filter(|f| !f.is_empty()),
-                        Err(e) => {
-                            tracing::warn!(task = %task.key.0, error = %e, "couldn't read the last failure; parking without it");
-                            None
-                        }
-                    }
-                    .unwrap_or_else(|| reason.clone());
+                    let last = last.unwrap_or_else(|| reason.clone());
                     let question = match &repeated {
                         Some(before) if failed < max => messages::repeated_failure_question(before, &reason),
                         _ => messages::gave_up_question(failed, max, &reason, &last),
