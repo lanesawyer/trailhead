@@ -62,6 +62,7 @@ env = { DOCKER_HOST = "{{vars.docker_host}}" }
 run = [
   "cargo build -j 4 --release -p trailhead-daemon --bin trailhead-daemon",
   "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon cargo test -j 4 -p trailhead-compute-docker --test live -- --ignored --nocapture --test-threads=1 --skip credentials",
+  "TRAILHEAD_DAEMON_BIN={{config_root}}/target/release/trailhead-daemon cargo test -j 4 -p trailhead-compute-docker --test live_daemon -- --ignored --nocapture",
 ]
 
 [tasks.test-live-docker-credentials]
