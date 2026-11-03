@@ -145,11 +145,14 @@ impl Factory {
         p.compute.set_labels(&sandbox.id, &self.pooled(Some(p), label::BUSY, warm.as_deref(), Some(task))).await?;
         drop(pick);
         p.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
+        let started = Instant::now();
         if let Some(cp) = &warm {
             p.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
             p.daemon.forget(&sandbox.id).await;
         }
+        let restored = started.elapsed();
         p.compute.preflight(&sandbox.id).await?;
+        let preparing = Instant::now();
         let rework = branch.is_some();
         let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
         let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone()).await;
@@ -185,11 +188,30 @@ impl Factory {
             }
             return Err(e);
         }
+        let prepare_took = preparing.elapsed();
+        // A checkpoint pauses the sandbox while its whole filesystem is copied (minutes on Docker), and what it saves the
+        // next prepare is mostly dependencies, which rarely change. So the warm point is kept while a prepare from it
+        // takes no longer than taking a new one did; a slower prepare means it has gone stale.
+        let cost = self.warm_cost.lock().unwrap().get(&sandbox.id).copied();
+        let rewarm = warm.is_none() || cost.is_none_or(|cost| prepare_took > cost);
         let warmed = async {
-            let cp = p.compute.checkpoint(&sandbox.id, "warm").await?;
-            let labels = self.pooled(Some(p), label::BUSY, Some(&cp.0), Some(task));
-            p.compute.set_labels(&sandbox.id, &labels).await?;
+            let mut labels = self.pooled(Some(p), label::BUSY, warm.as_deref(), Some(task));
+            let checkpointing = Instant::now();
+            if rewarm {
+                let cp = p.compute.checkpoint(&sandbox.id, "warm").await?;
+                self.warm_cost.lock().unwrap().insert(sandbox.id.clone(), checkpointing.elapsed());
+                labels = self.pooled(Some(p), label::BUSY, Some(&cp.0), Some(task));
+                p.compute.set_labels(&sandbox.id, &labels).await?;
+            }
             p.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+            tracing::info!(
+                sandbox = %sandbox.name,
+                restore_s = restored.as_secs(),
+                prepare_s = prepare_took.as_secs(),
+                checkpoint_s = rewarm.then(|| checkpointing.elapsed().as_secs()),
+                total_s = started.elapsed().as_secs(),
+                "worker sandbox ready"
+            );
             Ok::<_, Error>(labels)
         }
         .await;

@@ -35,6 +35,8 @@ pub struct FakeCompute {
     wake_attempts: Arc<Mutex<BTreeMap<String, usize>>>,
     /// Whether the compute's API is down: listing fails, while its sandboxes carry on.
     unreachable: Arc<std::sync::atomic::AtomicBool>,
+    /// How long a warm checkpoint takes, on tokio's clock.
+    checkpoint_takes: Arc<Mutex<std::time::Duration>>,
 }
 
 impl FakeCompute {
@@ -118,6 +120,11 @@ impl FakeCompute {
         self.failing.lock().unwrap().insert((name.to_string(), op));
     }
 
+    /// Makes every later warm checkpoint take `takes` on tokio's clock, for a test with paused time.
+    pub fn checkpoint_takes(&self, takes: std::time::Duration) {
+        *self.checkpoint_takes.lock().unwrap() = takes;
+    }
+
     /// Like [`FakeCompute::fail`], once `calls` calls of the operation have succeeded: a sandbox that goes bad mid-run.
     pub fn fail_after(&self, name: &str, op: &'static str, calls: usize) {
         self.failing_after.lock().unwrap().insert((name.to_string(), op), calls);
@@ -193,6 +200,11 @@ impl Compute for FakeCompute {
         // The pool's warm checkpoint is taken before a run starts, so a test can't fail only later ones through it.
         if note != "warm" {
             self.check(id, "checkpoint")?;
+        } else {
+            let takes = *self.checkpoint_takes.lock().unwrap();
+            if !takes.is_zero() {
+                tokio::time::sleep(takes).await;
+            }
         }
         self.with(id, |l| {
             let cp = CheckpointId(format!("{}-cp{}", id.0, l.checkpoints.len() + 1));

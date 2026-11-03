@@ -52,6 +52,8 @@ pub struct FakeWorkspace {
     /// Outputs the next prepares that run a `setup` check fail it with, after the checkout is otherwise ready.
     setup_errors: Mutex<Vec<String>>,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
+    /// How long each later prepare takes, on tokio's clock.
+    prepare_takes: Mutex<Duration>,
 }
 
 #[async_trait]
@@ -70,6 +72,10 @@ impl Workspace for FakeWorkspace {
         let gate = self.prepare_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.notified().await;
+        }
+        let takes = *self.prepare_takes.lock().unwrap();
+        if !takes.is_zero() {
+            tokio::time::sleep(takes).await;
         }
         if let Some(error) = self.prepare_errors.lock().unwrap().pop() {
             return Err(Error::Other(error));
@@ -305,6 +311,11 @@ impl LocalDaemon {
     /// Makes every later prepare wait for `gate`, like a cold build.
     pub fn gate_prepare(&self, gate: Arc<Notify>) {
         *self.workspace.prepare_gate.lock().unwrap() = Some(gate);
+    }
+
+    /// Makes every later prepare take `takes` on tokio's clock, for a test with paused time.
+    pub fn prepare_takes(&self, takes: Duration) {
+        *self.workspace.prepare_takes.lock().unwrap() = takes;
     }
 
     /// Prepares the workspace has begun, including ones still running.
