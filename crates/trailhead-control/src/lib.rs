@@ -14,9 +14,11 @@ mod reconcile;
 mod review;
 mod run_loop;
 mod spend;
+mod status;
 mod timing;
 
 pub use core_tracker::CoreTracker;
+pub use status::StatusBoard;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -148,6 +150,8 @@ pub struct Factory {
     ledger: Arc<spend::Ledger>,
     /// The targets last reported as at their daily cap, so reaching it and leaving it are each logged once.
     capped: Mutex<HashSet<String>>,
+    /// What this control plane shows of itself to `factory status` and the UI.
+    status: Arc<StatusBoard>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -243,6 +247,7 @@ impl Factory {
             placed: Arc::default(),
             ledger: Arc::default(),
             capped: Mutex::default(),
+            status: StatusBoard::new(),
         }
     }
 
@@ -257,6 +262,17 @@ impl Factory {
     pub fn with_spend_file(mut self, path: std::path::PathBuf) -> Factory {
         self.ledger = Arc::new(spend::Ledger::kept_in(path, &spend::today()));
         self
+    }
+
+    /// Publishes to `board` instead of a board of its own, to share one between repos or with a server.
+    pub fn with_status(mut self, board: Arc<StatusBoard>) -> Factory {
+        self.status = board;
+        self
+    }
+
+    /// The live status board: the snapshot and the stream of events.
+    pub fn status(&self) -> &Arc<StatusBoard> {
+        &self.status
     }
 
     /// Checks the server is reachable before starting runs, and starts none while it isn't.

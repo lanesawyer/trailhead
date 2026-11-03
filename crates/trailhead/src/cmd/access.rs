@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use trailhead_server::creds::{Cred, Saved};
+use trailhead_client::creds::{Cred, Saved};
 
 use super::{Ctx, print_json};
 use crate::cli::{AgentCmd, TokenCmd};

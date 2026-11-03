@@ -35,6 +35,7 @@ anyhow = "1"
 async-trait = "0.1"
 toml = "1"
 trailhead-core = { path = "crates/trailhead-core", version = "0.1.0" }
+trailhead-client = { path = "crates/trailhead-client", version = "0.1.0" }
 trailhead-server = { path = "crates/trailhead-server", version = "0.1.0" }
 trailhead-factory = { path = "crates/trailhead-factory" }
 trailhead-testkit = { path = "crates/trailhead-testkit" }

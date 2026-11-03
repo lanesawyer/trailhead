@@ -2,7 +2,6 @@
 //! adapter over [`trailhead_core::Store`].
 
 mod auth;
-pub mod creds;
 mod error;
 mod idempotency;
 mod llms;
@@ -21,6 +20,7 @@ use std::time::Duration;
 
 use axum::Router;
 use tower_http::trace::TraceLayer;
+use trailhead_client::creds;
 use trailhead_core::{Ctx, DEFAULT_REMINDER_WINDOW, Principal, Store};
 
 pub use auth::BATCH_HEADER;
@@ -206,17 +206,6 @@ pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::
         }
     }
     Ok((store, ctx))
-}
-
-/// Writes a token readable only by the current user.
-pub fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    std::io::Write::write_all(&mut opts.open(path)?, format!("{secret}\n").as_bytes())
 }
 
 /// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first.

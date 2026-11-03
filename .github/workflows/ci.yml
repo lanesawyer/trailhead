@@ -67,7 +67,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Only the published crates; the factory crates are publish = false until they're ready.
-      - run: cargo package --locked -p trailhead-core -p trailhead-server -p trailhead
+      - run: cargo package --locked -p trailhead-core -p trailhead-client -p trailhead-server -p trailhead
       # rust-cache's cleanup trips over the unpacked crates and logs ENOENT errors.
       - if: always()
         run: rm -rf target/package

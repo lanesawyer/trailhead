@@ -33,6 +33,7 @@ use iroh::{Endpoint, SecretKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tracing::Instrument;
+use trailhead_client::creds::{Cred, CredStore};
 use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
@@ -44,13 +45,13 @@ use trailhead_factory::{
     Compute, ComputeConfig, Daemon, FactoryConfig, HarnessSecrets, ProviderKind, Registry, Target,
 };
 use trailhead_provider_anthropic::Anthropic;
-use trailhead_server::creds::{Cred, CredStore};
 
 mod find;
 mod fnox;
 mod login;
 mod ops;
 mod repos;
+mod surface;
 mod wake;
 
 /// The agent the control plane acts as; sandboxes get its sub-agents.
@@ -677,6 +678,12 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
         }
         Cmd::Run(run) => {
             let Setup { repos, tunnel, _lock, store, ctx } = setup(&run).await?;
+            let paths =
+                trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+            // Beside the lock, so it exists and says the same thing: this machine has one control plane.
+            let boards = repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect();
+            let serving = surface::serve(&paths.data_dir.join("factory"), boards).await?;
+            tracing::info!(addr = %serving.addr, "serving factory status for `trailhead-factory status` and `logs --follow`");
             // The first Ctrl-C drains; the second cancels what is left.
             let (drain_tx, drain) = tokio::sync::watch::channel(false);
             let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
@@ -705,6 +712,7 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
                     }
                 }
             }
+            drop(serving);
             tunnel.shutdown().await.map_err(|e| e.to_string())?;
             match failed {
                 0 => Ok(()),

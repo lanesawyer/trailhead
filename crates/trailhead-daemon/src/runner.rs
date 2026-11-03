@@ -186,7 +186,7 @@ impl Runner {
             }
         };
         let finished = tokio::select! {
-            done = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge) => done,
+            done = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge, &events) => done,
             () = beating => unreachable!("heartbeats don't end"),
         };
         let (result, checks) = match finished {
@@ -371,6 +371,7 @@ impl Runner {
         (out, retried)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn finish(
         &self,
         req: &RunRequest,
@@ -379,6 +380,7 @@ impl Runner {
         cancel: &Notify,
         start: &str,
         merge: Merge,
+        events: &EventSink,
     ) -> Result<(RunResult, Vec<CheckResult>)> {
         let key = &req.task.key;
         match outcome {
@@ -410,6 +412,7 @@ impl Runner {
                         return Ok((RunResult::Failed(reason), vec![]));
                     }
                 }
+                let _ = events.send(RunEvent::Checking);
                 let (checks, retried) = tokio::select! {
                     biased;
                     _ = cancel.notified() => return Err(Error::Cancelled),
@@ -423,6 +426,7 @@ impl Runner {
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), checks));
                 }
+                let _ = events.send(RunEvent::Publishing);
                 let notes = format!("{}{}", messages::flaky_checks(&retried), messages::skipped_checks(&checks));
                 let pr = match self.publish(req, tracker.agent(), start, commits, summary, &notes).await {
                     Ok(pr) => pr,

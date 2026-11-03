@@ -6,7 +6,8 @@ use reqwest::{Method, StatusCode, Url};
 use serde_json::Value;
 use trailhead_server::{Paths, modified_ms};
 
-use trailhead_server::creds::{Cred, CredStore};
+use trailhead_client::creds::{Cred, CredStore};
+pub use trailhead_client::{ApiError, Health};
 
 /// The agent to act as, and the `.trailhead.toml` that chose it, if one did.
 pub struct Identity {
@@ -25,21 +26,6 @@ pub struct Client {
     /// Where this server's tokens are saved on this machine.
     pub creds: CredStore,
 }
-
-/// An API error with its stable code, so the CLI can print `error[claim_held]: ...`.
-#[derive(Debug)]
-pub struct ApiError {
-    pub code: String,
-    pub message: String,
-}
-
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "error[{}]: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for ApiError {}
 
 pub fn is_local(url: &Url) -> bool {
     matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
@@ -120,12 +106,7 @@ impl Client {
         if status.is_success() {
             return Ok(v);
         }
-        let err = &v["error"];
-        Err(ApiError {
-            code: err["code"].as_str().unwrap_or("unknown").into(),
-            message: err["message"].as_str().unwrap_or("request failed").into(),
-        }
-        .into())
+        Err(ApiError::from_body(&v).into())
     }
 
     /// Follows `GET /v1/events/stream`, calling `on_event` with each event's JSON.
@@ -346,20 +327,6 @@ pub fn http_and_base(url: &str) -> Result<(reqwest::Client, Url)> {
     let base = Url::parse(url).with_context(|| format!("bad server URL {url}"))?.join("/v1/")?;
     let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
     Ok((http, base))
-}
-
-/// `/v1/health` as the CLI reads it. Every field is optional so an older or newer
-/// server still counts as running.
-#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
-#[serde(default)]
-pub struct Health {
-    pub version: Option<String>,
-    pub instance: Option<String>,
-    pub pid: Option<u32>,
-    pub exe: Option<std::path::PathBuf>,
-    pub exe_modified_ms: Option<u64>,
-    pub db: Option<std::path::PathBuf>,
-    pub started_at: Option<String>,
 }
 
 /// The server's pid and paths come back only with a `token`.

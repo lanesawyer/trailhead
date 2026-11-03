@@ -7918,10 +7918,21 @@ dependencies = [
  "tokio",
  "toml",
  "tracing-subscriber",
+ "trailhead-client",
  "trailhead-core",
  "trailhead-factory",
  "trailhead-server",
  "uuid",
+]
+
+[[package]]
+name = "trailhead-client"
+version = "0.1.0"
+dependencies = [
+ "keyring",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -8063,6 +8074,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "futures-util",
+ "getrandom 0.4.3",
  "hex",
  "iroh",
  "reqwest",
@@ -8072,6 +8085,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "trailhead-client",
  "trailhead-codehost-github",
  "trailhead-compute-docker",
  "trailhead-compute-sprites",
@@ -8121,7 +8135,6 @@ dependencies = [
  "http 1.5.0",
  "http-body-util",
  "jiff",
- "keyring",
  "reqwest",
  "rmcp",
  "serde",
@@ -8131,6 +8144,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-http 0.7.1",
  "tracing",
+ "trailhead-client",
  "trailhead-core",
  "utoipa",
  "uuid",

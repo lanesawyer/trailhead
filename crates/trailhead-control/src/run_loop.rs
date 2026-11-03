@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 use tokio::task::{self, JoinSet};
 use tracing::Instrument;
 use trailhead_factory::messages;
-use trailhead_factory::{Labels, Result, Role, RunUpdate, Sandbox, Status, Task, TaskKey, label};
+use trailhead_factory::{ControlState, Labels, Result, Role, RunUpdate, Sandbox, Status, Task, TaskKey, label};
 
 use crate::timing::{unix_now, until};
 use crate::{FACTORY_LABEL, Factory, Outcome, Reconciled, SHUTDOWN_GRACE};
@@ -52,6 +52,7 @@ impl Factory {
             }
             if dirty {
                 dirty = false;
+                self.status.control(ControlState::Reconciling);
                 match self.reconcile_deferring(&keys.values().cloned().collect()).await {
                     Ok((done, due)) => {
                         if done != Reconciled::default() || !due.reviews.is_empty() {
@@ -83,8 +84,12 @@ impl Factory {
                             reviews.insert(handle.id());
                         }
                     }
-                    Err(e) => tracing::warn!(error = %e, "reconcile failed"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "reconcile failed");
+                        self.status.error(format!("reconcile failed: {e}"));
+                    }
                 }
+                self.status.control(ControlState::Up);
                 if (&mut shutdown).now_or_never().is_some() {
                     break;
                 }
@@ -97,6 +102,7 @@ impl Factory {
             }
             if !draining && let Err(e) = self.start_ready(&mut running, &mut keys, reviews.len()).await {
                 tracing::warn!(error = %e, "couldn't start ready tasks");
+                self.status.error(format!("couldn't start ready tasks: {e}"));
             }
             let resume = self.paused_until().map(|(_, _, resets_at)| until(resets_at));
             tokio::select! {
@@ -124,6 +130,7 @@ impl Factory {
                         reviews.remove(&id);
                         let key = keys.remove(&id);
                         tracing::warn!(task = ?key, error = %e, "run failed; reconciling");
+                        self.status.error(format!("{} failed: {e}", key.as_ref().map_or("a run", |k| k.0.as_str())));
                         dirty = true;
                     }
                     Err(e) => {
@@ -148,6 +155,7 @@ impl Factory {
             }
         }
         running.shutdown().await;
+        self.status.control(ControlState::Stopped);
         Ok(())
     }
 
