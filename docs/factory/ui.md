@@ -112,7 +112,7 @@ default-members = ["crates/*"]
 
 - Plain `cargo build` and `cargo test` and the factory's sandboxes build only `crates/*`; the UI builds with `-p trailhead-lookout` or `--workspace`. CI checks the whole workspace on every PR, the UI in its own job, never skipped by path (decided 2026-11-02). In the factory, UI checks run only when a task's diff touches `clients/**` (TRAIL-691), and until they do, `clients/**` is grade 3.
 - Bevy's dependencies share `Cargo.lock` with the server. If an upgrade forces a version bump on a shared dependency, or rust-analyzer's indexing gets slow, move the UI to its own repo.
-- The UI depends on the API, not on `trailhead-core`. Request and response types come from a hand-written client crate in `crates/`, shared with the CLI (TRAIL-693).
+- The UI depends on the API, not on `trailhead-core`. Request and response types come from a hand-written client crate, `crates/trailhead-client`, shared with the CLI (TRAIL-693): saved credentials (`creds`) and the `Health` and `ApiError` bodies.
 
 ## First steps
 
