@@ -110,7 +110,7 @@ impl Default for GradesConfig {
                         "rustfmt.toml",
                     ]),
                 ),
-                ("3".to_string(), globs(&["**/Cargo.toml", "Cargo.lock", "**/migrations/**"])),
+                ("3".to_string(), globs(&["**/Cargo.toml", "**/migrations/**"])),
                 // What steers the agents themselves, as well as CI and the factory's own policy.
                 (
                     "4".to_string(),
@@ -124,6 +124,15 @@ impl Default for GradesConfig {
                         "skills/**",
                         ".trailhead.toml",
                         "LICENSE",
+                        // A new package gets a person's look, since workers may fetch them (TRAIL-704).
+                        "**/Cargo.lock",
+                        "**/package-lock.json",
+                        "**/pnpm-lock.yaml",
+                        "**/yarn.lock",
+                        "**/uv.lock",
+                        "**/poetry.lock",
+                        "**/go.sum",
+                        "**/Gemfile.lock",
                     ]),
                 ),
             ]),
@@ -796,7 +805,8 @@ impl FactoryConfig {
     }
 
     /// Readies a checkout, on `branch` when given: a worker's rework, or a reviewer's look at the PR's head. Only
-    /// workers build: a reviewer reads the diff, so it skips `setup`.
+    /// workers build: a reviewer reads the diff, so it skips `setup` and the stack's tools, saving a cold install of
+    /// mise and the toolchain on every fresh reviewer Sprite.
     pub fn prepare_request(&self, role: Role, branch: Option<String>) -> PrepareRequest {
         let named = |name: &str, c: &Option<String>| {
             c.as_ref().filter(|_| role == Role::Worker).map(|c| Check { name: name.into(), command: c.clone() })
@@ -811,8 +821,8 @@ impl FactoryConfig {
             trim: named("trim", &self.checks.trim),
             disk_warn_bytes: some(self.daemon.disk_warn_bytes),
             disk_limit_bytes: some(self.daemon.disk_limit_bytes),
-            tools: self.stack.tools.clone(),
-            tool_hosts: self.egress.tools.clone(),
+            tools: if role == Role::Worker { self.stack.tools.clone() } else { Default::default() },
+            tool_hosts: if role == Role::Worker { self.egress.tools.clone() } else { Default::default() },
         }
     }
 }
@@ -863,8 +873,16 @@ mod tests {
         assert_eq!(prepare.disk_warn_bytes, Some(DEFAULT_DISK_WARN_BYTES));
         assert_eq!(prepare.disk_limit_bytes, None);
         assert!(config.prepare_request(Role::Reviewer, None).trim.is_none(), "reviewers don't build");
+        assert!(config.prepare_request(Role::Reviewer, None).tools.is_empty(), "reviewers don't install the stack");
+        assert!(config.prepare_request(Role::Reviewer, None).tool_hosts.is_empty());
+        assert_eq!(config.prepare_request(Role::Worker, None).tools, config.stack.tools);
         assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
-        assert_eq!(config.grades, GradesConfig::default(), "this repo's rules are the documented example");
+        let mut documented = GradesConfig::default();
+        documented.rules.get_mut("3").unwrap().push("clients/**".into());
+        assert_eq!(
+            config.grades, documented,
+            "this repo's rules are the documented example, plus clients/** (TRAIL-703)"
+        );
         assert_eq!(config.merge.mode, MergeMode::On);
         assert!(config.gate(1).auto_merge);
         assert!(config.gate(2).auto_merge);
@@ -893,6 +911,30 @@ mod tests {
         assert_eq!(with("queue = [\"TRAIL-102\", \"TRAIL-167\"]"), ["TRAIL-102", "TRAIL-167"]);
         let err = parse(&SAMPLE.replace("[repo]\n", "[repo]\nqueue = []\n")).unwrap_err();
         assert!(err.to_string().contains("queue = [] is empty"), "{err}");
+    }
+    #[test]
+    fn lockfiles_are_grade_four_and_manifests_grade_three_by_default() {
+        let g = GradesConfig::default();
+        let grade_of = |path: &str| {
+            g.rules
+                .iter()
+                .filter(|(_, gl)| gl.iter().any(|p| crate::grade::glob_match(p, path)))
+                .map(|(k, _)| k.as_str())
+                .max()
+        };
+        for lock in [
+            "Cargo.lock",
+            "web/package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "uv.lock",
+            "poetry.lock",
+            "go.sum",
+            "Gemfile.lock",
+        ] {
+            assert_eq!(grade_of(lock), Some("4"), "{lock}");
+        }
+        assert_eq!(grade_of("crates/a/Cargo.toml"), Some("3"));
     }
     #[test]
     fn grades_default_to_the_documented_rules_and_parse_from_the_file() {

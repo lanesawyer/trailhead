@@ -16,13 +16,14 @@ The factory's own client for people: watch runs live, steer them, and author tas
 | Offline | No local actions without a live connection; no optimistic updates | Decided |
 | Identity | A user-principal token, the same kind the CLI holds | Decided (already built) |
 | Transport | Embedded iroh, dialing the control plane on its own UI protocol, not the daemons' API tunnel | Decided (2026-10-28) |
-| Platforms | Linux first, matching Trailhead; macOS and Windows stay open (TRAIL-131) | Leaning |
-| Name | Working name `trailhead-ui`; Lookout is a candidate ([naming.md](naming.md)) | Open |
+| Platforms | Linux first, matching Trailhead; macOS and Windows later through Bevy's own targets (TRAIL-131) | Decided (2026-11-02) |
+| Name | Lookout: crate `trailhead-lookout` in `clients/trailhead-lookout`, binary `lookout` | Decided (2026-11-02) |
+| API types | A hand-written client crate, not generated from the OpenAPI document; the API is ours and the UI reaches it through the iroh tunnel anyway | Decided (2026-11-02) |
 
 ## Views
 
 - **Trail map (watch).** The spatial view and the reason to use a game engine. Campsites are pooled Sprites, agents are run sub-agents (`factory/trail-42-a1`) moving between them, tasks are waypoints. Claims, handoffs, questions, review verdicts and spend show as movement and markers. Everything on it comes from the event stream.
-- **Task board (author).** Lists, filters and forms: create tasks under the queue task, write and edit specs, comment, answer questions. Leans on feathers' text input for multiline specs, so prototype that first.
+- **Task board (author).** Lists, filters and forms: create tasks under the queue task, write and edit specs, comment, answer questions. Leans on feathers' text input for multiline specs; no spike first, the editor is built with the forms and anything feathers lacks is filed then.
 - **Inspector (steer).** An overlay on either view for the selected task, run or agent: release a claim, cancel, move status, answer a question, approve `in_review` → `approved` (then `done`), undo an event, revert everything an agent did since a time.
 
 Approving needs care. In Trailhead, approving and merging are one step ([lifecycle.md](lifecycle.md): "approved and merged are the same step"), and in the MVP a person merges on GitHub and then marks the task `done` by hand. An approve button that only moves the status lets a task show `done` while its PR is still open, and still leaves the merge to GitHub. Until the merger agent exists, the inspector should either link to the PR and only offer `done` once the PR is merged, or show approving as "merge on GitHub" and let the factory notice the merge. Whichever the factory adopts (a merger agent, or closing tasks when their PR merges), the UI follows it instead of adding a third path.
@@ -92,7 +93,7 @@ When the factory isn't running, the map shows Trailhead's last known state (clai
 
 ## Repo layout
 
-The UI lives at `clients/trailhead-ui`, outside `crates/`, so the default build never compiles Bevy. Glob support in `default-members` was checked with cargo 1.97.
+The UI lives at `clients/trailhead-lookout`, outside `crates/`, so the default build never compiles Bevy. Glob support in `default-members` was checked with cargo 1.97.
 
 ```toml
 [workspace]
@@ -100,16 +101,19 @@ members = ["crates/*", "clients/*"]
 default-members = ["crates/*"]
 ```
 
-- `cargo build`, `cargo test`, CI and Sprites build only `crates/*`; the UI builds with `-p trailhead-ui` or `--workspace`, in its own CI job.
+- Plain `cargo build` and `cargo test` and the factory's sandboxes build only `crates/*`; the UI builds with `-p trailhead-lookout` or `--workspace`. CI checks the whole workspace on every PR, the UI in its own job, never skipped by path (decided 2026-11-02). In the factory, UI checks run only when a task's diff touches `clients/**` (TRAIL-691), and until they do, `clients/**` is grade 3.
 - Bevy's dependencies share `Cargo.lock` with the server. If an upgrade forces a version bump on a shared dependency, or rust-analyzer's indexing gets slow, move the UI to its own repo.
-- The UI depends on the API, not on `trailhead-core`. Request and response types come from a client crate or the OpenAPI document (to decide).
+- The UI depends on the API, not on `trailhead-core`. Request and response types come from a hand-written client crate in `crates/`, shared with the CLI (TRAIL-693).
 
 ## First steps
 
-Prerequisite, on the factory side: the status surface above, built with `factory status` and `logs` (TRAIL-109).
+Decided (2026-11-02): the factory builds the UI. The epic is TRAIL-685 and it is a factory queue task, so its subtasks run like TRAIL-102's. A sandbox can't open a window, so UI tasks test headlessly (`MinimalPlugins`) and the look gets a human review. The multiline-editor spike is dropped.
 
-1. Spike multiline spec editing in feathers' text input.
-2. Net thread: login, the three-step sync, the stream, and the `Connection` state, over a plain loopback URL first.
-3. Task board and inspector against a local server.
-4. The `trailhead/ui/0` protocol and its allowlist, then remote use.
-5. Trail map.
+1. Scaffold `clients/trailhead-lookout`, CI over the whole workspace (TRAIL-690); a shared client crate for API types and credentials (TRAIL-693).
+2. The control plane's `trailhead/ui/0` protocol with API forwarding and its allowlist (TRAIL-700). Iroh from the start, decided 2026-11-02: reaching your factory from anywhere is the point, so there's no loopback-only stage.
+3. Net thread over iroh, login and `Connection` (TRAIL-694); sync and the stream into the ECS mirror (TRAIL-695); commands (TRAIL-696).
+4. Task board (TRAIL-697), forms with the spec editor (TRAIL-698), inspector (TRAIL-699).
+5. The control plane's status snapshot and stream (TRAIL-692), carried over `trailhead/ui/0` into Lookout (TRAIL-701).
+6. Trail map (TRAIL-702).
+
+On the factory side: checks scoped to paths (TRAIL-691), then UI checks, disk and time for Bevy builds in `.trailhead.toml` (TRAIL-703).

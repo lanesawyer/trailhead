@@ -130,7 +130,9 @@ impl Factory {
             },
         )
         .await?;
-        self.tracker.revoke_sub_agent(&name).await?;
+        if let Err(e) = self.tracker.revoke_sub_agent(&name).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the reviewer's sub-agent; its token will expire");
+        }
         match run {
             Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
                 self.setbacks.lock().unwrap().remove(&task.key);
