@@ -6,11 +6,14 @@ project = "TRAIL"
 
 [factory.repo]
 # owner and name come from the git remote; the project is the one above.
-max_sandboxes = 2
+max_sandboxes = 1
 # Until TRAIL-159 and TRAIL-172 stop infrastructure blips counting, leave room for a few.
 max_attempts = 5
 # Only subtasks of this task are the factory's work.
 queue = "TRAIL-102"
+
+[factory.compute]
+kind = "docker"
 
 [factory.stack]
 tools = { rust = "stable" }
@@ -61,7 +64,7 @@ role = "worker"
 adapter = "claude-code"
 provider = "anthropic"
 model = "sonnet"
-budget = { usd = 5, minutes = 60, steps = 60 }
+budget = { usd = 5, minutes = 60, steps = 120 }
 
 [factory.profiles.reviewer]
 role = "reviewer"
