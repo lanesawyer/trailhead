@@ -103,7 +103,7 @@ impl Factory {
 
     /// A worker sandbox for `task` from the repo's pool (`docs/factory/sandbox.md`): an idle one restored to its warm
     /// checkpoint, or a new one when none is idle. The tick's room check keeps the pool within `max_sandboxes`.
-    /// The prepared checkout becomes the new warm checkpoint, so the next task starts from it.
+    /// The prepared checkout becomes the new warm checkpoint when the old one has gone stale (TRAIL-707).
     /// A rework whose `setup` fails still gets its sandbox, with the failure output returned beside it.
     pub(crate) async fn acquire_worker(
         &self,
@@ -148,20 +148,27 @@ impl Factory {
             return Err(e);
         }
         drop(pick);
+        let began = Instant::now();
         let started = async {
             p.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
             if let Some(cp) = &warm {
                 p.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
                 p.daemon.forget(&sandbox.id).await;
             }
-            p.compute.preflight(&sandbox.id).await
+            let restored = began.elapsed();
+            p.compute.preflight(&sandbox.id).await?;
+            Ok::<_, Error>(restored)
         }
         .await;
-        if let Err(e) = started {
-            // Labelled busy but never handed out: without this it holds its disk until reconcile.
-            self.give_back(&sandbox, &busy).await;
-            return Err(e);
-        }
+        let restored = match started {
+            Ok(restored) => restored,
+            Err(e) => {
+                // Labelled busy but never handed out: without this it holds its disk until reconcile.
+                self.give_back(&sandbox, &busy).await;
+                return Err(e);
+            }
+        };
+        let preparing = Instant::now();
         let rework = branch.is_some();
         let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
         let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone()).await;
@@ -193,11 +200,30 @@ impl Factory {
             }
             return Err(e);
         }
+        let prepare_took = preparing.elapsed();
+        // A checkpoint pauses the sandbox while its whole filesystem is copied (minutes on Docker), and what it saves the
+        // next prepare is mostly dependencies, which rarely change. So the warm point is kept while a prepare from it
+        // takes no longer than taking a new one did; a slower prepare means it has gone stale.
+        let cost = self.warm_cost.lock().unwrap().get(&sandbox.id).copied();
+        let rewarm = warm.is_none() || cost.is_none_or(|cost| prepare_took > cost);
         let warmed = async {
-            let cp = p.compute.checkpoint(&sandbox.id, "warm").await?;
-            let labels = self.pooled(Some(p), label::BUSY, Some(&cp.0), Some(task));
-            p.compute.set_labels(&sandbox.id, &labels).await?;
+            let mut labels = busy.clone();
+            let checkpointing = Instant::now();
+            if rewarm {
+                let cp = p.compute.checkpoint(&sandbox.id, "warm").await?;
+                self.warm_cost.lock().unwrap().insert(sandbox.id.clone(), checkpointing.elapsed());
+                labels = self.pooled(Some(p), label::BUSY, Some(&cp.0), Some(task));
+                p.compute.set_labels(&sandbox.id, &labels).await?;
+            }
             p.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+            tracing::info!(
+                sandbox = %sandbox.name,
+                restore_s = restored.as_secs(),
+                prepare_s = prepare_took.as_secs(),
+                checkpoint_s = rewarm.then(|| checkpointing.elapsed().as_secs()),
+                total_s = began.elapsed().as_secs(),
+                "worker sandbox ready"
+            );
             Ok::<_, Error>(labels)
         }
         .await;
