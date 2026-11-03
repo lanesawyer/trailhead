@@ -9,8 +9,8 @@ project = "TRAIL"
 max_sandboxes = 1
 # Until TRAIL-159 and TRAIL-172 stop infrastructure blips counting, leave room for a few.
 max_attempts = 5
-# Only subtasks of this task are the factory's work.
-queue = "TRAIL-102"
+# Only subtasks of these tasks are the factory's work: general work, and the Bevy UI (TRAIL-685).
+queue = ["TRAIL-102", "TRAIL-685"]
 
 [factory.compute]
 kind = "docker"
@@ -34,7 +34,8 @@ install = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang
 [factory.grades]
 # Path globs that raise a PR to at least this grade (docs/factory/review.md#grades); the task's own grade is the floor.
 2 = ["crates/*/src/**", "crates/*/build.rs", "crates/*/benches/**", "crates/*/examples/**", "cliff.toml", "rustfmt.toml"]
-3 = ["**/Cargo.toml", "Cargo.lock", "**/migrations/**"]
+# clients/** until CI and the sandbox checks cover the UI (TRAIL-690, TRAIL-703).
+3 = ["**/Cargo.toml", "Cargo.lock", "**/migrations/**", "clients/**"]
 4 = [".github/**", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE"]
 max_lines = 600          # bigger diffs are at least grade 3
 

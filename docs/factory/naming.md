@@ -1,6 +1,6 @@
 # Naming ideas
 
-> **Undecided.** Brainstormed names, not what anything is called. The one exception is grades, which are decided.
+> **Undecided.** Brainstormed names, not what anything is called. The exceptions are grades and Lookout, which are decided.
 
 Undecided. The theme is PNW hiking and climbing, to match Trailhead. With the factory built into Trailhead, these work as names for its parts.
 
@@ -13,7 +13,7 @@ Undecided. The theme is PNW hiking and climbing, to match Trailhead. With the fa
 | Waterbar | Drainage bar that keeps water from wrecking a trail | Verification gate |
 | Grade | Climbing's Yosemite Decimal classes, by exposure | A change's risk tier (decided, [review.md](review.md#grades)) |
 | Treeline | Where routine ends and exposure begins | The line between grades that auto-merge and grades that need a human (decided) |
-| Lookout | PNW fire lookouts | Observability |
+| Lookout | PNW fire lookouts | The factory's Bevy app (decided 2026-11-02, [ui.md](ui.md)) |
 | Cairn | Rock-pile trail marker | Checkpoints |
 | Bivy | Emergency overnight shelter | Suspended, resumable sandbox |
 | Summit Register | Logbook every party signs | Event log |
