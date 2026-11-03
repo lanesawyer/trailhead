@@ -19,7 +19,7 @@ kind = "docker"
 tools = { rust = "stable" }
 
 [factory.checks]
-# Runs while install egress is open; the agent's phase can't reach crates.io.
+# Runs while install egress is open, so the warm checkpoint has every locked crate.
 setup = "cargo fetch --locked && cargo build --all-targets --locked"
 # Cuts target to 6 GiB before the warm checkpoint (docs/factory/sandbox.md); the cap costs about 24 s a task.
 trim = "\"$TRAILHEAD_DAEMON\" trim-cargo --cap 6442450944"
@@ -28,7 +28,9 @@ lint = "cargo clippy --all-targets -- -D warnings"
 test = "cargo test"
 
 [factory.egress]
-# crates.io and rustup while installing dependencies; nothing extra while the agent works.
+# crates.io stays open while the agent works, so it can add dependencies; a person approves any Cargo.lock change.
+always = ["crates.io", "index.crates.io", "static.crates.io"]
+# rustup only while installing.
 install = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang.org"]
 
 [factory.grades]
