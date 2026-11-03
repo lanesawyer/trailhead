@@ -452,27 +452,65 @@ impl Stack {
     }
 }
 
-/// The fixed set of named checks. A repo leaves out what it doesn't have; exit code 0 passes.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// A verifying check in `[factory.checks]`: a command, or a table of `run` and the `paths` it's limited to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CheckSpec {
+    /// Runs on every task.
+    Command(String),
+    /// Runs when the change against the base branch touches one of the globs (as in `[factory.grades]`).
+    Scoped(ScopedCheck),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ScopedCheck {
+    pub run: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+impl CheckSpec {
+    pub fn run(&self) -> &str {
+        match self {
+            CheckSpec::Command(c) => c,
+            CheckSpec::Scoped(s) => &s.run,
+        }
+    }
+
+    /// The path globs the check is limited to; empty runs it always.
+    pub fn paths(&self) -> &[String] {
+        match self {
+            CheckSpec::Command(_) => &[],
+            CheckSpec::Scoped(s) => &s.paths,
+        }
+    }
+}
+
+/// The named checks. `fmt`, `lint`, `typecheck`, `test` and `build` are the usual ones; any other name is a further
+/// verifying check, which runs after them in name order. A repo leaves out what it doesn't have; exit code 0 passes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Checks {
+    /// Never path-scoped: it prepares every checkout.
     pub setup: Option<String>,
     /// Runs after `setup` and before the warm checkpoint, to cut build output and caches down to a size worth
     /// exporting on every task (`docs/factory/sandbox.md` has suggestions per stack). `$TRAILHEAD_DAEMON` is the
     /// daemon binary, whose `trim-cargo` does it for cargo.
     pub trim: Option<String>,
-    pub fmt: Option<String>,
+    pub fmt: Option<CheckSpec>,
     pub fmt_fix: Option<String>,
-    pub lint: Option<String>,
-    pub typecheck: Option<String>,
-    pub test: Option<String>,
-    pub build: Option<String>,
+    pub lint: Option<CheckSpec>,
+    pub typecheck: Option<CheckSpec>,
+    pub test: Option<CheckSpec>,
+    pub build: Option<CheckSpec>,
+    #[serde(flatten)]
+    pub more: BTreeMap<String, CheckSpec>,
 }
 
 impl Checks {
     /// The verification checks, in the order they run. `setup`, `trim` and `fmt_fix` change the tree, so they're left out.
-    pub fn verifying(&self) -> Vec<(&'static str, &str)> {
-        [
+    pub fn verifying(&self) -> Vec<(&str, &CheckSpec)> {
+        let named = [
             ("fmt", &self.fmt),
             ("lint", &self.lint),
             ("typecheck", &self.typecheck),
@@ -480,8 +518,8 @@ impl Checks {
             ("build", &self.build),
         ]
         .into_iter()
-        .filter_map(|(name, cmd)| cmd.as_deref().map(|c| (name, c)))
-        .collect()
+        .filter_map(|(name, spec)| spec.as_ref().map(|s| (name, s)));
+        named.chain(self.more.iter().map(|(n, s)| (n.as_str(), s))).collect()
     }
 }
 
@@ -800,7 +838,7 @@ impl FactoryConfig {
         self.checks
             .verifying()
             .into_iter()
-            .map(|(n, c)| Check { name: n.to_string(), command: c.to_string() })
+            .map(|(n, c)| Check { name: n.to_string(), command: c.run().to_string(), paths: c.paths().to_vec() })
             .collect()
     }
 
@@ -809,7 +847,7 @@ impl FactoryConfig {
     /// mise and the toolchain on every fresh reviewer Sprite.
     pub fn prepare_request(&self, role: Role, branch: Option<String>) -> PrepareRequest {
         let named = |name: &str, c: &Option<String>| {
-            c.as_ref().filter(|_| role == Role::Worker).map(|c| Check { name: name.into(), command: c.clone() })
+            c.as_ref().filter(|_| role == Role::Worker).map(|c| Check::new(name, c.clone()))
         };
         let some = |b: u64| Some(b).filter(|&b| b > 0);
         PrepareRequest {
@@ -1009,6 +1047,33 @@ require = ["checks", "agent_review", "human"]
     }
 
     #[test]
+    fn a_check_is_a_string_or_a_table_with_paths() {
+        let c = parse(&SAMPLE.replace(
+            "test = \"cargo test\"",
+            "test = { run = \"cargo test\", paths = [\"crates/**\"] }\nui-lint = { run = \"cargo clippy -p ui\", paths = [\"clients/**\"] }\nzz = \"true\"",
+        ))
+        .unwrap();
+        let checks = c.required_checks();
+        let names: Vec<_> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["fmt", "lint", "test", "ui-lint", "zz"]);
+        assert!(checks[0].paths.is_empty() && checks[4].paths.is_empty(), "a string runs always");
+        assert_eq!(checks[2].paths, ["crates/**"]);
+        assert_eq!(checks[3].command, "cargo clippy -p ui");
+        assert!(checks[3].applies_to(&["clients/lookout/src/main.rs".to_string()]));
+        assert!(!checks[3].applies_to(&["crates/a/src/lib.rs".to_string()]));
+        assert!(checks[0].applies_to(&[]));
+        // A gate can require a scoped check by name.
+        let gated = SAMPLE.replace("\"checks\", \"agent_review\"", "\"ui-lint\", \"agent_review\"");
+        assert!(parse(&gated.replace("test = ", "ui-lint = \"x\"\ntest = ")).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_scoped_check_with_unknown_keys() {
+        let bad = SAMPLE.replace("test = \"cargo test\"", "test = { run = \"t\", path = [\"a\"] }");
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
+    }
+
+    #[test]
     fn repo_pause_at_rejects_unknown_windows_and_percents_over_100() {
         for bad in ["five_hours = 80", "five_hour = 101"] {
             let err = parse(&format!("{SAMPLE}\n[usage]\npause_at = {{ {bad} }}\n")).unwrap_err();
@@ -1035,9 +1100,7 @@ require = ["checks", "agent_review", "human"]
     }
 
     #[test]
-    fn rejects_unknown_checks_and_profiles() {
-        let bad = SAMPLE.replace("lint = ", "lnt = ");
-        assert!(matches!(parse(&bad), Err(Error::Config(_))));
+    fn rejects_unknown_profiles_and_gate_requirements() {
         let bad = SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"nope\"");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
         let bad = SAMPLE.replace("\"agent_review\", \"human\"", "\"agent_review\", \"vibes\"");

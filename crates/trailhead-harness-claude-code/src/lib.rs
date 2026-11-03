@@ -342,7 +342,17 @@ fn checks_section(checks: &[CheckResult]) -> String {
     }
     out.push_str(" The worker already ran these checks in its own sandbox, where the dependencies are installed:\n");
     for c in checks {
-        out.push_str(&format!("- {}: {}\n", c.name, if c.passed { "passed" } else { "FAILED" }));
+        out.push_str(&format!(
+            "- {}: {}\n",
+            c.name,
+            if c.skipped {
+                "skipped (the change touches none of its paths)"
+            } else if c.passed {
+                "passed"
+            } else {
+                "FAILED"
+            }
+        ));
         if !c.passed {
             out.push_str(&format!("  Output (tail):\n```\n{}\n```\n", clip_tail(&c.output, 2000)));
         }
