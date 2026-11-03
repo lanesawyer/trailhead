@@ -276,7 +276,8 @@ async fn a_run_survives_a_dropped_connection() {
         seen.push(ev);
     }
     let steps = seen.iter().filter(|e| matches!(e, RunEvent::StepStarted { .. })).count();
-    assert_eq!((seen.len(), steps), (4, 2), "every event exactly once: {seen:?}");
+    // The four the harness sent, and the daemon's two notes of its checks and its publishing.
+    assert_eq!((seen.len(), steps), (6, 2), "every event exactly once: {seen:?}");
     assert_eq!(r.harness.contexts().len(), 1, "the run went on rather than starting again");
     assert_eq!(r.compute.wakes("flaky"), 2, "redialed once after the drop");
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
