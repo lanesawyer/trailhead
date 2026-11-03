@@ -55,7 +55,10 @@ impl Factory {
             Ok(credential) => credential,
             // The name was used by a run whose give-back didn't land; skip past it rather than retry it forever.
             Err(e @ Error::Forbidden(_)) => {
-                self.set_back(&task.key, 1);
+                // The give-back below may be lost with the tracker down, so the wait grows with the skips held in
+                // memory instead of resetting to a minute. It's a wait only: the count that parks isn't raised.
+                let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
+                self.set_back_waiting(&task.key, held);
                 let update = RunUpdate { retries: Some(retries + 1), ..RunUpdate::default() };
                 if let Err(e) = self.tracker.report(&task.key, update).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't skip a used run name");

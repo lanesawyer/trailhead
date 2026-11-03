@@ -6,17 +6,20 @@ project = "TRAIL"
 
 [factory.repo]
 # owner and name come from the git remote; the project is the one above.
-max_sandboxes = 2
+max_sandboxes = 1
 # Until TRAIL-159 and TRAIL-172 stop infrastructure blips counting, leave room for a few.
 max_attempts = 5
-# Only subtasks of this task are the factory's work.
-queue = "TRAIL-102"
+# Only subtasks of these tasks are the factory's work: general work, and the Bevy UI (TRAIL-685).
+queue = ["TRAIL-102", "TRAIL-685"]
+
+[factory.compute]
+kind = "docker"
 
 [factory.stack]
 tools = { rust = "stable" }
 
 [factory.checks]
-# Runs while install egress is open; the agent's phase can't reach crates.io.
+# Runs while install egress is open, so the warm checkpoint has every locked crate.
 setup = "cargo fetch --locked && cargo build --all-targets --locked"
 # Cuts target to 6 GiB before the warm checkpoint (docs/factory/sandbox.md); the cap costs about 24 s a task.
 trim = "\"$TRAILHEAD_DAEMON\" trim-cargo --cap 6442450944"
@@ -25,14 +28,17 @@ lint = "cargo clippy --all-targets -- -D warnings"
 test = "cargo test"
 
 [factory.egress]
-# crates.io and rustup while installing dependencies; nothing extra while the agent works.
+# crates.io stays open while the agent works, so it can add dependencies; a person approves any Cargo.lock change.
+always = ["crates.io", "index.crates.io", "static.crates.io"]
+# rustup only while installing.
 install = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang.org"]
 
 [factory.grades]
 # Path globs that raise a PR to at least this grade (docs/factory/review.md#grades); the task's own grade is the floor.
 2 = ["crates/*/src/**", "crates/*/build.rs", "crates/*/benches/**", "crates/*/examples/**", "cliff.toml", "rustfmt.toml"]
-3 = ["**/Cargo.toml", "Cargo.lock", "**/migrations/**"]
-4 = [".github/**", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE"]
+# clients/** until CI and the sandbox checks cover the UI (TRAIL-690, TRAIL-703).
+3 = ["**/Cargo.toml", "**/migrations/**", "clients/**"]
+4 = [".github/**", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE", "**/Cargo.lock", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/uv.lock", "**/poetry.lock", "**/go.sum", "**/Gemfile.lock"]
 max_lines = 600          # bigger diffs are at least grade 3
 
 [factory.gates]
@@ -61,7 +67,7 @@ role = "worker"
 adapter = "claude-code"
 provider = "anthropic"
 model = "sonnet"
-budget = { usd = 5, minutes = 60, steps = 60 }
+budget = { usd = 5, minutes = 60, steps = 120 }
 
 [factory.profiles.reviewer]
 role = "reviewer"

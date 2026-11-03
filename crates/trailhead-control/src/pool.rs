@@ -142,14 +142,26 @@ impl Factory {
                 (p.compute.create(&spec).await?, None)
             }
         };
-        p.compute.set_labels(&sandbox.id, &self.pooled(Some(p), label::BUSY, warm.as_deref(), Some(task))).await?;
-        drop(pick);
-        p.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
-        if let Some(cp) = &warm {
-            p.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
-            p.daemon.forget(&sandbox.id).await;
+        let busy = self.pooled(Some(p), label::BUSY, warm.as_deref(), Some(task));
+        if let Err(e) = p.compute.set_labels(&sandbox.id, &busy).await {
+            self.give_back(&sandbox, &busy).await;
+            return Err(e);
         }
-        p.compute.preflight(&sandbox.id).await?;
+        drop(pick);
+        let started = async {
+            p.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
+            if let Some(cp) = &warm {
+                p.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
+                p.daemon.forget(&sandbox.id).await;
+            }
+            p.compute.preflight(&sandbox.id).await
+        }
+        .await;
+        if let Err(e) = started {
+            // Labelled busy but never handed out: without this it holds its disk until reconcile.
+            self.give_back(&sandbox, &busy).await;
+            return Err(e);
+        }
         let rework = branch.is_some();
         let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
         let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone()).await;
@@ -170,11 +182,7 @@ impl Factory {
                 // The code failed, not the sandbox, and the same error would come from any other: it goes back to
                 // the pool rather than being destroyed for a cold build to replace.
                 tracing::warn!(sandbox = %sandbox.name, error = %e, "setup failed on a fresh run; returning the sandbox");
-                let held =
-                    Sandbox { labels: self.pooled(Some(p), label::BUSY, warm.as_deref(), Some(task)), ..sandbox };
-                if let Err(r) = self.release_worker(&held).await {
-                    tracing::warn!(sandbox = %held.name, error = %r, "couldn't return the sandbox to the pool; reconcile will");
-                }
+                self.give_back(&sandbox, &busy).await;
                 return Err(e);
             }
             // A sandbox whose checkout won't prepare would fail the next task placed on it the same way, so it
@@ -197,8 +205,20 @@ impl Factory {
             Ok(labels) => Ok((Sandbox { labels, ..sandbox }, setup_failure)),
             Err(e) => {
                 self.forget_install_opened(&sandbox);
+                p.daemon.forget(&sandbox.id).await;
+                // The old warm checkpoint (if any) is what release restores; a new sandbox has none and is destroyed.
+                self.give_back(&sandbox, &busy).await;
                 Err(e)
             }
+        }
+    }
+
+    /// Releases a worker sandbox that `acquire_worker` labelled busy but isn't handing out. A failure is logged and
+    /// left to reconcile.
+    async fn give_back(&self, sandbox: &Sandbox, labels: &Labels) {
+        let held = Sandbox { labels: labels.clone(), ..sandbox.clone() };
+        if let Err(r) = self.release_worker(&held).await {
+            tracing::warn!(sandbox = %held.name, error = %r, "couldn't return the sandbox to the pool; reconcile will");
         }
     }
 
