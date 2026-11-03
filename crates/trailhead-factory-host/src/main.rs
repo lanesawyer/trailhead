@@ -33,6 +33,7 @@ use iroh::{Endpoint, SecretKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tracing::Instrument;
+use trailhead_client::creds::{Cred, CredStore};
 use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
@@ -43,7 +44,6 @@ use trailhead_factory::{
     Compute, ComputeConfig, Daemon, FactoryConfig, HarnessSecrets, ProviderKind, Registry, Target,
 };
 use trailhead_provider_anthropic::Anthropic;
-use trailhead_server::creds::{Cred, CredStore};
 
 mod find;
 mod fnox;

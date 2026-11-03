@@ -8,7 +8,7 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use trailhead_server::creds::Cred;
+use trailhead_client::creds::Cred;
 use trailhead_server::{AppState, BATCH_HEADER, open_local, router};
 
 struct Api {

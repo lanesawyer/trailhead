@@ -5,10 +5,10 @@
 use std::io::{BufRead, IsTerminal};
 
 use clap::Subcommand;
+use trailhead_client::creds::{Cred, CredStore, Saved};
 use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_factory::Repo;
-use trailhead_server::creds::{Cred, CredStore, Saved};
 
 use crate::fnox::Fnox;
 
