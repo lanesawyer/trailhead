@@ -864,7 +864,12 @@ mod tests {
         assert_eq!(prepare.disk_limit_bytes, None);
         assert!(config.prepare_request(Role::Reviewer, None).trim.is_none(), "reviewers don't build");
         assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
-        assert_eq!(config.grades, GradesConfig::default(), "this repo's rules are the documented example");
+        let mut documented = GradesConfig::default();
+        documented.rules.get_mut("3").unwrap().push("clients/**".into());
+        assert_eq!(
+            config.grades, documented,
+            "this repo's rules are the documented example, plus clients/** (TRAIL-703)"
+        );
         assert_eq!(config.merge.mode, MergeMode::On);
         assert!(config.gate(1).auto_merge);
         assert!(config.gate(2).auto_merge);
