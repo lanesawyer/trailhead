@@ -74,8 +74,10 @@ pub enum BranchUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrState {
     /// Still open. `mergeable` is whether it merges cleanly into its base: `Some(false)` when it conflicts, `None`
-    /// while the host is still working it out.
-    Open { mergeable: Option<bool> },
+    /// while the host is still working it out. `head` is the head commit the PR has on the host, which a reading of
+    /// `mergeable` is only known to belong to once it matches the head that was pushed (TRAIL-446); `None` when the
+    /// host didn't say.
+    Open { mergeable: Option<bool>, head: Option<String> },
     /// Merged, into the base branch as `commit` when the host says which.
     Merged { commit: Option<String> },
     /// Closed without merging.
