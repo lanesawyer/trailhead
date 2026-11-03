@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use trailhead_factory::{
-    CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, Sandbox, SandboxSpec, Task,
+    CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, RunPhase, Sandbox, SandboxSpec, Task,
     install_host_allowed, label,
 };
 
@@ -60,6 +60,7 @@ impl Factory {
         // Install egress only while the checkout is prepared, then narrowed before any agent runs.
         let spec = SandboxSpec { name: name.to_string(), labels, egress: self.install_egress() };
         let sandbox = p.compute.create(&spec).await?;
+        self.status.sandbox(&sandbox);
         let ready = async {
             self.prepare_sandbox(p, &sandbox, self.config.prepare_request(role, branch)).await?;
             p.compute.set_egress(&sandbox.id, &self.agent_egress()).await
@@ -67,6 +68,7 @@ impl Factory {
         if let Err(e) = ready.await {
             self.forget_install_opened(&sandbox);
             // Not handed out, so nothing else would clean it up before reconcile.
+            self.status.sandbox_gone(&sandbox.name);
             if let Err(d) = p.compute.destroy(&sandbox.id).await {
                 tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
             }
@@ -147,6 +149,8 @@ impl Factory {
             self.give_back(&sandbox, &busy).await;
             return Err(e);
         }
+        self.status.phase(&task.key, RunPhase::Preparing { cold: warm.is_none() }, Some(&sandbox.name));
+        self.status.sandbox(&Sandbox { labels: busy.clone(), ..sandbox.clone() });
         drop(pick);
         let began = Instant::now();
         let started = async {
@@ -228,7 +232,11 @@ impl Factory {
         }
         .await;
         match warmed {
-            Ok(labels) => Ok((Sandbox { labels, ..sandbox }, setup_failure)),
+            Ok(labels) => {
+                let sandbox = Sandbox { labels, ..sandbox };
+                self.status.sandbox(&sandbox);
+                Ok((sandbox, setup_failure))
+            }
             Err(e) => {
                 self.forget_install_opened(&sandbox);
                 p.daemon.forget(&sandbox.id).await;
@@ -255,12 +263,12 @@ impl Factory {
         let p = self.target_of(sandbox);
         p.compute.set_egress(&sandbox.id, &Egress::none()).await?;
         let Some(warm) = sandbox.labels.get(label::WARM).cloned() else {
-            return p.compute.destroy(&sandbox.id).await;
+            return self.destroy_pooled(p, sandbox).await;
         };
         if let Err(e) = p.compute.restore(&sandbox.id, &CheckpointId(warm.clone())).await {
             tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't restore the warm checkpoint; destroying");
             p.daemon.forget(&sandbox.id).await;
-            return p.compute.destroy(&sandbox.id).await;
+            return self.destroy_pooled(p, sandbox).await;
         }
         p.daemon.forget(&sandbox.id).await;
         // The warm checkpoint was built for the stack the sandbox is labelled with, which isn't the current
@@ -270,7 +278,15 @@ impl Factory {
             Some(stack) => labels.insert(label::STACK.into(), stack.clone()),
             None => labels.remove(label::STACK),
         };
-        p.compute.set_labels(&sandbox.id, &labels).await
+        p.compute.set_labels(&sandbox.id, &labels).await?;
+        self.status.sandbox(&Sandbox { labels, ..sandbox.clone() });
+        Ok(())
+    }
+
+    async fn destroy_pooled(&self, p: &Placed, sandbox: &Sandbox) -> Result<()> {
+        p.compute.destroy(&sandbox.id).await?;
+        self.status.sandbox_gone(&sandbox.name);
+        Ok(())
     }
 
     /// The first free `<repo>-w<n>` name.
@@ -347,18 +363,20 @@ impl Factory {
             t.abandoned = true;
         }
         if p.compute.destroy(&sandbox.id).await.is_ok() {
+            self.status.sandbox_gone(name);
             self.troubled.lock().unwrap().remove(name);
             return;
         }
         let mut labels = self.pool_labels();
         labels.insert(label::STATE.into(), label::BROKEN.into());
         labels.insert(label::TARGET.into(), p.target.name.clone());
-        if let Err(e) = p.compute.set_labels(&sandbox.id, &labels).await {
-            tracing::error!(
+        match p.compute.set_labels(&sandbox.id, &labels).await {
+            Ok(()) => self.status.sandbox(&Sandbox { labels, ..sandbox.clone() }),
+            Err(e) => tracing::error!(
                 sandbox = %name,
                 error = %e,
                 "couldn't label it broken either; it's out of the pool until this control plane restarts"
-            );
+            ),
         }
     }
 

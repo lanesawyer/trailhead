@@ -74,7 +74,7 @@ Decided (2026-10-28): the UI is the factory's UI, so it connects to the control 
 
 ## Factory status
 
-The map shows what the factory is doing right now, and most of that isn't in Trailhead. The same gap is why `trailhead factory status` and `logs` (TRAIL-109) don't exist yet, so both should read one surface rather than each building their own.
+The map shows what the factory is doing right now, and most of that isn't in Trailhead. `trailhead factory status` and `logs --follow` read the same surface the UI will, rather than each building their own.
 
 What Trailhead already has, through events: claims and their holders (`factory/trail-n-aK`), each task's `factory` metadata (attempt, `host`, spend, PR, review rounds), questions, handoffs and verdicts. The control plane writes metadata per step, so these move without polling.
 
@@ -85,9 +85,18 @@ What only the control plane knows:
 - **Live activity.** Steps, tool calls and spend as they stream from the daemon. Today they're only in the control plane's log.
 - **The control plane itself.** Up, reconciling or stopped, which run it's reconnecting to, and the last error.
 
-Proposal: the control plane serves a snapshot of the above plus a stream of factory events (sandbox state changes, run phase changes, steps and tool calls). The CLI's `factory status` reads the snapshot, `factory logs TRAIL-n` follows the stream for one task, and the UI uses both. None of it is stored. The control plane keeps no state of its own ([state.md](state.md)), so on boot it rebuilds the snapshot from compute labels and the tracker, and the stream starts fresh. Durable facts still go to Trailhead.
+The control plane serves a snapshot of the above plus a stream of factory events (sandbox state changes, run phase changes, steps and tool calls). The CLI's `factory status` reads the snapshot, `factory logs TRAIL-n --follow` follows the stream for one task, and the UI uses both. None of it is stored. The control plane keeps no state of its own ([state.md](state.md)), so on boot it rebuilds the snapshot from compute labels and the tracker, and the stream starts fresh. Durable facts still go to Trailhead.
 
 Tool calls and steps don't become Trailhead events. The event log holds reversible changes with before and after snapshots. A run produces hundreds of tool calls, which would bury the changes people undo and push real history toward the archive.
+
+### As built
+
+The types are in `trailhead-factory` (`status.rs`) and the board that holds them in `trailhead-control` (`StatusBoard`, one per repo). The control plane updates it where the run loop, the pool and the lifecycle already change state, and reconcile rebuilds its sandboxes from the compute labels each time it lists them, which is also how a boot does.
+
+- **Snapshot.** `control` (`up`, `reconciling`, `reattaching` to a task, `stopped`), the last error with its time, every sandbox (`idle`, `busy`, `paused` for a parked task's, `broken`, with its task, role, target and whether it has a warm checkpoint), and each run (`preparing` and whether `cold`, `agent`, `checks`, `publishing`, `reviewing`, with its sandbox, steps, tool calls, spend and last tool). `seq` is the last event it includes.
+- **Stream.** Each event has a `seq` that starts from 1 on every boot: control changes and errors, sandbox changes, run phase changes and ends, steps and tool calls. `checks` and `publishing` come from the daemon, which sends `RunEvent::Checking` and `RunEvent::Publishing`; the rest the control plane knows itself. Tool calls and steps are only here, never Trailhead events.
+- **Serving.** `trailhead-factory run` binds a loopback port and writes where, with a random bearer token, to `<data dir>/factory/status.json` (mode `0600`, removed on a clean stop). `GET /status` returns `{"repos": [...]}` with one snapshot per repo. `GET /events[?task=TRAIL-n]` streams newline-delimited JSON, one `{repo, seq, event, ...}` per line, from the moment it connects. The token is there because tool calls can name commands and paths. The UI's iroh protocol later carries the same two things.
+- **Clients.** `trailhead-factory status` asks the port and falls back to reading the compute and tracker when nothing answers. `logs TRAIL-n --follow` prints the daemon log once, then follows the task's events instead of polling.
 
 When the factory isn't running, the map shows Trailhead's last known state (claims, metadata, open questions) with the factory marked stopped, and the board still works if the UI can reach the server.
 

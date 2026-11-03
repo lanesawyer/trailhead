@@ -43,6 +43,7 @@ impl Factory {
         let mut due = Due::default();
         // A target that can't be reached is unknown, not empty: what ran there is left as it is until it answers.
         let (live, down) = self.list_all(&self.base_labels()).await?;
+        self.status.sync_sandboxes(&live, &down);
         let tasks: Vec<Task> = self
             .tracker
             .in_flight(self.project(), &self.queue())

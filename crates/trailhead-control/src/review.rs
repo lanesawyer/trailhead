@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use trailhead_factory::messages;
 use trailhead_factory::{
-    ChangesRequested, CheckResult, Error, PrRef, Result, ReviewBreach, Role, RunReport, RunRequest, RunResult,
-    RunUpdate, Task, TaskKey, VerdictKind, review_name,
+    ChangesRequested, CheckResult, Error, PrRef, Result, ReviewBreach, Role, RunPhase, RunReport, RunRequest,
+    RunResult, RunUpdate, Task, TaskKey, VerdictKind, review_name,
 };
 
 use crate::lifecycle::{Begin, Run, spec, token_ttl};
@@ -40,6 +40,7 @@ impl Factory {
             Some(codehost) => Some(codehost.head(pr).await?),
             None => None,
         };
+        let _run = self.status.begin(&task.key, RunPhase::Preparing { cold: true });
         let before = shown.run.review_rounds.unwrap_or(0);
         // The re-review after a conflict rework doesn't use a round (TRAIL-221); it does if it asks for changes.
         let after_conflict = shown.run.pending_changes().is_some_and(|c| c.conflict);
@@ -79,12 +80,15 @@ impl Factory {
             credential,
         };
         let prior = self.tracker.show(&task.key).await?.run.spend.unwrap_or_default();
+        self.status.phase(&task.key, RunPhase::Reviewing, Some(&sandbox.name));
         let run =
             self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
         // A sandbox that won't go doesn't undo the review: the verdict and spend are still recorded, and reconcile
         // destroys the orphan.
         if let Err(e) = target.compute.destroy(&sandbox.id).await {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't destroy the reviewer's sandbox; reconcile will");
+        } else {
+            self.status.sandbox_gone(&sandbox.name);
         }
         let run = match run {
             Ok(Run::Lost(e, spend)) => {
