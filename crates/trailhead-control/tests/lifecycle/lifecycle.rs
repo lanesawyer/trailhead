@@ -802,6 +802,25 @@ async fn a_breach_park_cut_short_is_finished_by_reconcile_without_a_rerun_or_a_s
 }
 
 #[tokio::test]
+async fn an_answer_to_a_breach_within_the_lease_requeues_the_task_without_asking_again() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    assert!(matches!(r.factory.run_task(&r.tracker.task(&key)).await.unwrap(), Outcome::Parked { .. }));
+    assert!(r.tracker.task(&key).run.worker_breach.as_ref().is_some_and(|b| b.parked));
+
+    r.tracker.answer_within_lease(&key, "Raised the budget; carry on.");
+    let task = r.tracker.task(&key);
+    assert_eq!((task.status, task.holder.as_deref()), (Status::InProgress, Some("factory/trail-1-a1")));
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.breached.is_empty(), "the answered park isn't finished again: {done:?}");
+    assert_eq!(done.requeued, std::slice::from_ref(&key.0));
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    let questions = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").count();
+    assert_eq!(questions, 1, "asked once");
+}
+
+#[tokio::test]
 async fn a_failed_revoke_doesnt_undo_a_park_or_a_failure() {
     for (max, parked) in [(1, true), (3, false)] {
         let r =

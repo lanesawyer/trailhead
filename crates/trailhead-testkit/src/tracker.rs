@@ -185,6 +185,13 @@ impl FakeTracker {
         push_comment(&mut s, key, "lane", "answer", body);
     }
 
+    /// A human answers while the asker's claim is still live: the task goes back to in progress under the same holder.
+    pub fn answer_within_lease(&self, key: &TaskKey, body: &str) {
+        let mut s = self.state.lock().unwrap();
+        s.tasks.get_mut(key).unwrap().status = Status::InProgress;
+        push_comment(&mut s, key, "lane", "answer", body);
+    }
+
     /// A human moves a task, as from the CLI.
     pub fn set_status(&self, key: &TaskKey, status: Status) {
         let mut s = self.state.lock().unwrap();

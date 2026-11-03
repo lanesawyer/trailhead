@@ -251,13 +251,16 @@ pub struct ReviewBreach {
     pub parked: bool,
 }
 
-/// A worker run that overran its budget. Whether the task was parked for it follows from its status: parked, it is
-/// waiting on a human; still in progress under the run's sub-agent, reconcile finishes the park.
+/// A worker run that overran its budget. Recorded unparked with the run's spend, and marked parked just before the
+/// question is asked, so reconcile finishes a park that was cut short and never asks again once it's answered (an
+/// answer within the run's claim moves the task back to in progress under the same sub-agent).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerBreach {
     /// The run that breached, by name; a breach only parks the task while that run is the task's current one.
     pub run: String,
     pub reason: String,
+    #[serde(default)]
+    pub parked: bool,
 }
 
 impl RunUpdate {

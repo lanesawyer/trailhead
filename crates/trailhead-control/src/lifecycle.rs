@@ -196,6 +196,32 @@ impl Factory {
         false
     }
 
+    /// Asks a worker breach's question, marking the breach parked first so that a question that was asked can't be
+    /// asked again once it's answered. The mark is taken back if the ask fails, so reconcile finishes the park. A mark
+    /// that can't be written doesn't stop the ask.
+    pub(crate) async fn park_worker_breach(
+        &self,
+        key: &TaskKey,
+        sub: &Arc<dyn Tracker>,
+        breach: &WorkerBreach,
+        question: &str,
+    ) -> Result<()> {
+        let mark = |parked| RunUpdate {
+            worker_breach: Some(WorkerBreach { parked, ..breach.clone() }),
+            ..RunUpdate::default()
+        };
+        if let Err(e) = sub.report(key, mark(true)).await {
+            tracing::warn!(task = %key.0, error = %e, "couldn't mark the breach parked; asking anyway");
+        }
+        if let Err(e) = sub.ask(key, question).await {
+            if let Err(re) = sub.report(key, mark(false)).await {
+                tracing::warn!(task = %key.0, error = %re, "couldn't take back the breach's park mark");
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// What a worker's run came to: the report acted on, or the failure given back to the queue.
     #[allow(clippy::too_many_arguments)]
     async fn conclude(
@@ -233,7 +259,7 @@ impl Factory {
                 let update = RunUpdate {
                     spend: Some(spend),
                     concluded: Some(name.to_string()),
-                    worker_breach: Some(WorkerBreach { run: name.to_string(), reason: reason.clone() }),
+                    worker_breach: Some(WorkerBreach { run: name.to_string(), reason: reason.clone(), parked: false }),
                     ..RunUpdate::default()
                 };
                 let recorded = sub.report(&task.key, update).await;
@@ -246,8 +272,9 @@ impl Factory {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't checkpoint the breached sandbox");
                 }
                 let suspended = self.cut_off_breached(task, sandbox).await;
-                let asked =
-                    sub.ask(&task.key, &messages::budget_breach_question(&reason, &sandbox.name, suspended)).await;
+                let breach = WorkerBreach { run: name.to_string(), reason: reason.clone(), parked: false };
+                let question = messages::budget_breach_question(&reason, &sandbox.name, suspended);
+                let asked = self.park_worker_breach(&task.key, sub, &breach, &question).await;
                 recorded?;
                 asked?;
                 return Ok(Outcome::Parked { reason });
