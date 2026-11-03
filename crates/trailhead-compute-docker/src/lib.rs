@@ -386,6 +386,23 @@ impl DockerCompute {
         Ok(())
     }
 
+    /// The size in bytes of the largest `trailhead-checkpoint` image on the host, or 0 if there is none or they
+    /// can't be listed (the check then falls back to the container's own size).
+    async fn largest_checkpoint(&self) -> u64 {
+        let filter = vec![CHECKPOINT_REPO.to_string()];
+        let opts = ListImagesOptions {
+            filters: Some(HashMap::from([("reference".to_string(), filter)])),
+            ..Default::default()
+        };
+        match self.docker.list_images(Some(opts)).await {
+            Ok(images) => images.iter().map(|i| i.size.max(0) as u64).max().unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't list checkpoint images to size the disk a run needs");
+                0
+            }
+        }
+    }
+
     async fn sandbox(&self, name: &str) -> Result<Sandbox> {
         let state = self.read_state(name).await?;
         Ok(Sandbox { id: SandboxId(name.into()), name: name.into(), labels: state.labels })
@@ -586,6 +603,9 @@ impl Compute for DockerCompute {
         let opts = InspectContainerOptions { size: true };
         let info = self.docker.inspect_container(&id.0, Some(opts)).await.map_err(docker_err)?;
         let size = info.size_root_fs.unwrap_or(0).max(0) as u64;
+        // A new sandbox's filesystem is small, but its checkpoint after prepare is not: size the need by the largest
+        // checkpoint image the host holds too.
+        let size = size.max(self.largest_checkpoint().await);
         let need = disk_needed(self.config.min_free_bytes, size);
         if free < need {
             return Err(Error::Unavailable(format!(
