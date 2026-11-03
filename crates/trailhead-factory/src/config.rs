@@ -796,7 +796,8 @@ impl FactoryConfig {
     }
 
     /// Readies a checkout, on `branch` when given: a worker's rework, or a reviewer's look at the PR's head. Only
-    /// workers build: a reviewer reads the diff, so it skips `setup`.
+    /// workers build: a reviewer reads the diff, so it skips `setup` and the stack's tools, saving a cold install of
+    /// mise and the toolchain on every fresh reviewer Sprite.
     pub fn prepare_request(&self, role: Role, branch: Option<String>) -> PrepareRequest {
         let named = |name: &str, c: &Option<String>| {
             c.as_ref().filter(|_| role == Role::Worker).map(|c| Check { name: name.into(), command: c.clone() })
@@ -811,8 +812,8 @@ impl FactoryConfig {
             trim: named("trim", &self.checks.trim),
             disk_warn_bytes: some(self.daemon.disk_warn_bytes),
             disk_limit_bytes: some(self.daemon.disk_limit_bytes),
-            tools: self.stack.tools.clone(),
-            tool_hosts: self.egress.tools.clone(),
+            tools: if role == Role::Worker { self.stack.tools.clone() } else { Default::default() },
+            tool_hosts: if role == Role::Worker { self.egress.tools.clone() } else { Default::default() },
         }
     }
 }
@@ -863,6 +864,9 @@ mod tests {
         assert_eq!(prepare.disk_warn_bytes, Some(DEFAULT_DISK_WARN_BYTES));
         assert_eq!(prepare.disk_limit_bytes, None);
         assert!(config.prepare_request(Role::Reviewer, None).trim.is_none(), "reviewers don't build");
+        assert!(config.prepare_request(Role::Reviewer, None).tools.is_empty(), "reviewers don't install the stack");
+        assert!(config.prepare_request(Role::Reviewer, None).tool_hosts.is_empty());
+        assert_eq!(config.prepare_request(Role::Worker, None).tools, config.stack.tools);
         assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
         let mut documented = GradesConfig::default();
         documented.rules.get_mut("3").unwrap().push("clients/**".into());
