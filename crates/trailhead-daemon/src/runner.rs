@@ -42,6 +42,8 @@ pub trait Workspace: Send + Sync {
     async fn contains(&self, commit: &str) -> Result<bool>;
     /// The files that have `<<<<<<<` or `>>>>>>>` lines added since `start`, committed or not.
     async fn conflict_markers(&self, start: &str) -> Result<Vec<String>>;
+    /// The files the checkout changes against the base branch's remote head (`origin/<base>`), committed or not.
+    async fn changed_files(&self, base: &str) -> Result<Vec<String>>;
 }
 
 /// What became of the merge of the base branch that a run's checkout started with, if any.
@@ -263,7 +265,7 @@ impl Runner {
         start: &str,
         commits: Vec<trailhead_factory::Commit>,
         summary: String,
-        retried: &[String],
+        notes: &str,
     ) -> Result<PrRef> {
         // Checked here as well as in the harness, so no harness can open a PR the changelog would drop.
         let title = commits
@@ -274,12 +276,11 @@ impl Runner {
             })
             .map(str::to_string);
         self.codehost.publish(&req.repo, start, &req.branch, &commits).await?;
-        let flaky: String = messages::flaky_checks(retried);
         match &req.pr {
             Some(pr) => {
-                // The PR is already open, so a note on a flaky check goes on it as a comment.
-                if !flaky.is_empty() {
-                    self.codehost.comment(pr, &format!("{}{}", flaky.trim_start(), pr_footer(req, agent))).await?;
+                // The PR is already open, so a note on a flaky or skipped check goes on it as a comment.
+                if !notes.is_empty() {
+                    self.codehost.comment(pr, &format!("{}{}", notes.trim_start(), pr_footer(req, agent))).await?;
                 }
                 Ok(pr.clone())
             }
@@ -290,7 +291,7 @@ impl Runner {
                     title: title.unwrap_or_else(|| {
                         trailhead_factory::conventional_title(None, &req.task.key, &req.task.title).0
                     }),
-                    body: format!("{summary}{flaky}{}", pr_footer(req, agent)),
+                    body: format!("{summary}{notes}{}", pr_footer(req, agent)),
                 };
                 self.codehost.open_pr(&req.repo, new).await
             }
@@ -334,12 +335,29 @@ impl Runner {
         filed
     }
 
-    /// Runs each check, rerunning one that fails once in case it was a flake. Returns the final results and the
-    /// names of checks that passed on the rerun.
-    async fn checks(&self, checks: &[Check]) -> (Vec<CheckResult>, Vec<String>) {
+    /// Runs each check that applies to the change, rerunning one that fails once in case it was a flake. A check
+    /// scoped to paths the change didn't touch is reported as skipped. Returns the final results and the names of
+    /// checks that passed on the rerun.
+    async fn checks(&self, base: &str, checks: &[Check]) -> (Vec<CheckResult>, Vec<String>) {
         let mut out = Vec::with_capacity(checks.len());
         let mut retried = Vec::new();
+        // Only worked out when a check is scoped. If it can't be, every check runs: a skip must not hide a failure.
+        let changed = if checks.iter().any(|c| !c.paths.is_empty()) {
+            match self.workspace.changed_files(base).await {
+                Ok(files) => Some(files),
+                Err(e) => {
+                    tracing::warn!(error = %e, "couldn't list the changed files; running every check");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         for check in checks {
+            if changed.as_ref().is_some_and(|files| !check.applies_to(files)) {
+                out.push(CheckResult::skipped(&check.name));
+                continue;
+            }
             let mut result = self.workspace.check(check).await;
             if !result.passed {
                 tracing::warn!(check = %check.name, "check failed; rerunning once");
@@ -398,7 +416,7 @@ impl Runner {
                 let (checks, retried) = tokio::select! {
                     biased;
                     _ = cancel.notified() => return Err(Error::Cancelled),
-                    done = self.checks(&req.required_checks) => done,
+                    done = self.checks(&req.base_branch, &req.required_checks) => done,
                 };
                 if let Some(failed) = checks.iter().find(|c| !c.passed) {
                     let reason = messages::check_failed_reason(&failed.name);
@@ -409,7 +427,8 @@ impl Runner {
                     return Ok((RunResult::Failed(reason), checks));
                 }
                 let _ = events.send(RunEvent::Publishing);
-                let pr = match self.publish(req, tracker.agent(), start, commits, summary, &retried).await {
+                let notes = format!("{}{}", messages::flaky_checks(&retried), messages::skipped_checks(&checks));
+                let pr = match self.publish(req, tracker.agent(), start, commits, summary, &notes).await {
                     Ok(pr) => pr,
                     // The agent's work is done and checked; retrying the whole run would only hit the same wall, so
                     // park the task with the reason instead, keeping the sandbox and its checkout.

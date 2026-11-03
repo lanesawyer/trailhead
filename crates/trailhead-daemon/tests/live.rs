@@ -112,7 +112,7 @@ async fn daemon_in_a_sprite() {
                 disk_warn_bytes: None,
                 disk_limit_bytes: None,
                 branch: None,
-                setup: Some(Check { name: "setup".into(), command: "test -f Cargo.toml".into() }),
+                setup: Some(Check::new("setup", "test -f Cargo.toml")),
                 tools: Default::default(),
                 tool_hosts: Default::default(),
             };

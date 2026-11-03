@@ -135,6 +135,16 @@ pub fn flaky_checks(retried: &[String]) -> String {
     retried.iter().map(|name| format!("\n\n⚠️ Check `{name}` failed, then passed when rerun.")).collect()
 }
 
+/// The note a PR carries for the checks that were skipped because the change touches none of their paths, so a reader
+/// doesn't take them for passes. Empty when none were; otherwise it starts with a blank line, like [`flaky_checks`].
+pub fn skipped_checks(checks: &[CheckResult]) -> String {
+    let names: Vec<String> = checks.iter().filter(|c| c.skipped).map(|c| format!("`{}`", c.name)).collect();
+    if names.is_empty() {
+        return String::new();
+    }
+    format!("\n\nℹ️ Skipped, not run: {}. The change touches none of the paths they are limited to.", names.join(", "))
+}
+
 /// What the merger says, on the PR and the task, when the code host refuses to merge.
 pub fn merge_refused(why: &str) -> String {
     format!("The code host refused to merge: {why}. The merger tries again each pass.")
@@ -581,8 +591,8 @@ mod tests {
             follow_up_description(" Why. ", &TaskKey("TRAIL-1".into()), Some("https://x/pr/1")),
             "Why.\n\nRaised by the reviewer of TRAIL-1 (https://x/pr/1)."
         );
-        let failed = CheckResult { name: "fmt".into(), passed: false, output: "bad\n".into() };
-        let passed = CheckResult { name: "ok".into(), passed: true, output: String::new() };
+        let failed = CheckResult { name: "fmt".into(), passed: false, output: "bad\n".into(), skipped: false };
+        let passed = CheckResult { name: "ok".into(), passed: true, output: String::new(), skipped: false };
         assert_eq!(
             checks_failed_note(&[passed, failed]),
             "The factory's checks failed, so nothing was published.\n\n`fmt` failed; the end of its output:\n```\nbad\n```\n"

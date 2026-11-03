@@ -915,3 +915,37 @@ async fn the_status_board_follows_a_run_from_a_cold_sandbox_through_review() {
     assert_eq!(after.sandboxes.len(), 1, "{after:?}");
     assert_eq!(after.sandboxes[0].state, SandboxState::Idle);
 }
+
+const SCOPED: &str = "\n[checks.ui-lint]\nrun = \"cargo clippy -p ui\"\npaths = [\"clients/**\"]\n";
+
+#[tokio::test]
+async fn a_path_scoped_check_is_skipped_and_reported_when_the_diff_misses_its_paths() {
+    let r = rig_with(&CONFIG.replace("[checks]", &format!("{SCOPED}\n[checks]")));
+    r.tracker.add_task("TRAIL", "Backend only", "");
+    r.daemon.change_files(&["crates/a/src/lib.rs"]);
+    // Would fail the PR if it ran.
+    r.daemon.fail_check("ui-lint", "broken");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+
+    let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
+    let ui = review.checks.iter().find(|c| c.name == "ui-lint").expect("the scoped check is reported");
+    assert!(ui.skipped && ui.passed);
+    assert!(review.checks.iter().filter(|c| c.name != "ui-lint").all(|c| !c.skipped));
+    let body = &r.codehost.prs()[0].spec.body;
+    assert!(body.contains("Skipped, not run: `ui-lint`"), "{body}");
+}
+
+#[tokio::test]
+async fn a_path_scoped_check_runs_when_the_diff_touches_its_paths() {
+    let r = rig_with(&CONFIG.replace("[checks]", &format!("{SCOPED}\n[checks]")));
+    r.tracker.add_task("TRAIL", "Touch the UI", "");
+    r.daemon.change_files(&["crates/a/src/lib.rs", "clients/lookout/src/main.rs"]);
+    r.daemon.fail_check("ui-lint", "broken");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+    assert!(r.codehost.prs().is_empty(), "the failing UI check stopped the PR");
+}

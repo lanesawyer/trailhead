@@ -41,7 +41,7 @@ fn rev(dir: &Path, rev: &str) -> String {
 }
 
 fn check(name: &str, command: &str) -> Check {
-    Check { name: name.into(), command: command.into() }
+    Check::new(name, command)
 }
 
 #[tokio::test]
@@ -441,4 +441,40 @@ async fn prepare_refuses_when_the_disk_is_over_the_limit() {
     assert!(err.to_string().contains("disk_limit_bytes"), "{err}");
     let ok = PrepareRequest { disk_limit_bytes: Some(u64::MAX), ..req };
     ws.prepare(&ok).await.unwrap();
+}
+
+#[tokio::test]
+async fn changed_files_lists_committed_uncommitted_and_new_files_against_the_base() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        setup: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+    };
+    ws.prepare(&req).await.unwrap();
+    assert!(ws.changed_files("main").await.unwrap().is_empty());
+
+    let dir = ws.dir();
+    git(&dir, &["config", "user.email", "t@example.com"]);
+    git(&dir, &["config", "user.name", "t"]);
+    std::fs::create_dir_all(dir.join("clients/ui")).unwrap();
+    std::fs::write(dir.join("clients/ui/main.rs"), "fn main() {}\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "ui"]);
+    std::fs::write(dir.join("README.md"), "edited\n").unwrap();
+    std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+
+    let mut files = ws.changed_files("main").await.unwrap();
+    files.sort();
+    assert_eq!(files, ["README.md", "clients/ui/main.rs", "new.txt"]);
 }

@@ -17,6 +17,22 @@ use crate::{
 pub struct Check {
     pub name: String,
     pub command: String,
+    /// Path globs (as in `[factory.grades]`): when non-empty, the check runs only if the checkout's changes against the
+    /// base branch touch one of them. Empty means it always runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+impl Check {
+    /// A check that always runs.
+    pub fn new(name: impl Into<String>, command: impl Into<String>) -> Self {
+        Check { name: name.into(), command: command.into(), paths: Vec::new() }
+    }
+
+    /// Whether the check applies to a change touching `files`.
+    pub fn applies_to(&self, files: &[String]) -> bool {
+        self.paths.is_empty() || files.iter().any(|f| self.paths.iter().any(|g| crate::grade::glob_match(g, f)))
+    }
 }
 
 /// Gets a sandbox's checkout ready before any agent runs: clone or refresh the
@@ -101,8 +117,18 @@ pub struct RunRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckResult {
     pub name: String,
+    /// True for a skipped check too, so "every check passed" means every check that applied did.
     pub passed: bool,
     pub output: String,
+    /// The check is scoped to paths the change didn't touch, so it didn't run. Not a pass.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
+}
+
+impl CheckResult {
+    pub fn skipped(name: impl Into<String>) -> Self {
+        CheckResult { name: name.into(), passed: true, output: String::new(), skipped: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
