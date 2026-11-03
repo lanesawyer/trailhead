@@ -15,12 +15,14 @@ Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). 
 - `trailhead-compute-sprites`, `trailhead-compute-docker`, `trailhead-harness-claude-code`, `trailhead-provider-anthropic`, `trailhead-codehost-github`: the real implementations of the traits.
 - `trailhead-testkit`: in-memory fakes of all five, so the whole lifecycle runs in `cargo test`.
 
+Phase 6, Lookout, the factory's Bevy app (`docs/factory/ui.md`, epic TRAIL-685), lives in `clients/trailhead-lookout`. It is a workspace member but not a default member, so plain `cargo build`/`test`/`clippy` and the factory's sandboxes skip it. Build it with `-p trailhead-lookout`, or check everything with `--workspace` as CI does. It talks to the API only, never `trailhead-core` or the database.
+
 ## Development
 
-- `cargo test` runs everything, including the concurrency suite in `crates/trailhead-core/tests/concurrency.rs`.
+- `cargo test` runs the default members (everything but `clients/*`), including the concurrency suite in `crates/trailhead-core/tests/concurrency.rs`.
 - Commit subjects and PR titles are `type(scope): message [TRAIL-n]`: a type cliff.toml groups (feat, fix, perf, refactor, docs, test, chore, ci, build), the crate or area as scope, and the task key last in square brackets. Squash merges take the PR title, and cliff.toml drops unconventional commits from CHANGELOG.md. The factory titles its PRs this way too.
 - In `trailhead-control`, once a run has produced something (a verdict, spend, a breach), record it before any teardown. Once a sandbox or sub-agent exists, don't propagate errors with a bare `?`: route them through `infra_failed` or `review_infra_failed`, or log the error and carry on to the cleanup. Teardown failures are logged and left to reconcile, never allowed to skip a record or a park.
-- `cargo clippy --all-targets` and `cargo fmt --all` must be clean.
+- `cargo clippy --all-targets` and `cargo fmt --all` must be clean; touching `clients/*`, also `cargo clippy -p trailhead-lookout --all-targets`.
 - Local secrets come from Bitwarden Secrets Manager through fnox (`fnox.toml`; needs `BWS_ACCESS_TOKEN`). Tests that hit real services are `#[ignore]`d and run as mise tasks, e.g. `mise run test-live-sprites`.
 - The docs in `docs/` build into an mdBook (`mise run docs`); list any new page in `docs/SUMMARY.md` or it is left out of the book.
 - Migrations are numbered `.sql` files in `crates/trailhead-core/migrations`, registered in `src/db.rs`. Never edit an applied migration; add a new one.
@@ -29,8 +31,8 @@ Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). 
 
 Work on Trailhead is tracked in Trailhead, in the `TRAIL` project. It reaches this repo two ways, and they track differently:
 
-- **Factory runs.** Lane queues a task for the factory as a subtask of TRAIL-102 (`trailhead add "..." --parent TRAIL-102`). Its control plane runs Claude Code in a sandbox on that one task. If you were started that way, your prompt says so and `TRAILHEAD_FACTORY_TASK` is set: **skip the rest of this section.** The factory claims, records and closes the task for you, and `trailhead` isn't installed in the sandbox. Do the task, put follow-ups and anything surprising in your summary, and use `needs_input` for questions only Lane can answer.
-- **Interactive sessions.** Lane and an agent working together, as in Claude Code on his machine. Everything below applies. Leave tasks queued under TRAIL-102, or held by a `factory/...` agent, to the factory unless Lane says otherwise.
+- **Factory runs.** Lane queues a task for the factory as a subtask of a queue task: TRAIL-102 for general work (`trailhead add "..." --parent TRAIL-102`), TRAIL-685 for the Bevy UI. `queue` in `.trailhead.toml` lists them. Its control plane runs Claude Code in a sandbox on that one task. If you were started that way, your prompt says so and `TRAILHEAD_FACTORY_TASK` is set: **skip the rest of this section.** The factory claims, records and closes the task for you, and `trailhead` isn't installed in the sandbox. Do the task, put follow-ups and anything surprising in your summary, and use `needs_input` for questions only Lane can answer.
+- **Interactive sessions.** Lane and an agent working together, as in Claude Code on his machine. Everything below applies. Leave tasks queued under a queue task (TRAIL-102, TRAIL-685), or held by a `factory/...` agent, to the factory unless Lane says otherwise.
 
 In an interactive session, tracking isn't optional, because this is how we dogfood Trailhead:
 
