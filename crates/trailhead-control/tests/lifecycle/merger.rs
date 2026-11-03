@@ -770,6 +770,30 @@ async fn a_grade_raise_leaves_lanes_own_approval_in_place() {
 }
 
 #[tokio::test]
+async fn a_stale_merge_intent_does_not_make_a_persons_merge_the_mergers() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+
+    // The merger recorded its intent, `merge` errored without merging, then the PR was pushed to.
+    let old = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    let intent = trailhead_factory::RunUpdate { merging: Some(old), ..Default::default() };
+    Tracker::report(&r.tracker, &key, intent).await.unwrap();
+    r.codehost.push_to(&pr);
+    // A person merges the new head.
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Done);
+    assert_eq!(task.run.merged.expect("recorded").by, MergedBy::Human);
+    let handoff = r.tracker.comments(&key).into_iter().find(|c| c.kind == "handoff").expect("a handoff").body;
+    assert!(!handoff.contains("gates passed"), "{handoff}");
+}
+
+#[tokio::test]
 async fn a_queued_update_is_forgotten_when_a_person_merges_the_pr() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;

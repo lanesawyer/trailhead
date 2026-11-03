@@ -241,7 +241,7 @@ impl Factory {
             PrState::Merged { commit } => {
                 // A merge the factory didn't make is a person's, outside the factory; one the merger started but
                 // didn't get to close (TRAIL-289) is still the merger's.
-                let by = merged_by(task);
+                let by = self.merged_by(task, pr).await?;
                 self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
                 done.merged.push(task.key.0.clone());
                 Ok(None)
@@ -387,7 +387,13 @@ impl Factory {
     }
 }
 
-/// Who merged a PR that is found merged: the merger when it recorded the intent before merging (TRAIL-289), else a person.
-pub(crate) fn merged_by(task: &Task) -> MergedBy {
-    if task.run.merging.as_deref().is_some_and(|h| !h.is_empty()) { MergedBy::Merger } else { MergedBy::Human }
+impl Factory {
+    /// Who merged a PR that is found merged: the merger when it recorded the intent to merge this very head
+    /// (TRAIL-289), else a person. An intent for another head is stale: the host didn't merge it, and the PR was
+    /// pushed to and merged by someone since (TRAIL-456).
+    pub(crate) async fn merged_by(&self, task: &Task, pr: &PrRef) -> Result<MergedBy> {
+        let Some(intent) = task.run.merging.as_deref().filter(|h| !h.is_empty()) else { return Ok(MergedBy::Human) };
+        let Some(codehost) = &self.codehost else { return Ok(MergedBy::Human) };
+        Ok(if codehost.head(pr).await? == intent { MergedBy::Merger } else { MergedBy::Human })
+    }
 }
