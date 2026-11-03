@@ -16,7 +16,7 @@
 - [ ] Outcome tracking: success rate, escalations, review rounds and spend per profile and task type.
 - [ ] Repo onboarding: an agent proposes stack, checks, profiles and policy for a human to confirm.
 - [ ] Names for the factory, the daemon and the todo client ([naming.md](naming.md)).
-- [ ] The factory status surface the UI and `factory status`/`logs` share: its shape, and how clients reach it ([ui.md](ui.md#factory-status)).
+- [x] The factory status surface the UI and `factory status`/`logs` share: loopback HTTP now (snapshot and NDJSON event stream), the UI's iroh protocol carrying the same data later ([ui.md](ui.md#factory-status)).
 - [x] First repo for the MVP: Trailhead itself.
 
 ## Hands-on tests (MVP M0)

@@ -872,3 +872,46 @@ async fn a_failed_revoke_doesnt_undo_a_park_or_a_failure() {
         }
     }
 }
+
+#[tokio::test]
+async fn the_status_board_follows_a_run_from_a_cold_sandbox_through_review() {
+    use trailhead_factory::{ControlState, FactoryEvent, RunPhase, SandboxState};
+
+    let r = rig();
+    r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(3, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    let (before, mut rx) = r.factory.status().subscribe();
+    assert_eq!((before.seq, before.runs.len()), (0, 0));
+
+    r.factory.tick().await.unwrap();
+
+    let events: Vec<FactoryEvent> = std::iter::from_fn(|| rx.try_recv().ok()).map(|e| e.event).collect();
+    let phases: Vec<RunPhase> = events
+        .iter()
+        .filter_map(|e| match e {
+            FactoryEvent::RunPhase { phase, .. } => Some(*phase),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        phases.first(),
+        Some(&RunPhase::Preparing { cold: false }),
+        "a run starts when its sandbox is being got: {phases:?}"
+    );
+    assert!(phases.contains(&RunPhase::Preparing { cold: true }), "no warm checkpoint the first time: {phases:?}");
+    let agent = phases.iter().position(|p| *p == RunPhase::Agent).expect("the agent phase");
+    let reviewing = phases.iter().position(|p| *p == RunPhase::Reviewing).expect("the reviewing phase");
+    assert!(agent < reviewing, "{phases:?}");
+    let steps = events.iter().filter(|e| matches!(e, FactoryEvent::Step { .. })).count();
+    assert!(steps >= 3, "the worker's steps are in the stream: {events:?}");
+    assert!(matches!(events.last(), Some(FactoryEvent::RunEnded { .. })), "{events:?}");
+
+    let after = r.factory.status().snapshot();
+    assert!(after.runs.is_empty(), "a finished run leaves the board");
+    assert_ne!(after.control, ControlState::Stopped);
+    assert!(after.seq > 0);
+    // The pooled worker went back to idle; the reviewer's own sandbox is gone.
+    assert_eq!(after.sandboxes.len(), 1, "{after:?}");
+    assert_eq!(after.sandboxes[0].state, SandboxState::Idle);
+}

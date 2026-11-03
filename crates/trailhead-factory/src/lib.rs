@@ -14,6 +14,7 @@ pub mod messages;
 pub mod money;
 pub mod provider;
 pub mod registry;
+pub mod status;
 pub mod target;
 pub mod tracker;
 
@@ -45,6 +46,9 @@ pub use host::HostConfig;
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
+pub use status::{
+    ControlState, FactoryEvent, FactorySnapshot, RunPhase, RunStatus, SandboxState, SandboxStatus, Sequenced,
+};
 pub use target::{DEFAULT_TARGET, Spend, Target};
 pub use tracker::{
     Answered, ChangesRequested, Credential, FollowUpTask, HumanContext, METADATA_KEY, MergeDecision, Merged, MergedBy,
