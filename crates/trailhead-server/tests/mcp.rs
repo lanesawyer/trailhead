@@ -8,8 +8,8 @@ use rmcp::service::RunningService;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
+use trailhead_client::creds::Cred;
 use trailhead_core::{NewProject, NewTask, Principal, TokenOptions};
-use trailhead_server::creds::Cred;
 use trailhead_server::{AppState, open_local, router};
 
 struct Server {

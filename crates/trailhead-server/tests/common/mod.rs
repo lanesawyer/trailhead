@@ -1,7 +1,7 @@
 use std::path::Path;
 
+use trailhead_client::creds::CredStore;
 use trailhead_server::LocalConfig;
-use trailhead_server::creds::CredStore;
 
 /// A local server config with its database and credentials under `dir`.
 pub fn local_config(dir: &Path) -> LocalConfig {

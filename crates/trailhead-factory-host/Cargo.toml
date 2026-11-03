@@ -19,6 +19,7 @@ path = "src/main.rs"
 docker = ["dep:trailhead-compute-docker"]
 
 [dependencies]
+trailhead-client.workspace = true
 trailhead-core.workspace = true
 trailhead-server.workspace = true
 trailhead-factory.workspace = true
