@@ -782,3 +782,31 @@ async fn a_request_from_an_earlier_attempt_costs_no_host_call() {
     // Asked only for the review's staleness check, not for the old request's recorded head.
     assert!(r.codehost.head_lookups() <= before + 1, "{} lookups", r.codehost.head_lookups() - before);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_lost_after_spending_records_the_spend_and_counts_an_infrastructure_failure() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Dropped review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let before = r.tracker.task(&key).run.spend.unwrap_or_default();
+    let rounds = r.tracker.task(&key).run.review_rounds;
+    assert_eq!(r.tracker.task(&key).run.infra_failures, Some(1));
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 100_000).hang());
+    r.daemon.fail_runs_midway(1, "connection lost");
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "{done:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "retried");
+    assert_eq!(task.run.review_rounds, rounds, "the failed round is given back");
+    assert!(
+        task.run.spend.is_some_and(|s| s > before),
+        "the lost review's spend is recorded: {:?} vs {before:?}",
+        task.run.spend
+    );
+    assert_eq!(task.run.infra_failures, Some(2));
+}

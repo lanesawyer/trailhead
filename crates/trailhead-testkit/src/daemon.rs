@@ -163,6 +163,8 @@ pub struct LocalDaemon {
     requests: Mutex<Vec<RunRequest>>,
     /// Errors the next runs fail with before the agent does anything, like a lost daemon.
     run_errors: Mutex<Vec<trailhead_factory::Error>>,
+    /// Errors the next runs fail with once the agent has reported usage, like a daemon lost partway through.
+    late_run_errors: Mutex<Vec<String>>,
     /// Runs that are going in a sandbox from before this control plane: their events so far, and how they end.
     ongoing: Mutex<HashMap<String, Ongoing>>,
     attached: Mutex<Vec<String>>,
@@ -199,6 +201,7 @@ impl LocalDaemon {
             prepared: Mutex::default(),
             requests: Mutex::default(),
             run_errors: Mutex::default(),
+            late_run_errors: Mutex::default(),
             ongoing: Mutex::default(),
             attached: Mutex::default(),
         }
@@ -271,6 +274,15 @@ impl LocalDaemon {
         let mut errors = self.run_errors.lock().unwrap();
         for _ in 0..times {
             errors.push(trailhead_factory::Error::Other(error.to_string()));
+        }
+    }
+
+    /// Makes the next `times` runs fail with this error right after the agent's first usage is reported, as a daemon
+    /// lost partway through a run that has already spent money would.
+    pub fn fail_runs_midway(&self, times: usize, error: &str) {
+        let mut errors = self.late_run_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push(error.to_string());
         }
     }
 
@@ -371,7 +383,29 @@ impl Daemon for LocalDaemon {
         if let Some(error) = self.run_errors.lock().unwrap().pop() {
             return Err(error);
         }
-        self.runner.run(req, events, self.cancel_handle(sandbox)).await
+        let late = self.late_run_errors.lock().unwrap().pop();
+        let Some(error) = late else {
+            return self.runner.run(req, events, self.cancel_handle(sandbox)).await;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let run = self.runner.run(req, tx, self.cancel_handle(sandbox));
+        tokio::pin!(run);
+        loop {
+            tokio::select! {
+                biased;
+                event = rx.recv() => match event {
+                    Some(event) => {
+                        let spent = matches!(event, RunEvent::Usage { .. });
+                        let _ = events.send(event);
+                        if spent {
+                            return Err(Error::Other(error));
+                        }
+                    }
+                    None => return run.await,
+                },
+                report = &mut run => return report,
+            }
+        }
     }
 
     async fn attach(&self, sandbox: &SandboxId, run: &str, events: EventSink) -> Result<RunReport> {

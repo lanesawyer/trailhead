@@ -998,3 +998,18 @@ async fn a_give_up_after_failed_checks_is_retried_because_that_attempt_changed_t
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Parked { .. }), "{:?}", ran[0].1);
 }
+
+#[tokio::test]
+async fn a_daemon_that_errors_after_the_workers_usage_still_records_the_spend() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Dropped mid-run", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000).hang());
+    r.daemon.fail_runs_midway(1, "connection lost");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("connection lost"), "{err}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open, "not parked");
+    assert_eq!(task.run.attempt, Some(0));
+    assert!(task.run.spend.is_some_and(|s| s > Usd::ZERO), "the lost run's spend is recorded: {:?}", task.run.spend);
+    assert_eq!(task.run.infra_failures, Some(1));
+}
