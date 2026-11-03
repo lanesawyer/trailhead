@@ -334,14 +334,16 @@ impl Factory {
                 };
                 // The head recorded with the request is sturdier than the counts, whose reset can be lost: a PR that
                 // has moved since was pushed to by a person (TRAIL-338).
-                let moved =
-                    match (&task.run.pr, &self.codehost, task.run.pending_changes().and_then(|c| c.head.as_ref())) {
-                        (Some(pr), Some(codehost), Some(recorded)) => codehost.head(pr).await? != *recorded,
-                        _ => false,
-                    };
-                if let Some(requested) =
-                    task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c) && !moved)
+                // It's only fetched for a request that applies to this attempt: after a normal rework the old one
+                // lingers until the next review, and asking the host about it each reconcile would be wasted.
+                let mut applicable = task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c));
+                if let (Some(c), Some(pr), Some(codehost)) = (applicable, &task.run.pr, &self.codehost)
+                    && let Some(recorded) = &c.head
+                    && codehost.head(pr).await? != *recorded
                 {
+                    applicable = None;
+                }
+                if let Some(requested) = applicable {
                     let round = if requested.conflict {
                         task.run.conflict_reworks.unwrap_or(1)
                     } else {
