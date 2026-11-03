@@ -7,11 +7,10 @@ use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages;
 use trailhead_factory::{
     Error, Feedback, HumanContext, Merged, PrState, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult,
-    RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind, run_name,
+    RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind, WorkerBreach, run_name,
 };
 
 use crate::place::Placement;
-use crate::reconcile::merged_by;
 use crate::timing::{backoff, unix_now, until};
 use crate::{CANCEL_GRACE, Factory, Outcome, Placed};
 
@@ -35,7 +34,7 @@ impl Factory {
             match codehost.pr_state(pr).await? {
                 PrState::Merged { commit } => {
                     self.tracker.claim(&task.key).await?;
-                    let by = merged_by(task);
+                    let by = self.merged_by(task, pr).await?;
                     self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
                     return Ok(Outcome::Settled { reason: messages::settled_merged(&pr.url) });
                 }
@@ -188,6 +187,44 @@ impl Factory {
         self.conclude(task, &sub, sandbox, &name, attempt, run, None).await
     }
 
+    /// Cuts a breached sandbox off, true when it is left suspended. One that can't be cut off is destroyed: reconcile
+    /// leaves a parked task's sandbox alone, so that loses the suspended state, which beats leaving it reachable.
+    pub(crate) async fn cut_off_breached(&self, task: &Task, sandbox: &Sandbox) -> bool {
+        let Err(e) = self.cut_off(sandbox).await else { return true };
+        tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
+        self.daemon_of(sandbox).forget(&sandbox.id).await;
+        if let Err(e) = self.target_of(sandbox).compute.destroy(&sandbox.id).await {
+            tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile will");
+        }
+        false
+    }
+
+    /// Asks a worker breach's question, marking the breach parked first so that a question that was asked can't be
+    /// asked again once it's answered. The mark is taken back if the ask fails, so reconcile finishes the park. A mark
+    /// that can't be written doesn't stop the ask.
+    pub(crate) async fn park_worker_breach(
+        &self,
+        key: &TaskKey,
+        sub: &Arc<dyn Tracker>,
+        breach: &WorkerBreach,
+        question: &str,
+    ) -> Result<()> {
+        let mark = |parked| RunUpdate {
+            worker_breach: Some(WorkerBreach { parked, ..breach.clone() }),
+            ..RunUpdate::default()
+        };
+        if let Err(e) = sub.report(key, mark(true)).await {
+            tracing::warn!(task = %key.0, error = %e, "couldn't mark the breach parked; asking anyway");
+        }
+        if let Err(e) = sub.ask(key, question).await {
+            if let Err(re) = sub.report(key, mark(false)).await {
+                tracing::warn!(task = %key.0, error = %re, "couldn't take back the breach's park mark");
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// What a worker's run came to: the report acted on, or the failure given back to the queue.
     #[allow(clippy::too_many_arguments)]
     async fn conclude(
@@ -219,8 +256,16 @@ impl Factory {
             Run::Breach(reason, spend) => {
                 tracing::warn!(task = %task.key.0, %reason, "budget breached; parking");
                 // The spend is recorded before any teardown. A record that fails doesn't skip the kill switch or the
-                // park; its error is returned after them.
-                let recorded = sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await;
+                // park; its error is returned after them. The report marks the run concluded and records the breach, so
+                // a restart before the park lands neither reattaches to the run and prices its replayed events a second
+                // time, nor requeues the task on a fresh budget: reconcile finishes the park (TRAIL-451).
+                let update = RunUpdate {
+                    spend: Some(spend),
+                    concluded: Some(name.to_string()),
+                    worker_breach: Some(WorkerBreach { run: name.to_string(), reason: reason.clone(), parked: false }),
+                    ..RunUpdate::default()
+                };
+                let recorded = sub.report(&task.key, update).await;
                 if let Err(e) = &recorded {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't record the breach's spend; cutting off anyway");
                 }
@@ -229,19 +274,10 @@ impl Factory {
                 {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't checkpoint the breached sandbox");
                 }
-                let cut = self.cut_off(sandbox).await;
-                let suspended = cut.is_ok();
-                if let Err(e) = &cut {
-                    // Reconcile leaves a parked task's sandbox alone, so a sandbox that couldn't be cut off is
-                    // destroyed: that loses the suspended state, which beats leaving it reachable.
-                    tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
-                    self.daemon_of(sandbox).forget(&sandbox.id).await;
-                    if let Err(e) = self.target_of(sandbox).compute.destroy(&sandbox.id).await {
-                        tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile will");
-                    }
-                }
+                let suspended = self.cut_off_breached(task, sandbox).await;
+                let breach = WorkerBreach { run: name.to_string(), reason: reason.clone(), parked: false };
                 let question = messages::budget_breach_question(&reason, &sandbox.name, suspended);
-                let asked = sub.ask(&task.key, &question).await;
+                let asked = self.park_worker_breach(&task.key, sub, &breach, &question).await;
                 recorded?;
                 asked?;
                 return Ok(Outcome::Parked { reason });
@@ -271,8 +307,13 @@ impl Factory {
 
         match report.result {
             RunResult::PrOpened(pr) => {
-                if task.run.pending_changes().is_some_and(|c| c.conflict) {
-                    self.fresh_pushes.lock().unwrap().insert(task.key.clone());
+                if let Some(stale) = task.run.pending_changes().filter(|c| c.conflict).and_then(|c| c.head.clone()) {
+                    // Recorded so a `mergeable` reading for the head from before the push is ignored, across a restart
+                    // too. A request whose head the host couldn't say leaves the mark off; readings count as they come.
+                    let update = RunUpdate { stale_head: Some(stale), ..RunUpdate::default() };
+                    if let Err(e) = sub.report(&task.key, update).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't record the head from before the push");
+                    }
                 }
                 // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
                 // starts from the PR branch.
@@ -330,10 +371,14 @@ impl Factory {
                     // human has to do.
                     sub.report(&task.key, RunUpdate { gave_up: Some(attempt), ..RunUpdate::default() }).await?;
                     sub.ask(&task.key, &messages::gave_up_question(failed, max, &reason, &last)).await?;
-                    self.tracker.revoke_sub_agent(name).await?;
+                    if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
+                    }
                     return Ok(Outcome::Parked { reason });
                 }
-                self.tracker.revoke_sub_agent(name).await?;
+                if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
+                }
                 Ok(Outcome::Failed { reason })
             }
             RunResult::Reviewed(_) => Err(Error::Other("a worker returned a review".into())),

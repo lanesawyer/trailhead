@@ -120,9 +120,6 @@ pub struct Factory {
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, u32, Instant)>>,
-    /// Tasks whose PR a run just pushed to: the host's next `mergeable = false` for each may be a verdict on the head
-    /// before the push, so it is read as not yet worked out, once (TRAIL-241).
-    fresh_pushes: Mutex<HashSet<TaskKey>>,
     /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
     /// unchanged grades from them instead of asking the host again (TRAIL-266).
     listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
@@ -191,6 +188,12 @@ pub struct Reconciled {
 }
 
 impl Factory {
+    /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).
+    #[doc(hidden)]
+    pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {
+        self.updating.lock().unwrap().contains_key(task)
+    }
+
     /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
     pub fn new(
         config: FactoryConfig,
@@ -227,7 +230,6 @@ impl Factory {
             server_down: Mutex::new(false),
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
-            fresh_pushes: Mutex::default(),
             listed: Mutex::default(),
             updating: Mutex::default(),
             host,

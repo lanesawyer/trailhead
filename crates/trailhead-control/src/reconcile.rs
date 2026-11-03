@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use trailhead_factory::messages;
 use trailhead_factory::{
-    ChangesRequested, Error, Merged, MergedBy, PrRef, PrState, Result, RunUpdate, Sandbox, Status, Task, TaskKey, label,
+    ChangesRequested, Error, Merged, MergedBy, PrRef, PrState, Result, RunUpdate, Sandbox, Status, Task, TaskKey,
+    WorkerBreach, label,
 };
 
 use crate::lifecycle::worker_name;
@@ -61,8 +62,9 @@ impl Factory {
             if live_runs.iter().any(|(_, s)| s.name == sandbox.name) {
                 continue;
             }
+            // A run parked for its breach, or one whose park is yet to land, keeps its suspended sandbox.
             let parked = tasks.iter().any(|t| {
-                t.status == Status::NeedsInput
+                (t.status == Status::NeedsInput || self.unparked_breach(t).is_some())
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
             });
             if parked {
@@ -90,6 +92,10 @@ impl Factory {
                 done.unknown.push(task.key.0.clone());
                 continue;
             }
+            if let Some(breach) = self.unparked_breach(task) {
+                self.finish_worker_breach(task, breach, &live, &mut done).await;
+                continue;
+            }
             match self.reconcile_task(task, &mut done).await {
                 Ok(true) => due.reviews.push(task.clone()),
                 Ok(false) => {}
@@ -99,6 +105,36 @@ impl Factory {
             }
         }
         Ok((done, due))
+    }
+
+    /// A worker's breach the task wasn't parked for yet (TRAIL-451): never marked parked, the task still in progress
+    /// under the sub-agent of the run that breached, and that run its current one.
+    fn unparked_breach<'a>(&self, task: &'a Task) -> Option<&'a WorkerBreach> {
+        let breach = task.run.worker_breach.as_ref().filter(|b| !b.parked)?;
+        let current = task.run.sandbox.as_ref() == Some(&breach.run);
+        let held = task.holder.as_deref() == Some(self.tracker.sub_agent(&breach.run).agent());
+        (task.status == Status::InProgress && current && held).then_some(breach)
+    }
+
+    /// Finishes the park of a run that breached its budget, cut short by a restart: its sandbox is cut off (again, if
+    /// that was done) and the question is asked, rather than the task being requeued on a fresh budget. The spend
+    /// was recorded with the breach, so it isn't counted again. A failure is left for the next reconcile.
+    async fn finish_worker_breach(&self, task: &Task, breach: &WorkerBreach, live: &[Sandbox], done: &mut Reconciled) {
+        let reason = breach.reason.as_str();
+        let (Some(name), Some(host)) = (&task.run.sandbox, task.run.host.as_ref()) else { return };
+        tracing::warn!(task = %task.key.0, %reason, "finishing the park for a worker's budget breach");
+        // A sandbox that's gone was destroyed after the breach, so there's nothing suspended to point at.
+        let suspended = match live.iter().find(|s| s.name == *host) {
+            Some(sandbox) => self.cut_off_breached(task, sandbox).await,
+            None => false,
+        };
+        let question = messages::budget_breach_question(reason, host, suspended);
+        match self.park_worker_breach(&task.key, &self.tracker.sub_agent(name), breach, &question).await {
+            Ok(()) => done.breached.push(task.key.0.clone()),
+            Err(e) => {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't park the breached task; the next reconcile retries")
+            }
+        }
     }
 
     /// Whether a task's run may be on a target that didn't answer: the target it recorded, or, for a task that
@@ -151,6 +187,8 @@ impl Factory {
     /// `CodeHost::merge` (`docs/factory/lifecycle.md`). Metadata first, so a handoff that failed to land is retried
     /// with the record already there.
     pub async fn close_merged(&self, task: &Task, merged: Merged) -> Result<()> {
+        // The task has left the merge path, so a queued branch update is no longer waited on (TRAIL-491).
+        self.updating.lock().unwrap().remove(&task.key);
         let decision = match merged.by {
             MergedBy::Merger => self.tracker.show(&task.key).await?.run.merge,
             MergedBy::Human => None,
@@ -171,6 +209,7 @@ impl Factory {
     /// rework would push to a PR nobody is going to merge. Reopening it after reopening the PR resumes as a rework.
     pub(crate) async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
         tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
+        self.updating.lock().unwrap().remove(&task.key);
         // Already open when it's found before a run starts (TRAIL-304); there's nothing in review to reopen.
         if task.status != Status::Open {
             self.tracker.reopen(&task.key).await?;
@@ -238,7 +277,7 @@ impl Factory {
             PrState::Merged { commit } => {
                 // A merge the factory didn't make is a person's, outside the factory; one the merger started but
                 // didn't get to close (TRAIL-289) is still the merger's.
-                let by = merged_by(task);
+                let by = self.merged_by(task, pr).await?;
                 self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
                 done.merged.push(task.key.0.clone());
                 Ok(None)
@@ -248,11 +287,22 @@ impl Factory {
                 done.closed.push(task.key.0.clone());
                 Ok(None)
             }
-            PrState::Open { mergeable } => {
-                // GitHub works `mergeable` out after a push, so right after one a `false` may be the old head's. Read
-                // it as unknown this once; the next reconcile asks again and gets the settled answer.
-                let fresh = self.fresh_pushes.lock().unwrap().remove(&task.key);
-                Ok(Some(if fresh && mergeable == Some(false) { None } else { mergeable }))
+            PrState::Open { mergeable, head } => {
+                // GitHub works `mergeable` out after a push, so right after a conflict rework a reading may still be
+                // the old head's. While the PR shows the head from before the push, or the host hasn't answered, the
+                // reading is unknown. An answer for any other head (the rework's, or one pushed since) settles the
+                // mark, so a head that moves on can't leave it stuck (TRAIL-446).
+                let Some(stale) = task.run.stale_head.as_deref().filter(|h| !h.is_empty()) else {
+                    return Ok(Some(mergeable));
+                };
+                if mergeable.is_none() || head.as_deref() == Some(stale) {
+                    return Ok(Some(None));
+                }
+                let settled = RunUpdate { stale_head: Some(String::new()), ..RunUpdate::default() };
+                if let Err(e) = self.tracker.report(&task.key, settled).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the stale head; reading it again");
+                }
+                Ok(Some(mergeable))
             }
         }
     }
@@ -331,14 +381,16 @@ impl Factory {
                 };
                 // The head recorded with the request is sturdier than the counts, whose reset can be lost: a PR that
                 // has moved since was pushed to by a person (TRAIL-338).
-                let moved =
-                    match (&task.run.pr, &self.codehost, task.run.pending_changes().and_then(|c| c.head.as_ref())) {
-                        (Some(pr), Some(codehost), Some(recorded)) => codehost.head(pr).await? != *recorded,
-                        _ => false,
-                    };
-                if let Some(requested) =
-                    task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c) && !moved)
+                // It's only fetched for a request that applies to this attempt: after a normal rework the old one
+                // lingers until the next review, and asking the host about it each reconcile would be wasted.
+                let mut applicable = task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c));
+                if let (Some(c), Some(pr), Some(codehost)) = (applicable, &task.run.pr, &self.codehost)
+                    && let Some(recorded) = &c.head
+                    && codehost.head(pr).await? != *recorded
                 {
+                    applicable = None;
+                }
+                if let Some(requested) = applicable {
                     let round = if requested.conflict {
                         task.run.conflict_reworks.unwrap_or(1)
                     } else {
@@ -384,7 +436,13 @@ impl Factory {
     }
 }
 
-/// Who merged a PR that is found merged: the merger when it recorded the intent before merging (TRAIL-289), else a person.
-pub(crate) fn merged_by(task: &Task) -> MergedBy {
-    if task.run.merging.as_deref().is_some_and(|h| !h.is_empty()) { MergedBy::Merger } else { MergedBy::Human }
+impl Factory {
+    /// Who merged a PR that is found merged: the merger when it recorded the intent to merge this very head
+    /// (TRAIL-289), else a person. An intent for another head is stale: the host didn't merge it, and the PR was
+    /// pushed to and merged by someone since (TRAIL-456).
+    pub(crate) async fn merged_by(&self, task: &Task, pr: &PrRef) -> Result<MergedBy> {
+        let Some(intent) = task.run.merging.as_deref().filter(|h| !h.is_empty()) else { return Ok(MergedBy::Human) };
+        let Some(codehost) = &self.codehost else { return Ok(MergedBy::Human) };
+        Ok(if codehost.head(pr).await? == intent { MergedBy::Merger } else { MergedBy::Human })
+    }
 }

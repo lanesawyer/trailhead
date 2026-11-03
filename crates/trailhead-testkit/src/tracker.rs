@@ -100,7 +100,7 @@ impl FakeTracker {
         self.state.lock().unwrap().context_fails = fails;
     }
 
-    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report`, `release` or `ask`) fail, as a tracker outage would.
+    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report`, `release`, `ask`, `finish` or `revoke_sub_agent`) fail, as a tracker outage would.
     pub fn fail_next(&self, agent: &str, op: &'static str, times: usize) {
         self.state.lock().unwrap().failing.insert((agent.to_string(), op), times);
     }
@@ -199,6 +199,13 @@ impl FakeTracker {
         let t = s.tasks.get_mut(key).unwrap();
         t.status = Status::Open;
         t.holder = None;
+        push_comment(&mut s, key, "lane", "answer", body);
+    }
+
+    /// A human answers while the asker's claim is still live: the task goes back to in progress under the same holder.
+    pub fn answer_within_lease(&self, key: &TaskKey, body: &str) {
+        let mut s = self.state.lock().unwrap();
+        s.tasks.get_mut(key).unwrap().status = Status::InProgress;
         push_comment(&mut s, key, "lane", "answer", body);
     }
 
@@ -496,6 +503,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
+        self.inject("finish")?;
         self.write(task, |t, me| {
             // Like core: review states need no claim, and an unclaimed task can be finished by anyone, but
             // not one another agent holds.
@@ -573,6 +581,7 @@ impl Tracker for FakeTracker {
 
     async fn revoke_sub_agent(&self, name: &str) -> Result<()> {
         self.check_live()?;
+        self.inject("revoke_sub_agent")?;
         let full = format!("{}/{name}", self.agent);
         let mut s = self.state.lock().unwrap();
         for (n, a) in s.agents.iter_mut() {

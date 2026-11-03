@@ -198,8 +198,12 @@ impl Factory {
                 self.tracker.last_review(&task.key).await?.is_some_and(|v| v.kind == VerdictKind::RequestChanges);
             return Ok(asked.then_some(Rework::Running));
         }
-        let pushed =
-            task.run.pending_changes().is_some_and(|c| !c.conflict && c.head.as_deref().is_some_and(|h| h != head));
+        // Only a later attempt than the reviewed one is the rework; a new head on the same attempt is a person's push.
+        let attempt = task.run.attempt.unwrap_or(0);
+        let pushed = task
+            .run
+            .pending_changes()
+            .is_some_and(|c| !c.conflict && attempt > c.attempt && c.head.as_deref().is_some_and(|h| h != head));
         Ok(pushed.then_some(Rework::Pushed))
     }
 

@@ -20,6 +20,8 @@ pub struct FakePr {
     pub closed: bool,
     /// What the host says of whether it merges cleanly: `None` while it is still working it out.
     pub mergeable: Option<bool>,
+    /// The head `pr_state` reports instead of the real one, as a slow host does right after a push.
+    pub lagging_head: Option<String>,
     /// The base branch has commits the PR's branch lacks.
     pub behind: bool,
     /// What the host lists as changed, when a test sets it; otherwise it follows the published commits.
@@ -45,6 +47,8 @@ struct State {
     update_requests: usize,
     /// How many times `files` was asked for a PR's file list.
     file_listings: usize,
+    /// How many times `head` was asked for a PR's head.
+    head_lookups: usize,
     refuse_publish: Option<String>,
     refuse_merge: Option<String>,
 }
@@ -118,6 +122,11 @@ impl FakeCodeHost {
         self.state.lock().unwrap().update_requests
     }
 
+    /// How many times the host was asked for a PR's head.
+    pub fn head_lookups(&self) -> usize {
+        self.state.lock().unwrap().head_lookups
+    }
+
     /// Closes a PR without merging it, as a person would on GitHub.
     pub fn close(&self, pr: &PrRef) {
         self.find(pr, |p, _| p.closed = true).unwrap();
@@ -126,6 +135,12 @@ impl FakeCodeHost {
     /// Sets whether the host says the PR merges cleanly (`None`: not worked out yet).
     pub fn set_mergeable(&self, pr: &PrRef, mergeable: Option<bool>) {
         self.find(pr, |p, _| p.mergeable = mergeable).unwrap();
+    }
+
+    /// Makes `pr_state` report `head` as the PR's head (`None`: the real one), as a host that hasn't caught up with a
+    /// push yet does.
+    pub fn set_lagging_head(&self, pr: &PrRef, head: Option<&str>) {
+        self.find(pr, |p, _| p.lagging_head = head.map(str::to_string)).unwrap();
     }
 
     /// Sets whether the PR's branch is behind its base.
@@ -215,6 +230,7 @@ impl CodeHost for FakeCodeHost {
             merged: false,
             closed: false,
             mergeable: Some(true),
+            lagging_head: None,
             behind: false,
             files: None,
             ci: CiState::Pending,
@@ -337,10 +353,13 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
-        self.find(pr, |p, _| match (p.merged, p.closed) {
+        self.find(pr, |p, s| match (p.merged, p.closed) {
             (true, _) => PrState::Merged { commit: Some(FakeCodeHost::merge_commit(&p.pr)) },
             (false, true) => PrState::Closed,
-            _ => PrState::Open { mergeable: p.mergeable },
+            _ => PrState::Open {
+                mergeable: p.mergeable,
+                head: p.lagging_head.clone().or_else(|| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned()),
+            },
         })
     }
 
@@ -349,6 +368,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn head(&self, pr: &PrRef) -> Result<String> {
+        self.state.lock().unwrap().head_lookups += 1;
         self.find(pr, |p, s| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default())
     }
 
