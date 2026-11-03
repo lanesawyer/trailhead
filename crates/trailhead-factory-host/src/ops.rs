@@ -12,7 +12,7 @@ use trailhead_factory::{
     FactorySnapshot, Labels, Sandbox, SandboxState, SandboxStatus, Status, Task, TaskKey, Tracker,
 };
 
-use crate::{AGENT, Opts, computes, factory_ctx, load_config, resolve_opts, surface};
+use crate::{AGENT, Opts, computes, factory_ctx, load_config, resolve_opts, saved_endpoint_id, surface};
 
 /// The program the control plane starts the daemon as, whose service log `logs` prints.
 const DAEMON_PROGRAM: &str = "trailhead-daemon";
@@ -73,6 +73,10 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
         print!("{}", render_live(&live.snapshot));
     }
     print!("{}", render_status(&rows, &tasks, &waiting, config.repo.max_sandboxes));
+    match saved_endpoint_id(&paths.creds()) {
+        Some(id) => println!("\nUI endpoint id: {id}  (allow a UI with `trailhead factory allow <its endpoint id>`)"),
+        None => println!("\nUI endpoint id: none yet (the control plane makes it on its first run)"),
+    }
     Ok(())
 }
 

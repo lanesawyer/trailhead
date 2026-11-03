@@ -20,6 +20,8 @@ pub mod gateway;
 pub mod net;
 #[cfg(feature = "net")]
 mod rest;
+#[cfg(feature = "net")]
+pub mod ui;
 
 #[cfg(feature = "net")]
 pub use rest::RestTracker;
