@@ -61,11 +61,11 @@ async fn ungraded_tasks_dont_crowd_graded_ones_out_of_the_cap() {
 }
 
 #[tokio::test]
-async fn a_grade_one_task_that_changes_cargo_lock_is_raised_to_three() {
+async fn a_grade_one_task_that_changes_cargo_toml_is_raised_to_three() {
     let (r, queue) = queued_rig();
     let key = r.tracker.add_subtask(&queue, "Bump a dependency", "");
     r.tracker.set_grade(&key, 1);
-    r.harness.push(Role::Worker, Script::new(changes_to("Cargo.lock")));
+    r.harness.push(Role::Worker, Script::new(changes_to("Cargo.toml")));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
 
@@ -73,10 +73,10 @@ async fn a_grade_one_task_that_changes_cargo_lock_is_raised_to_three() {
     assert_eq!(task.grade, Some(3), "the task is raised to match the PR");
     let grade = task.run.grade.expect("recorded in the factory metadata");
     assert_eq!((grade.grade, grade.task), (3, Some(1)));
-    assert_eq!(grade.reasons, ["Cargo.lock changed"]);
-    assert_eq!(notes(&r, &key), ["Raised to grade 3 (task was 1): Cargo.lock changed"]);
+    assert_eq!(grade.reasons, ["Cargo.toml changed"]);
+    assert_eq!(notes(&r, &key), ["Raised to grade 3 (task was 1): Cargo.toml changed"]);
     let comment = r.codehost.prs()[0].comments[0].clone();
-    assert!(comment.ends_with("\n\nGrade 3 (task was 1; Cargo.lock changed)"), "{comment}");
+    assert!(comment.ends_with("\n\nGrade 3 (task was 1; Cargo.toml changed)"), "{comment}");
 
     // A rework's review sees the same PR and neither raises nor notes again.
     r.harness.push(Role::Reviewer, Script::new(approve()));
@@ -84,7 +84,7 @@ async fn a_grade_one_task_that_changes_cargo_lock_is_raised_to_three() {
     r.factory.review(&shown, shown.run.pr.as_ref().unwrap(), 1, &[]).await.unwrap();
     assert_eq!(notes(&r, &key).len(), 1);
     let comment = r.codehost.prs()[0].comments[1].clone();
-    assert!(comment.ends_with("\n\nGrade 3 (task was 1; Cargo.lock changed)"), "{comment}");
+    assert!(comment.ends_with("\n\nGrade 3 (task was 1; Cargo.toml changed)"), "{comment}");
 }
 
 #[tokio::test]
@@ -135,7 +135,7 @@ async fn a_reviewer_cant_lower_the_grade() {
     let (r, queue) = queued_rig();
     let key = r.tracker.add_subtask(&queue, "Bump a dependency", "");
     r.tracker.set_grade(&key, 3);
-    r.harness.push(Role::Worker, Script::new(changes_to("Cargo.lock")));
+    r.harness.push(Role::Worker, Script::new(changes_to("Cargo.toml")));
     let lower = RaiseGrade { grade: 1, reason: "trivial".into() };
     let verdict = RunOutcome::Verdict {
         kind: VerdictKind::Approve,
@@ -147,4 +147,25 @@ async fn a_reviewer_cant_lower_the_grade() {
     r.factory.tick().await.unwrap();
     assert_eq!(r.tracker.task(&key).grade, Some(3));
     assert!(r.codehost.prs()[0].comments[0].ends_with("\n\nGrade 3"));
+}
+
+#[tokio::test]
+async fn a_failed_reviewer_revoke_doesnt_drop_the_verdict() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Document it", "");
+    r.tracker.set_grade(&key, 1);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    let raise = RaiseGrade { grade: 4, reason: "the docs change the token policy".into() };
+    let verdict = RunOutcome::Verdict {
+        kind: VerdictKind::Approve,
+        body: "Fine.".into(),
+        follow_ups: vec![],
+        raise_grade: Some(raise),
+    };
+    r.harness.push(Role::Reviewer, Script::new(verdict));
+    // The worker's revoke and the reviewer's both fail.
+    r.tracker.fail_next("factory", "revoke_sub_agent", 2);
+    r.factory.tick().await.unwrap();
+
+    assert_eq!(r.tracker.task(&key).grade, Some(4), "the verdict was still acted on");
 }

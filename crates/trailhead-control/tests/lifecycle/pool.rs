@@ -276,11 +276,20 @@ async fn a_sandbox_out_of_disk_is_reported_before_the_run_starts() {
 }
 
 #[tokio::test]
+async fn a_sandbox_that_fails_preflight_isnt_left_busy() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Needs disk", "");
+    r.compute.fail("trailhead-w1", "preflight");
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(r.compute.get("trailhead-w1").is_none(), "a cold sandbox that never got warm is destroyed, not left busy");
+}
+
+#[tokio::test]
 async fn a_host_out_of_disk_is_waited_out_never_parked() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
     let key = r.tracker.add_task("TRAIL", "Waits for disk", "");
-    for n in 1..=4 {
-        r.compute.fail(&format!("trailhead-w{n}"), "preflight");
+    r.compute.fail("trailhead-w1", "preflight");
+    for _ in 1..=4 {
         let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
         assert!(matches!(err, trailhead_factory::Error::Unavailable(_)), "{err}");
     }
@@ -294,12 +303,14 @@ async fn a_host_out_of_disk_is_waited_out_never_parked() {
 async fn disk_waits_dont_count_toward_parking_a_later_real_failure() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
     let key = r.tracker.add_task("TRAIL", "Waits then fails", "");
-    for n in 1..=2 {
-        r.compute.fail(&format!("trailhead-w{n}"), "preflight");
+    r.compute.fail("trailhead-w1", "preflight");
+    for _ in 0..2 {
         let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
         assert!(matches!(err, trailhead_factory::Error::Unavailable(_)), "{err}");
     }
-    r.compute.fail("trailhead-w3", "set_labels");
+    // The failed sandboxes were destroyed, so the next one takes the same name.
+    r.compute.heal("trailhead-w1");
+    r.compute.fail("trailhead-w1", "set_labels");
     r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Open, "one real failure after the waits isn't enough to park");

@@ -16,8 +16,8 @@ Named after the climbing classes of the Yosemite Decimal System: the higher the 
 | --- | --- | --- | --- |
 | 1 | A walk on a trail | Docs, new or changed tests, formatting | Checks + CI; auto-merge |
 | 2 | Off-trail | Ordinary code within existing modules | Checks + CI + agent review; auto-merge |
-| 3 | Scrambling, above Treeline | New or upgraded dependencies, schema or migrations, public API changes, large diffs | Checks + CI + agent review + human |
-| 4 | Exposed | Auth, secrets handling, sandbox egress, CI workflows, the factory's own policy (`.trailhead.toml`) and profiles | Checks + CI + human; agent review advisory |
+| 3 | Scrambling, above Treeline | Dependency manifests, schema or migrations, public API changes, large diffs | Checks + CI + agent review + human |
+| 4 | Exposed | Lockfile changes (any new or upgraded package), auth, secrets handling, sandbox egress, CI workflows, the factory's own policy (`.trailhead.toml`) and profiles | Checks + CI + human; agent review advisory |
 
 How grades are set:
 
@@ -25,7 +25,7 @@ How grades are set:
 - **Only raised after that.** Agents can raise a task's grade but never set the first one, lower it or clear it. The PR is graded the task's grade or higher:
   - **By the diff.** The control plane matches each changed file against the repo's path rules, and a diff over the repo's line limit is at least grade 3. If that comes out higher than the task's grade, the PR and the task are raised, with the file or rule that did it. Deleting a test or a check is never grade 1.
   - **By the reviewer.** Its verdict can name a higher grade with a reason.
-- **The grade and anything that raised it** are recorded on the task and stated in the reviewer's PR comment, e.g. "Grade 3 (task was 1; Cargo.lock changed)".
+- **The grade and anything that raised it** are recorded on the task and stated in the reviewer's PR comment, e.g. "Grade 4 (task was 1; Cargo.lock changed)".
 
 ## Gate policy
 
@@ -35,8 +35,8 @@ Decided: gates per grade are configurable per repo, in `.trailhead.toml`. The ta
 [factory.grades]
 # Path globs that raise a PR to at least this grade; unmatched files don't raise it.
 2 = ["crates/*/src/**", "crates/*/build.rs", "crates/*/benches/**", "crates/*/examples/**", "cliff.toml", "rustfmt.toml"]
-3 = ["**/Cargo.toml", "Cargo.lock", "**/migrations/**"]
-4 = [".github/**", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE"]
+3 = ["**/Cargo.toml", "**/migrations/**"]
+4 = [".github/**", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE", "**/Cargo.lock", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/uv.lock", "**/poetry.lock", "**/go.sum", "**/Gemfile.lock"]
 max_lines = 600          # bigger diffs are at least grade 3
 
 [factory.gates.1]

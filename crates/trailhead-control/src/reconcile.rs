@@ -176,7 +176,10 @@ impl Factory {
         let rounds = task.run.review_rounds.unwrap_or(0);
         if let Some(round) = Some(rounds + u32::from(after_conflict)).filter(|r| *r > 0) {
             let retries = task.run.retries.unwrap_or(0);
-            self.tracker.revoke_sub_agent(&reviewer_name(&task.key, attempt, round, retries)).await?;
+            let name = reviewer_name(&task.key, attempt, round, retries);
+            if let Err(e) = self.tracker.revoke_sub_agent(&name).await {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the interrupted reviewer's sub-agent; its token will expire");
+            }
         }
         self.review(task, pr, attempt, &[]).await
     }
@@ -333,7 +336,9 @@ impl Factory {
                 if task.holder.as_deref() == Some(sub.agent()) {
                     sub.release(&task.key).await?;
                 }
-                self.tracker.revoke_sub_agent(name).await?;
+                if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the sub-agent; its token will expire");
+                }
                 done.requeued.push(task.key.0.clone());
             }
             Status::Open => {
@@ -341,7 +346,9 @@ impl Factory {
                 if self.pr_settled(task, done).await?.is_none() {
                     return Ok(false);
                 }
-                self.tracker.revoke_sub_agent(name).await?;
+                if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the sub-agent; its token will expire");
+                }
             }
             // Parked for a human, so a PR still open or closed stays as it is (a closed one was the question). A merge
             // by anyone finishes the task all the same.
