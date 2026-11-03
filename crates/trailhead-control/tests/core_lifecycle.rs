@@ -657,7 +657,7 @@ async fn conflict_and_rework(r: &Rig, key: &TaskKey, pr: &trailhead_factory::PrR
         r.harness.push(Role::Reviewer, Script::new(approve()));
         r.factory.tick().await.unwrap();
         assert_eq!(r.show(key).await.status, Status::InReview);
-        // The host has answered for the pushed head, which settles the published mark.
+        // The host has answered for the pushed head, which settles the stale-head mark.
         assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
     }
 }
@@ -1001,8 +1001,8 @@ async fn rework_and_publish(r: &Rig, key: &TaskKey, pr: &trailhead_factory::PrRe
 async fn stale_conflicts_for_the_old_head_never_start_a_second_rework() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
-    let (before, published) = rework_and_publish(&r, &key, &pr).await;
-    assert_eq!(r.show(&key).await.run.published_head, Some(published));
+    let (before, _) = rework_and_publish(&r, &key, &pr).await;
+    assert_eq!(r.show(&key).await.run.stale_head, Some(before.clone()));
 
     // The host hasn't caught up with the push: it shows the old head and its `false`, however many polls it takes.
     r.codehost.set_lagging_head(&pr, Some(&before));
@@ -1022,7 +1022,7 @@ async fn stale_conflicts_for_the_old_head_never_start_a_second_rework() {
 }
 
 #[tokio::test]
-async fn the_published_head_is_in_the_run_record_so_a_restart_keeps_ignoring_stale_conflicts() {
+async fn the_stale_head_is_in_the_run_record_so_a_restart_keeps_ignoring_stale_conflicts() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
     let (before, _) = rework_and_publish(&r, &key, &pr).await;
@@ -1033,7 +1033,21 @@ async fn the_published_head_is_in_the_run_record_so_a_restart_keeps_ignoring_sta
     r.codehost.set_mergeable(&pr, Some(true));
     assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
     // A settled reading clears the mark, so a later conflict is read as it comes.
-    assert_eq!(r.show(&key).await.run.published_head.as_deref(), Some(""));
+    assert_eq!(r.show(&key).await.run.stale_head.as_deref(), Some(""));
+    r.codehost.set_mergeable(&pr, Some(false));
+    assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
+}
+
+#[tokio::test]
+async fn a_head_pushed_past_the_rework_still_has_its_conflicts_seen() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    let (before, _) = rework_and_publish(&r, &key, &pr).await;
+    // A person pushes before any poll saw the rework's head settle, and the new head conflicts.
+    r.codehost.set_lagging_head(&pr, Some(&before));
+    assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty(), "still the old head's reading");
+    r.codehost.set_lagging_head(&pr, None);
+    r.codehost.push_to(&pr);
     r.codehost.set_mergeable(&pr, Some(false));
     assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
 }
