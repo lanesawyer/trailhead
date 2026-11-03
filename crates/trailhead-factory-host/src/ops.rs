@@ -34,7 +34,7 @@ pub struct LogsOpts {
 
 pub async fn status(opts: &Opts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let opts = resolve_opts(opts, &paths)?;
+    let (opts, fnox) = resolve_opts(opts, &paths)?;
     let (_, _, config) = load_config(&opts)?;
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
@@ -49,7 +49,7 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     let (rows, runs): (Vec<Row>, _) = match &live {
         Some(live) => (live.snapshot.sandboxes.iter().map(Row::from_status).collect(), Some(live)),
         None => {
-            let computes = computes(&config, &opts, &paths, Default::default(), true)?;
+            let computes = computes(&config, &opts, &fnox, &paths, Default::default(), true)?;
             let labels = Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), slug)]);
             let (sandboxes, unreachable) = list_everywhere(&computes, &labels).await?;
             for name in &unreachable {
@@ -82,7 +82,7 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
 
 pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let opts = resolve_opts(&logs.opts, &paths)?;
+    let (opts, fnox) = resolve_opts(&logs.opts, &paths)?;
     let (_, _, config) = load_config(&opts)?;
 
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
@@ -94,7 +94,7 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     // With a control plane to ask, `--follow` follows its stream of the task's events rather than polling the log.
     let dir = paths.data_dir.join("factory");
     let streaming = logs.follow && surface::fetch(&dir).await.is_some();
-    let source = log_source(&config, &opts, &paths, &task).await;
+    let source = log_source(&config, &opts, &fnox, &paths, &task).await;
     let (compute, sandbox) = match source {
         Ok(source) => source,
         Err(why) if streaming => {
@@ -135,10 +135,11 @@ async fn stream_events(dir: &std::path::Path, key: &TaskKey) -> Result<(), Strin
 async fn log_source(
     config: &trailhead_factory::FactoryConfig,
     opts: &Opts,
+    fnox: &crate::fnox::Fnox,
     paths: &trailhead_server::Paths,
     task: &Task,
 ) -> Result<(Arc<dyn trailhead_factory::Compute>, Sandbox), String> {
-    let computes = computes(config, opts, paths, Default::default(), true)?;
+    let computes = computes(config, opts, fnox, paths, Default::default(), true)?;
     let wanted =
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
     let (found, unreachable) = list_everywhere(&computes, &wanted).await?;

@@ -59,21 +59,24 @@ impl Source {
 
 /// A secret from the environment if it's set and not blank, else the one fnox defines, else the one saved by `login`.
 /// Logs which source it came from, never the value.
-pub fn resolve(name: &str, env: Option<String>, fnox: &Fnox, creds: &CredStore, cred: Cred) -> Option<String> {
+pub fn resolve(
+    name: &str,
+    env: Option<String>,
+    fnox: &Fnox,
+    creds: &CredStore,
+    cred: Cred,
+) -> Result<Option<String>, String> {
     let found = match env.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
         Some(v) => Some((v, Source::Env)),
-        None => match fnox.get(name) {
+        None => match fnox.get(name)? {
             Some(v) => Some((v, Source::Fnox)),
             None => creds.read(cred).map(|(v, _)| v).filter(|v| !v.is_empty()).map(|v| (v, Source::Keyring)),
         },
     };
-    match found {
-        Some((v, source)) => {
-            tracing::info!("{name} from {}", source.label());
-            Some(v)
-        }
-        None => None,
-    }
+    Ok(found.map(|(v, source)| {
+        tracing::info!("{name} from {}", source.label());
+        v
+    }))
 }
 
 /// The first line of `input`, trimmed; prompts on stderr first when stdin is a terminal.
@@ -199,7 +202,7 @@ pub async fn github_writer(
 
 /// The gateway's GitHub token, from `GITHUB_WRITER_TOKEN` or the saved one. Never falls back to the read token.
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
-pub fn github_writer_token(fnox: &Fnox, creds: &CredStore) -> Option<String> {
+pub fn github_writer_token(fnox: &Fnox, creds: &CredStore) -> Result<Option<String>, String> {
     resolve("GITHUB_WRITER_TOKEN", std::env::var("GITHUB_WRITER_TOKEN").ok(), fnox, creds, GITHUB_WRITER)
 }
 
@@ -246,20 +249,36 @@ mod tests {
         h.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {token}"))
     }
 
-    /// A script standing in for `fnox`: `export --format json` defines SPRITES_TOKEN and a blank CLAUDE_CODE_OAUTH_TOKEN,
-    /// and not GITHUB_TOKEN. With `fail` it exits 1 as a refused provider login would.
-    fn fake_fnox(dir: &tempfile::TempDir, fail: bool) -> String {
+    /// A script standing in for `fnox`. `list --complete` names SPRITES_TOKEN, BROKEN (whose `get` fails as an expired
+    /// login would), CLAUDE_CODE_OAUTH_TOKEN (which `get` leaves blank, as `if_missing = "warn"` does) and OTHER, and
+    /// not GITHUB_TOKEN. Every call is appended to `calls` beside it.
+    fn fake_fnox(dir: &tempfile::TempDir) -> String {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.path().join("fnox");
-        let body = if fail {
-            "echo 'provider auth failed' >&2; exit 1"
-        } else {
-            "echo '{\"secrets\":{\"SPRITES_TOKEN\":\"from-fnox\",\"OTHER\":\"x\",\"CLAUDE_CODE_OAUTH_TOKEN\":\"\"}}'"
-        };
-        std::fs::write(&path, format!("#!/bin/sh\n[ \"$1 $2 $3\" = \"export --format json\" ] || exit 2\n{body}\n"))
-            .unwrap();
+        let calls = dir.path().join("calls");
+        let body = format!(
+            r#"#!/bin/sh
+echo "$@" >> {calls}
+case "$1 $2" in
+  "list --complete") printf 'SPRITES_TOKEN\nBROKEN\nCLAUDE_CODE_OAUTH_TOKEN\nOTHER\n' ;;
+  "get SPRITES_TOKEN") echo from-fnox ;;
+  "get CLAUDE_CODE_OAUTH_TOKEN") ;;
+  "get BROKEN") echo 'provider auth failed' >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+"#,
+            calls = calls.display()
+        );
+        std::fs::write(&path, body).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.display().to_string()
+    }
+
+    /// The fnox invocations the stand-in has seen, one per line.
+    fn calls(dir: &tempfile::TempDir) -> Vec<String> {
+        std::fs::read_to_string(dir.path().join("calls"))
+            .map(|s| s.lines().map(str::to_string).collect())
+            .unwrap_or_default()
     }
 
     /// A working directory holding a `fnox.toml`, which is all the host looks for before running fnox.
@@ -270,8 +289,8 @@ mod tests {
         repo
     }
 
-    fn load(program: &str, repo: &std::path::Path) -> Result<Fnox, String> {
-        Fnox::load(program, repo, None)
+    fn load(program: &str, repo: &std::path::Path) -> Fnox {
+        Fnox::new(program, repo, None)
     }
 
     #[test]
@@ -279,10 +298,11 @@ mod tests {
         let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let creds = store(&dir);
-        let fnox = load(&fake_fnox(&dir, false), &repo_with_config(&dir)).unwrap();
+        let fnox = load(&fake_fnox(&dir), &repo_with_config(&dir));
         creds.save(SPRITES, "saved").unwrap();
-        let got = |env: Option<&str>| resolve("SPRITES_TOKEN", env.map(Into::into), &fnox, &creds, SPRITES);
+        let got = |env: Option<&str>| resolve("SPRITES_TOKEN", env.map(Into::into), &fnox, &creds, SPRITES).unwrap();
         assert_eq!(got(Some("env")).as_deref(), Some("env"));
+        assert!(calls(&dir).is_empty(), "fnox was run though the environment had the secret");
         assert_eq!(got(Some("  ")).as_deref(), Some("from-fnox"));
         assert_eq!(got(None).as_deref(), Some("from-fnox"));
     }
@@ -292,12 +312,42 @@ mod tests {
         let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let creds = store(&dir);
-        let fnox = load(&fake_fnox(&dir, false), &repo_with_config(&dir)).unwrap();
-        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB), None);
+        let fnox = load(&fake_fnox(&dir), &repo_with_config(&dir));
+        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB).unwrap(), None);
         creds.save(GITHUB, "saved").unwrap();
         creds.save(CLAUDE, "saved-claude").unwrap();
-        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB).as_deref(), Some("saved"));
-        assert_eq!(resolve("CLAUDE_CODE_OAUTH_TOKEN", None, &fnox, &creds, CLAUDE).as_deref(), Some("saved-claude"));
+        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB).unwrap().as_deref(), Some("saved"));
+        let claude = resolve("CLAUDE_CODE_OAUTH_TOKEN", None, &fnox, &creds, CLAUDE).unwrap();
+        assert_eq!(claude.as_deref(), Some("saved-claude"));
+    }
+
+    #[test]
+    fn an_unrelated_failing_secret_is_never_read_and_a_needed_one_is_fatal() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        let fnox = load(&fake_fnox(&dir), &repo_with_config(&dir));
+        let got = resolve("SPRITES_TOKEN", None, &fnox, &creds, SPRITES).unwrap();
+        assert_eq!(got.as_deref(), Some("from-fnox"));
+        assert!(calls(&dir).iter().all(|c| !c.contains("BROKEN")), "{:?}", calls(&dir));
+        let err = resolve("BROKEN", None, &fnox, &creds, SPRITES).unwrap_err();
+        assert!(err.contains("fnox") && err.contains("provider auth failed"), "{err}");
+    }
+
+    #[test]
+    fn fnox_lists_its_config_once_however_many_names_are_asked_for() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        let fnox = load(&fake_fnox(&dir), &repo_with_config(&dir));
+        for (name, cred) in
+            [("SPRITES_TOKEN", SPRITES), ("GITHUB_TOKEN", GITHUB), ("GITHUB_WRITER_TOKEN", GITHUB_WRITER)]
+        {
+            resolve(name, None, &fnox, &creds, cred).unwrap();
+        }
+        let calls = calls(&dir);
+        assert_eq!(calls.iter().filter(|c| c.starts_with("list")).count(), 1, "{calls:?}");
+        assert_eq!(calls.iter().filter(|c| c.starts_with("get")).count(), 1, "{calls:?}");
     }
 
     #[test]
@@ -307,23 +357,16 @@ mod tests {
         let creds = store(&dir);
         let repo = repo_with_config(&dir);
         let missing = dir.path().join("no-such-fnox").display().to_string();
-        let fnox = load(&missing, &repo).unwrap();
+        let fnox = load(&missing, &repo);
         creds.save(GITHUB, "saved").unwrap();
-        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB).as_deref(), Some("saved"));
-        assert_eq!(resolve("SPRITES_TOKEN", None, &fnox, &creds, SPRITES), None);
+        assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB).unwrap().as_deref(), Some("saved"));
+        assert_eq!(resolve("SPRITES_TOKEN", None, &fnox, &creds, SPRITES).unwrap(), None);
         // Even a fnox that would fail isn't run when there's no config for it to read.
         let bare = dir.path().join("bare");
         std::fs::create_dir_all(&bare).unwrap();
-        let fnox = load(&fake_fnox(&dir, true), &bare);
-        assert!(fnox.is_ok(), "{fnox:?}");
-    }
-
-    #[test]
-    fn fnox_failing_against_a_config_is_an_error_naming_fnox() {
-        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let err = load(&fake_fnox(&dir, true), &repo_with_config(&dir)).unwrap_err();
-        assert!(err.contains("fnox") && err.contains("provider auth failed"), "{err}");
+        let fnox = load(&fake_fnox(&dir), &bare);
+        assert_eq!(fnox.get("BROKEN"), Ok(None));
+        assert!(calls(&dir).is_empty());
     }
 
     #[test]
@@ -334,7 +377,8 @@ mod tests {
         std::fs::write(&global, "").unwrap();
         let bare = dir.path().join("bare");
         std::fs::create_dir_all(&bare).unwrap();
-        let err = Fnox::load(&fake_fnox(&dir, true), &bare, Some(&global)).unwrap_err();
+        let fnox = Fnox::new(&fake_fnox(&dir), &bare, Some(&global));
+        let err = fnox.get("BROKEN").unwrap_err();
         assert!(err.contains("fnox"), "{err}");
     }
 
