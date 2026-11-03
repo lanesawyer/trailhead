@@ -340,6 +340,15 @@ pub fn gave_up_question(failed: u32, max: u32, reason: &str, last: &str) -> Stri
     )
 }
 
+/// Why a task is parked when two attempts in a row gave up, which points at the environment, not the task.
+pub fn repeated_failure_question(before: &str, reason: &str) -> String {
+    format!(
+        "Two attempts in a row gave up, so trying again is unlikely to help. The attempt before: {before}\n\n\
+         The last attempt: {reason}\n\nIf the cause is in the environment (network, a missing tool, credentials), \
+         fix it; otherwise say what to change. Then reopen the task; the attempt count starts again from here."
+    )
+}
+
 /// Why a task is parked when the infrastructure kept failing under a worker.
 pub fn infra_question(failures: u32, max: u32, error: &str) -> String {
     format!(
