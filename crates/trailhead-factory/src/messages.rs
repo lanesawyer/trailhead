@@ -227,6 +227,12 @@ pub fn agent_gave_up(reason: &str) -> String {
     format!("The agent gave up: {reason}")
 }
 
+/// Whether a recorded failure is [`agent_gave_up`]'s, as opposed to failed checks, a lost merge or conflict markers,
+/// which all come from an attempt that changed the checkout.
+pub fn is_agent_gave_up(failure: &str) -> bool {
+    failure.starts_with(&agent_gave_up(""))
+}
+
 /// How much of a failed check's output goes on the task.
 const NOTE_TAIL: usize = 4000;
 
@@ -337,6 +343,15 @@ pub fn gave_up_question(failed: u32, max: u32, reason: &str, last: &str) -> Stri
         "Gave up after {failed} failed attempts (the limit is {max}). The last failure: \
          {reason}\n\n{last}\n\nFix the cause, then reopen the task; the attempt count starts again from \
          here. Or raise `max_attempts` to allow more tries."
+    )
+}
+
+/// Why a task is parked when two attempts in a row gave up, which points at the environment, not the task.
+pub fn repeated_failure_question(before: &str, reason: &str) -> String {
+    format!(
+        "Two attempts in a row gave up, so trying again is unlikely to help. The attempt before: {before}\n\n\
+         The last attempt: {reason}\n\nIf the cause is in the environment (network, a missing tool, credentials), \
+         fix it; otherwise say what to change. Then reopen the task; the attempt count starts again from here."
     )
 }
 
