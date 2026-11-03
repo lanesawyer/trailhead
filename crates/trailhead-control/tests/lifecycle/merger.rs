@@ -137,12 +137,12 @@ async fn a_push_by_a_person_is_not_credited_to_the_rework() {
 #[tokio::test]
 async fn a_grade_three_pr_waits_for_lane_who_approves_it() {
     let (r, queue) = queued_rig_with(SHADOW);
-    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert_eq!(
         said(&r),
-        ["Grade 3 (task was 1; Cargo.lock changed): waiting for a person."],
+        ["Grade 3 (task was 1; Cargo.toml changed): waiting for a person."],
         "one comment, edited as the decision changed"
     );
     assert_eq!(r.tracker.task(&key).status, Status::InReview, "the factory doesn't approve for Lane");
@@ -155,7 +155,7 @@ async fn a_grade_three_pr_waits_for_lane_who_approves_it() {
     assert_eq!(
         said(&r),
         [
-            "Grade 3 (task was 1; Cargo.lock changed): checks, CI, review and a person's approval passed; not auto-merged at this grade, so a person merges."
+            "Grade 3 (task was 1; Cargo.toml changed): checks, CI, review and a person's approval passed; not auto-merged at this grade, so a person merges."
         ]
     );
     let decision = task.run.merge.unwrap();
@@ -641,7 +641,7 @@ async fn a_push_on_top_of_a_host_made_update_needs_a_new_review() {
 #[tokio::test]
 async fn lane_approving_a_grade_three_task_gets_it_merged() {
     let (r, queue) = queued_rig_with(&merging());
-    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(!r.codehost.prs()[0].merged, "waits for Lane");
@@ -654,7 +654,7 @@ async fn lane_approving_a_grade_three_task_gets_it_merged() {
 #[tokio::test]
 async fn a_host_made_update_keeps_lanes_approval_of_a_grade_three_task() {
     let (r, queue) = queued_rig_with(&merging());
-    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
     r.codehost.set_ci(&pr, CiState::Passed);
     r.tracker.approve_as_human(&key);
     r.codehost.set_behind(&pr, true);
@@ -672,7 +672,7 @@ async fn a_host_made_update_keeps_lanes_approval_of_a_grade_three_task() {
 #[tokio::test]
 async fn a_push_after_lanes_approval_of_a_grade_three_task_unapproves_it() {
     let (r, queue) = queued_rig_with(&merging());
-    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.lock").await;
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
     r.tracker.approve_as_human(&key);
     // CI is still running, so the first pass only marks the approval as Lane's, given on this head.
     r.factory.reconcile().await.unwrap();

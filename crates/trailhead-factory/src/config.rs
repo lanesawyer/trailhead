@@ -110,7 +110,7 @@ impl Default for GradesConfig {
                         "rustfmt.toml",
                     ]),
                 ),
-                ("3".to_string(), globs(&["**/Cargo.toml", "Cargo.lock", "**/migrations/**"])),
+                ("3".to_string(), globs(&["**/Cargo.toml", "**/migrations/**"])),
                 // What steers the agents themselves, as well as CI and the factory's own policy.
                 (
                     "4".to_string(),
@@ -124,6 +124,15 @@ impl Default for GradesConfig {
                         "skills/**",
                         ".trailhead.toml",
                         "LICENSE",
+                        // A new package gets a person's look, since workers may fetch them (TRAIL-704).
+                        "**/Cargo.lock",
+                        "**/package-lock.json",
+                        "**/pnpm-lock.yaml",
+                        "**/yarn.lock",
+                        "**/uv.lock",
+                        "**/poetry.lock",
+                        "**/go.sum",
+                        "**/Gemfile.lock",
                     ]),
                 ),
             ]),
@@ -898,6 +907,30 @@ mod tests {
         assert_eq!(with("queue = [\"TRAIL-102\", \"TRAIL-167\"]"), ["TRAIL-102", "TRAIL-167"]);
         let err = parse(&SAMPLE.replace("[repo]\n", "[repo]\nqueue = []\n")).unwrap_err();
         assert!(err.to_string().contains("queue = [] is empty"), "{err}");
+    }
+    #[test]
+    fn lockfiles_are_grade_four_and_manifests_grade_three_by_default() {
+        let g = GradesConfig::default();
+        let grade_of = |path: &str| {
+            g.rules
+                .iter()
+                .filter(|(_, gl)| gl.iter().any(|p| crate::grade::glob_match(p, path)))
+                .map(|(k, _)| k.as_str())
+                .max()
+        };
+        for lock in [
+            "Cargo.lock",
+            "web/package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "uv.lock",
+            "poetry.lock",
+            "go.sum",
+            "Gemfile.lock",
+        ] {
+            assert_eq!(grade_of(lock), Some("4"), "{lock}");
+        }
+        assert_eq!(grade_of("crates/a/Cargo.toml"), Some("3"));
     }
     #[test]
     fn grades_default_to_the_documented_rules_and_parse_from_the_file() {
