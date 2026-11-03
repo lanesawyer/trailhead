@@ -168,6 +168,11 @@ pub struct RunUpdate {
     /// still attributed to the merger. Empty once the host said the merge didn't happen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merging: Option<String>,
+    /// The PR's head from before a conflict rework pushed (its request's `head`), until the host answers `mergeable`
+    /// for another head (TRAIL-446). A reading while the PR still shows this head is the old head's, so it doesn't
+    /// count. Empty once settled; written empty to clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_head: Option<String>,
 }
 
 /// The merger's decision on a PR's current head (`docs/factory/review.md#the-merger`). Written whole, and its
@@ -292,6 +297,7 @@ impl RunUpdate {
             reviewed_head,
             merge,
             merging,
+            stale_head,
         } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
@@ -319,6 +325,7 @@ impl RunUpdate {
         self.reviewed_head = reviewed_head.or(self.reviewed_head.take());
         self.merge = merge.or(self.merge.take());
         self.merging = merging.or(self.merging.take());
+        self.stale_head = stale_head.or(self.stale_head.take());
     }
 
     /// The review the next run has to address: the last one that asked for changes, unless a later review has

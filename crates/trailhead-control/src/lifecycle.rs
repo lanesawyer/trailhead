@@ -304,8 +304,13 @@ impl Factory {
 
         match report.result {
             RunResult::PrOpened(pr) => {
-                if task.run.pending_changes().is_some_and(|c| c.conflict) {
-                    self.fresh_pushes.lock().unwrap().insert(task.key.clone());
+                if let Some(stale) = task.run.pending_changes().filter(|c| c.conflict).and_then(|c| c.head.clone()) {
+                    // Recorded so a `mergeable` reading for the head from before the push is ignored, across a restart
+                    // too. A request whose head the host couldn't say leaves the mark off; readings count as they come.
+                    let update = RunUpdate { stale_head: Some(stale), ..RunUpdate::default() };
+                    if let Err(e) = sub.report(&task.key, update).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't record the head from before the push");
+                    }
                 }
                 // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
                 // starts from the PR branch.

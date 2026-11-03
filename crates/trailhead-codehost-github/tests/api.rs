@@ -544,7 +544,8 @@ async fn pr_state_tells_open_from_merged_from_closed() {
         let new = NewPr { branch, base: "main".into(), title: "t".into(), body: "b".into() };
         prs.push(gh.open_pr(&repo(), new).await.unwrap());
     }
-    assert_eq!(gh.pr_state(&prs[0]).await.unwrap(), PrState::Open { mergeable: None });
+    let tip = head(&git, "factory/trail-1");
+    assert_eq!(gh.pr_state(&prs[0]).await.unwrap(), PrState::Open { mergeable: None, head: Some(tip) });
 
     gh.merge(&prs[1], &head(&git, "factory/trail-2")).await.unwrap();
     assert_eq!(gh.pr_state(&prs[1]).await.unwrap(), PrState::Merged { commit: Some("squash2".into()) });
@@ -568,12 +569,13 @@ async fn mergeable_reads_githubs_verdict_and_publish_can_make_a_merge_commit() {
     let pr = gh.open_pr(&repo(), new).await.unwrap();
 
     // GitHub says nothing while it works the answer out.
+    let tip = Some(head(&git, "factory/trail-1"));
     git.lock().unwrap().prs[0]["mergeable"] = Value::Null;
-    assert_eq!(gh.pr_state(&pr).await.unwrap(), PrState::Open { mergeable: None });
+    assert_eq!(gh.pr_state(&pr).await.unwrap(), PrState::Open { mergeable: None, head: tip.clone() });
     git.lock().unwrap().prs[0]["mergeable"] = json!(false);
-    assert_eq!(gh.pr_state(&pr).await.unwrap(), PrState::Open { mergeable: Some(false) });
+    assert_eq!(gh.pr_state(&pr).await.unwrap(), PrState::Open { mergeable: Some(false), head: tip.clone() });
     git.lock().unwrap().prs[0]["mergeable"] = json!(true);
-    assert_eq!(gh.pr_state(&pr).await.unwrap(), PrState::Open { mergeable: Some(true) });
+    assert_eq!(gh.pr_state(&pr).await.unwrap(), PrState::Open { mergeable: Some(true), head: tip });
 
     // A commit that merges main in has both parents.
     let branch = head(&git, "factory/trail-1");
