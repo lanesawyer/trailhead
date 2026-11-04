@@ -55,10 +55,13 @@ On a dropped stream, reconnect with the last applied id; the server resumes with
 
 A `Connection` state: `Offline`, `Syncing`, `Live`. Every command system runs only in `Live`, and the UI greys out its controls otherwise, with the reason shown. A command in flight when the connection drops is retried with its idempotency key once the client is `Live` again, or reported failed; it never silently disappears.
 
+As built (TRAIL-694): `ConnectionPlugin` runs the net thread (`net.rs`) and mirrors it into the `Connection` state, a `ConnectionStatus { reason }` resource (`Reason` says plainly why: no target, bad id, `NotAllowed`, unreachable, needs login, token rejected, dialing, signing in), `LocalEndpoint` (Lookout's own id, for `trailhead factory allow`) and, once signed in, `Api { base, token, user }`. The net thread probes `/v1/health` through the tunnel every 2 seconds. `Syncing` covers dialing and signing in until the event sync (TRAIL-695) exists. The endpoint key and the last control plane dialed are in Lookout's config directory (`LOOKOUT_CONFIG_DIR` overrides it). The control plane is given as an endpoint id; a longer ticket with addresses isn't built.
+
 ## Identity
 
 Nothing new. Tokens already have a `principal` of user or agent, and every write records the actor and the user it acted for, so the event log tells "a person approved it" from "`factory/trail-42-a1` did it."
 
+- Built (TRAIL-694): the token is found by the server's instance id from `/v1/health`, in the same place the CLI keeps it; `NetCommand::Login` takes a pasted token, confirms it with `/v1/me`, refuses an agent's, and saves it there. The window has no text input yet, so `lookout <endpoint-id>` and `LOOKOUT_TOKEN` stand in.
 - The UI reads the user token the CLI saved for this server (`<config dir>/servers/<instance>/`, or the keyring entry named after it), or runs the same `trailhead login` flow: paste a printed token, confirm with `/v1/me`.
 - It acts only as the user. No `--as <agent>` equivalent.
 - Proposal: move `trailhead_server::creds` into a small crate so the UI can share it without depending on the server.

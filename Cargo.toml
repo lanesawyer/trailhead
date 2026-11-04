@@ -19,6 +19,7 @@ libsql = { version = "0.10", default-features = false, features = ["core", "remo
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+globset = "0.4"
 uuid = { version = "1", features = ["v7", "serde"] }
 thiserror = "2"
 sha2 = "0.11"

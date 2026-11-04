@@ -825,3 +825,26 @@ async fn a_queued_update_is_forgotten_when_a_person_closes_the_pr() {
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
     assert!(!r.factory.awaiting_branch_update(&key));
 }
+
+#[tokio::test]
+async fn a_pr_merged_by_hand_before_approval_is_parked_once_not_retried() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+    // Core refuses the factory's `done` on work it did that nobody approved.
+    r.tracker.forbid_finishing_unapproved(true);
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "a person is asked to mark it done");
+    assert_eq!(task.run.merged.expect("the merge is recorded").by, MergedBy::Human);
+    let asked = |r: &Rig| r.tracker.comments(&key).iter().filter(|c| c.kind == "question").count();
+    assert_eq!(asked(&r), 1);
+
+    let again = r.factory.reconcile().await.unwrap();
+    assert!(again.merged.is_empty(), "a parked task isn't finished again");
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    assert_eq!(asked(&r), 1, "and not asked again");
+}
