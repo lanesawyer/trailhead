@@ -55,7 +55,7 @@ On a dropped stream, reconnect with the last applied id; the server resumes with
 
 A `Connection` state: `Offline`, `Syncing`, `Live`. Every command system runs only in `Live`, and the UI greys out its controls otherwise, with the reason shown. A command in flight when the connection drops is retried with its idempotency key once the client is `Live` again, or reported failed; it never silently disappears.
 
-As built (TRAIL-694): `ConnectionPlugin` runs the net thread (`net.rs`) and mirrors it into the `Connection` state, a `ConnectionStatus { reason }` resource (`Reason` says plainly why: no target, bad id, `NotAllowed`, unreachable, needs login, token rejected, dialing, signing in), `LocalEndpoint` (Lookout's own id, for `trailhead factory allow`) and, once signed in, `Api { base, token, user }`. The net thread probes `/v1/health` through the tunnel every 2 seconds. `Syncing` covers dialing and signing in until the event sync (TRAIL-695) exists. The endpoint key and the last control plane dialed are in Lookout's config directory (`LOOKOUT_CONFIG_DIR` overrides it). The control plane is given as an endpoint id; a longer ticket with addresses isn't built.
+As built (TRAIL-694): `ConnectionPlugin` runs the net thread (`net.rs`) and mirrors it into the `Connection` state, a `ConnectionStatus { reason }` resource (`Reason` says plainly why: no target, bad id, `NotAllowed`, unreachable, needs login, token rejected, dialing, signing in), `LocalEndpoint` (Lookout's own id, for `trailhead factory allow`) and, once signed in, `Api { base, token, user }`. The net thread probes `/v1/health` through the tunnel every 2 seconds. `Syncing` covers dialing, signing in, and loading the snapshot (`Reason::Loading`), and again if the feed drops (`Reason::Reconnecting`); `Live` means the stream is open. The endpoint key and the last control plane dialed are in Lookout's config directory (`LOOKOUT_CONFIG_DIR` overrides it). The control plane is given as an endpoint id; a longer ticket with addresses isn't built.
 
 ## Identity
 
@@ -124,7 +124,7 @@ Decided (2026-11-02): the factory builds the UI. The epic is TRAIL-685 and it is
 
 1. Scaffold `clients/trailhead-lookout`, CI over the whole workspace (TRAIL-690); a shared client crate for API types and credentials (TRAIL-693).
 2. The control plane's `trailhead/ui/0` protocol with API forwarding and its allowlist (TRAIL-700). Iroh from the start, decided 2026-11-02: reaching your factory from anywhere is the point, so there's no loopback-only stage.
-3. Net thread over iroh, login and `Connection` (TRAIL-694); sync and the stream into the ECS mirror (TRAIL-695); commands (TRAIL-696).
+3. Net thread over iroh, login and `Connection` (TRAIL-694); sync and the stream into the ECS mirror (TRAIL-695, built: `sync.rs` runs the three steps and resumes a dropped stream, past five minutes down it starts over; `mirror.rs` applies them, tasks and projects by `version`, comments by stage, claims by event id; agents have no events, so they change only with a snapshot, and the snapshot holds every task, closed ones included); commands (TRAIL-696).
 4. Task board (TRAIL-697), forms with the spec editor (TRAIL-698), inspector (TRAIL-699).
 5. The control plane's status snapshot and stream (TRAIL-692), carried over `trailhead/ui/0` into Lookout (TRAIL-701).
 6. Trail map (TRAIL-702).
