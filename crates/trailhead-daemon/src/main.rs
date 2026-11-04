@@ -206,7 +206,7 @@ async fn main() -> std::process::ExitCode {
             .exit(),
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| args.log.as_str().into());
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt().with_timer(trailhead_factory::logging::local_timer()).with_env_filter(filter).init();
     match serve(args).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
@@ -225,7 +225,10 @@ async fn gateway_command(command: Command) -> std::process::ExitCode {
             Command::Gateway { listen, socket, log } => {
                 let filter =
                     tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| log.as_str().into());
-                tracing_subscriber::fmt().with_env_filter(filter).init();
+                tracing_subscriber::fmt()
+                    .with_timer(trailhead_factory::logging::local_timer())
+                    .with_env_filter(filter)
+                    .init();
                 gateway::run(listen, &socket).await.map_err(|e| e.to_string())
             }
             Command::TrimCargo { .. } => unreachable!("handled in main"),
