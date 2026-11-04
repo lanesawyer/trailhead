@@ -5,9 +5,11 @@
 //!
 //! What "newer" means depends on what the entity has:
 //! - tasks and projects carry a `version`;
-//! - a comment is created, then resolved (or deleted), and only ever moves forward, so its stage is its revision;
-//! - a claim has no version, so the id of the event that last set it is its revision, and a snapshot's claim, which
-//!   has no event, gives way to any event for it;
+//! - a comment and a claim have no version, so the id of the event that last set it is its revision (the stream is
+//!   ordered, and an undo puts a comment back to an earlier state, so its state can't rank it), and a snapshot's
+//!   copy, which has no event, gives way to any event for it;
+//! - a deleted entity is despawned, as a snapshot leaves it out, so the stream and a snapshot agree; an undo of the
+//!   delete brings it back;
 //! - agents have no events yet, so they change only with a snapshot.
 
 use std::collections::HashMap;
@@ -128,7 +130,7 @@ impl Mirror {
             }
             let comments = questions.as_array().into_iter().flatten().chain(handoff.is_object().then_some(&handoff));
             for comment in comments {
-                self.put(commands, Kind::Comment, &str_of(comment, "id"), comment_rev(comment), comment.clone(), true);
+                self.put(commands, Kind::Comment, &str_of(comment, "id"), Rev(0), comment.clone(), true);
             }
         }
     }
@@ -142,23 +144,19 @@ impl Mirror {
         self.last_event = event_id;
         let id = event["entity_id"].as_str().unwrap_or_default().to_string();
         let after = event["after"].clone();
-        match event["entity"].as_str() {
-            Some("project") if after.is_object() => {
-                self.put(commands, Kind::Project, &id, version(&after), after, false);
-            }
-            Some("task") if after.is_object() => {
-                self.put(commands, Kind::Task, &id, version(&after), after, false);
-            }
-            Some("comment") if after.is_object() => {
-                self.put(commands, Kind::Comment, &id, comment_rev(&after), after, false);
-            }
-            Some("claim") if after.is_object() => {
-                self.put(commands, Kind::Claim, &id, Rev(event_id), after, false);
-            }
-            Some("claim") => self.remove(commands, Kind::Claim, &id),
+        let kind = match event["entity"].as_str() {
+            Some("project") => Kind::Project,
+            Some("task") => Kind::Task,
+            Some("comment") => Kind::Comment,
+            Some("claim") => Kind::Claim,
             // Dependencies aren't mirrored yet.
-            _ => {}
+            _ => return,
+        };
+        if !after.is_object() || !after["deleted_at"].is_null() {
+            return self.remove(commands, kind, &id);
         }
+        let rev = if matches!(kind, Kind::Task | Kind::Project) { version(&after) } else { Rev(event_id) };
+        self.put(commands, kind, &id, rev, after, false);
     }
 }
 
@@ -168,12 +166,6 @@ fn str_of(v: &Value, key: &str) -> String {
 
 fn version(v: &Value) -> Rev {
     Rev(v["version"].as_i64().unwrap_or(0))
-}
-
-/// A comment only moves forward: created, then resolved, then deleted.
-fn comment_rev(comment: &Value) -> Rev {
-    let set = |k: &str| !comment[k].is_null();
-    Rev(1 + i64::from(set("resolved_at")) + i64::from(set("deleted_at")))
 }
 
 pub fn apply_sync(mut items: MessageReader<SyncItem>, mut mirror: ResMut<Mirror>, mut commands: Commands) {
@@ -254,6 +246,44 @@ mod tests {
         assert_eq!(title(&mut app), "b");
         let world = app.world_mut();
         assert_eq!(world.query::<&IsTask>().iter(world).count(), 1);
+    }
+
+    fn comment_event(id: i64, resolved: bool, deleted: bool) -> SyncItem {
+        let at = |on: bool| if on { json!("2026-01-01T00:00:00Z") } else { Value::Null };
+        SyncItem::Event(json!({
+            "id": id, "entity": "comment", "entity_id": "c1", "kind": "comment.updated",
+            "after": {"id": "c1", "resolved_at": at(resolved), "deleted_at": at(deleted)},
+        }))
+    }
+
+    fn data_of<C: Component>(app: &mut App) -> Vec<Value> {
+        let world = app.world_mut();
+        world.query_filtered::<&Data, With<C>>().iter(world).map(|d| d.0.clone()).collect()
+    }
+
+    #[test]
+    fn undoing_a_resolve_reopens_the_question() {
+        let mut app = app();
+        send(&mut app, [snapshot(10, 1, "a"), comment_event(11, false, false), comment_event(12, true, false)]);
+        assert!(!data_of::<IsComment>(&mut app)[0]["resolved_at"].is_null());
+        send(&mut app, [comment_event(13, false, false)]);
+        assert!(data_of::<IsComment>(&mut app)[0]["resolved_at"].is_null());
+    }
+
+    #[test]
+    fn deleted_entities_are_despawned_and_undo_restores_them() {
+        let mut app = app();
+        send(&mut app, [snapshot(10, 1, "a"), comment_event(11, false, false)]);
+        let gone = SyncItem::Event(json!({
+            "id": 12, "entity": "task", "entity_id": "t1", "kind": "task.deleted",
+            "after": {"id": "t1", "title": "a", "version": 2, "deleted_at": "2026-01-01T00:00:00Z"},
+        }));
+        send(&mut app, [gone, comment_event(13, false, true)]);
+        assert!(data_of::<IsTask>(&mut app).is_empty());
+        assert!(data_of::<IsComment>(&mut app).is_empty());
+        send(&mut app, [task_event(14, 3, "back"), comment_event(15, false, false)]);
+        assert_eq!(title(&mut app), "back");
+        assert_eq!(data_of::<IsComment>(&mut app).len(), 1);
     }
 
     #[test]

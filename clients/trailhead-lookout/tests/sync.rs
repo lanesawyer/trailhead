@@ -12,7 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use trailhead_core::{Ctx, NewComment, NewProject, NewTask, Principal, Store, TaskPatch};
 use trailhead_lookout::mirror::{Data, IsClaim, IsComment, IsProject, IsTask, Mirror, MirrorPlugin, Rev};
-use trailhead_lookout::sync::{self, Remote, Report, SyncItem, SyncTimings};
+use trailhead_lookout::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 
 struct Rig {
     _dir: tempfile::TempDir,
@@ -110,12 +110,17 @@ struct Running {
 
 impl Running {
     fn start(remote: Remote, timings: SyncTimings) -> Running {
+        Running::start_from(remote, timings, Resume::default())
+    }
+
+    fn start_from(remote: Remote, timings: SyncTimings, resume: Resume) -> Running {
         let (tx, items) = std::sync::mpsc::channel();
         let reports = Arc::new(Mutex::new(Vec::new()));
         let r = reports.clone();
         let task = tokio::spawn(sync::run(
             remote,
             timings,
+            resume,
             move |item| tx.send(item).is_ok(),
             move |report| r.lock().unwrap().push(report),
         ));
@@ -325,4 +330,63 @@ async fn claims_comments_and_projects_are_mirrored() {
         world.query_filtered::<&Data, With<IsComment>>().iter(world).filter(|d| !d.0["resolved_at"].is_null()).count();
     assert_eq!(resolved, 1);
     run.task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_sync_resumes_from_where_the_stream_got_to() {
+    let rig = Rig::new().await;
+    rig.task("before").await;
+    let resume = Resume::default();
+    let mut run = Running::start_from(rig.remote(rig.server, &fast()), fast(), resume.clone());
+    run.until("live", |_, r| r.contains(&Report::Live)).await;
+    rig.task("one").await;
+    run.until("one", |s, _| has_title(s, "one")).await;
+
+    // The link went down (the net thread's probe failed): the task is aborted, and a write is missed.
+    run.task.abort();
+    resume.pause();
+    rig.task("two").await;
+
+    // Back up: no second snapshot, and the missed write arrives from the stream.
+    let mut again = Running::start_from(rig.remote(rig.server, &fast()), fast(), resume);
+    again.until("two", |s, _| has_title(s, "two")).await;
+    assert_eq!(again.snapshots(), 0);
+    let mut app = mirror_app();
+    feed(&mut app, run.seen.iter().chain(&again.seen).cloned());
+    let titles: Vec<_> = tasks(&mut app).into_iter().map(|t| t.0).collect();
+    assert_eq!(titles, ["before", "one", "two"]);
+    again.task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_sync_past_the_long_disconnect_starts_over() {
+    let rig = Rig::new().await;
+    let timings = SyncTimings { long_disconnect: Duration::from_millis(100), ..fast() };
+    let resume = Resume::default();
+    let mut run = Running::start_from(rig.remote(rig.server, &timings), timings, resume.clone());
+    run.until("live", |_, r| r.contains(&Report::Live)).await;
+    run.task.abort();
+    resume.pause();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut again = Running::start_from(rig.remote(rig.server, &timings), timings, resume);
+    again.until("a snapshot", |s, _| s.iter().any(|i| matches!(i, SyncItem::Snapshot(_)))).await;
+    again.task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_after_a_delete_keeps_every_other_task() {
+    let rig = Rig::new().await;
+    // More than a page, so the boundary task moves up when an earlier one goes.
+    let mut ids = Vec::new();
+    for n in 0..102 {
+        ids.push(rig.task(&format!("t{n:03}")).await["id"].as_str().unwrap().to_string());
+    }
+    // A delete after step 1 (a mid-paging one needs a hook in the server; the re-check covers it).
+    let remote = rig.remote(rig.server, &fast());
+    let at = remote.newest_event_id().await.unwrap();
+    rig.state.store.delete_task(&rig.ctx, &ids[0], None).await.unwrap();
+    let snapshot = remote.load_snapshot(at).await.unwrap();
+    let titles: Vec<_> = snapshot.tasks.iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(titles.len(), 101);
+    assert!(titles.contains(&"t100".to_string()) && titles.contains(&"t101".to_string()));
 }

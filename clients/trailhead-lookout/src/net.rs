@@ -18,7 +18,7 @@ use trailhead_client::creds::{Cred, CredStore};
 use trailhead_daemon::net::{parse_endpoint_id, parse_secret_key};
 use trailhead_daemon::ui::{CLOSE_NOT_ALLOWED, UI_ALPN, open_ui_tunnel};
 
-use crate::sync::{self, Remote, Report, SyncItem, SyncTimings};
+use crate::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 
 /// How the app is connected to its factory. The Bevy `States` type is in [`crate::connection`]; this is the same
 /// three values as the net thread reports them.
@@ -249,6 +249,8 @@ struct Net {
     /// The running sync, and which run it is, so a report from one that was replaced is ignored.
     sync: Option<tokio::task::JoinHandle<()>>,
     sync_run: u64,
+    /// Where the stream got to, kept across `Offline` so a short outage resumes instead of starting over.
+    resume: Resume,
     reports: tokio_mpsc::UnboundedSender<(u64, Report)>,
     timings: SyncTimings,
 }
@@ -280,6 +282,7 @@ async fn run(
         state: None,
         sync: None,
         sync_run: 0,
+        resume: Resume::default(),
         reports,
         timings: SyncTimings::default(),
     };
@@ -364,6 +367,7 @@ impl Net {
             self.token = None;
             self.state = None;
             self.stop_sync();
+            self.resume.clear();
         }
         if std::fs::create_dir_all(&self.config.config_dir).is_ok()
             && let Err(e) = std::fs::write(self.config.target_file(), format!("{id}\n"))
@@ -419,6 +423,7 @@ impl Net {
             Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.unwrap_or_default(),
             Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
                 self.token = None;
+                self.resume.clear();
                 return self.set(Link::Offline, Some(Reason::TokenRejected));
             }
             Ok(r) => {
@@ -430,12 +435,16 @@ impl Net {
         // The user token only: an agent's would let Lookout act as one.
         if me["agent"]["name"].as_str().is_some() {
             self.token = None;
+            self.resume.clear();
             return self.set(Link::Offline, Some(Reason::AgentToken));
         }
         if pasted.is_some()
             && let Some(Err(e)) = store.map(|s| s.save(Cred::User, &token))
         {
             tracing::warn!(error = %e, "can't save the token; it will be asked for again next start");
+        }
+        if pasted.is_some() {
+            self.resume.clear();
         }
         let user = me["user"]["name"].as_str().unwrap_or("you").to_string();
         self.token = Some(token.clone());
@@ -454,6 +463,7 @@ impl Net {
         self.sync = Some(tokio::spawn(sync::run(
             remote,
             self.timings,
+            self.resume.clone(),
             move |item| events.send(NetEvent::Sync(item)).is_ok(),
             move |report| {
                 let _ = reports.send((run, report));
@@ -462,6 +472,7 @@ impl Net {
     }
 
     fn stop_sync(&mut self) {
+        self.resume.pause();
         if let Some(task) = self.sync.take() {
             task.abort();
         }

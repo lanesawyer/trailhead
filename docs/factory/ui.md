@@ -124,7 +124,7 @@ Decided (2026-11-02): the factory builds the UI. The epic is TRAIL-685 and it is
 
 1. Scaffold `clients/trailhead-lookout`, CI over the whole workspace (TRAIL-690); a shared client crate for API types and credentials (TRAIL-693).
 2. The control plane's `trailhead/ui/0` protocol with API forwarding and its allowlist (TRAIL-700). Iroh from the start, decided 2026-11-02: reaching your factory from anywhere is the point, so there's no loopback-only stage.
-3. Net thread over iroh, login and `Connection` (TRAIL-694); sync and the stream into the ECS mirror (TRAIL-695, built: `sync.rs` runs the three steps and resumes a dropped stream, past five minutes down it starts over; `mirror.rs` applies them, tasks and projects by `version`, comments by stage, claims by event id; agents have no events, so they change only with a snapshot, and the snapshot holds every task, closed ones included); commands (TRAIL-696).
+3. Net thread over iroh, login and `Connection` (TRAIL-694); sync and the stream into the ECS mirror (TRAIL-695, built: `sync.rs` runs the three steps and resumes a dropped stream, past five minutes down it starts over; `mirror.rs` applies them, tasks and projects by `version`, comments and claims by event id, deleted entities despawned; a link that goes `Offline` keeps the stream position, so a short outage resumes; agents have no events, so they change only with a snapshot, and the snapshot holds every task, closed ones included); commands (TRAIL-696).
 4. Task board (TRAIL-697), forms with the spec editor (TRAIL-698), inspector (TRAIL-699).
 5. The control plane's status snapshot and stream (TRAIL-692), carried over `trailhead/ui/0` into Lookout (TRAIL-701).
 6. Trail map (TRAIL-702).

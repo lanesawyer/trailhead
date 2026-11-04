@@ -9,6 +9,7 @@
 //! server refuses to resume, all three steps run again: the stream reads only `events`, not the archive, so a
 //! long-lost client can't trust a resume.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -119,6 +120,20 @@ impl Remote {
     pub async fn load_snapshot(&self, at: i64) -> Result<Snapshot, String> {
         let projects = self.list("/v1/projects").await?;
         let agents = self.list("/v1/agents").await?;
+        // Pages are by offset, and a task deleted from an earlier page moves the rest up one, so the one at the
+        // boundary is skipped. Nothing after `at` need bring it back, so page again if anything was deleted meanwhile.
+        let tasks = loop {
+            let from = self.newest_event_id().await?.max(at);
+            let tasks = self.load_tasks().await?;
+            let deleted = self.list(&format!("/v1/events?after={from}&kinds=task.deleted&limit=1")).await?;
+            if deleted.is_empty() {
+                break tasks;
+            }
+        };
+        Ok(Snapshot { at, projects, agents, tasks })
+    }
+
+    async fn load_tasks(&self) -> Result<Vec<Value>, String> {
         let mut tasks = Vec::new();
         loop {
             let page = self
@@ -131,10 +146,9 @@ impl Remote {
             let last = page.len() < PAGE;
             tasks.extend(page);
             if last {
-                break;
+                return Ok(tasks);
             }
         }
-        Ok(Snapshot { at, projects, agents, tasks })
     }
 
     /// Step 3, until it ends. Each event is passed to `emit` and `last` moves to its id; `emit` returning false
@@ -193,52 +207,122 @@ pub enum StreamEnd {
     AppGone,
 }
 
+/// Where the stream got to, kept outside [`run`] so a sync that is stopped (the link went down) can be picked up
+/// again from the same place if it's soon enough.
+#[derive(Clone, Default)]
+pub struct Resume(Arc<Mutex<Option<ResumePoint>>>);
+
+#[derive(Clone, Copy)]
+struct ResumePoint {
+    /// The id of the last event handed on, or the snapshot's.
+    last: i64,
+    /// Since when the stream has not been open; `None` while it is.
+    down_since: Option<Instant>,
+}
+
+impl Resume {
+    fn point(&self) -> Option<ResumePoint> {
+        *self.0.lock().expect("resume lock")
+    }
+
+    fn set(&self, point: Option<ResumePoint>) {
+        *self.0.lock().expect("resume lock") = point;
+    }
+
+    /// Forgets the position: the next sync starts from a snapshot.
+    pub fn clear(&self) {
+        self.set(None);
+    }
+
+    /// Notes that the stream is no longer being read, as of now.
+    pub fn pause(&self) {
+        if let Some(p) = self.0.lock().expect("resume lock").as_mut() {
+            p.down_since.get_or_insert_with(Instant::now);
+        }
+    }
+
+    fn advance(&self, id: i64) {
+        if let Some(p) = self.0.lock().expect("resume lock").as_mut() {
+            p.last = p.last.max(id);
+        }
+    }
+
+    fn opened(&self) {
+        if let Some(p) = self.0.lock().expect("resume lock").as_mut() {
+            p.down_since = None;
+        }
+    }
+}
+
 /// Runs the sync until the app goes away: the snapshot, then the stream, over and over. `report` says where it is.
+/// With a `resume` position that's younger than [`SyncTimings::long_disconnect`], it starts at the stream.
 pub async fn run(
     remote: Remote,
     timings: SyncTimings,
+    resume: Resume,
     mut emit: impl FnMut(SyncItem) -> bool,
     report: impl Fn(Report),
 ) {
+    let mut emit = |item: SyncItem| {
+        let id = match &item {
+            SyncItem::Event(e) => e["id"].as_i64(),
+            SyncItem::Snapshot(_) => None,
+        };
+        let sent = emit(item);
+        if let (true, Some(id)) = (sent, id) {
+            resume.advance(id);
+        }
+        sent
+    };
     'sync: loop {
-        report(Report::Loading);
-        let mut last = match snapshot(&remote, &mut emit).await {
-            Ok(Some(at)) => at,
-            Ok(None) => return,
-            Err(e) => {
-                tracing::warn!(error = %e, "can't load the snapshot");
-                tokio::time::sleep(timings.retry).await;
-                continue;
+        let kept = resume.point().filter(|p| p.down_since.is_none_or(|d| d.elapsed() < timings.long_disconnect));
+        let mut last = match kept {
+            Some(p) => {
+                report(Report::Reconnecting);
+                p.last
+            }
+            None => {
+                resume.clear();
+                report(Report::Loading);
+                match snapshot(&remote, &mut emit).await {
+                    Ok(Some(at)) => {
+                        resume.set(Some(ResumePoint { last: at, down_since: Some(Instant::now()) }));
+                        at
+                    }
+                    Ok(None) => return,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "can't load the snapshot");
+                        tokio::time::sleep(timings.retry).await;
+                        continue;
+                    }
+                }
             }
         };
-        let mut down_since: Option<Instant> = None;
         loop {
-            let opened = std::sync::atomic::AtomicBool::new(false);
             let end = remote
                 .stream(
                     &mut last,
                     || {
-                        opened.store(true, std::sync::atomic::Ordering::Relaxed);
+                        resume.opened();
                         report(Report::Live);
                     },
                     &mut emit,
                 )
                 .await;
-            if opened.load(std::sync::atomic::Ordering::Relaxed) {
-                down_since = None;
-            }
             match end {
                 StreamEnd::AppGone => return,
                 StreamEnd::Refused(why) => {
                     tracing::warn!(%why, "can't resume the event stream; syncing from scratch");
+                    resume.clear();
                     tokio::time::sleep(timings.retry).await;
                     continue 'sync;
                 }
                 StreamEnd::Dropped(why) => {
                     tracing::debug!(%why, last, "event stream dropped");
                     report(Report::Reconnecting);
-                    let since = *down_since.get_or_insert_with(Instant::now);
-                    if since.elapsed() >= timings.long_disconnect {
+                    resume.pause();
+                    let down = resume.point().and_then(|p| p.down_since);
+                    if down.is_some_and(|d| d.elapsed() >= timings.long_disconnect) {
                         continue 'sync;
                     }
                     tokio::time::sleep(timings.retry).await;
