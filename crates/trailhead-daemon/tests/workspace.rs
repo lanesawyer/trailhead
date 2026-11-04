@@ -279,7 +279,10 @@ async fn prepare_installs_the_stack_with_mise_and_checks_run_under_it() {
     let generated = std::fs::read_to_string(conf.join("trailhead-factory.toml")).unwrap();
     assert!(generated.contains("node = \"26\""), "{generated}");
     let log = std::fs::read_to_string(tools.join("mise.log")).unwrap();
-    assert!(log.contains("conf.d: bootstrap --only tools"), "installed from outside the checkout: {log}");
+    assert!(log.contains("conf.d: bootstrap --only tools"), "the stack installs from outside the checkout: {log}");
+    let preview = log.find("bootstrap --only packages,tools,task --dry-run").expect("the preview is logged first");
+    let apply = log.find("bootstrap --only packages,tools,task\n").expect("only the allowed parts run");
+    assert!(preview < apply, "{log}");
     assert_eq!(
         std::fs::read_to_string(ws.dir().join(".setup-env")).unwrap().trim(),
         "pinned=1",
@@ -288,11 +291,86 @@ async fn prepare_installs_the_stack_with_mise_and_checks_run_under_it() {
     assert_eq!(ws.agent_env().await["PATH"], "/pinned/bin:/usr/bin");
     let result = ws.check(&check("test", "echo $PINNED $MISE_IGNORED_CONFIG_PATHS")).await;
     assert!(result.passed, "{result:?}");
-    assert_eq!(result.output.trim(), format!("1 {}", ws.dir().display()), "the repo's own mise config is ignored");
+    assert_eq!(result.output.trim(), "1", "the repo's config installed, so it isn't ignored: {result:?}");
 
     // Dropping the stack removes the factory's tools again.
     ws.prepare(&PrepareRequest { tools: Default::default(), setup: None, ..req }).await.unwrap();
     assert!(!conf.join("trailhead-factory.toml").exists());
+}
+
+fn mise_workspace(root: &Path, tools: &Path) -> GitWorkspace {
+    let remote = format!("file://{}", root.join("remote").display());
+    GitWorkspace::with_remote(root.join("work/widget"), remote)
+        .with_mise(Mise::with(fake_mise(tools), root.join("conf.d")))
+}
+
+fn mise_request(tools: &[(&str, &str)]) -> PrepareRequest {
+    PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        setup: None,
+        tools: tools.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        tool_hosts: Default::default(),
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+    }
+}
+
+#[tokio::test]
+async fn a_repos_own_mise_config_alone_runs_under_mise() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    add_mise_toml(root.path(), &src);
+    let tools = root.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let ws = mise_workspace(root.path(), &tools);
+    ws.prepare(&mise_request(&[])).await.unwrap();
+
+    let result = ws.check(&check("test", "echo pinned=$PINNED ignored=$MISE_IGNORED_CONFIG_PATHS")).await;
+    assert_eq!(result.output.trim(), "pinned=1 ignored=", "{result:?}");
+    assert!(!root.path().join("conf.d/trailhead-factory.toml").exists());
+}
+
+#[tokio::test]
+async fn a_failing_repo_config_is_ignored_and_the_stack_still_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    add_mise_toml(root.path(), &src);
+    let tools = root.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let ws = mise_workspace(root.path(), &tools);
+    let req = mise_request(&[("node", "26")]);
+    ws.prepare(&req).await.unwrap();
+
+    // Fails only for the repo's own bootstrap: a dev-machine tool that can't install here.
+    let script = std::fs::read_to_string(tools.join("mise")).unwrap();
+    let fail = "case \"$PWD:$1\" in */widget:bootstrap) exit 1;; esac\n";
+    std::fs::write(tools.join("mise"), script.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{fail}"), 1)).unwrap();
+    ws.prepare(&req).await.unwrap();
+
+    let result = ws.check(&check("test", "echo pinned=$PINNED ignored=$MISE_IGNORED_CONFIG_PATHS")).await;
+    assert_eq!(result.output.trim(), format!("pinned=1 ignored={}", ws.dir().display()), "{result:?}");
+}
+
+#[tokio::test]
+async fn a_failing_repo_config_with_no_stack_gets_the_stock_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    add_mise_toml(root.path(), &src);
+    let tools = root.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let ws = mise_workspace(root.path(), &tools);
+    let script = std::fs::read_to_string(fake_mise(&tools)).unwrap();
+    let fail = "case \"$1\" in bootstrap) exit 1;; esac\n";
+    std::fs::write(tools.join("mise"), script.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{fail}"), 1)).unwrap();
+    ws.prepare(&mise_request(&[])).await.unwrap();
+
+    let result = ws.check(&check("test", "echo pinned=$PINNED")).await;
+    assert_eq!(result.output.trim(), "pinned=", "{result:?}");
+    assert!(ws.agent_env().await.is_empty());
 }
 
 #[tokio::test]

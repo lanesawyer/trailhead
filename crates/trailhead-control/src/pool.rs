@@ -11,7 +11,7 @@ use crate::{Factory, Placed, RELEASE_ATTEMPTS, RELEASE_PATIENCE, Reconciled};
 
 impl Factory {
     /// Prepares `sandbox`'s checkout under install egress. The control plane can't see the checkout, so the daemon
-    /// first says which hosts the `[stack]` tools it will install need; exactly
+    /// first says which hosts the tools it will install need (the `[stack]` and the repo's own mise config); exactly
     /// those are opened on top of the install set for the prepare, each logged with the tool that asked, and
     /// confirmed closed again before any agent runs.
     async fn prepare_sandbox(&self, p: &Placed, sandbox: &Sandbox, req: PrepareRequest) -> Result<()> {

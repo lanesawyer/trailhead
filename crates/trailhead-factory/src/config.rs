@@ -606,7 +606,7 @@ pub struct EgressConfig {
     pub always: Vec<String>,
     #[serde(default)]
     pub install: Vec<String>,
-    /// Download hosts per mise tool (`zig = ["ziglang.org"]`), for a `[stack]` tool the daemon's table
+    /// Download hosts per mise tool (`zig = ["ziglang.org"]`), for a `[stack]` or `mise.toml` tool the daemon's table
     /// doesn't know. Opened only while that tool installs; they take precedence over the table.
     #[serde(default)]
     pub tools: BTreeMap<String, Vec<String>>,

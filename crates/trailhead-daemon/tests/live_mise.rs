@@ -1,5 +1,5 @@
 //! A repo whose `[stack]` asks for node 26 gets node 26: the daemon installs mise and the tool in a real Sprite,
-//! and the `setup` check runs under mise's environment, despite this repo's own `mise.toml` pinning other tools. Creates and destroys one Sprite. Needs `SPRITES_TOKEN` and a
+//! and the `setup` check runs under mise's environment, even with this repo's own `mise.toml`, whose dev-machine tools may not install there. Creates and destroys one Sprite. Needs `SPRITES_TOKEN` and a
 //! release build of the daemon in `TRAILHEAD_DAEMON_BIN`:
 //!
 //! `mise run test-live-mise`

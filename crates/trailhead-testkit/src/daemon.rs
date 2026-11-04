@@ -46,6 +46,8 @@ pub struct FakeWorkspace {
     rebases: AtomicBool,
     /// Files the agent leaves conflict markers in.
     markers: Mutex<Vec<String>>,
+    /// Tools in the fake checkout's own mise config.
+    repo_tools: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
     /// Errors the next prepares fail with, before they change anything.
     prepare_errors: Mutex<Vec<String>>,
@@ -62,7 +64,7 @@ impl Workspace for FakeWorkspace {
 
     async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
         let stack: Vec<String> = req.tools.keys().cloned().collect();
-        trailhead_daemon::install_hosts_for(&stack, &req.tool_hosts, false)
+        trailhead_daemon::install_hosts_for(&stack, &self.repo_tools.lock().unwrap(), &req.tool_hosts, false, false)
     }
 
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
@@ -190,6 +192,11 @@ impl LocalDaemon {
             ongoing: Mutex::default(),
             attached: Mutex::default(),
         }
+    }
+
+    /// Has the checkout's own mise config ask for these tools, as a `mise.toml` in the repo would.
+    pub fn repo_mise_tools(&self, tools: &[&str]) {
+        *self.workspace.repo_tools.lock().unwrap() = tools.iter().map(|t| t.to_string()).collect();
     }
 
     /// Has the daemon send a heartbeat this often instead of every 30 seconds.
