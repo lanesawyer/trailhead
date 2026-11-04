@@ -718,7 +718,7 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt().with_timer(trailhead_factory::logging::local_timer()).with_env_filter(filter).init();
     match main_inner(Cli::parse()).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
