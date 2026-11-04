@@ -701,6 +701,37 @@ async fn breaching_rig() -> (Rig, TaskKey, PrRef) {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_reviewer_breach_park_a_person_fixed_gets_a_fresh_review_under_a_new_name() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Big diff", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.task(&key).run.review_breach.expect("recorded").parked);
+
+    // A person fixes the PR and moves the task back to review.
+    r.codehost.push_to(&pr);
+    r.tracker.set_status(&key, Status::InReview);
+    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed, vec![key.0.clone()], "{done:?}");
+    assert!(done.breached.is_empty(), "{done:?}");
+    // A reused name would hit the revoked reviewer's sub-agent and fail with Forbidden, so a verdict proves a fresh one.
+    let agents = r.tracker.agents();
+    for name in ["factory/trail-1-a1-r1-1", "factory/trail-1-a1-r1-2"] {
+        assert!(agents.iter().any(|a| a == name), "{name} in {agents:?}");
+    }
+    assert_ne!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_breach_park_finished_from_open_claims_the_task_first() {
     let (r, key, _) = breaching_rig().await;
     // The claim fails after the reopen: the task is left Open.
