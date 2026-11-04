@@ -13,7 +13,7 @@ use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
     BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
-    Repo, Result,
+    RateLimit, Repo, Result,
 };
 
 pub const API_URL: &str = "https://api.github.com";
@@ -40,6 +40,8 @@ pub struct GitHub {
     /// The last answer to each conditional GET, by URL: its ETag and body. A `304 Not Modified` isn't counted
     /// against GitHub's rate limit, so asking again about an unchanged PR is almost free.
     etags: Arc<Mutex<HashMap<String, (String, Value)>>>,
+    /// What the last response said of GitHub's rate limit (`x-ratelimit-*`), if it said.
+    rate: Arc<Mutex<Option<RateLimit>>>,
 }
 
 impl GitHub {
@@ -54,7 +56,14 @@ impl GitHub {
             .user_agent("trailhead-factory")
             .build()
             .expect("http client");
-        GitHub { http, base: base.into().trim_end_matches('/').to_string(), token, author: None, etags: Arc::default() }
+        GitHub {
+            http,
+            base: base.into().trim_end_matches('/').to_string(),
+            token,
+            author: None,
+            etags: Arc::default(),
+            rate: Arc::default(),
+        }
     }
 
     pub fn with_author(mut self, author: Identity) -> GitHub {
@@ -118,7 +127,7 @@ impl GitHub {
             let Some(again) = req.try_clone() else { break };
             let failure = match self.http.execute(again).await {
                 Ok(res) if transient(res.status()) => res.status().to_string(),
-                Ok(res) => return Self::read(res, call).await,
+                Ok(res) => return self.read(res, call).await,
                 Err(e) => causes(&e),
             };
             tracing::warn!(%call, error = %failure, tries, "github call failed; retrying");
@@ -126,10 +135,13 @@ impl GitHub {
             wait *= 2;
         }
         let res = self.http.execute(req).await.map_err(|e| Error::Other(format!("github {call}: {}", causes(&e))))?;
-        Self::read(res, call).await
+        self.read(res, call).await
     }
 
-    async fn read(res: reqwest::Response, call: String) -> Result<(StatusCode, Value, String, Option<String>)> {
+    async fn read(&self, res: reqwest::Response, call: String) -> Result<(StatusCode, Value, String, Option<String>)> {
+        if let Some(rate) = rate_limit(res.headers()) {
+            *self.rate.lock().unwrap() = Some(rate);
+        }
         let status = res.status();
         let etag = res.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_string);
         let text = res.text().await.unwrap_or_default();
@@ -238,6 +250,16 @@ impl GitHub {
             self.call(self.request(Method::GET, &path).query(&[("head", head.as_str()), ("state", "open")])).await?;
         Ok(prs.as_array().and_then(|a| a.first()).map(|p| pr_ref(repo, p)))
     }
+}
+
+/// The rate limit a response's headers report, if they all do.
+fn rate_limit(headers: &reqwest::header::HeaderMap) -> Option<RateLimit> {
+    let get = |name: &str| headers.get(name)?.to_str().ok()?.trim().parse::<i64>().ok();
+    Some(RateLimit {
+        limit: u64::try_from(get("x-ratelimit-limit")?).ok()?,
+        remaining: u64::try_from(get("x-ratelimit-remaining")?).ok()?,
+        resets_at: get("x-ratelimit-reset")?,
+    })
 }
 
 /// Extra tries a GET makes after a transient failure.
@@ -350,6 +372,10 @@ fn pr_ref(repo: &Repo, p: &Value) -> PrRef {
 
 #[async_trait]
 impl CodeHost for GitHub {
+    fn rate_limit(&self) -> Option<RateLimit> {
+        *self.rate.lock().unwrap()
+    }
+
     async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let existing = self.head(repo, branch).await?;
         if let Some(head) = existing.as_deref().filter(|head| *head != start) {

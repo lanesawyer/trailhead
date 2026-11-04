@@ -103,6 +103,18 @@ pub struct Ci {
     pub state: CiState,
 }
 
+/// The code host's rate limit as of its last answer. The limit is shared with whoever else uses the credential
+/// (Lane's `gh`, say), so the control plane backs off before it's spent (TRAIL-535).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimit {
+    /// Requests allowed per window.
+    pub limit: u64,
+    /// Requests left in this window.
+    pub remaining: u64,
+    /// When the window resets, in unix seconds.
+    pub resets_at: i64,
+}
+
 #[async_trait]
 pub trait CodeHost: Send + Sync {
     /// Publishes commits made on top of `start`, the commit sha the checkout was at when the work began. A new
@@ -151,5 +163,9 @@ pub trait CodeHost: Send + Sync {
     /// checks the host keeps a log of; a check without one is left out. Best effort: a host with no logs says none.
     async fn ci_logs(&self, _pr: &PrRef, _checks: &[String]) -> Result<Vec<(String, String)>> {
         Ok(Vec::new())
+    }
+    /// The rate limit as the host last reported it, or `None` when it doesn't say or hasn't been asked yet.
+    fn rate_limit(&self) -> Option<RateLimit> {
+        None
     }
 }

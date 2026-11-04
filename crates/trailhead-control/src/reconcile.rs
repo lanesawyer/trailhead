@@ -9,6 +9,7 @@ use trailhead_factory::{
 use crate::lifecycle::worker_name;
 use crate::review::{CI_REVIEWER, reviewer_name};
 use crate::run_loop::Due;
+use crate::timing::until;
 use crate::{Factory, Outcome, Reconciled};
 
 impl Factory {
@@ -95,6 +96,13 @@ impl Factory {
             }
             if let Some(breach) = self.unparked_breach(task) {
                 self.finish_worker_breach(task, breach, &live, &mut done).await;
+                continue;
+            }
+            // A task that is only waiting on its PR costs the code host requests; those wait out a nearly spent limit.
+            if task.status != Status::InProgress
+                && let Some(resets_at) = self.code_host_pause()
+            {
+                tracing::warn!(task = %task.key.0, resumes_in = ?until(resets_at), "code host rate limit nearly spent; leaving its PR alone");
                 continue;
             }
             match self.reconcile_task(task, &mut done).await {
