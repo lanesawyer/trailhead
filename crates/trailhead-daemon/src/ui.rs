@@ -23,6 +23,12 @@ use crate::net::{io_err, parse_endpoint_id, pipe, read_frame, write_frame};
 
 pub const UI_ALPN: &[u8] = b"trailhead/ui/0";
 
+/// The application close code on a connection from an endpoint that isn't on the allowlist, so a UI can say so.
+pub const CLOSE_NOT_ALLOWED: u32 = 1;
+
+/// How long a UI waits to reach the control plane before a request fails.
+const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// The first frame on every stream a UI opens.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -122,7 +128,7 @@ impl ProtocolHandler for UiProtocol {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
         if !self.allowed.contains(&conn.remote_id()) {
             tracing::warn!(peer = %conn.remote_id(), "refusing a UI connection from an endpoint that isn't allowed");
-            conn.close(1u32.into(), b"not allowed");
+            conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
             return Ok(());
         }
         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
@@ -164,7 +170,15 @@ pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Re
                     let c = match live {
                         Some(c) => c,
                         None => {
-                            let c = endpoint.connect(control_plane, UI_ALPN).await.map_err(io_err)?;
+                            // Bounded, so a dial to a control plane that has gone away doesn't hold the lock (and every
+                            // request behind it) until QUIC gives up.
+                            let dial = endpoint.connect(control_plane, UI_ALPN);
+                            let c = tokio::time::timeout(DIAL_TIMEOUT, dial)
+                                .await
+                                .map_err(|_| {
+                                    Error::Other("daemon connection: dialing the control plane timed out".into())
+                                })?
+                                .map_err(io_err)?;
                             *guard = Some(c.clone());
                             c
                         }
