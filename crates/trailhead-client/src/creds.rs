@@ -1,8 +1,19 @@
 //! Where local tokens live: the OS keyring when one is reachable, otherwise a
-//! `0600` file in the config directory. The server and the CLI share this, so the
+//! `0600` file in the config directory. The server, the CLI and Lookout share this, so the
 //! bootstrap credential and agent tokens follow the same rules.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Writes a token readable only by the current user.
+pub fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    std::io::Write::write_all(&mut opts.open(path)?, format!("{secret}\n").as_bytes())
+}
 
 /// A saved credential: the local user's, a local agent's, or another named secret (such as the factory's keys).
 #[derive(Clone, Copy, Debug)]
@@ -93,7 +104,7 @@ impl CredStore {
             let _ = std::fs::remove_file(&path);
             return Ok(Saved::Keyring);
         }
-        crate::write_secret(&path, secret)?;
+        write_secret(&path, secret)?;
         Ok(Saved::File(path))
     }
 
@@ -148,7 +159,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = CredStore { config_dir: dir.path().into(), keyring: true };
         let file = s.file(Cred::Agent("kr-test"));
-        crate::write_secret(&file, "old").unwrap();
+        write_secret(&file, "old").unwrap();
         assert!(matches!(s.save(Cred::Agent("kr-test"), "s3cret").unwrap(), Saved::Keyring));
         assert!(!file.exists(), "a keyring save removes the plaintext copy");
         assert_eq!(s.read(Cred::Agent("kr-test")).unwrap().0, "s3cret");

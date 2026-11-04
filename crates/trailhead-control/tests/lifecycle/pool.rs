@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use trailhead_factory::{Compute, Role, RunOutcome, Status, TaskKey, label};
 use trailhead_testkit::Script;
@@ -31,9 +32,11 @@ async fn sandboxes_are_prepared_under_install_egress_then_narrowed() {
     assert_eq!(allowed, ["iroh.link"], "named agent hosts are kept resolved; wildcards can't be");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn workers_reuse_a_warm_pooled_sandbox_restored_between_tasks() {
     let r = rig_with(&CONFIG.replace("[checks]\n", "[checks]\nsetup = \"cargo build\"\n"));
+    r.daemon.prepare_takes(Duration::from_secs(60));
+    r.compute.checkpoint_takes(Duration::from_secs(200));
     let first = r.tracker.add_task("TRAIL", "First", "");
     let second = r.tracker.add_task("TRAIL", "Second", "");
     for _ in 0..2 {
@@ -51,7 +54,11 @@ async fn workers_reuse_a_warm_pooled_sandbox_restored_between_tasks() {
     assert_eq!(r.tracker.task(&second).run.sandbox.as_deref(), Some("trail-2-a1"), "each run keeps its own name");
     // Released after the first task, restored again before the second, released after it.
     assert_eq!(r.compute.restores("trailhead-w1").len(), 3);
-    assert_eq!(r.compute.checkpoints("trailhead-w1"), ["warm", "warm"], "each prepare refreshes the warm point");
+    assert_eq!(
+        r.compute.checkpoints("trailhead-w1"),
+        ["warm"],
+        "a prepare quicker than a checkpoint keeps the warm one"
+    );
 
     let prepared = r.daemon.prepared();
     let workers: Vec<_> = prepared.iter().filter(|(s, _)| s.0 == "trailhead-w1").collect();
@@ -60,6 +67,31 @@ async fn workers_reuse_a_warm_pooled_sandbox_restored_between_tasks() {
     assert!(workers.iter().all(|(_, p)| p.setup.is_some()), "workers build");
     assert_eq!(reviewers.len(), 2);
     assert!(reviewers.iter().all(|(_, p)| p.setup.is_none()), "reviewers only read the diff");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_prepare_slower_than_the_last_checkpoint_takes_a_new_warm_one() {
+    let r = rig_with(&CONFIG.replace("[checks]\n", "[checks]\nsetup = \"cargo build\"\n"));
+    r.daemon.prepare_takes(Duration::from_secs(300));
+    r.compute.checkpoint_takes(Duration::from_secs(200));
+    for title in ["First", "Second", "Third"] {
+        r.tracker.add_task("TRAIL", title, "");
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+    }
+    r.factory.tick().await.unwrap();
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.compute.checkpoints("trailhead-w1"), ["warm", "warm"], "the warm point went stale, so it's refreshed");
+
+    r.daemon.prepare_takes(Duration::from_secs(30));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.compute.checkpoints("trailhead-w1"), ["warm", "warm"], "kept once a prepare is quick again");
+    let restores = r.compute.restores("trailhead-w1");
+    assert_eq!(
+        restores[restores.len() - 1],
+        restores[restores.len() - 2],
+        "the third task started from the second's warm point"
+    );
 }
 
 #[tokio::test]
@@ -244,11 +276,20 @@ async fn a_sandbox_out_of_disk_is_reported_before_the_run_starts() {
 }
 
 #[tokio::test]
+async fn a_sandbox_that_fails_preflight_isnt_left_busy() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Needs disk", "");
+    r.compute.fail("trailhead-w1", "preflight");
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(r.compute.get("trailhead-w1").is_none(), "a cold sandbox that never got warm is destroyed, not left busy");
+}
+
+#[tokio::test]
 async fn a_host_out_of_disk_is_waited_out_never_parked() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
     let key = r.tracker.add_task("TRAIL", "Waits for disk", "");
-    for n in 1..=4 {
-        r.compute.fail(&format!("trailhead-w{n}"), "preflight");
+    r.compute.fail("trailhead-w1", "preflight");
+    for _ in 1..=4 {
         let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
         assert!(matches!(err, trailhead_factory::Error::Unavailable(_)), "{err}");
     }
@@ -262,12 +303,14 @@ async fn a_host_out_of_disk_is_waited_out_never_parked() {
 async fn disk_waits_dont_count_toward_parking_a_later_real_failure() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
     let key = r.tracker.add_task("TRAIL", "Waits then fails", "");
-    for n in 1..=2 {
-        r.compute.fail(&format!("trailhead-w{n}"), "preflight");
+    r.compute.fail("trailhead-w1", "preflight");
+    for _ in 0..2 {
         let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
         assert!(matches!(err, trailhead_factory::Error::Unavailable(_)), "{err}");
     }
-    r.compute.fail("trailhead-w3", "set_labels");
+    // The failed sandboxes were destroyed, so the next one takes the same name.
+    r.compute.heal("trailhead-w1");
+    r.compute.fail("trailhead-w1", "set_labels");
     r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Open, "one real failure after the waits isn't enough to park");

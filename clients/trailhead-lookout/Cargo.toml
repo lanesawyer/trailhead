@@ -1,0 +1,42 @@
+[package]
+name = "trailhead-lookout"
+description = "Lookout, the Trailhead factory's Bevy client"
+publish = false
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "lookout"
+path = "src/main.rs"
+
+[dependencies]
+# Default features pull in audio (alsa), gamepads (udev), 3D and more; take only what a UI needs.
+bevy = { version = "0.20", default-features = false, features = [
+    "std",
+    "bevy_state",
+    "multi_threaded",
+    "ui_bevy_render",
+    "bevy_ui_widgets",
+    "bevy_feathers",
+    "bevy_winit",
+    "default_font",
+    "custom_cursor",
+    "x11",
+] }
+trailhead-client.workspace = true
+trailhead-daemon = { workspace = true, features = ["net"] }
+iroh.workspace = true
+tokio = { workspace = true, features = ["time"] }
+reqwest.workspace = true
+serde_json.workspace = true
+directories.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+trailhead-core.workspace = true
+trailhead-server.workspace = true
+axum.workspace = true
+tempfile.workspace = true

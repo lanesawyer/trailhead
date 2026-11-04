@@ -126,6 +126,10 @@ pub enum RunEvent {
     /// A tool call finished (its result went back to the model). Lets the daemon tell a tool that's still running
     /// from an agent that has gone quiet.
     ToolResult,
+    /// From the daemon: the agent is done and the required checks are starting.
+    Checking,
+    /// From the daemon: the checks passed and the PR is being opened.
+    Publishing,
     /// From the daemon, not the harness, every so often while it's connected: how long the agent has been quiet, in
     /// seconds, not counting time a tool call was running. The control plane fails a run that stays quiet past its
     /// profile's `stall_timeout`.

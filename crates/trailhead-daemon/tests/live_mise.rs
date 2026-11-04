@@ -41,10 +41,7 @@ async fn a_stack_asking_for_node_26_gets_node_26() {
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
-        setup: Some(Check {
-            name: "setup".into(),
-            command: "node --version | tee /dev/stderr | grep -q '^v26\\.'".into(),
-        }),
+        setup: Some(Check::new("setup", "node --version | tee /dev/stderr | grep -q '^v26\\.'")),
         tools: [("node".to_string(), "26".to_string())].into(),
         tool_hosts: Default::default(),
     };

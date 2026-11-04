@@ -46,12 +46,16 @@ pub struct FakeWorkspace {
     rebases: AtomicBool,
     /// Files the agent leaves conflict markers in.
     markers: Mutex<Vec<String>>,
+    /// Files the agent changes, for path-scoped checks.
+    changed: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
     /// Errors the next prepares fail with, before they change anything.
     prepare_errors: Mutex<Vec<String>>,
     /// Outputs the next prepares that run a `setup` check fail it with, after the checkout is otherwise ready.
     setup_errors: Mutex<Vec<String>>,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
+    /// How long each later prepare takes, on tokio's clock.
+    prepare_takes: Mutex<Duration>,
 }
 
 #[async_trait]
@@ -70,6 +74,10 @@ impl Workspace for FakeWorkspace {
         let gate = self.prepare_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.notified().await;
+        }
+        let takes = *self.prepare_takes.lock().unwrap();
+        if !takes.is_zero() {
+            tokio::time::sleep(takes).await;
         }
         if let Some(error) = self.prepare_errors.lock().unwrap().pop() {
             return Err(Error::Other(error));
@@ -111,6 +119,10 @@ impl Workspace for FakeWorkspace {
         Ok(self.markers.lock().unwrap().clone())
     }
 
+    async fn changed_files(&self, _base: &str) -> Result<Vec<String>> {
+        Ok(self.changed.lock().unwrap().clone())
+    }
+
     async fn head(&self) -> Result<String> {
         let on = self.branch.lock().unwrap().clone();
         let heads = self.heads.lock().unwrap().clone();
@@ -135,8 +147,8 @@ impl Workspace for FakeWorkspace {
             None => None,
         };
         match output {
-            Some(output) => CheckResult { name: check.name.clone(), passed: false, output },
-            None => CheckResult { name: check.name.clone(), passed: true, output: String::new() },
+            Some(output) => CheckResult { name: check.name.clone(), passed: false, output, skipped: false },
+            None => CheckResult { name: check.name.clone(), passed: true, output: String::new(), skipped: false },
         }
     }
 }
@@ -151,6 +163,8 @@ pub struct LocalDaemon {
     requests: Mutex<Vec<RunRequest>>,
     /// Errors the next runs fail with before the agent does anything, like a lost daemon.
     run_errors: Mutex<Vec<trailhead_factory::Error>>,
+    /// Errors the next runs fail with once the agent has reported usage, like a daemon lost partway through.
+    late_run_errors: Mutex<Vec<String>>,
     /// Runs that are going in a sandbox from before this control plane: their events so far, and how they end.
     ongoing: Mutex<HashMap<String, Ongoing>>,
     attached: Mutex<Vec<String>>,
@@ -187,6 +201,7 @@ impl LocalDaemon {
             prepared: Mutex::default(),
             requests: Mutex::default(),
             run_errors: Mutex::default(),
+            late_run_errors: Mutex::default(),
             ongoing: Mutex::default(),
             attached: Mutex::default(),
         }
@@ -196,6 +211,11 @@ impl LocalDaemon {
     pub fn heartbeat_every(mut self, every: Duration) -> LocalDaemon {
         Arc::get_mut(&mut self.runner).expect("the runner isn't shared yet").heartbeat_every = every;
         self
+    }
+
+    /// Has the agent change these files, which path-scoped checks match against.
+    pub fn change_files(&self, files: &[&str]) {
+        *self.workspace.changed.lock().unwrap() = files.iter().map(|f| f.to_string()).collect();
     }
 
     /// Has the agent leave conflict markers in these files.
@@ -257,6 +277,15 @@ impl LocalDaemon {
         }
     }
 
+    /// Makes the next `times` runs fail with this error right after the agent's first usage is reported, as a daemon
+    /// lost partway through a run that has already spent money would.
+    pub fn fail_runs_midway(&self, times: usize, error: &str) {
+        let mut errors = self.late_run_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push(error.to_string());
+        }
+    }
+
     /// Makes the next `times` prepares fail with this error, as a checkout that won't clone or build would.
     pub fn fail_prepares(&self, times: usize, error: &str) {
         let mut errors = self.workspace.prepare_errors.lock().unwrap();
@@ -307,6 +336,11 @@ impl LocalDaemon {
         *self.workspace.prepare_gate.lock().unwrap() = Some(gate);
     }
 
+    /// Makes every later prepare take `takes` on tokio's clock, for a test with paused time.
+    pub fn prepare_takes(&self, takes: Duration) {
+        *self.workspace.prepare_takes.lock().unwrap() = takes;
+    }
+
     /// Prepares the workspace has begun, including ones still running.
     pub fn prepares_started(&self) -> usize {
         self.workspace.prepares_started.load(Ordering::SeqCst)
@@ -349,7 +383,29 @@ impl Daemon for LocalDaemon {
         if let Some(error) = self.run_errors.lock().unwrap().pop() {
             return Err(error);
         }
-        self.runner.run(req, events, self.cancel_handle(sandbox)).await
+        let late = self.late_run_errors.lock().unwrap().pop();
+        let Some(error) = late else {
+            return self.runner.run(req, events, self.cancel_handle(sandbox)).await;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let run = self.runner.run(req, tx, self.cancel_handle(sandbox));
+        tokio::pin!(run);
+        loop {
+            tokio::select! {
+                biased;
+                event = rx.recv() => match event {
+                    Some(event) => {
+                        let spent = matches!(event, RunEvent::Usage { .. });
+                        let _ = events.send(event);
+                        if spent {
+                            return Err(Error::Other(error));
+                        }
+                    }
+                    None => return run.await,
+                },
+                report = &mut run => return report,
+            }
+        }
     }
 
     async fn attach(&self, sandbox: &SandboxId, run: &str, events: EventSink) -> Result<RunReport> {

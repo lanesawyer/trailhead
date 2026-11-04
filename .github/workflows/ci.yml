@@ -45,6 +45,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
 
+  # Lookout (clients/trailhead-lookout) is outside default-members, so the jobs above skip Bevy.
+  # Its own job keeps Bevy's build in its own rust-cache. It always runs, never filtered by path.
+  # With the jobs above, the workspace is covered: default members there, the rest here.
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # No system packages: it builds without alsa, udev or wayland headers (see its README).
+      - run: cargo clippy -p trailhead-lookout --all-targets --locked -- -D warnings
+      - run: cargo test -p trailhead-lookout --locked
+
   package:
     runs-on: ubuntu-latest
     steps:
@@ -52,7 +67,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Only the published crates; the factory crates are publish = false until they're ready.
-      - run: cargo package --locked -p trailhead-core -p trailhead-server -p trailhead
+      - run: cargo package --locked -p trailhead-core -p trailhead-client -p trailhead-server -p trailhead
       # rust-cache's cleanup trips over the unpacked crates and logs ENOENT errors.
       - if: always()
         run: rm -rf target/package

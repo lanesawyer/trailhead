@@ -17,6 +17,7 @@ bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [dependencies]
+trailhead-client.workspace = true
 trailhead-core.workspace = true
 trailhead-server.workspace = true
 tokio = { workspace = true, features = ["process", "io-std", "io-util"] }

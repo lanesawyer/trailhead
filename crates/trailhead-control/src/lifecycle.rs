@@ -6,8 +6,9 @@ use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages;
 use trailhead_factory::{
-    Error, Feedback, HumanContext, Merged, PrState, Profile, Result, Role, RunEvent, RunReport, RunRequest, RunResult,
-    RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind, WorkerBreach, run_name,
+    ControlState, Error, Feedback, HumanContext, Merged, PrState, Profile, Result, Role, RunEvent, RunPhase, RunReport,
+    RunRequest, RunResult, RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind, WorkerBreach,
+    run_name,
 };
 
 use crate::place::Placement;
@@ -93,6 +94,7 @@ impl Factory {
         if let Err(e) = sub.report(&task.key, started).await {
             return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
         }
+        let _run = self.status.begin(&task.key, RunPhase::Preparing { cold: false });
         tracing::info!(task = %task.key.0, run = %name, "preparing a worker sandbox");
         // A task with a PR is a rework: the checkout starts from the PR branch's head, and the worker is told what the
         // review asked for.
@@ -139,6 +141,7 @@ impl Factory {
             Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await),
         };
         tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
+        self.status.phase(&task.key, RunPhase::Agent, Some(&sandbox.name));
         let req = RunRequest {
             run: name.clone(),
             role: Role::Worker,
@@ -172,6 +175,9 @@ impl Factory {
             task.run.sandbox.clone().ok_or_else(|| Error::Other(format!("{} has no run to resume", task.key.0)))?;
         let attempt = task.run.attempt.unwrap_or(1);
         let sub = self.tracker.sub_agent(&name);
+        let _run = self.status.begin(&task.key, RunPhase::Agent);
+        self.status.phase(&task.key, RunPhase::Agent, Some(&sandbox.name));
+        self.status.control(ControlState::Reattaching { task: task.key.clone() });
         // The attempt this run took was already counted; if it's given back, it goes back to the number before it.
         let mut before = task.clone();
         before.run.attempt = Some(attempt.saturating_sub(1));
@@ -280,6 +286,7 @@ impl Factory {
                 let asked = self.park_worker_breach(&task.key, sub, &breach, &question).await;
                 recorded?;
                 asked?;
+                self.status.paused(&sandbox.name);
                 return Ok(Outcome::Parked { reason });
             }
             Run::Report(report, spend) => (report, spend),
@@ -327,7 +334,10 @@ impl Factory {
                 }
                 self.review(task, &pr, attempt, &report.checks).await
             }
-            RunResult::NeedsInput(question) => Ok(Outcome::Parked { reason: question }),
+            RunResult::NeedsInput(question) => {
+                self.status.paused(&sandbox.name);
+                Ok(Outcome::Parked { reason: question })
+            }
             RunResult::Failed(reason) => {
                 tracing::warn!(task = %task.key.0, %reason, "attempt failed");
                 match self.release_worker(sandbox).await {
@@ -355,25 +365,41 @@ impl Factory {
                 let max = self.config.repo.max_attempts;
                 // Counted from the last review that asked for changes, so reworks get attempts of their own.
                 let failed = attempt.saturating_sub(task.run.attempt_floor());
-                if failed >= max {
+                // The failure the daemon just recorded for this attempt.
+                let last = match self.tracker.show(&task.key).await {
+                    Ok(shown) => shown.run.failure.filter(|f| !f.is_empty()),
+                    Err(e) => {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't read the last failure; parking without it");
+                        None
+                    }
+                };
+                // Two attempts in a row that gave up say the cause is in the environment, not in a try that can
+                // improve: a give-up publishes nothing, so each starts from the same checkout. Failed checks, a lost
+                // merge and conflict markers come from runs that changed it, so those are left to try again. A human
+                // is asked now instead of after `max_attempts` (TRAIL-705).
+                let repeated = task
+                    .run
+                    .failure
+                    .clone()
+                    .filter(|before| messages::is_agent_gave_up(before))
+                    .filter(|_| failed >= 2 && last.as_deref().is_some_and(messages::is_agent_gave_up));
+                if failed >= max || repeated.is_some() {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
                     // A task that can't be read still parks, with this attempt's reason alone.
-                    let last = match self.tracker.show(&task.key).await {
-                        Ok(shown) => shown.run.failure.filter(|f| !f.is_empty()),
-                        Err(e) => {
-                            tracing::warn!(task = %task.key.0, error = %e, "couldn't read the last failure; parking without it");
-                            None
-                        }
-                    }
-                    .unwrap_or_else(|| reason.clone());
+                    let last = last.unwrap_or_else(|| reason.clone());
+                    let question = match &repeated {
+                        Some(before) if failed < max => messages::repeated_failure_question(before, &reason),
+                        _ => messages::gave_up_question(failed, max, &reason, &last),
+                    };
                     sub.claim(&task.key).await?;
                     // Recorded before the question, so a task that is parked has the marker; reopening it is all a
                     // human has to do.
                     sub.report(&task.key, RunUpdate { gave_up: Some(attempt), ..RunUpdate::default() }).await?;
-                    sub.ask(&task.key, &messages::gave_up_question(failed, max, &reason, &last)).await?;
+                    sub.ask(&task.key, &question).await?;
                     if let Err(e) = self.tracker.revoke_sub_agent(name).await {
                         tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
                     }
+                    self.status.paused(&sandbox.name);
                     return Ok(Outcome::Parked { reason });
                 }
                 if let Err(e) = self.tracker.revoke_sub_agent(name).await {
@@ -509,6 +535,7 @@ impl Factory {
         tokio::pin!(deadline);
         let key = task.0.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reattaching = matches!(begin, Begin::Attach(_));
         let run = async {
             match begin {
                 Begin::Start(req) => self.daemon_of(sandbox).run(&sandbox.id, *req, tx).await,
@@ -524,15 +551,25 @@ impl Factory {
         let mut stalled = false;
         let mut grace_fired = false;
         let mut on_event = |ev: RunEvent, spent: &mut Usd| -> Option<String> {
+            if std::mem::take(&mut reattaching) {
+                self.status.control(ControlState::Up);
+            }
             match ev {
-                RunEvent::Usage { model, usage } => *spent += self.provider_of(sandbox).price(&model, &usage),
+                RunEvent::Usage { model, usage } => {
+                    *spent += self.provider_of(sandbox).price(&model, &usage);
+                    self.status.spend(task, prior + *spent);
+                }
                 RunEvent::StepStarted { step } => {
                     steps += 1;
+                    self.status.step(task, steps, prior + *spent);
                     tracing::info!(task = %key, step, spent = %(prior + *spent), "step");
                 }
                 RunEvent::ToolCall { name, detail } => {
+                    self.status.tool_call(task, &name, detail.as_deref());
                     tracing::info!(task = %key, tool = %name, detail = detail.as_deref().unwrap_or(""), "tool");
                 }
+                RunEvent::Checking => self.status.phase(task, RunPhase::Checks, None),
+                RunEvent::Publishing => self.status.phase(task, RunPhase::Publishing, None),
                 RunEvent::NeedsInput { question } => tracing::info!(task = %key, %question, "asked"),
                 RunEvent::Quota { window, used_percent, resets_at } => {
                     tracing::info!(%window, used_percent, resets_in = ?until(resets_at), "subscription usage");

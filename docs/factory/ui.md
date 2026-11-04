@@ -55,10 +55,13 @@ On a dropped stream, reconnect with the last applied id; the server resumes with
 
 A `Connection` state: `Offline`, `Syncing`, `Live`. Every command system runs only in `Live`, and the UI greys out its controls otherwise, with the reason shown. A command in flight when the connection drops is retried with its idempotency key once the client is `Live` again, or reported failed; it never silently disappears.
 
+As built (TRAIL-694): `ConnectionPlugin` runs the net thread (`net.rs`) and mirrors it into the `Connection` state, a `ConnectionStatus { reason }` resource (`Reason` says plainly why: no target, bad id, `NotAllowed`, unreachable, needs login, token rejected, dialing, signing in), `LocalEndpoint` (Lookout's own id, for `trailhead factory allow`) and, once signed in, `Api { base, token, user }`. The net thread probes `/v1/health` through the tunnel every 2 seconds. `Syncing` covers dialing and signing in until the event sync (TRAIL-695) exists. The endpoint key and the last control plane dialed are in Lookout's config directory (`LOOKOUT_CONFIG_DIR` overrides it). The control plane is given as an endpoint id; a longer ticket with addresses isn't built.
+
 ## Identity
 
 Nothing new. Tokens already have a `principal` of user or agent, and every write records the actor and the user it acted for, so the event log tells "a person approved it" from "`factory/trail-42-a1` did it."
 
+- Built (TRAIL-694): the token is found by the server's instance id from `/v1/health`, in the same place the CLI keeps it; `NetCommand::Login` takes a pasted token, confirms it with `/v1/me`, refuses an agent's, and saves it there. The window has no text input yet, so `lookout <endpoint-id>` and `LOOKOUT_TOKEN` stand in.
 - The UI reads the user token the CLI saved for this server (`<config dir>/servers/<instance>/`, or the keyring entry named after it), or runs the same `trailhead login` flow: paste a printed token, confirm with `/v1/me`.
 - It acts only as the user. No `--as <agent>` equivalent.
 - Proposal: move `trailhead_server::creds` into a small crate so the UI can share it without depending on the server.
@@ -69,12 +72,13 @@ Decided (2026-10-28): the UI is the factory's UI, so it connects to the control 
 
 - **What it carries.** The factory status snapshot and stream ([Factory status](#factory-status)), and Trailhead API requests forwarded to the server's loopback port as the API tunnel does, so the UI's HTTP client talks to a local port.
 - **Admission.** A persisted allowlist of UI endpoint ids, added by a person (for example `trailhead factory allow <endpoint-id>`), plus the user's bearer token on every API request. The allowlist decides who can connect, and the token decides what they can do.
+- **Built (TRAIL-700).** Each stream opens with one framed JSON request, `{"op":"api"}`, after which it is raw bytes to the server's loopback port (the event stream included). Status (TRAIL-692, TRAIL-701) adds ops beside `api`; a request the control plane doesn't know resets the stream. The allowlist is the file `<data dir>/factory/ui-allowed`, one endpoint id per line, read on every connection: `trailhead factory allow <id>`, `disallow <id>` and `allowed`. The control plane's endpoint id is logged at startup and shown by `trailhead factory status`. The control plane doesn't parse the forwarded HTTP; the server rejects any request without a valid token.
 - **Why not the API tunnel.** That tunnel admits only daemons this control plane started, and only reaches the Trailhead API. Keeping the UI out of it means a compromised sandbox can't see factory status or reach steering, and how daemons get in can change without touching the UI.
 - **Factory stopped.** There's little to watch, so the map shows Trailhead's last known state marked "factory stopped". The task board may fall back to the server URL the CLI already uses. Once the control plane moves into the server process (later work in [mvp.md](mvp.md)), the server and the factory are one endpoint, and this case mostly goes away.
 
 ## Factory status
 
-The map shows what the factory is doing right now, and most of that isn't in Trailhead. The same gap is why `trailhead factory status` and `logs` (TRAIL-109) don't exist yet, so both should read one surface rather than each building their own.
+The map shows what the factory is doing right now, and most of that isn't in Trailhead. `trailhead factory status` and `logs --follow` read the same surface the UI will, rather than each building their own.
 
 What Trailhead already has, through events: claims and their holders (`factory/trail-n-aK`), each task's `factory` metadata (attempt, `host`, spend, PR, review rounds), questions, handoffs and verdicts. The control plane writes metadata per step, so these move without polling.
 
@@ -85,9 +89,18 @@ What only the control plane knows:
 - **Live activity.** Steps, tool calls and spend as they stream from the daemon. Today they're only in the control plane's log.
 - **The control plane itself.** Up, reconciling or stopped, which run it's reconnecting to, and the last error.
 
-Proposal: the control plane serves a snapshot of the above plus a stream of factory events (sandbox state changes, run phase changes, steps and tool calls). The CLI's `factory status` reads the snapshot, `factory logs TRAIL-n` follows the stream for one task, and the UI uses both. None of it is stored. The control plane keeps no state of its own ([state.md](state.md)), so on boot it rebuilds the snapshot from compute labels and the tracker, and the stream starts fresh. Durable facts still go to Trailhead.
+The control plane serves a snapshot of the above plus a stream of factory events (sandbox state changes, run phase changes, steps and tool calls). The CLI's `factory status` reads the snapshot, `factory logs TRAIL-n --follow` follows the stream for one task, and the UI uses both. None of it is stored. The control plane keeps no state of its own ([state.md](state.md)), so on boot it rebuilds the snapshot from compute labels and the tracker, and the stream starts fresh. Durable facts still go to Trailhead.
 
 Tool calls and steps don't become Trailhead events. The event log holds reversible changes with before and after snapshots. A run produces hundreds of tool calls, which would bury the changes people undo and push real history toward the archive.
+
+### As built
+
+The types are in `trailhead-factory` (`status.rs`) and the board that holds them in `trailhead-control` (`StatusBoard`, one per repo). The control plane updates it where the run loop, the pool and the lifecycle already change state, and reconcile rebuilds its sandboxes from the compute labels each time it lists them, which is also how a boot does.
+
+- **Snapshot.** `control` (`up`, `reconciling`, `reattaching` to a task, `stopped`), the last error with its time, every sandbox (`idle`, `busy`, `paused` for a parked task's, `broken`, with its task, role, target and whether it has a warm checkpoint), and each run (`preparing` and whether `cold`, `agent`, `checks`, `publishing`, `reviewing`, with its sandbox, steps, tool calls, spend and last tool). `seq` is the last event it includes.
+- **Stream.** Each event has a `seq` that starts from 1 on every boot: control changes and errors, sandbox changes, run phase changes and ends, steps and tool calls. `checks` and `publishing` come from the daemon, which sends `RunEvent::Checking` and `RunEvent::Publishing`; the rest the control plane knows itself. Tool calls and steps are only here, never Trailhead events.
+- **Serving.** `trailhead-factory run` binds a loopback port and writes where, with a random bearer token, to `<data dir>/factory/status.json` (mode `0600`, removed on a clean stop). `GET /status` returns `{"repos": [...]}` with one snapshot per repo. `GET /events[?task=TRAIL-n]` streams newline-delimited JSON, one `{repo, seq, event, ...}` per line, from the moment it connects. The token is there because tool calls can name commands and paths. The UI's iroh protocol later carries the same two things.
+- **Clients.** `trailhead-factory status` asks the port and falls back to reading the compute and tracker when nothing answers. `logs TRAIL-n --follow` prints the daemon log once, then follows the task's events instead of polling.
 
 When the factory isn't running, the map shows Trailhead's last known state (claims, metadata, open questions) with the factory marked stopped, and the board still works if the UI can reach the server.
 
@@ -103,7 +116,7 @@ default-members = ["crates/*"]
 
 - Plain `cargo build` and `cargo test` and the factory's sandboxes build only `crates/*`; the UI builds with `-p trailhead-lookout` or `--workspace`. CI checks the whole workspace on every PR, the UI in its own job, never skipped by path (decided 2026-11-02). In the factory, UI checks run only when a task's diff touches `clients/**` (TRAIL-691), and until they do, `clients/**` is grade 3.
 - Bevy's dependencies share `Cargo.lock` with the server. If an upgrade forces a version bump on a shared dependency, or rust-analyzer's indexing gets slow, move the UI to its own repo.
-- The UI depends on the API, not on `trailhead-core`. Request and response types come from a hand-written client crate in `crates/`, shared with the CLI (TRAIL-693).
+- The UI depends on the API, not on `trailhead-core`. Request and response types come from a hand-written client crate, `crates/trailhead-client`, shared with the CLI (TRAIL-693): saved credentials (`creds`) and the `Health` and `ApiError` bodies.
 
 ## First steps
 

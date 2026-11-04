@@ -43,6 +43,7 @@ impl Factory {
         let mut due = Due::default();
         // A target that can't be reached is unknown, not empty: what ran there is left as it is until it answers.
         let (live, down) = self.list_all(&self.base_labels()).await?;
+        self.status.sync_sandboxes(&live, &down);
         let tasks: Vec<Task> = self
             .tracker
             .in_flight(self.project(), &self.queue())
@@ -196,14 +197,30 @@ impl Factory {
             MergedBy::Merger => self.tracker.show(&task.key).await?.run.merge,
             MergedBy::Human => None,
         };
+        let merged_by_human = merged.by == MergedBy::Human;
+        let pr_url = merged.pr.url.clone();
         let handoff = messages::merged_handoff(merged.by, &merged.pr.url, merged.commit.as_deref(), decision.as_ref());
         self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
         // A parked task can't be finished from where it is: it goes back to open and is claimed first.
+        let mut claimed = false;
         if task.status == Status::NeedsInput {
             self.tracker.reopen(&task.key).await?;
             self.tracker.claim(&task.key).await?;
+            claimed = true;
         }
-        self.tracker.finish(&task.key, &handoff).await?;
+        match self.tracker.finish(&task.key, &handoff).await {
+            // A person merged work nobody approved, and core won't let the factory that did it call it done. The merge
+            // is recorded, so ask once for a person to mark it done rather than be refused again every pass (TRAIL-706).
+            Err(Error::Forbidden(why)) if merged_by_human => {
+                tracing::warn!(task = %task.key.0, %why, "the PR was merged unapproved; parking for a person to finish it");
+                if !claimed {
+                    self.tracker.reopen(&task.key).await?;
+                    self.tracker.claim(&task.key).await?;
+                }
+                return self.tracker.ask(&task.key, &messages::merged_unapproved_question(&pr_url)).await;
+            }
+            finished => finished?,
+        }
         tracing::info!(task = %task.key.0, %handoff, "PR merged; task done");
         Ok(())
     }
@@ -353,7 +370,9 @@ impl Factory {
             // Parked for a human, so a PR still open or closed stays as it is (a closed one was the question). A merge
             // by anyone finishes the task all the same.
             Status::NeedsInput => {
-                if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost)
+                // One already recorded as merged by hand was parked for a person to finish: don't ask again.
+                if task.run.merged.is_none()
+                    && let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost)
                     && let PrState::Merged { commit } = codehost.pr_state(pr).await?
                 {
                     self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;

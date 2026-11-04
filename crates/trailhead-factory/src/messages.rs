@@ -135,6 +135,16 @@ pub fn flaky_checks(retried: &[String]) -> String {
     retried.iter().map(|name| format!("\n\n⚠️ Check `{name}` failed, then passed when rerun.")).collect()
 }
 
+/// The note a PR carries for the checks that were skipped because the change touches none of their paths, so a reader
+/// doesn't take them for passes. Empty when none were; otherwise it starts with a blank line, like [`flaky_checks`].
+pub fn skipped_checks(checks: &[CheckResult]) -> String {
+    let names: Vec<String> = checks.iter().filter(|c| c.skipped).map(|c| format!("`{}`", c.name)).collect();
+    if names.is_empty() {
+        return String::new();
+    }
+    format!("\n\nℹ️ Skipped, not run: {}. The change touches none of the paths they are limited to.", names.join(", "))
+}
+
 /// What the merger says, on the PR and the task, when the code host refuses to merge.
 pub fn merge_refused(why: &str) -> String {
     format!("The code host refused to merge: {why}. The merger tries again each pass.")
@@ -215,6 +225,12 @@ pub fn settled_closed(pr_url: &str) -> String {
 /// The note on a task whose worker gave up, kept as the failure the next attempt is told.
 pub fn agent_gave_up(reason: &str) -> String {
     format!("The agent gave up: {reason}")
+}
+
+/// Whether a recorded failure is [`agent_gave_up`]'s, as opposed to failed checks, a lost merge or conflict markers,
+/// which all come from an attempt that changed the checkout.
+pub fn is_agent_gave_up(failure: &str) -> bool {
+    failure.starts_with(&agent_gave_up(""))
 }
 
 /// How much of a failed check's output goes on the task.
@@ -330,6 +346,15 @@ pub fn gave_up_question(failed: u32, max: u32, reason: &str, last: &str) -> Stri
     )
 }
 
+/// Why a task is parked when two attempts in a row gave up, which points at the environment, not the task.
+pub fn repeated_failure_question(before: &str, reason: &str) -> String {
+    format!(
+        "Two attempts in a row gave up, so trying again is unlikely to help. The attempt before: {before}\n\n\
+         The last attempt: {reason}\n\nIf the cause is in the environment (network, a missing tool, credentials), \
+         fix it; otherwise say what to change. Then reopen the task; the attempt count starts again from here."
+    )
+}
+
 /// Why a task is parked when the infrastructure kept failing under a worker.
 pub fn infra_question(failures: u32, max: u32, error: &str) -> String {
     format!(
@@ -404,6 +429,13 @@ pub fn pr_closed_question(pr_url: &str) -> String {
     format!(
         "The PR {pr_url} was closed without being merged. If the work is abandoned, cancel this task. To carry on, \
          reopen the PR on the code host and then reopen this task, and the next run continues on the PR's branch."
+    )
+}
+
+/// Why a task is parked when its PR was merged by hand before anyone approved the work.
+pub fn merged_unapproved_question(pr_url: &str) -> String {
+    format!(
+        "The PR {pr_url} was merged by hand before the work was approved, so the factory can't finish this task. Mark it done."
     )
 }
 
@@ -581,8 +613,8 @@ mod tests {
             follow_up_description(" Why. ", &TaskKey("TRAIL-1".into()), Some("https://x/pr/1")),
             "Why.\n\nRaised by the reviewer of TRAIL-1 (https://x/pr/1)."
         );
-        let failed = CheckResult { name: "fmt".into(), passed: false, output: "bad\n".into() };
-        let passed = CheckResult { name: "ok".into(), passed: true, output: String::new() };
+        let failed = CheckResult { name: "fmt".into(), passed: false, output: "bad\n".into(), skipped: false };
+        let passed = CheckResult { name: "ok".into(), passed: true, output: String::new(), skipped: false };
         assert_eq!(
             checks_failed_note(&[passed, failed]),
             "The factory's checks failed, so nothing was published.\n\n`fmt` failed; the end of its output:\n```\nbad\n```\n"

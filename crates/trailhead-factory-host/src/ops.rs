@@ -7,9 +7,12 @@ use std::time::Duration;
 use trailhead_control::{CoreTracker, FACTORY_LABEL};
 use trailhead_core::Store;
 use trailhead_factory::compute::label;
-use trailhead_factory::{Labels, Sandbox, Status, Task, TaskKey, Tracker};
+use trailhead_factory::status::control_label;
+use trailhead_factory::{
+    FactorySnapshot, Labels, Sandbox, SandboxState, SandboxStatus, Status, Task, TaskKey, Tracker,
+};
 
-use crate::{AGENT, Opts, computes, factory_ctx, load_config, resolve_opts};
+use crate::{AGENT, Opts, computes, factory_ctx, load_config, resolve_opts, saved_endpoint_id, surface};
 
 /// The program the control plane starts the daemon as, whose service log `logs` prints.
 const DAEMON_PROGRAM: &str = "trailhead-daemon";
@@ -33,18 +36,29 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = resolve_opts(opts, &paths)?;
     let (_, _, config) = load_config(&opts)?;
-    let computes = computes(&config, &opts, &paths, Default::default(), true)?;
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
     let tracker = CoreTracker::new(store, ctx, AGENT);
 
-    let labels =
-        Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
-    let (sandboxes, unreachable) = list_everywhere(&computes, &labels).await?;
-    for name in &unreachable {
-        eprintln!("target {name} can't be reached; its sandboxes aren't listed");
-    }
-    let sandboxes: Vec<Sandbox> = sandboxes.into_iter().map(|(_, s)| s).collect();
+    // A running control plane knows its sandboxes and runs itself, so it is asked first; the compute is only read when
+    // there isn't one (or it isn't running this repo).
+    let slug = config.repo.repo().slug();
+    let live = surface::fetch(&paths.data_dir.join("factory"))
+        .await
+        .and_then(|reply| reply.repos.into_iter().find(|r| r.repo == slug));
+    let (rows, runs): (Vec<Row>, _) = match &live {
+        Some(live) => (live.snapshot.sandboxes.iter().map(Row::from_status).collect(), Some(live)),
+        None => {
+            let computes = computes(&config, &opts, &paths, Default::default(), true)?;
+            let labels = Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), slug)]);
+            let (sandboxes, unreachable) = list_everywhere(&computes, &labels).await?;
+            for name in &unreachable {
+                eprintln!("target {name} can't be reached; its sandboxes aren't listed");
+            }
+            let sandboxes: Vec<Sandbox> = sandboxes.into_iter().map(|(_, s)| s).collect();
+            (sandboxes.iter().map(Row::from_sandbox).collect(), None)
+        }
+    };
     let tasks = tracker
         .in_flight(&config.repo.project, &config.repo.queue.iter().cloned().map(TaskKey).collect::<Vec<_>>())
         .await
@@ -55,7 +69,14 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     if !queue.is_empty() {
         waiting.retain(|t| t.grade.is_some());
     }
-    print!("{}", render_status(&sandboxes, &tasks, &waiting, config.repo.max_sandboxes));
+    if let Some(live) = runs {
+        print!("{}", render_live(&live.snapshot));
+    }
+    print!("{}", render_status(&rows, &tasks, &waiting, config.repo.max_sandboxes));
+    match saved_endpoint_id(&paths.creds()) {
+        Some(id) => println!("\nUI endpoint id: {id}  (allow a UI with `trailhead factory allow <its endpoint id>`)"),
+        None => println!("\nUI endpoint id: none yet (the control plane makes it on its first run)"),
+    }
     Ok(())
 }
 
@@ -63,7 +84,6 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let opts = resolve_opts(&logs.opts, &paths)?;
     let (_, _, config) = load_config(&opts)?;
-    let computes = computes(&config, &opts, &paths, Default::default(), true)?;
 
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
     let ctx = factory_ctx(&store, false).await?;
@@ -71,22 +91,18 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     let key = TaskKey(logs.task.to_ascii_uppercase());
     let task = tracker.show(&key).await.map_err(|e| format!("{}: {e}", key.0))?;
 
-    let wanted =
-        Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
-    let (found, unreachable) = list_everywhere(&computes, &wanted).await?;
-    let sandboxes: Vec<Sandbox> = found.iter().map(|(_, s)| s.clone()).collect();
-    let sandbox = find_sandbox(&task, &sandboxes).ok_or_else(|| {
-        let unknown = if unreachable.is_empty() {
-            String::new()
-        } else {
-            format!("; target(s) {} couldn't be reached, so it may be there", unreachable.join(", "))
-        };
-        format!(
-            "{} has no sandbox right now (it isn't running, or its sandbox was released or destroyed){unknown}",
-            key.0
-        )
-    })?;
-    let compute = &computes[found.iter().find(|(_, s)| s.name == sandbox.name).map_or(0, |(i, _)| *i)].0;
+    // With a control plane to ask, `--follow` follows its stream of the task's events rather than polling the log.
+    let dir = paths.data_dir.join("factory");
+    let streaming = logs.follow && surface::fetch(&dir).await.is_some();
+    let source = log_source(&config, &opts, &paths, &task).await;
+    let (compute, sandbox) = match source {
+        Ok(source) => source,
+        Err(why) if streaming => {
+            eprintln!("{why}");
+            return stream_events(&dir, &key).await;
+        }
+        Err(why) => return Err(why),
+    };
 
     let mut printed = String::new();
     loop {
@@ -96,11 +112,50 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
         if !logs.follow {
             return Ok(());
         }
+        if streaming {
+            println!("-- following the control plane's events for {} --", key.0);
+            return stream_events(&dir, &key).await;
+        }
         tokio::select! {
             _ = tokio::time::sleep(FOLLOW_EVERY) => {}
             _ = tokio::signal::ctrl_c() => return Ok(()),
         }
     }
+}
+
+/// Prints the control plane's events about `key` as they happen, until Ctrl-C or it stops.
+async fn stream_events(dir: &std::path::Path, key: &TaskKey) -> Result<(), String> {
+    surface::follow(dir, Some(&key.0), |e| println!("{}", e.event.event.line()), async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+}
+
+/// The compute and sandbox whose daemon log belongs to `task`.
+async fn log_source(
+    config: &trailhead_factory::FactoryConfig,
+    opts: &Opts,
+    paths: &trailhead_server::Paths,
+    task: &Task,
+) -> Result<(Arc<dyn trailhead_factory::Compute>, Sandbox), String> {
+    let computes = computes(config, opts, paths, Default::default(), true)?;
+    let wanted =
+        Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
+    let (found, unreachable) = list_everywhere(&computes, &wanted).await?;
+    let sandboxes: Vec<Sandbox> = found.iter().map(|(_, s)| s.clone()).collect();
+    let sandbox = find_sandbox(task, &sandboxes).ok_or_else(|| {
+        let unknown = if unreachable.is_empty() {
+            String::new()
+        } else {
+            format!("; target(s) {} couldn't be reached, so it may be there", unreachable.join(", "))
+        };
+        format!(
+            "{} has no sandbox right now (it isn't running, or its sandbox was released or destroyed){unknown}",
+            task.key.0
+        )
+    })?;
+    let compute = computes[found.iter().find(|(_, s)| s.name == sandbox.name).map_or(0, |(i, _)| *i)].0.clone();
+    Ok((compute, sandbox.clone()))
 }
 
 /// The sandbox a task is on: the one its run recorded (a pooled sandbox's name, else the run's own), else one labelled
@@ -129,40 +184,83 @@ fn new_output<'a>(printed: &str, log: &'a str) -> &'a str {
     if log == printed { "" } else { log }
 }
 
-/// `waiting` is the ready tasks the factory could start; `max_sandboxes` the repo's cap.
-fn render_status(sandboxes: &[Sandbox], tasks: &[Task], waiting: &[Task], max_sandboxes: usize) -> String {
+/// A sandbox as `status` lists it, whether read from compute labels or from the control plane.
+struct Row {
+    name: String,
+    state: String,
+    role: String,
+    task: String,
+    warm: String,
+}
+
+impl Row {
+    fn from_sandbox(s: &Sandbox) -> Row {
+        let get = |k: &str| s.labels.get(k).map_or("-", String::as_str).to_string();
+        // A run's own sandbox, not a pooled one, has no state label.
+        let state = s.labels.get(label::STATE).map_or("run", String::as_str).to_string();
+        Row { name: s.name.clone(), state, role: get(label::ROLE), task: get(label::TASK), warm: get(label::WARM) }
+    }
+
+    fn from_status(s: &SandboxStatus) -> Row {
+        let state = if s.own && s.state == SandboxState::Busy { "run" } else { s.state.as_str() };
+        Row {
+            name: s.name.clone(),
+            state: state.to_string(),
+            role: s.role.clone().unwrap_or_else(|| "-".into()),
+            task: s.task.as_ref().map_or("-", |t| t.0.as_str()).to_string(),
+            warm: if s.warm { "yes" } else { "-" }.to_string(),
+        }
+    }
+}
+
+/// What only a running control plane knows: itself, its last error and each run's phase and activity.
+fn render_live(snapshot: &FactorySnapshot) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    let none = "-";
+    let _ = writeln!(out, "Control plane: {}", control_label(&snapshot.control));
+    if let Some((at, message)) = &snapshot.last_error {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let ago = (now - at).max(0);
+        let _ = writeln!(out, "  last error ({ago}s ago): {}", message.lines().next().unwrap_or_default());
+    }
+    let _ = writeln!(out, "\nRuns in flight ({})", snapshot.runs.len());
+    for r in &snapshot.runs {
+        let last = r.last_tool.as_ref().map_or(String::new(), |t| format!(", last tool {t}"));
+        let _ = writeln!(
+            out,
+            "  {} {:<16} on {}, step {}, {} tool calls, spend {}{last}",
+            r.task.0,
+            r.phase.label(),
+            r.sandbox.as_deref().unwrap_or("-"),
+            r.steps,
+            r.tool_calls,
+            r.spend,
+        );
+    }
+    out.push('\n');
+    out
+}
 
-    let mut pool: Vec<&Sandbox> = sandboxes.iter().collect();
+/// `waiting` is the ready tasks the factory could start; `max_sandboxes` the repo's cap.
+fn render_status(sandboxes: &[Row], tasks: &[Task], waiting: &[Task], max_sandboxes: usize) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+
+    let mut pool: Vec<&Row> = sandboxes.iter().collect();
     pool.sort_by(|a, b| a.name.cmp(&b.name));
     let _ = writeln!(out, "Sandboxes ({})", pool.len());
     if pool.is_empty() {
         let _ = writeln!(out, "  none");
     }
     for s in pool {
-        let get = |k: &str| s.labels.get(k).map_or(none, String::as_str);
-        let state = match s.labels.get(label::STATE) {
-            Some(state) => state.as_str(),
-            None => "run", // a run's own sandbox, not a pooled one
-        };
-        let _ = writeln!(
-            out,
-            "  {:<20} {:<7} {:<9} task {:<10} warm {}",
-            s.name,
-            state,
-            get(label::ROLE),
-            get(label::TASK),
-            get(label::WARM)
-        );
+        let _ = writeln!(out, "  {:<20} {:<7} {:<9} task {:<10} warm {}", s.name, s.state, s.role, s.task, s.warm);
     }
 
     // A parked task keeps its sandbox in the cap, so enough of them leave ready tasks waiting on a person's answer.
     let parked = tasks
         .iter()
         .filter(|t| t.status == Status::NeedsInput)
-        .filter(|t| sandboxes.iter().any(|s| s.labels.get(label::TASK) == Some(&t.key.0)))
+        .filter(|t| sandboxes.iter().any(|s| s.task == t.key.0))
         .count();
     if !waiting.is_empty() && parked > 0 && parked >= max_sandboxes {
         let _ = writeln!(
@@ -241,6 +339,10 @@ mod tests {
         }
     }
 
+    fn rows(boxes: &[Sandbox]) -> Vec<Row> {
+        boxes.iter().map(Row::from_sandbox).collect()
+    }
+
     fn task(key: &str, status: Status, run: RunUpdate) -> Task {
         Task {
             key: TaskKey(key.into()),
@@ -308,7 +410,7 @@ mod tests {
             ..Default::default()
         };
         let out = render_status(
-            &boxes,
+            &rows(&boxes),
             &[task("TRAIL-7", Status::InProgress, running), task("TRAIL-5", Status::InReview, reviewed)],
             &[],
             2,
@@ -334,10 +436,47 @@ mod tests {
             task("TRAIL-2", Status::NeedsInput, Default::default()),
         ];
         let waiting = [task("TRAIL-3", Status::Open, Default::default())];
-        let out = render_status(&boxes, &parked, &waiting, 2);
+        let out = render_status(&rows(&boxes), &parked, &waiting, 2);
         assert!(out.contains("1 ready tasks waiting; all 2 sandboxes held by parked tasks"), "{out}");
-        assert!(!render_status(&boxes, &parked, &[], 2).contains("waiting;"));
-        assert!(!render_status(&boxes, &parked, &waiting, 3).contains("waiting;"));
+        assert!(!render_status(&rows(&boxes), &parked, &[], 2).contains("waiting;"));
+        assert!(!render_status(&rows(&boxes), &parked, &waiting, 3).contains("waiting;"));
+    }
+
+    #[test]
+    fn a_running_control_plane_adds_its_runs_and_sandbox_states() {
+        use trailhead_factory::{ControlState, RunPhase, RunStatus};
+        let snapshot = FactorySnapshot {
+            control: ControlState::Reattaching { task: TaskKey("TRAIL-7".into()) },
+            last_error: Some((0, "reconcile failed: boom\nmore".into())),
+            sandboxes: vec![SandboxStatus {
+                name: "trailhead-w1".into(),
+                target: None,
+                state: SandboxState::Paused,
+                task: Some(TaskKey("TRAIL-7".into())),
+                role: Some("worker".into()),
+                warm: true,
+                own: false,
+            }],
+            runs: vec![RunStatus {
+                task: TaskKey("TRAIL-7".into()),
+                phase: RunPhase::Preparing { cold: true },
+                sandbox: Some("trailhead-w1".into()),
+                steps: 3,
+                tool_calls: 9,
+                spend: Usd::dollars(1.5),
+                last_tool: Some("Bash".into()),
+                started: 0,
+            }],
+            seq: 12,
+        };
+        let out = render_live(&snapshot);
+        assert!(out.contains("Control plane: reattaching to TRAIL-7"), "{out}");
+        assert!(out.contains("last error ("), "{out}");
+        assert!(out.contains(": reconcile failed: boom\n"), "{out}");
+        assert!(out.contains("TRAIL-7 preparing (cold)"), "{out}");
+        assert!(out.contains("step 3, 9 tool calls, spend $1.5000, last tool Bash"), "{out}");
+        let row = Row::from_status(&snapshot.sandboxes[0]);
+        assert_eq!((row.state.as_str(), row.warm.as_str(), row.task.as_str()), ("paused", "yes", "TRAIL-7"));
     }
 
     #[test]

@@ -240,8 +240,8 @@ async fn reviewer_verdict_from_result_text() {
     let r = rig();
     let mut c = ctx(&r, Role::Reviewer, 10);
     c.checks = vec![
-        CheckResult { name: "test".into(), passed: true, output: String::new() },
-        CheckResult { name: "lint".into(), passed: false, output: "warning: unused import".into() },
+        CheckResult { name: "test".into(), passed: true, output: String::new(), skipped: false },
+        CheckResult { name: "lint".into(), passed: false, output: "warning: unused import".into(), skipped: false },
     ];
     let (out, _) = play(&r, "review", c).await;
     assert_eq!(

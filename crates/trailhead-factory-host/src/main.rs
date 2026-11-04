@@ -33,23 +33,25 @@ use iroh::{Endpoint, SecretKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tracing::Instrument;
+use trailhead_client::creds::{Cred, CredStore};
 use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
 use trailhead_daemon::plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN};
+use trailhead_daemon::ui::{UI_ALPN, UiAllowlist, UiProtocol};
 use trailhead_factory::{
     Compute, ComputeConfig, Daemon, FactoryConfig, HarnessSecrets, ProviderKind, Registry, Target,
 };
 use trailhead_provider_anthropic::Anthropic;
-use trailhead_server::creds::{Cred, CredStore};
 
 mod find;
 mod fnox;
 mod login;
 mod ops;
 mod repos;
+mod surface;
 mod wake;
 
 /// The agent the control plane acts as; sandboxes get its sub-agents.
@@ -120,6 +122,12 @@ enum Cmd {
     Status(Opts),
     /// Print the daemon's service log from a task's sandbox.
     Logs(ops::LogsOpts),
+    /// Let a UI (Lookout) connect: add its endpoint id to the allowlist. Takes effect on a running control plane at once.
+    Allow { endpoint_id: String },
+    /// Stop allowing a UI endpoint.
+    Disallow { endpoint_id: String },
+    /// List the UI endpoint ids allowed to connect.
+    Allowed,
     /// Save a secret in the OS keyring (read from stdin), so `run` needs no environment variables.
     #[command(subcommand)]
     Login(login::Login),
@@ -129,6 +137,13 @@ enum Cmd {
 struct Keys {
     endpoint: String,
     master: String,
+}
+
+/// The control plane's endpoint id, if it has run here and saved its keys. Read-only, for `status`.
+fn saved_endpoint_id(creds: &CredStore) -> Option<iroh::EndpointId> {
+    let (saved, _) = creds.read(KEYS)?;
+    let keys: Keys = serde_json::from_str(&saved).ok()?;
+    Some(trailhead_daemon::net::parse_secret_key(&keys.endpoint).ok()?.public())
 }
 
 fn load_or_create_keys(creds: &CredStore) -> Result<(SecretKey, [u8; 32]), String> {
@@ -179,6 +194,39 @@ fn lock_control_plane(data_dir: &Path, repo: &str) -> Result<File, String> {
     file.set_len(0).and_then(|()| file.rewind()).map_err(|e| format!("{}: {e}", path.display()))?;
     write!(file, "{} {repo}", std::process::id()).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(file)
+}
+
+/// The UI endpoints allowed on `trailhead/ui/0`, kept beside the control plane's other state.
+fn ui_allowlist(paths: &trailhead_server::Paths) -> UiAllowlist {
+    UiAllowlist::new(paths.data_dir.join("factory").join("ui-allowed"))
+}
+
+fn allowlist() -> Result<UiAllowlist, String> {
+    let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+    Ok(ui_allowlist(&paths))
+}
+
+/// `allow` (`add`) or `disallow` a UI endpoint id.
+fn allow(endpoint_id: &str, add: bool) -> Result<(), String> {
+    let id = trailhead_daemon::net::parse_endpoint_id(endpoint_id).map_err(|e| e.to_string())?;
+    let list = allowlist()?;
+    let changed = if add { list.add(id) } else { list.remove(&id) }.map_err(|e| e.to_string())?;
+    match (add, changed) {
+        (true, true) => println!("allowed {id}"),
+        (true, false) => println!("{id} was already allowed"),
+        (false, true) => println!("no longer allowed: {id}"),
+        (false, false) => println!("{id} wasn't allowed"),
+    }
+    Ok(())
+}
+
+fn allowed() -> Result<(), String> {
+    let ids = allowlist()?.list().map_err(|e| e.to_string())?;
+    if ids.is_empty() {
+        println!("no UI endpoints are allowed; add one with `trailhead factory allow <endpoint-id>`");
+    }
+    ids.iter().for_each(|id| println!("{id}"));
+    Ok(())
 }
 
 /// The `factory` agent's context, looked up through the local user.
@@ -342,8 +390,16 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
         let daemon = RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch).with_peers(peers.clone());
         targets.push((target, compute, Arc::new(daemon)));
     }
-    let tunnel = Router::builder(endpoint.clone()).accept(API_ALPN, ApiTunnel::new(opts.server, peers)).spawn();
+    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths));
+    let tunnel = Router::builder(endpoint.clone())
+        .accept(API_ALPN, ApiTunnel::new(opts.server, peers))
+        .accept(UI_ALPN, ui)
+        .spawn();
     tracing::info!(endpoint = %endpoint.id(), repos = %slugs.join(", "), "factory ready");
+    tracing::info!(
+        "a UI connects to endpoint id {}; allow it with `trailhead factory allow <its endpoint id>`",
+        endpoint.id()
+    );
 
     let host = Host::new(host_config.max_sandboxes);
     let mut repos = Vec::new();
@@ -612,6 +668,9 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
         }
         Cmd::Status(opts) => ops::status(&opts).await,
         Cmd::Logs(logs) => ops::logs(&logs).await,
+        Cmd::Allow { endpoint_id } => allow(&endpoint_id, true),
+        Cmd::Disallow { endpoint_id } => allow(&endpoint_id, false),
+        Cmd::Allowed => allowed(),
         Cmd::Login(cmd) => {
             let paths =
                 trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
@@ -619,6 +678,12 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
         }
         Cmd::Run(run) => {
             let Setup { repos, tunnel, _lock, store, ctx } = setup(&run).await?;
+            let paths =
+                trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+            // Beside the lock, so it exists and says the same thing: this machine has one control plane.
+            let boards = repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect();
+            let serving = surface::serve(&paths.data_dir.join("factory"), boards).await?;
+            tracing::info!(addr = %serving.addr, "serving factory status for `trailhead-factory status` and `logs --follow`");
             // The first Ctrl-C drains; the second cancels what is left.
             let (drain_tx, drain) = tokio::sync::watch::channel(false);
             let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
@@ -647,6 +712,7 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
                     }
                 }
             }
+            drop(serving);
             tunnel.shutdown().await.map_err(|e| e.to_string())?;
             match failed {
                 0 => Ok(()),
