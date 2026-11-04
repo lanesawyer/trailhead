@@ -525,3 +525,35 @@ async fn the_run_loop_holds_due_reviews_while_the_server_is_down() {
     stop.send(()).unwrap();
     handle.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn a_drain_retries_the_reconcile_when_it_fails_after_the_last_run_errors() {
+    let mut r = rig();
+    r.tracker.add_task("TRAIL", "First", "");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    r.daemon.gate_prepare(gate.clone());
+    let factory = Arc::new(std::mem::replace(&mut r.factory, rig().factory));
+    let (drain, draining) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(factory.run_draining(
+        Arc::new(tokio::sync::Notify::new()),
+        std::time::Duration::from_millis(20),
+        async {
+            let _ = draining.await;
+        },
+        std::future::pending::<()>(),
+    ));
+    let daemon = r.daemon.clone();
+    until("the run to be preparing", || daemon.prepares_started() == 1).await;
+    drain.send(()).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // The run errors while the compute API is down, so reconcile can't look: the drain mustn't conclude on that.
+    r.daemon.fail_runs(1, "stream dropped");
+    r.compute.set_unreachable(true);
+    gate.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!handle.is_finished(), "a failed reconcile doesn't end the drain");
+
+    r.compute.set_unreachable(false);
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle).await.unwrap().unwrap().unwrap();
+}

@@ -87,6 +87,9 @@ impl Factory {
                     Err(e) => {
                         tracing::warn!(error = %e, "reconcile failed");
                         self.status.error(format!("reconcile failed: {e}"));
+                        // A drain mustn't conclude on a reconcile that couldn't look: a daemon may still have a run.
+                        // Retry at the next poll; a shutdown still ends it.
+                        dirty = draining;
                     }
                 }
                 self.status.control(ControlState::Up);
@@ -95,8 +98,9 @@ impl Factory {
                 }
             }
             // A run that just errored set `dirty`: its daemon may still have it, so the reconcile above runs first and
-            // a drain concludes only if that found nothing. A poll re-dirtying an idle loop mustn't hold it open.
-            if draining && running.is_empty() {
+            // a drain concludes only if that found nothing, and
+            // looked successfully. A poll re-dirtying an idle loop mustn't hold it open.
+            if draining && running.is_empty() && !dirty {
                 tracing::info!("drained; no runs left");
                 break;
             }
