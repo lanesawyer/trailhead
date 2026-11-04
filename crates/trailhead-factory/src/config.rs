@@ -789,6 +789,13 @@ impl FactoryConfig {
                 )));
             }
         }
+        for (grade, globs) in &self.grades.rules {
+            for glob in globs {
+                if let Err(e) = crate::grade::compile_glob(glob) {
+                    return Err(Error::Config(format!("[factory.grades] `{grade}`: bad glob `{glob}`: {e}")));
+                }
+            }
+        }
         let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
         for (grade, gate) in &self.gates {
             if !matches!(grade.as_str(), "1" | "2" | "3" | "4") {
@@ -995,6 +1002,11 @@ mod tests {
         }
         let err = parse(&format!("{base}\n[grades]\n5 = [\"a\"]\n")).unwrap_err();
         assert!(err.to_string().contains("[factory.grades] has `5`"), "{err}");
+
+        let ok = format!("{base}\n[grades]\n3 = [\"crates/{{core,server}}/**\", \"src/[ab].rs\"]\n");
+        assert!(parse(&ok).is_ok());
+        let err = parse(&format!("{base}\n[grades]\n3 = [\"src/[ab\"]\n")).unwrap_err();
+        assert!(err.to_string().contains("bad glob `src/[ab`"), "{err}");
     }
 
     const SAMPLE: &str = r#"

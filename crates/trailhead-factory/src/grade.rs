@@ -77,32 +77,16 @@ impl PrGrade {
     }
 }
 
-/// Matches a `/`-separated path against a glob: `*` and `?` within a segment, and a `**` segment for any number of
-/// segments, none included (so `**/Cargo.toml` matches the root's too).
+/// Compiles a path glob: `*` and `?` stay within a segment, `**` spans segments (none included, so `**/Cargo.toml`
+/// matches the root's too), and `{a,b}` and `[ab]` work as in a shell.
+pub fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, globset::Error> {
+    Ok(globset::GlobBuilder::new(pattern).literal_separator(true).build()?.compile_matcher())
+}
+
+/// Matches a `/`-separated path against a glob (see [`compile_glob`]). A pattern that doesn't compile matches nothing;
+/// config loading rejects those.
 pub fn glob_match(pattern: &str, path: &str) -> bool {
-    let pattern: Vec<&str> = pattern.split('/').collect();
-    let path: Vec<&str> = path.split('/').collect();
-    segments_match(&pattern, &path)
-}
-
-fn segments_match(pattern: &[&str], path: &[&str]) -> bool {
-    match pattern.split_first() {
-        None => path.is_empty(),
-        Some((&"**", rest)) => (0..=path.len()).any(|skip| segments_match(rest, &path[skip..])),
-        Some((p, rest)) => match path.split_first() {
-            Some((s, tail)) => segment_match(p.as_bytes(), s.as_bytes()) && segments_match(rest, tail),
-            None => false,
-        },
-    }
-}
-
-fn segment_match(pattern: &[u8], text: &[u8]) -> bool {
-    match pattern.split_first() {
-        None => text.is_empty(),
-        Some((b'*', rest)) => (0..=text.len()).any(|skip| segment_match(rest, &text[skip..])),
-        Some((b'?', rest)) => !text.is_empty() && segment_match(rest, &text[1..]),
-        Some((c, rest)) => text.first() == Some(c) && segment_match(rest, &text[1..]),
-    }
+    compile_glob(pattern).is_ok_and(|m| m.is_match(path))
 }
 
 /// Whether the path looks like a test: in a `tests`-like directory, or named like one.
@@ -246,6 +230,11 @@ mod tests {
         assert!(glob_match("a?c", "abc"));
         assert!(!glob_match("Cargo.lock", "crates/Cargo.lock"));
         assert!(!glob_match("crates/**", "docs/crates/a.rs"));
+        assert!(glob_match("crates/{core,server}/**", "crates/server/src/a.rs"));
+        assert!(!glob_match("crates/{core,server}/**", "crates/cli/src/a.rs"));
+        assert!(glob_match("src/[ab].rs", "src/b.rs"));
+        assert!(!glob_match("src/[ab].rs", "src/c.rs"));
+        assert!(!glob_match("src/[ab", "src/[ab"));
     }
 
     #[test]
