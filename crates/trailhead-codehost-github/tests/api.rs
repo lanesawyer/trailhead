@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use trailhead_codehost_github::{GitHub, Identity};
 use trailhead_factory::{
     BranchUpdate, ChangedFile, CodeHost, Commit, Error, FileChange, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
-    Repo,
+    RateLimit, Repo,
 };
 
 #[derive(Default)]
@@ -37,6 +37,8 @@ struct Git {
     /// Reads of a PR, check runs and status answered in full, and answered 304 to a matching If-None-Match.
     full_reads: usize,
     not_modified: usize,
+    /// The `x-ratelimit-*` headers (limit, remaining, reset) pull reads carry, when a test sets them.
+    rate: Option<(u64, u64, i64)>,
 }
 
 impl Git {
@@ -268,12 +270,31 @@ async fn get_pull(
 /// Answers with `body` and an ETag of it, or 304 when the request already has that ETag.
 fn etagged(g: &mut Git, headers: &HeaderMap, body: Value) -> Response {
     let etag = format!("\"{}\"", body);
+    let rate = g.rate.map(|(limit, remaining, reset)| {
+        [
+            ("x-ratelimit-limit", limit.to_string()),
+            ("x-ratelimit-remaining", remaining.to_string()),
+            ("x-ratelimit-reset", reset.to_string()),
+        ]
+    });
+    let rate = rate.into_iter().flatten();
     if headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
         g.not_modified += 1;
-        return (StatusCode::NOT_MODIFIED, [("etag", etag)]).into_response();
+        return (
+            StatusCode::NOT_MODIFIED,
+            [("etag", etag)],
+            HeaderMap::from_iter(rate.map(|(k, v)| (k.parse().unwrap(), v.parse().unwrap()))),
+        )
+            .into_response();
     }
     g.full_reads += 1;
-    (StatusCode::OK, [("etag", etag)], Json(body)).into_response()
+    (
+        StatusCode::OK,
+        [("etag", etag)],
+        HeaderMap::from_iter(rate.map(|(k, v)| (k.parse().unwrap(), v.parse().unwrap()))),
+        Json(body),
+    )
+        .into_response()
 }
 
 async fn check_runs(State(g): State<Shared>, headers: HeaderMap) -> Response {
@@ -794,4 +815,27 @@ async fn unchanged_pr_reads_are_conditional_and_answered_from_the_cache() {
     // A change shows through at once: the ETag no longer matches.
     git.lock().unwrap().prs[0]["title"] = json!("renamed");
     assert_eq!(gh.title(&pr).await.unwrap(), "renamed");
+}
+
+#[tokio::test]
+async fn the_rate_limit_is_read_from_the_response_headers() {
+    let (git, url) = serve().await;
+    let gh = GitHub::new(url, Some("tok".into()));
+    let main = head(&git, "main");
+    let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))], merges: vec![] };
+    gh.publish(&repo(), &main, "factory/trail-1", &[commit]).await.unwrap();
+    let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };
+    let pr = gh.open_pr(&repo(), new).await.unwrap();
+
+    gh.title(&pr).await.unwrap();
+    assert_eq!(gh.rate_limit(), None, "a host that doesn't say has no reading");
+
+    git.lock().unwrap().rate = Some((5000, 123, 1_900_000_000));
+    gh.title(&pr).await.unwrap();
+    assert_eq!(gh.rate_limit(), Some(RateLimit { limit: 5000, remaining: 123, resets_at: 1_900_000_000 }));
+
+    // A 304 carries the headers too, and the latest reading wins.
+    git.lock().unwrap().rate = Some((5000, 122, 1_900_000_000));
+    gh.title(&pr).await.unwrap();
+    assert_eq!(gh.rate_limit().map(|r| r.remaining), Some(122));
 }

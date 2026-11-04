@@ -108,7 +108,13 @@ impl Factory {
                 tracing::warn!(error = %e, "couldn't start ready tasks");
                 self.status.error(format!("couldn't start ready tasks: {e}"));
             }
-            let resume = self.paused_until().map(|(_, _, resets_at)| until(resets_at));
+            let resume = self
+                .paused_until()
+                .map(|(_, _, resets_at)| until(resets_at))
+                .into_iter()
+                .chain(self.code_host_pause().map(until))
+                .min();
+            let poll = self.polled_every(poll);
             tokio::select! {
                 _ = &mut shutdown => break,
                 _ = &mut drain, if !draining => {
@@ -406,6 +412,26 @@ impl Factory {
                 (used >= *limit && resets_at > now).then(|| (window.clone(), used, resets_at))
             })
             .max_by_key(|(_, _, resets_at)| *resets_at)
+    }
+
+    /// When the code host's rate limit resets, if it is nearly spent (10% or less left). The merger's passes wait for
+    /// it: the limit is shared with Lane's own tools, so the factory leaves the last of it alone (TRAIL-535).
+    pub(crate) fn code_host_pause(&self) -> Option<i64> {
+        let rate = self.codehost.as_ref()?.rate_limit()?;
+        (rate.remaining.saturating_mul(10) <= rate.limit && rate.resets_at > unix_now()).then_some(rate.resets_at)
+    }
+
+    /// `poll`, stretched as the code host's rate limit runs down: twice as long under half left, four times under 30%.
+    pub fn polled_every(&self, poll: Duration) -> Duration {
+        let Some(rate) = self.codehost.as_ref().and_then(|c| c.rate_limit()).filter(|r| r.resets_at > unix_now())
+        else {
+            return poll;
+        };
+        match rate.remaining.saturating_mul(100) {
+            r if r < rate.limit.saturating_mul(30) => poll * 4,
+            r if r < rate.limit.saturating_mul(50) => poll * 2,
+            _ => poll,
+        }
     }
 
     /// Whether to hold off starting runs because a usage window is nearly full. Running ones carry on.
