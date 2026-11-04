@@ -36,6 +36,7 @@ struct State {
     failing: HashMap<(String, &'static str), usize>,
     /// Whether every `report`, by any agent, fails.
     reports_fail: bool,
+    finish_unapproved_forbidden: bool,
     /// Whether `create_sub_agent` fails with a plain error, not `Forbidden`.
     sub_agents_fail: bool,
 }
@@ -108,6 +109,12 @@ impl FakeTracker {
     /// Makes every `report`, whichever agent makes it, fail (or heal), as the tracker write outage of 2026-10-28 did.
     pub fn fail_reports(&self, fails: bool) {
         self.state.lock().unwrap().reports_fail = fails;
+    }
+
+    /// Makes finishing a task still in review refuse with `Forbidden`, as core does when the factory did the work
+    /// and nobody approved it.
+    pub fn forbid_finishing_unapproved(&self, forbids: bool) {
+        self.state.lock().unwrap().finish_unapproved_forbidden = forbids;
     }
 
     /// Makes `create_sub_agent` fail (or heal) with an error that isn't `Forbidden`, as a whole-tracker outage does.
@@ -504,6 +511,13 @@ impl Tracker for FakeTracker {
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
         self.inject("finish")?;
+        if self.state.lock().unwrap().finish_unapproved_forbidden
+            && self.state.lock().unwrap().tasks.get(task).is_some_and(|t| t.status == Status::InReview)
+        {
+            return Err(Error::Forbidden(
+                "a reviewer can't approve or finish work it did; another reviewer or a human has to".into(),
+            ));
+        }
         self.write(task, |t, me| {
             // Like core: review states need no claim, and an unclaimed task can be finished by anyone, but
             // not one another agent holds.

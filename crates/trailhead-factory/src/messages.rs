@@ -432,6 +432,13 @@ pub fn pr_closed_question(pr_url: &str) -> String {
     )
 }
 
+/// Why a task is parked when its PR was merged by hand before anyone approved the work.
+pub fn merged_unapproved_question(pr_url: &str) -> String {
+    format!(
+        "The PR {pr_url} was merged by hand before the work was approved, so the factory can't finish this task. Mark it done."
+    )
+}
+
 /// Why a task is parked when the agent's work is done and checked but publishing it failed.
 pub fn publish_failed_question(error: &dyn std::fmt::Display) -> String {
     format!(
