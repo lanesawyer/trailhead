@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use trailhead_control::Outcome;
-use trailhead_factory::{CiState, CodeHost, Commit, MergedBy, Role, RunOutcome, Status, Tracker};
+use trailhead_factory::{CiState, CodeHost, Commit, MergedBy, RateLimit, Role, RunOutcome, Status, Tracker};
 use trailhead_testkit::Script;
 
 use crate::common::*;
@@ -847,4 +847,35 @@ async fn a_pr_merged_by_hand_before_approval_is_parked_once_not_retried() {
     assert!(again.merged.is_empty(), "a parked task isn't finished again");
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
     assert_eq!(asked(&r), 1, "and not asked again");
+}
+
+#[tokio::test]
+async fn a_nearly_spent_code_host_rate_limit_holds_the_merger_until_it_resets() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let resets_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 + 3600;
+
+    r.codehost.set_rate_limit(Some(RateLimit { limit: 5000, remaining: 400, resets_at }));
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "the PR is left alone while the limit is nearly spent");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+
+    // Plenty left, or the window already reset: the merger carries on.
+    r.codehost.set_rate_limit(Some(RateLimit { limit: 5000, remaining: 400, resets_at: resets_at - 7200 }));
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+}
+
+#[tokio::test]
+async fn the_poll_stretches_as_the_rate_limit_runs_down() {
+    let (r, _queue) = queued_rig_with(&merging());
+    let poll = std::time::Duration::from_secs(10);
+    let resets_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 + 3600;
+    let at = |remaining| {
+        r.codehost.set_rate_limit(Some(RateLimit { limit: 5000, remaining, resets_at }));
+        r.factory.polled_every(poll).as_secs()
+    };
+    assert_eq!(r.factory.polled_every(poll).as_secs(), 10, "no reading, no change");
+    assert_eq!((at(4000), at(2000), at(1000)), (10, 20, 40));
 }

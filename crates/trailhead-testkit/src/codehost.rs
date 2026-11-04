@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use trailhead_factory::{
     BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
-    Repo, Result,
+    RateLimit, Repo, Result,
 };
 
 #[derive(Debug, Clone)]
@@ -51,6 +51,7 @@ struct State {
     head_lookups: usize,
     refuse_publish: Option<String>,
     refuse_merge: Option<String>,
+    rate_limit: Option<RateLimit>,
 }
 
 #[derive(Clone, Default)]
@@ -91,6 +92,11 @@ impl FakeCodeHost {
     /// called with `None`.
     pub fn refuse_merge(&self, why: Option<&str>) {
         self.state.lock().unwrap().refuse_merge = why.map(str::to_string);
+    }
+
+    /// Makes the host report this rate limit from now on.
+    pub fn set_rate_limit(&self, limit: Option<RateLimit>) {
+        self.state.lock().unwrap().rate_limit = limit;
     }
 
     /// Makes every later merge report a conflict.
@@ -198,6 +204,10 @@ impl FakeCodeHost {
 
 #[async_trait]
 impl CodeHost for FakeCodeHost {
+    fn rate_limit(&self) -> Option<RateLimit> {
+        self.state.lock().unwrap().rate_limit
+    }
+
     async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let mut s = self.state.lock().unwrap();
         if let Some(why) = &s.refuse_publish {
