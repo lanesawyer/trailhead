@@ -1,61 +1,99 @@
 //! Looks secrets up through [fnox](https://fnox.jdx.dev) when a `fnox` binary is installed. It's shelled out to, never
 //! linked, and never required: no binary, or no fnox config, just means it defines nothing.
 //!
-//! One `fnox export --format json` call at startup lists every secret its config defines with its value, so fnox's
-//! error text is never read to decide whether a name is defined: a name is in the export or it isn't. The call fails,
-//! and the error names fnox, only when there is a config to read.
+//! Only the secrets the factory needs are fetched, never the whole config, so one broken provider for a secret the
+//! factory doesn't use can't stop it. `fnox list --complete` names what the config defines, so fnox's error text is
+//! never read to decide whether a name is defined; a defined name is then read with `fnox get NAME`. The list is read
+//! at most once per `Fnox`, and only when a name is asked for. A defined name that fails is an error naming fnox; one
+//! the config doesn't define is just not found.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
 
-/// The secrets fnox defines, by name.
-#[derive(Debug, Default)]
-pub struct Fnox(HashMap<String, String>);
+/// What `fnox list` says the config defines, read on first use.
+#[derive(Debug)]
+enum Names {
+    Unread,
+    /// No `fnox` binary: nothing is defined.
+    NoBinary,
+    Defined(HashSet<String>),
+}
+
+/// A fnox config to look secrets up in.
+#[derive(Debug)]
+pub struct Fnox {
+    /// The program and the directory to run it in; `None` when fnox isn't used.
+    run: Option<(String, PathBuf)>,
+    names: Mutex<Names>,
+}
 
 impl Fnox {
     /// Nothing defined: fnox isn't used.
     pub fn none() -> Self {
-        Fnox::default()
+        Fnox { run: None, names: Mutex::new(Names::NoBinary) }
     }
 
-    /// Runs `program export --format json` in `dir`. Nothing is defined when `program` isn't installed or when no
-    /// config exists (`fnox.toml` or `fnox.local.toml` in `dir` or above, or `global`); `Err` (naming fnox, never a
-    /// value) when it runs against a config and fails.
-    pub fn load(program: &str, dir: &Path, global: Option<&Path>) -> Result<Self, String> {
+    /// Looks names up with `program` run in `dir`. Nothing is defined when no config exists (`fnox.toml` or
+    /// `fnox.local.toml` in `dir` or above, or `global`). Runs nothing until [`Fnox::get`].
+    pub fn new(program: &str, dir: &Path, global: Option<&Path>) -> Self {
         if !has_config(dir, global) {
-            return Ok(Fnox::none());
+            return Fnox::none();
         }
-        let out = match Command::new(program)
-            .args(["export", "--format", "json"])
-            .current_dir(dir)
-            .stdin(Stdio::null())
-            .output()
-        {
-            Ok(out) => out,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Fnox::none()),
-            Err(e) => return Err(format!("running fnox: {e}")),
+        Fnox { run: Some((program.to_string(), dir.to_path_buf())), names: Mutex::new(Names::Unread) }
+    }
+
+    /// `Ok(None)` when `program` isn't installed; `Err` (naming fnox) when it runs and fails.
+    fn command(program: &str, dir: &Path, args: &[&str]) -> Result<Option<Output>, String> {
+        match Command::new(program).args(args).current_dir(dir).stdin(Stdio::null()).output() {
+            Ok(out) if out.status.success() => Ok(Some(out)),
+            Ok(out) => {
+                let why = String::from_utf8_lossy(&out.stderr);
+                let why = why.trim();
+                Err(format!("fnox failed ({}){}{why}", out.status, if why.is_empty() { "" } else { ": " }))
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("running fnox: {e}")),
+        }
+    }
+
+    /// The value of `name`, if fnox defines it and it isn't blank. `Err` (naming fnox, never a value) when fnox fails
+    /// to list the config or to read a name it defines.
+    pub fn get(&self, name: &str) -> Result<Option<String>, String> {
+        let Some((program, dir)) = &self.run else {
+            return Ok(None);
         };
-        if !out.status.success() {
-            let why = String::from_utf8_lossy(&out.stderr);
-            let why = why.trim();
-            return Err(format!("fnox failed ({}){}{why}", out.status, if why.is_empty() { "" } else { ": " }));
+        let mut names = self.names.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(*names, Names::Unread) {
+            *names = match Self::command(program, dir, &["list", "--complete"])? {
+                None => Names::NoBinary,
+                Some(out) => Names::Defined(
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .filter_map(|l| l.split_whitespace().next())
+                        .map(str::to_string)
+                        .collect(),
+                ),
+            };
         }
-        Self::parse(&out.stdout)
-    }
-
-    /// The `{"secrets": {NAME: value}}` an export prints (a bare `{NAME: value}` is taken too). Only strings count.
-    fn parse(json: &[u8]) -> Result<Self, String> {
-        let doc: serde_json::Value =
-            serde_json::from_slice(json).map_err(|e| format!("fnox export wasn't JSON: {e}"))?;
-        let map = doc.get("secrets").unwrap_or(&doc).as_object().ok_or("fnox export wasn't a JSON object")?;
-        Ok(Fnox(map.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.trim().to_string()))).collect()))
-    }
-
-    /// The value of `name`, if fnox defines it and it isn't blank.
-    pub fn get(&self, name: &str) -> Option<String> {
-        self.0.get(name).filter(|v| !v.is_empty()).cloned()
+        let Names::Defined(defined) = &*names else {
+            return Ok(None);
+        };
+        if !defined.contains(name) {
+            return Ok(None);
+        }
+        let Some(out) = Self::command(program, dir, &["get", name])? else {
+            return Ok(None);
+        };
+        let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if value.is_empty() {
+            // `if_missing = "warn"` lets fnox exit 0 with nothing for a secret it defines but couldn't resolve.
+            tracing::warn!("fnox defines {name} but returned nothing for it; trying the next source");
+            return Ok(None);
+        }
+        Ok(Some(value))
     }
 }
 
