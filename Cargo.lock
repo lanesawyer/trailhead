@@ -8114,7 +8114,19 @@ dependencies = [
 name = "trailhead-lookout"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "bevy",
+ "directories",
+ "iroh",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "trailhead-client",
+ "trailhead-core",
+ "trailhead-daemon",
+ "trailhead-server",
 ]
 
 [[package]]

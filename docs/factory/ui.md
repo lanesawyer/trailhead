@@ -55,10 +55,13 @@ On a dropped stream, reconnect with the last applied id; the server resumes with
 
 A `Connection` state: `Offline`, `Syncing`, `Live`. Every command system runs only in `Live`, and the UI greys out its controls otherwise, with the reason shown. A command in flight when the connection drops is retried with its idempotency key once the client is `Live` again, or reported failed; it never silently disappears.
 
+As built (TRAIL-694): `ConnectionPlugin` runs the net thread (`net.rs`) and mirrors it into the `Connection` state, a `ConnectionStatus { reason }` resource (`Reason` says plainly why: no target, bad id, `NotAllowed`, unreachable, needs login, token rejected, dialing, signing in), `LocalEndpoint` (Lookout's own id, for `trailhead factory allow`) and, once signed in, `Api { base, token, user }`. The net thread probes `/v1/health` through the tunnel every 2 seconds. `Syncing` covers dialing and signing in until the event sync (TRAIL-695) exists. The endpoint key and the last control plane dialed are in Lookout's config directory (`LOOKOUT_CONFIG_DIR` overrides it). The control plane is given as an endpoint id; a longer ticket with addresses isn't built.
+
 ## Identity
 
 Nothing new. Tokens already have a `principal` of user or agent, and every write records the actor and the user it acted for, so the event log tells "a person approved it" from "`factory/trail-42-a1` did it."
 
+- Built (TRAIL-694): the token is found by the server's instance id from `/v1/health`, in the same place the CLI keeps it; `NetCommand::Login` takes a pasted token, confirms it with `/v1/me`, refuses an agent's, and saves it there. The window has no text input yet, so `lookout <endpoint-id>` and `LOOKOUT_TOKEN` stand in.
 - The UI reads the user token the CLI saved for this server (`<config dir>/servers/<instance>/`, or the keyring entry named after it), or runs the same `trailhead login` flow: paste a printed token, confirm with `/v1/me`.
 - It acts only as the user. No `--as <agent>` equivalent.
 - Proposal: move `trailhead_server::creds` into a small crate so the UI can share it without depending on the server.
@@ -69,6 +72,7 @@ Decided (2026-10-28): the UI is the factory's UI, so it connects to the control 
 
 - **What it carries.** The factory status snapshot and stream ([Factory status](#factory-status)), and Trailhead API requests forwarded to the server's loopback port as the API tunnel does, so the UI's HTTP client talks to a local port.
 - **Admission.** A persisted allowlist of UI endpoint ids, added by a person (for example `trailhead factory allow <endpoint-id>`), plus the user's bearer token on every API request. The allowlist decides who can connect, and the token decides what they can do.
+- **Built (TRAIL-700).** Each stream opens with one framed JSON request, `{"op":"api"}`, after which it is raw bytes to the server's loopback port (the event stream included). Status (TRAIL-692, TRAIL-701) adds ops beside `api`; a request the control plane doesn't know resets the stream. The allowlist is the file `<data dir>/factory/ui-allowed`, one endpoint id per line, read on every connection: `trailhead factory allow <id>`, `disallow <id>` and `allowed`. The control plane's endpoint id is logged at startup and shown by `trailhead factory status`. The control plane doesn't parse the forwarded HTTP; the server rejects any request without a valid token.
 - **Why not the API tunnel.** That tunnel admits only daemons this control plane started, and only reaches the Trailhead API. Keeping the UI out of it means a compromised sandbox can't see factory status or reach steering, and how daemons get in can change without touching the UI.
 - **Factory stopped.** There's little to watch, so the map shows Trailhead's last known state marked "factory stopped". The task board may fall back to the server URL the CLI already uses. Once the control plane moves into the server process (later work in [mvp.md](mvp.md)), the server and the factory are one endpoint, and this case mostly goes away.
 

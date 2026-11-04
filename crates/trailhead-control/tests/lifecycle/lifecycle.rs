@@ -608,20 +608,24 @@ async fn backs_off_1_2_4_minutes(r: &Rig, key: &TaskKey) {
 async fn failures_that_are_the_agents_or_the_tasks_still_use_up_attempts() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Gives up", "");
-    // Not API trouble, though it mentions one: a 400 about max_tokens: 5000.
-    for reason in ["I couldn't make the build pass", "API Error: 400 invalid request, max_tokens: 5000"] {
-        r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: reason.into() }));
-    }
-    for _ in 0..2 {
-        let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
-        assert!(matches!(ran, Outcome::Failed { .. }), "{ran:?}");
-    }
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "I couldn't make the build pass".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::Failed { .. }), "{ran:?}");
+
+    // A failed check changed the checkout, so it doesn't count toward the two give-ups in a row.
+    r.daemon.fail_check("lint", "warning: unused variable");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::Failed { .. }), "{ran:?}");
     let task = r.tracker.task(&key);
     assert_eq!(task.run.attempt, Some(2));
     assert_eq!(task.run.infra_failures.unwrap_or(0), 0);
 
-    r.daemon.fail_check("lint", "warning: unused variable");
-    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    // Not API trouble, though it mentions one: a 400 about max_tokens: 5000.
+    r.harness.push(
+        Role::Worker,
+        Script::new(RunOutcome::Failed { reason: "API Error: 400 invalid request, max_tokens: 5000".into() }),
+    );
     let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
     assert!(matches!(&ran, Outcome::Parked { .. }), "{ran:?}");
     let body = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap().body;
@@ -948,4 +952,64 @@ async fn a_path_scoped_check_runs_when_the_diff_touches_its_paths() {
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
     assert!(r.codehost.prs().is_empty(), "the failing UI check stopped the PR");
+}
+
+#[tokio::test]
+async fn two_attempts_in_a_row_that_give_up_park_the_task_with_both_reasons() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Needs the network", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "crates.io unreachable".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "one give-up is retried");
+
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "still cannot reach crates.io".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Parked { .. }), "{:?}", ran[0].1);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.gave_up, Some(2));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(
+        questions[0].body.contains("crates.io unreachable") && questions[0].body.contains("still cannot reach"),
+        "{}",
+        questions[0].body
+    );
+    assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
+    assert_eq!(r.harness.contexts().len(), 2);
+}
+
+#[tokio::test]
+async fn a_give_up_after_failed_checks_is_retried_because_that_attempt_changed_the_checkout() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 4"));
+    let key = r.tracker.add_task("TRAIL", "Lint then give up", "");
+    r.daemon.fail_check("lint", "warning: unused variable");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "I couldn't make the build pass".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "only one attempt gave up");
+
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "still can't".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Parked { .. }), "{:?}", ran[0].1);
+}
+
+#[tokio::test]
+async fn a_daemon_that_errors_after_the_workers_usage_still_records_the_spend() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Dropped mid-run", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000).hang());
+    r.daemon.fail_runs_midway(1, "connection lost");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("connection lost"), "{err}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open, "not parked");
+    assert_eq!(task.run.attempt, Some(0));
+    assert!(task.run.spend.is_some_and(|s| s > Usd::ZERO), "the lost run's spend is recorded: {:?}", task.run.spend);
+    assert_eq!(task.run.infra_failures, Some(1));
 }

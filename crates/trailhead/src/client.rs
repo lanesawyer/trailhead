@@ -137,20 +137,15 @@ impl Client {
                     continue;
                 }
             };
-            let mut buf = String::new();
+            // Buffer bytes, not text: a character can span two chunks.
+            let mut buf = Vec::new();
             while let Ok(Some(chunk)) = res.chunk().await {
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-                while let Some(end) = buf.find("\n\n") {
-                    let frame: String = buf.drain(..end + 2).collect();
-                    let mut data = String::new();
-                    for line in frame.lines() {
-                        if let Some(id) = line.strip_prefix("id:") {
-                            last_id = Some(id.trim().to_string());
-                        } else if let Some(d) = line.strip_prefix("data:") {
-                            data.push_str(d.trim_start());
-                        }
+                buf.extend_from_slice(&chunk);
+                while let Some(frame) = take_sse_frame(&mut buf) {
+                    if let Some(id) = frame.id {
+                        last_id = Some(id);
                     }
-                    if let Ok(v) = serde_json::from_str(&data) {
+                    if let Ok(v) = serde_json::from_str(&frame.data) {
                         on_event(v);
                     }
                 }
@@ -196,13 +191,16 @@ impl Client {
         if !is_sse {
             return Ok(vec![body.trim().to_string()]);
         }
-        Ok(body
-            .split("\n\n")
-            .map(|frame| {
-                frame.lines().filter_map(|l| l.strip_prefix("data:")).map(str::trim_start).collect::<Vec<_>>().join("")
-            })
-            .filter(|data| !data.is_empty())
-            .collect())
+        let mut buf = body.into_bytes();
+        // The last frame may lack its blank line.
+        buf.extend_from_slice(b"\n\n");
+        let mut out = Vec::new();
+        while let Some(frame) = take_sse_frame(&mut buf) {
+            if !frame.data.is_empty() {
+                out.push(frame.data);
+            }
+        }
+        Ok(out)
     }
 
     pub async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
@@ -220,6 +218,39 @@ impl Client {
     pub async fn delete(&self, path: &str) -> Result<Value> {
         self.request(Method::DELETE, path, &[], None).await
     }
+}
+
+/// One server-sent-events frame: its `id:` and its `data:` lines joined by `\n`.
+#[derive(Debug, Default, PartialEq)]
+struct SseFrame {
+    id: Option<String>,
+    data: String,
+}
+
+/// Removes the first complete frame (ended by a blank line, with LF, CRLF or CR
+/// line endings) from `buf` and parses it. Frames are decoded whole, so a
+/// multi-byte character split across chunks survives.
+fn take_sse_frame(buf: &mut Vec<u8>) -> Option<SseFrame> {
+    let (pos, len) = [&b"\r\n\r\n"[..], b"\n\n", b"\r\r"]
+        .into_iter()
+        .filter_map(|sep| buf.windows(sep.len()).position(|w| w == sep).map(|p| (p, sep.len())))
+        .min_by_key(|&(p, _)| p)?;
+    let raw: Vec<u8> = buf.drain(..pos + len).collect();
+    let text = String::from_utf8_lossy(&raw[..pos]);
+    let mut frame = SseFrame::default();
+    let mut lines = Vec::new();
+    for line in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+        let value = |v: &str| v.strip_prefix(' ').unwrap_or(v).to_string();
+        if let Some(id) = line.strip_prefix("id:") {
+            frame.id = Some(value(id));
+        } else if let Some(d) = line.strip_prefix("data:") {
+            lines.push(value(d));
+        } else if line == "data" {
+            lines.push(String::new());
+        }
+    }
+    frame.data = lines.join("\n");
+    Some(frame)
 }
 
 /// This machine's own server keeps its tokens at the top of the config directory;
@@ -475,4 +506,30 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Err(anyhow!("started a local server but it isn't answering; see {}", paths.server_log().display()))
+}
+
+#[cfg(test)]
+mod sse_tests {
+    use super::*;
+
+    #[test]
+    fn frame_split_inside_a_character_is_intact() {
+        let bytes = "data: {\"t\":\"héllo ✓\"}\nid: 7\n\n".as_bytes();
+        let cut = bytes.iter().position(|&b| b == 0xC3).unwrap() + 1;
+        let mut buf = bytes[..cut].to_vec();
+        assert_eq!(take_sse_frame(&mut buf), None);
+        buf.extend_from_slice(&bytes[cut..]);
+        let f = take_sse_frame(&mut buf).unwrap();
+        assert_eq!(f.data, "{\"t\":\"héllo ✓\"}");
+        assert_eq!(f.id.as_deref(), Some("7"));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn crlf_frames_and_multiline_data() {
+        let mut buf = b"data: a\r\ndata: b\r\n\r\ndata: c\n\n".to_vec();
+        assert_eq!(take_sse_frame(&mut buf).unwrap().data, "a\nb");
+        assert_eq!(take_sse_frame(&mut buf).unwrap().data, "c");
+        assert_eq!(take_sse_frame(&mut buf), None);
+    }
 }
