@@ -432,9 +432,14 @@ impl Factory {
         // A host short of a resource (its disk) is waited out, not failed: the backoff grows but the task is never
         // parked for it, and the count that parks isn't raised.
         let waiting = matches!(error, Error::Unavailable(_));
-        let park = failures >= max && !waiting;
-        tracing::warn!(task = %task.key.0, %error, failures, max, waiting, "infrastructure failure; the attempt doesn't count");
-        if waiting {
+        // Waiting has no count that parks, so a host that never frees up would be waited on silently forever: after
+        // `MAX_RESOURCE_WAITS` waits in a row the task is parked once, so a person hears of it.
+        let waits = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(_, w, _)| *w) + 1;
+        let park = if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
+        tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "infrastructure failure; the attempt doesn't count");
+        if park {
+            // Parked below; the count starts again when Lane reopens it.
+        } else if waiting {
             self.set_back_waiting(&task.key, failures - 1);
         } else {
             self.set_back(&task.key, failures);
@@ -460,7 +465,11 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
         }
         if park {
-            let question = messages::infra_question(failures, max, &error.to_string());
+            let question = if waiting {
+                messages::resource_wait_question(waits, &error.to_string())
+            } else {
+                messages::infra_question(failures, max, &error.to_string())
+            };
             match sub.ask(&task.key, &question).await {
                 // Reopened by Lane, it starts again with no wait, as its count does.
                 Ok(()) => {
@@ -642,6 +651,10 @@ impl Factory {
 
 /// The first wait before retrying a task after an infrastructure failure, doubling up to [`MAX_INFRA_BACKOFF`].
 const FIRST_INFRA_BACKOFF: Duration = Duration::from_secs(60);
+
+/// How many times in a row a task may wait for a host's resource (its disk) before it's parked for a person: about
+/// two and a half hours at the capped backoff.
+const MAX_RESOURCE_WAITS: u32 = 12;
 
 const MAX_INFRA_BACKOFF: Duration = Duration::from_secs(15 * 60);
 
