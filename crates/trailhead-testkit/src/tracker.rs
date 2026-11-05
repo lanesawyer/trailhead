@@ -384,6 +384,19 @@ impl Tracker for FakeTracker {
             .collect())
     }
 
+    async fn strays(&self, project: &str, queues: &[TaskKey]) -> Result<Vec<Task>> {
+        self.check_live()?;
+        let s = self.state.lock().unwrap();
+        Ok(s.tasks
+            .values()
+            .filter(|t| {
+                t.project == project && !t.run.is_empty() && !matches!(t.status, Status::Done | Status::Cancelled)
+            })
+            .filter(|t| !s.parents.get(&t.key).is_some_and(|p| queues.contains(p)))
+            .cloned()
+            .collect())
+    }
+
     async fn claim(&self, task: &TaskKey) -> Result<()> {
         self.inject("claim")?;
         self.write(task, |t, me| match (&t.holder, t.status) {

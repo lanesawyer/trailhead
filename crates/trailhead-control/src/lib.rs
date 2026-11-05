@@ -73,6 +73,10 @@ pub struct Host {
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// The reset a pause was last logged for, so a pause is logged once per host rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
+    /// Every repo's queue task keys, so a factory can tell a run re-parented out of its own queue from another repo's.
+    queues: Mutex<HashSet<String>>,
+    /// The stray runs already warned about, so each is logged once.
+    strays_logged: Mutex<HashSet<String>>,
 }
 
 impl Host {
@@ -233,6 +237,7 @@ impl Factory {
         assert!(!targets.is_empty(), "a factory needs a target to run on");
         targets.sort_by(|a, b| (a.target.priority, &a.target.name).cmp(&(b.target.priority, &b.target.name)));
         assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
+        host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
         let merge_mode = Mutex::new(config.merge.mode);
         Factory {
             config,

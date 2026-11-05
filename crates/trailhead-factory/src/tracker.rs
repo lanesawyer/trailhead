@@ -448,6 +448,12 @@ pub trait Tracker: Send + Sync {
     /// Open, in-progress, parked or in-review tasks that carry factory metadata, limited to the queues' subtasks when
     /// there are any, so repos sharing a project through different queues never see each other's runs.
     async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>>;
+    /// Open, in-progress, parked or in-review tasks in `project` that carry factory metadata but aren't direct subtasks
+    /// of any of `queues`: runs re-parented out of their queue, which [`Tracker::in_flight`] no longer sees (TRAIL-531).
+    /// A tracker that can't tell says there are none.
+    async fn strays(&self, _project: &str, _queues: &[TaskKey]) -> Result<Vec<Task>> {
+        Ok(Vec::new())
+    }
 
     async fn claim(&self, task: &TaskKey) -> Result<()>;
     async fn renew(&self, task: &TaskKey) -> Result<()>;
