@@ -40,6 +40,9 @@ pub trait Workspace: Send + Sync {
     async fn head(&self) -> Result<String>;
     /// The commit being merged into the checkout, while a merge is under way (`PrepareRequest::merge_base`).
     async fn merge_head(&self) -> Result<Option<String>>;
+    /// The tip of `origin/<base>`, when a merge commit in `start..HEAD` has it as a parent: a merge of the base branch
+    /// the agent started and committed itself, which leaves no `MERGE_HEAD` behind.
+    async fn merged_base(&self, start: &str, base: &str) -> Result<Option<String>>;
     /// Whether `commit` is an ancestor of (or is) the checkout's HEAD.
     async fn contains(&self, commit: &str) -> Result<bool>;
     /// The files that have `<<<<<<<` or `>>>>>>>` lines added since `start`, committed or not.
@@ -178,7 +181,12 @@ impl Runner {
         {
             lost_merge = Some(before.clone());
         }
-        let merging = now.or(merging_before).filter(|_| lost_merge.is_none());
+        let mut merging = now.or(merging_before).filter(|_| lost_merge.is_none());
+        // One the agent both started and committed leaves no MERGE_HEAD to see, only a merge commit with the base as a
+        // parent.
+        if merging.is_none() && lost_merge.is_none() && matches!(outcome, RunOutcome::Changes { .. }) {
+            merging = self.workspace.merged_base(&start, &req.base_branch).await?;
+        }
         let merge = match (&merging, lost_merge) {
             (_, Some(base)) => Merge::Lost(base),
             (Some(_), None) => Merge::Merged,
