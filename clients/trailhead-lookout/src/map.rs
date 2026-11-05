@@ -417,11 +417,11 @@ fn redraw(
     let (panel, _) = *panel;
     let fresh = *drawn != Some(panel);
     // The factory's status changes with every tool call; only its link is drawn.
-    if !(fresh || map.is_changed() || *link != Some(factory.link)) {
+    if !(fresh || map.is_changed() || *link != Some(factory.link.clone())) {
         return;
     }
     *drawn = Some(panel);
-    *link = Some(factory.link);
+    *link = Some(factory.link.clone());
     for e in &terrain {
         commands.entity(e).despawn();
     }
@@ -441,8 +441,7 @@ fn redraw(
         ))
         .id();
     commands.queue_spawn_scene(board_button()).insert(ChildOf(bar));
-    let note =
-        if stopped { format!("{}: showing the last known state", factory.label()) } else { factory.label().into() };
+    let note = if stopped { format!("{}: showing the last known state", factory.label()) } else { factory.label() };
     let color = if stopped { Color::srgb(0.9, 0.7, 0.3) } else { Color::srgb(0.7, 0.7, 0.7) };
     commands.spawn((Text::new(note), TextColor(color), ChildOf(bar)));
 
