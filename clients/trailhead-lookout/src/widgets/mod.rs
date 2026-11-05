@@ -11,6 +11,7 @@
 //! - Text: [`text`], [`text_dim`], [`text_toned`] at a [`size`]. A button's caption: [`button_text`].
 //! - An icon in text: [`icon_text`]; as a button's caption: [`button_icon`].
 //! - A panel over the board: [`panel`], with a [`layer`]. Inside it: [`section`], [`row`], [`field`].
+//! - A dot and a few words of state: [`chip`].
 //! - A hint over anything: put a [`Hint`] on it.
 //! - Colors: [`token`] (Lookout's) and `bevy::feathers::tokens` (the controls'); a status column's: [`status_token`].
 //! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`].
@@ -19,6 +20,7 @@
 use bevy::prelude::*;
 
 mod buttons;
+mod chip;
 mod containers;
 mod hint;
 mod icons;
@@ -31,6 +33,7 @@ mod text;
 mod theme;
 
 pub use buttons::{button, button_text, tool_button};
+pub use chip::chip;
 pub use containers::{field, panel, row, section};
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
