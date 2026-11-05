@@ -457,6 +457,11 @@ fn redraw(
                 .insert(ChildOf(col));
             if let Some(holder) = &card.holder {
                 text(&mut commands, col, format!("held by {holder}"), dim, card.depth + 1);
+                if let Some(id) = &card.holder_id {
+                    commands
+                        .queue_spawn_scene(inspect_button(format!("inspect {holder}"), Subject::Agent(id.clone())))
+                        .insert(ChildOf(col));
+                }
             }
             for q in &card.open_questions {
                 text(&mut commands, col, format!("? {q}"), Color::srgb(0.9, 0.7, 0.3), card.depth + 1);

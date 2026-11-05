@@ -27,7 +27,7 @@ use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror
 use crate::sync::SyncItem;
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Subject {
     Task(String),
     Agent(String),
@@ -342,9 +342,10 @@ pub enum Control {
     Refused(String),
 }
 
-/// One persistent entity per action, so the answer finds its control however often the panel is redrawn.
+/// One persistent entity per subject and action, so the answer finds its control however often the panel is redrawn,
+/// and one subject's result never shows on another's.
 #[derive(Resource, Default)]
-struct Controls(HashMap<Action, Entity>);
+struct Controls(HashMap<(Subject, Action), Entity>);
 
 /// The id of the event that last changed each task, for undo.
 #[derive(Resource, Default, Debug)]
@@ -419,6 +420,7 @@ impl Plugin for InspectorPlugin {
             .init_resource::<RevertWindow>()
             .init_resource::<Latest>()
             .init_resource::<InspectorState>()
+            // Registering a message twice is a no-op, so these are safe beside the mirror's and commands' own.
             .add_message::<SyncItem>()
             .add_message::<CommandDone>()
             .add_systems(Update, (track_events, rebuild, settle).chain());
@@ -464,15 +466,41 @@ fn line(commands: &mut Commands, parent: Entity, text: String, color: Color) {
     commands.spawn((Text::new(text), TextColor(color), ChildOf(parent)));
 }
 
-fn action_button(label: String, source: Entity, request: Request) -> impl Scene {
+/// Builds the request when the button is pressed, from the mirror as it is then: the version for `If-Match`, the
+/// event to undo and the `since` of a revert must not be those of the last redraw.
+fn send(world: &mut World, source: Entity, subject: &Subject, action: &Action) {
+    fn rows<C: Component>(world: &mut World) -> Vec<Value> {
+        world.query_filtered::<&Data, With<C>>().iter(world).map(|d| d.0.clone()).collect()
+    }
+    let (projects, tasks, claims, comments, agents) = (
+        rows::<IsProject>(world),
+        rows::<IsTask>(world),
+        rows::<IsClaim>(world),
+        rows::<IsComment>(world),
+        rows::<IsAgent>(world),
+    );
+    let input = Input { projects: &projects, tasks: &tasks, claims: &claims, comments: &comments, agents: &agents };
+    let draft = world.resource::<AnswerDraft>().0.clone();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let request = plan(action, input, &world.resource::<Latest>().0, subject, &draft, now);
+    let outcome = match request {
+        Some(request) => {
+            world.resource_mut::<Messages<Submit>>().write(Submit { source, request });
+            Control::Busy
+        }
+        None => Control::Refused("no longer possible: the task changed".into()),
+    };
+    if let Some(mut c) = world.get_mut::<Control>(source) {
+        *c = outcome;
+    }
+}
+
+fn action_button(label: String, source: Entity, subject: Subject, action: Action) -> impl Scene {
     bsn! {
         @FeathersButton
-        on(move |_: On<Activate>, mut submit: MessageWriter<Submit>, mut controls: Query<&mut Control>| {
-            if let Ok(mut c) = controls.get_mut(source) {
-                *c = Control::Busy;
-            }
-            let r = request.clone();
-            submit.write(Submit { source, request: Request::new(r.method, r.path, r.body, r.if_match) });
+        on(move |_: On<Activate>, mut commands: Commands| {
+            let (subject, action) = (subject.clone(), action.clone());
+            commands.queue(move |world: &mut World| send(world, source, &subject, &action));
         })
         Children [ @caption(label) ]
     }
@@ -499,12 +527,6 @@ fn redraw(
     mut controls: ResMut<Controls>,
     states: Query<&Control>,
     changed_controls: Query<(), Changed<Control>>,
-    projects: Query<&Data, With<IsProject>>,
-    tasks: Query<&Data, With<IsTask>>,
-    claims: Query<&Data, With<IsClaim>>,
-    comments: Query<&Data, With<IsComment>>,
-    agents: Query<&Data, With<IsAgent>>,
-    latest: Res<Latest>,
     panel: Single<(Entity, Option<&Children>, &mut Node), With<InspectorPanel>>,
     mut commands: Commands,
 ) {
@@ -570,15 +592,15 @@ fn redraw(
         return;
     }
 
-    let (projects, tasks, claims, comments, agents) =
-        (collect(&projects), collect(&tasks), collect(&claims), collect(&comments), collect(&agents));
-    let input = Input { projects: &projects, tasks: &tasks, claims: &claims, comments: &comments, agents: &agents };
     for action in &view.actions {
         let mut action = action.clone();
         if let Action::Revert(_) = action {
             action = Action::Revert(window.0);
         }
-        let source = *controls.0.entry(action.clone()).or_insert_with(|| commands.spawn(Control::Idle).id());
+        let source = *controls
+            .0
+            .entry((view.subject.clone(), action.clone()))
+            .or_insert_with(|| commands.spawn(Control::Idle).id());
         let row = commands
             .spawn((Node { column_gap: px(6), align_items: AlignItems::Center, ..default() }, ChildOf(panel)))
             .id();
@@ -587,11 +609,9 @@ fn redraw(
                 line(&mut commands, row, "answer: nothing to send yet (no text input)".into(), dim);
             }
             _ => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs() as i64);
-                let Some(request) = plan(&action, input, &latest.0, &view.subject, &draft.0, now) else { continue };
-                commands.queue_spawn_scene(action_button(action.label(), source, request)).insert(ChildOf(row));
+                commands
+                    .queue_spawn_scene(action_button(action.label(), source, view.subject.clone(), action.clone()))
+                    .insert(ChildOf(row));
             }
         }
         if matches!(action, Action::Revert(_)) {
