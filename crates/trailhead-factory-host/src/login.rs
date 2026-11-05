@@ -85,6 +85,7 @@ fn read_secret(prompt: &str, input: &mut impl BufRead, interactive: bool) -> Res
         eprint!("{prompt}: ");
     }
     let mut line = String::new();
+    let _quiet = interactive.then(trailhead_client::echo::NoEcho::new);
     input.read_line(&mut line).map_err(|e| format!("reading stdin: {e}"))?;
     let secret = line.trim().to_string();
     if secret.is_empty() {
@@ -128,6 +129,7 @@ pub fn claude(creds: &CredStore, input: &mut impl BufRead, interactive: bool) ->
         eprint!("Claude token (from `claude setup-token`; end with a blank line): ");
     }
     let mut all = String::new();
+    let _quiet = interactive.then(trailhead_client::echo::NoEcho::new);
     if interactive {
         loop {
             let mut line = String::new();
