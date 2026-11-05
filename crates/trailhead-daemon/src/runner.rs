@@ -44,6 +44,8 @@ pub trait Workspace: Send + Sync {
     async fn conflict_markers(&self, start: &str) -> Result<Vec<String>>;
     /// The files the checkout changes against the base branch's remote head (`origin/<base>`), committed or not.
     async fn changed_files(&self, base: &str) -> Result<Vec<String>>;
+    /// Whether the checkout has uncommitted changes or commits that are not on `origin/<remote_branch>`.
+    async fn unpublished(&self, remote_branch: &str) -> Result<bool>;
 }
 
 /// What became of the merge of the base branch that a run's checkout started with, if any.
@@ -109,6 +111,10 @@ impl Runner {
 
     pub async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
         self.workspace.prepare(req).await
+    }
+
+    pub async fn unpublished(&self, remote_branch: &str) -> Result<bool> {
+        self.workspace.unpublished(remote_branch).await
     }
 
     /// Runs one step until it finishes or `cancel` fires, which ends it with `Error::Cancelled`. A cancel during the

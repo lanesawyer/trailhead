@@ -6,6 +6,7 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::task::{self, JoinSet};
+use tokio::time::Instant;
 use tracing::Instrument;
 use trailhead_factory::messages;
 use trailhead_factory::{ControlState, Labels, Result, Role, RunUpdate, Sandbox, Status, Task, TaskKey, label};
@@ -179,13 +180,12 @@ impl Factory {
             return Ok(());
         }
         let busy: HashSet<TaskKey> = keys.values().cloned().collect();
-        let others = self
-            .occupied_after_release(&busy)
-            .await?
-            .into_iter()
-            .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !busy.contains(&TaskKey(t.clone()))))
-            .count();
-        let room = self.room(keys.len() - reviewing + others).await?;
+        let mut others = self.held_by_others(&busy).await?;
+        let mut room = self.room(keys.len() - reviewing + others).await?;
+        if room == 0 && self.release_parked_for_waiting(&busy).await > 0 {
+            others = self.held_by_others(&busy).await?;
+            room = self.room(keys.len() - reviewing + others).await?;
+        }
         if room == 0 {
             if keys.len() > reviewing {
                 *self.starved.lock().unwrap() = None;
@@ -210,6 +210,109 @@ impl Factory {
             keys.insert(handle.id(), key);
         }
         Ok(())
+    }
+
+    /// How many sandboxes in the cap are held for tasks this process isn't running: parked tasks', mostly.
+    async fn held_by_others(&self, busy: &HashSet<TaskKey>) -> Result<usize> {
+        Ok(self
+            .occupied_after_release(busy)
+            .await?
+            .into_iter()
+            .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !busy.contains(&TaskKey(t.clone()))))
+            .count())
+    }
+
+    /// With the cap full, gives up the pooled sandboxes of parked tasks to ready tasks that are waiting for a place,
+    /// one per waiting task, longest parked first (TRAIL-601). A sandbox goes only when `release_parked_after` minutes
+    /// have passed and releasing loses nothing: the daemon finds no work in the checkout that isn't on the remote
+    /// branch the task resumes from. The task keeps its place in the queue; answered, it starts like a rework on a
+    /// pooled sandbox. Returns how many were released. A failure is logged and the sandbox kept or left to reconcile.
+    async fn release_parked_for_waiting(&self, busy: &HashSet<TaskKey>) -> usize {
+        let after = self.config.repo.release_parked_after;
+        if after == 0 {
+            return 0;
+        }
+        let delay = Duration::from_secs(u64::from(after) * 60);
+        let mut due: Vec<(TaskKey, Duration)> = self
+            .parked_since
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| !busy.contains(*key))
+            .map(|(key, since)| (key.clone(), since.elapsed()))
+            .filter(|(_, parked_for)| *parked_for >= delay)
+            .collect();
+        if due.is_empty() {
+            return 0;
+        }
+        due.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let waiting = match self.ready_graded(usize::MAX).await {
+            Ok(ready) => ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)).count(),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't list the ready tasks to see whether a parked task's sandbox is wanted");
+                return 0;
+            }
+        };
+        if waiting == 0 {
+            return 0;
+        }
+        let held = match self.occupied().await {
+            Ok(held) => held,
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't list the sandboxes held by parked tasks");
+                return 0;
+            }
+        };
+        let mut released = 0;
+        for (key, parked_for) in due {
+            if released == waiting {
+                break;
+            }
+            let Some(sandbox) = held
+                .iter()
+                .find(|s| s.labels.contains_key(label::POOL) && s.labels.get(label::TASK).is_some_and(|t| *t == key.0))
+            else {
+                continue;
+            };
+            let task = match self.tracker.show(&key).await {
+                Ok(task) => task,
+                Err(e) => {
+                    tracing::warn!(task = %key.0, error = %e, "couldn't look up a parked task to release its sandbox");
+                    continue;
+                }
+            };
+            // A budget breach leaves its sandbox suspended for a person to look at; that is what it is kept for.
+            if task.status != Status::NeedsInput || task.run.worker_breach.is_some() {
+                continue;
+            }
+            // What the task resumes from: its PR branch on a rework, else the base branch.
+            let remote = if task.run.pr.is_some() { Self::branch(&task) } else { self.config.repo.base_branch.clone() };
+            match self.daemon_of(sandbox).unpublished(&sandbox.id, &remote).await {
+                Ok(false) => {}
+                Ok(true) => {
+                    tracing::debug!(task = %key.0, sandbox = %sandbox.name, "a parked task has unpublished work; keeping its sandbox");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::debug!(task = %key.0, sandbox = %sandbox.name, error = %e, "couldn't tell whether a parked task has unpublished work; keeping its sandbox");
+                    continue;
+                }
+            }
+            // Recorded before the release, so reconcile and `factory status` don't look for a sandbox that is going.
+            let record = RunUpdate { released: Some(unix_now()), ..RunUpdate::default() };
+            if let Err(e) = self.tracker.report(&key, record).await {
+                // Most likely the asker's lease on the task hasn't lapsed yet, which keeps everyone else out of it.
+                tracing::debug!(task = %key.0, error = %e, "couldn't record that a parked task's sandbox is released; keeping it for now");
+                continue;
+            }
+            self.parked_since.lock().unwrap().remove(&key);
+            released += 1;
+            tracing::info!(task = %key.0, parked_for = ?parked_for, "released a parked task's sandbox for waiting work");
+            if let Err(e) = self.release_worker(sandbox).await {
+                tracing::warn!(task = %key.0, sandbox = %sandbox.name, error = %e, "couldn't release a parked task's sandbox; reconcile will");
+            }
+        }
+        released
     }
 
     /// With no place left and nothing running, parked tasks are holding the cap. If ready tasks are waiting, say so
@@ -345,14 +448,24 @@ impl Factory {
             .filter(|s| s.labels.get(label::TASK).is_some_and(|t| !running.contains(&TaskKey(t.clone()))))
             .collect();
         if candidates.is_empty() {
+            self.parked_since.lock().unwrap().clear();
             return Ok(held);
         }
+        let mut parked = HashSet::new();
         let mut released = Vec::new();
         for sandbox in candidates {
             let Some(key) = sandbox.labels.get(label::TASK) else { continue };
             let task = match self.tracker.show(&TaskKey(key.clone())).await {
                 Ok(task) if matches!(task.status, Status::Open | Status::Cancelled | Status::Done) => task,
-                Ok(_) => continue,
+                Ok(task) => {
+                    // The wait before a sandbox is given up (`release_parked_after`) counts from the first look.
+                    if task.status == Status::NeedsInput {
+                        let key = task.key.clone();
+                        self.parked_since.lock().unwrap().entry(key.clone()).or_insert_with(Instant::now);
+                        parked.insert(key);
+                    }
+                    continue;
+                }
                 Err(e) => {
                     tracing::warn!(task = %key, error = %e, "couldn't look up a parked task's status");
                     continue;
@@ -368,6 +481,7 @@ impl Factory {
                 released.push(sandbox.name.clone());
             }
         }
+        self.parked_since.lock().unwrap().retain(|key, _| parked.contains(key));
         if released.is_empty() {
             return Ok(held);
         }
@@ -379,7 +493,11 @@ impl Factory {
         if self.usage_paused() || !self.server_up().await {
             return Ok(Vec::new());
         }
-        let room = self.room(self.occupied_after_release(&HashSet::new()).await?.len()).await?;
+        let none = HashSet::new();
+        let mut room = self.room(self.occupied_after_release(&none).await?.len()).await?;
+        if room == 0 && self.release_parked_for_waiting(&none).await > 0 {
+            room = self.room(self.occupied_after_release(&none).await?.len()).await?;
+        }
         if room == 0 {
             return Ok(Vec::new());
         }

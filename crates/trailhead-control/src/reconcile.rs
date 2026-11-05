@@ -67,6 +67,7 @@ impl Factory {
             // A run parked for its breach, or one whose park is yet to land, keeps its suspended sandbox.
             let parked = tasks.iter().any(|t| {
                 (t.status == Status::NeedsInput || self.unparked_breach(t).is_some())
+                    && t.run.released.is_none_or(|at| at <= 0)
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
             });
             if parked {

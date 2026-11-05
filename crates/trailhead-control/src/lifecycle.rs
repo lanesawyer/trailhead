@@ -89,6 +89,8 @@ impl Factory {
             sandbox: Some(name.clone()),
             profile: Some(self.config.repo.worker.clone()),
             started: Some(unix_now()),
+            // A sandbox given up while parked is no longer the task's to look for (TRAIL-601).
+            released: task.run.released.filter(|at| *at > 0).map(|_| 0),
             ..RunUpdate::default()
         };
         if let Err(e) = sub.report(&task.key, started).await {

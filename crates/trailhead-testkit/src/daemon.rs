@@ -56,6 +56,9 @@ pub struct FakeWorkspace {
     prepare_gate: Mutex<Option<Arc<Notify>>>,
     /// How long each later prepare takes, on tokio's clock.
     prepare_takes: Mutex<Duration>,
+    /// Whether the checkout holds work that exists nowhere else, and the remote branches asked about.
+    unpublished: AtomicBool,
+    unpublished_asked: Mutex<Vec<String>>,
     /// Install hosts `install_hosts` names on top of the real ones, as a confused or compromised daemon would.
     extra_install_hosts: Mutex<Vec<InstallHost>>,
 }
@@ -125,6 +128,11 @@ impl Workspace for FakeWorkspace {
 
     async fn changed_files(&self, _base: &str) -> Result<Vec<String>> {
         Ok(self.changed.lock().unwrap().clone())
+    }
+
+    async fn unpublished(&self, remote_branch: &str) -> Result<bool> {
+        self.unpublished_asked.lock().unwrap().push(remote_branch.to_string());
+        Ok(self.unpublished.load(Ordering::SeqCst))
     }
 
     async fn head(&self) -> Result<String> {
@@ -345,6 +353,16 @@ impl LocalDaemon {
         *self.workspace.prepare_takes.lock().unwrap() = takes;
     }
 
+    /// Makes the checkout hold work that exists nowhere else (an unpushed diff), or not.
+    pub fn set_unpublished(&self, unpublished: bool) {
+        self.workspace.unpublished.store(unpublished, Ordering::SeqCst);
+    }
+
+    /// The remote branches the control plane asked whether the checkout had unpublished work against, oldest first.
+    pub fn unpublished_asked(&self) -> Vec<String> {
+        self.workspace.unpublished_asked.lock().unwrap().clone()
+    }
+
     /// Makes `install_hosts` also ask for `host` on behalf of `tool`, whether or not the control plane allows it.
     pub fn add_install_host(&self, host: &str, tool: &str) {
         let need = InstallHost { host: host.into(), tool: tool.into() };
@@ -380,6 +398,10 @@ impl LocalDaemon {
 impl Daemon for LocalDaemon {
     async fn install_hosts(&self, _sandbox: &SandboxId, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
         self.runner.install_hosts(req).await
+    }
+
+    async fn unpublished(&self, _sandbox: &SandboxId, remote_branch: &str) -> Result<bool> {
+        self.runner.unpublished(remote_branch).await
     }
 
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
