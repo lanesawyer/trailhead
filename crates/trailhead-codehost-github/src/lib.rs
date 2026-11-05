@@ -55,6 +55,9 @@ impl GitHub {
     pub fn new(base: impl Into<String>, token: Option<String>) -> GitHub {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
+            // Drop idle pooled connections before GitHub closes them, or a reconcile pass's first call finds one
+            // dead ("connection closed before message completed").
+            .pool_idle_timeout(Duration::from_secs(30))
             .user_agent("trailhead-factory")
             .build()
             .expect("http client");

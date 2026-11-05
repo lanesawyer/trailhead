@@ -53,6 +53,8 @@ struct State {
     head_lookups: usize,
     /// Whether `behind` fails, like a host that is down.
     fail_behind: bool,
+    /// How many times each `CodeHost` method was called, by name.
+    calls: BTreeMap<&'static str, usize>,
     refuse_publish: Option<String>,
     /// Publishes still to fail with a transient error, and how many were attempted.
     flaky_publishes: usize,
@@ -150,6 +152,20 @@ impl FakeCodeHost {
         self.state.lock().unwrap().head_lookups
     }
 
+    /// How many times the `CodeHost` method of this name (`"pr_state"`, `"merge"`, ...) was called.
+    pub fn calls(&self, method: &str) -> usize {
+        self.state.lock().unwrap().calls.get(method).copied().unwrap_or(0)
+    }
+
+    /// How many calls the host got in all, whatever the method.
+    pub fn total_calls(&self) -> usize {
+        self.state.lock().unwrap().calls.values().sum()
+    }
+
+    fn count(&self, method: &'static str) {
+        *self.state.lock().unwrap().calls.entry(method).or_default() += 1;
+    }
+
     /// Closes a PR without merging it, as a person would on GitHub.
     pub fn close(&self, pr: &PrRef) {
         self.find(pr, |p, _| p.closed = true).unwrap();
@@ -241,6 +257,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()> {
+        self.count("publish");
         let mut s = self.state.lock().unwrap();
         s.publish_attempts += 1;
         if s.flaky_publishes > 0 {
@@ -262,6 +279,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn open_pr(&self, repo: &Repo, pr: NewPr) -> Result<PrRef> {
+        self.count("open_pr");
         let mut s = self.state.lock().unwrap();
         if !s.branches.contains_key(&(repo.slug(), pr.branch.clone())) {
             return Err(Error::NotFound(format!("branch {}", pr.branch)));
@@ -288,6 +306,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn diff(&self, pr: &PrRef) -> Result<String> {
+        self.count("diff");
         self.find(pr, |p, s| {
             let commits = s.branches.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default();
             let mut out = String::new();
@@ -306,6 +325,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn comment(&self, pr: &PrRef, body: &str) -> Result<u64> {
+        self.count("comment");
         self.find(pr, |p, _| {
             p.comments.push(body.to_string());
             p.comments.len() as u64
@@ -313,6 +333,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn edit_comment(&self, pr: &PrRef, id: u64, body: &str) -> Result<()> {
+        self.count("edit_comment");
         let edited = self.find(pr, |p, _| {
             let slot = (id as usize).checked_sub(1).and_then(|i| p.comments.get_mut(i));
             match slot {
@@ -327,6 +348,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn merge(&self, pr: &PrRef, head: &str) -> Result<MergeOutcome> {
+        self.count("merge");
         let (conflicts, refused) = {
             let s = self.state.lock().unwrap();
             (s.conflicts, s.refuse_merge.clone())
@@ -347,6 +369,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn open_prs(&self, repo: &Repo, base: &str) -> Result<Vec<OpenPr>> {
+        self.count("open_prs");
         let s = self.state.lock().unwrap();
         Ok(s.prs
             .iter()
@@ -359,10 +382,12 @@ impl CodeHost for FakeCodeHost {
         if self.state.lock().unwrap().fail_behind {
             return Err(trailhead_factory::Error::Other("the host is down".into()));
         }
+        self.count("behind");
         self.find(pr, |p, _| p.behind)
     }
 
     async fn update_branch(&self, pr: &PrRef) -> Result<BranchUpdate> {
+        self.count("update_branch");
         // Like the host: nothing to merge means up to date, even if conflicts are on.
         if !self.find(pr, |p, _| p.behind)? {
             return Ok(BranchUpdate::UpToDate);
@@ -396,6 +421,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn carries_verdict(&self, pr: &PrRef, reviewed: &str) -> Result<bool> {
+        self.count("carries_verdict");
         self.find(pr, |p, s| {
             let key = (pr.repo.slug(), p.spec.branch.clone());
             let commits = s.branches.get(&key).map_or(&[][..], Vec::as_slice);
@@ -413,6 +439,7 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
+        self.count("pr_state");
         self.find(pr, |p, s| match (p.merged, p.closed) {
             (true, _) => PrState::Merged { commit: Some(FakeCodeHost::merge_commit(&p.pr)) },
             (false, true) => PrState::Closed,
@@ -424,24 +451,29 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn title(&self, pr: &PrRef) -> Result<String> {
+        self.count("title");
         self.find(pr, |p, _| p.spec.title.clone())
     }
 
     async fn head(&self, pr: &PrRef) -> Result<String> {
+        self.count("head");
         self.state.lock().unwrap().head_lookups += 1;
         self.find(pr, |p, s| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default())
     }
 
     async fn ci(&self, pr: &PrRef) -> Result<Ci> {
+        self.count("ci");
         let head = CodeHost::head(self, pr).await?;
         self.find(pr, |p, _| Ci { head, state: p.ci.clone() })
     }
 
     async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {
+        self.count("ci_logs");
         self.find(pr, |p, _| p.ci_logs.iter().filter(|(n, _)| checks.contains(n)).cloned().collect())
     }
 
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
+        self.count("files");
         self.state.lock().unwrap().file_listings += 1;
         self.find(pr, |p, s| {
             if let Some(files) = &p.files {

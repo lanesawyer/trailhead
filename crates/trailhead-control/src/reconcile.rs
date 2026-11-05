@@ -244,9 +244,11 @@ impl Factory {
     pub(crate) async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
         tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
         self.updating.lock().unwrap().remove(&task.key);
-        // Already open when it's found before a run starts (TRAIL-304); there's nothing in review to reopen.
-        if task.status != Status::Open {
-            self.tracker.reopen(&task.key).await?;
+        // Claimed as it stands, whether open, in review or parked, never reopened first: if the claim then failed, an
+        // open, unheld task could start a rework against this PR (TRAIL-216). An approved task can't be claimed, so it
+        // is unapproved back to in review, still held, rather than passed through open.
+        if task.status == Status::Approved {
+            self.tracker.unapprove(&task.key).await?;
         }
         self.tracker.claim(&task.key).await?;
         let question = messages::pr_closed_question(&pr.url);
@@ -382,7 +384,8 @@ impl Factory {
                 }
             }
             // Parked for a human, so a PR still open or closed stays as it is (a closed one was the question). A merge
-            // by anyone finishes the task all the same.
+            // by anyone finishes the task all the same, unless it is already recorded (merged by hand before approval,
+            // parked for a person to mark it done): that one is skipped below.
             Status::NeedsInput => {
                 // One already recorded as merged by hand was parked for a person to finish: don't ask again.
                 if task.run.merged.is_none()
