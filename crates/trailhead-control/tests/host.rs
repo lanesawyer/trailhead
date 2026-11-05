@@ -247,3 +247,24 @@ async fn repos_sharing_a_project_through_different_queues_leave_each_others_in_f
     );
     assert_eq!(tracker.in_flight("TRAIL", std::slice::from_ref(&q2)).await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn a_run_re_parented_out_of_every_queue_is_a_stray_not_an_in_flight_task() {
+    use trailhead_factory::{RunUpdate, Status, Tracker};
+
+    let tracker = FakeTracker::new("factory");
+    let queue = tracker.add_task("TRAIL", "The queue", "");
+    let inside = tracker.add_subtask(&queue, "Inside", "");
+    let outside = tracker.add_task("TRAIL", "Moved out", "");
+    for key in [&inside, &outside] {
+        tracker.set_status(key, Status::InProgress);
+        tracker
+            .report(key, RunUpdate { sandbox: Some("run".into()), attempt: Some(1), ..RunUpdate::default() })
+            .await
+            .unwrap();
+    }
+    let queues = std::slice::from_ref(&queue);
+    let keys = |tasks: Vec<trailhead_factory::Task>| tasks.into_iter().map(|t| t.key).collect::<Vec<_>>();
+    assert_eq!(keys(tracker.in_flight("TRAIL", queues).await.unwrap()), vec![inside]);
+    assert_eq!(keys(tracker.strays("TRAIL", queues).await.unwrap()), vec![outside]);
+}

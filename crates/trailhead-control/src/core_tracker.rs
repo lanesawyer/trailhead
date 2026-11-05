@@ -330,6 +330,23 @@ impl Tracker for CoreTracker {
         self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
     }
 
+    async fn strays(&self, project: &str, queues: &[TaskKey]) -> Result<Vec<Task>> {
+        let ctx = self.ctx().await?;
+        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let all = self.list_all(&ctx, filter).await?;
+        let mut inside = std::collections::HashSet::new();
+        for queue in queues {
+            let filter = TaskFilter {
+                project: Some(project.to_string()),
+                parent: Some(queue.0.clone()),
+                ..TaskFilter::default()
+            };
+            inside.extend(self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id));
+        }
+        self.tasks(&ctx, all.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some() && !inside.contains(&t.id)))
+            .await
+    }
+
     async fn claim(&self, task: &TaskKey) -> Result<()> {
         let ctx = self.ctx().await?;
         self.store.claim(&ctx, &task.0, None).await.map_err(map_err)?;

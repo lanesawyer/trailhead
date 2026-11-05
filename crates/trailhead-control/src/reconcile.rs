@@ -45,6 +45,29 @@ impl Factory {
         Ok(done)
     }
 
+    /// Warns, once per task, about factory tasks sitting outside every repo's queue: re-parented while their run was
+    /// live, they're invisible to reconcile, so their claim lapses and the sandbox stays (TRAIL-531). Which repo owns
+    /// one is unknowable, so nothing is torn down.
+    async fn warn_strays(&self) {
+        // Without a queue the factory works the whole project, so nothing can sit outside it.
+        if self.queue().is_empty() {
+            return;
+        }
+        let queues: Vec<TaskKey> = self.host.queues.lock().unwrap().iter().cloned().map(TaskKey).collect();
+        match self.tracker.strays(self.project(), &queues).await {
+            Ok(strays) => {
+                let mut logged = self.host.strays_logged.lock().unwrap();
+                for t in strays.iter().filter(|t| logged.insert(t.key.0.clone())) {
+                    tracing::warn!(
+                        task = %t.key.0,
+                        "a factory task sits outside every configured queue, so reconcile can't see it; move it back under its queue or close it"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "couldn't look for factory tasks outside the queues"),
+        }
+    }
+
     /// [`Factory::reconcile_except`] without running the reviews it finds due: they're returned for the caller to run,
     /// so the run loop can start workers alongside them instead of waiting (TRAIL-196).
     pub(crate) async fn reconcile_deferring(&self, running: &HashSet<TaskKey>) -> Result<(Reconciled, Due)> {
@@ -61,6 +84,7 @@ impl Factory {
             .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
             .collect();
         self.status.sync_sandboxes(&live, &down, &parked);
+        self.warn_strays().await;
         let in_flight = in_flight?;
         let factory_prs = in_flight.iter().filter_map(|t| t.run.pr.as_ref().map(|p| p.number)).collect();
         self.person_pass(&factory_prs).await;
