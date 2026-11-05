@@ -462,7 +462,10 @@ impl Factory {
         // A request the remote refused for good (a 4xx that isn't a blip) fails the same way on every retry, so
         // it's parked at once instead of burning the infra retries.
         let rejected = matches!(error, Error::Rejected(_));
-        let park = rejected || if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
+        // A `setup` that fails on a fresh run fails on the base branch itself, so a second failure is proof enough:
+        // more retries would only spend `max_infra_failures` on the same compile error (TRAIL-652).
+        let broken_base = matches!(error, Error::SetupFailed(_)) && failures >= SETUP_FAILURES_TO_PARK;
+        let park = rejected || broken_base || if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
         tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "infrastructure failure; the attempt doesn't count");
         if park {
             // Parked below; the count starts again when Lane reopens it.
@@ -492,7 +495,9 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
         }
         if park {
-            let question = if rejected {
+            let question = if broken_base {
+                messages::setup_failed_question(failures, &error.to_string())
+            } else if rejected {
                 messages::rejected_question(&error.to_string())
             } else if waiting {
                 messages::resource_wait_question(waits, &error.to_string())
@@ -721,6 +726,9 @@ const FIRST_INFRA_BACKOFF: Duration = Duration::from_secs(60);
 /// How many times in a row a task may wait for a host's resource (its disk) before it's parked for a person: about
 /// two and a half hours at the capped backoff.
 const MAX_RESOURCE_WAITS: u32 = 12;
+
+/// How many `setup` failures in a row on a fresh run park the task: the base branch is broken, not one sandbox.
+const SETUP_FAILURES_TO_PARK: u32 = 2;
 
 const MAX_INFRA_BACKOFF: Duration = Duration::from_secs(15 * 60);
 
