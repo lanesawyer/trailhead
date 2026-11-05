@@ -9,7 +9,7 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tokio::sync::broadcast;
 use trailhead_core::{Ctx, NewProject, NewTask, Principal, Store};
-use trailhead_daemon::net::{API_ALPN, ApiTunnel, Peers};
+use trailhead_daemon::net::{API_ALPN, ApiTunnel, Peers, read_frame, write_frame};
 use trailhead_daemon::ui::{
     RepoFeed, StatusFeed, StatusFrame, StatusStream, UI_ALPN, UiAllowlist, UiProtocol, dial_ui, open_ui_tunnel,
 };
@@ -207,4 +207,28 @@ async fn status_is_refused_to_an_endpoint_that_is_not_allowed() {
     };
     let result = tokio::time::timeout(Duration::from_secs(10), opened).await.unwrap();
     assert!(!matches!(result, Ok(Some(_))), "a stranger got status: {result:?}");
+}
+
+#[tokio::test]
+async fn an_unknown_request_is_answered_with_what_the_factory_knows() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let client = r.client(key).await;
+    let conn = dial_ui(&client, r.control.id).await.unwrap();
+    // Twice: a retrying UI gets the answer every time, though the factory logs it once.
+    for _ in 0..2 {
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        write_frame(&mut send, &serde_json::json!({"op": "from_the_future", "x": 1})).await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(10), read_frame::<StatusFrame>(&mut recv)).await;
+        let Some(StatusFrame::Unsupported(u)) = reply.unwrap().unwrap() else {
+            panic!("an unknown request should be answered with the error");
+        };
+        assert_eq!(u.got["op"], "from_the_future");
+        assert_eq!(u.known, ["api", "status"]);
+        assert_eq!(u.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(u.build, "unknown");
+        // And then the stream ends.
+        assert!(read_frame::<StatusFrame>(&mut recv).await.unwrap().is_none());
+    }
 }

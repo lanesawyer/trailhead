@@ -61,7 +61,38 @@ pub enum StatusFrame {
         #[serde(flatten)]
         event: Sequenced,
     },
+    /// The only frame on a stream whose request the control plane doesn't know, which is then closed.
+    Unsupported(Unsupported),
 }
+
+/// What a control plane says to a request it can't parse: the request it got, the ones it knows, and its build, so a
+/// newer UI can tell its factory is older.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Unsupported {
+    /// The request as it arrived.
+    pub got: serde_json::Value,
+    /// The `op` of every request this control plane serves.
+    pub known: Vec<String>,
+    pub version: String,
+    pub build: String,
+}
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the factory is older than this Lookout and doesn't know the request {}: reinstall trailhead-factory and \
+             restart it (it serves {}; version {}, build {})",
+            self.got,
+            self.known.join(", "),
+            self.version,
+            self.build
+        )
+    }
+}
+
+/// The `op` of every [`UiRequest`], for [`Unsupported::known`].
+const KNOWN_OPS: [&str; 2] = ["api", "status"];
 
 /// One repo's status as the control plane keeps it: a snapshot and the events after it.
 pub struct RepoFeed {
@@ -162,11 +193,27 @@ pub struct UiProtocol {
     server: SocketAddr,
     allowed: Arc<UiAllowlist>,
     status: Option<Arc<dyn StatusFeed>>,
+    /// The build reported to a UI that sent a request this control plane doesn't know.
+    build: String,
+    /// The (peer, request kind) pairs already logged as unknown, so a UI retrying doesn't fill the log.
+    unknown: Arc<std::sync::Mutex<std::collections::HashSet<(EndpointId, String)>>>,
 }
 
 impl UiProtocol {
     pub fn new(server: SocketAddr, allowed: UiAllowlist) -> UiProtocol {
-        UiProtocol { server, allowed: Arc::new(allowed), status: None }
+        UiProtocol {
+            server,
+            allowed: Arc::new(allowed),
+            status: None,
+            build: "unknown".into(),
+            unknown: Arc::default(),
+        }
+    }
+
+    /// Sets the build reported with an unknown request: [`build_id`](crate::net::build_id) of the executable.
+    pub fn build(mut self, build: String) -> UiProtocol {
+        self.build = build;
+        self
     }
 
     /// Serves [`UiRequest::Status`] from `feed`; without one that request is refused.
@@ -229,8 +276,21 @@ impl ProtocolHandler for UiProtocol {
         }
         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
             let (server, status) = (self.server, self.status.clone());
+            let (peer, build, unknown) = (conn.remote_id(), self.build.clone(), self.unknown.clone());
             tokio::spawn(async move {
-                match read_frame::<UiRequest>(&mut recv).await {
+                let request = match read_frame::<serde_json::Value>(&mut recv).await {
+                    Ok(Some(raw)) => match serde_json::from_value::<UiRequest>(raw.clone()) {
+                        Ok(request) => Ok(Some(request)),
+                        Err(e) => Err((raw, e.to_string())),
+                    },
+                    Ok(None) => Ok(None),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "bad UI request");
+                        let _ = send.reset(BAD_REQUEST.into());
+                        return;
+                    }
+                };
+                match request {
                     Ok(Some(UiRequest::Api)) => match TcpStream::connect(server).await {
                         Ok(tcp) => pipe(send, recv, tcp).await,
                         Err(e) => {
@@ -245,9 +305,24 @@ impl ProtocolHandler for UiProtocol {
                         }
                     },
                     Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "bad UI request");
-                        let _ = send.reset(BAD_REQUEST.into());
+                    Err((got, error)) => {
+                        let kind = got.get("op").and_then(|op| op.as_str()).unwrap_or("(no op)").to_string();
+                        let first = unknown.lock().unwrap().insert((peer, kind.clone()));
+                        if first {
+                            tracing::warn!(
+                                %peer, request = %kind, %error, version = env!("CARGO_PKG_VERSION"), %build,
+                                "a UI sent a request this factory doesn't know; it is probably newer"
+                            );
+                        }
+                        let known = KNOWN_OPS.iter().map(|op| op.to_string()).collect();
+                        let reply = Unsupported { got, known, version: env!("CARGO_PKG_VERSION").into(), build };
+                        if write_frame(&mut send, &StatusFrame::Unsupported(reply)).await.is_ok() {
+                            let _ = send.finish();
+                            // Held until the UI has read it, so closing the connection doesn't cut the frame short.
+                            let _ = send.stopped().await;
+                        } else {
+                            let _ = send.reset(BAD_REQUEST.into());
+                        }
                     }
                 }
             });
@@ -360,6 +435,15 @@ mod tests {
     }
 
     #[test]
+    fn known_ops_are_the_requests_variants() {
+        for request in [UiRequest::Api, UiRequest::Status] {
+            let op = serde_json::to_value(&request).unwrap()["op"].as_str().unwrap().to_string();
+            assert!(KNOWN_OPS.contains(&op.as_str()), "{op}");
+        }
+        assert_eq!(KNOWN_OPS.len(), 2);
+    }
+
+    #[test]
     fn status_frames_round_trip() {
         use trailhead_factory::{ControlState, FactoryEvent, TaskKey};
         let snapshot =
@@ -370,6 +454,12 @@ mod tests {
                 repo: "a/b".into(),
                 event: Sequenced { seq: 5, event: FactoryEvent::RunEnded { task: TaskKey("TRAIL-1".into()) } },
             },
+            StatusFrame::Unsupported(Unsupported {
+                got: serde_json::json!({"op": "later"}),
+                known: vec!["api".into()],
+                version: "0.1.0".into(),
+                build: "abc".into(),
+            }),
         ];
         for frame in frames {
             let text = serde_json::to_string(&frame).unwrap();

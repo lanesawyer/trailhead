@@ -38,7 +38,7 @@ use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
-use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
+use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon, build_id};
 use trailhead_daemon::plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN};
 use trailhead_daemon::ui::{UI_ALPN, UiAllowlist, UiProtocol};
 use trailhead_factory::{
@@ -389,7 +389,9 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
         targets.push((target, compute, Arc::new(daemon)));
     }
     let feed = surface::BoardFeed::default();
-    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths)).with_status(Arc::new(feed.clone()));
+    let build =
+        std::env::current_exe().and_then(std::fs::read).map(|b| build_id(&b)).unwrap_or_else(|_| "unknown".into());
+    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths)).with_status(Arc::new(feed.clone())).build(build);
     let tunnel = Router::builder(endpoint.clone())
         .accept(API_ALPN, ApiTunnel::new(opts.server, peers))
         .accept(UI_ALPN, ui)

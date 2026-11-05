@@ -56,6 +56,8 @@ pub enum Reason {
     Loading,
     /// The event stream dropped, and the board may be out of date until it is back.
     Reconnecting,
+    /// The factory answered a request with "I don't know that": it is older than this Lookout.
+    FactoryOlder(String),
 }
 
 impl std::fmt::Display for Reason {
@@ -77,6 +79,7 @@ impl std::fmt::Display for Reason {
             Reason::SigningIn => write!(f, "signing in"),
             Reason::Loading => write!(f, "loading tasks and projects"),
             Reason::Reconnecting => write!(f, "the live feed dropped: reconnecting"),
+            Reason::FactoryOlder(e) => write!(f, "{e}"),
         }
     }
 }
@@ -106,6 +109,8 @@ pub enum NetEvent {
     Reply(Reply),
     /// The control plane's status snapshot and stream, or that it can't be reached.
     Factory(FactoryUpdate),
+    /// Something wrong with the factory that leaves the link as it is, such as one too old for a request.
+    FactoryReason(Reason),
 }
 
 /// Everything the HTTP client needs to talk to the Trailhead API through the control plane.
@@ -401,6 +406,11 @@ async fn follow_status(
         let update = match frame {
             StatusFrame::Snapshot { repos } => FactoryUpdate::Snapshot(repos),
             StatusFrame::Event { repo, event } => FactoryUpdate::Event { repo, event },
+            StatusFrame::Unsupported(unsupported) => {
+                let reason = Reason::FactoryOlder(unsupported.to_string());
+                let _ = events.send(NetEvent::FactoryReason(reason));
+                return Ok(());
+            }
         };
         *stopped = false;
         if events.send(NetEvent::Factory(update)).is_err() {
