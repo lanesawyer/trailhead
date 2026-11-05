@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use trailhead_factory::{Daemon, Labels, ModelProvider, Role, Sandbox, TaskKey, label};
+use trailhead_factory::{Daemon, Labels, ModelProvider, Role, Sandbox, Task, TaskKey, label};
 
 use tokio::time::Instant;
 
@@ -19,6 +19,8 @@ pub(crate) struct Survey {
     pub(crate) down: HashSet<String>,
     /// Targets that have cost their daily cap: they take no new runs, and those running finish.
     capped: HashSet<String>,
+    /// The target each task's worker sandbox is on, for the tasks that have one (a parked task's, say).
+    holders: HashMap<TaskKey, String>,
 }
 
 /// A worker's or review's place on a target, held from the moment it is chosen until it ends, because its sandbox
@@ -130,9 +132,15 @@ impl Factory {
         let placed = self.placed.lock().unwrap().clone();
         let mut loads: HashMap<String, usize> = HashMap::new();
         let mut down = HashSet::new();
+        let mut holders = HashMap::new();
         for p in &self.targets {
             match self.held_on(p).await {
                 Ok(held) => {
+                    for s in held.iter().filter(|s| role_of(s) == Role::Worker) {
+                        if let Some(task) = s.labels.get(label::TASK) {
+                            holders.insert(TaskKey(task.clone()), p.target.name.clone());
+                        }
+                    }
                     let counted = held
                         .iter()
                         .filter(|s| {
@@ -152,7 +160,7 @@ impl Factory {
             *loads.entry(target).or_default() += 1;
         }
         let capped = self.capped();
-        Survey { loads, down, capped }
+        Survey { loads, down, capped, holders }
     }
 
     /// The first target that is reachable and under its `max_sandboxes`, now one fuller. `None` when none has room.
@@ -165,6 +173,18 @@ impl Factory {
         })?;
         *survey.loads.entry(chosen.target.name.clone()).or_default() += 1;
         Some(chosen)
+    }
+
+    /// Where `task` goes: the target its recorded run is on, when its worker sandbox there still holds its state (a
+    /// parked or reworked task, `docs/factory/targets.md`), else the first with room, as `place` chooses. The
+    /// sandbox already counts in the target's load, so staying put takes no further room.
+    pub(crate) fn place_task<'a>(&'a self, survey: &mut Survey, task: &Task) -> Option<&'a Placed> {
+        let stays = task.run.target.as_ref().filter(|t| survey.holders.get(&task.key) == Some(*t));
+        let kept = stays.and_then(|name| self.targets.iter().find(|p| p.target.name == *name));
+        match kept {
+            Some(p) if !survey.down.contains(&p.target.name) && !survey.capped.contains(&p.target.name) => Some(p),
+            _ => self.place(survey),
+        }
     }
 
     /// Holds `task`'s place as `role` on `target` until the guard drops.

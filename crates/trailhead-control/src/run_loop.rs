@@ -201,7 +201,7 @@ impl Factory {
         // behind it from starting (TRAIL-756).
         let startable = ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key));
         for task in startable.take(room) {
-            let Some(target) = self.place(&mut survey) else {
+            let Some(target) = self.place_task(&mut survey, &task) else {
                 tracing::info!("{}", messages::no_target_has_room(&task.key.0));
                 continue;
             };
@@ -507,7 +507,7 @@ impl Factory {
         let ready = self.ready_graded().await?;
         let mut survey = self.survey().await;
         for task in ready.into_iter().filter(|t| self.setback_over(&t.key)).take(room) {
-            let Some(target) = self.place(&mut survey) else {
+            let Some(target) = self.place_task(&mut survey, &task) else {
                 tracing::info!("{}", messages::no_target_has_room(&task.key.0));
                 continue;
             };
