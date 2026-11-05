@@ -570,6 +570,22 @@ async fn infrastructure_retries_wait_longer_each_time_up_to_a_cap() {
     assert_eq!(r.tracker.task(&key).status, Status::Open, "under the cap of 10");
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_task_backing_off_at_the_head_of_the_queue_doesnt_hold_up_the_rest() {
+    let r = rig();
+    let first = r.tracker.add_task("TRAIL", "Down for a while", "");
+    r.daemon.fail_runs(1, "connection lost");
+    assert!(r.factory.tick().await.is_err());
+    r.factory.reconcile().await.unwrap();
+    let second = r.tracker.add_task("TRAIL", "Behind it", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    // One place, and the first task in the queue is still backing off: the one behind it takes the place (TRAIL-756).
+    let started: Vec<_> = r.factory.tick().await.unwrap().into_iter().map(|(t, _)| t.key).collect();
+    assert_eq!(started, [second]);
+    assert_eq!(r.tracker.task(&first).status, Status::Open, "still waiting out its backoff");
+}
+
 /// Reports and sub-agent creation both fail, so `infra_failed` runs every time with no persisted count.
 #[tokio::test(start_paused = true)]
 async fn infrastructure_retries_back_off_longer_when_the_tracker_is_down_entirely() {
