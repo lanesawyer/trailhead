@@ -535,6 +535,16 @@ impl Net {
             Via::Direct => self.config.server_url.clone().unwrap_or_default(),
         };
         if live {
+            // /v1/health is open to anyone, so a token revoked since sign-in shows only on an authenticated call.
+            // Anything but a refusal is left to the sync, which has its own way of coping.
+            if let Some(token) = &self.token
+                && let Ok(r) = self.http.get(format!("{base}/v1/me")).bearer_auth(token).send().await
+                && r.status() == reqwest::StatusCode::UNAUTHORIZED
+            {
+                self.token = None;
+                self.resume.clear();
+                self.set(Link::Offline, Some(Reason::TokenRejected));
+            }
             return;
         }
 
