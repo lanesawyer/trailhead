@@ -57,6 +57,9 @@ pub struct PrepareRequest {
     /// `[factory.egress.tools]`: download hosts per mise tool, for tools the daemon has no hosts for.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tool_hosts: BTreeMap<String, Vec<String>>,
+    /// `[factory.stack] env`: variables for `setup` and `trim`, on top of mise's environment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// The repo's `trim` check, run after setup to cut build output and caches down so the warm checkpoint taken
     /// next stays small. A failure is logged and the sandbox goes on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,6 +113,9 @@ pub struct RunRequest {
     /// DNS has recently resolved it, and a long-lived connection whose allowance lapses gets reset.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+    /// `[factory.stack] env`: variables for the agent and every check, on top of mise's environment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// The sandbox's own Trailhead sub-agent.
     pub credential: Credential,
 }
@@ -376,6 +382,7 @@ mod tests {
             setup: None,
             tools: tools.iter().map(|t| (t.to_string(), "1".to_string())).collect(),
             tool_hosts: hosts.iter().map(|(t, h)| (t.to_string(), h.iter().map(|h| h.to_string()).collect())).collect(),
+            env: Default::default(),
             trim: None,
             disk_warn_bytes: None,
             disk_limit_bytes: None,
