@@ -1115,3 +1115,33 @@ async fn a_head_pushed_past_the_rework_still_has_its_conflicts_seen() {
     r.codehost.set_mergeable(&pr, Some(false));
     assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
 }
+
+#[tokio::test]
+async fn a_task_that_blocks_urgent_work_is_listed_as_urgent_too() {
+    let mut r = rig().await;
+    let queue = r.task("Queue").await;
+    let mk = |title: &str, priority: i64| NewTask {
+        project: "TRAIL".into(),
+        title: title.into(),
+        parent: Some(queue.0.clone()),
+        priority: Some(priority),
+        grade: Some(1),
+        ..Default::default()
+    };
+    let older = TaskKey(r.store.create_task(&r.human, mk("older", 3)).await.unwrap().key);
+    let blocker = TaskKey(r.store.create_task(&r.human, mk("blocker", 3)).await.unwrap().key);
+    let middle = TaskKey(r.store.create_task(&r.human, mk("middle", 3)).await.unwrap().key);
+    let urgent = TaskKey(r.store.create_task(&r.human, mk("urgent", 2)).await.unwrap().key);
+    r.store.add_dependency(&r.human, &blocker.0, &middle.0).await.unwrap();
+    r.store.add_dependency(&r.human, &middle.0, &urgent.0).await.unwrap();
+
+    let ready = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 10).await.unwrap();
+    let priority = |k: &TaskKey| ready.iter().find(|t| &t.key == k).unwrap().priority;
+    assert_eq!(priority(&blocker), 2, "through a chain, a p3 blocker of a p2 task runs as p2");
+    assert_eq!(priority(&older), 3);
+
+    r.factory.config.repo.max_sandboxes = 1;
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.iter().map(|(t, _)| &t.key).collect::<Vec<_>>(), [&blocker], "before the older p3 task");
+}

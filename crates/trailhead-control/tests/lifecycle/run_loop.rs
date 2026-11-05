@@ -674,3 +674,28 @@ async fn a_parked_task_with_an_open_pr_gives_up_its_sandbox_and_resumes_on_its_b
     assert!(answered, "the answer reached the agent");
     assert_eq!(r.tracker.task(&key).run.released, Some(0), "the new run clears the release");
 }
+const GATED: &str = "
+[gates.1]
+require = [\"checks\", \"ci\", \"agent_review\"]
+auto_merge = true
+";
+
+#[tokio::test]
+async fn a_rework_of_an_open_pr_starts_before_older_fresh_tasks_of_its_priority() {
+    let (r, queue) = queued_rig_with(GATED);
+    // Older and of the same priority as the rework, which is filed after it; graded once the rework has its PR.
+    let fresh = r.tracker.add_subtask(&queue, "Fresh", "");
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    assert!(fresh.0 < key.0);
+    r.tracker.set_grade(&fresh, 1);
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Failed { checks: vec!["test".into()] });
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    let keys: Vec<_> = ran.iter().map(|(t, _)| &t.key).collect();
+    assert_eq!(keys, [&key], "the rework starts before the fresh task");
+    assert_eq!(r.tracker.task(&fresh).status, Status::Open);
+}
