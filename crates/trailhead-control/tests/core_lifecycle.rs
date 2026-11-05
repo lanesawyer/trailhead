@@ -792,6 +792,25 @@ async fn a_merge_the_agent_committed_itself_is_still_published_as_a_merge_commit
 }
 
 #[tokio::test]
+async fn a_merge_the_agent_started_and_committed_itself_is_published_as_a_merge_commit() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+
+    // Prepare started no merge, and the agent's `git merge` and `git commit` leave no MERGE_HEAD behind.
+    r.daemon.agent_merges_and_commits();
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let commits = r.codehost.commits(&pr.repo, "factory/trail-1");
+    assert_eq!(commits.last().unwrap().merges, [FAKE_BASE_MERGE], "published as a merge commit");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+}
+
+#[tokio::test]
 async fn a_merge_the_agent_aborted_is_not_published() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
