@@ -150,7 +150,10 @@ pub(crate) async fn login(paths: &trailhead_server::Paths, url: &str, json: bool
         eprint!("token: ");
     }
     let mut secret = String::new();
-    std::io::stdin().read_line(&mut secret)?;
+    {
+        let _quiet = trailhead_client::echo::NoEcho::new();
+        std::io::stdin().read_line(&mut secret)?;
+    }
     let secret = secret.trim();
     if secret.is_empty() {
         bail!("no token on stdin");
