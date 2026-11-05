@@ -40,6 +40,8 @@ pub mod space {
 
     /// Inside a badge.
     pub const BADGE_INSET: f32 = step::XXS;
+    /// Inside a map label, tight against its border.
+    pub const LABEL_INSET: f32 = step::XS;
     /// Inside a card, a field, the hint over a button.
     pub const CONTROL_INSET: f32 = step::S;
     /// Inside a panel, a column, the header bar.

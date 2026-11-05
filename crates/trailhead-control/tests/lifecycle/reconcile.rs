@@ -201,6 +201,43 @@ async fn no_worker_starts_on_a_task_whose_pr_closed_meanwhile() {
 }
 
 #[tokio::test]
+async fn a_closed_pr_whose_claim_fails_leaves_the_task_in_review() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    r.tracker.set_status(&key, Status::InReview);
+    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    r.codehost.close(&pr);
+
+    r.tracker.fail_next("factory", "claim", 1);
+    let _ = r.factory.reconcile().await;
+    assert_eq!(r.tracker.task(&key).status, Status::InReview, "never open and unheld");
+}
+
+#[tokio::test]
+async fn a_closed_pr_on_an_approved_task_whose_claim_fails_leaves_it_in_review() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    r.tracker.set_status(&key, Status::Approved);
+    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    r.codehost.close(&pr);
+
+    r.tracker.fail_next("factory", "claim", 1);
+    let _ = r.factory.reconcile().await;
+    assert_eq!(r.tracker.task(&key).status, Status::InReview, "never open and unheld");
+
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "the next pass parks it");
+}
+
+#[tokio::test]
 async fn a_rework_request_cut_short_is_finished_by_reconcile() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
@@ -235,4 +272,23 @@ async fn a_parked_task_whose_pr_is_merged_is_finished() {
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.merged, std::slice::from_ref(&key.0));
     assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn reconcile_asks_the_host_once_per_pr_in_review() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let mut keys = Vec::new();
+    for title in ["Add a greeting", "Add a farewell"] {
+        let key = r.tracker.add_task("TRAIL", title, "");
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+        r.factory.tick().await.unwrap();
+        assert_eq!(r.tracker.task(&key).status, Status::InReview);
+        keys.push(key);
+    }
+
+    let states = r.codehost.calls("pr_state");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.codehost.calls("pr_state") - states, keys.len(), "one pr_state per PR in review");
 }
