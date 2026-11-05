@@ -61,6 +61,7 @@ async fn prepare_clones_runs_setup_and_resets() {
         setup: Some(check("setup", "touch .setup-ran")),
         tools: Default::default(),
         tool_hosts: Default::default(),
+        env: Default::default(),
     };
 
     ws.prepare(&req).await.unwrap();
@@ -112,6 +113,7 @@ async fn prepare_can_check_out_a_branchs_remote_head() {
         setup: None,
         tools: Default::default(),
         tool_hosts: Default::default(),
+        env: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
     assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "the work starts from the PR head");
@@ -119,6 +121,16 @@ async fn prepare_can_check_out_a_branchs_remote_head() {
 
     ws.prepare(&PrepareRequest { branch: None, ..req }).await.unwrap();
     assert_eq!(ws.head().await.unwrap(), rev(&src, "main"), "a later plain prepare is back on the base");
+}
+
+#[tokio::test]
+async fn stack_env_reaches_checks_and_the_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let ws = GitWorkspace::new(root.path());
+    ws.set_env(&[("CARGO_BUILD_JOBS".to_string(), "2".to_string())].into());
+    let result = ws.check(&check("test", "echo jobs=$CARGO_BUILD_JOBS")).await;
+    assert_eq!(result.output.trim(), "jobs=2");
+    assert_eq!(ws.agent_env().await["CARGO_BUILD_JOBS"], "2");
 }
 
 #[tokio::test]
@@ -214,6 +226,7 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         setup: None,
         tools: Default::default(),
         tool_hosts: Default::default(),
+        env: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
     assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "still at the PR head, merge uncommitted");
@@ -270,6 +283,7 @@ async fn prepare_installs_the_stack_with_mise_and_checks_run_under_it() {
         setup: Some(check("setup", "echo \"pinned=$PINNED\" > .setup-env")),
         tools: [("node".to_string(), "26".to_string())].into(),
         tool_hosts: Default::default(),
+        env: Default::default(),
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -317,6 +331,7 @@ async fn the_stack_install_is_retried_while_egress_opens() {
         setup: None,
         tools: [("node".to_string(), "26".to_string())].into(),
         tool_hosts: Default::default(),
+        env: Default::default(),
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -374,6 +389,7 @@ async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
         setup: None,
         tools: Default::default(),
         tool_hosts: Default::default(),
+        env: Default::default(),
     };
     let status = || {
         let out = Command::new("git").args(["status", "--porcelain"]).current_dir(ws.dir()).output().unwrap();
@@ -411,6 +427,7 @@ async fn prepare_runs_the_trim_check_after_setup_and_survives_its_failure() {
         disk_limit_bytes: None,
         tools: Default::default(),
         tool_hosts: Default::default(),
+        env: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
     assert!(!ws.dir().join("cache").exists());
@@ -436,6 +453,7 @@ async fn prepare_refuses_when_the_disk_is_over_the_limit() {
         disk_limit_bytes: Some(1),
         tools: Default::default(),
         tool_hosts: Default::default(),
+        env: Default::default(),
     };
     let err = ws.prepare(&req).await.unwrap_err();
     assert!(err.to_string().contains("disk_limit_bytes"), "{err}");
@@ -460,6 +478,7 @@ async fn changed_files_lists_committed_uncommitted_and_new_files_against_the_bas
         setup: None,
         tools: Default::default(),
         tool_hosts: Default::default(),
+        env: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
     assert!(ws.changed_files("main").await.unwrap().is_empty());
@@ -496,6 +515,7 @@ async fn unpublished_sees_uncommitted_and_unpushed_work_but_not_a_clean_checkout
         setup: None,
         tools: Default::default(),
         tool_hosts: Default::default(),
+        env: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
     assert!(!ws.unpublished("main").await.unwrap(), "a fresh checkout has nothing to lose");

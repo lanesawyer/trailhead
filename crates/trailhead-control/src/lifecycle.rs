@@ -161,6 +161,7 @@ impl Factory {
             worker_checks: Vec::new(),
             blocked_hosts: self.blocked_hosts(&sandbox),
             allowed_hosts: self.allowed_hosts(),
+            env: self.config.stack.env.clone(),
             credential,
         };
         let prior = task.run.spend.unwrap_or_default();
