@@ -55,8 +55,6 @@ pub struct WidgetsPlugin;
 
 impl Plugin for WidgetsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((icons::IconsPlugin, hint::HintPlugin))
-            .add_observer(scroll::on_both_scroll)
-            .add_observer(scroll::on_down_scroll);
+        app.add_plugins((icons::IconsPlugin, hint::HintPlugin)).add_observer(scroll::on_scroll);
     }
 }

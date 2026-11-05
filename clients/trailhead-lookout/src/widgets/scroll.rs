@@ -1,14 +1,21 @@
-//! An area that scrolls both ways, where holding Shift turns the wheel sideways (ported from bevy-data-explorer's
-//! `widgets/scroll.rs`).
+//! Areas that scroll: [`ScrollBoth`] (both ways, with Shift turning the wheel sideways) and [`ScrollDown`] (down only,
+//! nested in one that scrolls across, such as the board's columns inside the board). Ported in part from
+//! bevy-data-explorer's `widgets/scroll.rs`.
+//!
+//! One observer routes every wheel turn. It starts from what the pointer is over and walks up its parents for the
+//! nearest [`ScrollDown`] and the nearest [`ScrollBoth`], then splits the turn between them: down to the column,
+//! across (a touchpad swipe, or Shift + wheel) to the board. Each area handling the event as it bubbled didn't work:
+//! the event names the entity it was fired on, not the ancestor it has reached, so the board never saw its own
+//! (TRAIL-836).
 //!
 //! Shift is what a browser and a spreadsheet use, and the only way across for a wheel with no sideways axis of its
-//! own, which is most of them. A touchpad's sideways swipe moves it across directly.
+//! own, which is most of them.
 //!
-//! Not `bevy_ui_widgets`' `ScrollArea`, which scrolls only down: its observer runs first and would already have moved
-//! the area down by the time this one noticed Shift, so an area that wants Shift reads the wheel itself.
+//! Not `bevy_ui_widgets`' `ScrollArea`, which scrolls only down and would move the area before Shift was noticed.
 //!
-//! Give the node [`ScrollBoth`] and `overflow: Overflow::scroll()`. A view that rebuilds its nodes keeps the
-//! [`ScrollPosition`] itself and puts it back on the new node, or the area jumps to its start on every redraw.
+//! Give a node the marker and the matching `overflow` (`Overflow::scroll()` or `scroll_x()` for [`ScrollBoth`],
+//! `scroll_y()` for [`ScrollDown`]). A view that rebuilds its nodes keeps the [`ScrollPosition`] itself and puts it
+//! back on the new node, or the area jumps to its start on every redraw.
 
 use bevy::input::mouse::MouseScrollPixelsPerLine;
 use bevy::picking::events::PointerScroll;
@@ -19,50 +26,69 @@ use bevy::prelude::*;
 #[require(ScrollPosition)]
 pub struct ScrollBoth;
 
-pub(super) fn on_both_scroll(
-    mut scroll: On<PointerScroll>,
-    keys: Res<ButtonInput<KeyCode>>,
-    per_line: Res<MouseScrollPixelsPerLine>,
-    mut areas: Query<(&ComputedNode, &mut ScrollPosition), With<ScrollBoth>>,
-) {
-    let Ok((computed, mut position)) = areas.get_mut(scroll.entity) else { return };
-    let pixels = scroll.to_pixels(&per_line);
-    let delta = wheel(keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]), Vec2::new(pixels.x, pixels.y));
-    // Layout is in physical pixels and `ScrollPosition` in logical ones. Scrollbars take a lane out of what's visible.
-    let scale = computed.inverse_scale_factor;
-    let visible = (computed.size() - computed.scrollbar_size) * scale;
-    let range = (computed.content_size() * scale - visible).max(Vec2::ZERO);
-    position.x = scrolled(position.x, delta.x, range.x);
-    position.y = scrolled(position.y, delta.y, range.y);
-    scroll.propagate(false);
-}
-
-/// Marks an area that scrolls down only, such as a board column. Shift + wheel is left for the area around it (a
-/// [`ScrollBoth`] board), so a column doesn't trap the sideways scroll. Give it `overflow: Overflow::scroll_y()`.
+/// Marks an area that scrolls down only, inside a [`ScrollBoth`] that takes the sideways part.
 #[derive(Component, Clone, Default)]
 #[require(ScrollPosition)]
 pub struct ScrollDown;
 
-pub(super) fn on_down_scroll(
+pub(super) fn on_scroll(
     mut scroll: On<PointerScroll>,
     keys: Res<ButtonInput<KeyCode>>,
     per_line: Res<MouseScrollPixelsPerLine>,
-    mut areas: Query<(&ComputedNode, &mut ScrollPosition), With<ScrollDown>>,
+    parents: Query<&ChildOf>,
+    downs: Query<(), With<ScrollDown>>,
+    boths: Query<(), With<ScrollBoth>>,
+    mut areas: Query<(&ComputedNode, &mut ScrollPosition)>,
 ) {
-    if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+    let start = scroll.entity;
+    let lineage = || std::iter::once(start).chain(parents.iter_ancestors(start));
+    let down = lineage().find(|e| downs.contains(*e));
+    let both = lineage().find(|e| boths.contains(*e));
+    if down.is_none() && both.is_none() {
         return;
     }
-    let Ok((computed, mut position)) = areas.get_mut(scroll.entity) else { return };
-    let scale = computed.inverse_scale_factor;
-    let visible = (computed.size() - computed.scrollbar_size) * scale;
-    let range = (computed.content_size() * scale - visible).max(Vec2::ZERO);
-    position.y = scrolled(position.y, scroll.to_pixels(&per_line).y, range.y);
+    let pixels = scroll.to_pixels(&per_line);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let route = route(shift, Vec2::new(pixels.x, pixels.y), down.is_some());
+    if let (Some(down), Some(dy)) = (down, route.down) {
+        move_by(&mut areas, down, Vec2::new(0.0, dy));
+    }
+    if let Some(both) = both {
+        move_by(&mut areas, both, route.both);
+    }
+    // Handled here, all of it, so nothing above scrolls it a second time.
     scroll.propagate(false);
 }
 
-/// Which way a wheel turn moves the area: with Shift held, a vertical turn goes sideways.
-fn wheel(shift: bool, wheel: Vec2) -> Vec2 {
-    if shift && wheel.x == 0.0 { Vec2::new(wheel.y, 0.0) } else { wheel }
+/// How a wheel turn splits between the nearest down-only area and the nearest both-ways one.
+#[derive(Debug, PartialEq)]
+struct Route {
+    down: Option<f32>,
+    both: Vec2,
+}
+
+fn route(shift: bool, wheel: Vec2, has_down: bool) -> Route {
+    // With Shift held, a vertical turn goes across; a touchpad's own sideways swipe isn't turned again.
+    let wheel = if shift && wheel.x == 0.0 { Vec2::new(wheel.y, 0.0) } else { wheel };
+    if has_down {
+        // The column takes the vertical part; the board only the sideways one.
+        Route { down: (wheel.y != 0.0).then_some(wheel.y), both: Vec2::new(wheel.x, 0.0) }
+    } else {
+        Route { down: None, both: wheel }
+    }
+}
+
+fn move_by(areas: &mut Query<(&ComputedNode, &mut ScrollPosition)>, area: Entity, delta: Vec2) {
+    let Ok((computed, mut position)) = areas.get_mut(area) else { return };
+    // Layout is in physical pixels and `ScrollPosition` in logical ones. Scrollbars take a lane out of what's visible.
+    let scale = computed.inverse_scale_factor;
+    let visible = (computed.size() - computed.scrollbar_size) * scale;
+    let range = (computed.content_size() * scale - visible).max(Vec2::ZERO);
+    let next = Vec2::new(scrolled(position.x, delta.x, range.x), scrolled(position.y, delta.y, range.y));
+    // Only write a change, so a turn at the end doesn't mark the position changed.
+    if next != position.0 {
+        position.0 = next;
+    }
 }
 
 /// Where a wheel turn of `delta` leaves an area at `from` that can move as far as `range`.
@@ -75,11 +101,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shift_turns_the_wheel_sideways() {
-        assert_eq!(wheel(true, Vec2::new(0.0, -3.0)), Vec2::new(-3.0, 0.0));
-        assert_eq!(wheel(false, Vec2::new(0.0, -3.0)), Vec2::new(0.0, -3.0));
-        // A touchpad's own sideways swipe isn't turned again.
-        assert_eq!(wheel(true, Vec2::new(-5.0, 0.0)), Vec2::new(-5.0, 0.0));
+    fn over_a_column_the_wheel_scrolls_it_down_and_shift_scrolls_the_board_across() {
+        assert_eq!(route(false, Vec2::new(0.0, -3.0), true), Route { down: Some(-3.0), both: Vec2::ZERO });
+        assert_eq!(route(true, Vec2::new(0.0, -3.0), true), Route { down: None, both: Vec2::new(-3.0, 0.0) });
+        // A touchpad's sideways swipe goes to the board, and a diagonal one is split.
+        assert_eq!(route(false, Vec2::new(-5.0, 0.0), true), Route { down: None, both: Vec2::new(-5.0, 0.0) });
+        assert_eq!(route(false, Vec2::new(-5.0, -2.0), true), Route { down: Some(-2.0), both: Vec2::new(-5.0, 0.0) });
+    }
+
+    #[test]
+    fn with_no_column_the_board_takes_both_ways() {
+        assert_eq!(route(false, Vec2::new(0.0, -3.0), false), Route { down: None, both: Vec2::new(0.0, -3.0) });
+        assert_eq!(route(true, Vec2::new(0.0, -3.0), false), Route { down: None, both: Vec2::new(-3.0, 0.0) });
     }
 
     #[test]
