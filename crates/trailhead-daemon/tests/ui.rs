@@ -7,9 +7,24 @@ use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+use tokio::sync::broadcast;
 use trailhead_core::{Ctx, NewProject, NewTask, Principal, Store};
 use trailhead_daemon::net::{API_ALPN, ApiTunnel, Peers};
-use trailhead_daemon::ui::{UI_ALPN, UiAllowlist, UiProtocol, open_ui_tunnel};
+use trailhead_daemon::ui::{
+    RepoFeed, StatusFeed, StatusFrame, StatusStream, UI_ALPN, UiAllowlist, UiProtocol, dial_ui, open_ui_tunnel,
+};
+use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, Sequenced, TaskKey};
+
+/// One repo whose events the test sends.
+struct TestFeed(broadcast::Sender<Sequenced>);
+
+impl StatusFeed for TestFeed {
+    fn subscribe(&self) -> Vec<RepoFeed> {
+        let snapshot =
+            FactorySnapshot { control: ControlState::Up, last_error: None, sandboxes: vec![], runs: vec![], seq: 7 };
+        vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
+    }
+}
 
 async fn endpoint(key: SecretKey, lookup: Arc<MemoryLookup>, alpns: Vec<Vec<u8>>) -> Endpoint {
     Endpoint::builder(presets::Minimal)
@@ -30,6 +45,7 @@ struct Rig {
     control: EndpointAddr,
     allowed: UiAllowlist,
     peers: Peers,
+    events: broadcast::Sender<Sequenced>,
     _router: Router,
 }
 
@@ -52,13 +68,14 @@ impl Rig {
 
         let allowed = UiAllowlist::new(dir.path().join("ui-allowed"));
         let peers = Peers::default();
+        let events = broadcast::channel(16).0;
         let control_ep = endpoint(SecretKey::generate(), Arc::new(MemoryLookup::new()), vec![]).await;
         let control = control_ep.addr();
         let router = Router::builder(control_ep)
-            .accept(UI_ALPN, UiProtocol::new(server, allowed.clone()))
+            .accept(UI_ALPN, UiProtocol::new(server, allowed.clone()).with_status(Arc::new(TestFeed(events.clone()))))
             .accept(API_ALPN, ApiTunnel::new(server, peers.clone()))
             .spawn();
-        Rig { _dir: dir, store, human, token, control, allowed, peers, _router: router }
+        Rig { _dir: dir, store, human, token, control, allowed, peers, events, _router: router }
     }
 
     /// An endpoint that knows how to find the control plane.
@@ -155,4 +172,39 @@ async fn the_event_stream_survives_being_forwarded() {
         .await
         .unwrap_or_else(|_| panic!("no event for {title:?}; got {seen:?}"));
     }
+}
+
+async fn next(stream: &mut StatusStream) -> Option<StatusFrame> {
+    tokio::time::timeout(Duration::from_secs(10), stream.next()).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn status_is_a_snapshot_then_the_events_after_it() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let client = r.client(key).await;
+    let mut stream = StatusStream::open(dial_ui(&client, r.control.id).await.unwrap()).await.unwrap();
+
+    let Some(StatusFrame::Snapshot { repos }) = next(&mut stream).await else {
+        panic!("the first frame is the snapshot");
+    };
+    assert_eq!((repos[0].repo.as_str(), repos[0].snapshot.seq), ("o/r", 7));
+
+    let event = Sequenced { seq: 8, event: FactoryEvent::RunEnded { task: TaskKey("TRAIL-1".into()) } };
+    r.events.send(event.clone()).unwrap();
+    assert_eq!(next(&mut stream).await, Some(StatusFrame::Event { repo: "o/r".into(), event }));
+}
+
+#[tokio::test]
+async fn status_is_refused_to_an_endpoint_that_is_not_allowed() {
+    let r = Rig::new().await;
+    r.allowed.add(SecretKey::generate().public()).unwrap();
+    let client = r.client(SecretKey::generate()).await;
+    let opened = async {
+        let mut stream = StatusStream::open(dial_ui(&client, r.control.id).await?).await?;
+        stream.next().await
+    };
+    let result = tokio::time::timeout(Duration::from_secs(10), opened).await.unwrap();
+    assert!(!matches!(result, Ok(Some(_))), "a stranger got status: {result:?}");
 }

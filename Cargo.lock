@@ -1228,6 +1228,7 @@ dependencies = [
  "bevy_ptr",
  "bevy_reflect",
  "bevy_render",
+ "bevy_scene",
  "bevy_shader",
  "bevy_shape",
  "bevy_sprite",
@@ -8149,10 +8150,12 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "trailhead-client",
  "trailhead-core",
  "trailhead-daemon",
+ "trailhead-factory",
  "trailhead-server",
 ]
 

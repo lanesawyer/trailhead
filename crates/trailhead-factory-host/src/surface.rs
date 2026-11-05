@@ -7,7 +7,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -20,7 +20,35 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use trailhead_control::StatusBoard;
+use trailhead_daemon::ui::{RepoFeed, StatusFeed};
 use trailhead_factory::{FactorySnapshot, Sequenced};
+
+/// The boards behind `trailhead/ui/0`'s status request. The protocol is up before the repos are, so the boards are
+/// filled in once they exist; until then a UI sees no repos.
+#[derive(Clone, Default)]
+pub struct BoardFeed(Arc<OnceLock<Boards>>);
+
+/// A repo's slug and its board.
+type Boards = Vec<(String, Arc<StatusBoard>)>;
+
+impl BoardFeed {
+    pub fn set(&self, boards: Vec<(String, Arc<StatusBoard>)>) {
+        let _ = self.0.set(boards);
+    }
+}
+
+impl StatusFeed for BoardFeed {
+    fn subscribe(&self) -> Vec<RepoFeed> {
+        let boards = self.0.get().map(Vec::as_slice).unwrap_or_default();
+        boards
+            .iter()
+            .map(|(repo, board)| {
+                let (snapshot, events) = board.subscribe();
+                RepoFeed { repo: repo.clone(), snapshot, events }
+            })
+            .collect()
+    }
+}
 
 /// Where the control plane says how to reach it, inside `<data dir>/factory`.
 pub const FILE: &str = "status.json";

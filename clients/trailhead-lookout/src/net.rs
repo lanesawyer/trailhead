@@ -16,9 +16,10 @@ use tokio::time::{MissedTickBehavior, interval, timeout};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
 use trailhead_daemon::net::{parse_endpoint_id, parse_secret_key};
-use trailhead_daemon::ui::{CLOSE_NOT_ALLOWED, UI_ALPN, open_ui_tunnel};
+use trailhead_daemon::ui::{CLOSE_NOT_ALLOWED, StatusFrame, StatusStream, UI_ALPN, dial_ui, open_ui_tunnel};
 
 use crate::commands::{self, CommandId, Reply, Request};
+use crate::factory::FactoryUpdate;
 use crate::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 
 /// How the app is connected to its factory. The Bevy `States` type is in [`crate::connection`]; this is the same
@@ -103,6 +104,8 @@ pub enum NetEvent {
     Sync(SyncItem),
     /// What came of a [`NetCommand::Request`].
     Reply(Reply),
+    /// The control plane's status snapshot and stream, or that it can't be reached.
+    Factory(FactoryUpdate),
 }
 
 /// Everything the HTTP client needs to talk to the Trailhead API through the control plane.
@@ -125,6 +128,9 @@ pub struct NetConfig {
     /// Whether tokens may use the OS keyring (off in tests; `TRAILHEAD_NO_KEYRING` turns it off too).
     pub keyring: bool,
     pub network: Network,
+    /// The server URL the CLI uses. When the control plane can't be reached, the board talks to the server here
+    /// instead of through the tunnel. `None` keeps the tunnel as the only way in.
+    pub server_url: Option<String>,
 }
 
 /// How the endpoint finds the control plane.
@@ -145,12 +151,14 @@ impl NetConfig {
         };
         let trailhead = directories::ProjectDirs::from("", "", "trailhead");
         let lookout = directories::ProjectDirs::from("", "", "lookout")?;
+        let trailhead_config_dir = pick("TRAILHEAD_CONFIG_DIR", trailhead.as_ref().map(|d| d.config_dir()))?;
         Some(NetConfig {
             config_dir: pick("LOOKOUT_CONFIG_DIR", Some(lookout.config_dir()))?,
-            trailhead_config_dir: pick("TRAILHEAD_CONFIG_DIR", trailhead.as_ref().map(|d| d.config_dir()))?,
+            trailhead_config_dir: trailhead_config_dir.clone(),
             trailhead_data_dir: pick("TRAILHEAD_DATA_DIR", trailhead.as_ref().map(|d| d.data_dir()))?,
             keyring: CredStore::new(PathBuf::new()).keyring,
             network: Network::Internet,
+            server_url: Some(cli_server_url(&trailhead_config_dir, std::env::var("TRAILHEAD_URL").ok())),
         })
     }
 
@@ -179,6 +187,22 @@ impl NetConfig {
         }
     }
 }
+
+/// The server the CLI would use: `TRAILHEAD_URL`, else `url` in `<config dir>/config.toml` (which `trailhead login`
+/// sets), else the default.
+pub fn cli_server_url(config_dir: &Path, env: Option<String>) -> String {
+    let from_file = || {
+        let text = std::fs::read_to_string(config_dir.join("config.toml")).ok()?;
+        text.parse::<toml::Table>().ok()?.get("url")?.as_str().map(String::from)
+    };
+    env.filter(|u| !u.is_empty())
+        .or_else(from_file)
+        .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:7241";
 
 /// The app's end of the channels. Dropping it stops the net thread.
 pub struct NetHandle {
@@ -240,12 +264,26 @@ struct Target {
     api: SocketAddr,
 }
 
+/// Which way the Trailhead API is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Via {
+    /// Through the control plane's tunnel.
+    Tunnel,
+    /// Straight to the server the CLI uses, because the control plane can't be reached.
+    Direct,
+}
+
+const STATUS_RETRY: Duration = Duration::from_secs(2);
+
 struct Net {
     config: NetConfig,
     endpoint: Endpoint,
     http: reqwest::Client,
     events: mpsc::Sender<NetEvent>,
     target: Option<Target>,
+    via: Via,
+    /// Follows the control plane's status stream, redialing until it is back.
+    status: Option<tokio::task::JoinHandle<()>>,
     /// A token pasted in, not yet confirmed (and so not yet saved).
     pasted: Option<String>,
     /// The token that signed in, kept while `Live` so a dropped link signs back in without asking again.
@@ -282,6 +320,8 @@ async fn run(
         http,
         events,
         target: None,
+        via: Via::Tunnel,
+        status: None,
         pasted: None,
         token: None,
         state: None,
@@ -318,6 +358,7 @@ async fn run(
         }
     }
     net.stop_sync();
+    net.stop_status();
     net.endpoint.close().await;
 }
 
@@ -347,6 +388,28 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// One connection's worth of the status stream: the snapshot, then events until it ends. `stopped` says whether the
+/// app was last told the factory is stopped, and is cleared by anything heard.
+async fn follow_status(
+    endpoint: &Endpoint,
+    id: EndpointId,
+    events: &mpsc::Sender<NetEvent>,
+    stopped: &mut bool,
+) -> Result<(), trailhead_factory::Error> {
+    let mut stream = StatusStream::open(dial_ui(endpoint, id).await?).await?;
+    while let Some(frame) = stream.next().await? {
+        let update = match frame {
+            StatusFrame::Snapshot { repos } => FactoryUpdate::Snapshot(repos),
+            StatusFrame::Event { repo, event } => FactoryUpdate::Event { repo, event },
+        };
+        *stopped = false;
+        if events.send(NetEvent::Factory(update)).is_err() {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 impl Net {
     /// Reports a change of link or reason, and only changes.
     fn set(&mut self, link: Link, reason: Option<Reason>) {
@@ -370,6 +433,8 @@ impl Net {
                 Ok(api) => self.target = Some(Target { id, api }),
                 Err(e) => return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string()))),
             }
+            self.via = Via::Tunnel;
+            self.start_status(id);
             self.token = None;
             self.state = None;
             self.stop_sync();
@@ -388,9 +453,9 @@ impl Net {
         let Some(target) = &self.target else {
             return self.set(Link::Offline, Some(Reason::NoTarget));
         };
-        let (id, base) = (target.id, format!("http://{}", target.api));
+        let (id, tunnel) = (target.id, format!("http://{}", target.api));
         // Signed in: live, or still loading the board or reconnecting its feed.
-        let live =
+        let mut live =
             matches!(self.state, Some((Link::Live, _) | (Link::Syncing, Some(Reason::Loading | Reason::Reconnecting))))
                 && self.pasted.is_none();
         if !live {
@@ -398,16 +463,35 @@ impl Net {
         }
 
         // The control plane forwards to the server, which answers /v1/health to anyone.
-        let health = match self.http.get(format!("{base}/v1/health")).send().await {
-            Ok(r) if r.status().is_success() => r.json::<Health>().await.unwrap_or_default(),
+        let (health, via) = match self.http.get(format!("{tunnel}/v1/health")).send().await {
+            Ok(r) if r.status().is_success() => (r.json::<Health>().await.unwrap_or_default(), Via::Tunnel),
             Ok(r) => {
                 return self
                     .set(Link::Offline, Some(Reason::Unreachable(format!("the server answered {}", r.status()))));
             }
             Err(_) => {
-                let reason = self.diagnose(id).await;
-                return self.set(Link::Offline, Some(reason));
+                // Already on the server's own URL: the control plane stays down, and asking why again is slow.
+                let reason = if self.via == Via::Direct {
+                    Reason::Unreachable("the control plane isn't answering".into())
+                } else {
+                    self.diagnose(id).await
+                };
+                // A control plane that refuses this Lookout is up, so that is told rather than hidden; one that is
+                // gone leaves the board working from the server the CLI uses.
+                match (&reason, self.direct_health().await) {
+                    (Reason::Unreachable(_), Some(health)) => (health, Via::Direct),
+                    _ => return self.set(Link::Offline, Some(reason)),
+                }
             }
+        };
+        if via != self.via {
+            // Moving between the tunnel and the server: sign in and sync again on the new address.
+            self.via = via;
+            live = false;
+        }
+        let base = match via {
+            Via::Tunnel => tunnel,
+            Via::Direct => self.config.server_url.clone().unwrap_or_default(),
         };
         if live {
             return;
@@ -460,6 +544,49 @@ impl Net {
         self.start_sync(base, token);
     }
 
+    /// Where the Trailhead API is reached right now.
+    fn api_base(&self) -> Option<String> {
+        match self.via {
+            Via::Tunnel => self.target.as_ref().map(|t| format!("http://{}", t.api)),
+            Via::Direct => self.config.server_url.clone(),
+        }
+    }
+
+    /// The server's health at the URL the CLI uses, if it answers there.
+    async fn direct_health(&self) -> Option<Health> {
+        let url = self.config.server_url.as_ref()?;
+        let r = self.http.get(format!("{url}/v1/health")).send().await.ok()?.error_for_status().ok()?;
+        Some(r.json::<Health>().await.unwrap_or_default())
+    }
+
+    /// Follows the control plane's status stream on its own connection, and says when it can't be reached.
+    fn start_status(&mut self, id: EndpointId) {
+        self.stop_status();
+        let (endpoint, events) = (self.endpoint.clone(), self.events.clone());
+        self.status = Some(tokio::spawn(async move {
+            let mut stopped = false;
+            loop {
+                let followed = follow_status(&endpoint, id, &events, &mut stopped).await;
+                if let Err(e) = followed {
+                    tracing::debug!(error = %e, "the factory status stream ended");
+                }
+                if !stopped {
+                    stopped = true;
+                    if events.send(NetEvent::Factory(FactoryUpdate::Stopped)).is_err() {
+                        return;
+                    }
+                }
+                tokio::time::sleep(STATUS_RETRY).await;
+            }
+        }));
+    }
+
+    fn stop_status(&mut self) {
+        if let Some(task) = self.status.take() {
+            task.abort();
+        }
+    }
+
     /// Makes a command's request on its own task, so a slow one holds up neither the probe nor the others. It goes
     /// out only while `Live`; otherwise the app is told to hold it for later.
     fn request(&self, id: CommandId, attempt: u32, request: Request) {
@@ -467,10 +594,10 @@ impl Net {
         let reply = move |result| {
             let _ = events.send(NetEvent::Reply(Reply { id, attempt, result }));
         };
-        let (Some(target), Some(token), Some((Link::Live, _))) = (&self.target, &self.token, &self.state) else {
+        let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
             return reply(Err("not connected".into()));
         };
-        let (http, base, token) = (self.http.clone(), format!("http://{}", target.api), token.clone());
+        let (http, token) = (self.http.clone(), token.clone());
         tokio::spawn(async move { reply(commands::execute(&http, &base, &token, &request).await) });
     }
 
