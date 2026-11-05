@@ -115,8 +115,13 @@ impl std::fmt::Debug for dyn StatusFeed {
 /// Why a stream was reset: the first frame wasn't a request this control plane knows.
 const BAD_REQUEST: u32 = 2;
 
-/// The endpoint ids allowed to use `trailhead/ui/0`, one per line in a file. It is read on every connection, so
-/// `trailhead-factory allow` takes effect without restarting the control plane.
+/// How often an open UI connection is checked against the allowlist, so a disallowed endpoint loses the streams it
+/// already has open (the event and status feeds), not just new ones.
+const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The endpoint ids allowed to use `trailhead/ui/0`, one per line in a file. It is read on every connection and
+/// stream, and an open connection is rechecked every second, so `trailhead-factory allow` and `disallow` take
+/// effect without restarting the control plane.
 #[derive(Debug, Clone)]
 pub struct UiAllowlist {
     path: PathBuf,
@@ -273,7 +278,27 @@ impl ProtocolHandler for UiProtocol {
             conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
             return Ok(());
         }
-        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+        let mut recheck = tokio::time::interval(RECHECK_EVERY);
+        loop {
+            let (mut send, mut recv) = tokio::select! {
+                stream = conn.accept_bi() => match stream {
+                    Ok(stream) => stream,
+                    Err(_) => break,
+                },
+                _ = recheck.tick() => {
+                    if self.allowed.contains(&conn.remote_id()) {
+                        continue;
+                    }
+                    tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
+                    conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
+                    return Ok(());
+                }
+            };
+            if !self.allowed.contains(&conn.remote_id()) {
+                tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
+                conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
+                return Ok(());
+            }
             let (server, status) = (self.server, self.status.clone());
             let (peer, build, unknown) = (conn.remote_id(), self.build.clone(), self.unknown.clone());
             tokio::spawn(async move {
