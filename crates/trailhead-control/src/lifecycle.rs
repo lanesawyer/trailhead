@@ -338,6 +338,14 @@ impl Factory {
                 self.review(task, &pr, attempt, &report.checks).await
             }
             RunResult::NeedsInput(question) => {
+                // An attempt that asked a question didn't give up, so a give-up from before it isn't "the attempt
+                // before" the next one (TRAIL-727). An empty failure is how a recorded one is cleared.
+                if task.run.failure.as_deref().is_some_and(|f| !f.is_empty()) {
+                    let clear = RunUpdate { failure: Some(String::new()), ..RunUpdate::default() };
+                    if let Err(e) = sub.report(&task.key, clear).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the earlier failure");
+                    }
+                }
                 self.status.paused(&sandbox.name);
                 Ok(Outcome::Parked { reason: question })
             }

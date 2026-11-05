@@ -1091,3 +1091,22 @@ fn stack_env_cant_set_a_name_the_factory_does() {
     let err = trailhead_factory::FactoryConfig::parse_table(&src, "TRAIL", None).unwrap_err();
     assert!(err.to_string().contains("HTTPS_PROXY"), "{err}");
 }
+
+#[tokio::test]
+async fn a_give_up_from_before_a_question_doesnt_count_toward_two_in_a_row() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 5"));
+    let key = r.tracker.add_task("TRAIL", "Needs the network", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "crates.io unreachable".into() }));
+    r.factory.tick().await.unwrap();
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which registry?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    assert!(r.tracker.task(&key).run.failure.as_deref().unwrap_or("").is_empty(), "the question clears the give-up");
+
+    r.tracker.answer(&key, "The mirror.");
+    r.factory.reconcile().await.unwrap();
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "mirror unreachable too".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "one give-up since the question is retried");
+}
