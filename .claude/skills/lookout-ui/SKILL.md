@@ -20,6 +20,10 @@ there.
   fields that drift apart are a bug.
 - **It doesn't exist:** add a widget file to `widgets/`, built on feathers, with a doc comment saying what it's for.
   Then use it in the view. A widget never imports a view module.
+- **Layouts that repeat are widgets too.** A panel header, a section with a heading, a label-and-value row, a form's
+  button bar: if more than one surface has or will have it, it's a widget in `widgets/`, even while only one uses it.
+  Composing kit pieces inline the same way in two views drifts just like two hand-made buttons (TRAIL-861). Before
+  building one, check the other views (inspector, forms, connect panel, modal) for the same shape.
 
 Much of the kit is ported from Lane's `bevy-data-explorer` (`~/Dev/bevy-data-explorer/src/widgets/`, also on GitHub at
 lanesawyer/bevy-data-explorer). Porting a widget from there is better than writing a new one.
