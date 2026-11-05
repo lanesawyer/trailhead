@@ -10,9 +10,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use bevy::feathers::controls::FeathersButton;
 use bevy::feathers::display::caption;
 use bevy::prelude::*;
+use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::Activate;
 use serde_json::Value;
 
+use crate::author::{Act, act_button};
 use crate::connection::{Connection, ConnectionStatus, LocalEndpoint};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
 
@@ -127,6 +129,8 @@ pub struct Card {
     pub depth: usize,
     pub holder: Option<String>,
     pub open_questions: Vec<String>,
+    /// The comment ids of `open_questions`, in the same order, for answering them.
+    pub question_ids: Vec<String>,
     pub handoff: Option<String>,
 }
 
@@ -210,6 +214,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
             depth,
             holder: holder_of.get(id).map(|h| holder_label(h)),
             open_questions: open.iter().map(|q| s(q, "body").to_string()).collect(),
+            question_ids: open.iter().map(|q| s(q, "id").to_string()).collect(),
             handoff: handoffs.get(id).map(|h| s(h, "body").to_string()),
         }
     };
@@ -420,6 +425,11 @@ fn redraw(
         });
         commands.queue_spawn_scene(filter_button(key, format!("{}: {value}", key.name()))).insert(ChildOf(bar));
     }
+    let mut new = commands.queue_spawn_scene(act_button("+ new task".into(), Act::New));
+    new.insert(ChildOf(bar));
+    if !live {
+        new.insert(InteractionDisabled);
+    }
 
     let columns = commands
         .spawn((Node { column_gap: px(12), align_items: AlignItems::FlexStart, ..default() }, ChildOf(panel)))
@@ -438,6 +448,27 @@ fn redraw(
                 head += &format!(" (under {parent})");
             }
             text(&mut commands, col, head, ink, card.depth);
+            let tools = commands
+                .spawn((
+                    Node { column_gap: px(4), margin: UiRect::left(px(16 * card.depth)), ..default() },
+                    ChildOf(col),
+                ))
+                .id();
+            let mut buttons = vec![
+                ("edit".to_string(), Act::Edit(card.key.clone())),
+                ("comment".to_string(), Act::Comment(card.key.clone())),
+            ];
+            for (n, (q, id)) in card.open_questions.iter().zip(&card.question_ids).enumerate() {
+                let act = Act::Answer { key: card.key.clone(), comment_id: id.clone(), question: q.clone() };
+                buttons.push((if n == 0 { "answer".to_string() } else { format!("answer {}", n + 1) }, act));
+            }
+            for (label, act) in buttons {
+                let mut button = commands.queue_spawn_scene(act_button(label, act));
+                button.insert(ChildOf(tools));
+                if !live {
+                    button.insert(InteractionDisabled);
+                }
+            }
             if let Some(holder) = &card.holder {
                 text(&mut commands, col, format!("held by {holder}"), dim, card.depth + 1);
             }
