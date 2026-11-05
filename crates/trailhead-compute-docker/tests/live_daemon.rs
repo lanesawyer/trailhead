@@ -21,6 +21,7 @@ fn request() -> PrepareRequest {
         setup: None,
         tools: Default::default(),
         tool_hosts: Default::default(),
+        env: Default::default(),
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,

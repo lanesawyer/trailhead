@@ -28,6 +28,8 @@ pub struct GitWorkspace {
     /// Extra environment for git; tests use it to hide the machine's git config.
     git_env: Vec<(String, String)>,
     mise: Mise,
+    /// `[factory.stack] env`, from the latest prepare or run request.
+    env: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 impl GitWorkspace {
@@ -42,6 +44,7 @@ impl GitWorkspace {
             block_patience: BLOCK_PATIENCE,
             git_env: Vec::new(),
             mise: Mise::new(),
+            env: Default::default(),
         }
     }
 
@@ -143,6 +146,7 @@ impl Workspace for GitWorkspace {
     /// Clones the base branch, or resets an existing checkout to it, then moves to the request's branch if it has one.
     /// Ignored files such as build output stay, so a sandbox reused for another round keeps its caches.
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
+        self.set_env(&req.env);
         let base = &req.base_branch;
         if self.dir.join(".git").exists() {
             // A merge left under way (a warm checkpoint taken mid-rework) would block the checkout. Abort it if
@@ -216,7 +220,13 @@ impl Workspace for GitWorkspace {
     }
 
     async fn agent_env(&self) -> std::collections::BTreeMap<String, String> {
-        self.mise.env(&self.dir).await
+        let mut env = self.mise.env(&self.dir).await;
+        env.extend(self.env.lock().unwrap().clone());
+        env
+    }
+
+    fn set_env(&self, env: &std::collections::BTreeMap<String, String>) {
+        *self.env.lock().unwrap() = env.clone();
     }
 
     async fn merge_head(&self) -> Result<Option<String>> {
@@ -285,6 +295,7 @@ impl Workspace for GitWorkspace {
     }
 
     async fn check(&self, check: &Check) -> CheckResult {
+        let env = self.env.lock().unwrap().clone();
         let ooms_before = oom_kills();
         let out = self
             .mise
@@ -292,6 +303,7 @@ impl Workspace for GitWorkspace {
             .arg(format!("exec 2>&1\n{}", check.command))
             .current_dir(&self.dir)
             .stdin(Stdio::null())
+            .envs(env)
             .envs(std::env::current_exe().ok().map(|exe| ("TRAILHEAD_DAEMON", exe)))
             .kill_on_drop(true)
             .output()

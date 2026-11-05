@@ -61,6 +61,9 @@ pub struct FakeWorkspace {
     unpublished_asked: Mutex<Vec<String>>,
     /// Install hosts `install_hosts` names on top of the real ones, as a confused or compromised daemon would.
     extra_install_hosts: Mutex<Vec<InstallHost>>,
+    /// The `[factory.stack] env` the latest prepare or run request set, and what each check ran with.
+    env: Mutex<BTreeMap<String, String>>,
+    check_envs: Mutex<Vec<(String, BTreeMap<String, String>)>>,
 }
 
 #[async_trait]
@@ -77,6 +80,11 @@ impl Workspace for FakeWorkspace {
     }
 
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
+        self.set_env(&req.env);
+        // The real workspace runs these with the env.
+        for check in [&req.setup, &req.trim].into_iter().flatten() {
+            self.check_envs.lock().unwrap().push((check.name.clone(), req.env.clone()));
+        }
         self.prepares_started.fetch_add(1, Ordering::SeqCst);
         let gate = self.prepare_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
@@ -144,7 +152,13 @@ impl Workspace for FakeWorkspace {
         }
     }
 
+    fn set_env(&self, env: &BTreeMap<String, String>) {
+        *self.env.lock().unwrap() = env.clone();
+    }
+
     async fn check(&self, check: &Check) -> CheckResult {
+        let env = self.env.lock().unwrap().clone();
+        self.check_envs.lock().unwrap().push((check.name.clone(), env));
         let mut failing = self.failing.lock().unwrap();
         let output = match failing.get_mut(&check.name) {
             Some((output, None)) => Some(output.clone()),
@@ -387,6 +401,11 @@ impl LocalDaemon {
     /// Run requests received so far, oldest first.
     pub fn requests(&self) -> Vec<RunRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// The environment each check ran with, in order, by check name.
+    pub fn check_envs(&self) -> Vec<(String, BTreeMap<String, String>)> {
+        self.workspace.check_envs.lock().unwrap().clone()
     }
 
     fn cancel_handle(&self, sandbox: &SandboxId) -> Arc<Notify> {

@@ -28,6 +28,8 @@ pub trait Workspace: Send + Sync {
     }
     async fn prepare(&self, req: &PrepareRequest) -> Result<()>;
     async fn check(&self, check: &Check) -> CheckResult;
+    /// The `[factory.stack] env` that `check` and `agent_env` add on top of mise's environment, until it's set again.
+    fn set_env(&self, _env: &BTreeMap<String, String>) {}
     /// Environment for the agent on top of the daemon's: the `[stack]` tools' mise environment, when there are any.
     async fn agent_env(&self) -> BTreeMap<String, String> {
         BTreeMap::new()
@@ -124,6 +126,7 @@ impl Runner {
     /// checks stops them before anything is published; once publishing starts, the step runs to the end.
     pub async fn run(&self, req: RunRequest, events: EventSink, cancel: Arc<Notify>) -> Result<RunReport> {
         let key = &req.task.key.0;
+        self.workspace.set_env(&req.env);
         self.workspace.confirm_blocked(&req.blocked_hosts).await?;
         tracing::info!(task = %key, role = req.role.as_str(), "egress confirmed; starting");
         let tracker = (self.connect)(req.credential.clone()).await?;

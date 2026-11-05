@@ -440,22 +440,69 @@ impl RepoConfig {
 pub struct Stack {
     #[serde(default)]
     pub tools: BTreeMap<String, String>,
+    /// Variables for the agent and every check (`setup` and `trim` too) in a sandbox, on top of mise's environment:
+    /// `{ CARGO_BUILD_JOBS = "2" }`. Not the names the factory sets itself (`RESERVED_ENV`).
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
+
+/// Names `[factory.stack] env` can't set: the proxy variables the sandboxes' egress depends on, the harness's
+/// credential and settings, and `PATH` and `HOME`, which are mise's and the sandbox user's.
+const RESERVED_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "DISABLE_AUTOUPDATER",
+];
+const RESERVED_ENV_PREFIXES: &[&str] = &["TRAILHEAD_", "ANTHROPIC_", "MISE_"];
 
 impl Stack {
     /// A short stable tag, which pooled sandboxes carry so a changed `[stack]` reinstalls (FNV-1a;
-    /// `DefaultHasher` isn't stable across builds). Empty for no tools.
+    /// `DefaultHasher` isn't stable across builds). Empty for no tools and no `env`. The `env` is in it because
+    /// `setup` and `trim` run with it, so it can change what the warm checkpoint holds (`RUSTFLAGS`, say); a stack
+    /// with only tools hashes as it did before `env` existed.
     pub fn tag(&self) -> String {
-        if self.tools.is_empty() {
+        if self.tools.is_empty() && self.env.is_empty() {
             return String::new();
         }
         let mut hash: u64 = 0xcbf29ce484222325;
-        for (k, v) in &self.tools {
-            for byte in format!("{k}={v};").bytes() {
+        let mut feed = |text: String| {
+            for byte in text.bytes() {
                 hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            }
+        };
+        for (k, v) in &self.tools {
+            feed(format!("{k}={v};"));
+        }
+        if !self.env.is_empty() {
+            feed("env;".into());
+            for (k, v) in &self.env {
+                feed(format!("{k}={v};"));
             }
         }
         format!("{hash:016x}")
+    }
+
+    /// Refuses an `env` name that is malformed or that the factory sets itself.
+    fn validate(&self) -> Result<()> {
+        for name in self.env.keys() {
+            if name.is_empty() || name.contains(['=', '\0']) {
+                return Err(Error::Config(format!("[factory.stack] env name `{name}` isn't a variable name")));
+            }
+            let upper = name.to_ascii_uppercase();
+            if RESERVED_ENV.contains(&upper.as_str()) || RESERVED_ENV_PREFIXES.iter().any(|p| upper.starts_with(p)) {
+                return Err(Error::Config(format!(
+                    "[factory.stack] env can't set `{name}`: the factory sets it itself (proxy variables, PATH, HOME, \
+                     TRAILHEAD_*, ANTHROPIC_*, MISE_* and the harness's credential)"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -748,6 +795,7 @@ impl FactoryConfig {
 
     fn validate(&self) -> Result<()> {
         validate_pause_at(&self.usage.pause_at, "[factory.usage]")?;
+        self.stack.validate()?;
         for (name, target) in &self.targets {
             // Names go into sandbox names and labels.
             let ok = !name.is_empty()
@@ -875,6 +923,7 @@ impl FactoryConfig {
             disk_limit_bytes: some(self.daemon.disk_limit_bytes),
             tools: if role == Role::Worker { self.stack.tools.clone() } else { Default::default() },
             tool_hosts: if role == Role::Worker { self.egress.tools.clone() } else { Default::default() },
+            env: if role == Role::Worker { self.stack.env.clone() } else { Default::default() },
         }
     }
 }
@@ -884,9 +933,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stack_env_reaches_the_workers_prepare_and_the_tag_only_when_set() {
+        let with = SAMPLE.to_string();
+        let config = parse(&with.replace(
+            "tools = { rust = \"stable\" }",
+            "tools = { rust = \"stable\" }\nenv = { CARGO_BUILD_JOBS = \"2\" }",
+        ))
+        .unwrap();
+        assert_eq!(config.stack.env["CARGO_BUILD_JOBS"], "2");
+        assert_eq!(config.prepare_request(Role::Worker, None).env, config.stack.env);
+        assert!(config.prepare_request(Role::Reviewer, None).env.is_empty());
+        let plain = parse(&with).unwrap();
+        assert_ne!(config.stack.tag(), plain.stack.tag(), "setup runs with the env, so it can change the checkpoint");
+        assert_eq!(plain.stack.tag(), Stack { tools: plain.stack.tools.clone(), env: Default::default() }.tag());
+    }
+
+    #[test]
+    fn stack_env_refuses_the_names_the_factory_sets() {
+        for name in [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "NO_PROXY",
+            "TRAILHEAD_FACTORY_TASK",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "MISE_OFFLINE",
+            "PATH",
+            "A=B",
+        ] {
+            let src = SAMPLE.replace("tools = { rust = \"stable\" }", &format!("env = {{ \"{name}\" = \"x\" }}"));
+            let err = parse(&src).unwrap_err().to_string();
+            assert!(err.contains("[factory.stack] env") && err.contains(name), "{name}: {err}");
+        }
+    }
+
+    #[test]
     fn the_stack_tag_follows_the_tools() {
         let stack = |pairs: &[(&str, &str)]| Stack {
             tools: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            env: Default::default(),
         };
         assert_eq!(stack(&[]).tag(), "");
         let a = stack(&[("node", "26")]).tag();
