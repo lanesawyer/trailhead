@@ -8204,6 +8204,7 @@ dependencies = [
  "trailhead-daemon",
  "trailhead-factory",
  "trailhead-server",
+ "uuid",
 ]
 
 [[package]]

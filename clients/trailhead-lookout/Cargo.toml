@@ -45,3 +45,4 @@ trailhead-core.workspace = true
 trailhead-server.workspace = true
 axum.workspace = true
 tempfile.workspace = true
+uuid.workspace = true
