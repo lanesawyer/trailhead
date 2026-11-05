@@ -18,7 +18,7 @@
 //! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`]; one that scrolls down only,
 //!   inside it: [`ScrollDown`].
 //! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
-//! - A board column: [`column_shell`], [`column_header`], [`column_body`], [`column_scrollbar`]; [`column_empty`] for none.
+//! - A board column: [`column_shell`], [`column_header`], [`column_frame`], [`column_body`], [`column_scrollbar`]; [`column_empty`] for none.
 //! - Children that follow a list of keyed view models without respawning: [`Keyed`].
 //! - Gaps, padding, margins: [`space`]. Corners: [`radius`].
 
@@ -46,14 +46,17 @@ pub use badge::badge;
 pub use buttons::{button, button_text, tool_button};
 pub use card::{TITLE_LINES, card, card_row, card_title, card_under};
 pub use chip::chip;
-pub use column::{COLUMN_WIDTH, ColumnCount, column_body, column_empty, column_header, column_scrollbar, column_shell};
+pub use column::{
+    COLUMN_GUTTER, COLUMN_WIDTH, ColumnCount, column_body, column_empty, column_frame, column_header, column_scrollbar,
+    column_shell,
+};
 pub use containers::{field, panel, row, section};
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
 pub use keyed::Keyed;
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu};
 pub use scroll::{ScrollBoth, ScrollDown};
-pub use scrollbar::scrollbar;
+pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
 pub use select::{Picked, select};
 pub use spacing::{radius, space};
 pub use text::{size, text, text_dim, text_toned};

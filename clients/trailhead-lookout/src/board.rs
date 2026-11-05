@@ -629,7 +629,7 @@ fn spawn_panel(mut commands: Commands, kept: Res<BoardScroll>) {
         .spawn((
             Node {
                 column_gap: px(space::GROUPS),
-                align_items: AlignItems::Stretch,
+                align_items: AlignItems::FlexStart,
                 flex_grow: 1.0,
                 min_height: px(0),
                 overflow: Overflow::scroll_x(),
@@ -694,7 +694,10 @@ fn dress_columns(
         let at = kept.columns.get(status).copied().unwrap_or_default();
         commands.entity(shell).insert(widgets::column_shell(status));
         commands.entity(body).insert((widgets::column_body(), ScrollPosition(Vec2::new(0.0, at))));
-        widgets::column_scrollbar(&mut commands, shell, body);
+        // The body and its bar share a frame under the header, so the bar's track is the body's.
+        let frame = commands.spawn((widgets::column_frame(), ChildOf(shell))).id();
+        commands.entity(body).insert(ChildOf(frame));
+        widgets::column_scrollbar(&mut commands, frame, body);
         widgets::column_header(&mut commands, shell, status, count);
     }
 }

@@ -1,6 +1,6 @@
 //! A scrollbar along one edge of a scrolling area: [`scrollbar`] for the area and the way it scrolls.
 //!
-//! A vertical one lies over the area's right edge (a column's body), a horizontal one along the bottom (the board).
+//! A vertical one lies over the area's right edge (a column's body, which keeps a gutter for it), a horizontal one along the bottom (the board).
 //! Spawn it as a child of the node that holds the area, with that node's padding or the area's own edge leaving room.
 //! It takes its color from feathers' scrollbar tokens and hides while the area fits, so there is nothing to scroll.
 
