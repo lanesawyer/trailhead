@@ -81,8 +81,7 @@ impl std::fmt::Display for Unsupported {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the factory is older than this Lookout and doesn't know the request {}: reinstall trailhead-factory and \
-             restart it (it serves {}; version {}, build {})",
+            "the control plane doesn't know the request {} (it serves {}; version {}, build {})",
             self.got,
             self.known.join(", "),
             self.version,

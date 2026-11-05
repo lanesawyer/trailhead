@@ -56,8 +56,6 @@ pub enum Reason {
     Loading,
     /// The event stream dropped, and the board may be out of date until it is back.
     Reconnecting,
-    /// The factory answered a request with "I don't know that": it is older than this Lookout.
-    FactoryOlder(String),
 }
 
 impl std::fmt::Display for Reason {
@@ -79,7 +77,6 @@ impl std::fmt::Display for Reason {
             Reason::SigningIn => write!(f, "signing in"),
             Reason::Loading => write!(f, "loading tasks and projects"),
             Reason::Reconnecting => write!(f, "the live feed dropped: reconnecting"),
-            Reason::FactoryOlder(e) => write!(f, "{e}"),
         }
     }
 }
@@ -109,8 +106,6 @@ pub enum NetEvent {
     Reply(Reply),
     /// The control plane's status snapshot and stream, or that it can't be reached.
     Factory(FactoryUpdate),
-    /// Something wrong with the factory that leaves the link as it is, such as one too old for a request.
-    FactoryReason(Reason),
 }
 
 /// Everything the HTTP client needs to talk to the Trailhead API through the control plane.
@@ -279,6 +274,8 @@ enum Via {
 }
 
 const STATUS_RETRY: Duration = Duration::from_secs(2);
+/// How often to ask a factory that is too old, so a reinstall takes effect without restarting Lookout.
+const STATUS_RETRY_OLD: Duration = Duration::from_secs(30);
 
 struct Net {
     config: NetConfig,
@@ -394,30 +391,43 @@ fn hex_of(bytes: &[u8]) -> String {
 }
 
 /// One connection's worth of the status stream: the snapshot, then events until it ends. `stopped` says whether the
-/// app was last told the factory is stopped, and is cleared by anything heard.
+/// app was last told the factory is stopped, and is cleared by anything heard. Returns whether the factory said it
+/// doesn't know the request.
 async fn follow_status(
     endpoint: &Endpoint,
     id: EndpointId,
     events: &mpsc::Sender<NetEvent>,
     stopped: &mut bool,
-) -> Result<(), trailhead_factory::Error> {
+) -> Result<bool, trailhead_factory::Error> {
     let mut stream = StatusStream::open(dial_ui(endpoint, id).await?).await?;
     while let Some(frame) = stream.next().await? {
         let update = match frame {
             StatusFrame::Snapshot { repos } => FactoryUpdate::Snapshot(repos),
             StatusFrame::Event { repo, event } => FactoryUpdate::Event { repo, event },
             StatusFrame::Unsupported(unsupported) => {
-                let reason = Reason::FactoryOlder(unsupported.to_string());
-                let _ = events.send(NetEvent::FactoryReason(reason));
-                return Ok(());
+                *stopped = false;
+                let _ = events.send(NetEvent::Factory(FactoryUpdate::TooOld(too_old_message(&unsupported))));
+                return Ok(true);
             }
         };
         *stopped = false;
         if events.send(NetEvent::Factory(update)).is_err() {
-            return Ok(());
+            return Ok(false);
         }
     }
-    Ok(())
+    Ok(false)
+}
+
+/// What the map says of a factory that didn't know our request: what it was asked, what it serves, and its build.
+fn too_old_message(u: &trailhead_daemon::ui::Unsupported) -> String {
+    format!(
+        "the factory is older than this Lookout: reinstall trailhead-factory and restart it (it was asked {}, and \
+         serves {}; version {}, build {})",
+        u.got,
+        u.known.join(", "),
+        u.version,
+        u.build
+    )
 }
 
 impl Net {
@@ -577,8 +587,13 @@ impl Net {
             let mut stopped = false;
             loop {
                 let followed = follow_status(&endpoint, id, &events, &mut stopped).await;
+                let old = matches!(followed, Ok(true));
                 if let Err(e) = followed {
                     tracing::debug!(error = %e, "the factory status stream ended");
+                }
+                if old {
+                    tokio::time::sleep(STATUS_RETRY_OLD).await;
+                    continue;
                 }
                 if !stopped {
                     stopped = true;

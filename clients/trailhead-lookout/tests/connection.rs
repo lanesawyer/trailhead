@@ -221,7 +221,7 @@ fn campsites(app: &mut App) -> Vec<(String, SandboxState)> {
 }
 
 fn link(app: &App) -> FactoryLink {
-    app.world().resource::<FactoryStatus>().link
+    app.world().resource::<FactoryStatus>().link.clone()
 }
 
 async fn allowed_and_live(app: &mut App, rig: &Rig) {
@@ -356,8 +356,15 @@ async fn a_factory_older_than_lookout_says_so() {
     let _router = Router::builder(endpoint).accept(UI_ALPN, OldFactory(rig.server)).spawn();
     let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
 
-    until(&mut app, "factory older", |a| matches!(reason(a), Some(Reason::FactoryOlder(_)))).await;
-    let Some(Reason::FactoryOlder(why)) = reason(&app) else { unreachable!() };
-    assert!(why.contains("older than this Lookout") && why.contains("reinstall trailhead-factory"), "{why}");
-    assert!(why.contains("status") && why.contains("old"), "the request and the build are named: {why}");
+    allowed_and_live(&mut app, &rig).await;
+    until(&mut app, "factory too old", |a| matches!(link(a), FactoryLink::TooOld(_))).await;
+    let label = app.world().resource::<FactoryStatus>().label();
+    assert!(label.contains("older than this Lookout") && label.contains("reinstall trailhead-factory"), "{label}");
+    assert!(label.contains("status") && label.contains("old"), "the request and the build are named: {label}");
+    // A later retry doesn't turn it into "factory stopped".
+    for _ in 0..20 {
+        app.update();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(matches!(link(&app), FactoryLink::TooOld(_)));
 }

@@ -115,7 +115,6 @@ fn apply_events(
             NetEvent::Factory(update) => {
                 factory.write(FactoryItem(update));
             }
-            NetEvent::FactoryReason(reason) => status.reason = Some(reason),
         }
     }
 }
