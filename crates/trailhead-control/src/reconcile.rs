@@ -379,7 +379,8 @@ impl Factory {
                 }
             }
             // Parked for a human, so a PR still open or closed stays as it is (a closed one was the question). A merge
-            // by anyone finishes the task all the same.
+            // by anyone finishes the task all the same, unless it is already recorded (merged by hand before approval,
+            // parked for a person to mark it done): that one is skipped below.
             Status::NeedsInput => {
                 // One already recorded as merged by hand was parked for a person to finish: don't ask again.
                 if task.run.merged.is_none()
