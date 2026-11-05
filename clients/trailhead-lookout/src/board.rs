@@ -22,11 +22,12 @@ use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror
 use crate::widgets::ScrollBoth;
 use crate::widgets::{Icon, badge, card as card_shell, card_row, card_title, card_under, token, tool_button};
 
-/// The views of the app; the trail map joins the board later.
+/// The views of the app: the task board and the trail map.
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum View {
     #[default]
     Board,
+    Map,
 }
 
 /// Status columns in lifecycle order.
@@ -417,6 +418,14 @@ fn text(commands: &mut Commands, parent: Entity, line: String, color: Color, ind
     ));
 }
 
+fn map_button() -> impl Scene {
+    bsn! {
+        @FeathersButton
+        on(|_: On<Activate>, mut next: ResMut<NextState<View>>| next.set(View::Map))
+        Children [ @caption("trail map") ]
+    }
+}
+
 fn filter_button(key: FilterKey, label: String) -> impl Scene {
     bsn! {
         @FeathersButton
@@ -500,6 +509,7 @@ fn redraw(
         });
         commands.queue_spawn_scene(filter_button(key, format!("{}: {value}", key.name()))).insert(ChildOf(bar));
     }
+    commands.queue_spawn_scene(map_button()).insert(ChildOf(bar));
     let mut new = commands.queue_spawn_scene(act_button("+ new task".into(), Act::New));
     new.insert(ChildOf(bar));
     if !live {

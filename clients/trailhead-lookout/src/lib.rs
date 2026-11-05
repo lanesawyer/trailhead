@@ -9,6 +9,7 @@ pub mod connect;
 pub mod connection;
 pub mod factory;
 pub mod inspector;
+pub mod map;
 pub mod mirror;
 pub mod net;
 pub mod sync;
