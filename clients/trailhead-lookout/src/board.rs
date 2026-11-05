@@ -18,6 +18,7 @@ use crate::author::Act;
 use crate::connection::{Connection, ConnectionStatus};
 use crate::inspector::{Selection, Subject};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
+use crate::widgets;
 use crate::widgets::{
     Icon, Picked, ScrollBoth, badge, button, card as card_shell, card_row, card_title, card_under, chip, field, select,
     size, space, text as label_text, token, tool_button,
@@ -34,6 +35,14 @@ pub enum View {
 /// Status columns in lifecycle order.
 pub const STATUSES: [&str; 7] = ["open", "in_progress", "needs_input", "in_review", "approved", "done", "cancelled"];
 
+/// The statuses nothing more happens in; their columns are hidden unless asked for.
+pub const CLOSED: [&str; 2] = ["done", "cancelled"];
+
+/// How many cards a column builds at first, and how many more each "show more" adds. A column holds hundreds
+/// (`open` held 366 on 2026-11-05) and every card is a dozen entities, so building them all would make each redraw
+/// cost in proportion to the backlog.
+pub const PAGE: usize = 40;
+
 /// What the board shows. `None` means all. `project` and `parent` are keys (`TRAIL`, `TRAIL-102`); `holder` is
 /// the id of whoever holds the claim.
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
@@ -42,6 +51,8 @@ pub struct Filter {
     pub status: Option<String>,
     pub parent: Option<String>,
     pub holder: Option<String>,
+    /// Show the closed columns (done, cancelled) too. They are left off unless a status is chosen or this is set.
+    pub closed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,7 +220,8 @@ fn s<'a>(v: &'a Value, key: &str) -> &'a str {
 }
 
 /// Groups the tasks passing `filter` into one column per status (empty ones included, unless a status is
-/// chosen), with subtasks under their parent, and works out what each filter can offer.
+/// chosen; done and cancelled only when chosen or `closed`), with subtasks under their parent, and works out
+/// what each filter can offer.
 pub fn build(input: Input, filter: &Filter) -> BoardView {
     let project_key: HashMap<&str, &str> = input.projects.iter().map(|p| (s(p, "id"), s(p, "key"))).collect();
     let task_key: HashMap<&str, &str> = input.tasks.iter().map(|t| (s(t, "id"), s(t, "key"))).collect();
@@ -273,7 +285,9 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
     let shown: Vec<&Value> = input.tasks.iter().filter(|t| passes(t)).collect();
     let mut columns = Vec::new();
     for status in STATUSES {
-        if filter.status.as_deref().is_some_and(|f| f != status) {
+        if filter.status.as_deref().is_some_and(|f| f != status)
+            || (filter.status.is_none() && !filter.closed && CLOSED.contains(&status))
+        {
             continue;
         }
         let mut here: Vec<&Value> = shown.iter().copied().filter(|t| s(t, "status") == status).collect();
@@ -399,6 +413,7 @@ impl Plugin for BoardUiPlugin {
             .add_systems(OnEnter(View::Board), spawn_panel)
             .add_systems(OnExit(View::Board), despawn_panel)
             .init_resource::<BoardScroll>()
+            .init_resource::<Shown>()
             .add_systems(Update, (remember_scroll, redraw, redraw_header).chain().run_if(in_state(View::Board)));
     }
 }
@@ -435,34 +450,57 @@ fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<BoardPanel>>)
     }
 }
 
-fn text(commands: &mut Commands, parent: Entity, line: String, color: Color, indent: usize) {
-    commands.spawn((
-        Text::new(line),
-        TextColor(color),
-        Node { margin: UiRect::left(px(16 * indent)), ..default() },
-        ChildOf(parent),
-    ));
-}
-
 /// The header bar, which lives across redraws of the columns so an open dropdown isn't closed under the pointer.
 #[derive(Component)]
 struct HeaderBar;
 
-/// Where the board's columns are scrolled to, kept across redraws: each redraw builds a new scrolling node, which
-/// would start back at the left edge.
+/// What the cards of one column build now: the first `limit` of them, and how many are left out.
+pub fn visible(cards: &[Card], limit: usize) -> (&[Card], usize) {
+    let shown = limit.min(cards.len());
+    (&cards[..shown], cards.len() - shown)
+}
+
+/// How many cards each column has been asked to build, by status; a column not in it builds [`PAGE`].
 #[derive(Resource, Default)]
-struct BoardScroll(Vec2);
+struct Shown(HashMap<String, usize>);
+
+impl Shown {
+    fn limit(&self, status: &str) -> usize {
+        self.0.get(status).copied().unwrap_or(PAGE)
+    }
+
+    fn more(&mut self, status: &str) {
+        let next = self.limit(status) + PAGE;
+        self.0.insert(status.to_string(), next);
+    }
+}
+
+/// Where the board is scrolled to, kept across redraws: each redraw builds new scrolling nodes, which would start
+/// back at the top left.
+#[derive(Resource, Default)]
+struct BoardScroll {
+    board: Vec2,
+    columns: HashMap<String, f32>,
+}
 
 /// The node holding the columns, which scrolls both ways.
 #[derive(Component)]
 struct BoardColumns;
 
+/// The scrolling body of the column for this status.
+#[derive(Component)]
+struct ColumnBody(String);
+
 fn remember_scroll(
-    columns: Query<&ScrollPosition, (With<BoardColumns>, Changed<ScrollPosition>)>,
+    board: Query<&ScrollPosition, (With<BoardColumns>, Changed<ScrollPosition>)>,
+    columns: Query<(&ColumnBody, &ScrollPosition), Changed<ScrollPosition>>,
     mut kept: ResMut<BoardScroll>,
 ) {
-    if let Some(position) = columns.iter().next() {
-        kept.0 = position.0;
+    if let Some(position) = board.iter().next() {
+        kept.board = position.0;
+    }
+    for (column, position) in &columns {
+        kept.columns.insert(column.0.clone(), position.y);
     }
 }
 
@@ -538,14 +576,13 @@ fn redraw_header(
         new.insert(InteractionDisabled);
     }
     let (tone, words, hint) = connection_chip(*connection.get(), &status);
-    commands
-        .queue_spawn_scene(chip(tone, words, hint))
-        .insert((ChildOf(bar), Node { margin: UiRect::left(Val::Auto), ..default() }));
+    commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(bar)));
+    commands.queue_spawn_scene(chip(tone, words, hint)).insert(ChildOf(bar));
     *drawn = Some(now);
 }
 
-/// Redraws the whole panel when the view, filter or connection changes: the board is small enough that diffing it
-/// isn't worth the code.
+/// Redraws the whole panel when the view, filter, connection or a column's page changes. Each column builds at most
+/// [`PAGE`] cards at a time, so a redraw costs the same however long the backlog.
 #[allow(clippy::too_many_arguments)]
 fn redraw(
     view: Res<BoardView>,
@@ -553,6 +590,7 @@ fn redraw(
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,
     scroll: Res<BoardScroll>,
+    shown: Res<Shown>,
     panel: Single<(Entity, Option<&Children>), With<BoardPanel>>,
     header: Query<(), With<HeaderBar>>,
     mut commands: Commands,
@@ -560,7 +598,13 @@ fn redraw(
 ) {
     let (panel, children) = *panel;
     let fresh = *drawn != Some(panel);
-    if !(fresh || view.is_changed() || filter.is_changed() || connection.is_changed() || status.is_changed()) {
+    if !(fresh
+        || view.is_changed()
+        || filter.is_changed()
+        || shown.is_changed()
+        || connection.is_changed()
+        || status.is_changed())
+    {
         return;
     }
     *drawn = Some(panel);
@@ -568,35 +612,39 @@ fn redraw(
         commands.entity(*child).despawn();
     }
     let live = *connection.get() == Connection::Live;
-    let ink = if live { Color::WHITE } else { Color::srgb(0.45, 0.45, 0.45) };
 
     // Columns past the window's edge are reached by scrolling sideways (Shift + wheel, or a touchpad swipe), and a
-    // long column by scrolling down. TRAIL-799 gives each column its own vertical scroll.
+    // long column by scrolling down on its own.
     let columns = commands
         .spawn((
             Node {
-                column_gap: px(12),
-                align_items: AlignItems::FlexStart,
+                column_gap: px(space::GROUPS),
+                align_items: AlignItems::Stretch,
                 flex_grow: 1.0,
                 min_height: px(0),
-                overflow: Overflow::scroll(),
+                overflow: Overflow::scroll_x(),
                 ..default()
             },
             BoardColumns,
             ScrollBoth,
-            ScrollPosition(scroll.0),
+            ScrollPosition(scroll.board),
             ChildOf(panel),
         ))
         .id();
     for column in &view.columns {
-        let col = commands
-            .spawn((
-                Node { flex_direction: FlexDirection::Column, width: px(260), row_gap: px(4), ..default() },
-                ChildOf(columns),
-            ))
-            .id();
-        text(&mut commands, col, format!("{} ({})", column.status, column.cards.len()), ink, 0);
-        for card in &column.cards {
+        let (cards, hidden) = visible(&column.cards, shown.limit(&column.status));
+        let col = widgets::column(
+            &mut commands,
+            columns,
+            &column.status,
+            column.cards.len(),
+            scroll.columns.get(&column.status).copied().unwrap_or_default(),
+        );
+        commands.entity(col).insert(ColumnBody(column.status.clone()));
+        if column.cards.is_empty() {
+            commands.queue_spawn_scene(widgets::column_empty()).insert(ChildOf(col));
+        }
+        for card in cards {
             let shell = commands.queue_spawn_scene(card_shell(card.depth)).insert(ChildOf(col)).id();
             let subject = Subject::Task(card.id.clone());
             commands.entity(shell).observe(move |_: On<Activate>, mut selection: ResMut<Selection>| {
@@ -625,6 +673,12 @@ fn redraw(
                     tool.insert(InteractionDisabled);
                 }
             }
+        }
+        if hidden > 0 {
+            let status = column.status.clone();
+            let label = format!("Show {} more", hidden.min(PAGE));
+            let mut more = commands.queue_spawn_scene(button(label, None, ButtonVariant::Normal));
+            more.insert(ChildOf(col)).observe(move |_: On<Activate>, mut shown: ResMut<Shown>| shown.more(&status));
         }
     }
 }
@@ -677,7 +731,7 @@ mod tests {
 
     #[test]
     fn groups_by_status_with_subtasks_under_their_parent() {
-        let view = run(&Filter::default());
+        let view = run(&Filter { closed: true, ..Default::default() });
         assert_eq!(view.columns.len(), STATUSES.len());
         // TRAIL-105 is a subtask of TRAIL-102 in the same column, so it nests under it.
         assert_eq!(keys(&view, "open"), [("TRAIL-102".into(), 0), ("TRAIL-105".into(), 1)]);
@@ -745,6 +799,46 @@ mod tests {
     }
 
     #[test]
+    fn done_and_cancelled_are_hidden_until_asked_for() {
+        let names = |f: Filter| run(&f).columns.into_iter().map(|c| c.status).collect::<Vec<_>>();
+        assert_eq!(names(Filter::default()), ["open", "in_progress", "needs_input", "in_review", "approved"]);
+        assert_eq!(names(Filter { closed: true, ..Default::default() }), STATUSES);
+        assert_eq!(names(Filter { status: Some("cancelled".into()), ..Default::default() }), ["cancelled"]);
+    }
+
+    fn many(n: usize) -> Vec<Card> {
+        (0..n)
+            .map(|i| Card {
+                id: format!("t{i}"),
+                key: format!("TRAIL-{i}"),
+                title: String::new(),
+                parent: None,
+                depth: 0,
+                badges: vec![],
+                actions: vec![],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_column_builds_one_page_and_counts_the_rest() {
+        let cards = many(366);
+        let (shown, hidden) = visible(&cards, PAGE);
+        assert_eq!((shown.len(), hidden), (PAGE, 366 - PAGE));
+        assert_eq!(shown[0].key, "TRAIL-0");
+        // Show more adds a page, in the same order.
+        let mut asked = Shown::default();
+        assert_eq!(asked.limit("open"), PAGE);
+        asked.more("open");
+        let (shown, hidden) = visible(&cards, asked.limit("open"));
+        assert_eq!((shown.len(), hidden), (2 * PAGE, 366 - 2 * PAGE));
+        assert_eq!(shown[PAGE].key, format!("TRAIL-{PAGE}"));
+        // Other columns are untouched, and a short one has nothing hidden.
+        assert_eq!(asked.limit("done"), PAGE);
+        assert_eq!(visible(&many(3), PAGE).1, 0);
+        assert!(visible(&[], PAGE).0.is_empty());
+    }
+    #[test]
     fn filters_narrow_the_board() {
         let by = |f: Filter| -> Vec<String> {
             run(&f).columns.iter().flat_map(|c| c.cards.iter().map(|c| c.key.clone())).collect()
@@ -755,7 +849,7 @@ mod tests {
         assert_eq!(by(Filter { holder: Some("a1".into()), ..Default::default() }), ["TRAIL-103"]);
         let none = Filter { project: Some("OPS".into()), holder: Some("a1".into()), ..Default::default() };
         assert!(by(none).is_empty());
-        // Choosing a status leaves one column.
+        // Choosing a status leaves one column, even a closed one.
         assert_eq!(run(&Filter { status: Some("done".into()), ..Default::default() }).columns.len(), 1);
     }
 
@@ -816,6 +910,7 @@ mod tests {
         assert_eq!(view.columns.iter().map(|c| c.cards.len()).sum::<usize>(), 1);
 
         // An event moves the task to another column.
+        app.world_mut().resource_mut::<Filter>().closed = true;
         app.world_mut().write_message(SyncItem::Event(json!({
             "id": 6, "entity": "task", "entity_id": "t200", "kind": "task.updated",
             "after": {"id": "t200", "key": "OPS-1", "project_id": "p2", "status": "done", "priority": 2, "version": 2},
