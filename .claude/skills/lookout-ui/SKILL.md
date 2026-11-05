@@ -1,0 +1,78 @@
+---
+name: lookout-ui
+description: 'Build or change UI in Lookout (clients/trailhead-lookout), the factory''s Bevy app, the way it is meant to look and work: shared feathers widgets used everywhere, theme tokens, named sizes and spacing, Lucide icons, layering, and how to check it. Use when: adding or restyling a button, card, column, dropdown, field, panel, menu or view in Lookout, or anything under clients/trailhead-lookout/src.'
+argument-hint: 'What the UI does, and which view it lives in'
+---
+
+# Lookout UI
+
+The design is in `docs/factory/ui.md#look-and-components`. These rules keep the app consistent. Most of them come from
+bugs that built cleanly and failed silently.
+
+## 1. Use the kit, or grow it
+
+Every control and surface comes from `clients/trailhead-lookout/src/widgets/`, one widget to a file, re-exported from
+`widgets/mod.rs`. Before you write a `Node` with a background, a button, a dropdown or a text style in a view, look
+there.
+
+- **The kit has it:** call it. Don't copy its insides into the view and tweak them.
+- **It nearly fits:** add an option to the widget (a variant, a prop) and use that. Two similar buttons, cards or
+  fields that drift apart are a bug.
+- **It doesn't exist:** add a widget file to `widgets/`, built on feathers, with a doc comment saying what it's for.
+  Then use it in the view. A widget never imports a view module.
+
+Much of the kit is ported from Lane's `bevy-data-explorer` (`~/Dev/bevy-data-explorer/src/widgets/`, also on GitHub at
+lanesawyer/bevy-data-explorer). Porting a widget from there is better than writing a new one.
+
+## 2. Build on feathers
+
+`bevy_feathers` 0.20 has buttons (`ButtonVariant`: normal, primary), tool buttons, menu buttons and popups,
+`FeathersSelect` for dropdowns, text inputs, checkboxes, toggles, sliders, scrollbars, list views, and panes. The kit
+wraps these; it doesn't draw its own where feathers has one.
+
+- **A fixed set of choices** (a filter, a priority, a status) is a dropdown (`FeathersSelect`), never a button that
+  cycles through values.
+- **A button that opens a menu** shows a chevron. One that acts when pressed doesn't.
+- **One primary button per surface** ("New task", "Save"). Everything else is normal or an icon-only tool button with a
+  tooltip.
+
+## 3. Colors, sizes, spacing, icons
+
+- **Colors are theme tokens** (`ThemeBackgroundColor`, `ThemeTextColor`, `ThemeBorderColor`), never `Color::srgb(..)`
+  literals. Lookout's own colors (one per status column, grades, priorities, warnings) are tokens defined once where
+  the theme is built. A missing token renders fuchsia (TRAIL-777): if you see magenta, a token isn't in the theme.
+- **Text sizes** come from the kit's `size` scale and **gaps, padding and margins** from its `space` scale, named for
+  what they're for. A test fails on a literal. If no name fits, add one with a doc comment.
+- **Icons** are `Icon` variants (Lucide glyphs from the embedded font). The text font has no icon glyphs, so anything
+  else shows as a box or a question mark. Adding an icon is one variant; take its codepoint from the same
+  `lucide-static` release the font came from.
+- **Long text is clamped or truncated** on cards and in lists. Full handoffs, questions and descriptions belong to the
+  inspector.
+
+## 4. Layering and input
+
+- **The board fills the window and is spawned after the overlays**, so an overlay without a `GlobalZIndex` loses every
+  click to it, even though it draws on top (TRAIL-776). Use the kit's layer constants: board, connect panel,
+  inspector, then forms and menus on top.
+- Presses arrive as feathers `Activate` events, not `Interaction`.
+- `system_clipboard` must stay in the Bevy features, or no text field can paste.
+
+## 5. Plugins and tests
+
+- **Logic and drawing are separate plugins.** `XPlugin` holds the state and observers and runs under `MinimalPlugins`
+  in tests; `XUiPlugin` spawns and draws, and only `main.rs` adds it.
+- **The app wires its own dependencies** in `main.rs` (`DefaultPlugins`, `FeathersPlugins`, the theme, winit
+  settings). A plugin never adds `StatesPlugin` or other app-level plugins for its tests' sake; the test app adds what
+  `MinimalPlugins` lacks (TRAIL-774).
+- **Test the logic headless.** Pure functions that turn the mirror into a view model (`board::build`,
+  `inspector::build`) carry most of the tests.
+
+## 6. Check it in the window
+
+No headless test builds what `main.rs` builds, and the sandbox can't open a window. Before calling UI work done:
+
+- `cargo clippy -p trailhead-lookout --all-targets -- -D warnings` and `cargo test -p trailhead-lookout`.
+- With a display: `timeout 15 cargo run -p trailhead-lookout` and look for panics and
+  `bevy_feathers::theme: Theme color ... not found` in the log.
+- In a factory sandbox, say in your summary which parts nobody has seen yet. Every `clients/**` PR gets a human look
+  before it merges.
