@@ -19,6 +19,7 @@ use crate::author::{Act, act_button};
 use crate::connection::{Connection, ConnectionStatus, LocalEndpoint};
 use crate::inspector::{Selection, Subject};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
+use crate::widgets::ScrollBoth;
 use crate::widgets::{Icon, badge, card as card_shell, card_row, card_title, card_under, token, tool_button};
 
 /// The views of the app; the trail map joins the board later.
@@ -378,7 +379,8 @@ impl Plugin for BoardUiPlugin {
             .init_state::<View>()
             .add_systems(OnEnter(View::Board), spawn_panel)
             .add_systems(OnExit(View::Board), despawn_panel)
-            .add_systems(Update, redraw.run_if(in_state(View::Board)));
+            .init_resource::<BoardScroll>()
+            .add_systems(Update, (remember_scroll, redraw).chain().run_if(in_state(View::Board)));
     }
 }
 
@@ -426,6 +428,24 @@ fn filter_button(key: FilterKey, label: String) -> impl Scene {
     }
 }
 
+/// Where the board's columns are scrolled to, kept across redraws: each redraw builds a new scrolling node, which
+/// would start back at the left edge.
+#[derive(Resource, Default)]
+struct BoardScroll(Vec2);
+
+/// The node holding the columns, which scrolls both ways.
+#[derive(Component)]
+struct BoardColumns;
+
+fn remember_scroll(
+    columns: Query<&ScrollPosition, (With<BoardColumns>, Changed<ScrollPosition>)>,
+    mut kept: ResMut<BoardScroll>,
+) {
+    if let Some(position) = columns.iter().next() {
+        kept.0 = position.0;
+    }
+}
+
 /// Redraws the whole panel when the view, filter or connection changes: the board is small enough that diffing it
 /// isn't worth the code.
 #[allow(clippy::too_many_arguments)]
@@ -435,6 +455,7 @@ fn redraw(
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,
     endpoint: Res<LocalEndpoint>,
+    scroll: Res<BoardScroll>,
     panel: Single<(Entity, Option<&Children>), With<BoardPanel>>,
     mut commands: Commands,
     mut drawn: Local<Option<Entity>>,
@@ -485,8 +506,23 @@ fn redraw(
         new.insert(InteractionDisabled);
     }
 
+    // Columns past the window's edge are reached by scrolling sideways (Shift + wheel, or a touchpad swipe), and a
+    // long column by scrolling down. TRAIL-799 gives each column its own vertical scroll.
     let columns = commands
-        .spawn((Node { column_gap: px(12), align_items: AlignItems::FlexStart, ..default() }, ChildOf(panel)))
+        .spawn((
+            Node {
+                column_gap: px(12),
+                align_items: AlignItems::FlexStart,
+                flex_grow: 1.0,
+                min_height: px(0),
+                overflow: Overflow::scroll(),
+                ..default()
+            },
+            BoardColumns,
+            ScrollBoth,
+            ScrollPosition(scroll.0),
+            ChildOf(panel),
+        ))
         .id();
     for column in &view.columns {
         let col = commands
