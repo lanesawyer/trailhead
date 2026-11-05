@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use trailhead_factory::{
     ControlState, FactoryEvent, FactorySnapshot, RunPhase, RunStatus, Sandbox, SandboxState, SandboxStatus, Sequenced,
-    TaskKey, Usd, label,
+    TargetSpend, TaskKey, Usd, label,
 };
 
 use crate::timing::unix_now;
@@ -22,6 +22,7 @@ struct Inner {
     sandboxes: Vec<SandboxStatus>,
     runs: Vec<RunStatus>,
     holding: Option<String>,
+    targets: Vec<TargetSpend>,
     seq: u64,
 }
 
@@ -39,6 +40,7 @@ impl Default for StatusBoard {
                 sandboxes: Vec::new(),
                 runs: Vec::new(),
                 holding: None,
+                targets: Vec::new(),
                 seq: 0,
             }),
             tx: broadcast::channel(BACKLOG).0,
@@ -77,6 +79,7 @@ fn snapshot_locked(inner: &Inner) -> FactorySnapshot {
         sandboxes,
         runs,
         holding: inner.holding.clone(),
+        targets: inner.targets.clone(),
         seq: inner.seq,
     }
 }
@@ -120,6 +123,12 @@ impl StatusBoard {
             Some(FactoryEvent::Holding { holding })
         });
         changed
+    }
+
+    /// Sets the spend of each capped target. It goes in the snapshot and not the stream, because it changes with the
+    /// clock and not with an event.
+    pub fn targets(&self, targets: Vec<TargetSpend>) {
+        self.inner.lock().unwrap().targets = targets;
     }
 
     pub fn control(&self, control: ControlState) {

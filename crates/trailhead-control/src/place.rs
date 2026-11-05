@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use trailhead_factory::{Daemon, Labels, ModelProvider, Role, Sandbox, Task, TaskKey, label};
+use trailhead_factory::{Daemon, Labels, ModelProvider, Role, Sandbox, TargetSpend, Task, TaskKey, label};
 
 use tokio::time::Instant;
 
@@ -110,11 +110,13 @@ impl Factory {
     fn capped(&self) -> HashSet<String> {
         let (now, today) = (Instant::now(), spend::today());
         let mut capped = HashSet::new();
+        let mut board = Vec::new();
         let mut logged = self.capped.lock().unwrap();
         for p in &self.targets {
             let Some(spend) = &p.target.spend else { continue };
             let name = &p.target.name;
             let spent = self.ledger.spent(name, now, &today);
+            board.push(TargetSpend { target: name.clone(), spent, cap: spend.daily, capped: spent >= spend.daily });
             if spent >= spend.daily {
                 if logged.insert(name.clone()) {
                     tracing::warn!(target = %name, %spent, cap = %spend.daily, "the daily spend cap is reached; taking no new runs on this target, and running ones finish");
@@ -124,6 +126,7 @@ impl Factory {
                 tracing::info!(target = %name, %spent, cap = %spend.daily, "under the daily spend cap again; placing runs on this target");
             }
         }
+        self.status.targets(board);
         capped
     }
 

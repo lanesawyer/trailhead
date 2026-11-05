@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use trailhead_control::{Factory, Host, Placed};
 use trailhead_factory::{
-    Compute, FactoryConfig, Labels, Role, SandboxSpec, Status, Target, TaskKey, Tracker, label, run_name,
+    Compute, FactoryConfig, Labels, Role, SandboxSpec, Status, Target, TaskKey, Tracker, Usd, label, run_name,
 };
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
 
@@ -294,6 +294,10 @@ async fn a_target_at_its_daily_cap_takes_no_new_runs() {
     assert_eq!(ran(&t.local, Role::Worker), vec![first.0.clone()]);
     assert!(ran(&t.cloud, Role::Worker).is_empty(), "the cap kept the second task off the cloud");
     assert_eq!(t.tracker.task(&second).status, Status::Open);
+    let board = t.factory.status().snapshot().targets;
+    assert_eq!(board.len(), 1, "{board:?}");
+    assert_eq!((board[0].target.as_str(), board[0].capped), ("cloud", true));
+    assert_eq!((board[0].spent, board[0].cap), (Usd(5_000_000), Usd(5_000_000)));
 }
 
 #[tokio::test]
