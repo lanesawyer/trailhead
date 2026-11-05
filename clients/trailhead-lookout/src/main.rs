@@ -9,6 +9,7 @@ use trailhead_lookout::board::BoardUiPlugin;
 use trailhead_lookout::connect::ConnectUiPlugin;
 use trailhead_lookout::connection::{ConnectionPlugin, SendNet};
 use trailhead_lookout::inspector::InspectorUiPlugin;
+use trailhead_lookout::map::MapUiPlugin;
 use trailhead_lookout::net::{NetCommand, NetConfig};
 
 /// `lookout [<control plane endpoint id>]`, with `LOOKOUT_TOKEN` to sign in with a pasted user token and
@@ -38,7 +39,7 @@ fn main() {
         .insert_resource(trailhead_lookout::widgets::theme())
         .add_plugins(trailhead_lookout::widgets::WidgetsPlugin)
         .add_plugins(ConnectionPlugin::new(config, target))
-        .add_plugins((LookoutPlugin, BoardUiPlugin, AuthorUiPlugin, InspectorUiPlugin, ConnectUiPlugin))
+        .add_plugins((LookoutPlugin, BoardUiPlugin, MapUiPlugin, AuthorUiPlugin, InspectorUiPlugin, ConnectUiPlugin))
         .add_systems(Startup, |mut authoring: ResMut<Authoring>| {
             if let Some(queue) = std::env::var("LOOKOUT_QUEUE").ok().filter(|q| !q.is_empty()) {
                 authoring.queue = queue;
