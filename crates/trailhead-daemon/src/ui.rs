@@ -476,6 +476,7 @@ mod tests {
             sandboxes: vec![],
             runs: vec![],
             holding: None,
+            targets: Vec::new(),
             seq: 4,
         };
         let frames = [

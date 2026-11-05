@@ -201,7 +201,7 @@ impl Factory {
         // behind it from starting (TRAIL-756).
         let startable = ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key));
         for task in startable.take(room) {
-            let Some(target) = self.place(&mut survey) else {
+            let Some(target) = self.place_task(&mut survey, &task) else {
                 tracing::info!("{}", messages::no_target_has_room(&task.key.0));
                 continue;
             };
@@ -344,14 +344,14 @@ impl Factory {
         }
     }
 
-    /// The ready tasks that are the factory's work, in the tracker's order. Under a queue that means graded ones: grading a task is
+    /// The ready tasks that are the factory's work, in the tracker's order. Then reworks of open PRs go first within a priority (below). Under a queue that means graded ones: grading a task is
     /// what queues it. An ungraded one is skipped and reported once, in the log and on the task, rather than on every
     /// poll (`docs/factory/review.md#grades`).
     async fn ready_graded(&self) -> Result<Vec<Task>> {
         let queue = self.queue();
         // With no queue the whole project is the factory's by configuration, so a grade is not what releases a task.
         if queue.is_empty() {
-            return self.tracker.ready(self.project(), &[], usize::MAX).await;
+            return Ok(in_start_order(self.tracker.ready(self.project(), &[], usize::MAX).await?));
         }
         let ready = self.tracker.ready(self.project(), &queue, usize::MAX).await?;
         let (graded, ungraded): (Vec<Task>, Vec<Task>) = ready.into_iter().partition(|t| t.grade.is_some());
@@ -361,7 +361,7 @@ impl Factory {
         for task in &graded {
             self.clear_ungraded(task).await;
         }
-        Ok(graded)
+        Ok(in_start_order(graded))
     }
 
     /// A task that has been graded is no longer ungraded, so it's told again if its grade is ever cleared.
@@ -507,7 +507,7 @@ impl Factory {
         let ready = self.ready_graded().await?;
         let mut survey = self.survey().await;
         for task in ready.into_iter().filter(|t| self.setback_over(&t.key)).take(room) {
-            let Some(target) = self.place(&mut survey) else {
+            let Some(target) = self.place_task(&mut survey, &task) else {
                 tracing::info!("{}", messages::no_target_has_room(&task.key.0));
                 continue;
             };
@@ -588,6 +588,14 @@ pub(crate) struct Due {
 /// tasks'; a full host cap alone isn't their doing, since the other repos' runs free their places unaided.
 fn parked_fill_repo_cap(others: usize, max_sandboxes: usize) -> bool {
     others > 0 && others >= max_sandboxes
+}
+
+/// Puts the ready tasks in the order runs start: by priority, and within a priority a rework of a task whose PR is
+/// open (changes requested for a conflict, CI or a review) before fresh tasks, since it is nearly done and goes stale
+/// while it waits (TRAIL-868). The sort is stable, so the tracker's order (due date, age) holds among equals.
+fn in_start_order(mut ready: Vec<Task>) -> Vec<Task> {
+    ready.sort_by_key(|t| (t.priority, !(t.run.pr.is_some() && t.run.changes_requested.is_some())));
+    ready
 }
 
 #[cfg(test)]

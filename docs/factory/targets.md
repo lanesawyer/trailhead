@@ -38,7 +38,7 @@ A `Factory` holds a `Placed` per target: its `Target`, `Compute`, daemon and pro
 
 **Placement.** For each ready task, in order, take the first target that is available, under its `max_sandboxes` and under its spend cap. If none qualifies, the task waits. Reviews are placed the same way, on their own. Built so far: reachable and under `max_sandboxes`, which counts the repo's worker and reviewer sandboxes on the target (idle pooled ones don't count). Targets are tried by `priority`, lowest first, then by name; `available` and the spend cap arrive with TRAIL-507 and TRAIL-506. A review that finds no room is left due, and reconcile starts it when a place frees up.
 
-**What stays put.** A parked or reworked task whose sandbox still exists stays on that target, because the sandbox holds its state. The task's `factory` metadata records the target beside `host`.
+**What stays put.** A parked or reworked task whose sandbox still exists stays on that target, because the sandbox holds its state. Built (TRAIL-635): placement prefers the recorded `target` when a worker sandbox for the task still exists there, and falls back to priority otherwise. The task's `factory` metadata records the target beside `host`.
 
 **Pools.** Each target has its own pool. Names carry the target, because `trailhead-w1` could otherwise exist on both: `<repo>-<target>-w<n>`. The one target of a `[factory.compute]` file is called `default` and keeps `<repo>-w<n>`, so its existing sandboxes aren't orphaned. Every sandbox also carries a `target` label, and a name must be lowercase letters, digits and single hyphens, and not `default`.
 
@@ -56,7 +56,7 @@ So the control plane also keeps its own estimate, and the cap uses the higher of
 
 At the cap, the target takes no new runs, those running finish, and the log and `factory status` say so. So the cap can be passed by what's already running. It covers compute only: storage and a plan's included allowance aren't counted, so it can differ from the invoice.
 
-The estimate is in `<data dir>/factory/spend-<repo>.json`, as microdollars by target for one local day; a file from an earlier day, or one that can't be read, starts the day over. A run counts from the moment it is placed until it ends, so a parked task's idle sandbox, which Sprites pause, costs nothing. `factory status` doesn't show the spend yet; the control plane logs when a target reaches the cap and when it is under it again.
+The estimate is in `<data dir>/factory/spend-<repo>.json`, as microdollars by target for one local day; a file from an earlier day, or one that can't be read, starts the day over. A run counts from the moment it is placed until it ends, so a parked task's idle sandbox, which Sprites pause, costs nothing. `factory status` lists each capped target with its spend today, its cap and whether it is capped (TRAIL-654), as of the last placement pass; the control plane also logs when a target reaches the cap and when it is under it again.
 
 The cap is per repo for now. A host-wide cap belongs with TRAIL-168 and TRAIL-169's user config.
 

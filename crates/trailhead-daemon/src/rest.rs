@@ -86,6 +86,7 @@ fn task(t: &Value, claim: &Value) -> Result<Task> {
         description: t["description"].as_str().unwrap_or_default().to_string(),
         status: status(t["status"].as_str().unwrap_or_default())?,
         grade: t["grade"].as_u64().and_then(|g| u8::try_from(g).ok()),
+        priority: t["priority"].as_i64().unwrap_or(3),
         holder,
         run,
         key: TaskKey(key),

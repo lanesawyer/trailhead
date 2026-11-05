@@ -228,6 +228,10 @@ fn render_live(snapshot: &FactorySnapshot) -> String {
     if let Some(why) = &snapshot.holding {
         let _ = writeln!(out, "  holding merges: {why}");
     }
+    for t in &snapshot.targets {
+        let state = if t.capped { "capped, taking no new runs" } else { "under its cap" };
+        let _ = writeln!(out, "  target {}: spent {} of {} today, {state}", t.target, t.spent, t.cap);
+    }
     let _ = writeln!(out, "\nRuns in flight ({})", snapshot.runs.len());
     for r in &snapshot.runs {
         let last = r.last_tool.as_ref().map_or(String::new(), |t| format!(", last tool {t}"));
@@ -356,6 +360,7 @@ mod tests {
             description: String::new(),
             status,
             grade: Some(2),
+            priority: 3,
             holder: None,
             run,
         }
@@ -449,7 +454,7 @@ mod tests {
 
     #[test]
     fn a_running_control_plane_adds_its_runs_and_sandbox_states() {
-        use trailhead_factory::{ControlState, RunPhase, RunStatus};
+        use trailhead_factory::{ControlState, RunPhase, RunStatus, TargetSpend};
         let snapshot = FactorySnapshot {
             control: ControlState::Reattaching { task: TaskKey("TRAIL-7".into()) },
             last_error: Some((0, "reconcile failed: boom\nmore".into())),
@@ -473,11 +478,18 @@ mod tests {
                 started: 0,
             }],
             holding: Some("#306 has auto-merge on".into()),
+            targets: vec![TargetSpend {
+                target: "sprites".into(),
+                spent: Usd::dollars(5.0),
+                cap: Usd::dollars(5.0),
+                capped: true,
+            }],
             seq: 12,
         };
         let out = render_live(&snapshot);
         assert!(out.contains("Control plane: reattaching to TRAIL-7"), "{out}");
         assert!(out.contains("holding merges: #306 has auto-merge on"), "{out}");
+        assert!(out.contains("target sprites: spent $5.0000 of $5.0000 today, capped"), "{out}");
         assert!(out.contains("last error ("), "{out}");
         assert!(out.contains(": reconcile failed: boom\n"), "{out}");
         assert!(out.contains("TRAIL-7 preparing (cold)"), "{out}");

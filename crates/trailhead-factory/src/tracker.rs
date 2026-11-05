@@ -75,6 +75,9 @@ pub struct Task {
     pub status: Status,
     /// The task's risk grade, 1 to 4. The factory works only graded tasks.
     pub grade: Option<u8>,
+    /// The task's priority (1 is highest). `Tracker::ready` raises it to the highest among the task and the open tasks
+    /// it blocks, directly or through a chain, so a low-priority blocker is listed as urgent as the work it holds up.
+    pub priority: i64,
     /// The agent holding the claim, if any.
     pub holder: Option<String>,
     /// The `factory` object in the task's metadata ([`RunUpdate`] fields).

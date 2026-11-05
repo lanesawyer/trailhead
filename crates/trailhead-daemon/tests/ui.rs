@@ -26,6 +26,7 @@ impl StatusFeed for TestFeed {
             sandboxes: vec![],
             runs: vec![],
             holding: None,
+            targets: Vec::new(),
             seq: 7,
         };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]

@@ -101,6 +101,18 @@ pub struct RunStatus {
     pub started: i64,
 }
 
+/// A paid target's spend against its daily cap (`docs/factory/targets.md#spend`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetSpend {
+    pub target: String,
+    /// What it has cost today, estimated.
+    pub spent: Usd,
+    /// The daily cap.
+    pub cap: Usd,
+    /// Whether it has reached the cap, so takes no new runs.
+    pub capped: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactorySnapshot {
     pub control: ControlState,
@@ -112,6 +124,10 @@ pub struct FactorySnapshot {
     /// (TRAIL-804).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holding: Option<String>,
+    /// Today's spend on each target that has a daily cap. Not on the event stream: it is as fresh as the last
+    /// placement pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<TargetSpend>,
     /// The sequence number of the last event the snapshot includes, so a client can join the stream after it.
     pub seq: u64,
 }

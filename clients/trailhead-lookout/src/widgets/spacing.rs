@@ -32,6 +32,8 @@ pub mod space {
     pub const ROWS: f32 = step::S;
     /// Groups of rows within one panel, and the board's columns side by side.
     pub const GROUPS: f32 = step::M;
+    /// Between a column's cards and its scrollbar.
+    pub const SCROLLBAR_GAP: f32 = step::XS;
     /// How far a subtask's card sits in from its parent's.
     pub const INDENT: f32 = step::M;
 
@@ -90,6 +92,7 @@ mod tests {
             space::ROWS,
             space::GROUPS,
             space::INDENT,
+            space::SCROLLBAR_GAP,
             space::BADGE_INSET,
             space::CONTROL_INSET,
             space::PANEL_INSET,
