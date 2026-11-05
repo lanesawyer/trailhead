@@ -8,18 +8,20 @@
 //! `done` for the same reason.
 //!
 //! [`build`] is a pure function from the mirror's JSON to an [`InspectorView`], and [`plan`] turns an [`Action`] into
-//! the [`Request`] it sends, so both are tested without a window. The answer to a question comes from [`AnswerDraft`]
-//! until the forms (TRAIL-698) bring a text input to fill it.
+//! the [`Request`] it sends, so both are tested without a window. "answer" opens the answer form from
+//! [`crate::author`], as the board's does; "resolve" closes a question without one.
 
 use std::collections::HashMap;
 
 use bevy::feathers::controls::FeathersButton;
 use bevy::feathers::display::caption;
 use bevy::prelude::*;
+use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::Activate;
 use reqwest::Method;
 use serde_json::{Value, json};
 
+use crate::author::{Act, act_button};
 use crate::board::Input;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::{Connection, ConnectionStatus};
@@ -35,10 +37,6 @@ pub enum Subject {
 
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct Selection(pub Option<Subject>);
-
-/// What the "answer" control sends. Empty until something can edit it.
-#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
-pub struct AnswerDraft(pub String);
 
 /// How far back "revert" goes, in hours; stepped through by its button.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,8 +62,8 @@ pub enum Action {
     Cancel,
     /// Move the task to this status.
     Status(String),
-    /// Resolve this question (a comment id), with the draft as the answer when `true`.
-    Answer(String, bool),
+    /// Resolve this question (a comment id) without an answer. Answering opens the form instead.
+    Resolve(String),
     /// Undo the event that last changed the task.
     Undo,
     /// Revert what the holder (an agent id) did in the last `n` hours.
@@ -78,8 +76,7 @@ impl Action {
             Action::Release => "release claim".into(),
             Action::Cancel => "cancel task".into(),
             Action::Status(s) => format!("move to {s}"),
-            Action::Answer(_, true) => "answer".into(),
-            Action::Answer(_, false) => "resolve".into(),
+            Action::Resolve(_) => "resolve".into(),
             Action::Undo => "undo last change".into(),
             Action::Revert(h) => format!("revert last {h}h"),
         }
@@ -88,6 +85,8 @@ impl Action {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Question {
+    /// The task's key, which the answer form needs.
+    pub key: String,
     pub id: String,
     pub body: String,
 }
@@ -221,8 +220,10 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
                 .filter(|c| s(c, "task_id") == id && s(c, "kind") == "question" && c["resolved_at"].is_null())
                 .collect();
             questions.sort_by(|a, b| s(a, "created_at").cmp(s(b, "created_at")));
-            let questions: Vec<Question> =
-                questions.into_iter().map(|q| Question { id: s(q, "id").into(), body: s(q, "body").into() }).collect();
+            let questions: Vec<Question> = questions
+                .into_iter()
+                .map(|q| Question { key: s(task, "key").into(), id: s(q, "id").into(), body: s(q, "body").into() })
+                .collect();
 
             let pr = pr_panel(factory);
             let merge_note = (is_factory && !matches!(status, "done" | "cancelled")).then(|| match &pr {
@@ -241,8 +242,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
                 actions.push(Action::Cancel);
             }
             actions.extend(status_moves(status, is_factory));
-            actions.extend(questions.iter().map(|q| Action::Answer(q.id.clone(), true)));
-            actions.extend(questions.iter().map(|q| Action::Answer(q.id.clone(), false)));
+            actions.extend(questions.iter().map(|q| Action::Resolve(q.id.clone())));
             if latest.contains_key(id) {
                 actions.push(Action::Undo);
             }
@@ -268,7 +268,6 @@ pub fn plan(
     input: Input,
     latest: &HashMap<String, i64>,
     subject: &Subject,
-    draft: &str,
     now: i64,
 ) -> Option<Request> {
     let task = match subject {
@@ -282,10 +281,7 @@ pub fn plan(
         Action::Release => Request::new(Method::POST, path("/release"), None, None),
         Action::Cancel => Request::new(Method::PATCH, path(""), Some(json!({"status": "cancelled"})), version),
         Action::Status(st) => Request::new(Method::PATCH, path(""), Some(json!({"status": st})), version),
-        Action::Answer(comment, with_text) => {
-            let body = with_text.then(|| json!({"answer": draft}));
-            Request::new(Method::POST, format!("/v1/comments/{comment}/resolve"), body, None)
-        }
+        Action::Resolve(comment) => Request::new(Method::POST, format!("/v1/comments/{comment}/resolve"), None, None),
         Action::Undo => {
             let Subject::Task(id) = subject else { return None };
             Request::new(Method::POST, "/v1/undo", Some(json!({"event_id": latest.get(id)?})), None)
@@ -416,7 +412,6 @@ pub struct InspectorPlugin;
 impl Plugin for InspectorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Selection>()
-            .init_resource::<AnswerDraft>()
             .init_resource::<RevertWindow>()
             .init_resource::<Latest>()
             .init_resource::<InspectorState>()
@@ -459,6 +454,9 @@ fn spawn_panel(mut commands: Commands) {
             ..default()
         },
         BackgroundColor(Color::srgb(0.1, 0.1, 0.12)),
+        // Above the board, which fills the window and is spawned later, so it would take every click here; below
+        // the form (10) that "answer" opens.
+        GlobalZIndex(2),
     ));
 }
 
@@ -480,9 +478,8 @@ fn send(world: &mut World, source: Entity, subject: &Subject, action: &Action) {
         rows::<IsAgent>(world),
     );
     let input = Input { projects: &projects, tasks: &tasks, claims: &claims, comments: &comments, agents: &agents };
-    let draft = world.resource::<AnswerDraft>().0.clone();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-    let request = plan(action, input, &world.resource::<Latest>().0, subject, &draft, now);
+    let request = plan(action, input, &world.resource::<Latest>().0, subject, now);
     let outcome = match request {
         Some(request) => {
             world.resource_mut::<Messages<Submit>>().write(Submit { source, request });
@@ -522,7 +519,6 @@ fn redraw(
     state: Res<InspectorState>,
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,
-    draft: Res<AnswerDraft>,
     window: Res<RevertWindow>,
     mut controls: ResMut<Controls>,
     states: Query<&Control>,
@@ -533,7 +529,6 @@ fn redraw(
     if !(state.is_changed()
         || connection.is_changed()
         || status.is_changed()
-        || draft.is_changed()
         || window.is_changed()
         || !changed_controls.is_empty())
     {
@@ -563,7 +558,17 @@ fn redraw(
         line(&mut commands, panel, l.clone(), dim);
     }
     for q in &view.questions {
-        line(&mut commands, panel, format!("? {}", q.body), warn);
+        let row = commands
+            .spawn((Node { column_gap: px(6), align_items: AlignItems::Center, ..default() }, ChildOf(panel)))
+            .id();
+        line(&mut commands, row, format!("? {}", q.body), warn);
+        // The same form the board opens; it saves even after the inspector moves on.
+        let act = Act::Answer { key: q.key.clone(), comment_id: q.id.clone(), question: q.body.clone() };
+        let mut answer = commands.queue_spawn_scene(act_button("answer".into(), act));
+        answer.insert(ChildOf(row));
+        if !live {
+            answer.insert(InteractionDisabled);
+        }
     }
     if let Some(pr) = &view.pr {
         let number = pr.number.map_or(String::new(), |n| format!("#{n} "));
@@ -604,16 +609,9 @@ fn redraw(
         let row = commands
             .spawn((Node { column_gap: px(6), align_items: AlignItems::Center, ..default() }, ChildOf(panel)))
             .id();
-        match &action {
-            Action::Answer(_, true) if draft.0.is_empty() => {
-                line(&mut commands, row, "answer: nothing to send yet (no text input)".into(), dim);
-            }
-            _ => {
-                commands
-                    .queue_spawn_scene(action_button(action.label(), source, view.subject.clone(), action.clone()))
-                    .insert(ChildOf(row));
-            }
-        }
+        commands
+            .queue_spawn_scene(action_button(action.label(), source, view.subject.clone(), action.clone()))
+            .insert(ChildOf(row));
         if matches!(action, Action::Revert(_)) {
             commands
                 .queue_spawn_scene(plain_button("window".into(), |w: &mut World| {
@@ -707,14 +705,7 @@ mod tests {
             assert!(!matches!(a, Action::Status(s) if s == "done" || s == "approved"), "{a:?}");
         }
         assert_eq!(v.questions.len(), 1);
-        for want in [
-            Action::Release,
-            Action::Cancel,
-            Action::Undo,
-            Action::Revert(1),
-            Action::Answer("c1".into(), true),
-            Action::Answer("c1".into(), false),
-        ] {
+        for want in [Action::Release, Action::Cancel, Action::Undo, Action::Revert(1), Action::Resolve("c1".into())] {
             assert!(v.actions.contains(&want), "{want:?}");
         }
         assert!(!v.actions.contains(&Action::Status("in_review".into())));
@@ -750,28 +741,26 @@ mod tests {
     fn actions_become_the_requests_the_api_takes() {
         let f = fixture();
         let t = Subject::Task("t7".into());
-        let p = |a: &Action, d: &str| plan(a, f.input(), &latest(), &t, d, 1_700_000_000).unwrap();
-        let r = p(&Action::Release, "");
+        let p = |a: &Action| plan(a, f.input(), &latest(), &t, 1_700_000_000).unwrap();
+        let r = p(&Action::Release);
         assert_eq!((r.method, r.path.as_str(), r.if_match), (Method::POST, "/v1/tasks/TRAIL-7/release", None));
-        let r = p(&Action::Cancel, "");
+        let r = p(&Action::Cancel);
         assert_eq!((r.method, r.path.as_str(), r.if_match), (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4)));
         assert_eq!(r.body, Some(json!({"status": "cancelled"})));
-        assert_eq!(p(&Action::Status("open".into()), "").body, Some(json!({"status": "open"})));
-        let r = p(&Action::Answer("c1".into(), true), "sqlite");
-        assert_eq!((r.path.as_str(), r.body), ("/v1/comments/c1/resolve", Some(json!({"answer": "sqlite"}))));
-        assert_eq!(p(&Action::Answer("c1".into(), false), "x").body, None);
-        assert_eq!(p(&Action::Undo, "").body, Some(json!({"event_id": 41})));
-        let r = p(&Action::Revert(1), "");
+        assert_eq!(p(&Action::Status("open".into())).body, Some(json!({"status": "open"})));
+        let r = p(&Action::Resolve("c1".into()));
+        assert_eq!((r.path.as_str(), r.body), ("/v1/comments/c1/resolve", None));
+        assert_eq!(p(&Action::Undo).body, Some(json!({"event_id": 41})));
+        let r = p(&Action::Revert(1));
         assert_eq!(
             (r.path.as_str(), r.body),
             ("/v1/revert", Some(json!({"actor_id": "a1", "since": "2023-11-14T21:13:20Z"})))
         );
         // From the agent itself.
-        let r =
-            plan(&Action::Revert(24), f.input(), &latest(), &Subject::Agent("a1".into()), "", 1_700_000_000).unwrap();
+        let r = plan(&Action::Revert(24), f.input(), &latest(), &Subject::Agent("a1".into()), 1_700_000_000).unwrap();
         assert_eq!(r.body.unwrap()["since"], "2023-11-13T22:13:20Z");
         // No event to undo.
-        assert!(plan(&Action::Undo, f.input(), &HashMap::new(), &t, "", 0).is_none());
+        assert!(plan(&Action::Undo, f.input(), &HashMap::new(), &t, 0).is_none());
     }
 
     #[test]
