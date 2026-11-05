@@ -195,9 +195,12 @@ impl Factory {
             return Ok(());
         }
         *self.starved.lock().unwrap() = None;
-        let ready = self.ready_graded(room).await?;
+        let ready = self.ready_graded().await?;
         let mut survey = self.survey().await;
-        for task in ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)) {
+        // Skipped before taking `room`, so a task still backing off at the head of the queue can't keep the ones
+        // behind it from starting (TRAIL-756).
+        let startable = ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key));
+        for task in startable.take(room) {
             let Some(target) = self.place(&mut survey) else {
                 tracing::info!("{}", messages::no_target_has_room(&task.key.0));
                 continue;
@@ -246,7 +249,7 @@ impl Factory {
             return 0;
         }
         due.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let waiting = match self.ready_graded(usize::MAX).await {
+        let waiting = match self.ready_graded().await {
             Ok(ready) => ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)).count(),
             Err(e) => {
                 tracing::warn!(error = %e, "couldn't list the ready tasks to see whether a parked task's sandbox is wanted");
@@ -318,7 +321,7 @@ impl Factory {
     /// With no place left and nothing running, parked tasks are holding the cap. If ready tasks are waiting, say so
     /// loudly, once per change in who waits: the queue stalls until a person answers (TRAIL-538).
     async fn warn_if_starved(&self) {
-        let mut waiting: Vec<TaskKey> = match self.ready_graded(usize::MAX).await {
+        let mut waiting: Vec<TaskKey> = match self.ready_graded().await {
             Ok(ready) => ready.into_iter().map(|t| t.key).collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "couldn't list the ready tasks to see whether parked ones starve them");
@@ -341,16 +344,15 @@ impl Factory {
         }
     }
 
-    /// Up to `room` ready tasks that are the factory's work. Under a queue that means graded ones: grading a task is
+    /// The ready tasks that are the factory's work, in the tracker's order. Under a queue that means graded ones: grading a task is
     /// what queues it. An ungraded one is skipped and reported once, in the log and on the task, rather than on every
     /// poll (`docs/factory/review.md#grades`).
-    async fn ready_graded(&self, room: usize) -> Result<Vec<Task>> {
+    async fn ready_graded(&self) -> Result<Vec<Task>> {
         let queue = self.queue();
         // With no queue the whole project is the factory's by configuration, so a grade is not what releases a task.
         if queue.is_empty() {
-            return self.tracker.ready(self.project(), &[], room).await;
+            return self.tracker.ready(self.project(), &[], usize::MAX).await;
         }
-        // Ungraded tasks mustn't crowd graded ones out of the limit.
         let ready = self.tracker.ready(self.project(), &queue, usize::MAX).await?;
         let (graded, ungraded): (Vec<Task>, Vec<Task>) = ready.into_iter().partition(|t| t.grade.is_some());
         for task in ungraded {
@@ -359,7 +361,7 @@ impl Factory {
         for task in &graded {
             self.clear_ungraded(task).await;
         }
-        Ok(graded.into_iter().take(room).collect())
+        Ok(graded)
     }
 
     /// A task that has been graded is no longer ungraded, so it's told again if its grade is ever cleared.
@@ -502,9 +504,9 @@ impl Factory {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        let ready = self.ready_graded(room).await?;
+        let ready = self.ready_graded().await?;
         let mut survey = self.survey().await;
-        for task in ready.into_iter().filter(|t| self.setback_over(&t.key)) {
+        for task in ready.into_iter().filter(|t| self.setback_over(&t.key)).take(room) {
             let Some(target) = self.place(&mut survey) else {
                 tracing::info!("{}", messages::no_target_has_room(&task.key.0));
                 continue;
