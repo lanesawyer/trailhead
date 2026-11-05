@@ -74,9 +74,9 @@ struct Args {
     author_name: String,
     #[arg(long, default_value = "factory@trailhead.invalid")]
     author_email: String,
-    /// A `tracing` filter; `RUST_LOG` wins if set.
-    #[arg(long, default_value = "info")]
-    log: String,
+    /// A `tracing` filter. Wins over `RUST_LOG`; without it, `RUST_LOG` applies, then `info`.
+    #[arg(long)]
+    log: Option<String>,
     /// The compute's socket for holding the sandbox awake, used when it exists (the control plane passes it for
     /// computes that pause idle sandboxes).
     #[arg(long)]
@@ -207,7 +207,7 @@ async fn main() -> std::process::ExitCode {
             .error(clap::error::ErrorKind::MissingRequiredArgument, "--secrets and --workdir are required")
             .exit(),
     };
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| args.log.as_str().into());
+    let filter = log_filter(args.log.as_deref(), std::env::var("RUST_LOG").ok().as_deref());
     tracing_subscriber::fmt().with_timer(trailhead_factory::logging::local_timer()).with_env_filter(filter).init();
     match serve(args).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -216,6 +216,11 @@ async fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// The daemon's log filter: an explicit `--log` first, then `RUST_LOG`, then `info`.
+fn log_filter(flag: Option<&str>, env: Option<&str>) -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::new(flag.or(env).unwrap_or("info"))
 }
 
 async fn gateway_command(command: Command) -> std::process::ExitCode {
@@ -303,4 +308,20 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     let router = Router::builder(endpoint).accept(ALPN, protocol).spawn();
     tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
     router.shutdown().await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_filter;
+
+    #[test]
+    fn explicit_log_beats_rust_log() {
+        assert_eq!(log_filter(Some("debug"), Some("warn")).to_string(), "debug");
+    }
+
+    #[test]
+    fn rust_log_then_info_when_no_flag() {
+        assert_eq!(log_filter(None, Some("warn")).to_string(), "warn");
+        assert_eq!(log_filter(None, None).to_string(), "info");
+    }
 }
