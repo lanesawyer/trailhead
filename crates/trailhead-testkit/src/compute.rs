@@ -37,6 +37,8 @@ pub struct FakeCompute {
     unreachable: Arc<std::sync::atomic::AtomicBool>,
     /// How long a warm checkpoint takes, on tokio's clock.
     checkpoint_takes: Arc<Mutex<std::time::Duration>>,
+    /// Every `set_egress` call on any sandbox, kept after the sandbox is destroyed.
+    egress_calls: Arc<Mutex<Vec<Egress>>>,
 }
 
 impl FakeCompute {
@@ -59,6 +61,11 @@ impl FakeCompute {
     /// Every egress the sandbox has been given, oldest first.
     pub fn egress_log(&self, name: &str) -> Vec<Egress> {
         self.live.lock().unwrap().get(&SandboxId(name.into())).map(|l| l.egress_log.clone()).unwrap_or_default()
+    }
+
+    /// Every egress any sandbox has been given, destroyed ones included, oldest first.
+    pub fn all_egress_calls(&self) -> Vec<Egress> {
+        self.egress_calls.lock().unwrap().clone()
     }
 
     /// Checkpoint notes, oldest first.
@@ -257,6 +264,7 @@ impl Compute for FakeCompute {
 
     async fn set_egress(&self, id: &SandboxId, egress: &Egress) -> Result<()> {
         self.check(id, "set_egress")?;
+        self.egress_calls.lock().unwrap().push(egress.clone());
         self.with(id, |l| {
             l.egress = egress.clone();
             l.egress_log.push(egress.clone());

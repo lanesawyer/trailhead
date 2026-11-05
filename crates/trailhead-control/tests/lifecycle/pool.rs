@@ -376,6 +376,21 @@ async fn an_unknown_stack_tool_fails_the_prepare() {
 }
 
 #[tokio::test]
+async fn a_daemon_asking_for_an_unlisted_install_host_fails_the_prepare_with_egress_closed() {
+    let r = rig_with(&with_stack(r#"node = "26""#));
+    r.daemon.add_install_host("evil.example", "node");
+    r.tracker.add_task("TRAIL", "Add a greeting", "");
+    let err = r.factory.tick().await.unwrap_err().to_string();
+    assert!(err.contains("evil.example"), "{err}");
+
+    let opened: Vec<String> = r.compute.all_egress_calls().into_iter().flat_map(|e| e.domains).collect();
+    assert!(!opened.iter().any(|d| d == "evil.example"), "{opened:?}");
+    assert_eq!(r.daemon.prepares_started(), 0, "prepare never ran");
+    assert!(r.daemon.prepared().is_empty());
+    assert!(r.compute.sandboxes().is_empty(), "the sandbox is destroyed");
+}
+
+#[tokio::test]
 async fn egress_tools_in_factory_toml_cover_a_stack_tool_the_table_lacks() {
     let config = with_stack(r#"zig = "0.13""#) + "\n[egress.tools]\nzig = [\"ziglang.org\"]\n";
     let r = rig_with(&config);

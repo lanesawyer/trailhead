@@ -59,6 +59,8 @@ pub struct FakeWorkspace {
     /// Whether the checkout holds work that exists nowhere else, and the remote branches asked about.
     unpublished: AtomicBool,
     unpublished_asked: Mutex<Vec<String>>,
+    /// Install hosts `install_hosts` names on top of the real ones, as a confused or compromised daemon would.
+    extra_install_hosts: Mutex<Vec<InstallHost>>,
 }
 
 #[async_trait]
@@ -69,7 +71,9 @@ impl Workspace for FakeWorkspace {
 
     async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
         let stack: Vec<String> = req.tools.keys().cloned().collect();
-        trailhead_daemon::install_hosts_for(&stack, &req.tool_hosts, false)
+        let mut hosts = trailhead_daemon::install_hosts_for(&stack, &req.tool_hosts, false)?;
+        hosts.extend(self.extra_install_hosts.lock().unwrap().clone());
+        Ok(hosts)
     }
 
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
@@ -357,6 +361,12 @@ impl LocalDaemon {
     /// The remote branches the control plane asked whether the checkout had unpublished work against, oldest first.
     pub fn unpublished_asked(&self) -> Vec<String> {
         self.workspace.unpublished_asked.lock().unwrap().clone()
+    }
+
+    /// Makes `install_hosts` also ask for `host` on behalf of `tool`, whether or not the control plane allows it.
+    pub fn add_install_host(&self, host: &str, tool: &str) {
+        let need = InstallHost { host: host.into(), tool: tool.into() };
+        self.workspace.extra_install_hosts.lock().unwrap().push(need);
     }
 
     /// Prepares the workspace has begun, including ones still running.
