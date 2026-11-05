@@ -29,6 +29,8 @@ pub struct FakeCompute {
     failing: Arc<Mutex<BTreeSet<(String, &'static str)>>>,
     /// Calls of an operation still allowed to succeed before it starts failing.
     failing_after: Arc<Mutex<BTreeMap<(String, &'static str), usize>>>,
+    /// Like `failing_after`, but only the one call after the allowed ones fails.
+    failing_once: Arc<Mutex<BTreeMap<(String, &'static str), usize>>>,
     wake_failures: Arc<Mutex<BTreeMap<String, usize>>>,
     hung_wakes: Arc<Mutex<BTreeSet<String>>>,
     rejected_wakes: Arc<Mutex<BTreeSet<String>>>,
@@ -137,6 +139,12 @@ impl FakeCompute {
         self.failing_after.lock().unwrap().insert((name.to_string(), op), calls);
     }
 
+    /// Like [`FakeCompute::fail_after`], but only the one call after `calls` successes fails: a blip, so the cleanup
+    /// that follows it works.
+    pub fn fail_once_after(&self, name: &str, op: &'static str, calls: usize) {
+        self.failing_once.lock().unwrap().insert((name.to_string(), op), calls);
+    }
+
     /// Makes `list` fail, or work again, like a stopped engine or a frozen VM. Its sandboxes stay as they are.
     pub fn set_unreachable(&self, down: bool) {
         self.unreachable.store(down, std::sync::atomic::Ordering::SeqCst);
@@ -145,9 +153,19 @@ impl FakeCompute {
     pub fn heal(&self, name: &str) {
         self.failing.lock().unwrap().retain(|(n, _)| n != name);
         self.failing_after.lock().unwrap().retain(|(n, _), _| n != name);
+        self.failing_once.lock().unwrap().retain(|(n, _), _| n != name);
     }
 
     fn check(&self, id: &SandboxId, op: &'static str) -> Result<()> {
+        let mut once = self.failing_once.lock().unwrap();
+        if let Some(left) = once.get_mut(&(id.0.clone(), op)) {
+            if *left == 0 {
+                once.remove(&(id.0.clone(), op));
+                return Err(Error::Other(format!("sprites api 503 Service Unavailable: Storage not ready ({op})")));
+            }
+            *left -= 1;
+        }
+        drop(once);
         let mut after = self.failing_after.lock().unwrap();
         if let Some(left) = after.get_mut(&(id.0.clone(), op)) {
             if *left == 0 {

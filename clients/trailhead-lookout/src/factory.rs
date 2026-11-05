@@ -30,6 +30,9 @@ pub enum FactoryUpdate {
     },
     /// The control plane can't be reached: the mirror keeps its last state and says so.
     Stopped,
+    /// The control plane answered a request with "I don't know that": it is older than this Lookout. Carries the
+    /// message to show.
+    TooOld(String),
 }
 
 /// A [`FactoryUpdate`] on its way to the mirror.
@@ -51,7 +54,7 @@ pub struct Run {
 }
 
 /// Whether the factory is being heard from.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum FactoryLink {
     /// Nothing heard yet.
     #[default]
@@ -60,6 +63,8 @@ pub enum FactoryLink {
     Running,
     /// Not reachable. The mirror is the last state heard, and the board works from the server alone.
     Stopped,
+    /// Reachable, but older than this Lookout: it doesn't know the status request. The message says what to do.
+    TooOld(String),
 }
 
 /// One repo's control plane state.
@@ -90,11 +95,12 @@ pub struct FactoryStatus {
 
 impl FactoryStatus {
     /// What the map shows beside the factory: "factory stopped" when it can't be reached.
-    pub fn label(&self) -> &'static str {
-        match self.link {
-            FactoryLink::Unknown => "factory: connecting",
-            FactoryLink::Running => "factory running",
-            FactoryLink::Stopped => "factory stopped",
+    pub fn label(&self) -> String {
+        match &self.link {
+            FactoryLink::Unknown => "factory: connecting".into(),
+            FactoryLink::Running => "factory running".into(),
+            FactoryLink::Stopped => "factory stopped".into(),
+            FactoryLink::TooOld(why) => why.clone(),
         }
     }
 
@@ -291,6 +297,7 @@ pub fn apply_factory(
             }
             FactoryUpdate::Event { repo, event } => mirror.apply_event(&mut commands, &mut status, &repo, event),
             FactoryUpdate::Stopped => status.link = FactoryLink::Stopped,
+            FactoryUpdate::TooOld(why) => status.link = FactoryLink::TooOld(why),
         }
     }
 }
@@ -420,5 +427,12 @@ mod tests {
         send(&mut app, [snapshot(1, vec![])]);
         assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory running");
         assert!(campsites(&mut app).is_empty());
+    }
+
+    #[test]
+    fn a_factory_too_old_says_so_instead_of_stopped() {
+        let mut app = app();
+        send(&mut app, [FactoryUpdate::TooOld("reinstall it".into())]);
+        assert_eq!(app.world().resource::<FactoryStatus>().label(), "reinstall it");
     }
 }
