@@ -54,6 +54,14 @@ wraps these; it doesn't draw its own where feathers has one.
 - **The board fills the window and is spawned after the overlays**, so an overlay without a `GlobalZIndex` loses every
   click to it, even though it draws on top (TRAIL-776). Use the kit's layer constants: board, connect panel,
   inspector, then forms and menus on top.
+- **A node is never smaller than its content unless you say so.** `width/height: percent(100)` loses to the content's
+  size in Taffy, so a full-window panel full of cards grew past the window and nothing inside it could overflow, so
+  nothing scrolled (TRAIL-836). A panel or column that should hold its children to a size and let them scroll needs
+  `min_width: px(0)` / `min_height: px(0)` (and its scrolling child `overflow: scroll_*()`). `Overflow::clip()` alone
+  doesn't do it.
+- **Scrolling goes through the kit's `ScrollBoth` / `ScrollDown`,** whose one observer walks up from what the pointer
+  is over to the nearest of each. Don't add a second wheel observer per area: a bubbling `PointerScroll` keeps naming
+  the entity it was fired on, so an ancestor's handler never sees its own entity.
 - Presses arrive as feathers `Activate` events, not `Interaction`.
 - `system_clipboard` must stay in the Bevy features, or no text field can paste.
 
@@ -74,5 +82,8 @@ No headless test builds what `main.rs` builds, and the sandbox can't open a wind
 - `cargo clippy -p trailhead-lookout --all-targets -- -D warnings` and `cargo test -p trailhead-lookout`.
 - With a display: `timeout 15 cargo run -p trailhead-lookout` and look for panics and
   `bevy_feathers::theme: Theme color ... not found` in the log.
+- When layout or input misbehaves, measure rather than guess: log `ComputedNode` `size` and `content_size` (times
+  `inverse_scale_factor` for logical pixels) of the nodes involved, and what an observer receives. A temporary
+  `info!(target: "probe", ..)` you remove before committing. Never drive a person's mouse to test it.
 - In a factory sandbox, say in your summary which parts nobody has seen yet. Every `clients/**` PR gets a human look
   before it merges.

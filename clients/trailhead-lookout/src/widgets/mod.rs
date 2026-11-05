@@ -17,6 +17,7 @@
 //! - Colors: [`token`] (Lookout's) and `bevy::feathers::tokens` (the controls'); a status column's: [`status_token`].
 //! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`]; one that scrolls down only,
 //!   inside it: [`ScrollDown`].
+//! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
 //! - A board column: [`column`] (header, scrolling body, scrollbar), and [`column_empty`] for no cards.
 //! - Gaps, padding, margins: [`space`]. Corners: [`radius`].
 
@@ -33,6 +34,7 @@ mod icons;
 pub mod layer;
 mod menu;
 mod scroll;
+mod scrollbar;
 mod select;
 mod spacing;
 mod text;
@@ -48,6 +50,7 @@ pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu};
 pub use scroll::{ScrollBoth, ScrollDown};
+pub use scrollbar::scrollbar;
 pub use select::{Picked, select};
 pub use spacing::{radius, space};
 pub use text::{size, text, text_dim, text_toned};
@@ -59,7 +62,7 @@ pub struct WidgetsPlugin;
 impl Plugin for WidgetsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((icons::IconsPlugin, hint::HintPlugin))
-            .add_observer(scroll::on_both_scroll)
-            .add_observer(scroll::on_down_scroll);
+            .add_observer(scroll::on_scroll)
+            .add_systems(PostUpdate, scrollbar::hide_when_fits.after(bevy::ui::UiSystems::Layout));
     }
 }

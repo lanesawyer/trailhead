@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
-use bevy::ui_widgets::Activate;
+use bevy::ui_widgets::{Activate, ControlOrientation};
 use serde_json::Value;
 
 use crate::author::Act;
@@ -429,6 +429,11 @@ fn spawn_panel(mut commands: Commands) {
             Node {
                 width: percent(100),
                 height: percent(100),
+                // A layout node is never smaller than its content unless told so: without these the panel grew past
+                // the window to fit every card, so the board and its columns never overflowed (TRAIL-836).
+                min_width: px(0),
+                min_height: px(0),
+                overflow: Overflow::clip(),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(px(8)),
                 row_gap: px(6),
@@ -631,6 +636,7 @@ fn redraw(
             ChildOf(panel),
         ))
         .id();
+    commands.queue_spawn_scene(widgets::scrollbar(columns, ControlOrientation::Horizontal)).insert(ChildOf(panel));
     for column in &view.columns {
         let (cards, hidden) = visible(&column.cards, shown.limit(&column.status));
         let col = widgets::column(
