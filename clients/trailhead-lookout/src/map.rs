@@ -94,6 +94,8 @@ pub enum Spot {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Walker {
+    /// The claim holder's id, which stays put when the name is filled in later.
+    pub id: String,
     pub name: String,
     pub task: String,
     pub at: Spot,
@@ -139,7 +141,11 @@ fn way_origin() -> Vec2 {
 pub fn build(input: Input) -> MapModel {
     let mut camps: Vec<&Campsite> = input.campsites.iter().collect();
     camps.sort_by(|a, b| (&a.repo, &a.status.name).cmp(&(&b.repo, &b.status.name)));
-    let run_of: HashMap<&str, &Run> = input.runs.iter().map(|r| (r.status.task.0.as_str(), r)).collect();
+    // A task key names one task, so one run per key; if two repos have one, the later entry wins: the run that has a
+    // sandbox, then the later repo.
+    let mut runs: Vec<&Run> = input.runs.iter().collect();
+    runs.sort_by(|a, b| (a.status.sandbox.is_some(), &a.repo).cmp(&(b.status.sandbox.is_some(), &b.repo)));
+    let run_of: HashMap<&str, &Run> = runs.into_iter().map(|r| (r.status.task.0.as_str(), r)).collect();
     let camps: Vec<Camp> = camps
         .into_iter()
         .enumerate()
@@ -157,6 +163,14 @@ pub fn build(input: Input) -> MapModel {
 
     let agent_name: HashMap<&str, &str> = input.agents.iter().map(|a| (s(a, "id"), s(a, "name"))).collect();
     let holder_of: HashMap<&str, &str> = input.claims.iter().map(|c| (s(c, "task_id"), s(c, "holder_id"))).collect();
+    // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
+    // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
+    let holder_name = |holder: &str, key: &str| -> Option<String> {
+        match agent_name.get(holder) {
+            Some(n) => Some(n.to_string()),
+            None => run_of.contains_key(key).then(|| format!("factory/{}", key.to_lowercase())),
+        }
+    };
     let mut questions: HashMap<&str, usize> = HashMap::new();
     let mut handoffs: HashMap<&str, &Value> = HashMap::new();
     for c in input.comments {
@@ -180,9 +194,7 @@ pub fn build(input: Input) -> MapModel {
         let run = run_of.get(key);
         let mut markers = Vec::new();
         if let Some(holder) = holder_of.get(id) {
-            markers.push(Marker::Claim(
-                agent_name.get(holder).map_or_else(|| holder.chars().take(8).collect(), |n| n.to_string()),
-            ));
+            markers.push(Marker::Claim(holder_name(holder, key).unwrap_or_else(|| holder.chars().take(8).collect())));
         }
         if let Some(n) = questions.get(id) {
             markers.push(Marker::Questions(*n));
@@ -215,10 +227,10 @@ pub fn build(input: Input) -> MapModel {
     let mut claimed: Vec<(&str, &str)> = holder_of.iter().map(|(t, h)| (*t, *h)).collect();
     claimed.sort();
     for (task_id, holder) in claimed {
-        let Some(name) = agent_name.get(holder) else { continue };
         let Some(wp) = waypoints.iter().zip(&tasks).find(|(_, t)| s(t, "id") == task_id).map(|(w, _)| w) else {
             continue;
         };
+        let Some(name) = holder_name(holder, &wp.key) else { continue };
         let camp = run_of
             .get(wp.key.as_str())
             .and_then(|r| r.status.sandbox.as_deref().map(|sb| (&r.repo, sb)))
@@ -228,7 +240,7 @@ pub fn build(input: Input) -> MapModel {
             None => (Spot::Waypoint(wp.key.clone()), wp.pos),
         };
         let pos = corner + STAND;
-        walkers.push(Walker { name: name.to_string(), task: wp.key.clone(), at, pos });
+        walkers.push(Walker { id: holder.to_string(), name, task: wp.key.clone(), at, pos });
     }
     walkers.sort_by(|a, b| a.name.cmp(&b.name));
     MapModel { camps, waypoints, walkers }
@@ -343,7 +355,7 @@ struct Terrain;
 /// An agent's token, which outlives redraws so it can walk to where the model now puts it.
 #[derive(Component)]
 struct Token {
-    name: String,
+    id: String,
     target: Vec2,
 }
 
@@ -388,6 +400,7 @@ fn board_button() -> impl Scene {
 }
 
 /// Redraws the terrain when the model or the factory's link changes, and moves tokens' targets; [`glide`] walks them.
+#[allow(clippy::too_many_arguments)]
 fn redraw(
     map: Res<TrailMap>,
     factory: Res<FactoryStatus>,
@@ -396,13 +409,16 @@ fn redraw(
     terrain: Query<Entity, With<Terrain>>,
     mut commands: Commands,
     mut drawn: Local<Option<Entity>>,
+    mut link: Local<Option<crate::factory::FactoryLink>>,
 ) {
     let (panel, _) = *panel;
     let fresh = *drawn != Some(panel);
-    if !(fresh || map.is_changed() || factory.is_changed()) {
+    // The factory's status changes with every tool call; only its link is drawn.
+    if !(fresh || map.is_changed() || *link != Some(factory.link)) {
         return;
     }
     *drawn = Some(panel);
+    *link = Some(factory.link);
     for e in &terrain {
         commands.entity(e).despawn();
     }
@@ -445,20 +461,20 @@ fn redraw(
     // Tokens: move the ones the model still has, drop the rest, add the new at their spot.
     let mut have: HashMap<String, Entity> = HashMap::new();
     for (e, mut t) in &mut tokens {
-        match map.0.walkers.iter().find(|w| w.name == t.name) {
+        match map.0.walkers.iter().find(|w| w.id == t.id) {
             Some(w) => {
                 t.target = w.pos;
-                have.insert(t.name.clone(), e);
+                have.insert(t.id.clone(), e);
             }
             None => commands.entity(e).despawn(),
         }
     }
     for w in &map.0.walkers {
-        if have.contains_key(&w.name) {
+        if have.contains_key(&w.id) {
             continue;
         }
         let name = Name::new(format!("agent {}", w.name));
-        let node = commands.spawn((Token { name: w.name.clone(), target: w.pos }, name, ChildOf(panel))).id();
+        let node = commands.spawn((Token { id: w.id.clone(), target: w.pos }, name, ChildOf(panel))).id();
         commands.entity(node).insert(plot(w.pos, Vec2::new(20.0, 20.0), Color::srgb(0.95, 0.75, 0.3)));
         let initial = w.name.rsplit(['/', '-']).next().unwrap_or("a").to_string();
         commands.spawn((Text::new(initial), TextColor(Color::BLACK), TextFont::from_font_size(11.0), ChildOf(node)));
@@ -645,6 +661,59 @@ mod tests {
         w.runs[0] = run("TRAIL-42", Some("gone"), RunPhase::Agent, 1.0);
         let walker = w.model().walkers.into_iter().find(|k| k.name == "factory/trail-42-a1").unwrap();
         assert_eq!(walker.at, Spot::Waypoint("TRAIL-42".into()));
+    }
+
+    #[test]
+    fn an_agent_made_after_the_snapshot_still_walks_to_its_camp() {
+        use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate};
+        use crate::mirror::MirrorPlugin;
+        use crate::sync::{Snapshot, SyncItem};
+        use trailhead_daemon::ui::RepoSnapshot;
+        use trailhead_factory::{ControlState, FactorySnapshot};
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins((MirrorPlugin, FactoryPlugin, MapPlugin));
+        let w = world();
+        // No claims and no agents at the snapshot: the run's sub-agent doesn't exist yet.
+        let tasks: Vec<Value> = w
+            .tasks
+            .iter()
+            .cloned()
+            .map(|mut t| {
+                t["version"] = json!(1);
+                t["claim"] = Value::Null;
+                t["open_questions"] = json!([]);
+                t
+            })
+            .collect();
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, tasks, ..Default::default() }));
+        let snapshot = FactorySnapshot {
+            control: ControlState::Up,
+            last_error: None,
+            sandboxes: w.campsites.iter().map(|c| c.status.clone()).collect(),
+            runs: w.runs.iter().map(|r| r.status.clone()).collect(),
+            seq: 1,
+        };
+        app.world_mut()
+            .write_message(FactoryItem(FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])));
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(app.world().resource::<TrailMap>().0.walkers.is_empty());
+        // The claim arrives as an event; its holder is in no agent list.
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 2, "entity": "claim", "entity_id": "cl1", "kind": "claim.created",
+            "after": {"id": "cl1", "task_id": "t42", "holder_id": "a-new"},
+        })));
+        for _ in 0..3 {
+            app.update();
+        }
+        let map = &app.world().resource::<TrailMap>().0;
+        let walker = map.walkers.iter().find(|k| k.id == "a-new").expect("a walker for the new holder");
+        assert_eq!(walker.name, "factory/trail-42");
+        assert_eq!(walker.at, Spot::Camp("o/r".into(), "a".into()));
+        let wp = map.waypoints.iter().find(|p| p.key == "TRAIL-42").unwrap();
+        assert!(wp.markers.contains(&Marker::Claim("factory/trail-42".into())));
     }
 
     #[test]
