@@ -35,6 +35,9 @@ pub mod space {
     /// How far a subtask's card sits in from its parent's.
     pub const INDENT: f32 = step::M;
 
+    /// The colored dot of a status chip, across.
+    pub const DOT: f32 = step::S;
+
     /// Inside a badge.
     pub const BADGE_INSET: f32 = step::XXS;
     /// Inside a map label, tight against its border.
@@ -78,6 +81,7 @@ mod tests {
             space::BADGE_INSET,
             space::CONTROL_INSET,
             space::PANEL_INSET,
+            space::DOT,
         ] {
             assert!(STEPS.contains(&named), "{named} is off the scale");
         }

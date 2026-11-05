@@ -12,6 +12,7 @@
 //! - An icon in text: [`icon_text`]; as a button's caption: [`button_icon`].
 //! - A chip of small text: [`badge`]. A task's card: [`card`], with [`card_title`], [`card_under`] and [`card_row`].
 //! - A panel over the board: [`panel`], with a [`layer`]. Inside it: [`section`], [`row`], [`field`].
+//! - A dot and a few words of state: [`chip`].
 //! - A hint over anything: put a [`Hint`] on it.
 //! - Colors: [`token`] (Lookout's) and `bevy::feathers::tokens` (the controls'); a status column's: [`status_token`].
 //! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`]; one that scrolls down only,
@@ -25,6 +26,7 @@ use bevy::prelude::*;
 mod badge;
 mod buttons;
 mod card;
+mod chip;
 mod column;
 mod containers;
 mod hint;
@@ -41,6 +43,7 @@ mod theme;
 pub use badge::badge;
 pub use buttons::{button, button_text, tool_button};
 pub use card::{TITLE_LINES, card, card_row, card_title, card_under};
+pub use chip::chip;
 pub use column::{COLUMN_WIDTH, column, column_empty};
 pub use containers::{field, panel, row, section};
 pub use hint::Hint;

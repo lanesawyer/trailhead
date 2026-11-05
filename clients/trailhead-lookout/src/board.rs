@@ -8,19 +8,21 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bevy::feathers::controls::{ButtonVariant, FeathersButton};
-use bevy::feathers::display::caption;
+use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use serde_json::Value;
 
-use crate::author::{Act, act_button};
-use crate::connection::{Connection, ConnectionStatus, LocalEndpoint};
+use crate::author::Act;
+use crate::connection::{Connection, ConnectionStatus};
 use crate::inspector::{Selection, Subject};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
-use crate::widgets::{self, ScrollBoth, space};
-use crate::widgets::{Icon, badge, button, card as card_shell, card_row, card_title, card_under, token, tool_button};
+use crate::widgets;
+use crate::widgets::{
+    Icon, Picked, ScrollBoth, badge, button, card as card_shell, card_row, card_title, card_under, chip, field, select,
+    size, space, text as label_text, token, tool_button,
+};
 
 /// The views of the app: the task board and the trail map.
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -101,7 +103,7 @@ pub struct Choice {
     pub label: String,
 }
 
-/// The values each filter can take now, for its button to step through.
+/// The values each filter can take now, for its dropdown to list after "all".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
     pub projects: Vec<Choice>,
@@ -121,14 +123,17 @@ impl Options {
     }
 }
 
-/// The next choice after `current`, wrapping to "all" (`None`) after the last. A current value that is no longer
-/// offered starts the cycle again.
-pub fn cycle(current: &Option<String>, choices: &[Choice]) -> Option<String> {
-    let next = match current {
-        None => 0,
-        Some(v) => choices.iter().position(|c| &c.value == v).map_or(0, |i| i + 1),
-    };
-    choices.get(next).map(|c| c.value.clone())
+/// Sets `key`'s filter from a dropdown's pick: row 0 is "all", the rest are `choices` in order. A row that isn't
+/// there leaves the filter alone.
+pub fn choose(filter: &mut Filter, key: FilterKey, choices: &[Choice], index: usize) {
+    match index {
+        0 => *filter.get_mut(key) = None,
+        i => {
+            if let Some(choice) = choices.get(i - 1) {
+                *filter.get_mut(key) = Some(choice.value.clone());
+            }
+        }
+    }
 }
 
 /// What a badge on a card says.
@@ -375,12 +380,26 @@ fn rebuild_view(
     }
 }
 
+/// Tags a header dropdown with the filter it sets.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilterSelect(pub FilterKey);
+
+fn on_pick(pick: On<Picked>, selects: Query<&FilterSelect>, view: Res<BoardView>, mut filter: ResMut<Filter>) {
+    let Ok(&FilterSelect(key)) = selects.get(pick.entity) else { return };
+    let mut next = filter.clone();
+    choose(&mut next, key, view.options.of(key), pick.index);
+    filter.set_if_neq(next);
+}
+
 /// Keeps [`Filter`] and [`BoardView`] from the mirror.
 pub struct BoardPlugin;
 
 impl Plugin for BoardPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Filter>().init_resource::<BoardView>().add_systems(Update, rebuild_view);
+        app.init_resource::<Filter>()
+            .init_resource::<BoardView>()
+            .add_systems(Update, rebuild_view)
+            .add_observer(on_pick);
     }
 }
 
@@ -395,7 +414,7 @@ impl Plugin for BoardUiPlugin {
             .add_systems(OnExit(View::Board), despawn_panel)
             .init_resource::<BoardScroll>()
             .init_resource::<Shown>()
-            .add_systems(Update, (remember_scroll, redraw).chain().run_if(in_state(View::Board)));
+            .add_systems(Update, (remember_scroll, redraw, redraw_header).chain().run_if(in_state(View::Board)));
     }
 }
 
@@ -403,22 +422,30 @@ impl Plugin for BoardUiPlugin {
 struct BoardPanel;
 
 fn spawn_panel(mut commands: Commands) {
+    let panel = commands
+        .spawn((
+            Name::new("board"),
+            BoardPanel,
+            Node {
+                width: percent(100),
+                height: percent(100),
+                // A layout node is never smaller than its content unless told so: without these the panel grew past
+                // the window to fit every card, so the board and its columns never overflowed (TRAIL-836).
+                min_width: px(0),
+                min_height: px(0),
+                overflow: Overflow::clip(),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(8)),
+                row_gap: px(6),
+                ..default()
+            },
+        ))
+        .id();
     commands.spawn((
-        Name::new("board"),
-        BoardPanel,
-        Node {
-            width: percent(100),
-            height: percent(100),
-            // A layout node is never smaller than its content unless told so: without these the panel grew past the
-            // window to fit every card, so the board and its columns never overflowed and nothing scrolled (TRAIL-836).
-            min_width: px(0),
-            min_height: px(0),
-            overflow: Overflow::clip(),
-            flex_direction: FlexDirection::Column,
-            padding: UiRect::all(px(8)),
-            row_gap: px(6),
-            ..default()
-        },
+        Name::new("header"),
+        HeaderBar,
+        Node { align_items: AlignItems::End, column_gap: px(space::GROUPS), ..default() },
+        ChildOf(panel),
     ));
 }
 
@@ -428,33 +455,9 @@ fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<BoardPanel>>)
     }
 }
 
-fn text(commands: &mut Commands, parent: Entity, line: String, color: Color, indent: usize) {
-    commands.spawn((
-        Text::new(line),
-        TextColor(color),
-        Node { margin: UiRect::left(px(16 * indent)), ..default() },
-        ChildOf(parent),
-    ));
-}
-
-fn map_button() -> impl Scene {
-    bsn! {
-        @FeathersButton
-        on(|_: On<Activate>, mut next: ResMut<NextState<View>>| next.set(View::Map))
-        Children [ @caption("trail map") ]
-    }
-}
-
-fn filter_button(key: FilterKey, label: String) -> impl Scene {
-    bsn! {
-        @FeathersButton
-        on(move |_: On<Activate>, mut filter: ResMut<Filter>, view: Res<BoardView>| {
-            let next = cycle(filter.get(key), view.options.of(key));
-            *filter.get_mut(key) = next;
-        })
-        Children [ @caption(label) ]
-    }
-}
+/// The header bar, which lives across redraws of the columns so an open dropdown isn't closed under the pointer.
+#[derive(Component)]
+struct HeaderBar;
 
 /// What the cards of one column build now: the first `limit` of them, and how many are left out.
 pub fn visible(cards: &[Card], limit: usize) -> (&[Card], usize) {
@@ -506,6 +509,83 @@ fn remember_scroll(
     }
 }
 
+/// What the header bar was last drawn from, so it is rebuilt only when one of these changes.
+#[derive(Clone, PartialEq)]
+struct HeaderDrawn {
+    bar: Entity,
+    filter: Filter,
+    options: Options,
+    connection: Connection,
+    reason: String,
+}
+
+/// The connection chip's tone, words and hint.
+fn connection_chip(
+    connection: Connection,
+    status: &ConnectionStatus,
+) -> (bevy::feathers::theme::ThemeToken, &'static str, String) {
+    let reason = status.reason.as_ref().map(|r| r.to_string());
+    match connection {
+        Connection::Live => (token::OK, "Live", "Connected to the factory".into()),
+        Connection::Syncing => {
+            (token::WARN, "Syncing", reason.unwrap_or_else(|| "Catching up with the factory".into()))
+        }
+        Connection::Offline => {
+            (token::DANGER, "Offline", reason.unwrap_or_else(|| "Not connected to the factory".into()))
+        }
+    }
+}
+
+/// Draws the header bar: the app name, a dropdown per filter, New task, and the connection chip.
+fn redraw_header(
+    view: Res<BoardView>,
+    filter: Res<Filter>,
+    connection: Res<State<Connection>>,
+    status: Res<ConnectionStatus>,
+    bar: Single<(Entity, Option<&Children>), With<HeaderBar>>,
+    mut commands: Commands,
+    mut drawn: Local<Option<HeaderDrawn>>,
+) {
+    let (bar, children) = *bar;
+    let now = HeaderDrawn {
+        bar,
+        filter: filter.clone(),
+        options: view.options.clone(),
+        connection: *connection.get(),
+        reason: status.reason.as_ref().map(|r| r.to_string()).unwrap_or_default(),
+    };
+    if drawn.as_ref() == Some(&now) {
+        return;
+    }
+    for child in children.into_iter().flatten() {
+        commands.entity(*child).despawn();
+    }
+    commands.queue_spawn_scene(label_text("Lookout", size::APP_TITLE)).insert(ChildOf(bar));
+    for key in FilterKey::ALL {
+        let choices = view.options.of(key);
+        let mut names = vec!["all".to_string()];
+        names.extend(choices.iter().map(|c| c.label.clone()));
+        // A chosen value that is no longer offered shows as "all".
+        let at = filter.get(key).as_ref().and_then(|v| choices.iter().position(|c| &c.value == v)).map_or(0, |i| i + 1);
+        let field = commands.queue_spawn_scene(field(key.name())).insert(ChildOf(bar)).id();
+        commands.queue_spawn_scene(select(names, Some(at), 8)).insert((FilterSelect(key), ChildOf(field)));
+    }
+    commands
+        .queue_spawn_scene(button("Trail map", None, ButtonVariant::Normal))
+        .insert(ChildOf(bar))
+        .observe(|_: On<Activate>, mut next: ResMut<NextState<View>>| next.set(View::Map));
+    let live = *connection.get() == Connection::Live;
+    let mut new = commands.queue_spawn_scene(button("New task", Some(Icon::Plus), ButtonVariant::Primary));
+    new.insert((Act::New, ChildOf(bar)));
+    if !live {
+        new.insert(InteractionDisabled);
+    }
+    let (tone, words, hint) = connection_chip(*connection.get(), &status);
+    commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(bar)));
+    commands.queue_spawn_scene(chip(tone, words, hint)).insert(ChildOf(bar));
+    *drawn = Some(now);
+}
+
 /// Redraws the whole panel when the view, filter, connection or a column's page changes. Each column builds at most
 /// [`PAGE`] cards at a time, so a redraw costs the same however long the backlog.
 #[allow(clippy::too_many_arguments)]
@@ -514,10 +594,10 @@ fn redraw(
     filter: Res<Filter>,
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,
-    endpoint: Res<LocalEndpoint>,
     scroll: Res<BoardScroll>,
     shown: Res<Shown>,
     panel: Single<(Entity, Option<&Children>), With<BoardPanel>>,
+    header: Query<(), With<HeaderBar>>,
     mut commands: Commands,
     mut drawn: Local<Option<Entity>>,
 ) {
@@ -528,45 +608,15 @@ fn redraw(
         || filter.is_changed()
         || shown.is_changed()
         || connection.is_changed()
-        || status.is_changed()
-        || endpoint.is_changed())
+        || status.is_changed())
     {
         return;
     }
     *drawn = Some(panel);
-    for child in children.into_iter().flatten() {
+    for child in children.into_iter().flatten().filter(|c| !header.contains(**c)) {
         commands.entity(*child).despawn();
     }
     let live = *connection.get() == Connection::Live;
-
-    if !live {
-        let why = status.reason.as_ref().map_or_else(String::new, |r| format!(": {r}"));
-        text(
-            &mut commands,
-            panel,
-            format!(
-                "{:?}{why}. Showing the last known state.{}",
-                connection.get(),
-                endpoint.0.as_ref().map_or(String::new(), |id| format!(" This Lookout: {id}"))
-            ),
-            Color::srgb(0.9, 0.7, 0.3),
-            0,
-        );
-    }
-
-    let bar = commands.spawn((Node { column_gap: px(6), ..default() }, ChildOf(panel))).id();
-    for key in FilterKey::ALL {
-        let value = filter.get(key).as_ref().map_or("all", |v| {
-            view.options.of(key).iter().find(|c| &c.value == v).map_or(v.as_str(), |c| c.label.as_str())
-        });
-        commands.queue_spawn_scene(filter_button(key, format!("{}: {value}", key.name()))).insert(ChildOf(bar));
-    }
-    commands.queue_spawn_scene(map_button()).insert(ChildOf(bar));
-    let mut new = commands.queue_spawn_scene(act_button("+ new task".into(), Act::New));
-    new.insert(ChildOf(bar));
-    if !live {
-        new.insert(InteractionDisabled);
-    }
 
     // Columns past the window's edge are reached by scrolling sideways (Shift + wheel, or a touchpad swipe), and a
     // long column by scrolling down on its own.
@@ -810,20 +860,41 @@ mod tests {
     }
 
     #[test]
-    fn options_list_what_the_data_has_and_cycle_wraps_to_all() {
+    fn options_list_what_the_data_has() {
         let view = run(&Filter::default());
         let labels = |c: &[Choice]| c.iter().map(|c| c.label.clone()).collect::<Vec<_>>();
         assert_eq!(labels(&view.options.projects), ["OPS", "TRAIL"]);
         assert_eq!(labels(&view.options.parents), ["TRAIL-102", "TRAIL-103"]);
         assert_eq!(labels(&view.options.holders), ["factory/trail-103-a1", "u1"]);
+        assert_eq!(labels(&view.options.statuses).len(), STATUSES.len());
+    }
+
+    #[test]
+    fn choosing_a_row_sets_the_filter_and_row_zero_clears_it() {
+        let view = run(&Filter::default());
         let projects = &view.options.projects;
-        let one = cycle(&None, projects);
-        assert_eq!(one.as_deref(), Some("OPS"));
-        let two = cycle(&one, projects);
-        assert_eq!(two.as_deref(), Some("TRAIL"));
-        assert_eq!(cycle(&two, projects), None);
-        assert_eq!(cycle(&Some("gone".into()), projects).as_deref(), Some("OPS"));
-        assert_eq!(cycle(&None, &[]), None);
+        let mut filter = Filter::default();
+        choose(&mut filter, FilterKey::Project, projects, 2);
+        assert_eq!(filter.project.as_deref(), Some("TRAIL"));
+        choose(&mut filter, FilterKey::Project, projects, 1);
+        assert_eq!(filter.project.as_deref(), Some("OPS"));
+        // A row past the list leaves it alone.
+        choose(&mut filter, FilterKey::Project, projects, 9);
+        assert_eq!(filter.project.as_deref(), Some("OPS"));
+        choose(&mut filter, FilterKey::Project, projects, 0);
+        assert_eq!(filter, Filter::default());
+    }
+
+    #[test]
+    fn picking_a_dropdown_option_sets_the_filter() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(BoardPlugin);
+        *app.world_mut().resource_mut::<BoardView>() = run(&Filter::default());
+        let status = app.world_mut().spawn(FilterSelect(FilterKey::Status)).id();
+        app.world_mut().trigger(Picked { entity: status, index: 4 });
+        assert_eq!(app.world().resource::<Filter>().status.as_deref(), Some("in_review"));
+        app.world_mut().trigger(Picked { entity: status, index: 0 });
+        assert_eq!(app.world().resource::<Filter>().status, None);
     }
 
     #[test]
