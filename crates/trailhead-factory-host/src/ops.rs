@@ -356,6 +356,7 @@ mod tests {
             description: String::new(),
             status,
             grade: Some(2),
+            priority: 3,
             holder: None,
             run,
         }
