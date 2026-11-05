@@ -103,6 +103,14 @@ pub struct Ci {
     pub state: CiState,
 }
 
+/// An open PR on the base branch, as listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenPr {
+    pub pr: PrRef,
+    /// Whether the host's auto-merge is on for it, which merges it once its checks pass (TRAIL-804).
+    pub auto_merge: bool,
+}
+
 /// The code host's rate limit as of its last answer. The limit is shared with whoever else uses the credential
 /// (Lane's `gh`, say), so the control plane backs off before it's spent (TRAIL-535).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +158,10 @@ pub trait CodeHost: Send + Sync {
     /// or a person's hand-edited merge of the base looks like an update. The caller rules out reworks by only
     /// carrying a verdict given on the current attempt; hand-made merges stay a known gap.
     async fn carries_verdict(&self, pr: &PrRef, reviewed: &str) -> Result<bool>;
+    /// The open PRs whose base is `base`, oldest first, each with whether the host's auto-merge is on for it.
+    async fn open_prs(&self, _repo: &Repo, _base: &str) -> Result<Vec<OpenPr>> {
+        Ok(Vec::new())
+    }
     /// The PR's current title, which a squash merge takes as its commit subject.
     async fn title(&self, pr: &PrRef) -> Result<String>;
     /// The files the PR changes, with how and by how many lines, for grading it.

@@ -219,6 +219,11 @@ impl Factory {
     ) -> Result<()> {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let attempt = task.run.attempt.unwrap_or(1);
+        // A person's PR with auto-merge on goes first; the hold is set by the pass over the open PRs (TRAIL-804).
+        if self.merges_held() {
+            tracing::debug!(task = %task.key.0, pr = %pr.url, "merges are held for a person's PR; waiting");
+            return Ok(());
+        }
         // Gates passed on this head; a push since then is looked at on the next pass.
         if codehost.ci(pr).await?.head != decision.head {
             return Ok(());
