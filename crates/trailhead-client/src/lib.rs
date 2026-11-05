@@ -5,6 +5,7 @@
 //! - [`Health`] and [`ApiError`]: the bodies a client reads from `/v1/health` and from failed requests.
 
 pub mod creds;
+pub mod echo;
 
 use std::path::PathBuf;
 

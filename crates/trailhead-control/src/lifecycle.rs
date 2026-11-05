@@ -7,7 +7,7 @@ use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages;
 use trailhead_factory::{
     ControlState, Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase,
-    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
+    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
     WorkerBreach, run_name,
 };
 
@@ -317,6 +317,9 @@ impl Factory {
 
         match report.result {
             RunResult::PrOpened(pr) => {
+                // The daemon may have opened the PR without being able to write it down (TRAIL-441). Whatever is
+                // missing is recorded here; a failure is logged, since the PR is open either way.
+                self.record_opened_pr(task, sub, &pr).await;
                 if let Some(stale) = task.run.pending_changes().filter(|c| c.conflict).and_then(|c| c.head.clone()) {
                     // Recorded so a `mergeable` reading for the head from before the push is ignored, across a restart
                     // too. A request whose head the host couldn't say leaves the mark off; readings count as they come.
@@ -755,5 +758,29 @@ pub(crate) fn spec(task: &Task, context: HumanContext) -> TaskSpec {
         description: task.description.clone(),
         previous_failure: task.run.failure.clone().filter(|f| !f.is_empty()),
         context,
+    }
+}
+
+impl Factory {
+    /// Makes sure the tracker has the PR a worker opened and the review request, writing what the daemon couldn't.
+    async fn record_opened_pr(&self, task: &Task, sub: &Arc<dyn Tracker>, pr: &PrRef) {
+        let shown = match self.tracker.show(&task.key).await {
+            Ok(shown) => shown,
+            Err(e) => {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't read the task to check the opened PR was recorded");
+                return;
+            }
+        };
+        if shown.run.pr.as_ref() != Some(pr) {
+            let update = RunUpdate { pr: Some(pr.clone()), ..RunUpdate::default() };
+            if let Err(e) = sub.report(&task.key, update).await {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't record the opened PR");
+            }
+        }
+        if shown.status != Status::InReview
+            && let Err(e) = sub.request_review(&task.key).await
+        {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't move the task to review");
+        }
     }
 }

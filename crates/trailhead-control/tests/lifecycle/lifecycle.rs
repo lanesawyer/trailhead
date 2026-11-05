@@ -740,6 +740,24 @@ async fn a_worker_that_cant_record_its_failed_check_still_counts_the_attempt_and
     }
 }
 
+/// The PR is open and the checks passed, so a worker that can't ask for review doesn't make a failed attempt (TRAIL-441).
+#[tokio::test]
+async fn a_worker_that_cant_ask_for_review_after_opening_the_pr_still_gets_it_reviewed() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    // The daemon tries three times; the control plane's own request goes through.
+    r.tracker.fail_next("factory/trail-1-a1", "request_review", 3);
+
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    assert!(matches!(ran, Ok(Outcome::Reviewed { .. })), "{ran:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(r.codehost.prs().len(), 1);
+    assert!(task.run.pr.is_some());
+}
+
 #[tokio::test]
 async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_reopened() {
     let r = rig_with(
