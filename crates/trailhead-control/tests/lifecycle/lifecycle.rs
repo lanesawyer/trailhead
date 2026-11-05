@@ -867,6 +867,26 @@ async fn a_fresh_run_whose_setup_fails_is_still_an_infrastructure_failure() {
     assert_eq!(task.run.infra_failures, Some(1));
     assert_eq!(task.run.attempt.unwrap_or(0), 0, "no attempt was used");
     assert!(r.daemon.requests().is_empty(), "no agent started");
+    assert!(r.compute.get("trailhead-w1").is_none(), "a new sandbox has no warm checkpoint, so release destroys it");
+}
+
+#[tokio::test]
+async fn a_fresh_run_whose_setup_fails_returns_a_warm_idle_sandbox_to_the_pool() {
+    let r = with_setup();
+    let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&first)).await.unwrap();
+    let warm = r.compute.get("trailhead-w1").unwrap().labels.get(label::WARM).cloned().expect("warmed");
+
+    let second = r.tracker.add_task("TRAIL", "Hits a broken base", "");
+    r.daemon.fail_setups(1, "error[E0063]: broken base");
+    let err = r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
+    assert!(err.to_string().contains("setup failed"), "{err}");
+    assert_eq!(r.tracker.task(&second).run.infra_failures, Some(1));
+    let sandbox = r.compute.get("trailhead-w1").expect("the warm sandbox is kept");
+    assert_eq!(sandbox.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert_eq!(sandbox.labels.get(label::WARM), Some(&warm), "still on its warm checkpoint");
 }
 
 #[tokio::test]

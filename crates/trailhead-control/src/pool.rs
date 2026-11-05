@@ -190,9 +190,11 @@ impl Factory {
             self.forget_install_opened(&sandbox);
             p.daemon.forget(&sandbox.id).await;
             if matches!(e, Error::SetupFailed(_)) {
-                // The code failed, not the sandbox, and the same error would come from any other: it goes back to
-                // the pool rather than being destroyed for a cold build to replace.
-                tracing::warn!(sandbox = %sandbox.name, error = %e, "setup failed on a fresh run; returning the sandbox");
+                // The code failed, not the sandbox, and the same error would come from any other: it is released
+                // rather than destroyed as broken. Release restores a warm checkpoint, so a sandbox that was idle
+                // returns to the pool; a new one has none yet (the checkpoint comes after a good prepare) and is
+                // destroyed, costing nothing a retry wouldn't pay again, as `setup` would fail on it too.
+                tracing::warn!(sandbox = %sandbox.name, error = %e, "setup failed on a fresh run; releasing the sandbox");
                 self.give_back(&sandbox, &busy).await;
                 return Err(e);
             }
