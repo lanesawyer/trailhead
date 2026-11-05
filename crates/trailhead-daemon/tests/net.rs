@@ -550,6 +550,20 @@ async fn a_daemon_of_an_older_build_is_restarted_before_prepare() {
 }
 
 #[tokio::test]
+async fn a_restored_sandbox_whose_daemon_is_current_is_not_started_again() {
+    let mut r = Rig::new().await;
+    let sandbox = r.sandbox("warm").await;
+    // The restored container's own supervisor started the current build.
+    let current = r.daemon("warm", trailhead_daemon::net::ATTACH_PATIENCE, build_id(b"daemon")).await;
+    r.routers.push(current);
+    r.remote.forget(&sandbox).await;
+    let req = r.factory().config.prepare_request(Role::Worker, None);
+    r.remote.prepare(&sandbox, req).await.unwrap();
+    assert!(r.compute.programs("warm").is_empty(), "no start: the daemon was already there");
+    assert_eq!(r.local.prepares_started(), 1);
+}
+
+#[tokio::test]
 async fn a_daemon_that_stays_stale_fails_the_prepare_loudly() {
     let mut r = Rig::new().await;
     let sandbox = r.sandbox("stuck-old").await;
