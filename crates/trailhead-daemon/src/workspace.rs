@@ -257,6 +257,16 @@ impl Workspace for GitWorkspace {
         Ok(names.split('\0').filter(|f| !f.is_empty()).map(str::to_string).collect())
     }
 
+    async fn unpublished(&self, remote_branch: &str) -> Result<bool> {
+        // Untracked files count; ignored ones (build output) don't.
+        if !self.git_output(&self.dir, &["status", "--porcelain"]).await?.trim().is_empty() {
+            return Ok(true);
+        }
+        let remote = format!("origin/{remote_branch}");
+        let ahead = self.git_output(&self.dir, &["rev-list", "-n1", "HEAD", "--not", &remote]).await?;
+        Ok(!ahead.trim().is_empty())
+    }
+
     async fn head(&self) -> Result<String> {
         self.git_output(&self.dir, &["rev-parse", "HEAD"]).await
     }
