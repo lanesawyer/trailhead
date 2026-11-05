@@ -54,8 +54,9 @@ pub struct Filter {
     pub closed: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilterKey {
+    #[default]
     Project,
     Parent,
     Holder,
@@ -302,9 +303,13 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
     };
     let parents = {
         let ids: BTreeSet<&str> = input.tasks.iter().filter_map(|t| t["parent_id"].as_str()).collect();
-        let mut keys: Vec<&str> = ids.iter().filter_map(|id| task_key.get(id).copied()).collect();
-        keys.sort_by_key(|k| (key_number(k), k.to_string()));
-        keys.into_iter().map(|k| choice(k, k.to_string())).collect()
+        let title: HashMap<&str, &str> = input.tasks.iter().map(|t| (s(t, "id"), s(t, "title"))).collect();
+        let mut keys: Vec<(&str, &str)> = ids
+            .iter()
+            .filter_map(|id| Some((*task_key.get(id)?, title.get(id).copied().unwrap_or_default())))
+            .collect();
+        keys.sort_by_key(|(k, _)| (key_number(k), k.to_string()));
+        keys.into_iter().map(|(k, t)| choice(k, parent_label(k, t))).collect()
     };
     let holders = {
         let ids: BTreeSet<&str> = holder_of.values().copied().collect();
@@ -330,6 +335,22 @@ fn holder_badge(name: &str) -> String {
         return own.to_string();
     }
     own.chars().take(HOLDER_BADGE_CHARS - 1).chain(['…']).collect()
+}
+
+/// How many characters of a parent's title its filter option shows.
+const PARENT_TITLE_CHARS: usize = 40;
+
+/// A parent's filter option: its key, then its title cut with an ellipsis when long, since a key alone says nothing.
+fn parent_label(key: &str, title: &str) -> String {
+    if title.is_empty() {
+        return key.to_string();
+    }
+    let title = if title.chars().count() <= PARENT_TITLE_CHARS {
+        title.to_string()
+    } else {
+        title.chars().take(PARENT_TITLE_CHARS - 1).chain(['…']).collect()
+    };
+    format!("{key} {title}")
 }
 
 fn key_number(key: &str) -> i64 {
@@ -370,7 +391,7 @@ fn rebuild_view(
 }
 
 /// Tags a header dropdown with the filter it sets.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FilterSelect(pub FilterKey);
 
 fn on_pick(pick: On<Picked>, selects: Query<&FilterSelect>, view: Res<BoardView>, mut filter: ResMut<Filter>) {
@@ -567,8 +588,8 @@ fn redraw_header(
         names.extend(choices.iter().map(|c| c.label.clone()));
         // A chosen value that is no longer offered shows as "all".
         let at = filter.get(key).as_ref().and_then(|v| choices.iter().position(|c| &c.value == v)).map_or(0, |i| i + 1);
-        let field = commands.queue_spawn_scene(field(key.name())).insert(ChildOf(bar)).id();
-        commands.queue_spawn_scene(select(names, Some(at), 8)).insert((FilterSelect(key), ChildOf(field)));
+        let control = bsn_list! { @select(names, Some(at), 8) FilterSelect({ key }) };
+        commands.queue_spawn_scene(field(key.name(), control)).insert(ChildOf(bar));
     }
     let caption = if filter.closed { "closed: shown" } else { "closed: hidden" };
     commands.queue_spawn_scene(button(caption, None, ButtonVariant::Normal)).insert((ClosedToggle, ChildOf(bar)));
@@ -862,8 +883,17 @@ mod tests {
         let view = run(&Filter::default());
         let labels = |c: &[Choice]| c.iter().map(|c| c.label.clone()).collect::<Vec<_>>();
         assert_eq!(labels(&view.options.projects), ["OPS", "TRAIL"]);
-        assert_eq!(labels(&view.options.parents), ["TRAIL-102", "TRAIL-103"]);
+        assert_eq!(labels(&view.options.parents), ["TRAIL-102 title TRAIL-102", "TRAIL-103 title TRAIL-103"]);
+        assert_eq!(view.options.parents[0].value, "TRAIL-102", "the filter still takes the key");
         assert_eq!(labels(&view.options.holders), ["factory/trail-103-a1", "u1"]);
+    }
+
+    #[test]
+    fn a_long_parent_title_is_cut_with_an_ellipsis() {
+        let label = parent_label("TRAIL-685", &"x".repeat(60));
+        assert_eq!(label.chars().count(), "TRAIL-685 ".len() + PARENT_TITLE_CHARS);
+        assert!(label.ends_with('…'));
+        assert_eq!(parent_label("TRAIL-9", ""), "TRAIL-9");
     }
 
     #[test]
