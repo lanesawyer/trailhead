@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bevy::feathers::controls::ButtonVariant;
+use bevy::feathers::controls::{ButtonVariant, FeathersMenuPopup};
 use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
@@ -20,8 +20,8 @@ use crate::inspector::{Selection, Subject};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
 use crate::widgets;
 use crate::widgets::{
-    Icon, Picked, ScrollBoth, badge, button, card as card_shell, card_row, card_title, card_under, chip, field, select,
-    size, space, text as label_text, token, tool_button,
+    Icon, Keyed, Picked, ScrollBoth, badge, button, card as card_shell, card_row, card_title, card_under, chip, field,
+    select, size, space, text as label_text, token, tool_button,
 };
 
 /// The views of the app: the task board and the trail map.
@@ -411,14 +411,162 @@ fn on_toggle_closed(activate: On<Activate>, toggles: Query<(), With<ClosedToggle
     }
 }
 
-/// Keeps [`Filter`] and [`BoardView`] from the mirror.
+/// The node the columns sit in, which scrolls sideways. The panel spawns it; [`BoardPlugin`] keeps its children.
+#[derive(Component)]
+pub struct BoardColumns;
+
+/// A column's shell, one entity per status for as long as the status is on the board.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct BoardColumn {
+    pub status: String,
+    /// How many cards the column holds, shown or not.
+    pub count: usize,
+}
+
+/// The scrolling body of the column for this status, a child of its [`BoardColumn`].
+#[derive(Component)]
+pub struct ColumnBody(pub String);
+
+/// A card, one entity per task for as long as the task is on the board. It carries the view model it was drawn from,
+/// so it is redrawn when, and only when, that changes.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct BoardCard(pub Card);
+
+/// The "Nothing here" line of a column without cards.
+#[derive(Component)]
+pub struct ColumnEmpty;
+
+/// The "Show more" button at the foot of a column with cards past its page. `next` is how many one press adds.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct ColumnMore {
+    pub status: String,
+    pub next: usize,
+}
+
+/// What sits in a column's body besides the keys of its cards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Slot {
+    Card(Card),
+    Empty,
+    More(ColumnMore),
+}
+
+/// The entities the board has made, so a change touches only what it changes.
+#[derive(Resource, Default)]
+struct Tree {
+    /// The [`BoardColumns`] node these belong to; a new one (the panel was rebuilt) starts them over.
+    root: Option<Entity>,
+    columns: Keyed<BoardColumn>,
+    bodies: HashMap<String, Entity>,
+    slots: Keyed<Slot>,
+}
+
+/// How many cards each column has been asked to build, by status; a column not in it builds [`PAGE`].
+#[derive(Resource, Default)]
+struct Shown(HashMap<String, usize>);
+
+impl Shown {
+    fn limit(&self, status: &str) -> usize {
+        self.0.get(status).copied().unwrap_or(PAGE)
+    }
+
+    fn more(&mut self, status: &str) {
+        let next = self.limit(status) + PAGE;
+        self.0.insert(status.to_string(), next);
+    }
+}
+
+/// Brings the columns and cards under [`BoardColumns`] to [`BoardView`], touching only what changed: a card that
+/// left is despawned, a new one spawned, one that moved is re-parented, and one whose view model changed is given the
+/// new model. Everything else keeps its entity, so nothing flashes and the scroll positions stay put.
+fn sync_tree(
+    view: Res<BoardView>,
+    shown: Res<Shown>,
+    root: Query<Entity, With<BoardColumns>>,
+    mut tree: ResMut<Tree>,
+    mut commands: Commands,
+) {
+    let root = root.single().ok();
+    let Tree { root: drawn, columns, bodies, slots } = &mut *tree;
+    if *drawn != root {
+        // The old nodes went with their panel.
+        *drawn = root;
+        columns.forget();
+        slots.forget();
+        bodies.clear();
+    } else if !(view.is_changed() || shown.is_changed()) {
+        return;
+    }
+    let Some(root) = root else { return };
+
+    let wanted = [(
+        root,
+        view.columns
+            .iter()
+            .map(|c| (c.status.clone(), BoardColumn { status: c.status.clone(), count: c.cards.len() }))
+            .collect(),
+    )];
+    columns.sync(
+        &mut commands,
+        &wanted,
+        |commands, status, model| {
+            let shell = commands.spawn(model.clone()).id();
+            let body = commands.spawn((ColumnBody(status.to_string()), ChildOf(shell))).id();
+            bodies.insert(status.to_string(), body);
+            shell
+        },
+        |commands, shell, model| {
+            commands.entity(shell).insert(model.clone());
+        },
+    );
+
+    let wanted: Vec<(Entity, Vec<(String, Slot)>)> = view
+        .columns
+        .iter()
+        .filter_map(|column| {
+            let (cards, hidden) = visible(&column.cards, shown.limit(&column.status));
+            let mut items = Vec::new();
+            if column.cards.is_empty() {
+                items.push((format!("empty/{}", column.status), Slot::Empty));
+            }
+            items.extend(cards.iter().map(|c| (c.id.clone(), Slot::Card(c.clone()))));
+            if hidden > 0 {
+                let more = ColumnMore { status: column.status.clone(), next: hidden.min(PAGE) };
+                items.push((format!("more/{}", column.status), Slot::More(more)));
+            }
+            Some((*bodies.get(&column.status)?, items))
+        })
+        .collect();
+    slots.sync(
+        &mut commands,
+        &wanted,
+        |commands, _, slot| match slot {
+            Slot::Card(card) => commands.spawn(BoardCard(card.clone())).id(),
+            Slot::Empty => commands.spawn(ColumnEmpty).id(),
+            Slot::More(more) => commands.spawn(more.clone()).id(),
+        },
+        |commands, entity, slot| match slot {
+            Slot::Card(card) => {
+                commands.entity(entity).insert(BoardCard(card.clone()));
+            }
+            Slot::More(more) => {
+                commands.entity(entity).insert(more.clone());
+            }
+            Slot::Empty => {}
+        },
+    );
+}
+
+/// Keeps [`Filter`], [`BoardView`] and the entities of the columns and cards from the mirror.
 pub struct BoardPlugin;
 
 impl Plugin for BoardPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Filter>()
             .init_resource::<BoardView>()
-            .add_systems(Update, rebuild_view)
+            .init_resource::<Shown>()
+            .init_resource::<Tree>()
+            .add_systems(Update, (rebuild_view, sync_tree).chain())
             .add_observer(on_pick)
             .add_observer(on_toggle_closed);
     }
@@ -432,17 +580,24 @@ impl Plugin for BoardUiPlugin {
         app.add_plugins(BoardPlugin)
             .init_state::<View>()
             .add_systems(OnEnter(View::Board), spawn_panel)
-            .add_systems(OnExit(View::Board), despawn_panel)
+            .add_systems(OnExit(View::Board), (save_scroll, despawn_panel).chain())
             .init_resource::<BoardScroll>()
-            .init_resource::<Shown>()
-            .add_systems(Update, (remember_scroll, redraw, redraw_header).chain().run_if(in_state(View::Board)));
+            .add_observer(on_card_press)
+            .add_observer(on_more_press)
+            .add_systems(
+                Update,
+                (dress_columns, dress_cards, dress_slots, update_counts, tools_follow_connection, redraw_header)
+                    .chain()
+                    .after(sync_tree)
+                    .run_if(in_state(View::Board)),
+            );
     }
 }
 
 #[derive(Component)]
 struct BoardPanel;
 
-fn spawn_panel(mut commands: Commands) {
+fn spawn_panel(mut commands: Commands, kept: Res<BoardScroll>) {
     let panel = commands
         .spawn((
             Name::new("board"),
@@ -468,6 +623,25 @@ fn spawn_panel(mut commands: Commands) {
         Node { align_items: AlignItems::End, column_gap: px(space::GROUPS), ..default() },
         ChildOf(panel),
     ));
+    // Columns past the window's edge are reached by scrolling sideways (Shift + wheel, or a touchpad swipe), and a
+    // long column by scrolling down on its own. This node and the columns in it live as long as the panel.
+    let columns = commands
+        .spawn((
+            Node {
+                column_gap: px(space::GROUPS),
+                align_items: AlignItems::FlexStart,
+                flex_grow: 1.0,
+                min_height: px(0),
+                overflow: Overflow::scroll_x(),
+                ..default()
+            },
+            BoardColumns,
+            ScrollBoth,
+            ScrollPosition(kept.board),
+            ChildOf(panel),
+        ))
+        .id();
+    commands.queue_spawn_scene(widgets::scrollbar(columns, ControlOrientation::Horizontal)).insert(ChildOf(panel));
 }
 
 fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<BoardPanel>>) {
@@ -486,47 +660,150 @@ pub fn visible(cards: &[Card], limit: usize) -> (&[Card], usize) {
     (&cards[..shown], cards.len() - shown)
 }
 
-/// How many cards each column has been asked to build, by status; a column not in it builds [`PAGE`].
-#[derive(Resource, Default)]
-struct Shown(HashMap<String, usize>);
-
-impl Shown {
-    fn limit(&self, status: &str) -> usize {
-        self.0.get(status).copied().unwrap_or(PAGE)
-    }
-
-    fn more(&mut self, status: &str) {
-        let next = self.limit(status) + PAGE;
-        self.0.insert(status.to_string(), next);
-    }
-}
-
-/// Where the board is scrolled to, kept across redraws: each redraw builds new scrolling nodes, which would start
-/// back at the top left.
+/// Where the board was scrolled to when the view last left it. The panel's nodes stay as they are while the board is
+/// showing, so this only brings the positions back after a trip to another view, which builds the panel anew.
 #[derive(Resource, Default)]
 struct BoardScroll {
     board: Vec2,
     columns: HashMap<String, f32>,
 }
 
-/// The node holding the columns, which scrolls both ways.
-#[derive(Component)]
-struct BoardColumns;
-
-/// The scrolling body of the column for this status.
-#[derive(Component)]
-struct ColumnBody(String);
-
-fn remember_scroll(
-    board: Query<&ScrollPosition, (With<BoardColumns>, Changed<ScrollPosition>)>,
-    columns: Query<(&ColumnBody, &ScrollPosition), Changed<ScrollPosition>>,
+fn save_scroll(
+    board: Query<&ScrollPosition, With<BoardColumns>>,
+    columns: Query<(&ColumnBody, &ScrollPosition)>,
     mut kept: ResMut<BoardScroll>,
 ) {
-    if let Some(position) = board.iter().next() {
+    if let Ok(position) = board.single() {
         kept.board = position.0;
     }
     for (column, position) in &columns {
         kept.columns.insert(column.0.clone(), position.y);
+    }
+}
+
+/// Gives a new column its look: the shell, header, scrolling body and scrollbar.
+fn dress_columns(
+    bodies: Query<(Entity, &ColumnBody, &ChildOf), Added<ColumnBody>>,
+    columns: Query<&BoardColumn>,
+    kept: Res<BoardScroll>,
+    mut commands: Commands,
+) {
+    for (body, ColumnBody(status), parent) in &bodies {
+        let shell = parent.parent();
+        let count = columns.get(shell).map_or(0, |c| c.count);
+        let at = kept.columns.get(status).copied().unwrap_or_default();
+        commands.entity(shell).insert(widgets::column_shell(status));
+        commands.entity(body).insert((widgets::column_body(), ScrollPosition(Vec2::new(0.0, at))));
+        // The body and its bar share a frame under the header, so the bar's track is the body's.
+        let frame = commands.spawn((widgets::column_frame(), ChildOf(shell))).id();
+        commands.entity(body).insert(ChildOf(frame));
+        widgets::column_scrollbar(&mut commands, frame, body);
+        widgets::column_header(&mut commands, shell, status, count);
+    }
+}
+
+/// Keeps each header's count in step with its column, in place.
+fn update_counts(mut counts: Query<(&widgets::ColumnCount, &mut Text)>, columns: Query<&BoardColumn>) {
+    for (count, mut text) in &mut counts {
+        if let Ok(column) = columns.get(count.0) {
+            let now = column.count.to_string();
+            if text.0 != now {
+                text.0 = now;
+            }
+        }
+    }
+}
+
+/// Marks a card's tool button, which is disabled while the connection isn't live.
+#[derive(Component)]
+struct CardTool;
+
+/// Draws a card when it is new, and again only when its view model changed.
+fn dress_cards(
+    cards: Query<(Entity, &BoardCard, Option<&Children>), Changed<BoardCard>>,
+    connection: Res<State<Connection>>,
+    mut commands: Commands,
+) {
+    let live = *connection.get() == Connection::Live;
+    for (shell, BoardCard(card), children) in &cards {
+        for child in children.into_iter().flatten() {
+            commands.entity(*child).despawn();
+        }
+        commands.entity(shell).apply_scene(card_shell(card.depth));
+        commands.queue_spawn_scene(badge(card.key.clone(), None)).insert(ChildOf(shell));
+        commands.queue_spawn_scene(card_title(card.title.clone())).insert(ChildOf(shell));
+        if let Some(parent) = &card.parent {
+            commands.queue_spawn_scene(card_under(parent.clone())).insert(ChildOf(shell));
+        }
+        let badges = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
+        for b in &card.badges {
+            let tone = (b.kind == BadgeKind::Questions).then_some(token::WARN);
+            commands.queue_spawn_scene(badge(b.label.clone(), tone)).insert(ChildOf(badges));
+        }
+        let tools = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
+        for action in &card.actions {
+            let (icon, hint) = match action {
+                CardAction::Edit => (Icon::Pencil, "Edit"),
+                CardAction::Comment => (Icon::Comment, "Comment"),
+                CardAction::Answer { .. } => (Icon::Help, "Answer the open question"),
+            };
+            let mut tool = commands.queue_spawn_scene(tool_button(icon, hint, ButtonVariant::Plain));
+            tool.insert((action.act(&card.key), CardTool, ChildOf(tools)));
+            if !live {
+                tool.insert(InteractionDisabled);
+            }
+        }
+    }
+}
+
+/// Enables and disables the cards' tool buttons as the connection goes live and away, without redrawing them.
+fn tools_follow_connection(
+    connection: Res<State<Connection>>,
+    tools: Query<Entity, With<CardTool>>,
+    mut commands: Commands,
+) {
+    if !connection.is_changed() {
+        return;
+    }
+    let live = *connection.get() == Connection::Live;
+    for tool in &tools {
+        if live {
+            commands.entity(tool).remove::<InteractionDisabled>();
+        } else {
+            commands.entity(tool).insert(InteractionDisabled);
+        }
+    }
+}
+
+/// Draws the "Nothing here" line and the "Show more" button when they appear, and the button again when its count
+/// changes.
+fn dress_slots(
+    empty: Query<Entity, Added<ColumnEmpty>>,
+    more: Query<(Entity, &ColumnMore, Option<&Children>), Changed<ColumnMore>>,
+    mut commands: Commands,
+) {
+    for entity in &empty {
+        commands.entity(entity).queue_apply_scene(widgets::column_empty());
+    }
+    for (entity, more, children) in &more {
+        for child in children.into_iter().flatten() {
+            commands.entity(*child).despawn();
+        }
+        let label = format!("Show {} more", more.next);
+        commands.entity(entity).queue_apply_scene(button(label, None, ButtonVariant::Normal));
+    }
+}
+
+/// Opens a card in the inspector when it is pressed.
+fn on_card_press(activate: On<Activate>, cards: Query<&BoardCard>, mut selection: ResMut<Selection>) {
+    if let Ok(BoardCard(card)) = cards.get(activate.entity) {
+        selection.0 = Some(Subject::Task(card.id.clone()));
+    }
+}
+
+fn on_more_press(activate: On<Activate>, more: Query<&ColumnMore>, mut shown: ResMut<Shown>) {
+    if let Ok(more) = more.get(activate.entity) {
+        shown.more(&more.status);
     }
 }
 
@@ -558,6 +835,7 @@ fn connection_chip(
 }
 
 /// Draws the header bar: the app name, a dropdown per filter, New task, and the connection chip.
+#[allow(clippy::too_many_arguments)]
 fn redraw_header(
     view: Res<BoardView>,
     filter: Res<Filter>,
@@ -565,6 +843,7 @@ fn redraw_header(
     status: Res<ConnectionStatus>,
     bar: Single<(Entity, Option<&Children>), With<HeaderBar>>,
     mut commands: Commands,
+    popups: Query<&Visibility, With<FeathersMenuPopup>>,
     mut drawn: Local<Option<HeaderDrawn>>,
 ) {
     let (bar, children) = *bar;
@@ -575,7 +854,8 @@ fn redraw_header(
         connection: *connection.get(),
         reason: status.reason.as_ref().map(|r| r.to_string()).unwrap_or_default(),
     };
-    if drawn.as_ref() == Some(&now) {
+    // Rebuilding the bar would close a dropdown under the pointer; it is drawn when the dropdown has closed.
+    if drawn.as_ref() == Some(&now) || popups.iter().any(|v| *v != Visibility::Hidden) {
         return;
     }
     for child in children.into_iter().flatten() {
@@ -607,109 +887,6 @@ fn redraw_header(
     commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(bar)));
     commands.queue_spawn_scene(chip(tone, words, hint)).insert(ChildOf(bar));
     *drawn = Some(now);
-}
-
-/// Redraws the whole panel when the view, filter, connection or a column's page changes. Each column builds at most
-/// [`PAGE`] cards at a time, so a redraw costs the same however long the backlog.
-#[allow(clippy::too_many_arguments)]
-fn redraw(
-    view: Res<BoardView>,
-    filter: Res<Filter>,
-    connection: Res<State<Connection>>,
-    status: Res<ConnectionStatus>,
-    scroll: Res<BoardScroll>,
-    shown: Res<Shown>,
-    panel: Single<(Entity, Option<&Children>), With<BoardPanel>>,
-    header: Query<(), With<HeaderBar>>,
-    mut commands: Commands,
-    mut drawn: Local<Option<Entity>>,
-) {
-    let (panel, children) = *panel;
-    let fresh = *drawn != Some(panel);
-    if !(fresh
-        || view.is_changed()
-        || filter.is_changed()
-        || shown.is_changed()
-        || connection.is_changed()
-        || status.is_changed())
-    {
-        return;
-    }
-    *drawn = Some(panel);
-    for child in children.into_iter().flatten().filter(|c| !header.contains(**c)) {
-        commands.entity(*child).despawn();
-    }
-    let live = *connection.get() == Connection::Live;
-
-    // Columns past the window's edge are reached by scrolling sideways (Shift + wheel, or a touchpad swipe), and a
-    // long column by scrolling down on its own.
-    let columns = commands
-        .spawn((
-            Node {
-                column_gap: px(space::GROUPS),
-                align_items: AlignItems::Stretch,
-                flex_grow: 1.0,
-                min_height: px(0),
-                overflow: Overflow::scroll_x(),
-                ..default()
-            },
-            BoardColumns,
-            ScrollBoth,
-            ScrollPosition(scroll.board),
-            ChildOf(panel),
-        ))
-        .id();
-    commands.queue_spawn_scene(widgets::scrollbar(columns, ControlOrientation::Horizontal)).insert(ChildOf(panel));
-    for column in &view.columns {
-        let (cards, hidden) = visible(&column.cards, shown.limit(&column.status));
-        let col = widgets::column(
-            &mut commands,
-            columns,
-            &column.status,
-            column.cards.len(),
-            scroll.columns.get(&column.status).copied().unwrap_or_default(),
-        );
-        commands.entity(col).insert(ColumnBody(column.status.clone()));
-        if column.cards.is_empty() {
-            commands.queue_spawn_scene(widgets::column_empty()).insert(ChildOf(col));
-        }
-        for card in cards {
-            let shell = commands.queue_spawn_scene(card_shell(card.depth)).insert(ChildOf(col)).id();
-            let subject = Subject::Task(card.id.clone());
-            commands.entity(shell).observe(move |_: On<Activate>, mut selection: ResMut<Selection>| {
-                selection.0 = Some(subject.clone());
-            });
-            commands.queue_spawn_scene(badge(card.key.clone(), None)).insert(ChildOf(shell));
-            commands.queue_spawn_scene(card_title(card.title.clone())).insert(ChildOf(shell));
-            if let Some(parent) = &card.parent {
-                commands.queue_spawn_scene(card_under(parent.clone())).insert(ChildOf(shell));
-            }
-            let badges = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
-            for b in &card.badges {
-                let tone = (b.kind == BadgeKind::Questions).then_some(token::WARN);
-                commands.queue_spawn_scene(badge(b.label.clone(), tone)).insert(ChildOf(badges));
-            }
-            let tools = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
-            for action in &card.actions {
-                let (icon, hint) = match action {
-                    CardAction::Edit => (Icon::Pencil, "Edit"),
-                    CardAction::Comment => (Icon::Comment, "Comment"),
-                    CardAction::Answer { .. } => (Icon::Help, "Answer the open question"),
-                };
-                let mut tool = commands.queue_spawn_scene(tool_button(icon, hint, ButtonVariant::Plain));
-                tool.insert((action.act(&card.key), ChildOf(tools)));
-                if !live {
-                    tool.insert(InteractionDisabled);
-                }
-            }
-        }
-        if hidden > 0 {
-            let status = column.status.clone();
-            let label = format!("Show {} more", hidden.min(PAGE));
-            let mut more = commands.queue_spawn_scene(button(label, None, ButtonVariant::Normal));
-            more.insert(ChildOf(col)).observe(move |_: On<Activate>, mut shown: ResMut<Shown>| shown.more(&status));
-        }
-    }
 }
 
 #[cfg(test)]
@@ -968,5 +1145,174 @@ mod tests {
         app.update();
         let view = app.world().resource::<BoardView>();
         assert_eq!(keys(view, "done"), [("OPS-1".into(), 0)]);
+    }
+}
+
+#[cfg(test)]
+mod in_place_tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::mirror::MirrorPlugin;
+    use crate::sync::{Snapshot, SyncItem};
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins((MirrorPlugin, BoardPlugin));
+        app.world_mut().spawn(BoardColumns);
+        let task = |id: &str, status: &str| json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p1", "status": status, "priority": 2});
+        let tasks = vec![task("t1", "open"), task("t2", "open"), task("t3", "in_progress"), task("t4", "in_progress")];
+        let projects = vec![json!({"id": "p1", "key": "TRAIL"}), json!({"id": "p2", "key": "OPS"})];
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, agents: vec![] }));
+        settle(&mut app);
+        app
+    }
+
+    fn settle(app: &mut App) {
+        for _ in 0..3 {
+            app.update();
+        }
+    }
+
+    fn update_task(app: &mut App, id: &str, status: &str) {
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 9, "entity": "task", "entity_id": id, "kind": "task.updated",
+            "after": {"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p1", "status": status,
+                      "priority": 2, "version": 2},
+        })));
+        settle(app);
+    }
+
+    fn cards(app: &mut App) -> HashMap<String, Entity> {
+        let mut q = app.world_mut().query::<(Entity, &BoardCard)>();
+        q.iter(app.world()).map(|(e, c)| (c.0.id.clone(), e)).collect()
+    }
+
+    fn column_of(app: &mut App, card: Entity) -> String {
+        let body = app.world().get::<ChildOf>(card).expect("a card has a column").parent();
+        app.world().get::<ColumnBody>(body).expect("in a column body").0.clone()
+    }
+
+    fn count_cards(app: &mut App) -> usize {
+        let mut q = app.world_mut().query::<&BoardCard>();
+        q.iter(app.world()).count()
+    }
+
+    #[test]
+    fn changing_one_task_leaves_every_other_card_as_it_was() {
+        let mut app = app();
+        let before = cards(&mut app);
+        assert_eq!(before.len(), 4);
+        let mut q = app.world_mut().query::<(Entity, &BoardColumn)>();
+        let columns: Vec<Entity> = q.iter(app.world()).map(|(e, _)| e).collect();
+
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 9, "entity": "task", "entity_id": "t1", "kind": "task.updated",
+            "after": {"id": "t1", "key": "T1", "title": "renamed", "project_id": "p1", "status": "open",
+                      "priority": 2, "version": 2},
+        })));
+        settle(&mut app);
+        let after = cards(&mut app);
+        assert_eq!(before, after, "the same entities, one of them redrawn");
+        let renamed = app.world().get::<BoardCard>(after["t1"]).unwrap();
+        assert_eq!(renamed.0.title, "renamed");
+        let mut q = app.world_mut().query::<(Entity, &BoardColumn)>();
+        assert_eq!(columns, q.iter(app.world()).map(|(e, _)| e).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_card_that_changes_column_keeps_its_entity_and_leaves_no_copy() {
+        let mut app = app();
+        let before = cards(&mut app);
+        assert_eq!(column_of(&mut app, before["t1"]), "open");
+
+        update_task(&mut app, "t1", "in_progress");
+        let after = cards(&mut app);
+        assert_eq!(after, before);
+        assert_eq!(count_cards(&mut app), 4, "no stale copy in the old column");
+        assert_eq!(column_of(&mut app, after["t1"]), "in_progress");
+        // The columns' children are what the view says.
+        let mut q = app.world_mut().query::<(&ColumnBody, &Children)>();
+        let held: HashMap<String, usize> = q.iter(app.world()).map(|(b, c)| (b.0.clone(), c.len())).collect();
+        assert_eq!((held["open"], held["in_progress"]), (1, 3));
+    }
+
+    #[test]
+    fn a_filter_change_despawns_only_the_cards_it_hides() {
+        let mut app = app();
+        let before = cards(&mut app);
+        // Give two of the tasks to the other project.
+        for id in ["t2", "t4"] {
+            app.world_mut().write_message(SyncItem::Event(json!({
+                "id": if id == "t2" { 9 } else { 10 }, "entity": "task", "entity_id": id, "kind": "task.updated",
+                "after": {"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p2",
+                          "status": if id == "t2" { "open" } else { "in_progress" }, "priority": 2, "version": 2},
+            })));
+        }
+        settle(&mut app);
+        assert_eq!(cards(&mut app), before);
+
+        app.world_mut().resource_mut::<Filter>().project = Some("TRAIL".into());
+        settle(&mut app);
+        let after = cards(&mut app);
+        let mut ids: Vec<_> = after.keys().cloned().collect();
+        ids.sort();
+        assert_eq!(ids, ["t1", "t3"]);
+        for id in ids {
+            assert_eq!(after[&id], before[&id]);
+        }
+        for id in ["t2", "t4"] {
+            assert!(app.world().get_entity(before[id]).is_err(), "{id} is despawned");
+        }
+    }
+
+    #[test]
+    fn closed_columns_come_and_go_without_touching_the_open_ones() {
+        let mut app = app();
+        let before = cards(&mut app);
+        update_task(&mut app, "t1", "done");
+        // Done is hidden: its card is gone, the rest are untouched.
+        let hidden = cards(&mut app);
+        assert_eq!(hidden.len(), 3);
+        assert_eq!(hidden["t2"], before["t2"]);
+
+        app.world_mut().resource_mut::<Filter>().closed = true;
+        settle(&mut app);
+        let shown = cards(&mut app);
+        assert_eq!(shown.len(), 4);
+        assert_eq!(column_of(&mut app, shown["t1"]), "done");
+        for id in ["t2", "t3", "t4"] {
+            assert_eq!(shown[id], before[id]);
+        }
+    }
+
+    #[test]
+    fn showing_more_adds_cards_and_keeps_the_ones_shown() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins((MirrorPlugin, BoardPlugin));
+        app.world_mut().spawn(BoardColumns);
+        let tasks: Vec<Value> = (0..PAGE + 5)
+            .map(|i| {
+                json!({"id": format!("t{i}"), "key": format!("TRAIL-{i}"), "title": "", "project_id": "p1",
+                            "status": "open", "priority": 2})
+            })
+            .collect();
+        let projects = vec![json!({"id": "p1", "key": "TRAIL"})];
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, agents: vec![] }));
+        settle(&mut app);
+        let before = cards(&mut app);
+        assert_eq!(before.len(), PAGE);
+        let mut q = app.world_mut().query::<&ColumnMore>();
+        assert_eq!(q.single(app.world()).unwrap().next, 5);
+
+        app.world_mut().resource_mut::<Shown>().more("open");
+        settle(&mut app);
+        let after = cards(&mut app);
+        assert_eq!(after.len(), PAGE + 5);
+        for (id, e) in &before {
+            assert_eq!(after[id], *e);
+        }
+        let mut q = app.world_mut().query::<&ColumnMore>();
+        assert_eq!(q.iter(app.world()).count(), 0, "nothing left to show");
     }
 }
