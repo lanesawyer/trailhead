@@ -295,6 +295,11 @@ impl LocalDaemon {
         }
     }
 
+    /// Makes the next run fail with a permanent rejection, as a request the remote will never accept.
+    pub fn reject_runs(&self, error: &str) {
+        self.run_errors.lock().unwrap().push(trailhead_factory::Error::Rejected(error.to_string()));
+    }
+
     /// Makes the next `times` runs fail with this error, as a daemon the control plane lost would.
     pub fn fail_runs(&self, times: usize, error: &str) {
         let mut errors = self.run_errors.lock().unwrap();

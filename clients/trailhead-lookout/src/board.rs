@@ -1,5 +1,6 @@
 //! The task board (`docs/factory/ui.md#views`), read-only: tasks by status with subtasks under their parent, each
-//! with its claim holder, open questions and last handoff, filtered by project, status, parent and holder.
+//! a card with badges (priority, grade, holder, open questions) and icon actions, filtered by project, status,
+//! parent and holder.
 //!
 //! [`build`] is a pure function over the mirror's JSON, so the queries are tested without a window. [`BoardPlugin`]
 //! keeps a [`BoardView`] from the mirror and the [`Filter`]; [`BoardUiPlugin`] draws it with feathers, greyed out
@@ -7,7 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bevy::feathers::controls::FeathersButton;
+use bevy::feathers::controls::{ButtonVariant, FeathersButton};
 use bevy::feathers::display::caption;
 use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
@@ -19,6 +20,7 @@ use crate::connection::{Connection, ConnectionStatus, LocalEndpoint};
 use crate::inspector::{Selection, Subject};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
 use crate::widgets::ScrollBoth;
+use crate::widgets::{Icon, badge, card as card_shell, card_row, card_title, card_under, token, tool_button};
 
 /// The views of the app: the task board and the trail map.
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -119,24 +121,61 @@ pub fn cycle(current: &Option<String>, choices: &[Choice]) -> Option<String> {
     choices.get(next).map(|c| c.value.clone())
 }
 
+/// What a badge on a card says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadgeKind {
+    Priority,
+    Grade,
+    Holder,
+    /// Open questions, with their count.
+    Questions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Badge {
+    pub kind: BadgeKind,
+    pub label: String,
+}
+
+/// A tool button on a card. What each does is [`CardAction::act`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CardAction {
+    Edit,
+    Comment,
+    /// Answers the oldest open question; the inspector lists the rest.
+    Answer {
+        comment_id: String,
+        question: String,
+    },
+}
+
+impl CardAction {
+    fn act(&self, key: &str) -> Act {
+        let key = key.to_string();
+        match self {
+            CardAction::Edit => Act::Edit(key),
+            CardAction::Comment => Act::Comment(key),
+            CardAction::Answer { comment_id, question } => {
+                Act::Answer { key, comment_id: comment_id.clone(), question: question.clone() }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
     pub id: String,
     pub key: String,
     pub title: String,
-    pub priority: i64,
     /// `TRAIL-102` when this task is a subtask whose parent isn't in the same column (a nested card says it by
     /// sitting under its parent).
     pub parent: Option<String>,
     /// 0 for a top-level card, 1 for a subtask shown under its parent in the same column.
     pub depth: usize,
-    pub holder: Option<String>,
-    /// The id of the claim holder.
-    pub holder_id: Option<String>,
-    pub open_questions: Vec<String>,
-    /// The comment ids of `open_questions`, in the same order, for answering them.
-    pub question_ids: Vec<String>,
-    pub handoff: Option<String>,
+    /// Priority, grade, holder and open questions, in that order, leaving out what the task doesn't have.
+    pub badges: Vec<Badge>,
+    /// Edit and comment, and answer when a question is open.
+    pub actions: Vec<CardAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,18 +215,9 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
     let holder_label = |id: &str| agent_name.get(id).map_or_else(|| short(id), |n| n.to_string());
 
     let mut questions: HashMap<&str, Vec<&Value>> = HashMap::new();
-    let mut handoffs: HashMap<&str, &Value> = HashMap::new();
     for c in input.comments {
-        let task = s(c, "task_id");
-        match s(c, "kind") {
-            "question" if c["resolved_at"].is_null() => questions.entry(task).or_default().push(c),
-            "handoff" => {
-                let newer = handoffs.get(task).is_none_or(|h| s(h, "created_at") <= s(c, "created_at"));
-                if newer {
-                    handoffs.insert(task, c);
-                }
-            }
-            _ => {}
+        if s(c, "kind") == "question" && c["resolved_at"].is_null() {
+            questions.entry(s(c, "task_id")).or_default().push(c);
         }
     }
 
@@ -206,22 +236,33 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         let id = s(t, "id");
         let mut open: Vec<&Value> = questions.get(id).cloned().unwrap_or_default();
         open.sort_by(|a, b| s(a, "created_at").cmp(s(b, "created_at")));
+        let priority = format!("P{}", t["priority"].as_i64().unwrap_or(0));
+        let mut badges = vec![Badge { kind: BadgeKind::Priority, label: priority }];
+        if let Some(grade) = t["grade"].as_i64() {
+            badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}") });
+        }
+        if let Some(holder) = holder_of.get(id) {
+            badges.push(Badge { kind: BadgeKind::Holder, label: holder_badge(&holder_label(holder)) });
+        }
+        if !open.is_empty() {
+            badges.push(Badge { kind: BadgeKind::Questions, label: format!("? {}", open.len()) });
+        }
+        let mut actions = vec![CardAction::Edit, CardAction::Comment];
+        if let Some(q) = open.first() {
+            actions.push(CardAction::Answer { comment_id: s(q, "id").to_string(), question: s(q, "body").to_string() });
+        }
         Card {
             id: id.to_string(),
             key: s(t, "key").to_string(),
             title: s(t, "title").to_string(),
-            priority: t["priority"].as_i64().unwrap_or(0),
             parent: t["parent_id"]
                 .as_str()
                 .and_then(|p| task_key.get(p))
                 .filter(|_| with_parent)
                 .map(|k| k.to_string()),
             depth,
-            holder: holder_of.get(id).map(|h| holder_label(h)),
-            holder_id: holder_of.get(id).map(|h| h.to_string()),
-            open_questions: open.iter().map(|q| s(q, "body").to_string()).collect(),
-            question_ids: open.iter().map(|q| s(q, "id").to_string()).collect(),
-            handoff: handoffs.get(id).map(|h| s(h, "body").to_string()),
+            badges,
+            actions,
         }
     };
 
@@ -269,6 +310,19 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
 
 fn short(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+/// How many characters of a holder's name a badge shows.
+const HOLDER_BADGE_CHARS: usize = 12;
+
+/// An agent's name for a badge: without its parent (`factory/trail-103-a1` is `trail-103-a1`), cut with an ellipsis
+/// when still long.
+fn holder_badge(name: &str) -> String {
+    let own = name.rsplit('/').next().unwrap_or(name);
+    if own.chars().count() <= HOLDER_BADGE_CHARS {
+        return own.to_string();
+    }
+    own.chars().take(HOLDER_BADGE_CHARS - 1).chain(['…']).collect()
 }
 
 fn key_number(key: &str) -> i64 {
@@ -383,16 +437,6 @@ fn filter_button(key: FilterKey, label: String) -> impl Scene {
     }
 }
 
-fn inspect_button(label: String, subject: Subject) -> impl Scene {
-    bsn! {
-        @FeathersButton
-        on(move |_: On<Activate>, mut selection: ResMut<Selection>| {
-            selection.0 = Some(subject.clone());
-        })
-        Children [ @caption(label) ]
-    }
-}
-
 /// Where the board's columns are scrolled to, kept across redraws: each redraw builds a new scrolling node, which
 /// would start back at the left edge.
 #[derive(Resource, Default)]
@@ -441,11 +485,7 @@ fn redraw(
         commands.entity(*child).despawn();
     }
     let live = *connection.get() == Connection::Live;
-    let (ink, dim) = if live {
-        (Color::WHITE, Color::srgb(0.7, 0.7, 0.7))
-    } else {
-        (Color::srgb(0.45, 0.45, 0.45), Color::srgb(0.35, 0.35, 0.35))
-    };
+    let ink = if live { Color::WHITE } else { Color::srgb(0.45, 0.45, 0.45) };
 
     if !live {
         let why = status.reason.as_ref().map_or_else(String::new, |r| format!(": {r}"));
@@ -503,54 +543,33 @@ fn redraw(
             .id();
         text(&mut commands, col, format!("{} ({})", column.status, column.cards.len()), ink, 0);
         for card in &column.cards {
-            let mut head = format!("{} {}", card.key, card.title);
+            let shell = commands.queue_spawn_scene(card_shell(card.depth)).insert(ChildOf(col)).id();
+            let subject = Subject::Task(card.id.clone());
+            commands.entity(shell).observe(move |_: On<Activate>, mut selection: ResMut<Selection>| {
+                selection.0 = Some(subject.clone());
+            });
+            commands.queue_spawn_scene(badge(card.key.clone(), None)).insert(ChildOf(shell));
+            commands.queue_spawn_scene(card_title(card.title.clone())).insert(ChildOf(shell));
             if let Some(parent) = &card.parent {
-                head += &format!(" (under {parent})");
+                commands.queue_spawn_scene(card_under(parent.clone())).insert(ChildOf(shell));
             }
-            text(&mut commands, col, head, ink, card.depth);
-            let tools = commands
-                .spawn((
-                    Node { column_gap: px(4), margin: UiRect::left(px(16 * card.depth)), ..default() },
-                    ChildOf(col),
-                ))
-                .id();
-            let mut buttons = vec![
-                ("edit".to_string(), Act::Edit(card.key.clone())),
-                ("comment".to_string(), Act::Comment(card.key.clone())),
-            ];
-            for (n, (q, id)) in card.open_questions.iter().zip(&card.question_ids).enumerate() {
-                let act = Act::Answer { key: card.key.clone(), comment_id: id.clone(), question: q.clone() };
-                buttons.push((if n == 0 { "answer".to_string() } else { format!("answer {}", n + 1) }, act));
+            let badges = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
+            for b in &card.badges {
+                let tone = (b.kind == BadgeKind::Questions).then_some(token::WARN);
+                commands.queue_spawn_scene(badge(b.label.clone(), tone)).insert(ChildOf(badges));
             }
-            for (label, act) in buttons {
-                let mut button = commands.queue_spawn_scene(act_button(label, act));
-                button.insert(ChildOf(tools));
+            let tools = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
+            for action in &card.actions {
+                let (icon, hint) = match action {
+                    CardAction::Edit => (Icon::Pencil, "Edit"),
+                    CardAction::Comment => (Icon::Comment, "Comment"),
+                    CardAction::Answer { .. } => (Icon::Help, "Answer the open question"),
+                };
+                let mut tool = commands.queue_spawn_scene(tool_button(icon, hint, ButtonVariant::Plain));
+                tool.insert((action.act(&card.key), ChildOf(tools)));
                 if !live {
-                    button.insert(InteractionDisabled);
+                    tool.insert(InteractionDisabled);
                 }
-            }
-            commands
-                .queue_spawn_scene(inspect_button(format!("inspect {}", card.key), Subject::Task(card.id.clone())))
-                .insert(ChildOf(col));
-            if let Some(holder) = &card.holder {
-                text(&mut commands, col, format!("held by {holder}"), dim, card.depth + 1);
-                if let Some(id) = &card.holder_id {
-                    commands
-                        .queue_spawn_scene(inspect_button(format!("inspect {holder}"), Subject::Agent(id.clone())))
-                        .insert(ChildOf(col));
-                }
-            }
-            for q in &card.open_questions {
-                text(&mut commands, col, format!("? {q}"), Color::srgb(0.9, 0.7, 0.3), card.depth + 1);
-            }
-            if let Some(h) = &card.handoff {
-                text(
-                    &mut commands,
-                    col,
-                    format!("handoff: {}", h.lines().next().unwrap_or_default()),
-                    dim,
-                    card.depth + 1,
-                );
             }
         }
     }
@@ -570,13 +589,14 @@ mod tests {
             json!({"id": id, "key": key, "title": format!("title {key}"), "project_id": project, "status": status,
                    "parent_id": parent, "priority": prio})
         };
-        let tasks = vec![
+        let mut tasks = vec![
             task("t102", "TRAIL-102", "p1", "open", None, 2),
             task("t103", "TRAIL-103", "p1", "in_progress", Some("t102"), 2),
             task("t104", "TRAIL-104", "p1", "in_progress", Some("t103"), 1),
             task("t105", "TRAIL-105", "p1", "open", Some("t102"), 3),
             task("t200", "OPS-1", "p2", "in_progress", None, 2),
         ];
+        tasks[1]["grade"] = json!(3);
         let claims = vec![json!({"task_id": "t103", "holder_id": "a1"}), json!({"task_id": "t200", "holder_id": "u1"})];
         let comments = vec![
             json!({"id": "c1", "task_id": "t103", "kind": "question", "body": "which db?", "resolved_at": null, "created_at": "1"}),
@@ -614,16 +634,60 @@ mod tests {
         assert_eq!(parents, [None, Some("TRAIL-102"), None]);
     }
 
+    fn card<'a>(view: &'a BoardView, key: &str) -> &'a Card {
+        view.columns.iter().flat_map(|c| &c.cards).find(|c| c.key == key).unwrap()
+    }
+
+    fn badges(card: &Card) -> Vec<(BadgeKind, &str)> {
+        card.badges.iter().map(|b| (b.kind, b.label.as_str())).collect()
+    }
+
     #[test]
-    fn cards_carry_holder_open_questions_and_the_last_handoff() {
+    fn badges_show_priority_grade_holder_and_the_open_question_count() {
         let view = run(&Filter::default());
-        let col = view.columns.iter().find(|c| c.status == "in_progress").unwrap();
-        let card = col.cards.iter().find(|c| c.key == "TRAIL-103").unwrap();
-        assert_eq!(card.holder.as_deref(), Some("factory/trail-103-a1"));
-        assert_eq!(card.open_questions, ["which db?"]);
-        assert_eq!(card.handoff.as_deref(), Some("second\nmore"));
-        // A holder that isn't an agent shows as a short id.
-        assert_eq!(col.cards.iter().find(|c| c.key == "OPS-1").unwrap().holder.as_deref(), Some("u1"));
+        assert_eq!(
+            badges(card(&view, "TRAIL-103")),
+            [
+                (BadgeKind::Priority, "P2"),
+                (BadgeKind::Grade, "G3"),
+                (BadgeKind::Holder, "trail-103-a1"),
+                (BadgeKind::Questions, "? 1"),
+            ]
+        );
+        // No grade, no holder, no question: only the priority. A holder that isn't an agent shows as a short id.
+        assert_eq!(badges(card(&view, "TRAIL-102")), [(BadgeKind::Priority, "P2")]);
+        assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, "u1")]);
+    }
+
+    #[test]
+    fn a_long_holder_name_is_cut_short() {
+        assert_eq!(holder_badge("factory/trail-103-a1"), "trail-103-a1");
+        assert_eq!(holder_badge("a-very-long-agent-name"), "a-very-long…");
+        assert_eq!(holder_badge("claude"), "claude");
+    }
+
+    #[test]
+    fn every_card_can_be_edited_and_commented_and_only_one_with_a_question_can_be_answered() {
+        let view = run(&Filter::default());
+        assert_eq!(card(&view, "TRAIL-102").actions, [CardAction::Edit, CardAction::Comment]);
+        let asked = card(&view, "TRAIL-103");
+        let answer = CardAction::Answer { comment_id: "c1".into(), question: "which db?".into() };
+        assert_eq!(asked.actions, [CardAction::Edit, CardAction::Comment, answer.clone()]);
+        // The buttons send the commands the forms already handle.
+        assert_eq!(asked.actions[0].act(&asked.key), Act::Edit("TRAIL-103".into()));
+        assert_eq!(asked.actions[1].act(&asked.key), Act::Comment("TRAIL-103".into()));
+        assert_eq!(
+            answer.act(&asked.key),
+            Act::Answer { key: "TRAIL-103".into(), comment_id: "c1".into(), question: "which db?".into() }
+        );
+    }
+
+    #[test]
+    fn a_card_carries_no_handoff_or_question_body_but_names_its_parent() {
+        let view = run(&Filter::default());
+        let card = card(&view, "TRAIL-103");
+        assert_eq!(card.parent.as_deref(), Some("TRAIL-102"));
+        assert!(card.badges.iter().all(|b| !b.label.contains("which db?") && !b.label.contains("second")));
     }
 
     #[test]

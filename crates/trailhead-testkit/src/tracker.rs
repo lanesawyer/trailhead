@@ -388,7 +388,8 @@ impl Tracker for FakeTracker {
         self.inject("claim")?;
         self.write(task, |t, me| match (&t.holder, t.status) {
             (Some(h), _) if h == me => Ok(()),
-            (None, Status::Open) => {
+            // As in core, parked and in-review work is claimable without passing through `open`.
+            (None, Status::Open | Status::NeedsInput | Status::InReview) => {
                 t.holder = Some(me.to_string());
                 t.status = Status::InProgress;
                 Ok(())

@@ -10,6 +10,7 @@
 //! - A choice from a fixed set: [`select`], and observe [`Picked`].
 //! - Text: [`text`], [`text_dim`], [`text_toned`] at a [`size`]. A button's caption: [`button_text`].
 //! - An icon in text: [`icon_text`]; as a button's caption: [`button_icon`].
+//! - A chip of small text: [`badge`]. A task's card: [`card`], with [`card_title`], [`card_under`] and [`card_row`].
 //! - A panel over the board: [`panel`], with a [`layer`]. Inside it: [`section`], [`row`], [`field`].
 //! - A hint over anything: put a [`Hint`] on it.
 //! - Colors: [`token`] (Lookout's) and `bevy::feathers::tokens` (the controls'); a status column's: [`status_token`].
@@ -18,7 +19,9 @@
 
 use bevy::prelude::*;
 
+mod badge;
 mod buttons;
+mod card;
 mod containers;
 mod hint;
 mod icons;
@@ -30,7 +33,9 @@ mod spacing;
 mod text;
 mod theme;
 
+pub use badge::badge;
 pub use buttons::{button, button_text, tool_button};
+pub use card::{TITLE_LINES, card, card_row, card_title, card_under};
 pub use containers::{field, panel, row, section};
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
