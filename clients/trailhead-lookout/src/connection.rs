@@ -5,6 +5,7 @@
 
 use bevy::prelude::*;
 
+use crate::commands::{CommandsPlugin, Reply};
 use crate::mirror::{MirrorPlugin, apply_sync};
 use crate::net::{ApiAccess, Link, NetCommand, NetConfig, NetEvent, NetHandle, Reason};
 use crate::sync::SyncItem;
@@ -72,7 +73,7 @@ impl Plugin for ConnectionPlugin {
             .init_state::<Connection>()
             .init_resource::<ConnectionStatus>()
             .init_resource::<LocalEndpoint>()
-            .add_plugins(MirrorPlugin)
+            .add_plugins((MirrorPlugin, CommandsPlugin))
             .add_message::<SendNet>()
             .insert_resource(Net(NetHandle::spawn(self.config.clone(), self.target.clone())))
             .add_systems(PreUpdate, (forward_commands, apply_events.before(apply_sync)).chain());
@@ -92,6 +93,7 @@ fn apply_events(
     mut status: ResMut<ConnectionStatus>,
     mut endpoint: ResMut<LocalEndpoint>,
     mut sync: MessageWriter<SyncItem>,
+    mut replies: MessageWriter<Reply>,
 ) {
     for event in net.0.drain() {
         match event {
@@ -101,6 +103,9 @@ fn apply_events(
                 status.reason = reason;
             }
             NetEvent::Access(access) => commands.insert_resource(Api(access)),
+            NetEvent::Reply(reply) => {
+                replies.write(reply);
+            }
             NetEvent::Sync(item) => {
                 sync.write(item);
             }
