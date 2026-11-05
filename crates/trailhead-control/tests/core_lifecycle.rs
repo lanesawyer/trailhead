@@ -627,6 +627,48 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
 }
 
+fn reviewers_started(r: &Rig) -> usize {
+    r.daemon.requests().iter().filter(|req| req.role == Role::Reviewer).count()
+}
+
+#[tokio::test]
+async fn a_rework_that_conflicts_with_a_base_that_moved_during_it_is_reworked_again_without_a_review() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    let reviewed = reviewers_started(&r);
+
+    // The base moves again while the rework runs, so its push conflicts too.
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran[0].1, Outcome::Conflicted { pr: pr.clone() });
+    assert_eq!(reviewers_started(&r), reviewed, "no reviewer for a PR that already conflicts");
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Open, "back in the queue for another rework");
+    assert_eq!(task.run.conflict_reworks, Some(2));
+    assert_eq!(task.run.review_rounds, Some(1));
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    assert_eq!(task.run.changes_requested.and_then(|c| c.head), Some(head), "the request is for the new head");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_reading_for_the_head_from_before_the_push_does_not_skip_the_review() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    let old = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+
+    // The host hasn't caught up with the push: it still shows the old head and its conflict.
+    r.codehost.set_lagging_head(&pr, Some(&old));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.show(&key).await.run.conflict_reworks, Some(1));
+}
+
 #[tokio::test]
 async fn a_pr_that_keeps_conflicting_parks_for_lane_at_the_conflict_rework_cap() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_conflict_reworks = 1")).await;
@@ -739,6 +781,25 @@ async fn a_merge_the_agent_committed_itself_is_still_published_as_a_merge_commit
 
     // Prepare left the merge uncommitted; the agent's `git commit` removes MERGE_HEAD, but HEAD now has the base.
     r.daemon.agent_commits_merge();
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let commits = r.codehost.commits(&pr.repo, "factory/trail-1");
+    assert_eq!(commits.last().unwrap().merges, [FAKE_BASE_MERGE], "published as a merge commit");
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+}
+
+#[tokio::test]
+async fn a_merge_the_agent_started_and_committed_itself_is_published_as_a_merge_commit() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+
+    // Prepare started no merge, and the agent's `git merge` and `git commit` leave no MERGE_HEAD behind.
+    r.daemon.agent_merges_and_commits();
     r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
@@ -990,14 +1051,17 @@ async fn rework_and_publish(r: &Rig, key: &TaskKey, pr: &trailhead_factory::PrRe
     assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
+    // The host hasn't caught up with the push, so its conflict is the old head's and the review goes ahead.
+    r.codehost.set_lagging_head(pr, Some(&before));
     r.factory.tick().await.unwrap();
+    r.codehost.set_lagging_head(pr, None);
     assert_eq!(r.show(key).await.status, Status::InReview);
     let published = trailhead_factory::CodeHost::head(&r.codehost, pr).await.unwrap();
     assert_ne!(before, published);
     (before, published)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stale_conflicts_for_the_old_head_never_start_a_second_rework() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
@@ -1021,7 +1085,7 @@ async fn stale_conflicts_for_the_old_head_never_start_a_second_rework() {
     assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_stale_head_is_in_the_run_record_so_a_restart_keeps_ignoring_stale_conflicts() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
@@ -1038,7 +1102,7 @@ async fn the_stale_head_is_in_the_run_record_so_a_restart_keeps_ignoring_stale_c
     assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_head_pushed_past_the_rework_still_has_its_conflicts_seen() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;

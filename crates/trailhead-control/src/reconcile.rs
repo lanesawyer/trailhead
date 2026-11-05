@@ -12,6 +12,14 @@ use crate::run_loop::Due;
 use crate::timing::until;
 use crate::{Factory, Outcome, Reconciled};
 
+/// What `pr_settled` found of a task's PR.
+enum PrSettle {
+    /// Merged or closed, and dealt with.
+    Settled,
+    /// Still open (or no PR to ask about); whether it merges cleanly, if known.
+    Open { mergeable: Option<bool> },
+}
+
 impl Factory {
     /// Rebuilds the control plane's view after a restart: destroys sandboxes no
     /// task accounts for, requeues tasks whose run was interrupted, and retries
@@ -37,6 +45,29 @@ impl Factory {
         Ok(done)
     }
 
+    /// Warns, once per task, about factory tasks sitting outside every repo's queue: re-parented while their run was
+    /// live, they're invisible to reconcile, so their claim lapses and the sandbox stays (TRAIL-531). Which repo owns
+    /// one is unknowable, so nothing is torn down.
+    async fn warn_strays(&self) {
+        // Without a queue the factory works the whole project, so nothing can sit outside it.
+        if self.queue().is_empty() {
+            return;
+        }
+        let queues: Vec<TaskKey> = self.host.queues.lock().unwrap().iter().cloned().map(TaskKey).collect();
+        match self.tracker.strays(self.project(), &queues).await {
+            Ok(strays) => {
+                let mut logged = self.host.strays_logged.lock().unwrap();
+                for t in strays.iter().filter(|t| logged.insert(t.key.0.clone())) {
+                    tracing::warn!(
+                        task = %t.key.0,
+                        "a factory task sits outside every configured queue, so reconcile can't see it; move it back under its queue or close it"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "couldn't look for factory tasks outside the queues"),
+        }
+    }
+
     /// [`Factory::reconcile_except`] without running the reviews it finds due: they're returned for the caller to run,
     /// so the run loop can start workers alongside them instead of waiting (TRAIL-196).
     pub(crate) async fn reconcile_deferring(&self, running: &HashSet<TaskKey>) -> Result<(Reconciled, Due)> {
@@ -53,7 +84,11 @@ impl Factory {
             .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
             .collect();
         self.status.sync_sandboxes(&live, &down, &parked);
-        let tasks: Vec<Task> = in_flight?.into_iter().filter(|t| !running.contains(&t.key)).collect();
+        self.warn_strays().await;
+        let in_flight = in_flight?;
+        let factory_prs = in_flight.iter().filter_map(|t| t.run.pr.as_ref().map(|p| p.number)).collect();
+        self.person_pass(&factory_prs).await;
+        let tasks: Vec<Task> = in_flight.into_iter().filter(|t| !running.contains(&t.key)).collect();
 
         // Runs the daemon may still be working on, which are followed again rather than requeued (TRAIL-137).
         let live_runs: Vec<(&Task, &Sandbox)> =
@@ -241,9 +276,11 @@ impl Factory {
     pub(crate) async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
         tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
         self.updating.lock().unwrap().remove(&task.key);
-        // Already open when it's found before a run starts (TRAIL-304); there's nothing in review to reopen.
-        if task.status != Status::Open {
-            self.tracker.reopen(&task.key).await?;
+        // Claimed as it stands, whether open, in review or parked, never reopened first: if the claim then failed, an
+        // open, unheld task could start a rework against this PR (TRAIL-216). An approved task can't be claimed, so it
+        // is unapproved back to in review, still held, rather than passed through open.
+        if task.status == Status::Approved {
+            self.tracker.unapprove(&task.key).await?;
         }
         self.tracker.claim(&task.key).await?;
         let question = messages::pr_closed_question(&pr.url);
@@ -301,9 +338,12 @@ impl Factory {
 
     /// Whether the task's PR was merged or closed, which is dealt with here: a merge, by whoever, finishes the task and
     /// a closed PR parks it.
-    /// `None` when it did; when it's still open (or there's no PR to ask about), `Some` of whether it merges cleanly.
-    async fn pr_settled(&self, task: &Task, done: &mut Reconciled) -> Result<Option<Option<bool>>> {
-        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return Ok(Some(None)) };
+    /// [`PrSettle::Settled`] when it did; when it's still open (or there's no PR to ask about), [`PrSettle::Open`]
+    /// with whether it merges cleanly.
+    async fn pr_settled(&self, task: &Task, done: &mut Reconciled) -> Result<PrSettle> {
+        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else {
+            return Ok(PrSettle::Open { mergeable: None });
+        };
         match codehost.pr_state(pr).await? {
             PrState::Merged { commit } => {
                 // A merge the factory didn't make is a person's, outside the factory; one the merger started but
@@ -311,12 +351,12 @@ impl Factory {
                 let by = self.merged_by(task, pr).await?;
                 self.close_merged(task, Merged { by, pr: pr.clone(), commit }).await?;
                 done.merged.push(task.key.0.clone());
-                Ok(None)
+                Ok(PrSettle::Settled)
             }
             PrState::Closed => {
                 self.park_closed(task, pr).await?;
                 done.closed.push(task.key.0.clone());
-                Ok(None)
+                Ok(PrSettle::Settled)
             }
             PrState::Open { mergeable, head } => {
                 // GitHub works `mergeable` out after a push, so right after a conflict rework a reading may still be
@@ -324,16 +364,16 @@ impl Factory {
                 // reading is unknown. An answer for any other head (the rework's, or one pushed since) settles the
                 // mark, so a head that moves on can't leave it stuck (TRAIL-446).
                 let Some(stale) = task.run.stale_head.as_deref().filter(|h| !h.is_empty()) else {
-                    return Ok(Some(mergeable));
+                    return Ok(PrSettle::Open { mergeable });
                 };
                 if mergeable.is_none() || head.as_deref() == Some(stale) {
-                    return Ok(Some(None));
+                    return Ok(PrSettle::Open { mergeable: None });
                 }
                 let settled = RunUpdate { stale_head: Some(String::new()), ..RunUpdate::default() };
                 if let Err(e) = self.tracker.report(&task.key, settled).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the stale head; reading it again");
                 }
-                Ok(Some(mergeable))
+                Ok(PrSettle::Open { mergeable })
             }
         }
     }
@@ -371,7 +411,7 @@ impl Factory {
             }
             Status::Open => {
                 // A PR merged or closed while the task waited for its rework: settle it rather than rework a dead branch.
-                if self.pr_settled(task, done).await?.is_none() {
+                if matches!(self.pr_settled(task, done).await?, PrSettle::Settled) {
                     return Ok(false);
                 }
                 if let Err(e) = self.tracker.revoke_sub_agent(name).await {
@@ -392,7 +432,7 @@ impl Factory {
                 }
             }
             Status::Approved => {
-                let Some(mergeable) = self.pr_settled(task, done).await? else { return Ok(false) };
+                let PrSettle::Open { mergeable } = self.pr_settled(task, done).await? else { return Ok(false) };
                 // Main may have moved since the approval: a PR that now conflicts goes back for a rework, which
                 // would otherwise wait for a merge attempt (and never come, in shadow mode or at a grade that
                 // doesn't auto-merge).
@@ -408,7 +448,7 @@ impl Factory {
                 self.evaluate_gates(&task.key).await?;
             }
             Status::InReview => {
-                let Some(mergeable) = self.pr_settled(task, done).await? else { return Ok(false) };
+                let PrSettle::Open { mergeable } = self.pr_settled(task, done).await? else { return Ok(false) };
                 let attempt = task.run.attempt.unwrap_or(1);
                 // Changes were requested on this attempt but the task never left review: finish reopening it.
                 // A park resets the counts to zero, so a request still recorded beside zero counts was parked on and

@@ -290,8 +290,9 @@ pub struct Field(pub FieldKind, pub u64);
 pub struct InitialText(pub String);
 
 /// Which draft field a dropdown of the form sets.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormChoice {
+    #[default]
     Priority,
     Status,
 }
@@ -434,19 +435,13 @@ pub fn act_button(label: String, act: Act) -> impl Scene {
 }
 
 /// A text input of the form for `kind`, `lines` high, holding `initial` when it appears.
-fn input(kind: FieldKind, generation: u64, initial: String, lines: f32) -> impl Scene {
-    text_input(lines, bsn! { Field(kind, generation) InitialText(initial) })
+fn input(kind: FieldKind, generation: u64, initial: String, lines: f32) -> impl SceneList {
+    bsn_list! { @text_input(lines, bsn! { Field(kind, generation) InitialText(initial) }) }
 }
 
-/// A field labelled `label` under `parent`, for the caller to fill.
-fn labelled(commands: &mut Commands, parent: Entity, label: &str) -> Entity {
-    commands.spawn_scene(bsn! { @field(label.to_string()) }).insert(ChildOf(parent)).id()
-}
-
-/// A text field of the form, labelled, with its input in it.
-fn text_field(commands: &mut Commands, parent: Entity, label: &str, input: impl Scene) {
-    let field = labelled(commands, parent, label);
-    commands.spawn_scene(input).insert(ChildOf(field));
+/// A text field of the form: `label` over its input.
+fn text_field(commands: &mut Commands, parent: Entity, label: &str, input: impl SceneList) {
+    commands.queue_spawn_scene(field(label.to_string(), input)).insert(ChildOf(parent));
 }
 
 /// A dropdown of the form for `choice`, labelled, with `selected` showing.
@@ -458,9 +453,12 @@ fn choice_field(
     options: Vec<String>,
     selected: Option<usize>,
 ) {
-    let field = labelled(commands, parent, label);
     let max_visible = options.len();
-    commands.spawn_scene(select(options, selected, max_visible)).insert((choice, ChildOf(field)));
+    let control: Box<dyn SceneList> = match choice {
+        FormChoice::Priority => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Priority }),
+        FormChoice::Status => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Status }),
+    };
+    commands.queue_spawn_scene(field(label.to_string(), control)).insert(ChildOf(parent));
 }
 
 /// Sets the draft's priority or status from the dropdown that was used.

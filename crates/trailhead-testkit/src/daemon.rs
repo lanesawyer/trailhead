@@ -42,6 +42,9 @@ pub struct FakeWorkspace {
     abandons_merge: AtomicBool,
     /// Whether the agent commits the merge itself: `merge_head` sees none after prepare, but HEAD has the base.
     commits_merge: AtomicBool,
+    /// Whether the agent starts the merge itself and commits it in the same session: `merge_head` never sees one, but
+    /// `merged_base` finds the merge commit.
+    merges_and_commits: AtomicBool,
     /// Whether the agent rebases: the run's starting commit is no longer in HEAD's history.
     rebases: AtomicBool,
     /// Files the agent leaves conflict markers in.
@@ -121,6 +124,10 @@ impl Workspace for FakeWorkspace {
         }
         let merging = *self.merging.lock().unwrap() || (self.agent_merges.load(Ordering::SeqCst) && call > 0);
         Ok(merging.then(|| FAKE_BASE_MERGE.to_string()))
+    }
+
+    async fn merged_base(&self, _start: &str, _base: &str) -> Result<Option<String>> {
+        Ok(self.merges_and_commits.load(Ordering::SeqCst).then(|| FAKE_BASE_MERGE.to_string()))
     }
 
     async fn contains(&self, commit: &str) -> Result<bool> {
@@ -269,6 +276,11 @@ impl LocalDaemon {
         self.workspace.commits_merge.store(true, Ordering::SeqCst);
     }
 
+    /// Has the agent start the merge of the base branch itself and commit it, so no merge is ever under way to see.
+    pub fn agent_merges_and_commits(&self) {
+        self.workspace.merges_and_commits.store(true, Ordering::SeqCst);
+    }
+
     /// Lets fake checkouts of a branch start at its head on the code host, as a rework's does.
     pub fn with_heads(self, heads: impl Fn(&Repo, &str) -> Option<String> + Send + Sync + 'static) -> LocalDaemon {
         *self.workspace.heads.lock().unwrap() = Some(Arc::new(heads));
@@ -293,6 +305,11 @@ impl LocalDaemon {
         } else {
             failing.insert(name.to_string(), (output.to_string(), Some(times)));
         }
+    }
+
+    /// Makes the next run fail with a permanent rejection, as a request the remote will never accept.
+    pub fn reject_runs(&self, error: &str) {
+        self.run_errors.lock().unwrap().push(trailhead_factory::Error::Rejected(error.to_string()));
     }
 
     /// Makes the next `times` runs fail with this error, as a daemon the control plane lost would.

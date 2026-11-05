@@ -150,12 +150,12 @@ fn input_row(
     act: ConnectAct,
     variant: ButtonVariant,
 ) -> Entity {
+    let control = bsn_list! { @text_input(1.0, bsn! { which }) };
     let line = commands.spawn_scene(bsn! { @row() Node { align_items: AlignItems::FlexEnd } }).id();
     commands
         .spawn_scene(bsn! {
-            @field(label.to_string())
+            @field(label.to_string(), control)
             Node { flex_grow: 1.0 }
-            Children [ @text_input(1.0, bsn! { which }) ]
         })
         .insert(ChildOf(line));
     commands.spawn_scene(bsn! { @button(caption.to_string(), None, variant) act }).insert(ChildOf(line));

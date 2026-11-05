@@ -225,6 +225,9 @@ fn render_live(snapshot: &FactorySnapshot) -> String {
         let ago = (now - at).max(0);
         let _ = writeln!(out, "  last error ({ago}s ago): {}", message.lines().next().unwrap_or_default());
     }
+    if let Some(why) = &snapshot.holding {
+        let _ = writeln!(out, "  holding merges: {why}");
+    }
     let _ = writeln!(out, "\nRuns in flight ({})", snapshot.runs.len());
     for r in &snapshot.runs {
         let last = r.last_tool.as_ref().map_or(String::new(), |t| format!(", last tool {t}"));
@@ -469,10 +472,12 @@ mod tests {
                 last_tool: Some("Bash".into()),
                 started: 0,
             }],
+            holding: Some("#306 has auto-merge on".into()),
             seq: 12,
         };
         let out = render_live(&snapshot);
         assert!(out.contains("Control plane: reattaching to TRAIL-7"), "{out}");
+        assert!(out.contains("holding merges: #306 has auto-merge on"), "{out}");
         assert!(out.contains("last error ("), "{out}");
         assert!(out.contains(": reconcile failed: boom\n"), "{out}");
         assert!(out.contains("TRAIL-7 preparing (cold)"), "{out}");

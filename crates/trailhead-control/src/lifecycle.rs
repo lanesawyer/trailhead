@@ -6,9 +6,9 @@ use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages;
 use trailhead_factory::{
-    ControlState, Error, Feedback, HumanContext, Merged, PrState, Profile, Result, Role, RunEvent, RunPhase, RunReport,
-    RunRequest, RunResult, RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind, WorkerBreach,
-    run_name,
+    ControlState, Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase,
+    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
+    WorkerBreach, run_name,
 };
 
 use crate::place::Placement;
@@ -317,6 +317,9 @@ impl Factory {
 
         match report.result {
             RunResult::PrOpened(pr) => {
+                // The daemon may have opened the PR without being able to write it down (TRAIL-441). Whatever is
+                // missing is recorded here; a failure is logged, since the PR is open either way.
+                self.record_opened_pr(task, sub, &pr).await;
                 if let Some(stale) = task.run.pending_changes().filter(|c| c.conflict).and_then(|c| c.head.clone()) {
                     // Recorded so a `mergeable` reading for the head from before the push is ignored, across a restart
                     // too. A request whose head the host couldn't say leaves the mark off; readings count as they come.
@@ -334,6 +337,16 @@ impl Factory {
                 drop(place);
                 if let Err(e) = self.tracker.revoke_sub_agent(name).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
+                }
+                if self.conflicts_on_publish(task, &pr).await {
+                    return match self.rework_conflict(task, &pr, attempt).await {
+                        Ok(()) => Ok(Outcome::Conflicted { pr }),
+                        // Still in review and conflicting, so reconcile reworks it.
+                        Err(e) => {
+                            tracing::warn!(task = %task.key.0, error = %e, "couldn't reopen the conflicting PR for a rework; reconcile will");
+                            Ok(Outcome::AwaitingReview { pr })
+                        }
+                    };
                 }
                 self.review(task, &pr, attempt, &report.checks).await
             }
@@ -446,7 +459,10 @@ impl Factory {
         // Waiting has no count that parks, so a host that never frees up would be waited on silently forever: after
         // `MAX_RESOURCE_WAITS` waits in a row the task is parked once, so a person hears of it.
         let waits = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(_, w, _)| *w) + 1;
-        let park = if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
+        // A request the remote refused for good (a 4xx that isn't a blip) fails the same way on every retry, so
+        // it's parked at once instead of burning the infra retries.
+        let rejected = matches!(error, Error::Rejected(_));
+        let park = rejected || if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
         tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "infrastructure failure; the attempt doesn't count");
         if park {
             // Parked below; the count starts again when Lane reopens it.
@@ -476,7 +492,9 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
         }
         if park {
-            let question = if waiting {
+            let question = if rejected {
+                messages::rejected_question(&error.to_string())
+            } else if waiting {
                 messages::resource_wait_question(waits, &error.to_string())
             } else {
                 messages::infra_question(failures, max, &error.to_string())
@@ -658,7 +676,44 @@ impl Factory {
             (Err(e), _) => Ok(Run::Lost(e, total)),
         }
     }
+
+    /// Whether the PR a worker just pushed already conflicts with the base branch, which moved while the run worked
+    /// on an older one (TRAIL-844), so a review now would be wasted. The host works `mergeable` out after a push, so
+    /// it's asked a few times. A reading counts only once the PR's head has moved past the one from before the push
+    /// (TRAIL-446); a rework that doesn't know that head, an answer that doesn't come, or a host error reads as no
+    /// conflict, and the review goes ahead as before.
+    async fn conflicts_on_publish(&self, task: &Task, pr: &PrRef) -> bool {
+        let Some(codehost) = &self.codehost else { return false };
+        let before = match &task.run.pr {
+            None => None,
+            Some(_) => match task.run.pending_changes().and_then(|c| c.head.clone()) {
+                Some(head) => Some(head),
+                None => return false,
+            },
+        };
+        for wait in MERGEABLE_WAITS {
+            tokio::time::sleep(wait).await;
+            match codehost.pr_state(pr).await {
+                Ok(PrState::Open { mergeable: Some(mergeable), head: Some(head) })
+                    if Some(&head) != before.as_ref() =>
+                {
+                    return !mergeable;
+                }
+                Ok(PrState::Open { .. }) => {}
+                Ok(_) => return false,
+                Err(e) => {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't ask whether the PR merges cleanly; reviewing it");
+                    return false;
+                }
+            }
+        }
+        false
+    }
 }
+
+/// The waits before each reading of a just-pushed PR's `mergeable`: GitHub usually has it within a few seconds.
+const MERGEABLE_WAITS: [Duration; 4] =
+    [Duration::ZERO, Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(5)];
 
 /// The first wait before retrying a task after an infrastructure failure, doubling up to [`MAX_INFRA_BACKOFF`].
 const FIRST_INFRA_BACKOFF: Duration = Duration::from_secs(60);
@@ -703,5 +758,29 @@ pub(crate) fn spec(task: &Task, context: HumanContext) -> TaskSpec {
         description: task.description.clone(),
         previous_failure: task.run.failure.clone().filter(|f| !f.is_empty()),
         context,
+    }
+}
+
+impl Factory {
+    /// Makes sure the tracker has the PR a worker opened and the review request, writing what the daemon couldn't.
+    async fn record_opened_pr(&self, task: &Task, sub: &Arc<dyn Tracker>, pr: &PrRef) {
+        let shown = match self.tracker.show(&task.key).await {
+            Ok(shown) => shown,
+            Err(e) => {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't read the task to check the opened PR was recorded");
+                return;
+            }
+        };
+        if shown.run.pr.as_ref() != Some(pr) {
+            let update = RunUpdate { pr: Some(pr.clone()), ..RunUpdate::default() };
+            if let Err(e) = sub.report(&task.key, update).await {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't record the opened PR");
+            }
+        }
+        if shown.status != Status::InReview
+            && let Err(e) = sub.request_review(&task.key).await
+        {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't move the task to review");
+        }
     }
 }

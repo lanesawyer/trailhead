@@ -669,7 +669,7 @@ fn redraw(
                     (&pr.failing, Icon::CircleX, token::DANGER),
                 ] {
                     for name in names {
-                        c.spawn_scene(badge(name.clone(), Some(icon), tone.clone())).insert(ChildOf(gates));
+                        c.spawn_scene(badge(name.clone(), Some(icon), Some(tone.clone()))).insert(ChildOf(gates));
                     }
                 }
             }
