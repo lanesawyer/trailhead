@@ -108,6 +108,10 @@ pub struct FactorySnapshot {
     pub last_error: Option<(i64, String)>,
     pub sandboxes: Vec<SandboxStatus>,
     pub runs: Vec<RunStatus>,
+    /// Why the merger is holding the factory's merges, when it is: a person's PR with auto-merge on goes first
+    /// (TRAIL-804).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holding: Option<String>,
     /// The sequence number of the last event the snapshot includes, so a client can join the stream after it.
     pub seq: u64,
 }
@@ -146,6 +150,10 @@ pub enum FactoryEvent {
         name: String,
         detail: Option<String>,
     },
+    /// The merger started or stopped holding merges.
+    Holding {
+        holding: Option<String>,
+    },
 }
 
 impl FactoryEvent {
@@ -167,6 +175,8 @@ impl FactoryEvent {
         match self {
             FactoryEvent::Control { control } => format!("control plane: {}", control_label(control)),
             FactoryEvent::Error { message } => format!("error: {message}"),
+            FactoryEvent::Holding { holding: Some(why) } => format!("holding merges: {why}"),
+            FactoryEvent::Holding { holding: None } => "no longer holding merges".to_string(),
             FactoryEvent::SandboxChanged { sandbox } => format!("sandbox {} {}", sandbox.name, sandbox.state.as_str()),
             FactoryEvent::SandboxGone { name } => format!("sandbox {name} gone"),
             FactoryEvent::RunPhase { task, phase } => format!("{} {}", task.0, phase.label()),

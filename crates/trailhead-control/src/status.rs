@@ -21,6 +21,7 @@ struct Inner {
     last_error: Option<(i64, String)>,
     sandboxes: Vec<SandboxStatus>,
     runs: Vec<RunStatus>,
+    holding: Option<String>,
     seq: u64,
 }
 
@@ -37,6 +38,7 @@ impl Default for StatusBoard {
                 last_error: None,
                 sandboxes: Vec::new(),
                 runs: Vec::new(),
+                holding: None,
                 seq: 0,
             }),
             tx: broadcast::channel(BACKLOG).0,
@@ -74,6 +76,7 @@ fn snapshot_locked(inner: &Inner) -> FactorySnapshot {
         last_error: inner.last_error.clone(),
         sandboxes,
         runs,
+        holding: inner.holding.clone(),
         seq: inner.seq,
     }
 }
@@ -103,6 +106,20 @@ impl StatusBoard {
         let inner = self.inner.lock().unwrap();
         let rx = self.tx.subscribe();
         (snapshot_locked(&inner), rx)
+    }
+
+    /// Sets why merges are held (`None`: they aren't). Whether it changed.
+    pub fn holding(&self, holding: Option<String>) -> bool {
+        let mut changed = false;
+        self.apply(|i| {
+            if i.holding == holding {
+                return None;
+            }
+            changed = true;
+            i.holding = holding.clone();
+            Some(FactoryEvent::Holding { holding })
+        });
+        changed
     }
 
     pub fn control(&self, control: ControlState) {

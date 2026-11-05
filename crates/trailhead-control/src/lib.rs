@@ -8,6 +8,7 @@ pub mod daemon_binary;
 mod decide;
 mod lifecycle;
 mod merger;
+mod person;
 mod place;
 mod pool;
 mod reconcile;
@@ -129,6 +130,8 @@ pub struct Factory {
     /// (a 202), so until the head moves the PR is still behind and asking again would only queue another, unless the
     /// update never lands: after `UPDATE_PATIENCE` the merger asks again (TRAIL-490).
     updating: Mutex<HashMap<TaskKey, (String, Instant)>>,
+    /// The person's PR with auto-merge on that the merger is holding its merges for (TRAIL-804).
+    held: Mutex<Option<person::Held>>,
     /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
     host: Arc<Host>,
     /// The ready tasks last reported as starved by parked sandboxes, so a poll says it once per change.
@@ -241,6 +244,7 @@ impl Factory {
             setbacks: Mutex::default(),
             listed: Mutex::default(),
             updating: Mutex::default(),
+            held: Mutex::default(),
             host,
             starved: Mutex::default(),
             parked_since: Mutex::default(),

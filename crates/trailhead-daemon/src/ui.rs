@@ -445,8 +445,14 @@ mod tests {
     #[test]
     fn status_frames_round_trip() {
         use trailhead_factory::{ControlState, FactoryEvent, TaskKey};
-        let snapshot =
-            FactorySnapshot { control: ControlState::Up, last_error: None, sandboxes: vec![], runs: vec![], seq: 4 };
+        let snapshot = FactorySnapshot {
+            control: ControlState::Up,
+            last_error: None,
+            sandboxes: vec![],
+            runs: vec![],
+            holding: None,
+            seq: 4,
+        };
         let frames = [
             StatusFrame::Snapshot { repos: vec![RepoSnapshot { repo: "a/b".into(), snapshot }] },
             StatusFrame::Event {

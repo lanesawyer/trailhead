@@ -45,13 +45,10 @@ impl Factory {
         // A target that can't be reached is unknown, not empty: what ran there is left as it is until it answers.
         let (live, down) = self.list_all(&self.base_labels()).await?;
         self.status.sync_sandboxes(&live, &down);
-        let tasks: Vec<Task> = self
-            .tracker
-            .in_flight(self.project(), &self.queue())
-            .await?
-            .into_iter()
-            .filter(|t| !running.contains(&t.key))
-            .collect();
+        let in_flight = self.tracker.in_flight(self.project(), &self.queue()).await?;
+        let factory_prs = in_flight.iter().filter_map(|t| t.run.pr.as_ref().map(|p| p.number)).collect();
+        self.person_pass(&factory_prs).await;
+        let tasks: Vec<Task> = in_flight.into_iter().filter(|t| !running.contains(&t.key)).collect();
 
         // Runs the daemon may still be working on, which are followed again rather than requeued (TRAIL-137).
         let live_runs: Vec<(&Task, &Sandbox)> =
