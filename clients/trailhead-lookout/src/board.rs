@@ -1,6 +1,6 @@
 //! The task board (`docs/factory/ui.md#views`), read-only: tasks by status with subtasks under their parent, each
-//! a card with badges (priority, grade, holder, open questions) and icon actions, filtered by project, status,
-//! parent and holder.
+//! a card with badges (priority, grade, holder, open questions) and icon actions, filtered by project,
+//! parent and holder, with the closed columns behind a toggle.
 //!
 //! [`build`] is a pure function over the mirror's JSON, so the queries are tested without a window. [`BoardPlugin`]
 //! keeps a [`BoardView`] from the mirror and the [`Filter`]; [`BoardUiPlugin`] draws it with feathers, greyed out
@@ -48,28 +48,25 @@ pub const PAGE: usize = 40;
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct Filter {
     pub project: Option<String>,
-    pub status: Option<String>,
     pub parent: Option<String>,
     pub holder: Option<String>,
-    /// Show the closed columns (done, cancelled) too. They are left off unless a status is chosen or this is set.
+    /// Show the closed columns (done, cancelled) too. They are left off unless this is set.
     pub closed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterKey {
     Project,
-    Status,
     Parent,
     Holder,
 }
 
 impl FilterKey {
-    const ALL: [FilterKey; 4] = [FilterKey::Project, FilterKey::Status, FilterKey::Parent, FilterKey::Holder];
+    const ALL: [FilterKey; 3] = [FilterKey::Project, FilterKey::Parent, FilterKey::Holder];
 
     fn name(self) -> &'static str {
         match self {
             FilterKey::Project => "project",
-            FilterKey::Status => "status",
             FilterKey::Parent => "parent",
             FilterKey::Holder => "holder",
         }
@@ -80,7 +77,6 @@ impl Filter {
     pub fn get(&self, key: FilterKey) -> &Option<String> {
         match key {
             FilterKey::Project => &self.project,
-            FilterKey::Status => &self.status,
             FilterKey::Parent => &self.parent,
             FilterKey::Holder => &self.holder,
         }
@@ -89,7 +85,6 @@ impl Filter {
     fn get_mut(&mut self, key: FilterKey) -> &mut Option<String> {
         match key {
             FilterKey::Project => &mut self.project,
-            FilterKey::Status => &mut self.status,
             FilterKey::Parent => &mut self.parent,
             FilterKey::Holder => &mut self.holder,
         }
@@ -107,7 +102,6 @@ pub struct Choice {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
     pub projects: Vec<Choice>,
-    pub statuses: Vec<Choice>,
     pub parents: Vec<Choice>,
     pub holders: Vec<Choice>,
 }
@@ -116,7 +110,6 @@ impl Options {
     pub fn of(&self, key: FilterKey) -> &[Choice] {
         match key {
             FilterKey::Project => &self.projects,
-            FilterKey::Status => &self.statuses,
             FilterKey::Parent => &self.parents,
             FilterKey::Holder => &self.holders,
         }
@@ -219,8 +212,8 @@ fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or_default()
 }
 
-/// Groups the tasks passing `filter` into one column per status (empty ones included, unless a status is
-/// chosen; done and cancelled only when chosen or `closed`), with subtasks under their parent, and works out
+/// Groups the tasks passing `filter` into one column per status (empty ones included; done and cancelled
+/// only when `closed`), with subtasks under their parent, and works out
 /// what each filter can offer.
 pub fn build(input: Input, filter: &Filter) -> BoardView {
     let project_key: HashMap<&str, &str> = input.projects.iter().map(|p| (s(p, "id"), s(p, "key"))).collect();
@@ -240,7 +233,6 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
     let passes = |t: &Value| {
         let id = s(t, "id");
         filter.project.as_deref().is_none_or(|k| project_key.get(s(t, "project_id")) == Some(&k))
-            && filter.status.as_deref().is_none_or(|st| s(t, "status") == st)
             && filter
                 .parent
                 .as_deref()
@@ -285,9 +277,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
     let shown: Vec<&Value> = input.tasks.iter().filter(|t| passes(t)).collect();
     let mut columns = Vec::new();
     for status in STATUSES {
-        if filter.status.as_deref().is_some_and(|f| f != status)
-            || (filter.status.is_none() && !filter.closed && CLOSED.contains(&status))
-        {
+        if !filter.closed && CLOSED.contains(&status) {
             continue;
         }
         let mut here: Vec<&Value> = shown.iter().copied().filter(|t| s(t, "status") == status).collect();
@@ -322,8 +312,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         v.sort_by(|a, b| a.label.cmp(&b.label));
         v
     };
-    let statuses = STATUSES.iter().map(|st| choice(st, st.to_string())).collect();
-    BoardView { columns, options: Options { projects, statuses, parents, holders } }
+    BoardView { columns, options: Options { projects, parents, holders } }
 }
 
 fn short(id: &str) -> String {
@@ -391,6 +380,16 @@ fn on_pick(pick: On<Picked>, selects: Query<&FilterSelect>, view: Res<BoardView>
     filter.set_if_neq(next);
 }
 
+/// Tags the header button that shows or hides the closed columns.
+#[derive(Component)]
+struct ClosedToggle;
+
+fn on_toggle_closed(activate: On<Activate>, toggles: Query<(), With<ClosedToggle>>, mut filter: ResMut<Filter>) {
+    if toggles.contains(activate.entity) {
+        filter.closed = !filter.closed;
+    }
+}
+
 /// Keeps [`Filter`] and [`BoardView`] from the mirror.
 pub struct BoardPlugin;
 
@@ -399,7 +398,8 @@ impl Plugin for BoardPlugin {
         app.init_resource::<Filter>()
             .init_resource::<BoardView>()
             .add_systems(Update, rebuild_view)
-            .add_observer(on_pick);
+            .add_observer(on_pick)
+            .add_observer(on_toggle_closed);
     }
 }
 
@@ -570,6 +570,8 @@ fn redraw_header(
         let field = commands.queue_spawn_scene(field(key.name())).insert(ChildOf(bar)).id();
         commands.queue_spawn_scene(select(names, Some(at), 8)).insert((FilterSelect(key), ChildOf(field)));
     }
+    let caption = if filter.closed { "closed: shown" } else { "closed: hidden" };
+    commands.queue_spawn_scene(button(caption, None, ButtonVariant::Normal)).insert((ClosedToggle, ChildOf(bar)));
     commands
         .queue_spawn_scene(button("Trail map", None, ButtonVariant::Normal))
         .insert(ChildOf(bar))
@@ -809,7 +811,6 @@ mod tests {
         let names = |f: Filter| run(&f).columns.into_iter().map(|c| c.status).collect::<Vec<_>>();
         assert_eq!(names(Filter::default()), ["open", "in_progress", "needs_input", "in_review", "approved"]);
         assert_eq!(names(Filter { closed: true, ..Default::default() }), STATUSES);
-        assert_eq!(names(Filter { status: Some("cancelled".into()), ..Default::default() }), ["cancelled"]);
     }
 
     fn many(n: usize) -> Vec<Card> {
@@ -850,13 +851,10 @@ mod tests {
             run(&f).columns.iter().flat_map(|c| c.cards.iter().map(|c| c.key.clone())).collect()
         };
         assert_eq!(by(Filter { project: Some("OPS".into()), ..Default::default() }), ["OPS-1"]);
-        assert_eq!(by(Filter { status: Some("open".into()), ..Default::default() }), ["TRAIL-102", "TRAIL-105"]);
         assert_eq!(by(Filter { parent: Some("TRAIL-102".into()), ..Default::default() }), ["TRAIL-105", "TRAIL-103"]);
         assert_eq!(by(Filter { holder: Some("a1".into()), ..Default::default() }), ["TRAIL-103"]);
         let none = Filter { project: Some("OPS".into()), holder: Some("a1".into()), ..Default::default() };
         assert!(by(none).is_empty());
-        // Choosing a status leaves one column, even a closed one.
-        assert_eq!(run(&Filter { status: Some("done".into()), ..Default::default() }).columns.len(), 1);
     }
 
     #[test]
@@ -866,7 +864,6 @@ mod tests {
         assert_eq!(labels(&view.options.projects), ["OPS", "TRAIL"]);
         assert_eq!(labels(&view.options.parents), ["TRAIL-102", "TRAIL-103"]);
         assert_eq!(labels(&view.options.holders), ["factory/trail-103-a1", "u1"]);
-        assert_eq!(labels(&view.options.statuses).len(), STATUSES.len());
     }
 
     #[test]
@@ -890,11 +887,27 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins(BoardPlugin);
         *app.world_mut().resource_mut::<BoardView>() = run(&Filter::default());
-        let status = app.world_mut().spawn(FilterSelect(FilterKey::Status)).id();
-        app.world_mut().trigger(Picked { entity: status, index: 4 });
-        assert_eq!(app.world().resource::<Filter>().status.as_deref(), Some("in_review"));
-        app.world_mut().trigger(Picked { entity: status, index: 0 });
-        assert_eq!(app.world().resource::<Filter>().status, None);
+        let parent = app.world_mut().spawn(FilterSelect(FilterKey::Parent)).id();
+        app.world_mut().trigger(Picked { entity: parent, index: 2 });
+        assert_eq!(app.world().resource::<Filter>().parent.as_deref(), Some("TRAIL-103"));
+        app.world_mut().trigger(Picked { entity: parent, index: 0 });
+        assert_eq!(app.world().resource::<Filter>().parent, None);
+    }
+
+    #[test]
+    fn the_closed_toggle_shows_and_hides_done_and_cancelled() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(BoardPlugin);
+        let toggle = app.world_mut().spawn(ClosedToggle).id();
+        let closed_columns = |app: &App| {
+            let columns = run(app.world().resource::<Filter>()).columns;
+            columns.into_iter().map(|c| c.status).filter(|s| CLOSED.contains(&s.as_str())).collect::<Vec<_>>()
+        };
+        assert!(closed_columns(&app).is_empty());
+        app.world_mut().trigger(Activate { entity: toggle });
+        assert_eq!(closed_columns(&app), ["done", "cancelled"]);
+        app.world_mut().trigger(Activate { entity: toggle });
+        assert!(closed_columns(&app).is_empty());
     }
 
     #[test]
