@@ -241,8 +241,9 @@ impl Factory {
     pub(crate) async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
         tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
         self.updating.lock().unwrap().remove(&task.key);
-        // Already open when it's found before a run starts (TRAIL-304); there's nothing in review to reopen.
-        if task.status != Status::Open {
+        // Claimed as it stands, whether open, in review or parked, never reopened first: if the claim then failed, an
+        // open, unheld task could start a rework against this PR (TRAIL-216). Only an approved task can't be claimed.
+        if task.status == Status::Approved {
             self.tracker.reopen(&task.key).await?;
         }
         self.tracker.claim(&task.key).await?;
