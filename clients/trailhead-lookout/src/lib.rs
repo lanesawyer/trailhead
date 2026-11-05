@@ -2,6 +2,7 @@
 
 use bevy::prelude::*;
 
+pub mod board;
 pub mod commands;
 pub mod connection;
 pub mod mirror;
