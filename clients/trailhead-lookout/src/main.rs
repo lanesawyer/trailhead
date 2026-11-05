@@ -1,6 +1,4 @@
 use bevy::feathers::FeathersPlugins;
-use bevy::feathers::dark_theme::create_dark_theme;
-use bevy::feathers::theme::UiTheme;
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -37,7 +35,8 @@ fn main() {
             unfocused_mode: UpdateMode::reactive_low_power(Duration::from_secs(1)),
         })
         // Without a theme every feathers color is missing, and feathers draws missing ones in fuchsia.
-        .insert_resource(UiTheme(create_dark_theme()))
+        .insert_resource(trailhead_lookout::widgets::theme())
+        .add_plugins(trailhead_lookout::widgets::WidgetsPlugin)
         .add_plugins(ConnectionPlugin::new(config, target))
         .add_plugins((LookoutPlugin, BoardUiPlugin, AuthorUiPlugin, InspectorUiPlugin, ConnectUiPlugin))
         .add_systems(Startup, |mut authoring: ResMut<Authoring>| {

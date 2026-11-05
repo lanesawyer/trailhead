@@ -122,7 +122,7 @@ fn spawn_panel(mut commands: Commands) {
             },
             BackgroundColor(Color::srgb(0.12, 0.12, 0.14)),
             // Above the board, which fills the window and is spawned later: without this it takes every click here.
-            GlobalZIndex(1),
+            GlobalZIndex(crate::widgets::layer::CONNECT),
         ))
         .id();
     let target = commands.spawn((row(), ChildOf(panel))).id();
