@@ -18,6 +18,7 @@ The factory's own client for people: watch runs live, steer them, and author tas
 | Transport | Embedded iroh, dialing the control plane on its own UI protocol, not the daemons' API tunnel | Decided (2026-10-28) |
 | Platforms | Linux first, matching Trailhead; macOS and Windows later through Bevy's own targets (TRAIL-131) | Decided (2026-11-02) |
 | Name | Lookout: crate `trailhead-lookout` in `clients/trailhead-lookout`, binary `lookout` | Decided (2026-11-02) |
+| Look | One shared feathers component kit in `src/widgets/` used by every view; kanban board of cards; dropdown filters; Lucide icon buttons ([Look and components](#look-and-components)) | Decided (2026-11-05) |
 | API types | A hand-written client crate, not generated from the OpenAPI document; the API is ours and the UI reaches it through the iroh tunnel anyway | Decided (2026-11-02) |
 
 ## Views
@@ -33,6 +34,27 @@ The factory's own client for people: watch runs live, steer them, and author tas
 Approving needs care. In Trailhead, approving and merging are one step ([lifecycle.md](lifecycle.md): "approved and merged are the same step"), and in the MVP a person merges on GitHub and then marks the task `done` by hand. An approve button that only moves the status lets a task show `done` while its PR is still open, and still leaves the merge to GitHub. Until the merger agent exists, the inspector should either link to the PR and only offer `done` once the PR is merged, or show approving as "merge on GitHub" and let the factory notice the merge. Whichever the factory adopts (a merger agent, or closing tasks when their PR merges), the UI follows it instead of adding a third path.
 
 Views are Bevy `States`; the inspector is a panel that both views spawn.
+
+## Look and components
+
+Decided 2026-11-05 (TRAIL-796), after Lane's first real use: Lookout worked but read as a debug overlay of raw text rows. The look is built from one small component kit, and every view uses it.
+
+**One component, used everywhere.** Each kind of control or surface is built once in `clients/trailhead-lookout/src/widgets/`, one widget to a file, and every view calls it. A second, slightly different button, card or dropdown is a bug, even when it's quicker to write. If a widget doesn't do what a view needs, the widget grows the option. The rules agents follow are in the `lookout-ui` skill (`.claude/skills/lookout-ui/SKILL.md`).
+
+**Built on feathers.** Buttons, menus, dropdowns (`FeathersSelect`), text inputs, scrollbars, list views and panes come from `bevy_feathers` 0.20, wrapped by the kit so their props are set in one place. The kit doesn't draw its own controls where feathers has one. Much of it is ported from Lane's `bevy-data-explorer` (`src/widgets/`, `src/app/theme.rs`), whose rules have already paid for themselves:
+
+- **Theme tokens, not literal colors** (`ThemeBackgroundColor`, `ThemeTextColor`), so a theme switch repaints everything. Lookout's own colors (status columns, grades, priorities) are tokens added to the theme in one place.
+- **Named sizes and spacing.** Text sizes come from a `size` scale and every gap, padding and margin from a `space` scale named for its purpose; a test fails on a literal one.
+- **Icons are Lucide glyphs** from an embedded icon font (`Icon`), so they take the button's text color and stay sharp. Its license ships beside it.
+- **Button roles.** A primary button (one per surface, like "New task"), a normal one, and an icon-only tool button with a tooltip. A button that opens a menu shows a chevron; one that acts doesn't.
+
+**The board.** A kanban board: one fixed-width column per status in the lifecycle order, each with its own background (a theme token per status) and a header with the status and count. The columns scroll on their own, and the board scrolls sideways when they don't fit. Each task is a card: key and title (title clamped to two lines), small badges for priority, grade, holder and open questions, and actions as icon buttons. Clicking the card opens the inspector. A card never shows a handoff or a question body in full: that belongs to the inspector. A column with hundreds of cards (`open` held 366 on 2026-11-05) builds only what's on screen.
+
+**The header bar.** The app name, filters as dropdowns (project, status, parent, holder) in place of buttons that cycle through values, a primary "New task" button, and the connection state as a small status chip (dot and words) instead of a banner of text.
+
+**Panels.** The inspector, the forms and the connect panel use the same pane, section, field (label above input) and button widgets. Choices with a fixed set of values, such as a task's priority or status in the form, are dropdowns too.
+
+**Checking the look.** A sandbox can't open a window, so the look gets a human review (the `clients/**` grade rule). TRAIL-796's follow-ups include rendering screenshots headlessly, with a software Vulkan driver, so a worker and its reviewer can see what they built.
 
 ## Architecture
 
@@ -81,7 +103,7 @@ Decided (2026-10-28): the UI is the factory's UI, so it connects to the control 
 
 - **What it carries.** The factory status snapshot and stream ([Factory status](#factory-status)), and Trailhead API requests forwarded to the server's loopback port as the API tunnel does, so the UI's HTTP client talks to a local port.
 - **Admission.** A persisted allowlist of UI endpoint ids, added by a person (for example `trailhead factory allow <endpoint-id>`), plus the user's bearer token on every API request. The allowlist decides who can connect, and the token decides what they can do.
-- **Built (TRAIL-700).** Each stream opens with one framed JSON request, `{"op":"api"}`, after which it is raw bytes to the server's loopback port (the event stream included). Status (TRAIL-692, TRAIL-701) adds ops beside `api`; a request the control plane doesn't know resets the stream. Built (TRAIL-701): `{"op":"status"}` answers with framed JSON `StatusFrame`s, a `snapshot` of every repo and then one `event` per change (`{frame, repo, seq, event, ...}`), from the same boards as the loopback surface; a control plane with no status feed resets the stream. The allowlist is the file `<data dir>/factory/ui-allowed`, one endpoint id per line, read on every connection: `trailhead factory allow <id>`, `disallow <id>` and `allowed`. The control plane's endpoint id is logged at startup and shown by `trailhead factory status`. The control plane doesn't parse the forwarded HTTP; the server rejects any request without a valid token.
+- **Built (TRAIL-700).** Each stream opens with one framed JSON request, `{"op":"api"}`, after which it is raw bytes to the server's loopback port (the event stream included). Status (TRAIL-692, TRAIL-701) adds ops beside `api`; a request the control plane doesn't know resets the stream. Built (TRAIL-701): `{"op":"status"}` answers with framed JSON `StatusFrame`s, a `snapshot` of every repo and then one `event` per change (`{frame, repo, seq, event, ...}`), from the same boards as the loopback surface; a control plane with no status feed resets the stream. The allowlist is the file `<data dir>/factory/ui-allowed`, one endpoint id per line, read on every connection and stream, and rechecked every second on an open one so `disallow` cuts live connections too: `trailhead factory allow <id>`, `disallow <id>` and `allowed`. The control plane's endpoint id is logged at startup and shown by `trailhead factory status`. The control plane doesn't parse the forwarded HTTP; the server rejects any request without a valid token.
 - **Why not the API tunnel.** That tunnel admits only daemons this control plane started, and only reaches the Trailhead API. Keeping the UI out of it means a compromised sandbox can't see factory status or reach steering, and how daemons get in can change without touching the UI.
 - **Factory stopped.** There's little to watch, so the map shows Trailhead's last known state marked "factory stopped". The task board may fall back to the server URL the CLI already uses. Built (TRAIL-701): Lookout follows the status stream on its own connection and redials every 2 s; when it ends or can't be dialed, `FactoryStatus.link` becomes `Stopped` ("factory stopped") and the campsite and run entities keep their last state until the next snapshot replaces them. The board falls back to `NetConfig.server_url` (`TRAILHEAD_URL`, else `url` in the CLI's `config.toml`, else `http://127.0.0.1:7241`) only when the control plane is gone; one that refuses this Lookout (not on the allowlist) is still reported as such. It returns to the tunnel, with a fresh snapshot, once the control plane answers again. Once the control plane moves into the server process (later work in [mvp.md](mvp.md)), the server and the factory are one endpoint, and this case mostly goes away.
 
@@ -137,5 +159,6 @@ Decided (2026-11-02): the factory builds the UI. The epic is TRAIL-685 and it is
 4. Task board (TRAIL-697), forms with the spec editor (TRAIL-698), inspector (TRAIL-699).
 5. The control plane's status snapshot and stream (TRAIL-692), carried over `trailhead/ui/0` into Lookout (TRAIL-701).
 6. Trail map (TRAIL-702).
+7. Look and components (TRAIL-796): the widget kit by hand, ported from bevy-data-explorer (TRAIL-797); then task cards (TRAIL-798) and the board as kanban columns (TRAIL-799), the header bar with dropdown filters (TRAIL-800), and the inspector, forms and connect panel on the kit (TRAIL-801). Headless screenshots for workers and reviewers are a spike (TRAIL-802).
 
 On the factory side: checks scoped to paths (TRAIL-691), then UI checks, disk and time for Bevy builds in `.trailhead.toml` (TRAIL-703).

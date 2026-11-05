@@ -13,6 +13,7 @@ pub mod map;
 pub mod mirror;
 pub mod net;
 pub mod sync;
+pub mod widgets;
 
 /// The app's systems and resources, without a window or renderer, so tests can run it headless.
 pub struct LookoutPlugin;

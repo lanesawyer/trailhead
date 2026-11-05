@@ -494,7 +494,7 @@ fn redraw_form(
         .spawn((
             Name::new("form"),
             FormPanel,
-            GlobalZIndex(10),
+            GlobalZIndex(crate::widgets::layer::FORM),
             BackgroundColor(Color::srgb(0.13, 0.13, 0.15)),
             Node {
                 position_type: PositionType::Absolute,
