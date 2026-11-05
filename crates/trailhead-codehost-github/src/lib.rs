@@ -3,6 +3,8 @@
 //! paths, not git's protocol. Inside a sandbox the base URL is the connector's gateway and no token is sent; the
 //! gateway adds it. Elsewhere it's `https://api.github.com` with a token.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -11,7 +13,7 @@ use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
     BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
-    Repo, Result,
+    RateLimit, Repo, Result,
 };
 
 pub const API_URL: &str = "https://api.github.com";
@@ -35,6 +37,11 @@ pub struct GitHub {
     base: String,
     token: Option<String>,
     author: Option<Identity>,
+    /// The last answer to each conditional GET, by URL: its ETag and body. A `304 Not Modified` isn't counted
+    /// against GitHub's rate limit, so asking again about an unchanged PR is almost free.
+    etags: Arc<Mutex<HashMap<String, (String, Value)>>>,
+    /// What the last response said of GitHub's rate limit (`x-ratelimit-*`), if it said.
+    rate: Arc<Mutex<Option<RateLimit>>>,
 }
 
 impl GitHub {
@@ -49,7 +56,14 @@ impl GitHub {
             .user_agent("trailhead-factory")
             .build()
             .expect("http client");
-        GitHub { http, base: base.into().trim_end_matches('/').to_string(), token, author: None }
+        GitHub {
+            http,
+            base: base.into().trim_end_matches('/').to_string(),
+            token,
+            author: None,
+            etags: Arc::default(),
+            rate: Arc::default(),
+        }
     }
 
     pub fn with_author(mut self, author: Identity) -> GitHub {
@@ -95,6 +109,12 @@ impl GitHub {
 
     /// Sends, returning the status, the body, and which call this was (`POST /repos/o/r/git/refs`) for error messages.
     async fn send(&self, req: RequestBuilder) -> Result<(StatusCode, Value, String)> {
+        let (status, body, call, _) = self.send_full(req).await?;
+        Ok((status, body, call))
+    }
+
+    /// `send`, and the response's ETag.
+    async fn send_full(&self, req: RequestBuilder) -> Result<(StatusCode, Value, String, Option<String>)> {
         let req = req.build().map_err(|e| Error::Other(format!("github: {e}")))?;
         let path = req.url().path();
         let path = path.find("/repos/").map_or(path, |i| &path[i..]);
@@ -107,7 +127,7 @@ impl GitHub {
             let Some(again) = req.try_clone() else { break };
             let failure = match self.http.execute(again).await {
                 Ok(res) if transient(res.status()) => res.status().to_string(),
-                Ok(res) => return Self::read(res, call).await,
+                Ok(res) => return self.read(res, call).await,
                 Err(e) => causes(&e),
             };
             tracing::warn!(%call, error = %failure, tries, "github call failed; retrying");
@@ -115,19 +135,27 @@ impl GitHub {
             wait *= 2;
         }
         let res = self.http.execute(req).await.map_err(|e| Error::Other(format!("github {call}: {}", causes(&e))))?;
-        Self::read(res, call).await
+        self.read(res, call).await
     }
 
-    async fn read(res: reqwest::Response, call: String) -> Result<(StatusCode, Value, String)> {
+    async fn read(&self, res: reqwest::Response, call: String) -> Result<(StatusCode, Value, String, Option<String>)> {
+        if let Some(rate) = rate_limit(res.headers()) {
+            *self.rate.lock().unwrap() = Some(rate);
+        }
         let status = res.status();
+        let etag = res.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_string);
         let text = res.text().await.unwrap_or_default();
         let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-        Ok((status, body, call))
+        Ok((status, body, call, etag))
     }
 
     /// Sends and requires success, mapping GitHub's errors onto the factory's.
     async fn call(&self, req: RequestBuilder) -> Result<Value> {
         let (status, body, call) = self.send(req).await?;
+        Self::checked(status, body, call)
+    }
+
+    fn checked(status: StatusCode, body: Value, call: String) -> Result<Value> {
         if status.is_success() {
             return Ok(body);
         }
@@ -142,6 +170,31 @@ impl GitHub {
             StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY => Error::Conflict(msg),
             s => Error::from_status(s.as_u16(), msg),
         })
+    }
+
+    /// `call` for a GET, conditional on the ETag of the last answer to the same URL; a `304` returns that answer.
+    async fn call_cached(&self, req: RequestBuilder) -> Result<Value> {
+        let mut req = req.build().map_err(|e| Error::Other(format!("github: {e}")))?;
+        let key = req.url().to_string();
+        let known = self.etags.lock().unwrap().get(&key).cloned();
+        if let Some((etag, _)) = &known
+            && let Ok(value) = etag.parse()
+        {
+            req.headers_mut().insert(reqwest::header::IF_NONE_MATCH, value);
+        }
+        let (status, body, call, etag) = self.send_full(RequestBuilder::from_parts(self.http.clone(), req)).await?;
+        if status == StatusCode::NOT_MODIFIED
+            && let Some((_, cached)) = known
+        {
+            return Ok(cached);
+        }
+        let body = Self::checked(status, body, call)?;
+        let mut etags = self.etags.lock().unwrap();
+        match etag {
+            Some(etag) => etags.insert(key, (etag, body.clone())),
+            None => etags.remove(&key),
+        };
+        Ok(body)
     }
 
     fn repo_path(repo: &Repo) -> String {
@@ -197,6 +250,16 @@ impl GitHub {
             self.call(self.request(Method::GET, &path).query(&[("head", head.as_str()), ("state", "open")])).await?;
         Ok(prs.as_array().and_then(|a| a.first()).map(|p| pr_ref(repo, p)))
     }
+}
+
+/// The rate limit a response's headers report, if they all do.
+fn rate_limit(headers: &reqwest::header::HeaderMap) -> Option<RateLimit> {
+    let get = |name: &str| headers.get(name)?.to_str().ok()?.trim().parse::<i64>().ok();
+    Some(RateLimit {
+        limit: u64::try_from(get("x-ratelimit-limit")?).ok()?,
+        remaining: u64::try_from(get("x-ratelimit-remaining")?).ok()?,
+        resets_at: get("x-ratelimit-reset")?,
+    })
 }
 
 /// Extra tries a GET makes after a transient failure.
@@ -309,6 +372,10 @@ fn pr_ref(repo: &Repo, p: &Value) -> PrRef {
 
 #[async_trait]
 impl CodeHost for GitHub {
+    fn rate_limit(&self) -> Option<RateLimit> {
+        *self.rate.lock().unwrap()
+    }
+
     async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let existing = self.head(repo, branch).await?;
         if let Some(head) = existing.as_deref().filter(|head| *head != start) {
@@ -474,7 +541,7 @@ impl CodeHost for GitHub {
 
     async fn pr_state(&self, pr: &PrRef) -> Result<PrState> {
         let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
-        let p = self.call(self.request(Method::GET, &path)).await?;
+        let p = self.call_cached(self.request(Method::GET, &path)).await?;
         Ok(if p["merged"].as_bool().unwrap_or(false) {
             PrState::Merged { commit: p["merge_commit_sha"].as_str().map(str::to_string) }
         } else if p["state"].as_str() == Some("closed") {
@@ -487,13 +554,13 @@ impl CodeHost for GitHub {
 
     async fn title(&self, pr: &PrRef) -> Result<String> {
         let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
-        let p = self.call(self.request(Method::GET, &path)).await?;
+        let p = self.call_cached(self.request(Method::GET, &path)).await?;
         Ok(p["title"].as_str().unwrap_or_default().to_string())
     }
 
     async fn head(&self, pr: &PrRef) -> Result<String> {
         let path = format!("{}/pulls/{}", Self::repo_path(&pr.repo), pr.number);
-        let p = self.call(self.request(Method::GET, &path)).await?;
+        let p = self.call_cached(self.request(Method::GET, &path)).await?;
         p["head"]["sha"].as_str().map(str::to_string).ok_or_else(|| Error::Other("PR without a head sha".into()))
     }
 
@@ -505,14 +572,14 @@ impl CodeHost for GitHub {
             let req = self
                 .request(Method::GET, &format!("{r}/commits/{head}/check-runs"))
                 .query(&[("per_page", "100"), ("page", &page.to_string())]);
-            let found = self.call(req).await?;
+            let found = self.call_cached(req).await?;
             let found = found["check_runs"].as_array().map(Vec::as_slice).unwrap_or_default();
             runs.extend_from_slice(found);
             if found.len() < 100 {
                 break;
             }
         }
-        let combined = self.call(self.request(Method::GET, &format!("{r}/commits/{head}/status"))).await?;
+        let combined = self.call_cached(self.request(Method::GET, &format!("{r}/commits/{head}/status"))).await?;
         let statuses = combined["statuses"].as_array().map(Vec::as_slice).unwrap_or_default();
         Ok(Ci { state: summarize_ci(&runs, statuses), head })
     }

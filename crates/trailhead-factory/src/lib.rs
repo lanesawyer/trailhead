@@ -10,6 +10,7 @@ pub mod gateway;
 pub mod grade;
 pub mod harness;
 pub mod host;
+pub mod logging;
 pub mod messages;
 pub mod money;
 pub mod provider;
@@ -19,7 +20,7 @@ pub mod target;
 pub mod tracker;
 
 pub use codehost::{
-    BranchUpdate, Ci, CiState, CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, PrState, Repo,
+    BranchUpdate, Ci, CiState, CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, PrState, RateLimit, Repo,
 };
 pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,

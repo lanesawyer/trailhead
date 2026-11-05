@@ -78,8 +78,18 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
     Ok(())
 }
 
+/// Log timestamps in the machine's local time zone (`TZ` or `/etc/localtime`) with the offset
+/// shown; `TZ=UTC` gives UTC. Kept in step with `trailhead_factory::logging::LOG_TIME_FORMAT`,
+/// which this published crate can't depend on, as `trailhead-factory` isn't published.
+const LOG_TIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f%:z";
+
+fn local_timer() -> tracing_subscriber::fmt::time::ChronoLocal {
+    tracing_subscriber::fmt::time::ChronoLocal::new(LOG_TIME_FORMAT.to_string())
+}
+
 pub(crate) async fn serve(bind: &str) -> Result<()> {
     tracing_subscriber::fmt()
+        .with_timer(local_timer())
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,tower_http=warn".into()),
@@ -95,4 +105,12 @@ pub(crate) async fn serve(bind: &str) -> Result<()> {
         instance: Some(paths.instance_or_create()?),
     };
     trailhead_server::serve_local(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn log_time_format_matches_the_factorys() {
+        assert_eq!(super::LOG_TIME_FORMAT, trailhead_factory::logging::LOG_TIME_FORMAT);
+    }
 }

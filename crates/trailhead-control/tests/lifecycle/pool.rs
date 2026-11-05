@@ -317,6 +317,20 @@ async fn disk_waits_dont_count_toward_parking_a_later_real_failure() {
     assert_eq!(task.run.infra_failures, Some(1));
 }
 
+#[tokio::test]
+async fn a_host_that_never_frees_up_is_parked_for_a_person_after_enough_waits() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Waits too long", "");
+    r.compute.fail("trailhead-w1", "preflight");
+    for _ in 1..=12 {
+        let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+        assert!(matches!(err, trailhead_factory::Error::Unavailable(_)), "{err}");
+    }
+    let task = r.tracker.task(&key);
+    assert_ne!(task.status, Status::Open, "a person is asked after the waits run out");
+    assert_eq!(task.run.infra_failures.unwrap_or(0), 0);
+}
+
 fn with_stack(tools: &str) -> String {
     CONFIG.replace("[checks]", &format!("[stack]\ntools = {{ {tools} }}\n\n[checks]"))
 }

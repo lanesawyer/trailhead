@@ -364,6 +364,14 @@ pub fn infra_question(failures: u32, max: u32, error: &str) -> String {
     )
 }
 
+/// Why a task is parked when its host stayed short of a resource (its disk) through every wait.
+pub fn resource_wait_question(waits: u32, error: &str) -> String {
+    format!(
+        "The task has waited {waits} times in a row for a host with room, and none has freed up. The last \
+         message: {error}\n\nFree the space (on the Docker host, prune images and volumes), then reopen the task."
+    )
+}
+
 /// Why a task is parked when the infrastructure kept failing under its reviewer.
 pub fn review_infra_question(failures: u32, max: u32, error: &str) -> String {
     format!(
