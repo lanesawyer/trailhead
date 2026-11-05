@@ -240,6 +240,28 @@ async fn a_bad_endpoint_id_is_explained() {
     assert_eq!(state(&app), Connection::Offline);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_connect_replaces_the_old_target_and_its_error_stays() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    until(&mut app, "endpoint id", |a| a.world().resource::<LocalEndpoint>().0.is_some()).await;
+    rig.allowed.add(app.world().resource::<LocalEndpoint>().0.clone().unwrap().parse().unwrap()).unwrap();
+    send(&mut app, NetCommand::Login(rig.token.clone()));
+    until(&mut app, "live", |a| state(a) == Connection::Live).await;
+
+    send(&mut app, NetCommand::Connect("not an id".into()));
+    until(&mut app, "bad target", |a| matches!(reason(a), Some(Reason::BadTarget(_)))).await;
+    // Past a probe (every 2s), the old control plane hasn't taken the link back.
+    for _ in 0..100 {
+        app.update();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(state(&app), Connection::Offline);
+    assert!(matches!(reason(&app), Some(Reason::BadTarget(_))), "{:?}", reason(&app));
+}
+
 fn campsites(app: &mut App) -> Vec<(String, SandboxState)> {
     let world = app.world_mut();
     let mut all: Vec<_> =

@@ -446,12 +446,18 @@ impl Net {
     async fn connect(&mut self, text: &str) {
         let id = match parse_endpoint_id(text) {
             Ok(id) => id,
-            Err(_) => return self.set(Link::Offline, Some(Reason::BadTarget(text.trim().to_string()))),
+            Err(_) => {
+                self.drop_target();
+                return self.set(Link::Offline, Some(Reason::BadTarget(text.trim().to_string())));
+            }
         };
         if self.target.as_ref().is_none_or(|t| t.id != id) {
             match open_ui_tunnel(self.endpoint.clone(), id).await {
                 Ok(api) => self.target = Some(Target { id, api }),
-                Err(e) => return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string()))),
+                Err(e) => {
+                    self.drop_target();
+                    return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string())));
+                }
             }
             self.via = Via::Tunnel;
             self.start_status(id);
@@ -468,10 +474,25 @@ impl Net {
         self.check().await;
     }
 
+    /// Forgets the control plane a failed Connect was meant to replace, so the probe doesn't go back to it and bury
+    /// the error.
+    fn drop_target(&mut self) {
+        self.target = None;
+        self.stop_status();
+        self.stop_sync();
+        self.token = None;
+        self.pasted = None;
+        self.resume.clear();
+    }
+
     /// One probe of the whole path, and the climb back to `Live` from wherever it broke.
     async fn check(&mut self) {
         let Some(target) = &self.target else {
-            return self.set(Link::Offline, Some(Reason::NoTarget));
+            // After a failed Connect the error stays up; there is nothing to probe.
+            if self.state.is_none() {
+                self.set(Link::Offline, Some(Reason::NoTarget));
+            }
+            return;
         };
         let (id, tunnel) = (target.id, format!("http://{}", target.api));
         // Signed in: live, or still loading the board or reconnecting its feed.
