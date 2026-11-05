@@ -6,9 +6,9 @@ use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages;
 use trailhead_factory::{
-    ControlState, Error, Feedback, HumanContext, Merged, PrState, Profile, Result, Role, RunEvent, RunPhase, RunReport,
-    RunRequest, RunResult, RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind, WorkerBreach,
-    run_name,
+    ControlState, Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase,
+    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
+    WorkerBreach, run_name,
 };
 
 use crate::place::Placement;
@@ -334,6 +334,16 @@ impl Factory {
                 drop(place);
                 if let Err(e) = self.tracker.revoke_sub_agent(name).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
+                }
+                if self.conflicts_on_publish(task, &pr).await {
+                    return match self.rework_conflict(task, &pr, attempt).await {
+                        Ok(()) => Ok(Outcome::Conflicted { pr }),
+                        // Still in review and conflicting, so reconcile reworks it.
+                        Err(e) => {
+                            tracing::warn!(task = %task.key.0, error = %e, "couldn't reopen the conflicting PR for a rework; reconcile will");
+                            Ok(Outcome::AwaitingReview { pr })
+                        }
+                    };
                 }
                 self.review(task, &pr, attempt, &report.checks).await
             }
@@ -663,7 +673,44 @@ impl Factory {
             (Err(e), _) => Ok(Run::Lost(e, total)),
         }
     }
+
+    /// Whether the PR a worker just pushed already conflicts with the base branch, which moved while the run worked
+    /// on an older one (TRAIL-844), so a review now would be wasted. The host works `mergeable` out after a push, so
+    /// it's asked a few times. A reading counts only once the PR's head has moved past the one from before the push
+    /// (TRAIL-446); a rework that doesn't know that head, an answer that doesn't come, or a host error reads as no
+    /// conflict, and the review goes ahead as before.
+    async fn conflicts_on_publish(&self, task: &Task, pr: &PrRef) -> bool {
+        let Some(codehost) = &self.codehost else { return false };
+        let before = match &task.run.pr {
+            None => None,
+            Some(_) => match task.run.pending_changes().and_then(|c| c.head.clone()) {
+                Some(head) => Some(head),
+                None => return false,
+            },
+        };
+        for wait in MERGEABLE_WAITS {
+            tokio::time::sleep(wait).await;
+            match codehost.pr_state(pr).await {
+                Ok(PrState::Open { mergeable: Some(mergeable), head: Some(head) })
+                    if Some(&head) != before.as_ref() =>
+                {
+                    return !mergeable;
+                }
+                Ok(PrState::Open { .. }) => {}
+                Ok(_) => return false,
+                Err(e) => {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't ask whether the PR merges cleanly; reviewing it");
+                    return false;
+                }
+            }
+        }
+        false
+    }
 }
+
+/// The waits before each reading of a just-pushed PR's `mergeable`: GitHub usually has it within a few seconds.
+const MERGEABLE_WAITS: [Duration; 4] =
+    [Duration::ZERO, Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(5)];
 
 /// The first wait before retrying a task after an infrastructure failure, doubling up to [`MAX_INFRA_BACKOFF`].
 const FIRST_INFRA_BACKOFF: Duration = Duration::from_secs(60);

@@ -166,6 +166,9 @@ pub enum Outcome {
     Reviewed { pr: PrRef, verdict: Verdict },
     /// The PR is open but the review didn't finish; the reconciler retries it.
     AwaitingReview { pr: PrRef },
+    /// The worker's PR already conflicted with a base branch that moved during the run, so it went straight back for
+    /// a conflict rework without a review.
+    Conflicted { pr: PrRef },
     /// The task is parked for a human; its sandbox is kept for resuming.
     Parked { reason: String },
     /// The attempt failed and the task went back to the queue.
