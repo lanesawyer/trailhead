@@ -483,8 +483,29 @@ impl Runner {
                         return Ok((RunResult::NeedsInput(question), checks));
                     }
                 };
-                tracker.report(key, RunUpdate { pr: Some(pr.clone()), ..Default::default() }).await?;
-                tracker.request_review(key).await?;
+                // The PR is open and the work checked, so a tracker that fails now doesn't fail the run: the
+                // control plane records the PR and the review request itself when it sees `PrOpened`.
+                let mut written = false;
+                for attempt in 0..3u64 {
+                    if attempt > 0 {
+                        tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
+                    }
+                    let result =
+                        match tracker.report(key, RunUpdate { pr: Some(pr.clone()), ..Default::default() }).await {
+                            Ok(()) => tracker.request_review(key).await,
+                            Err(e) => Err(e),
+                        };
+                    match result {
+                        Ok(()) => {
+                            written = true;
+                            break;
+                        }
+                        Err(e) => tracing::warn!(task = %key.0, attempt, error = %e, "couldn't record the opened PR"),
+                    }
+                }
+                if !written {
+                    tracing::warn!(task = %key.0, "the PR is open but the tracker wouldn't take it; leaving it to the control plane");
+                }
                 Ok((RunResult::PrOpened(pr), checks))
             }
             RunOutcome::Verdict { kind, body, follow_ups, raise_grade } => {
