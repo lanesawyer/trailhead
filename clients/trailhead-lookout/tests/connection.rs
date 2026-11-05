@@ -9,10 +9,33 @@ use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+use tokio::sync::broadcast;
 use trailhead_core::{Ctx, NewProject, Principal, Store};
-use trailhead_daemon::ui::{UI_ALPN, UiAllowlist, UiProtocol};
+use trailhead_daemon::ui::{RepoFeed, StatusFeed, UI_ALPN, UiAllowlist, UiProtocol};
+use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, SandboxState, SandboxStatus, Sequenced};
 use trailhead_lookout::connection::{Api, Connection, ConnectionPlugin, ConnectionStatus, LocalEndpoint, SendNet};
+use trailhead_lookout::factory::{Campsite, FactoryLink, FactoryStatus};
 use trailhead_lookout::net::{NetCommand, NetConfig, Network, Reason};
+
+/// One repo, "o/r", with an idle sandbox, whose later events the test sends.
+struct TestFeed(broadcast::Sender<Sequenced>);
+
+fn sandbox(name: &str, state: SandboxState) -> SandboxStatus {
+    SandboxStatus { name: name.into(), target: None, state, task: None, role: None, warm: false, own: false }
+}
+
+impl StatusFeed for TestFeed {
+    fn subscribe(&self) -> Vec<RepoFeed> {
+        let snapshot = FactorySnapshot {
+            control: ControlState::Up,
+            last_error: None,
+            sandboxes: vec![sandbox("camp-1", SandboxState::Idle)],
+            runs: vec![],
+            seq: 1,
+        };
+        vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
+    }
+}
 
 async fn control_plane(key: SecretKey, lookup: &Arc<MemoryLookup>, rig: &Rig) -> (Router, EndpointAddr) {
     let endpoint = Endpoint::builder(presets::Minimal)
@@ -24,7 +47,12 @@ async fn control_plane(key: SecretKey, lookup: &Arc<MemoryLookup>, rig: &Rig) ->
         .unwrap();
     let addr = endpoint.addr();
     lookup.add_endpoint_info(addr.clone());
-    let router = Router::builder(endpoint).accept(UI_ALPN, UiProtocol::new(rig.server, rig.allowed.clone())).spawn();
+    let router = Router::builder(endpoint)
+        .accept(
+            UI_ALPN,
+            UiProtocol::new(rig.server, rig.allowed.clone()).with_status(Arc::new(TestFeed(rig.events.clone()))),
+        )
+        .spawn();
     (router, addr)
 }
 
@@ -34,6 +62,7 @@ struct Rig {
     allowed: UiAllowlist,
     token: String,
     agent_token: String,
+    events: broadcast::Sender<Sequenced>,
 }
 
 impl Rig {
@@ -53,7 +82,7 @@ impl Rig {
         let app = trailhead_server::router(Arc::new(trailhead_server::AppState::new(store)));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let allowed = UiAllowlist::new(dir.path().join("ui-allowed"));
-        Rig { dir, server, allowed, token, agent_token }
+        Rig { dir, server, allowed, token, agent_token, events: broadcast::channel(16).0 }
     }
 
     fn config(&self, lookup: &Arc<MemoryLookup>) -> NetConfig {
@@ -63,6 +92,7 @@ impl Rig {
             trailhead_data_dir: self.dir.path().join("data"),
             keyring: false,
             network: Network::Direct(lookup.clone()),
+            server_url: None,
         }
     }
 }
@@ -178,4 +208,97 @@ async fn a_bad_endpoint_id_is_explained() {
     send(&mut app, NetCommand::Connect("not an id".into()));
     until(&mut app, "bad target", |a| matches!(reason(a), Some(Reason::BadTarget(_)))).await;
     assert_eq!(state(&app), Connection::Offline);
+}
+
+fn campsites(app: &mut App) -> Vec<(String, SandboxState)> {
+    let world = app.world_mut();
+    let mut all: Vec<_> =
+        world.query::<&Campsite>().iter(world).map(|c| (c.status.name.clone(), c.status.state)).collect();
+    all.sort_by(|a, b| a.0.cmp(&b.0));
+    all
+}
+
+fn link(app: &App) -> FactoryLink {
+    app.world().resource::<FactoryStatus>().link
+}
+
+async fn allowed_and_live(app: &mut App, rig: &Rig) {
+    until(app, "endpoint id", |a| a.world().resource::<LocalEndpoint>().0.is_some()).await;
+    rig.allowed.add(app.world().resource::<LocalEndpoint>().0.clone().unwrap().parse().unwrap()).unwrap();
+    send(app, NetCommand::Login(rig.token.clone()));
+    until(app, "live", |a| state(a) == Connection::Live).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_factory_status_arrives_over_the_ui_protocol() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+
+    // The snapshot has the idle campsite; the stream adds a busy one.
+    until(&mut app, "snapshot", |a| link(a) == FactoryLink::Running).await;
+    assert_eq!(campsites(&mut app), [("camp-1".to_string(), SandboxState::Idle)]);
+    let busy = FactoryEvent::SandboxChanged { sandbox: sandbox("camp-2", SandboxState::Busy) };
+    rig.events.send(Sequenced { seq: 2, event: busy }).unwrap();
+    until(&mut app, "event", |a| a.world().resource::<FactoryStatus>().repos["o/r"].seq == 2).await;
+    assert_eq!(campsites(&mut app).len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn when_the_factory_stops_the_last_state_stays_and_the_board_uses_the_server_url() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let key = SecretKey::generate();
+    let (router, addr) = control_plane(key.clone(), &lookup, &rig).await;
+    let mut config = rig.config(&lookup);
+    config.server_url = Some(format!("http://{}", rig.server));
+    let mut app = app(config, Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+    until(&mut app, "snapshot", |a| link(a) == FactoryLink::Running).await;
+    let tunnel = app.world().resource::<Api>().0.base.clone();
+
+    router.shutdown().await.unwrap();
+    until(&mut app, "factory stopped", |a| link(a) == FactoryLink::Stopped).await;
+    // Trailhead's last known state is kept, marked stopped, and the board is reached without the control plane.
+    assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory stopped");
+    assert_eq!(campsites(&mut app), [("camp-1".to_string(), SandboxState::Idle)]);
+    let direct = format!("http://{}", rig.server);
+    until(&mut app, "live on the server url", |a| {
+        state(a) == Connection::Live && a.world().resource::<Api>().0.base == direct
+    })
+    .await;
+    let api = &app.world().resource::<Api>().0;
+    let me = reqwest::Client::new().get(format!("{}/v1/me", api.base)).bearer_auth(&api.token).send().await.unwrap();
+    assert!(me.status().is_success());
+
+    // The control plane comes back: the tunnel and a fresh snapshot replace the fallback.
+    let (_router, _) = control_plane(key, &lookup, &rig).await;
+    until(&mut app, "back on the tunnel", |a| {
+        link(a) == FactoryLink::Running && state(a) == Connection::Live && a.world().resource::<Api>().0.base == tunnel
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_lookout_does_not_fall_back_to_the_server_url() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut config = rig.config(&lookup);
+    config.server_url = Some(format!("http://{}", rig.server));
+    let mut app = app(config, Some(addr.id.to_string()));
+    until(&mut app, "refused", |a| reason(a) == Some(Reason::NotAllowed)).await;
+    assert_eq!(state(&app), Connection::Offline);
+}
+
+#[test]
+fn the_cli_server_url_comes_from_the_environment_then_the_config_then_the_default() {
+    use trailhead_lookout::net::cli_server_url;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(cli_server_url(dir.path(), None), "http://127.0.0.1:7241");
+    std::fs::write(dir.path().join("config.toml"), "url = \"http://10.0.0.5:9000/\"\n").unwrap();
+    assert_eq!(cli_server_url(dir.path(), None), "http://10.0.0.5:9000");
+    assert_eq!(cli_server_url(dir.path(), Some("http://127.0.0.1:1".into())), "http://127.0.0.1:1");
 }

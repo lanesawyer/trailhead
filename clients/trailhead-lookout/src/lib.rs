@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 pub mod commands;
 pub mod connection;
+pub mod factory;
 pub mod mirror;
 pub mod net;
 pub mod sync;
