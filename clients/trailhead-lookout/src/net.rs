@@ -18,6 +18,7 @@ use trailhead_client::creds::{Cred, CredStore};
 use trailhead_daemon::net::{parse_endpoint_id, parse_secret_key};
 use trailhead_daemon::ui::{CLOSE_NOT_ALLOWED, UI_ALPN, open_ui_tunnel};
 
+use crate::commands::{self, CommandId, Reply, Request};
 use crate::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 
 /// How the app is connected to its factory. The Bevy `States` type is in [`crate::connection`]; this is the same
@@ -86,6 +87,8 @@ pub enum NetCommand {
     Connect(String),
     /// Sign in with a pasted user token; confirmed with `/v1/me`, and saved for this server if it holds.
     Login(String),
+    /// Make this request (`crate::commands`); `attempt` comes back with the answer.
+    Request { id: CommandId, attempt: u32, request: Request },
 }
 
 /// What the net thread tells the app.
@@ -98,6 +101,8 @@ pub enum NetEvent {
     Access(ApiAccess),
     /// The snapshot and then each event, for the mirror.
     Sync(SyncItem),
+    /// What came of a [`NetCommand::Request`].
+    Reply(Reply),
 }
 
 /// Everything the HTTP client needs to talk to the Trailhead API through the control plane.
@@ -301,6 +306,7 @@ async fn run(
                     net.pasted = Some(token.trim().to_string());
                     net.check().await;
                 }
+                Some(NetCommand::Request { id, attempt, request }) => net.request(id, attempt, request),
                 None => break,
             },
             Some((run, report)) = report_rx.recv() => net.on_report(run, report),
@@ -452,6 +458,20 @@ impl Net {
         let _ = self.events.send(NetEvent::Access(access));
         self.set(Link::Syncing, Some(Reason::Loading));
         self.start_sync(base, token);
+    }
+
+    /// Makes a command's request on its own task, so a slow one holds up neither the probe nor the others. It goes
+    /// out only while `Live`; otherwise the app is told to hold it for later.
+    fn request(&self, id: CommandId, attempt: u32, request: Request) {
+        let events = self.events.clone();
+        let reply = move |result| {
+            let _ = events.send(NetEvent::Reply(Reply { id, attempt, result }));
+        };
+        let (Some(target), Some(token), Some((Link::Live, _))) = (&self.target, &self.token, &self.state) else {
+            return reply(Err("not connected".into()));
+        };
+        let (http, base, token) = (self.http.clone(), format!("http://{}", target.api), token.clone());
+        tokio::spawn(async move { reply(commands::execute(&http, &base, &token, &request).await) });
     }
 
     /// Starts the sync from the top, replacing any that runs. It brings the link to `Live` once the feed is open.
