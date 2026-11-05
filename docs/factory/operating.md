@@ -46,6 +46,7 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 - A second Ctrl-C stops it at once. Runs in flight are cancelled first (up to 15 seconds), and the next start's reconcile requeues their tasks (a run the control plane merely crashed on is followed again instead, if its daemon still has it) and returns their pooled Sprites to idle. Restarting is always safe, though a cancelled run counts as an attempt (TRAIL-159).
 - The factory clones from GitHub, not your checkout: push `main` before queuing work that builds on local commits.
 - One control plane per machine, running as many repos as you give it (below): two processes share an iroh identity and would undo each other's runs. `run` and `check` take an exclusive lock on `<data dir>/factory/control.lock` before touching anything, and a second one fails with `a control plane is already running on this machine (pid N, running owner/repo, …)`. The lock goes when the process exits, even after a crash, so stop the running one first; `check` can't run beside it.
+- `run` also writes its log to `<data dir>/factory/factory.log`, beside the lock, as well as the terminal, so a problem can be checked after the scrollback is gone. The file rotates at 10 MiB, keeping five older ones (`factory.log.1` is the newest); `factory status` prints its path. `check` and the other commands log to the terminal only.
 
 **Adding a repo (TRAIL-167).** Don't start a second `trailhead-factory`; add the repo to the one you run.
 
