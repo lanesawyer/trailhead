@@ -691,6 +691,7 @@ mod tests {
             sandboxes: w.campsites.iter().map(|c| c.status.clone()).collect(),
             runs: w.runs.iter().map(|r| r.status.clone()).collect(),
             seq: 1,
+            holding: None,
         };
         app.world_mut()
             .write_message(FactoryItem(FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])));
@@ -766,6 +767,7 @@ mod tests {
             sandboxes: w.campsites.iter().map(|c| c.status.clone()).collect(),
             runs: w.runs.iter().map(|r| r.status.clone()).collect(),
             seq: 1,
+            holding: None,
         };
         app.world_mut()
             .write_message(FactoryItem(FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])));

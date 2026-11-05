@@ -14,7 +14,9 @@
 //! - A panel over the board: [`panel`], with a [`layer`]. Inside it: [`section`], [`row`], [`field`].
 //! - A hint over anything: put a [`Hint`] on it.
 //! - Colors: [`token`] (Lookout's) and `bevy::feathers::tokens` (the controls'); a status column's: [`status_token`].
-//! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`].
+//! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`]; one that scrolls down only,
+//!   inside it: [`ScrollDown`].
+//! - A board column: [`column`] (header, scrolling body, scrollbar), and [`column_empty`] for no cards.
 //! - Gaps, padding, margins: [`space`]. Corners: [`radius`].
 
 use bevy::prelude::*;
@@ -22,6 +24,7 @@ use bevy::prelude::*;
 mod badge;
 mod buttons;
 mod card;
+mod column;
 mod containers;
 mod hint;
 mod icons;
@@ -36,11 +39,12 @@ mod theme;
 pub use badge::badge;
 pub use buttons::{button, button_text, tool_button};
 pub use card::{TITLE_LINES, card, card_row, card_title, card_under};
+pub use column::{COLUMN_WIDTH, column, column_empty};
 pub use containers::{field, panel, row, section};
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu};
-pub use scroll::ScrollBoth;
+pub use scroll::{ScrollBoth, ScrollDown};
 pub use select::{Picked, select};
 pub use spacing::{radius, space};
 pub use text::{size, text, text_dim, text_toned};
@@ -51,6 +55,8 @@ pub struct WidgetsPlugin;
 
 impl Plugin for WidgetsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((icons::IconsPlugin, hint::HintPlugin)).add_observer(scroll::on_both_scroll);
+        app.add_plugins((icons::IconsPlugin, hint::HintPlugin))
+            .add_observer(scroll::on_both_scroll)
+            .add_observer(scroll::on_down_scroll);
     }
 }
