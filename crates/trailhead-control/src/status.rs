@@ -170,14 +170,16 @@ impl StatusBoard {
 
     /// Makes the board's sandboxes those in `live`, and `kept` (on targets that didn't answer): what a reconcile
     /// listed is the truth, so this is also how a boot rebuilds them. A sandbox with no state label that no run is on
-    /// is a parked task's, suspended.
-    pub fn sync_sandboxes(&self, live: &[Sandbox], kept_targets: &HashSet<String>) {
+    /// is a parked task's, suspended, and so is a pooled one named in `parked` (the sandboxes of the tracker's NeedsInput
+    /// tasks), which a board rebuilt at boot can't know.
+    pub fn sync_sandboxes(&self, live: &[Sandbox], kept_targets: &HashSet<String>, parked: &HashSet<String>) {
         let mut events = Vec::new();
         self.apply(|i| {
             let mut next = Vec::new();
             for s in live {
                 let running = s.labels.get(label::TASK).is_some_and(|t| i.runs.iter().any(|r| r.task.0 == *t));
-                let known = i.sandboxes.iter().any(|k| k.name == s.name && k.state == SandboxState::Paused);
+                let known = parked.contains(&s.name)
+                    || i.sandboxes.iter().any(|k| k.name == s.name && k.state == SandboxState::Paused);
                 let own_idle = !s.labels.contains_key(label::POOL) && !running;
                 next.push(sandbox_status(s, known || own_idle));
             }
@@ -358,18 +360,32 @@ mod tests {
         let pooled = |n: &str, state: &str| {
             sandbox(n, &[("pool", "worker"), ("state", state), ("task", "TRAIL-1"), ("target", "a"), ("warm", "cp")])
         };
-        board.sync_sandboxes(&[pooled("w1", "idle"), pooled("w2", "busy")], &HashSet::new());
+        board.sync_sandboxes(&[pooled("w1", "idle"), pooled("w2", "busy")], &HashSet::new(), &HashSet::new());
         let snap = board.snapshot();
         assert_eq!(snap.sandboxes.len(), 2);
         assert_eq!(snap.sandboxes[0].state, SandboxState::Idle);
         assert!(snap.sandboxes[1].warm);
         // A run's own sandbox that nothing is running on is a parked task's.
-        board.sync_sandboxes(&[sandbox("trail-2-a1", &[("task", "TRAIL-2")])], &HashSet::from(["a".to_string()]));
+        board.sync_sandboxes(
+            &[sandbox("trail-2-a1", &[("task", "TRAIL-2")])],
+            &HashSet::from(["a".to_string()]),
+            &HashSet::new(),
+        );
         let snap = board.snapshot();
         assert_eq!(snap.sandboxes.len(), 3);
         let own = snap.sandboxes.iter().find(|s| s.name == "trail-2-a1").unwrap();
         assert_eq!(own.state, SandboxState::Paused);
-        board.sync_sandboxes(&[], &HashSet::new());
+        board.sync_sandboxes(&[], &HashSet::new(), &HashSet::new());
         assert!(board.snapshot().sandboxes.is_empty());
+    }
+
+    #[test]
+    fn a_sync_shows_a_parked_tasks_pooled_sandbox_as_paused_after_a_boot() {
+        let board = StatusBoard::new();
+        let pooled = |n: &str| sandbox(n, &[("pool", "worker"), ("state", "busy"), ("task", "TRAIL-1")]);
+        board.sync_sandboxes(&[pooled("w1"), pooled("w2")], &HashSet::new(), &HashSet::from(["w1".to_string()]));
+        let snap = board.snapshot();
+        assert_eq!(snap.sandboxes[0].state, SandboxState::Paused);
+        assert_eq!(snap.sandboxes[1].state, SandboxState::Busy);
     }
 }
