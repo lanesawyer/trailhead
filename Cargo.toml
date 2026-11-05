@@ -69,3 +69,5 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 # None for dependencies: linking Bevy's test binaries ran a 5 GiB sandbox VM out of memory (TRAIL-754).
 debug = false
+# Unoptimized Bevy and parley made Lookout lag behind typing and pasting (TRAIL-781). Our own crates stay at 0.
+opt-level = 2
