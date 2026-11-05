@@ -217,6 +217,7 @@ const FACTORY_FIELDS: &[(&str, Kind)] = &[
     ("infra_failures", Kind::Unsigned),
     ("conflict_reworks", Kind::Unsigned),
     ("started", Kind::Integer),
+    ("released", Kind::Integer),
     ("sandbox", Kind::String),
     ("host", Kind::String),
     ("target", Kind::String),
@@ -402,6 +403,7 @@ mod tests {
             ),
             merging: Some("x".into()),
             stale_head: Some("x".into()),
+            released: Some(1),
         };
         let Value::Object(map) = serde_json::to_value(&full).unwrap() else { panic!("RunUpdate isn't an object") };
         for key in map.keys() {

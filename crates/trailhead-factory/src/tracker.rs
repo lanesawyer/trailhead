@@ -173,6 +173,11 @@ pub struct RunUpdate {
     /// count. Empty once settled; written empty to clear it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_head: Option<String>,
+    /// When the control plane gave up the parked task's pooled sandbox for waiting work (unix seconds; 0 once a new run
+    /// has started, since a null write leaves the field as it is), so reconcile and `factory status` don't look for
+    /// it (TRAIL-601).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released: Option<i64>,
 }
 
 /// The merger's decision on a PR's current head (`docs/factory/review.md#the-merger`). Written whole, and its
@@ -298,6 +303,7 @@ impl RunUpdate {
             merge,
             merging,
             stale_head,
+            released,
         } = update;
         self.attempt = attempt.or(self.attempt.take());
         self.sandbox = sandbox.or(self.sandbox.take());
@@ -326,6 +332,7 @@ impl RunUpdate {
         self.merge = merge.or(self.merge.take());
         self.merging = merging.or(self.merging.take());
         self.stale_head = stale_head.or(self.stale_head.take());
+        self.released = released.or(self.released.take());
     }
 
     /// The review the next run has to address: the last one that asked for changes, unless a later review has

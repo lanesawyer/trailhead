@@ -335,6 +335,13 @@ impl DaemonProtocol {
                     return reply_with(&mut send, &FromDaemon::Failed(e)).await;
                 }
             },
+            ToDaemon::Unpublished { remote_branch } => {
+                let reply = match self.runner.unpublished(&remote_branch).await {
+                    Ok(unpublished) => FromDaemon::Unpublished(unpublished),
+                    Err(e) => FromDaemon::Failed(e),
+                };
+                return reply_with(&mut send, &reply).await;
+            }
             ToDaemon::Version => return reply_with(&mut send, &FromDaemon::Version(self.version.clone())).await,
             ToDaemon::Cancel => {
                 return reply_with(&mut send, &FromDaemon::Failed(Error::Other("cancel without a run".into()))).await;
@@ -862,7 +869,12 @@ impl RemoteDaemon {
                                 }
                                 Some(Ok(FromDaemon::Report(report))) => return Ok(report),
                                 Some(Ok(FromDaemon::Failed(e))) => return Err(e),
-                                Some(Ok(FromDaemon::Prepared | FromDaemon::InstallHosts(_) | FromDaemon::Version(_))) => {
+                                Some(Ok(
+                                FromDaemon::Prepared
+                                | FromDaemon::InstallHosts(_)
+                                | FromDaemon::Version(_)
+                                | FromDaemon::Unpublished(_),
+                            )) => {
                                     return Err(io_err("unexpected reply during a run"));
                                 }
                                 Some(Err(e)) => break e,
@@ -916,6 +928,20 @@ impl Daemon for RemoteDaemon {
             tracing::warn!(sandbox = %sandbox.0, %error, "lost the daemon while it listed install hosts; asking again");
             self.disconnect(sandbox);
             patience = RECONNECT_PATIENCE;
+        }
+    }
+
+    /// Asks the daemon whether the checkout has work that exists nowhere else. One attempt: the caller keeps the
+    /// sandbox when this fails.
+    async fn unpublished(&self, sandbox: &SandboxId, remote_branch: &str) -> Result<bool> {
+        self.start_current(sandbox).await?;
+        let (mut send, mut recv) = self.open(sandbox, CONNECT_PATIENCE).await?;
+        write_frame(&mut send, &ToDaemon::Unpublished { remote_branch: remote_branch.into() }).await?;
+        match read_frame::<FromDaemon>(&mut recv).await? {
+            Some(FromDaemon::Unpublished(unpublished)) => Ok(unpublished),
+            Some(FromDaemon::Failed(e)) => Err(e),
+            Some(other) => Err(io_err(format!("unexpected reply to unpublished: {other:?}"))),
+            None => Err(io_err(format!("the daemon in {} went away", sandbox.0))),
         }
     }
 

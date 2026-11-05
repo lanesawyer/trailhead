@@ -18,6 +18,9 @@ use trailhead_client::creds::{Cred, CredStore};
 use trailhead_daemon::net::{parse_endpoint_id, parse_secret_key};
 use trailhead_daemon::ui::{CLOSE_NOT_ALLOWED, UI_ALPN, open_ui_tunnel};
 
+use crate::commands::{self, CommandId, Reply, Request};
+use crate::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
+
 /// How the app is connected to its factory. The Bevy `States` type is in [`crate::connection`]; this is the same
 /// three values as the net thread reports them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,6 +51,10 @@ pub enum Reason {
     AgentToken,
     /// Confirming the token with `/v1/me`.
     SigningIn,
+    /// Signed in, and loading the tasks and projects.
+    Loading,
+    /// The event stream dropped, and the board may be out of date until it is back.
+    Reconnecting,
 }
 
 impl std::fmt::Display for Reason {
@@ -67,6 +74,8 @@ impl std::fmt::Display for Reason {
             Reason::TokenRejected => write!(f, "the server rejected the token: log in again"),
             Reason::AgentToken => write!(f, "that is an agent's token: log in with a user token"),
             Reason::SigningIn => write!(f, "signing in"),
+            Reason::Loading => write!(f, "loading tasks and projects"),
+            Reason::Reconnecting => write!(f, "the live feed dropped: reconnecting"),
         }
     }
 }
@@ -78,6 +87,8 @@ pub enum NetCommand {
     Connect(String),
     /// Sign in with a pasted user token; confirmed with `/v1/me`, and saved for this server if it holds.
     Login(String),
+    /// Make this request (`crate::commands`); `attempt` comes back with the answer.
+    Request { id: CommandId, attempt: u32, request: Request },
 }
 
 /// What the net thread tells the app.
@@ -88,6 +99,10 @@ pub enum NetEvent {
     State(Link, Option<Reason>),
     /// Signed in: where the forwarded API listens and who the user is. The token is the user's.
     Access(ApiAccess),
+    /// The snapshot and then each event, for the mirror.
+    Sync(SyncItem),
+    /// What came of a [`NetCommand::Request`].
+    Reply(Reply),
 }
 
 /// Everything the HTTP client needs to talk to the Trailhead API through the control plane.
@@ -236,6 +251,13 @@ struct Net {
     /// The token that signed in, kept while `Live` so a dropped link signs back in without asking again.
     token: Option<String>,
     state: Option<(Link, Option<Reason>)>,
+    /// The running sync, and which run it is, so a report from one that was replaced is ignored.
+    sync: Option<tokio::task::JoinHandle<()>>,
+    sync_run: u64,
+    /// Where the stream got to, kept across `Offline` so a short outage resumes instead of starting over.
+    resume: Resume,
+    reports: tokio_mpsc::UnboundedSender<(u64, Report)>,
+    timings: SyncTimings,
 }
 
 async fn run(
@@ -253,7 +275,22 @@ async fn run(
     };
     let _ = events.send(NetEvent::Endpoint(endpoint.id().to_string()));
     let http = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build().expect("http client");
-    let mut net = Net { config, endpoint, http, events, target: None, pasted: None, token: None, state: None };
+    let (reports, mut report_rx) = tokio_mpsc::unbounded_channel();
+    let mut net = Net {
+        config,
+        endpoint,
+        http,
+        events,
+        target: None,
+        pasted: None,
+        token: None,
+        state: None,
+        sync: None,
+        sync_run: 0,
+        resume: Resume::default(),
+        reports,
+        timings: SyncTimings::default(),
+    };
     match target {
         Some(t) => net.connect(&t).await,
         None => net.set(Link::Offline, Some(Reason::NoTarget)),
@@ -269,8 +306,10 @@ async fn run(
                     net.pasted = Some(token.trim().to_string());
                     net.check().await;
                 }
+                Some(NetCommand::Request { id, attempt, request }) => net.request(id, attempt, request),
                 None => break,
             },
+            Some((run, report)) = report_rx.recv() => net.on_report(run, report),
             _ = tick.tick() => {
                 net.check().await;
                 // A slow probe mustn't be followed at once by the next, or an `Offline` is replaced before anyone sees it.
@@ -278,6 +317,7 @@ async fn run(
             }
         }
     }
+    net.stop_sync();
     net.endpoint.close().await;
 }
 
@@ -310,6 +350,9 @@ fn hex_of(bytes: &[u8]) -> String {
 impl Net {
     /// Reports a change of link or reason, and only changes.
     fn set(&mut self, link: Link, reason: Option<Reason>) {
+        if link == Link::Offline {
+            self.stop_sync();
+        }
         let next = (link, reason);
         if self.state.as_ref() != Some(&next) {
             let _ = self.events.send(NetEvent::State(next.0, next.1.clone()));
@@ -329,6 +372,8 @@ impl Net {
             }
             self.token = None;
             self.state = None;
+            self.stop_sync();
+            self.resume.clear();
         }
         if std::fs::create_dir_all(&self.config.config_dir).is_ok()
             && let Err(e) = std::fs::write(self.config.target_file(), format!("{id}\n"))
@@ -344,7 +389,10 @@ impl Net {
             return self.set(Link::Offline, Some(Reason::NoTarget));
         };
         let (id, base) = (target.id, format!("http://{}", target.api));
-        let live = matches!(self.state, Some((Link::Live, _))) && self.pasted.is_none();
+        // Signed in: live, or still loading the board or reconnecting its feed.
+        let live =
+            matches!(self.state, Some((Link::Live, _) | (Link::Syncing, Some(Reason::Loading | Reason::Reconnecting))))
+                && self.pasted.is_none();
         if !live {
             self.set(Link::Syncing, Some(Reason::Dialing));
         }
@@ -381,6 +429,7 @@ impl Net {
             Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.unwrap_or_default(),
             Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
                 self.token = None;
+                self.resume.clear();
                 return self.set(Link::Offline, Some(Reason::TokenRejected));
             }
             Ok(r) => {
@@ -392,6 +441,7 @@ impl Net {
         // The user token only: an agent's would let Lookout act as one.
         if me["agent"]["name"].as_str().is_some() {
             self.token = None;
+            self.resume.clear();
             return self.set(Link::Offline, Some(Reason::AgentToken));
         }
         if pasted.is_some()
@@ -399,10 +449,64 @@ impl Net {
         {
             tracing::warn!(error = %e, "can't save the token; it will be asked for again next start");
         }
+        if pasted.is_some() {
+            self.resume.clear();
+        }
         let user = me["user"]["name"].as_str().unwrap_or("you").to_string();
         self.token = Some(token.clone());
-        let _ = self.events.send(NetEvent::Access(ApiAccess { base, token, user }));
-        self.set(Link::Live, None);
+        let access = ApiAccess { base: base.clone(), token: token.clone(), user };
+        let _ = self.events.send(NetEvent::Access(access));
+        self.set(Link::Syncing, Some(Reason::Loading));
+        self.start_sync(base, token);
+    }
+
+    /// Makes a command's request on its own task, so a slow one holds up neither the probe nor the others. It goes
+    /// out only while `Live`; otherwise the app is told to hold it for later.
+    fn request(&self, id: CommandId, attempt: u32, request: Request) {
+        let events = self.events.clone();
+        let reply = move |result| {
+            let _ = events.send(NetEvent::Reply(Reply { id, attempt, result }));
+        };
+        let (Some(target), Some(token), Some((Link::Live, _))) = (&self.target, &self.token, &self.state) else {
+            return reply(Err("not connected".into()));
+        };
+        let (http, base, token) = (self.http.clone(), format!("http://{}", target.api), token.clone());
+        tokio::spawn(async move { reply(commands::execute(&http, &base, &token, &request).await) });
+    }
+
+    /// Starts the sync from the top, replacing any that runs. It brings the link to `Live` once the feed is open.
+    fn start_sync(&mut self, base: String, token: String) {
+        self.stop_sync();
+        self.sync_run += 1;
+        let (run, events, reports) = (self.sync_run, self.events.clone(), self.reports.clone());
+        let remote = Remote::new(base, token, &self.timings);
+        self.sync = Some(tokio::spawn(sync::run(
+            remote,
+            self.timings,
+            self.resume.clone(),
+            move |item| events.send(NetEvent::Sync(item)).is_ok(),
+            move |report| {
+                let _ = reports.send((run, report));
+            },
+        )));
+    }
+
+    fn stop_sync(&mut self) {
+        self.resume.pause();
+        if let Some(task) = self.sync.take() {
+            task.abort();
+        }
+    }
+
+    fn on_report(&mut self, run: u64, report: Report) {
+        if run != self.sync_run || self.sync.is_none() {
+            return;
+        }
+        match report {
+            Report::Loading => self.set(Link::Syncing, Some(Reason::Loading)),
+            Report::Reconnecting => self.set(Link::Syncing, Some(Reason::Reconnecting)),
+            Report::Live => self.set(Link::Live, None),
+        }
     }
 
     /// The request failed somewhere; dial the control plane directly to tell "refused" from "gone".

@@ -133,6 +133,9 @@ pub struct Factory {
     host: Arc<Host>,
     /// The ready tasks last reported as starved by parked sandboxes, so a poll says it once per change.
     starved: Mutex<Option<Vec<TaskKey>>>,
+    /// When each task holding a pooled sandbox was first seen parked, so `release_parked_after` counts from there. In
+    /// memory: a restart starts the wait again (TRAIL-601).
+    parked_since: Mutex<HashMap<TaskKey, Instant>>,
     /// Tasks already reported as ungraded, so a poll doesn't say it again.
     ungraded: Mutex<HashSet<TaskKey>>,
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
@@ -240,6 +243,7 @@ impl Factory {
             updating: Mutex::default(),
             host,
             starved: Mutex::default(),
+            parked_since: Mutex::default(),
             ungraded: Mutex::default(),
             pool_pick: tokio::sync::Mutex::default(),
             install_opened: Mutex::default(),

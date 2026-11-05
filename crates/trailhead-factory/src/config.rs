@@ -359,6 +359,9 @@ pub struct RepoConfig {
     /// Reworks for a PR that conflicts with the base branch before the task is parked for a human. They don't use up
     /// review rounds.
     pub max_conflict_reworks: u32,
+    /// Minutes a task may sit parked (`needs_input`) before its pooled sandbox is given up for ready tasks that are
+    /// waiting for a place, when releasing loses nothing: no unpublished work in the checkout. 0 never releases.
+    pub release_parked_after: u32,
 }
 
 impl Default for RepoConfig {
@@ -376,6 +379,7 @@ impl Default for RepoConfig {
             max_infra_failures: default_max_infra_failures(),
             max_review_rounds: default_max_review_rounds(),
             max_conflict_reworks: default_max_conflict_reworks(),
+            release_parked_after: default_release_parked_after(),
         }
     }
 }
@@ -414,6 +418,9 @@ fn default_max_review_rounds() -> u32 {
 }
 fn default_max_conflict_reworks() -> u32 {
     5
+}
+fn default_release_parked_after() -> u32 {
+    15
 }
 fn default_worker() -> String {
     "worker".into()

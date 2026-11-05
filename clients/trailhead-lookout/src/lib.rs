@@ -2,8 +2,11 @@
 
 use bevy::prelude::*;
 
+pub mod commands;
 pub mod connection;
+pub mod mirror;
 pub mod net;
+pub mod sync;
 
 /// The app's systems and resources, without a window or renderer, so tests can run it headless.
 pub struct LookoutPlugin;

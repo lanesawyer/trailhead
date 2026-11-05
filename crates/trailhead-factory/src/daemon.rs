@@ -166,6 +166,10 @@ pub enum ToDaemon {
     Cancel,
     /// Asks which build of the daemon is answering. A daemon that predates this fails the request.
     Version,
+    /// Asks whether the checkout has work that isn't on `origin/<remote_branch>` (`FromDaemon::Unpublished`).
+    Unpublished {
+        remote_branch: String,
+    },
 }
 
 /// Which build of the daemon is running.
@@ -185,6 +189,7 @@ pub enum FromDaemon {
     Prepared,
     InstallHosts(Vec<InstallHost>),
     Version(DaemonVersion),
+    Unpublished(bool),
     Report(RunReport),
     Failed(Error),
 }
@@ -281,6 +286,12 @@ pub trait Daemon: Send + Sync {
     }
     /// Starts the sandbox's daemon if needed and readies its checkout.
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()>;
+    /// Whether the sandbox's checkout holds work that exists nowhere else: uncommitted changes, or commits that are not on
+    /// `origin/<remote_branch>` (the base branch, or a rework's PR branch). Defaults to true, so a daemon that can't
+    /// say is never taken to have nothing to lose (TRAIL-601).
+    async fn unpublished(&self, _sandbox: &SandboxId, _remote_branch: &str) -> Result<bool> {
+        Ok(true)
+    }
     /// Drops any connection to the sandbox's daemon, after something (a restore) restarted it.
     async fn forget(&self, _sandbox: &SandboxId) {}
     /// Runs one agent step in the sandbox, streaming events, until it finishes or is cancelled.

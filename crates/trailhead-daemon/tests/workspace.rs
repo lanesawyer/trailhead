@@ -478,3 +478,36 @@ async fn changed_files_lists_committed_uncommitted_and_new_files_against_the_bas
     files.sort();
     assert_eq!(files, ["README.md", "clients/ui/main.rs", "new.txt"]);
 }
+
+#[tokio::test]
+async fn unpublished_sees_uncommitted_and_unpushed_work_but_not_a_clean_checkout() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        setup: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+    };
+    ws.prepare(&req).await.unwrap();
+    assert!(!ws.unpublished("main").await.unwrap(), "a fresh checkout has nothing to lose");
+
+    let dir = ws.dir();
+    git(&dir, &["config", "user.email", "t@example.com"]);
+    git(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+    assert!(ws.unpublished("main").await.unwrap(), "an untracked file");
+    git(&dir, &["add", "."]);
+    assert!(ws.unpublished("main").await.unwrap(), "a staged one");
+    git(&dir, &["commit", "--quiet", "-m", "new"]);
+    assert!(ws.unpublished("main").await.unwrap(), "a commit nobody has");
+    assert!(ws.unpublished("nonesuch").await.is_err(), "a remote branch it can't compare with is an error");
+}

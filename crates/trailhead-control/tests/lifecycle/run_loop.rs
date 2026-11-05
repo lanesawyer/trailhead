@@ -557,3 +557,120 @@ async fn a_drain_retries_the_reconcile_when_it_fails_after_the_last_run_errors()
     r.compute.set_unreachable(false);
     tokio::time::timeout(std::time::Duration::from_secs(10), handle).await.unwrap().unwrap().unwrap();
 }
+
+const AFTER: std::time::Duration = std::time::Duration::from_secs(61);
+
+fn releasing_after(minutes: u32) -> Rig {
+    rig_with(
+        &CONFIG.replace("name = \"trailhead\"", &format!("name = \"trailhead\"\nrelease_parked_after = {minutes}")),
+    )
+}
+
+/// A task parked with a question on the pool's one sandbox, and a second task waiting for a place.
+async fn parked_with_one_waiting(r: &Rig) -> (TaskKey, TaskKey) {
+    let parked = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Already implemented?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&parked).status, Status::NeedsInput);
+    let waiting = r.tracker.add_task("TRAIL", "Next", "");
+    (parked, waiting)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_parked_task_with_no_changes_gives_its_sandbox_to_a_waiting_task_after_the_delay() {
+    let r = releasing_after(1);
+    let (parked, waiting) = parked_with_one_waiting(&r).await;
+    r.tracker.lapse_lease(&parked);
+
+    assert!(r.factory.tick().await.unwrap().is_empty(), "not parked long enough yet");
+    assert_eq!(r.tracker.task(&parked).run.released, None);
+
+    tokio::time::advance(AFTER).await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == waiting), "the waiting task took the place");
+    let task = r.tracker.task(&parked);
+    assert_eq!(task.status, Status::NeedsInput, "the question still stands");
+    assert!(task.run.released.is_some_and(|at| at > 0), "the release is recorded");
+    assert_eq!(r.compute.sandboxes().len(), 1, "the pool's one sandbox was reused");
+    assert_eq!(r.daemon.unpublished_asked(), ["main"], "asked against the base branch");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_parked_task_with_an_unpushed_diff_keeps_its_sandbox() {
+    let r = releasing_after(1);
+    let (parked, waiting) = parked_with_one_waiting(&r).await;
+    r.tracker.lapse_lease(&parked);
+    r.daemon.set_unpublished(true);
+
+    tokio::time::advance(AFTER).await;
+    assert!(r.factory.tick().await.unwrap().is_empty(), "the diff exists nowhere else");
+    assert_eq!(r.tracker.task(&waiting).status, Status::Open);
+    assert_eq!(r.tracker.task(&parked).run.released, None);
+    assert_eq!(busy(&r.compute), ["trailhead-w1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn release_parked_after_zero_never_releases() {
+    let r = releasing_after(0);
+    let (parked, waiting) = parked_with_one_waiting(&r).await;
+    r.tracker.lapse_lease(&parked);
+
+    tokio::time::advance(std::time::Duration::from_secs(24 * 3600)).await;
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    assert_eq!(r.tracker.task(&waiting).status, Status::Open);
+    assert_eq!(r.tracker.task(&parked).run.released, None);
+    assert!(r.daemon.unpublished_asked().is_empty(), "the daemon wasn't even asked");
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_is_released_when_no_task_is_waiting() {
+    let r = releasing_after(1);
+    let (parked, waiting) = parked_with_one_waiting(&r).await;
+    r.tracker.lapse_lease(&parked);
+    r.tracker.set_status(&waiting, Status::Cancelled);
+
+    tokio::time::advance(AFTER).await;
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    assert_eq!(r.tracker.task(&parked).run.released, None);
+    assert_eq!(busy(&r.compute), ["trailhead-w1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_parked_task_with_an_open_pr_gives_up_its_sandbox_and_resumes_on_its_branch() {
+    let r = releasing_after(1);
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
+    r.factory.tick().await.unwrap();
+    // The rework asks a question instead of finishing.
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which test style?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    assert!(r.tracker.task(&key).run.pr.is_some());
+    r.tracker.lapse_lease(&key);
+    let waiting = r.tracker.add_task("TRAIL", "Next", "");
+    assert!(r.factory.tick().await.unwrap().is_empty(), "not parked long enough yet");
+
+    tokio::time::advance(AFTER).await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == waiting), "the waiting task took the place");
+    assert!(r.tracker.task(&key).run.released.is_some_and(|at| at > 0));
+    assert_eq!(r.daemon.unpublished_asked(), ["factory/trail-1"], "asked against the PR branch");
+
+    // Answered, it resumes like a rework: a pooled sandbox on its branch, with the answer in its prompt.
+    r.tracker.answer(&key, "Table-driven.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == key), "the answered task started again");
+    let prepared = r.daemon.prepared();
+    assert_eq!(prepared.last().unwrap().1.branch.as_deref(), Some("factory/trail-1"));
+    let answered =
+        r.harness.contexts().iter().any(|c| c.task.context.answers.iter().any(|a| a.answer == "Table-driven."));
+    assert!(answered, "the answer reached the agent");
+    assert_eq!(r.tracker.task(&key).run.released, Some(0), "the new run clears the release");
+}

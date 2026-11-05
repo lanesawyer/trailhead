@@ -209,6 +209,11 @@ impl FakeTracker {
         push_comment(&mut s, key, "lane", "answer", body);
     }
 
+    /// The asker's lease on a parked task lapses: nobody holds it any more, and it stays parked.
+    pub fn lapse_lease(&self, key: &TaskKey) {
+        self.state.lock().unwrap().tasks.get_mut(key).unwrap().holder = None;
+    }
+
     /// A human answers while the asker's claim is still live: the task goes back to in progress under the same holder.
     pub fn answer_within_lease(&self, key: &TaskKey, body: &str) {
         let mut s = self.state.lock().unwrap();
