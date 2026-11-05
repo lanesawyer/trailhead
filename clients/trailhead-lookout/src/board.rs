@@ -409,6 +409,11 @@ fn spawn_panel(mut commands: Commands) {
         Node {
             width: percent(100),
             height: percent(100),
+            // A layout node is never smaller than its content unless told so: without these the panel grew past the
+            // window to fit every card, so the board and its columns never overflowed and nothing scrolled (TRAIL-836).
+            min_width: px(0),
+            min_height: px(0),
+            overflow: Overflow::clip(),
             flex_direction: FlexDirection::Column,
             padding: UiRect::all(px(8)),
             row_gap: px(6),
