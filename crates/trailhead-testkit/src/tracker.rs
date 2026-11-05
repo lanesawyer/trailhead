@@ -89,6 +89,7 @@ impl FakeTracker {
                 description: description.to_string(),
                 status: Status::Open,
                 grade: None,
+                priority: 3,
                 holder: None,
                 run: RunUpdate::default(),
             },
@@ -139,6 +140,16 @@ impl FakeTracker {
     /// A human grades a task, which is what makes it the factory's work.
     pub fn set_grade(&self, key: &TaskKey, grade: u8) {
         self.state.lock().unwrap().tasks.get_mut(key).unwrap().grade = Some(grade);
+    }
+
+    /// Sets a task's priority (1 is highest), as a person editing it would.
+    pub fn set_priority(&self, key: &TaskKey, priority: i64) {
+        self.state.lock().unwrap().tasks.get_mut(key).unwrap().priority = priority;
+    }
+
+    /// Sets the factory fields of a task as they stand: a PR and changes requested on it make a rework.
+    pub fn set_run(&self, key: &TaskKey, run: RunUpdate) {
+        self.state.lock().unwrap().tasks.get_mut(key).unwrap().run = run;
     }
 
     /// A human takes a task's grade away again.
