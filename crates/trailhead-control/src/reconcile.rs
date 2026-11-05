@@ -44,14 +44,16 @@ impl Factory {
         let mut due = Due::default();
         // A target that can't be reached is unknown, not empty: what ran there is left as it is until it answers.
         let (live, down) = self.list_all(&self.base_labels()).await?;
-        self.status.sync_sandboxes(&live, &down);
-        let tasks: Vec<Task> = self
-            .tracker
-            .in_flight(self.project(), &self.queue())
-            .await?
-            .into_iter()
-            .filter(|t| !running.contains(&t.key))
+        let in_flight = self.tracker.in_flight(self.project(), &self.queue()).await;
+        // The tracker says which pooled sandboxes a parked task holds; a board rebuilt at boot can't know.
+        let parked: HashSet<String> = in_flight
+            .iter()
+            .flatten()
+            .filter(|t| t.status == Status::NeedsInput && !running.contains(&t.key))
+            .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
             .collect();
+        self.status.sync_sandboxes(&live, &down, &parked);
+        let tasks: Vec<Task> = in_flight?.into_iter().filter(|t| !running.contains(&t.key)).collect();
 
         // Runs the daemon may still be working on, which are followed again rather than requeued (TRAIL-137).
         let live_runs: Vec<(&Task, &Sandbox)> =

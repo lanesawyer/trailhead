@@ -27,6 +27,7 @@ use trailhead_factory::{RunPhase, SandboxState};
 use crate::board::View;
 use crate::factory::{Campsite, FactoryStatus, Run};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsTask};
+use crate::widgets::space;
 
 /// Campsites sit on a grid on the left, this many to a row.
 const CAMP_COLUMNS: usize = 3;
@@ -379,7 +380,7 @@ fn plot(pos: Vec2, size: Vec2, color: Color) -> impl Bundle {
             width: px(size.x),
             height: px(size.y),
             flex_direction: FlexDirection::Column,
-            padding: UiRect::all(px(4)),
+            padding: UiRect::all(px(space::LABEL_INSET)),
             overflow: Overflow::clip(),
             ..default()
         },
@@ -434,7 +435,7 @@ fn redraw(
                 position_type: PositionType::Absolute,
                 left: px(ORIGIN.x),
                 top: px(8),
-                column_gap: px(8),
+                column_gap: px(space::ROWS),
                 ..default()
             },
             ChildOf(panel),
