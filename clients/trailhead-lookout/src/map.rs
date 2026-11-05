@@ -399,6 +399,9 @@ fn board_button() -> impl Scene {
     }
 }
 
+/// Tokens sit above the terrain, which is respawned (as later siblings) on every redraw.
+const TOKEN_Z: i32 = 1;
+
 /// Redraws the terrain when the model or the factory's link changes, and moves tokens' targets; [`glide`] walks them.
 #[allow(clippy::too_many_arguments)]
 fn redraw(
@@ -474,7 +477,8 @@ fn redraw(
             continue;
         }
         let name = Name::new(format!("agent {}", w.name));
-        let node = commands.spawn((Token { id: w.id.clone(), target: w.pos }, name, ChildOf(panel))).id();
+        let node =
+            commands.spawn((Token { id: w.id.clone(), target: w.pos }, name, ZIndex(TOKEN_Z), ChildOf(panel))).id();
         commands.entity(node).insert(plot(w.pos, Vec2::new(20.0, 20.0), Color::srgb(0.95, 0.75, 0.3)));
         let initial = w.name.rsplit(['/', '-']).next().unwrap_or("a").to_string();
         commands.spawn((Text::new(initial), TextColor(Color::BLACK), TextFont::from_font_size(11.0), ChildOf(node)));
@@ -485,14 +489,8 @@ fn redraw(
 fn glide(time: Res<Time>, mut tokens: Query<(&Token, &mut Node)>) {
     let k = 1.0 - (-8.0 * time.delta_secs()).exp();
     for (token, mut node) in &mut tokens {
-        let at = |v: Val| if let Val::Px(p) = v { p } else { token.target.x };
-        let (x, y) = (
-            at(node.left),
-            match node.top {
-                Val::Px(p) => p,
-                _ => token.target.y,
-            },
-        );
+        let at = |v: Val, or: f32| if let Val::Px(p) = v { p } else { or };
+        let (x, y) = (at(node.left, token.target.x), at(node.top, token.target.y));
         let (nx, ny) = (x + (token.target.x - x) * k, y + (token.target.y - y) * k);
         node.left = px(nx);
         node.top = px(ny);
@@ -714,6 +712,33 @@ mod tests {
         assert_eq!(walker.at, Spot::Camp("o/r".into(), "a".into()));
         let wp = map.waypoints.iter().find(|p| p.key == "TRAIL-42").unwrap();
         assert!(wp.markers.contains(&Marker::Claim("factory/trail-42".into())));
+    }
+
+    #[test]
+    fn tokens_are_drawn_above_the_terrain_after_a_redraw() {
+        use crate::factory::FactoryStatus;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_resource::<FactoryStatus>()
+            .init_asset::<bevy::text::Font>()
+            .add_systems(Update, redraw);
+        app.world_mut().spawn(MapPanel);
+        let w = world();
+        let walkers = w.model().walkers;
+        assert!(!walkers.is_empty());
+        app.insert_resource(TrailMap(w.model()));
+        for _ in 0..3 {
+            app.update();
+        }
+        // A later change redraws the terrain after the tokens; they must still win.
+        app.world_mut().resource_mut::<TrailMap>().set_changed();
+        app.update();
+        let mut q = app.world_mut().query::<(&Token, &ZIndex)>();
+        let zs: Vec<i32> = q.iter(app.world()).map(|(_, z)| z.0).collect();
+        assert_eq!(zs.len(), walkers.len());
+        assert!(zs.iter().all(|z| *z > 0));
     }
 
     #[test]
