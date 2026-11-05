@@ -692,6 +692,7 @@ mod tests {
             runs: w.runs.iter().map(|r| r.status.clone()).collect(),
             seq: 1,
             holding: None,
+            targets: Vec::new(),
         };
         app.world_mut()
             .write_message(FactoryItem(FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])));
@@ -768,6 +769,7 @@ mod tests {
             runs: w.runs.iter().map(|r| r.status.clone()).collect(),
             seq: 1,
             holding: None,
+            targets: Vec::new(),
         };
         app.world_mut()
             .write_message(FactoryItem(FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])));

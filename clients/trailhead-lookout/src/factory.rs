@@ -339,6 +339,7 @@ mod tests {
             sandboxes,
             runs: vec![],
             holding: None,
+            targets: Vec::new(),
             seq,
         };
         FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])

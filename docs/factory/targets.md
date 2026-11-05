@@ -56,7 +56,7 @@ So the control plane also keeps its own estimate, and the cap uses the higher of
 
 At the cap, the target takes no new runs, those running finish, and the log and `factory status` say so. So the cap can be passed by what's already running. It covers compute only: storage and a plan's included allowance aren't counted, so it can differ from the invoice.
 
-The estimate is in `<data dir>/factory/spend-<repo>.json`, as microdollars by target for one local day; a file from an earlier day, or one that can't be read, starts the day over. A run counts from the moment it is placed until it ends, so a parked task's idle sandbox, which Sprites pause, costs nothing. `factory status` doesn't show the spend yet; the control plane logs when a target reaches the cap and when it is under it again.
+The estimate is in `<data dir>/factory/spend-<repo>.json`, as microdollars by target for one local day; a file from an earlier day, or one that can't be read, starts the day over. A run counts from the moment it is placed until it ends, so a parked task's idle sandbox, which Sprites pause, costs nothing. `factory status` lists each capped target with its spend today, its cap and whether it is capped (TRAIL-654), as of the last placement pass; the control plane also logs when a target reaches the cap and when it is under it again.
 
 The cap is per repo for now. A host-wide cap belongs with TRAIL-168 and TRAIL-169's user config.
 

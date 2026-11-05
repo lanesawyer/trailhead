@@ -33,6 +33,7 @@ impl StatusFeed for TestFeed {
             sandboxes: vec![sandbox("camp-1", SandboxState::Idle)],
             runs: vec![],
             holding: None,
+            targets: Vec::new(),
             seq: 1,
         };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
