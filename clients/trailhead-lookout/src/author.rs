@@ -286,9 +286,10 @@ pub enum FieldKind {
     Body,
 }
 
-/// A text input of the form, and which draft field it holds.
+/// A text input of the form, which draft field it holds, and the form generation it was drawn for
+/// (inputs of a form being replaced are despawned late and must not feed the new draft).
 #[derive(Component, Debug, Clone, Copy, Default)]
-pub struct Field(pub FieldKind);
+pub struct Field(pub FieldKind, pub u64);
 
 /// Text to put in an input when it appears.
 #[derive(Component, Debug, Clone, Default)]
@@ -342,7 +343,9 @@ fn on_act(
         }
         Act::Comment(key) => form.open(Open::comment(key)),
         Act::Answer { key, comment_id, question } => form.open(Open::answer(key, comment_id, question)),
-        Act::Cancel => form.close(),
+        // A save in flight can't be withdrawn, so the form stays until it is answered.
+        Act::Cancel if !form.saving => form.close(),
+        Act::Cancel => {}
         Act::CyclePriority => {
             if let Some(open) = &mut form.open {
                 open.draft.priority = step(&PRIORITIES, &open.draft.priority);
@@ -380,7 +383,10 @@ fn on_act(
 fn read_fields(mut form: ResMut<Form>, fields: Query<(&Field, &EditableText)>) {
     let Some(open) = &form.open else { return };
     let mut draft = open.draft.clone();
-    for (Field(kind), text) in &fields {
+    for (Field(kind, generation), text) in &fields {
+        if *generation != form.generation {
+            continue;
+        }
         *field_value(&mut draft, *kind) = text.value().to_string();
     }
     if draft != open.draft {
@@ -441,13 +447,13 @@ pub fn act_button(label: String, act: Act) -> impl Scene {
     }
 }
 
-fn input(kind: FieldKind, initial: String, lines: f32) -> impl Scene {
+fn input(kind: FieldKind, generation: u64, initial: String, lines: f32) -> impl Scene {
     bsn! {
         @FeathersTextInputContainer
         Node { height: Val::Auto, width: percent(100), align_items: AlignItems::FlexStart, padding: UiRect::all(px(3)) }
         Children [
             @FeathersTextInput
-            Field(kind)
+            Field(kind, generation)
             InitialText(initial)
             EditableText { visible_lines: {Some(lines)}, allow_newlines: {lines > 1.0} }
             TextLayout { linebreak: LineBreak::WordBoundary }
@@ -483,6 +489,7 @@ fn redraw_form(
     }
     let Some(open) = &form.open else { return };
     let d = &open.draft;
+    let generation = form.generation;
     let root = commands
         .spawn((
             Name::new("form"),
@@ -516,10 +523,10 @@ fn redraw_form(
             let creating = open.target == Target::Create;
             if creating {
                 c.queue_spawn_scene(caption("parent".to_string())).insert(ChildOf(root));
-                c.queue_spawn_scene(input(FieldKind::Parent, d.parent.clone(), 1.0)).insert(ChildOf(root));
+                c.queue_spawn_scene(input(FieldKind::Parent, generation, d.parent.clone(), 1.0)).insert(ChildOf(root));
             }
             c.queue_spawn_scene(caption("title".to_string())).insert(ChildOf(root));
-            c.queue_spawn_scene(input(FieldKind::Title, d.title.clone(), 1.0)).insert(ChildOf(root));
+            c.queue_spawn_scene(input(FieldKind::Title, generation, d.title.clone(), 1.0)).insert(ChildOf(root));
             let line = c.spawn((row(), ChildOf(root))).id();
             c.queue_spawn_scene(act_button("priority".into(), Act::CyclePriority)).insert(ChildOf(line));
             c.queue_spawn_scene(label_text(LabelKind::Priority, format!("P{}", d.priority))).insert(ChildOf(line));
@@ -528,13 +535,14 @@ fn redraw_form(
                 c.queue_spawn_scene(label_text(LabelKind::Status, d.status.clone())).insert(ChildOf(line));
             }
             c.queue_spawn_scene(caption("spec".to_string())).insert(ChildOf(root));
-            c.queue_spawn_scene(input(FieldKind::Description, d.description.clone(), 12.0)).insert(ChildOf(root));
+            c.queue_spawn_scene(input(FieldKind::Description, generation, d.description.clone(), 12.0))
+                .insert(ChildOf(root));
         }
         Target::Comment { .. } | Target::Answer { .. } => {
             if let Target::Answer { question, .. } = &open.target {
                 c.queue_spawn_scene(caption(format!("? {question}"))).insert(ChildOf(root));
             }
-            c.queue_spawn_scene(input(FieldKind::Body, String::new(), 6.0)).insert(ChildOf(root));
+            c.queue_spawn_scene(input(FieldKind::Body, generation, String::new(), 6.0)).insert(ChildOf(root));
         }
     }
 
@@ -729,10 +737,35 @@ mod tests {
     fn typed_text_reaches_the_draft() {
         let mut app = app();
         press(&mut app, Act::Comment("TRAIL-7".into()));
+        let generation = app.world().resource::<Form>().generation;
         let mut text = EditableText::new("one\ntwo");
         text.allow_newlines = true;
-        app.world_mut().spawn((Field(FieldKind::Body), text));
+        app.world_mut().spawn((Field(FieldKind::Body, generation), text));
         app.update();
         assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.body, "one\ntwo");
+    }
+
+    #[test]
+    fn fields_of_a_replaced_form_do_not_feed_the_new_draft() {
+        let mut app = app();
+        press(&mut app, Act::Comment("TRAIL-1".into()));
+        let old = app.world().resource::<Form>().generation;
+        let mut text = EditableText::new("old form text");
+        text.allow_newlines = true;
+        app.world_mut().spawn((Field(FieldKind::Body, old), text));
+        // Switch forms while the old panel's inputs still exist.
+        press(&mut app, Act::Comment("TRAIL-2".into()));
+        let open = app.world().resource::<Form>().open.clone().unwrap();
+        assert_eq!(open.target, Target::Comment { key: "TRAIL-2".into() });
+        assert_eq!(open.draft.body, "");
+    }
+
+    #[test]
+    fn cancel_is_ignored_while_saving() {
+        let mut app = app();
+        press(&mut app, Act::Comment("TRAIL-7".into()));
+        app.world_mut().resource_mut::<Form>().saving = true;
+        press(&mut app, Act::Cancel);
+        assert!(app.world().resource::<Form>().open.is_some());
     }
 }
