@@ -446,7 +446,10 @@ impl Factory {
         // Waiting has no count that parks, so a host that never frees up would be waited on silently forever: after
         // `MAX_RESOURCE_WAITS` waits in a row the task is parked once, so a person hears of it.
         let waits = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(_, w, _)| *w) + 1;
-        let park = if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
+        // A request the remote refused for good (a 4xx that isn't a blip) fails the same way on every retry, so
+        // it's parked at once instead of burning the infra retries.
+        let rejected = matches!(error, Error::Rejected(_));
+        let park = rejected || if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
         tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "infrastructure failure; the attempt doesn't count");
         if park {
             // Parked below; the count starts again when Lane reopens it.
@@ -476,7 +479,9 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
         }
         if park {
-            let question = if waiting {
+            let question = if rejected {
+                messages::rejected_question(&error.to_string())
+            } else if waiting {
                 messages::resource_wait_question(waits, &error.to_string())
             } else {
                 messages::infra_question(failures, max, &error.to_string())
