@@ -15,7 +15,7 @@
 //!
 //! Give a node the marker and the matching `overflow` (`Overflow::scroll()` or `scroll_x()` for [`ScrollBoth`],
 //! `scroll_y()` for [`ScrollDown`]). A view that rebuilds its nodes keeps the [`ScrollPosition`] itself and puts it
-//! back on the new node, or the area jumps to its start on every redraw.
+//! back on the new node, or the area jumps to its start on every redraw. Better, keep the node (see `Keyed`).
 
 use bevy::input::mouse::MouseScrollPixelsPerLine;
 use bevy::picking::events::PointerScroll;
