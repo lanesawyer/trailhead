@@ -99,7 +99,8 @@ impl Rig {
 
 fn app(config: NetConfig, target: Option<String>) -> App {
     let mut app = App::new();
-    app.add_plugins(MinimalPlugins).add_plugins(ConnectionPlugin::new(config, target));
+    app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+        .add_plugins(ConnectionPlugin::new(config, target));
     app
 }
 

@@ -70,8 +70,7 @@ impl ConnectionPlugin {
 
 impl Plugin for ConnectionPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(bevy::state::app::StatesPlugin)
-            .init_state::<Connection>()
+        app.init_state::<Connection>()
             .init_resource::<ConnectionStatus>()
             .init_resource::<LocalEndpoint>()
             .add_plugins((MirrorPlugin, FactoryPlugin, CommandsPlugin))
