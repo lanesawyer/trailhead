@@ -364,6 +364,15 @@ pub fn infra_question(failures: u32, max: u32, error: &str) -> String {
     )
 }
 
+/// Why a task is parked at once when a service refused a request for good, so retrying is no use.
+pub fn rejected_question(error: &str) -> String {
+    format!(
+        "The infrastructure refused a request and won't answer differently on a retry, so the task is parked \
+         at once; it's not the task. The error: {error}\n\nFix the cause (the compute settings, the sandbox or \
+         the credentials), then reopen the task."
+    )
+}
+
 /// Why a task is parked when its host stayed short of a resource (its disk) through every wait.
 pub fn resource_wait_question(waits: u32, error: &str) -> String {
     format!(

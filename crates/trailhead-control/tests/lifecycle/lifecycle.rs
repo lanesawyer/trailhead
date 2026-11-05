@@ -1110,3 +1110,20 @@ async fn a_give_up_from_before_a_question_doesnt_count_toward_two_in_a_row() {
     assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
     assert_eq!(r.tracker.task(&key).status, Status::Open, "one give-up since the question is retried");
 }
+
+#[tokio::test]
+async fn a_permanent_rejection_parks_the_task_at_once() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Refused", "");
+    r.daemon.reject_runs("sprites api 400 Bad Request: bad size");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(matches!(err, trailhead_factory::Error::Rejected(_)), "{err:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked on the first rejection");
+    assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+    assert_eq!(task.run.infra_failures, Some(0));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("400 Bad Request: bad size"), "{}", questions[0].body);
+    assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
+}
