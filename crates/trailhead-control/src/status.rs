@@ -64,6 +64,20 @@ pub fn sandbox_status(s: &Sandbox, paused: bool) -> SandboxStatus {
     }
 }
 
+fn snapshot_locked(inner: &Inner) -> FactorySnapshot {
+    let mut sandboxes = inner.sandboxes.clone();
+    sandboxes.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut runs = inner.runs.clone();
+    runs.sort_by(|a, b| a.task.cmp(&b.task));
+    FactorySnapshot {
+        control: inner.control.clone(),
+        last_error: inner.last_error.clone(),
+        sandboxes,
+        runs,
+        seq: inner.seq,
+    }
+}
+
 impl StatusBoard {
     pub fn new() -> Arc<StatusBoard> {
         Arc::default()
@@ -80,27 +94,15 @@ impl StatusBoard {
     }
 
     pub fn snapshot(&self) -> FactorySnapshot {
-        let inner = self.inner.lock().unwrap();
-        let mut sandboxes = inner.sandboxes.clone();
-        sandboxes.sort_by(|a, b| a.name.cmp(&b.name));
-        let mut runs = inner.runs.clone();
-        runs.sort_by(|a, b| a.task.cmp(&b.task));
-        FactorySnapshot {
-            control: inner.control.clone(),
-            last_error: inner.last_error.clone(),
-            sandboxes,
-            runs,
-            seq: inner.seq,
-        }
+        snapshot_locked(&self.inner.lock().unwrap())
     }
 
     /// The snapshot, and a receiver for every event after it.
     pub fn subscribe(&self) -> (FactorySnapshot, broadcast::Receiver<Sequenced>) {
-        // Subscribing under the lock `apply` publishes under, so no event falls between the two.
+        // Both under the lock `apply` publishes under, so the snapshot's `seq` is exactly where the stream continues.
         let inner = self.inner.lock().unwrap();
         let rx = self.tx.subscribe();
-        drop(inner);
-        (self.snapshot(), rx)
+        (snapshot_locked(&inner), rx)
     }
 
     pub fn control(&self, control: ControlState) {
@@ -311,6 +313,26 @@ mod tests {
         assert!(board.snapshot().runs.is_empty());
         let seqs: Vec<u64> = std::iter::from_fn(|| rx.try_recv().ok()).map(|e| e.seq).collect();
         assert_eq!(seqs, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_subscription_continues_exactly_after_its_snapshot() {
+        let board = StatusBoard::new();
+        let publisher = {
+            let board = board.clone();
+            std::thread::spawn(move || {
+                for i in 0..2000 {
+                    board.error(format!("e{i}"));
+                }
+            })
+        };
+        for _ in 0..200 {
+            let (snap, mut rx) = board.subscribe();
+            if let Ok(next) = rx.try_recv() {
+                assert_eq!(next.seq, snap.seq + 1);
+            }
+        }
+        publisher.join().unwrap();
     }
 
     #[test]
