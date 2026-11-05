@@ -66,11 +66,15 @@ async fn a_review_whose_context_cant_be_read_creates_no_sandbox() {
     let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
     let before = r.compute.sandboxes().len();
+    let agents = r.tracker.agents();
+    let rounds = r.tracker.task(&key).run.review_rounds;
 
     r.tracker.fail_human_context(true);
     let done = r.factory.reconcile().await.unwrap();
     assert!(done.reviewed.is_empty(), "{done:?}");
     assert_eq!(r.compute.sandboxes().len(), before, "no sandbox is held for a review that couldn't start");
+    assert_eq!(r.tracker.agents(), agents, "no reviewer sub-agent is created for a review that couldn't start");
+    assert_eq!(r.tracker.task(&key).run.review_rounds, rounds, "a round that never ran isn't counted");
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
 }
 
