@@ -65,3 +65,7 @@ tar = "0.4"
 [profile.dev]
 # Line tables only: backtraces keep file:line, but builds, links and target/ shrink a lot.
 debug = "line-tables-only"
+
+[profile.dev.package."*"]
+# None for dependencies: linking Bevy's test binaries ran a 5 GiB sandbox VM out of memory (TRAIL-754).
+debug = false
