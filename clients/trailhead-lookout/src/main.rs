@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use trailhead_lookout::LookoutPlugin;
 use trailhead_lookout::board::BoardUiPlugin;
 use trailhead_lookout::connection::{ConnectionPlugin, SendNet};
+use trailhead_lookout::inspector::InspectorUiPlugin;
 use trailhead_lookout::net::{NetCommand, NetConfig};
 
 /// `lookout [<control plane endpoint id>]`, with `LOOKOUT_TOKEN` to sign in with a pasted user token. Without an
@@ -23,7 +24,7 @@ fn main() {
         )
         .add_plugins(FeathersPlugins)
         .add_plugins(ConnectionPlugin::new(config, target))
-        .add_plugins((LookoutPlugin, BoardUiPlugin))
+        .add_plugins((LookoutPlugin, BoardUiPlugin, InspectorUiPlugin))
         .add_systems(Startup, move |mut send: MessageWriter<SendNet>| {
             if let Some(token) = &token {
                 send.write(SendNet(NetCommand::Login(token.clone())));

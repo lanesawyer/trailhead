@@ -14,6 +14,7 @@ use bevy::ui_widgets::Activate;
 use serde_json::Value;
 
 use crate::connection::{Connection, ConnectionStatus, LocalEndpoint};
+use crate::inspector::{Selection, Subject};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
 
 /// The views of the app; the trail map joins the board later.
@@ -126,6 +127,8 @@ pub struct Card {
     /// 0 for a top-level card, 1 for a subtask shown under its parent in the same column.
     pub depth: usize,
     pub holder: Option<String>,
+    /// The id of the claim holder.
+    pub holder_id: Option<String>,
     pub open_questions: Vec<String>,
     pub handoff: Option<String>,
 }
@@ -209,6 +212,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
                 .map(|k| k.to_string()),
             depth,
             holder: holder_of.get(id).map(|h| holder_label(h)),
+            holder_id: holder_of.get(id).map(|h| h.to_string()),
             open_questions: open.iter().map(|q| s(q, "body").to_string()).collect(),
             handoff: handoffs.get(id).map(|h| s(h, "body").to_string()),
         }
@@ -363,6 +367,16 @@ fn filter_button(key: FilterKey, label: String) -> impl Scene {
     }
 }
 
+fn inspect_button(label: String, subject: Subject) -> impl Scene {
+    bsn! {
+        @FeathersButton
+        on(move |_: On<Activate>, mut selection: ResMut<Selection>| {
+            selection.0 = Some(subject.clone());
+        })
+        Children [ @caption(label) ]
+    }
+}
+
 /// Redraws the whole panel when the view, filter or connection changes: the board is small enough that diffing it
 /// isn't worth the code.
 #[allow(clippy::too_many_arguments)]
@@ -438,6 +452,9 @@ fn redraw(
                 head += &format!(" (under {parent})");
             }
             text(&mut commands, col, head, ink, card.depth);
+            commands
+                .queue_spawn_scene(inspect_button(format!("inspect {}", card.key), Subject::Task(card.id.clone())))
+                .insert(ChildOf(col));
             if let Some(holder) = &card.holder {
                 text(&mut commands, col, format!("held by {holder}"), dim, card.depth + 1);
             }
