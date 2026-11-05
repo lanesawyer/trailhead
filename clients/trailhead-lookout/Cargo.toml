@@ -21,6 +21,7 @@ bevy = { version = "0.20", default-features = false, features = [
     "ui_bevy_render",
     "bevy_ui_widgets",
     "bevy_feathers",
+    "bevy_scene",
     "bevy_winit",
     "default_font",
     "custom_cursor",
