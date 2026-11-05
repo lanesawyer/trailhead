@@ -6,6 +6,7 @@
 use bevy::prelude::*;
 
 use crate::commands::{CommandsPlugin, Reply};
+use crate::factory::{FactoryItem, FactoryPlugin, apply_factory};
 use crate::mirror::{MirrorPlugin, apply_sync};
 use crate::net::{ApiAccess, Link, NetCommand, NetConfig, NetEvent, NetHandle, Reason};
 use crate::sync::SyncItem;
@@ -73,10 +74,10 @@ impl Plugin for ConnectionPlugin {
             .init_state::<Connection>()
             .init_resource::<ConnectionStatus>()
             .init_resource::<LocalEndpoint>()
-            .add_plugins((MirrorPlugin, CommandsPlugin))
+            .add_plugins((MirrorPlugin, FactoryPlugin, CommandsPlugin))
             .add_message::<SendNet>()
             .insert_resource(Net(NetHandle::spawn(self.config.clone(), self.target.clone())))
-            .add_systems(PreUpdate, (forward_commands, apply_events.before(apply_sync)).chain());
+            .add_systems(PreUpdate, (forward_commands, apply_events.before(apply_sync).before(apply_factory)).chain());
     }
 }
 
@@ -86,6 +87,8 @@ fn forward_commands(net: Res<Net>, mut commands: MessageReader<SendNet>) {
     }
 }
 
+// A Bevy system takes what it reads and writes as parameters.
+#[allow(clippy::too_many_arguments)]
 fn apply_events(
     net: Res<Net>,
     mut commands: Commands,
@@ -93,6 +96,7 @@ fn apply_events(
     mut status: ResMut<ConnectionStatus>,
     mut endpoint: ResMut<LocalEndpoint>,
     mut sync: MessageWriter<SyncItem>,
+    mut factory: MessageWriter<FactoryItem>,
     mut replies: MessageWriter<Reply>,
 ) {
     for event in net.0.drain() {
@@ -108,6 +112,9 @@ fn apply_events(
             }
             NetEvent::Sync(item) => {
                 sync.write(item);
+            }
+            NetEvent::Factory(update) => {
+                factory.write(FactoryItem(update));
             }
         }
     }
