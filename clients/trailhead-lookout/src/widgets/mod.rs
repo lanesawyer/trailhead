@@ -13,6 +13,7 @@
 //! - A panel over the board: [`panel`], with a [`layer`]. Inside it: [`section`], [`row`], [`field`].
 //! - A hint over anything: put a [`Hint`] on it.
 //! - Colors: [`token`] (Lookout's) and `bevy::feathers::tokens` (the controls'); a status column's: [`status_token`].
+//! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`].
 //! - Gaps, padding, margins: [`space`]. Corners: [`radius`].
 
 use bevy::prelude::*;
@@ -23,6 +24,7 @@ mod hint;
 mod icons;
 pub mod layer;
 mod menu;
+mod scroll;
 mod select;
 mod spacing;
 mod text;
@@ -33,6 +35,7 @@ pub use containers::{field, panel, row, section};
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu};
+pub use scroll::ScrollBoth;
 pub use select::{Picked, select};
 pub use spacing::{radius, space};
 pub use text::{size, text, text_dim, text_toned};
@@ -43,6 +46,6 @@ pub struct WidgetsPlugin;
 
 impl Plugin for WidgetsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((icons::IconsPlugin, hint::HintPlugin));
+        app.add_plugins((icons::IconsPlugin, hint::HintPlugin)).add_observer(scroll::on_both_scroll);
     }
 }
