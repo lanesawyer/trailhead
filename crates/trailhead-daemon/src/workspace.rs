@@ -233,6 +233,18 @@ impl Workspace for GitWorkspace {
         Ok(self.git_output(&self.dir, &["rev-parse", "--quiet", "--verify", "MERGE_HEAD"]).await.ok())
     }
 
+    async fn merged_base(&self, start: &str, base: &str) -> Result<Option<String>> {
+        let tip = format!("origin/{base}");
+        let Ok(tip) = self.git_output(&self.dir, &["rev-parse", "--verify", "--quiet", &tip]).await else {
+            return Ok(None);
+        };
+        let range = format!("{start}..HEAD");
+        let merges = self.git_output(&self.dir, &["rev-list", "--merges", "--parents", &range]).await?;
+        // Each line is a commit followed by its parents.
+        let merged = merges.lines().any(|line| line.split_whitespace().skip(1).any(|parent| parent == tip));
+        Ok(merged.then_some(tip))
+    }
+
     async fn contains(&self, commit: &str) -> Result<bool> {
         let status = Command::new("git")
             .args(["merge-base", "--is-ancestor", commit, "HEAD"])
