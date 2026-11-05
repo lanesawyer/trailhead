@@ -1,0 +1,277 @@
+//! Connecting from the window while not [`Connection::Live`]: paste the factory's endpoint id, then a user token if
+//! the server asks for one, and copy the `trailhead factory allow` command for this Lookout.
+
+use bevy::clipboard::Clipboard;
+use bevy::feathers::controls::{FeathersButton, FeathersTextInput, FeathersTextInputContainer};
+use bevy::feathers::display::caption;
+use bevy::prelude::*;
+use bevy::scene::{Scene, bsn};
+use bevy::text::EditableText;
+use bevy::ui_widgets::Activate;
+
+use crate::connection::{Connection, ConnectionStatus, LocalEndpoint, SendNet};
+use crate::net::{NetCommand, Reason};
+
+/// A text field on the connect panel.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectField {
+    /// The control plane's endpoint id.
+    Target,
+    /// A user token.
+    Token,
+}
+
+/// A button on the connect panel.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectAct {
+    Dial,
+    SignIn,
+    CopyAllow,
+}
+
+/// The `trailhead factory allow` command for this Lookout, once its endpoint is up.
+pub fn allow_command(endpoint: &LocalEndpoint) -> Option<String> {
+    endpoint.0.as_ref().map(|id| format!("trailhead factory allow {id}"))
+}
+
+/// Whether the server is waiting for a token, so the token field is worth showing.
+pub fn wants_token(status: &ConnectionStatus) -> bool {
+    matches!(status.reason, Some(Reason::NeedsLogin | Reason::TokenRejected | Reason::AgentToken))
+}
+
+/// Sends what was typed when Connect or Sign in is pressed. The fields keep their text, so a typo can be fixed and
+/// sent again.
+fn on_act(
+    activate: On<Activate>,
+    acts: Query<&ConnectAct>,
+    fields: Query<(&ConnectField, &EditableText)>,
+    mut send: MessageWriter<SendNet>,
+) {
+    let Ok(act) = acts.get(activate.entity) else { return };
+    let typed = |want: ConnectField| {
+        fields
+            .iter()
+            .find(|(f, _)| **f == want)
+            .map(|(_, t)| t.value().to_string().trim().to_string())
+            .filter(|t| !t.is_empty())
+    };
+    match act {
+        ConnectAct::Dial => {
+            if let Some(target) = typed(ConnectField::Target) {
+                send.write(SendNet(NetCommand::Connect(target)));
+            }
+        }
+        ConnectAct::SignIn => {
+            if let Some(token) = typed(ConnectField::Token) {
+                send.write(SendNet(NetCommand::Login(token)));
+            }
+        }
+        ConnectAct::CopyAllow => {}
+    }
+}
+
+/// The connect panel's logic, without drawing.
+pub struct ConnectPlugin;
+
+impl Plugin for ConnectPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_observer(on_act);
+    }
+}
+
+/// Draws the connect panel along the bottom of the window while not live.
+pub struct ConnectUiPlugin;
+
+impl Plugin for ConnectUiPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(ConnectPlugin)
+            .add_observer(copy_allow)
+            .add_systems(Startup, spawn_panel)
+            .add_systems(Update, show);
+    }
+}
+
+#[derive(Component)]
+struct ConnectPanel;
+
+/// A row shown only while the server wants a token.
+#[derive(Component)]
+struct TokenRow;
+
+/// The row with the `allow` command, shown once Lookout's endpoint is up.
+#[derive(Component)]
+struct AllowRow;
+
+#[derive(Component)]
+struct AllowText;
+
+fn spawn_panel(mut commands: Commands) {
+    let panel = commands
+        .spawn((
+            Name::new("connect"),
+            ConnectPanel,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                right: px(0),
+                bottom: px(0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(8)),
+                row_gap: px(6),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.12, 0.12, 0.14)),
+            // Above the board, which fills the window and is spawned later: without this it takes every click here.
+            GlobalZIndex(1),
+        ))
+        .id();
+    let target = commands.spawn((row(), ChildOf(panel))).id();
+    commands.queue_spawn_scene(label("Factory endpoint id".into())).insert(ChildOf(target));
+    commands.queue_spawn_scene(input(ConnectField::Target)).insert(ChildOf(target));
+    commands.queue_spawn_scene(button("Connect".into(), ConnectAct::Dial)).insert(ChildOf(target));
+
+    let token = commands.spawn((row(), TokenRow, ChildOf(panel))).id();
+    commands.queue_spawn_scene(label("User token".into())).insert(ChildOf(token));
+    commands.queue_spawn_scene(input(ConnectField::Token)).insert(ChildOf(token));
+    commands.queue_spawn_scene(button("Sign in".into(), ConnectAct::SignIn)).insert(ChildOf(token));
+
+    let allow = commands.spawn((row(), AllowRow, ChildOf(panel))).id();
+    commands.spawn((Text::new(""), AllowText, ChildOf(allow)));
+    commands.queue_spawn_scene(button("Copy".into(), ConnectAct::CopyAllow)).insert(ChildOf(allow));
+}
+
+fn row() -> Node {
+    Node { column_gap: px(6), align_items: AlignItems::Center, ..default() }
+}
+
+fn label(text: String) -> impl Scene {
+    bsn! {
+        @caption(text)
+        Node { width: px(160) }
+    }
+}
+
+fn input(field: ConnectField) -> impl Scene {
+    bsn! {
+        @FeathersTextInputContainer
+        Node { width: px(560), padding: UiRect::all(px(3)) }
+        Children [
+            @FeathersTextInput
+            field
+        ]
+    }
+}
+
+fn button(text: String, act: ConnectAct) -> impl Scene {
+    bsn! {
+        @FeathersButton
+        act
+        Children [ @caption(text) ]
+    }
+}
+
+/// Shows the panel while not live, the token row while the server wants one, and the `allow` command once known.
+#[allow(clippy::type_complexity)]
+fn show(
+    connection: Res<State<Connection>>,
+    status: Res<ConnectionStatus>,
+    endpoint: Res<LocalEndpoint>,
+    mut nodes: ParamSet<(
+        Single<&mut Node, With<ConnectPanel>>,
+        Single<&mut Node, With<TokenRow>>,
+        Single<&mut Node, With<AllowRow>>,
+    )>,
+    mut allow: Single<&mut Text, With<AllowText>>,
+) {
+    if !(connection.is_changed() || status.is_changed() || endpoint.is_changed()) {
+        return;
+    }
+    let shown = |on: bool| if on { Display::Flex } else { Display::None };
+    nodes.p0().display = shown(*connection.get() != Connection::Live);
+    nodes.p1().display = shown(wants_token(&status));
+    let command = allow_command(&endpoint);
+    nodes.p2().display = shown(command.is_some());
+    allow.0 = command.map_or_else(String::new, |c| format!("Allow this Lookout on the factory's machine: {c}"));
+}
+
+fn copy_allow(
+    activate: On<Activate>,
+    acts: Query<&ConnectAct>,
+    endpoint: Res<LocalEndpoint>,
+    mut clipboard: ResMut<Clipboard>,
+) {
+    if acts.get(activate.entity) != Ok(&ConnectAct::CopyAllow) {
+        return;
+    }
+    if let Some(command) = allow_command(&endpoint)
+        && let Err(e) = clipboard.set_text(command)
+    {
+        warn!(error = %e, "couldn't copy the allow command");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::state::app::StatesPlugin;
+
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .init_state::<Connection>()
+            .add_message::<SendNet>()
+            .add_plugins(ConnectPlugin);
+        app
+    }
+
+    fn press(app: &mut App, act: ConnectAct) {
+        let button = app.world_mut().spawn(act).id();
+        app.world_mut().trigger(Activate { entity: button });
+        app.update();
+    }
+
+    fn sent(app: &mut App) -> Vec<String> {
+        let messages = app.world_mut().resource_mut::<Messages<SendNet>>().drain().collect::<Vec<_>>();
+        messages
+            .into_iter()
+            .map(|SendNet(c)| match c {
+                NetCommand::Connect(t) => format!("connect {t}"),
+                NetCommand::Login(t) => format!("login {t}"),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn connect_and_sign_in_send_what_was_typed_trimmed() {
+        let mut app = app();
+        app.world_mut().spawn((ConnectField::Target, EditableText::new("  7204d50f\n")));
+        app.world_mut().spawn((ConnectField::Token, EditableText::new("th_user ")));
+        press(&mut app, ConnectAct::Dial);
+        press(&mut app, ConnectAct::SignIn);
+        assert_eq!(sent(&mut app), ["connect 7204d50f", "login th_user"]);
+    }
+
+    #[test]
+    fn empty_fields_send_nothing() {
+        let mut app = app();
+        app.world_mut().spawn((ConnectField::Target, EditableText::new("   ")));
+        press(&mut app, ConnectAct::Dial);
+        press(&mut app, ConnectAct::SignIn);
+        assert!(sent(&mut app).is_empty());
+    }
+
+    #[test]
+    fn the_token_row_is_for_a_server_that_wants_one() {
+        let wants = |reason| wants_token(&ConnectionStatus { reason });
+        assert!(wants(Some(Reason::NeedsLogin)));
+        assert!(wants(Some(Reason::TokenRejected)));
+        assert!(wants(Some(Reason::AgentToken)));
+        assert!(!wants(Some(Reason::NoTarget)));
+        assert!(!wants(Some(Reason::NotAllowed)));
+        assert!(!wants(None));
+        assert_eq!(allow_command(&LocalEndpoint(Some("abc".into()))).as_deref(), Some("trailhead factory allow abc"));
+        assert_eq!(allow_command(&LocalEndpoint(None)), None);
+    }
+}

@@ -38,7 +38,7 @@ use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
-use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
+use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon, build_id};
 use trailhead_daemon::plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN};
 use trailhead_daemon::ui::{UI_ALPN, UiAllowlist, UiProtocol};
 use trailhead_factory::{
@@ -48,6 +48,7 @@ use trailhead_provider_anthropic::Anthropic;
 
 mod find;
 mod fnox;
+mod logfile;
 mod login;
 mod ops;
 mod repos;
@@ -389,7 +390,9 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
         targets.push((target, compute, Arc::new(daemon)));
     }
     let feed = surface::BoardFeed::default();
-    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths)).with_status(Arc::new(feed.clone()));
+    let build =
+        std::env::current_exe().and_then(std::fs::read).map(|b| build_id(&b)).unwrap_or_else(|_| "unknown".into());
+    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths)).with_status(Arc::new(feed.clone())).build(build);
     let tunnel = Router::builder(endpoint.clone())
         .accept(API_ALPN, ApiTunnel::new(opts.server, peers))
         .accept(UI_ALPN, ui)
@@ -717,11 +720,44 @@ async fn main_inner(cli: Cli) -> Result<(), String> {
     }
 }
 
+/// `run`'s log file, if it can be opened; without one the log still goes to the terminal.
+fn open_log_file() -> Option<logfile::Rotating> {
+    let paths = trailhead_server::Paths::from_env()?;
+    let path = logfile::path(&paths.data_dir);
+    match logfile::Rotating::open(&path) {
+        Ok(file) => Some(file),
+        Err(e) => {
+            eprintln!(
+                "trailhead-factory: can't open the log file {}: {e}; logging to the terminal only",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Logs to the terminal, and to `file` when there is one.
+fn init_logging(file: Option<logfile::Rotating>) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let timer = trailhead_factory::logging::local_timer;
+    let file = file.map(|f| {
+        tracing_subscriber::fmt::layer().with_timer(timer()).with_ansi(false).with_writer(std::sync::Mutex::new(f))
+    });
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_timer(timer()))
+        .with(file)
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    tracing_subscriber::fmt().with_timer(trailhead_factory::logging::local_timer()).with_env_filter(filter).init();
-    match main_inner(Cli::parse()).await {
+    let cli = Cli::parse();
+    let file = if matches!(cli.cmd, Cmd::Run(_)) { open_log_file() } else { None };
+    init_logging(file);
+    match main_inner(cli).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("trailhead-factory: {e}");

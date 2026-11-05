@@ -47,6 +47,9 @@ const CONNECT_PATIENCE: Duration = Duration::from_secs(90);
 /// How long it keeps dialing a running daemon, which may need to resume from a pause and rebuild its connections.
 const RECONNECT_PATIENCE: Duration = Duration::from_secs(60);
 
+/// How long the control plane waits for the daemon a restored container starts by itself before starting one.
+const RESTORE_PATIENCE: Duration = Duration::from_secs(20);
+
 /// How many times one run or prepare may lose its connection before the control plane gives up on it.
 const MAX_REATTACH: u32 = 10;
 
@@ -275,13 +278,23 @@ impl DaemonProtocol {
             runs: Arc::default(),
             preparing: Arc::default(),
             attach_patience: ATTACH_PATIENCE,
-            version: DaemonVersion { version: env!("CARGO_PKG_VERSION").into(), build: "unknown".into() },
+            version: DaemonVersion {
+                version: env!("CARGO_PKG_VERSION").into(),
+                build: "unknown".into(),
+                secrets: String::new(),
+            },
         }
     }
 
     /// Sets the build the daemon reports: [`build_id`] of its own executable.
     pub fn build(mut self, build: String) -> DaemonProtocol {
         self.version.build = build;
+        self
+    }
+
+    /// Sets the secrets the daemon reports: [`build_id`] of the secrets file it started with.
+    pub fn secrets(mut self, secrets: String) -> DaemonProtocol {
+        self.version.secrets = secrets;
         self
     }
 
@@ -658,6 +671,9 @@ pub struct RemoteDaemon {
     /// [`build_id`] of `launch.binary`, hashed once here rather than on every prepare.
     build: String,
     conns: Mutex<HashMap<SandboxId, Connection>>,
+    /// Sandboxes restored since the daemon was last started in them: their image has a daemon that starts with the
+    /// container, which is probably the current build with the secrets it was last started with.
+    restored: Mutex<HashSet<SandboxId>>,
     cancels: Mutex<HashMap<SandboxId, mpsc::UnboundedSender<()>>>,
     peers: Peers,
 }
@@ -672,6 +688,7 @@ impl RemoteDaemon {
             launch,
             build,
             conns: Mutex::default(),
+            restored: Mutex::default(),
             cancels: Mutex::default(),
             peers: Peers::default(),
         }
@@ -770,8 +787,8 @@ impl RemoteDaemon {
     }
 
     /// The version the daemon in the sandbox reports, or `None` when it predates version reporting (or hung up).
-    async fn running_version(&self, sandbox: &SandboxId) -> Result<Option<DaemonVersion>> {
-        let (mut send, mut recv) = self.open(sandbox, CONNECT_PATIENCE).await?;
+    async fn running_version(&self, sandbox: &SandboxId, patience: Duration) -> Result<Option<DaemonVersion>> {
+        let (mut send, mut recv) = self.open(sandbox, patience).await?;
         write_frame(&mut send, &ToDaemon::Version).await?;
         Ok(match read_frame::<FromDaemon>(&mut recv).await {
             Ok(Some(FromDaemon::Version(v))) => Some(v),
@@ -783,6 +800,22 @@ impl RemoteDaemon {
     /// current build.
     async fn start_current(&self, sandbox: &SandboxId) -> Result<()> {
         let connected = self.conns.lock().unwrap().get(sandbox).is_some_and(|c| c.close_reason().is_none());
+        // A restored container starts the daemon in its image by itself. When that is the current build, starting
+        // another would only upload the same files, kill it and wait for its replacement to publish its address.
+        if !connected && self.restored.lock().unwrap().remove(sandbox) {
+            // The daemon reads its secrets file once, at start: reuse it only when that file is what we'd write now.
+            let secrets = self.program(sandbox).files.get(1).map(|f| build_id(&f.contents)).unwrap_or_default();
+            match self.running_version(sandbox, RESTORE_PATIENCE).await {
+                Ok(Some(v)) if v.build == self.build && v.secrets == secrets => {
+                    tracing::info!(sandbox = %sandbox.0, version = %v.version, build = %v.build, "daemon version (started with the restored sandbox)");
+                    return Ok(());
+                }
+                other => {
+                    tracing::info!(sandbox = %sandbox.0, found = ?other.map(|v| v.map(|v| (v.build, v.secrets == secrets))), "the restored sandbox has no current daemon with the current secrets; starting one");
+                    self.disconnect(sandbox);
+                }
+            }
+        }
         if !connected {
             self.compute.start(sandbox, &self.program(sandbox)).await?;
         }
@@ -795,7 +828,7 @@ impl RemoteDaemon {
     /// after that is an error.
     async fn ensure_current(&self, sandbox: &SandboxId) -> Result<()> {
         let want = self.build.as_str();
-        let running = self.running_version(sandbox).await?;
+        let running = self.running_version(sandbox, CONNECT_PATIENCE).await?;
         if let Some(v) = running.as_ref().filter(|v| v.build == want) {
             tracing::info!(sandbox = %sandbox.0, version = %v.version, build = %v.build, "daemon version");
             return Ok(());
@@ -808,7 +841,7 @@ impl RemoteDaemon {
         );
         self.disconnect(sandbox);
         self.compute.start(sandbox, &self.program(sandbox)).await?;
-        match self.running_version(sandbox).await? {
+        match self.running_version(sandbox, CONNECT_PATIENCE).await? {
             Some(v) if v.build == want => {
                 tracing::info!(sandbox = %sandbox.0, version = %v.version, build = %v.build, "daemon restarted onto the current build");
                 Ok(())
@@ -993,9 +1026,15 @@ impl Daemon for RemoteDaemon {
     }
 
     async fn forget(&self, sandbox: &SandboxId) {
+        self.restored.lock().unwrap().remove(sandbox);
         if let Some(conn) = self.conns.lock().unwrap().remove(sandbox) {
             conn.close(0u32.into(), b"restarted");
         }
+    }
+
+    async fn restored(&self, sandbox: &SandboxId) {
+        self.forget(sandbox).await;
+        self.restored.lock().unwrap().insert(sandbox.clone());
     }
 
     async fn cancel(&self, sandbox: &SandboxId) -> Result<()> {

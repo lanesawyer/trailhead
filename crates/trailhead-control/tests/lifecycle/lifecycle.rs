@@ -1059,3 +1059,35 @@ async fn a_daemon_that_errors_after_the_workers_usage_still_records_the_spend() 
     assert!(task.run.spend.is_some_and(|s| s > Usd::ZERO), "the lost run's spend is recorded: {:?}", task.run.spend);
     assert_eq!(task.run.infra_failures, Some(1));
 }
+
+#[tokio::test]
+async fn stack_env_reaches_the_agent_run_and_every_check() {
+    let r = rig_with(&CONFIG.replace(
+        "[checks]\n",
+        "[stack]\nenv = { CARGO_BUILD_JOBS = \"2\" }\n\n[checks]\nsetup = \"cargo build\"\ntrim = \"true\"\n",
+    ));
+    r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let jobs = |env: &std::collections::BTreeMap<String, String>| env.get("CARGO_BUILD_JOBS").cloned();
+    assert_eq!(r.daemon.prepared()[0].1.env["CARGO_BUILD_JOBS"], "2");
+    let request = r.daemon.requests().into_iter().next().unwrap();
+    assert_eq!(request.env["CARGO_BUILD_JOBS"], "2", "the agent's run request carries it");
+    let checks = r.daemon.check_envs();
+    let ran: Vec<_> = checks.iter().map(|(n, _)| n.as_str()).collect();
+    for name in ["setup", "trim", "fmt", "lint", "test"] {
+        assert!(ran.contains(&name), "{name} ran: {ran:?}");
+    }
+    for (name, env) in &checks {
+        assert_eq!(jobs(env).as_deref(), Some("2"), "{name} sees the stack's env");
+    }
+}
+
+#[test]
+fn stack_env_cant_set_a_name_the_factory_does() {
+    let src = CONFIG.replace("[checks]\n", "[stack]\nenv = { HTTPS_PROXY = \"http://elsewhere\" }\n\n[checks]\n");
+    let err = trailhead_factory::FactoryConfig::parse_table(&src, "TRAIL", None).unwrap_err();
+    assert!(err.to_string().contains("HTTPS_PROXY"), "{err}");
+}

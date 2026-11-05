@@ -57,6 +57,9 @@ pub struct PrepareRequest {
     /// `[factory.egress.tools]`: download hosts per mise tool, for tools the daemon has no hosts for.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tool_hosts: BTreeMap<String, Vec<String>>,
+    /// `[factory.stack] env`: variables for `setup` and `trim`, on top of mise's environment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// The repo's `trim` check, run after setup to cut build output and caches down so the warm checkpoint taken
     /// next stays small. A failure is logged and the sandbox goes on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,6 +113,9 @@ pub struct RunRequest {
     /// DNS has recently resolved it, and a long-lived connection whose allowance lapses gets reset.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+    /// `[factory.stack] env`: variables for the agent and every check, on top of mise's environment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// The sandbox's own Trailhead sub-agent.
     pub credential: Credential,
 }
@@ -180,6 +186,10 @@ pub struct DaemonVersion {
     /// SHA-256 of the daemon's executable, hex. The control plane compares it with the binary it uploads, so
     /// it catches a stale process as well as a stale protocol.
     pub build: String,
+    /// SHA-256 of the secrets file the daemon started with, hex; empty from a daemon that predates it. The
+    /// control plane compares it with the file it would write, since a daemon reads that file once.
+    #[serde(default)]
+    pub secrets: String,
 }
 
 /// Daemon to control plane: `Event`s while a run streams, then exactly one of the rest.
@@ -292,8 +302,12 @@ pub trait Daemon: Send + Sync {
     async fn unpublished(&self, _sandbox: &SandboxId, _remote_branch: &str) -> Result<bool> {
         Ok(true)
     }
-    /// Drops any connection to the sandbox's daemon, after something (a restore) restarted it.
+    /// Drops any connection to the sandbox's daemon, after something restarted it or is about to destroy it.
     async fn forget(&self, _sandbox: &SandboxId) {}
+    /// Drops any connection to the sandbox's daemon, after a restore: its image may start a daemon by itself.
+    async fn restored(&self, sandbox: &SandboxId) {
+        self.forget(sandbox).await;
+    }
     /// Runs one agent step in the sandbox, streaming events, until it finishes or is cancelled.
     async fn run(&self, sandbox: &SandboxId, req: RunRequest, events: EventSink) -> Result<RunReport>;
     /// Follows a run this control plane didn't start, or lost track of in a restart: the daemon replays the run's
@@ -376,6 +390,7 @@ mod tests {
             setup: None,
             tools: tools.iter().map(|t| (t.to_string(), "1".to_string())).collect(),
             tool_hosts: hosts.iter().map(|(t, h)| (t.to_string(), h.iter().map(|h| h.to_string()).collect())).collect(),
+            env: Default::default(),
             trim: None,
             disk_warn_bytes: None,
             disk_limit_bytes: None,

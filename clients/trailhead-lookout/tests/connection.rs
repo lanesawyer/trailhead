@@ -11,7 +11,8 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tokio::sync::broadcast;
 use trailhead_core::{Ctx, NewProject, Principal, Store};
-use trailhead_daemon::ui::{RepoFeed, StatusFeed, UI_ALPN, UiAllowlist, UiProtocol};
+use trailhead_daemon::net::{read_frame, write_frame};
+use trailhead_daemon::ui::{RepoFeed, StatusFeed, StatusFrame, UI_ALPN, UiAllowlist, UiProtocol, Unsupported};
 use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, SandboxState, SandboxStatus, Sequenced};
 use trailhead_lookout::connection::{Api, Connection, ConnectionPlugin, ConnectionStatus, LocalEndpoint, SendNet};
 use trailhead_lookout::factory::{Campsite, FactoryLink, FactoryStatus};
@@ -99,7 +100,8 @@ impl Rig {
 
 fn app(config: NetConfig, target: Option<String>) -> App {
     let mut app = App::new();
-    app.add_plugins(MinimalPlugins).add_plugins(ConnectionPlugin::new(config, target));
+    app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+        .add_plugins(ConnectionPlugin::new(config, target));
     app
 }
 
@@ -219,7 +221,7 @@ fn campsites(app: &mut App) -> Vec<(String, SandboxState)> {
 }
 
 fn link(app: &App) -> FactoryLink {
-    app.world().resource::<FactoryStatus>().link
+    app.world().resource::<FactoryStatus>().link.clone()
 }
 
 async fn allowed_and_live(app: &mut App, rig: &Rig) {
@@ -301,4 +303,68 @@ fn the_cli_server_url_comes_from_the_environment_then_the_config_then_the_defaul
     std::fs::write(dir.path().join("config.toml"), "url = \"http://10.0.0.5:9000/\"\n").unwrap();
     assert_eq!(cli_server_url(dir.path(), None), "http://10.0.0.5:9000");
     assert_eq!(cli_server_url(dir.path(), Some("http://127.0.0.1:1".into())), "http://127.0.0.1:1");
+}
+
+/// A control plane from before the status request: it forwards the API, and answers anything else with the error.
+#[derive(Debug, Clone)]
+struct OldFactory(std::net::SocketAddr);
+
+impl iroh::protocol::ProtocolHandler for OldFactory {
+    async fn accept(&self, conn: iroh::endpoint::Connection) -> Result<(), iroh::protocol::AcceptError> {
+        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+            let server = self.0;
+            tokio::spawn(async move {
+                let request: serde_json::Value = read_frame(&mut recv).await.unwrap().unwrap();
+                if request["op"] == "api" {
+                    let tcp = tokio::net::TcpStream::connect(server).await.unwrap();
+                    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+                    let up = tokio::io::copy(&mut recv, &mut tcp_write);
+                    let down = tokio::io::copy(&mut tcp_read, &mut send);
+                    let _ = tokio::join!(up, down);
+                    let _ = send.finish();
+                } else {
+                    let unsupported = Unsupported {
+                        got: request,
+                        known: vec!["api".into()],
+                        version: "0.1.0".into(),
+                        build: "old".into(),
+                    };
+                    write_frame(&mut send, &StatusFrame::Unsupported(unsupported)).await.unwrap();
+                    let _ = send.finish();
+                    let _ = send.stopped().await;
+                }
+            });
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_factory_older_than_lookout_says_so() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let key = SecretKey::generate();
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(key)
+        .relay_mode(RelayMode::Disabled)
+        .address_lookup(lookup.clone())
+        .bind()
+        .await
+        .unwrap();
+    let addr = endpoint.addr();
+    lookup.add_endpoint_info(addr.clone());
+    let _router = Router::builder(endpoint).accept(UI_ALPN, OldFactory(rig.server)).spawn();
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+
+    allowed_and_live(&mut app, &rig).await;
+    until(&mut app, "factory too old", |a| matches!(link(a), FactoryLink::TooOld(_))).await;
+    let label = app.world().resource::<FactoryStatus>().label();
+    assert!(label.contains("older than this Lookout") && label.contains("reinstall trailhead-factory"), "{label}");
+    assert!(label.contains("status") && label.contains("old"), "the request and the build are named: {label}");
+    // A later retry doesn't turn it into "factory stopped".
+    for _ in 0..20 {
+        app.update();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(matches!(link(&app), FactoryLink::TooOld(_)));
 }

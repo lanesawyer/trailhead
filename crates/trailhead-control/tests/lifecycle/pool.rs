@@ -284,6 +284,63 @@ async fn a_sandbox_that_fails_preflight_isnt_left_busy() {
     assert!(r.compute.get("trailhead-w1").is_none(), "a cold sandbox that never got warm is destroyed, not left busy");
 }
 
+/// Runs one task to completion so `trailhead-w1` is left idle with its warm checkpoint.
+async fn warm_one_sandbox(r: &Rig) {
+    r.tracker.add_task("TRAIL", "Warm it", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let w1 = r.compute.get("trailhead-w1").unwrap();
+    assert_eq!(w1.labels.get(label::STATE), Some(&label::IDLE.to_string()));
+}
+
+#[tokio::test]
+async fn a_warm_sandbox_that_fails_preflight_goes_back_idle_and_is_picked_again() {
+    let r = rig();
+    warm_one_sandbox(&r).await;
+    let warm = r.compute.get("trailhead-w1").unwrap().labels.get(label::WARM).cloned().expect("warmed");
+
+    let key = r.tracker.add_task("TRAIL", "Needs disk", "");
+    r.compute.fail("trailhead-w1", "preflight");
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    let w1 = r.compute.get("trailhead-w1").expect("a warm sandbox is kept, not destroyed");
+    assert_eq!(w1.labels.get(label::STATE), Some(&label::IDLE.to_string()), "back to idle, not busy");
+    assert_eq!(w1.labels.get(label::WARM), Some(&warm), "with its warm checkpoint");
+
+    r.compute.heal("trailhead-w1");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    let names: Vec<_> = r.compute.sandboxes().into_iter().map(|s| s.name).filter(|n| n.contains("-w")).collect();
+    assert_eq!(names, ["trailhead-w1"], "the next run picked the same sandbox");
+}
+
+#[tokio::test]
+async fn a_cold_sandbox_that_fails_after_prepare_is_released_not_left_busy() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Relabel fails", "");
+    // The busy label goes on first; the call that records the new warm checkpoint is the second.
+    r.compute.fail_once_after("trailhead-w1", "set_labels", 1);
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(r.compute.get("trailhead-w1").is_none(), "never warm, so destroyed rather than left busy");
+    assert!(r.compute.sandboxes().iter().all(|s| s.labels.get(label::STATE) != Some(&label::BUSY.to_string())));
+}
+
+#[tokio::test]
+async fn a_warm_sandbox_that_fails_after_prepare_goes_back_idle_with_its_old_checkpoint() {
+    let r = rig();
+    warm_one_sandbox(&r).await;
+    let warm = r.compute.get("trailhead-w1").unwrap().labels.get(label::WARM).cloned().expect("warmed");
+
+    let key = r.tracker.add_task("TRAIL", "Egress fails", "");
+    // The install egress is set first; the agent egress after the prepare is the one that fails.
+    r.compute.fail_once_after("trailhead-w1", "set_egress", 1);
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    let w1 = r.compute.get("trailhead-w1").expect("kept");
+    assert_eq!(w1.labels.get(label::STATE), Some(&label::IDLE.to_string()), "released, not left busy");
+    assert_eq!(w1.labels.get(label::WARM), Some(&warm), "the old warm checkpoint is kept");
+}
+
 #[tokio::test]
 async fn a_host_out_of_disk_is_waited_out_never_parked() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));

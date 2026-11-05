@@ -115,6 +115,7 @@ async fn daemon_in_a_sprite() {
                 setup: Some(Check::new("setup", "test -f Cargo.toml")),
                 tools: Default::default(),
                 tool_hosts: Default::default(),
+                env: Default::default(),
             };
             let t = Instant::now();
             remote.prepare(&sandbox.id, prepare.clone()).await.expect("first prepare");
@@ -163,6 +164,7 @@ async fn daemon_in_a_sprite() {
                 worker_checks: Vec::new(),
                 blocked_hosts: vec!["github.com".into()],
                 allowed_hosts: vec!["api.anthropic.com".into()],
+                env: Default::default(),
                 credential: cred,
             };
             let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -223,6 +225,7 @@ async fn daemon_in_a_sprite() {
                 worker_checks: Vec::new(),
                 blocked_hosts: Vec::new(),
                 allowed_hosts: Vec::new(),
+                env: Default::default(),
                 credential: cred,
             };
             let (events, _rx) = tokio::sync::mpsc::unbounded_channel();

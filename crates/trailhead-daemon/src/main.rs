@@ -178,9 +178,11 @@ fn workspace(workdir: PathBuf, conns: &std::result::Result<Vec<serde_json::Value
     }
 }
 
-fn read_secrets(path: &PathBuf) -> std::result::Result<DaemonSecrets, String> {
+/// The secrets, with the [`build_id`] of the file they came from.
+fn read_secrets(path: &PathBuf) -> std::result::Result<(DaemonSecrets, String), String> {
     let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    serde_json::from_slice(&raw).map_err(|e| format!("{}: {e}", path.display()))
+    let secrets = serde_json::from_slice(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok((secrets, build_id(&raw)))
 }
 
 #[tokio::main]
@@ -256,7 +258,7 @@ async fn gateway_command(command: Command) -> std::process::ExitCode {
 }
 
 async fn serve(args: Args) -> std::result::Result<(), String> {
-    let secrets = read_secrets(&args.secrets)?;
+    let (secrets, secrets_id) = read_secrets(&args.secrets)?;
     let key = parse_secret_key(&secrets.secret_key).map_err(|e| e.to_string())?;
     let control_plane = parse_endpoint_id(&secrets.control_plane).map_err(|e| e.to_string())?;
 
@@ -293,7 +295,8 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
         }
     };
     tracing::info!(version = env!("CARGO_PKG_VERSION"), %build, "trailhead-daemon build");
-    let mut protocol = DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone()).build(build);
+    let mut protocol =
+        DaemonProtocol::new(Arc::new(runner), control_plane).on(endpoint.clone()).build(build).secrets(secrets_id);
     if let Some(socket) = args.hold_socket.filter(|s| s.exists()) {
         protocol = protocol.holding(SpriteHolds::new(socket));
     }
