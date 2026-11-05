@@ -232,3 +232,27 @@ async fn an_unknown_request_is_answered_with_what_the_factory_knows() {
         assert!(read_frame::<StatusFrame>(&mut recv).await.unwrap().is_none());
     }
 }
+
+#[tokio::test]
+async fn disallowing_drops_a_connection_that_is_already_open() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let api = open_ui_tunnel(r.client(key.clone()).await, r.control.id).await.unwrap();
+    let mut stream = reqwest::Client::new()
+        .get(format!("http://{api}/v1/events/stream"))
+        .bearer_auth(&r.token)
+        .send()
+        .await
+        .unwrap();
+    assert!(stream.status().is_success(), "{}", stream.status());
+
+    r.allowed.remove(&key.public()).unwrap();
+    // The open stream is cut, and a new request on the same tunnel gets nothing.
+    let ended =
+        tokio::time::timeout(Duration::from_secs(10), async { while let Ok(Some(_)) = stream.chunk().await {} }).await;
+    assert!(ended.is_ok(), "the event stream outlived the disallow");
+    let get = reqwest::Client::new().get(format!("http://{api}/v1/me")).bearer_auth(&r.token).send();
+    let result = tokio::time::timeout(Duration::from_secs(10), get).await.unwrap();
+    assert!(result.is_err(), "a disallowed endpoint still got an answer: {result:?}");
+}
