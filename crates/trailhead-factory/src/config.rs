@@ -561,7 +561,40 @@ pub struct Checks {
     pub more: BTreeMap<String, CheckSpec>,
 }
 
+/// Names with a meaning of their own in `[factory.checks]`; an extra check's name must not be a near miss of one.
+const RESERVED_CHECKS: [&str; 8] = ["setup", "trim", "fmt", "fmt_fix", "lint", "typecheck", "test", "build"];
+
+/// Whether two names differ by at most one insertion, deletion or substitution.
+fn within_one_edit(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    let skip = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let (a, b) = (&a[skip..], &b[skip..]);
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => a.is_empty() || a[1..] == b[1..],
+        std::cmp::Ordering::Greater => a[1..] == *b,
+        std::cmp::Ordering::Less => *a == b[1..],
+    }
+}
+
 impl Checks {
+    /// Any name is a verifying check, so a typo of a reserved key (`lnt`, `fmt-fix`, `setp`) would silently become
+    /// one, and `fmt-fix = "cargo fmt"` would rewrite the tree during checks. Reject names a typo away from one.
+    fn validate_names(&self) -> Result<()> {
+        for name in self.more.keys() {
+            let normal = name.to_ascii_lowercase().replace('-', "_");
+            if let Some(near) = RESERVED_CHECKS.iter().find(|r| within_one_edit(&normal, r)) {
+                return Err(Error::Config(format!(
+                    "[factory.checks] `{name}` looks like a misspelling of `{near}`; fix the key, or pick a name that isn't close to one of {}",
+                    RESERVED_CHECKS.join(", ")
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// The verification checks, in the order they run. `setup`, `trim` and `fmt_fix` change the tree, so they're left out.
     pub fn verifying(&self) -> Vec<(&str, &CheckSpec)> {
         let named = [
@@ -851,6 +884,7 @@ impl FactoryConfig {
                 }
             }
         }
+        self.checks.validate_names()?;
         let checks: Vec<&str> = self.checks.verifying().into_iter().map(|(n, _)| n).collect();
         for (grade, gate) in &self.gates {
             if !matches!(grade.as_str(), "1" | "2" | "3" | "4") {
@@ -1169,6 +1203,18 @@ require = ["checks", "agent_review", "human"]
         // A gate can require a scoped check by name.
         let gated = SAMPLE.replace("\"checks\", \"agent_review\"", "\"ui-lint\", \"agent_review\"");
         assert!(parse(&gated.replace("test = ", "ui-lint = \"x\"\ntest = ")).is_ok());
+    }
+
+    #[test]
+    fn rejects_extra_checks_named_like_a_misspelled_reserved_key() {
+        for typo in ["lnt", "fmt-fix", "setp", "tests", "typecheck2", "Build"] {
+            let bad = SAMPLE.replace("test = ", &format!("{typo} = \"x\"\ntest = "));
+            let err = parse(&bad).unwrap_err();
+            assert!(err.to_string().contains("misspelling"), "{typo}: {err}");
+        }
+        for ok in ["ui-lint", "e2e", "docs", "audit"] {
+            assert!(parse(&SAMPLE.replace("test = ", &format!("{ok} = \"x\"\ntest = "))).is_ok(), "{ok}");
+        }
     }
 
     #[test]
