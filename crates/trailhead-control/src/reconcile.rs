@@ -242,9 +242,10 @@ impl Factory {
         tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
         self.updating.lock().unwrap().remove(&task.key);
         // Claimed as it stands, whether open, in review or parked, never reopened first: if the claim then failed, an
-        // open, unheld task could start a rework against this PR (TRAIL-216). Only an approved task can't be claimed.
+        // open, unheld task could start a rework against this PR (TRAIL-216). An approved task can't be claimed, so it
+        // is unapproved back to in review, still held, rather than passed through open.
         if task.status == Status::Approved {
-            self.tracker.reopen(&task.key).await?;
+            self.tracker.unapprove(&task.key).await?;
         }
         self.tracker.claim(&task.key).await?;
         let question = messages::pr_closed_question(&pr.url);
