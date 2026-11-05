@@ -62,32 +62,36 @@ impl Factory {
         if self.status.holding(Some(said.clone())) {
             tracing::info!("holding merges: {said}");
         }
-        let mut held = self.held.lock().unwrap().take().filter(|h| h.number == number);
+        // The hold stays as it is until every fallible call has answered: an error returns with it untouched.
+        let mut updating =
+            self.held.lock().unwrap().as_ref().filter(|h| h.number == number).and_then(|h| h.updating.clone());
         if blocked.is_none() && codehost.behind(pr).await? {
             let head = codehost.head(pr).await?;
-            let waiting = held
-                .as_ref()
-                .and_then(|h| h.updating.as_ref())
-                .is_some_and(|(at, since)| *at == head && since.elapsed() < crate::UPDATE_PATIENCE);
+            let waiting =
+                updating.as_ref().is_some_and(|(at, since)| *at == head && since.elapsed() < crate::UPDATE_PATIENCE);
             if !waiting {
                 match codehost.update_branch(pr).await {
                     Ok(BranchUpdate::Updated) => {
                         tracing::info!(pr = %pr.url, "updated the branch of the PR merges are held for");
-                        held = Some(Held { number, updating: Some((head, Instant::now())) });
+                        updating = Some((head, Instant::now()));
                     }
                     Ok(BranchUpdate::UpToDate) => {}
                     Ok(BranchUpdate::Conflict) => {
                         tracing::warn!(pr = %pr.url, "the PR merges are held for conflicts with its base; auto-merge stays on, so the hold stays");
                     }
                     Err(e) => {
-                        *self.held.lock().unwrap() = Some(held.unwrap_or(Held { number, updating: None }));
+                        self.set_hold(number, updating);
                         return Err(e);
                     }
                 }
             }
         }
-        *self.held.lock().unwrap() = Some(held.unwrap_or(Held { number, updating: None }));
+        self.set_hold(number, updating);
         Ok(())
+    }
+
+    fn set_hold(&self, number: u64, updating: Option<(String, Instant)>) {
+        *self.held.lock().unwrap() = Some(Held { number, updating });
     }
 
     fn clear_hold(&self) {

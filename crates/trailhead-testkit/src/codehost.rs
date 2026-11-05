@@ -51,6 +51,8 @@ struct State {
     file_listings: usize,
     /// How many times `head` was asked for a PR's head.
     head_lookups: usize,
+    /// Whether `behind` fails, like a host that is down.
+    fail_behind: bool,
     refuse_publish: Option<String>,
     /// Publishes still to fail with a transient error, and how many were attempted.
     flaky_publishes: usize,
@@ -182,6 +184,11 @@ impl FakeCodeHost {
     /// Sets how CI stands on the PR's head. A new head starts over at pending.
     pub fn set_ci(&self, pr: &PrRef, ci: CiState) {
         self.find(pr, |p, _| p.ci = ci).unwrap();
+    }
+
+    /// Makes `behind` fail with a transient error until called with `false`.
+    pub fn fail_behind(&self, on: bool) {
+        self.state.lock().unwrap().fail_behind = on;
     }
 
     /// Turns the host's auto-merge on or off for the PR, as a person does.
@@ -349,6 +356,9 @@ impl CodeHost for FakeCodeHost {
     }
 
     async fn behind(&self, pr: &PrRef) -> Result<bool> {
+        if self.state.lock().unwrap().fail_behind {
+            return Err(trailhead_factory::Error::Other("the host is down".into()));
+        }
         self.find(pr, |p, _| p.behind)
     }
 

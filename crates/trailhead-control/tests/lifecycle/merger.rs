@@ -960,3 +960,24 @@ async fn a_failing_persons_pr_still_holds_and_is_left_alone() {
     r.factory.reconcile().await.unwrap();
     assert!(r.codehost.prs()[0].merged);
 }
+
+#[tokio::test]
+async fn a_host_error_while_looking_after_a_persons_pr_keeps_the_hold() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_auto_merge(&mine, true);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+
+    // The host fails to say whether it's behind: the hold stays, so the factory's merge still waits.
+    r.codehost.fail_behind(true);
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    assert!(!r.codehost.prs()[0].merged, "the factory's merge waits");
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+    assert!(r.factory.status().snapshot().holding.is_some());
+}
