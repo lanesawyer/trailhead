@@ -131,6 +131,9 @@ pub struct NetConfig {
     /// The server URL the CLI uses. When the control plane can't be reached, the board talks to the server here
     /// instead of through the tunnel. `None` keeps the tunnel as the only way in.
     pub server_url: Option<String>,
+    /// How soon the status stream is retried after a dropped link, and the first gap after a refusal, which then
+    /// doubles up to [`STATUS_BACKOFF_STEPS`] times.
+    pub status_retry: Duration,
 }
 
 /// How the endpoint finds the control plane.
@@ -159,6 +162,7 @@ impl NetConfig {
             keyring: CredStore::new(PathBuf::new()).keyring,
             network: Network::Internet,
             server_url: Some(cli_server_url(&trailhead_config_dir, std::env::var("TRAILHEAD_URL").ok())),
+            status_retry: STATUS_RETRY,
         })
     }
 
@@ -273,9 +277,57 @@ enum Via {
     Direct,
 }
 
-const STATUS_RETRY: Duration = Duration::from_secs(2);
-/// How often to ask a factory that is too old, so a reinstall takes effect without restarting Lookout.
-const STATUS_RETRY_OLD: Duration = Duration::from_secs(30);
+/// The default [`NetConfig::status_retry`].
+pub const STATUS_RETRY: Duration = Duration::from_secs(2);
+/// A refused request is asked again after 1x, 2x, 4x ... the retry, up to 2^5 = 32x (64 s by default). It is refused
+/// again until something changes, so asking at the probe rate only fills the factory's logs; a factory that is
+/// reinstalled is still found within the minute.
+pub const STATUS_BACKOFF_STEPS: u32 = 5;
+
+/// Why the factory won't serve the status stream.
+enum Refusal {
+    /// It doesn't know the request: older than this Lookout.
+    TooOld(String),
+    /// It knows the request and says no.
+    Refused(String),
+}
+
+/// What the status task has seen of the current connection.
+#[derive(Default)]
+struct Progress {
+    /// Whether the app was last told the factory is stopped; cleared by anything heard.
+    stopped: bool,
+    /// Whether the connection has served a frame, which means the factory isn't refusing us.
+    heard: bool,
+}
+
+/// The gap before the next try: the retry after a drop, and doubling from it after each refusal in a row.
+struct Backoff {
+    base: Duration,
+    refusals: u32,
+}
+
+impl Backoff {
+    fn new(base: Duration) -> Backoff {
+        Backoff { base, refusals: 0 }
+    }
+
+    fn reset(&mut self) {
+        self.refusals = 0;
+    }
+
+    /// A transient drop: back soon, without lengthening later gaps.
+    fn dropped(&self) -> Duration {
+        self.base
+    }
+
+    /// A refusal: this gap, and a longer one after the next.
+    fn refused(&mut self) -> Duration {
+        let wait = self.base * 2u32.pow(self.refusals);
+        self.refusals = (self.refusals + 1).min(STATUS_BACKOFF_STEPS);
+        wait
+    }
+}
 
 struct Net {
     config: NetConfig,
@@ -390,32 +442,58 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// One connection's worth of the status stream: the snapshot, then events until it ends. `stopped` says whether the
-/// app was last told the factory is stopped, and is cleared by anything heard. Returns whether the factory said it
-/// doesn't know the request.
+/// One connection's worth of the status stream: the snapshot, then events until it ends. Returns why the factory
+/// refused, if it did.
 async fn follow_status(
     endpoint: &Endpoint,
     id: EndpointId,
     events: &mpsc::Sender<NetEvent>,
-    stopped: &mut bool,
-) -> Result<bool, trailhead_factory::Error> {
-    let mut stream = StatusStream::open(dial_ui(endpoint, id).await?).await?;
+    progress: &mut Progress,
+) -> Result<Option<Refusal>, trailhead_factory::Error> {
+    let conn = dial_ui(endpoint, id).await?;
+    match stream_status(conn.clone(), events, progress).await {
+        Err(e) => match refusal_of(&conn, &e, progress.heard) {
+            Some(refusal) => Ok(Some(refusal)),
+            None => Err(e),
+        },
+        done => done,
+    }
+}
+
+async fn stream_status(
+    conn: iroh::endpoint::Connection,
+    events: &mpsc::Sender<NetEvent>,
+    progress: &mut Progress,
+) -> Result<Option<Refusal>, trailhead_factory::Error> {
+    let mut stream = StatusStream::open(conn).await?;
     while let Some(frame) = stream.next().await? {
         let update = match frame {
             StatusFrame::Snapshot { repos } => FactoryUpdate::Snapshot(repos),
             StatusFrame::Event { repo, event } => FactoryUpdate::Event { repo, event },
-            StatusFrame::Unsupported(unsupported) => {
-                *stopped = false;
-                let _ = events.send(NetEvent::Factory(FactoryUpdate::TooOld(too_old_message(&unsupported))));
-                return Ok(true);
-            }
+            StatusFrame::Unsupported(unsupported) => return Ok(Some(Refusal::TooOld(too_old_message(&unsupported)))),
         };
-        *stopped = false;
+        progress.stopped = false;
+        progress.heard = true;
         if events.send(NetEvent::Factory(update)).is_err() {
-            return Ok(false);
+            return Ok(None);
         }
     }
-    Ok(false)
+    Ok(None)
+}
+
+/// Whether a failed stream was the factory saying no, rather than the link dropping: the connection closed because
+/// this endpoint isn't allowed, or the stream reset before anything was served.
+fn refusal_of(conn: &iroh::endpoint::Connection, error: &trailhead_factory::Error, heard: bool) -> Option<Refusal> {
+    match conn.close_reason() {
+        Some(ConnectionError::ApplicationClosed(c)) if c.error_code == CLOSE_NOT_ALLOWED.into() => {
+            Some(Refusal::Refused(Reason::NotAllowed.to_string()))
+        }
+        Some(_) => None,
+        None if !heard && error.to_string().contains("stream reset by peer") => {
+            Some(Refusal::Refused("the factory refused the status request".into()))
+        }
+        None => None,
+    }
 }
 
 /// What the map says of a factory that didn't know our request: what it was asked, what it serves, and its build.
@@ -583,25 +661,43 @@ impl Net {
     fn start_status(&mut self, id: EndpointId) {
         self.stop_status();
         let (endpoint, events) = (self.endpoint.clone(), self.events.clone());
+        let mut backoff = Backoff::new(self.config.status_retry);
         self.status = Some(tokio::spawn(async move {
-            let mut stopped = false;
+            let mut progress = Progress::default();
             loop {
-                let followed = follow_status(&endpoint, id, &events, &mut stopped).await;
-                let old = matches!(followed, Ok(true));
-                if let Err(e) = followed {
-                    tracing::debug!(error = %e, "the factory status stream ended");
+                progress.heard = false;
+                let followed = follow_status(&endpoint, id, &events, &mut progress).await;
+                if progress.heard {
+                    backoff.reset();
                 }
-                if old {
-                    tokio::time::sleep(STATUS_RETRY_OLD).await;
+                let refusal = match followed {
+                    Ok(refusal) => refusal,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "the factory status stream ended");
+                        None
+                    }
+                };
+                if let Some(refusal) = refusal {
+                    let wait = backoff.refused();
+                    let retry = format!("trying again in {} s", wait.as_secs().max(1));
+                    progress.stopped = false;
+                    let update = match refusal {
+                        Refusal::TooOld(why) => FactoryUpdate::TooOld(format!("{why}; {retry}")),
+                        Refusal::Refused(why) => FactoryUpdate::Refused(format!("{why}; {retry}")),
+                    };
+                    if events.send(NetEvent::Factory(update)).is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
-                if !stopped {
-                    stopped = true;
+                if !progress.stopped {
+                    progress.stopped = true;
                     if events.send(NetEvent::Factory(FactoryUpdate::Stopped)).is_err() {
                         return;
                     }
                 }
-                tokio::time::sleep(STATUS_RETRY).await;
+                tokio::time::sleep(backoff.dropped()).await;
             }
         }));
     }
@@ -673,5 +769,20 @@ impl Net {
             Ok(ConnectionError::ApplicationClosed(c)) if c.error_code == CLOSE_NOT_ALLOWED.into() => Reason::NotAllowed,
             _ => Reason::Unreachable("the control plane is there, but the Trailhead server isn't answering".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refusals_back_off_to_a_cap_and_reset() {
+        let mut backoff = Backoff::new(Duration::from_secs(2));
+        let gaps: Vec<u64> = (0..8).map(|_| backoff.refused().as_secs()).collect();
+        assert_eq!(gaps, [2, 4, 8, 16, 32, 64, 64, 64]);
+        assert_eq!(backoff.dropped(), Duration::from_secs(2), "a drop is retried quickly even after refusals");
+        backoff.reset();
+        assert_eq!(backoff.refused(), Duration::from_secs(2));
     }
 }
