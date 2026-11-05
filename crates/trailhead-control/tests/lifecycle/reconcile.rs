@@ -273,3 +273,22 @@ async fn a_parked_task_whose_pr_is_merged_is_finished() {
     assert_eq!(done.merged, std::slice::from_ref(&key.0));
     assert_eq!(r.tracker.task(&key).status, Status::Done);
 }
+
+#[tokio::test]
+async fn reconcile_asks_the_host_once_per_pr_in_review() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let mut keys = Vec::new();
+    for title in ["Add a greeting", "Add a farewell"] {
+        let key = r.tracker.add_task("TRAIL", title, "");
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+        r.factory.tick().await.unwrap();
+        assert_eq!(r.tracker.task(&key).status, Status::InReview);
+        keys.push(key);
+    }
+
+    let states = r.codehost.calls("pr_state");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.codehost.calls("pr_state") - states, keys.len(), "one pr_state per PR in review");
+}
