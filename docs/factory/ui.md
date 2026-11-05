@@ -24,6 +24,8 @@ The factory's own client for people: watch runs live, steer them, and author tas
 ## Views
 
 - **Trail map (watch).** The spatial view and the reason to use a game engine. Campsites are pooled Sprites, agents are run sub-agents (`factory/trail-42-a1`) moving between them, tasks are waypoints. Claims, handoffs, questions, review verdicts and spend show as movement and markers. Everything on it comes from the event stream.
+
+  Built (TRAIL-702, `map.rs`): campsites on a grid at left (state colour, role, warm, task and phase held), waypoints at right for tasks in `in_progress`, `needs_input`, `in_review` or `approved` and any with a run. A claim holder is a token at its waypoint, which walks to the campsite once its run has a sandbox and back when the run ends. Markers on the waypoint: claim holder, open questions, last handoff, in review, approved, reviewing, spend. It is UI nodes, not sprites, until art exists; the board has a button to the map and back. Not done: pan and zoom, selecting a spot for the inspector, an animation for a verdict landing.
 - **Task board (author).** Lists, filters and forms: create tasks under the queue task, write and edit specs, comment, answer questions. Leans on feathers' text input for multiline specs; no spike first, the editor is built with the forms and anything feathers lacks is filed then.
 
   Built (TRAIL-698, `author.rs`): feathers' `FeathersTextInput` does multiline with `EditableText { allow_newlines, visible_lines }` and word-boundary wrapping, so there is no custom box. It lacks a taller container (the frame is one row high; overridden to auto here), a scrollbar and placeholder text. New tasks go under `LOOKOUT_QUEUE` (default TRAIL-102); the form sends one command at a time and closes only on `ok`.

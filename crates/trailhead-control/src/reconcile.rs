@@ -61,7 +61,10 @@ impl Factory {
             .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
             .collect();
         self.status.sync_sandboxes(&live, &down, &parked);
-        let tasks: Vec<Task> = in_flight?.into_iter().filter(|t| !running.contains(&t.key)).collect();
+        let in_flight = in_flight?;
+        let factory_prs = in_flight.iter().filter_map(|t| t.run.pr.as_ref().map(|p| p.number)).collect();
+        self.person_pass(&factory_prs).await;
+        let tasks: Vec<Task> = in_flight.into_iter().filter(|t| !running.contains(&t.key)).collect();
 
         // Runs the daemon may still be working on, which are followed again rather than requeued (TRAIL-137).
         let live_runs: Vec<(&Task, &Sandbox)> =

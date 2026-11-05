@@ -12,14 +12,16 @@ use base64::Engine;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
-    BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
-    RateLimit, Repo, Result,
+    BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, OpenPr, PrRef,
+    PrState, RateLimit, Repo, Result,
 };
 
 pub const API_URL: &str = "https://api.github.com";
 
 /// GitHub pages check runs 100 at a time; a commit with more than this many is read as far as this.
 const MAX_CHECK_PAGES: u32 = 10;
+/// Pages of open PRs listed, a hundred each.
+const MAX_PR_PAGES: u32 = 5;
 
 /// GitHub pages a PR's files 100 at a time, up to 3,000.
 const MAX_FILE_PAGES: u32 = 30;
@@ -465,6 +467,28 @@ impl CodeHost for GitHub {
             },
             s => Err(Error::from_status(s.as_u16(), format!("github {s}: {message}"))),
         }
+    }
+
+    async fn open_prs(&self, repo: &Repo, base: &str) -> Result<Vec<OpenPr>> {
+        let path = format!("{}/pulls", Self::repo_path(repo));
+        let mut out = Vec::new();
+        for page in 1..=MAX_PR_PAGES {
+            let req = self.request(Method::GET, &path).query(&[
+                ("state", "open"),
+                ("base", base),
+                ("sort", "created"),
+                ("direction", "asc"),
+                ("per_page", "100"),
+                ("page", &page.to_string()),
+            ]);
+            let found = self.call_cached(req).await?;
+            let found = found.as_array().map(Vec::as_slice).unwrap_or_default();
+            out.extend(found.iter().map(|p| OpenPr { pr: pr_ref(repo, p), auto_merge: !p["auto_merge"].is_null() }));
+            if found.len() < 100 {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     async fn behind(&self, pr: &PrRef) -> Result<bool> {

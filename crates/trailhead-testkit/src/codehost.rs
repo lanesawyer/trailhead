@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
-    RateLimit, Repo, Result,
+    BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, OpenPr, PrRef,
+    PrState, RateLimit, Repo, Result,
 };
 
 #[derive(Debug, Clone)]
@@ -30,6 +30,8 @@ pub struct FakePr {
     pub ci: CiState,
     /// The log tails of failed checks, by check name.
     pub ci_logs: Vec<(String, String)>,
+    /// Whether the host's auto-merge is on, as a person turns it on.
+    pub auto_merge: bool,
 }
 
 #[derive(Default)]
@@ -49,6 +51,8 @@ struct State {
     file_listings: usize,
     /// How many times `head` was asked for a PR's head.
     head_lookups: usize,
+    /// Whether `behind` fails, like a host that is down.
+    fail_behind: bool,
     /// How many times each `CodeHost` method was called, by name.
     calls: BTreeMap<&'static str, usize>,
     refuse_publish: Option<String>,
@@ -198,6 +202,21 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.ci = ci).unwrap();
     }
 
+    /// Makes `behind` fail with a transient error until called with `false`.
+    pub fn fail_behind(&self, on: bool) {
+        self.state.lock().unwrap().fail_behind = on;
+    }
+
+    /// Turns the host's auto-merge on or off for the PR, as a person does.
+    pub fn set_auto_merge(&self, pr: &PrRef, on: bool) {
+        self.find(pr, |p, _| p.auto_merge = on).unwrap();
+    }
+
+    /// The host merges the PR by itself, as auto-merge does once the checks pass.
+    pub fn merge_by_host(&self, pr: &PrRef) {
+        self.find(pr, |p, _| p.merged = true).unwrap();
+    }
+
     /// Sets the log tails the host keeps of failed checks.
     pub fn set_ci_logs(&self, pr: &PrRef, logs: Vec<(String, String)>) {
         self.find(pr, |p, _| p.ci_logs = logs).unwrap();
@@ -281,6 +300,7 @@ impl CodeHost for FakeCodeHost {
             files: None,
             ci: CiState::Pending,
             ci_logs: Vec::new(),
+            auto_merge: false,
         });
         Ok(r)
     }
@@ -348,7 +368,20 @@ impl CodeHost for FakeCodeHost {
         })
     }
 
+    async fn open_prs(&self, repo: &Repo, base: &str) -> Result<Vec<OpenPr>> {
+        self.count("open_prs");
+        let s = self.state.lock().unwrap();
+        Ok(s.prs
+            .iter()
+            .filter(|p| p.pr.repo == *repo && p.spec.base == base && !p.merged && !p.closed)
+            .map(|p| OpenPr { pr: p.pr.clone(), auto_merge: p.auto_merge })
+            .collect())
+    }
+
     async fn behind(&self, pr: &PrRef) -> Result<bool> {
+        if self.state.lock().unwrap().fail_behind {
+            return Err(trailhead_factory::Error::Other("the host is down".into()));
+        }
         self.count("behind");
         self.find(pr, |p, _| p.behind)
     }

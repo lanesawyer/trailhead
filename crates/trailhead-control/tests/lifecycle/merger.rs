@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use trailhead_control::Outcome;
-use trailhead_factory::{CiState, CodeHost, Commit, MergedBy, RateLimit, Role, RunOutcome, Status, Tracker};
+use trailhead_factory::{
+    CiState, CodeHost, Commit, MergedBy, NewPr, PrRef, RateLimit, Role, RunOutcome, Status, Tracker,
+};
 use trailhead_testkit::Script;
 
 use crate::common::*;
@@ -878,4 +880,104 @@ async fn the_poll_stretches_as_the_rate_limit_runs_down() {
     };
     assert_eq!(r.factory.polled_every(poll).as_secs(), 10, "no reading, no change");
     assert_eq!((at(4000), at(2000), at(1000)), (10, 20, 40));
+}
+
+/// A person's PR on the same repo and base as the factory's, opened by hand.
+async fn person_pr(r: &Rig) -> PrRef {
+    let first = r.codehost.prs()[0].clone();
+    let repo = first.pr.repo.clone();
+    let commit = Commit { message: "mine".into(), changes: Vec::new(), merges: Vec::new() };
+    r.codehost.publish(&repo, "start", "person/branch", &[commit]).await.unwrap();
+    let spec = NewPr {
+        branch: "person/branch".into(),
+        base: first.spec.base.clone(),
+        title: "A person's change".into(),
+        body: String::new(),
+    };
+    r.codehost.open_pr(&repo, spec).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_persons_pr_with_auto_merge_on_holds_a_ready_merge_and_is_kept_up_to_date() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_auto_merge(&mine, true);
+    r.codehost.set_behind(&mine, true);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    assert!(!r.codehost.prs()[0].merged, "the factory's merge waits");
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+    assert_eq!(r.codehost.update_requests(), 1, "the person's branch was brought up to date");
+    assert!(!r.codehost.prs()[1].behind);
+    assert_eq!(r.factory.status().snapshot().holding.as_deref(), Some("#2 has auto-merge on"));
+
+    // GitHub merges it once its CI is green; the factory's merge goes ahead.
+    r.codehost.merge_by_host(&mine);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+    assert_eq!(r.factory.status().snapshot().holding, None);
+}
+
+#[tokio::test]
+async fn a_persons_pr_without_auto_merge_changes_nothing() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_behind(&mine, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+    assert_eq!(r.codehost.update_requests(), 0);
+}
+
+#[tokio::test]
+async fn a_failing_persons_pr_still_holds_and_is_left_alone() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (_key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_auto_merge(&mine, true);
+    r.codehost.set_behind(&mine, true);
+    r.codehost.set_ci(&mine, CiState::Failed { checks: vec!["build".into()] });
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "held while auto-merge stays on");
+    assert_eq!(r.codehost.update_requests(), 0, "its code is not touched");
+    let held = r.factory.status().snapshot().holding.unwrap();
+    assert!(held.contains("#2") && held.contains("CI failed: build"), "{held}");
+
+    // A person turns auto-merge off: the factory carries on.
+    r.codehost.set_auto_merge(&mine, false);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged);
+}
+
+#[tokio::test]
+async fn a_host_error_while_looking_after_a_persons_pr_keeps_the_hold() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_auto_merge(&mine, true);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+
+    // The host fails to say whether it's behind: the hold stays, so the factory's merge still waits.
+    r.codehost.fail_behind(true);
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    assert!(!r.codehost.prs()[0].merged, "the factory's merge waits");
+    assert_ne!(r.tracker.task(&key).status, Status::Done);
+    assert!(r.factory.status().snapshot().holding.is_some());
 }
