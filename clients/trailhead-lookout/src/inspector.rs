@@ -456,7 +456,7 @@ fn spawn_panel(mut commands: Commands) {
         BackgroundColor(Color::srgb(0.1, 0.1, 0.12)),
         // Above the board, which fills the window and is spawned later, so it would take every click here; below
         // the form (10) that "answer" opens.
-        GlobalZIndex(2),
+        GlobalZIndex(crate::widgets::layer::INSPECTOR),
     ));
 }
 
