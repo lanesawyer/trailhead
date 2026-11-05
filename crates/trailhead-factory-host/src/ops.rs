@@ -73,6 +73,7 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
         print!("{}", render_live(&live.snapshot));
     }
     print!("{}", render_status(&rows, &tasks, &waiting, config.repo.max_sandboxes));
+    println!("\nlog file: {} (written by `run`)", crate::logfile::path(&paths.data_dir).display());
     match saved_endpoint_id(&paths.creds()) {
         Some(id) => println!("\nUI endpoint id: {id}  (allow a UI with `trailhead factory allow <its endpoint id>`)"),
         None => println!("\nUI endpoint id: none yet (the control plane makes it on its first run)"),

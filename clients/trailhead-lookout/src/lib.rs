@@ -2,8 +2,10 @@
 
 use bevy::prelude::*;
 
+pub mod author;
 pub mod board;
 pub mod commands;
+pub mod connect;
 pub mod connection;
 pub mod factory;
 pub mod mirror;
