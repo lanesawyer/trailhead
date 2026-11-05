@@ -10,10 +10,9 @@
 //! [`AuthorUiPlugin`] draws the form with feathers. The description and comment boxes are feathers' text input
 //! with `allow_newlines` and `visible_lines` set, which is all multiline takes.
 
-use bevy::feathers::controls::{FeathersButton, FeathersTextInput, FeathersTextInputContainer};
-use bevy::feathers::display::caption;
+use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
-use bevy::text::{EditableText, LineBreak, TextLayout};
+use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -22,6 +21,9 @@ use crate::board::STATUSES;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
 use crate::mirror::{Data, IsTask};
+use crate::widgets::{
+    Picked, button, extent, field, layer, panel, row, select, size, text, text_dim, text_input, text_toned, token,
+};
 
 /// The queue task new tasks go under unless the form says otherwise (`queue` in `.trailhead.toml`).
 pub const DEFAULT_QUEUE: &str = "TRAIL-102";
@@ -223,12 +225,6 @@ pub fn describe(outcome: &Outcome) -> String {
     }
 }
 
-/// The next value after `current` in `values`, wrapping.
-fn step<T: PartialEq + Clone>(values: &[T], current: &T) -> T {
-    let next = values.iter().position(|v| v == current).map_or(0, |i| (i + 1) % values.len());
-    values[next].clone()
-}
-
 /// The form on screen. `generation` changes whenever it opens or closes, which is when the panel is redrawn
 /// (redrawing for every keystroke would lose the cursor).
 #[derive(Resource, Default, Debug)]
@@ -273,8 +269,6 @@ pub enum Act {
     },
     Save,
     Cancel,
-    CyclePriority,
-    CycleStatus,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -295,17 +289,20 @@ pub struct Field(pub FieldKind, pub u64);
 #[derive(Component, Debug, Clone, Default)]
 pub struct InitialText(pub String);
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum LabelKind {
-    #[default]
+/// Which draft field a dropdown of the form sets.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormChoice {
     Priority,
     Status,
-    Message,
 }
 
-/// Text that shows a part of the form's state.
+/// The text showing the form's last message.
 #[derive(Component, Debug, Clone, Copy, Default)]
-pub struct FormLabel(pub LabelKind);
+pub struct FormMessage;
+
+/// Lines tall the spec's box is, and a comment's or answer's.
+const SPEC_LINES: f32 = 12.0;
+const BODY_LINES: f32 = 6.0;
 
 /// The form's root node, and the source of its commands.
 #[derive(Component)]
@@ -346,17 +343,6 @@ fn on_act(
         // A save in flight can't be withdrawn, so the form stays until it is answered.
         Act::Cancel if !form.saving => form.close(),
         Act::Cancel => {}
-        Act::CyclePriority => {
-            if let Some(open) = &mut form.open {
-                open.draft.priority = step(&PRIORITIES, &open.draft.priority);
-            }
-        }
-        Act::CycleStatus => {
-            if let Some(open) = &mut form.open {
-                let statuses: Vec<String> = STATUSES.iter().map(|s| s.to_string()).collect();
-                open.draft.status = step(&statuses, &open.draft.status);
-            }
-        }
         Act::Save => {
             let Some(open) = &form.open else { return };
             if form.saving {
@@ -425,6 +411,7 @@ impl Plugin for AuthorPlugin {
         app.init_resource::<Form>()
             .init_resource::<Authoring>()
             .add_observer(on_act)
+            .add_observer(on_pick)
             .add_systems(Update, (init_text, read_fields, finish).chain());
     }
 }
@@ -434,47 +421,69 @@ pub struct AuthorUiPlugin;
 
 impl Plugin for AuthorUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(AuthorPlugin).add_systems(Update, (redraw_form, update_labels).chain());
+        app.add_plugins(AuthorPlugin).add_systems(Update, (redraw_form, update_message).chain());
     }
 }
 
-/// A button for `act`.
+/// A button for `act`: a normal one, with no icon.
 pub fn act_button(label: String, act: Act) -> impl Scene {
     bsn! {
-        @FeathersButton
+        @button(label, None, ButtonVariant::Normal)
         act
-        Children [ @caption(label) ]
     }
 }
 
+/// A text input of the form for `kind`, `lines` high, holding `initial` when it appears.
 fn input(kind: FieldKind, generation: u64, initial: String, lines: f32) -> impl Scene {
-    bsn! {
-        @FeathersTextInputContainer
-        Node { height: Val::Auto, width: percent(100), align_items: AlignItems::FlexStart, padding: UiRect::all(px(3)) }
-        Children [
-            @FeathersTextInput
-            Field(kind, generation)
-            InitialText(initial)
-            EditableText { visible_lines: {Some(lines)}, allow_newlines: {lines > 1.0} }
-            TextLayout { linebreak: LineBreak::WordBoundary }
-        ]
-    }
+    text_input(lines, bsn! { Field(kind, generation) InitialText(initial) })
 }
 
-fn label_text(kind: LabelKind, text: String) -> impl Scene {
-    bsn! {
-        @caption(text)
-        FormLabel(kind)
-    }
+/// A field labelled `label` under `parent`, for the caller to fill.
+fn labelled(commands: &mut Commands, parent: Entity, label: &str) -> Entity {
+    commands.spawn_scene(bsn! { @field(label.to_string()) }).insert(ChildOf(parent)).id()
 }
 
-fn row() -> Node {
-    Node { column_gap: px(6), align_items: AlignItems::Center, ..default() }
+/// A text field of the form, labelled, with its input in it.
+fn text_field(commands: &mut Commands, parent: Entity, label: &str, input: impl Scene) {
+    let field = labelled(commands, parent, label);
+    commands.spawn_scene(input).insert(ChildOf(field));
+}
+
+/// A dropdown of the form for `choice`, labelled, with `selected` showing.
+fn choice_field(
+    commands: &mut Commands,
+    parent: Entity,
+    label: &str,
+    choice: FormChoice,
+    options: Vec<String>,
+    selected: Option<usize>,
+) {
+    let field = labelled(commands, parent, label);
+    let max_visible = options.len();
+    commands.spawn_scene(select(options, selected, max_visible)).insert((choice, ChildOf(field)));
+}
+
+/// Sets the draft's priority or status from the dropdown that was used.
+fn on_pick(picked: On<Picked>, choices: Query<&FormChoice>, mut form: ResMut<Form>) {
+    let Ok(choice) = choices.get(picked.entity) else { return };
+    let Some(open) = &mut form.open else { return };
+    match choice {
+        FormChoice::Priority => {
+            if let Some(priority) = PRIORITIES.get(picked.index) {
+                open.draft.priority = *priority;
+            }
+        }
+        FormChoice::Status => {
+            if let Some(status) = STATUSES.get(picked.index) {
+                open.draft.status = status.to_string();
+            }
+        }
+    }
 }
 
 fn redraw_form(
     form: Res<Form>,
-    panel: Query<Entity, With<FormPanel>>,
+    forms: Query<Entity, With<FormPanel>>,
     mut commands: Commands,
     mut drawn: Local<u64>,
     mut first: Local<bool>,
@@ -484,29 +493,24 @@ fn redraw_form(
     }
     *first = true;
     *drawn = form.generation;
-    for e in &panel {
+    for e in &forms {
         commands.entity(e).despawn();
     }
     let Some(open) = &form.open else { return };
     let d = &open.draft;
     let generation = form.generation;
     let root = commands
-        .spawn((
-            Name::new("form"),
-            FormPanel,
-            GlobalZIndex(crate::widgets::layer::FORM),
-            BackgroundColor(Color::srgb(0.13, 0.13, 0.15)),
+        .spawn_scene(bsn! {
+            @panel()
             Node {
                 position_type: PositionType::Absolute,
-                left: px(40),
-                top: px(60),
-                width: px(640),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(12)),
-                row_gap: px(8),
-                ..default()
-            },
-        ))
+                left: { px(extent::FORM_LEFT) },
+                top: { px(extent::FORM_TOP) },
+                width: { px(extent::FORM_WIDTH) },
+            }
+            GlobalZIndex({ layer::FORM })
+        })
+        .insert((Name::new("form"), FormPanel))
         .id();
     let c = &mut commands;
 
@@ -516,55 +520,48 @@ fn redraw_form(
         Target::Comment { key } => format!("Comment on {key}"),
         Target::Answer { key, .. } => format!("Answer on {key}"),
     };
-    c.queue_spawn_scene(caption(heading)).insert(ChildOf(root));
+    c.spawn_scene(text(heading, size::HEADING)).insert(ChildOf(root));
 
     match &open.target {
         Target::Create | Target::Edit { .. } => {
             let creating = open.target == Target::Create;
             if creating {
-                c.queue_spawn_scene(caption("parent".to_string())).insert(ChildOf(root));
-                c.queue_spawn_scene(input(FieldKind::Parent, generation, d.parent.clone(), 1.0)).insert(ChildOf(root));
+                text_field(c, root, "Parent", input(FieldKind::Parent, generation, d.parent.clone(), 1.0));
             }
-            c.queue_spawn_scene(caption("title".to_string())).insert(ChildOf(root));
-            c.queue_spawn_scene(input(FieldKind::Title, generation, d.title.clone(), 1.0)).insert(ChildOf(root));
-            let line = c.spawn((row(), ChildOf(root))).id();
-            c.queue_spawn_scene(act_button("priority".into(), Act::CyclePriority)).insert(ChildOf(line));
-            c.queue_spawn_scene(label_text(LabelKind::Priority, format!("P{}", d.priority))).insert(ChildOf(line));
+            text_field(c, root, "Title", input(FieldKind::Title, generation, d.title.clone(), 1.0));
+            let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(root)).id();
+            let priorities = PRIORITIES.iter().map(|p| format!("P{p}")).collect();
+            let priority = PRIORITIES.iter().position(|p| *p == d.priority);
+            choice_field(c, line, "Priority", FormChoice::Priority, priorities, priority);
             if !creating {
-                c.queue_spawn_scene(act_button("status".into(), Act::CycleStatus)).insert(ChildOf(line));
-                c.queue_spawn_scene(label_text(LabelKind::Status, d.status.clone())).insert(ChildOf(line));
+                let statuses = STATUSES.iter().map(|s| s.to_string()).collect();
+                let status = STATUSES.iter().position(|s| *s == d.status);
+                choice_field(c, line, "Status", FormChoice::Status, statuses, status);
             }
-            c.queue_spawn_scene(caption("spec".to_string())).insert(ChildOf(root));
-            c.queue_spawn_scene(input(FieldKind::Description, generation, d.description.clone(), 12.0))
-                .insert(ChildOf(root));
+            text_field(c, root, "Spec", input(FieldKind::Description, generation, d.description.clone(), SPEC_LINES));
         }
         Target::Comment { .. } | Target::Answer { .. } => {
             if let Target::Answer { question, .. } = &open.target {
-                c.queue_spawn_scene(caption(format!("? {question}"))).insert(ChildOf(root));
+                c.spawn_scene(text_toned(format!("? {question}"), size::BODY, token::WARN)).insert(ChildOf(root));
             }
-            c.queue_spawn_scene(input(FieldKind::Body, generation, String::new(), 6.0)).insert(ChildOf(root));
+            let label = if matches!(open.target, Target::Answer { .. }) { "Answer" } else { "Comment" };
+            text_field(c, root, label, input(FieldKind::Body, generation, String::new(), BODY_LINES));
         }
     }
 
-    let line = c.spawn((row(), ChildOf(root))).id();
-    c.queue_spawn_scene(act_button("save".into(), Act::Save)).insert(ChildOf(line));
-    c.queue_spawn_scene(act_button("cancel".into(), Act::Cancel)).insert(ChildOf(line));
-    c.queue_spawn_scene(label_text(LabelKind::Message, form.message.clone())).insert(ChildOf(line));
+    let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(root)).id();
+    c.spawn_scene(bsn! { @button("Save", None, ButtonVariant::Primary) Act::Save }).insert(ChildOf(line));
+    c.spawn_scene(bsn! { @button("Cancel", None, ButtonVariant::Normal) Act::Cancel }).insert(ChildOf(line));
+    c.spawn_scene(text_dim(form.message.clone(), size::SECONDARY)).insert((FormMessage, ChildOf(line)));
 }
 
-fn update_labels(form: Res<Form>, mut labels: Query<(&FormLabel, &mut Text)>) {
+fn update_message(form: Res<Form>, mut messages: Query<&mut Text, With<FormMessage>>) {
     if !form.is_changed() {
         return;
     }
-    let Some(open) = &form.open else { return };
-    for (FormLabel(kind), mut text) in &mut labels {
-        let value = match kind {
-            LabelKind::Priority => format!("P{}", open.draft.priority),
-            LabelKind::Status => open.draft.status.clone(),
-            LabelKind::Message => form.message.clone(),
-        };
-        if text.0 != value {
-            text.0 = value;
+    for mut text in &mut messages {
+        if text.0 != form.message {
+            text.0.clone_from(&form.message);
         }
     }
 }
@@ -637,11 +634,24 @@ mod tests {
         assert_eq!(body(&r), &json!({"answer": "sqlite"}));
     }
 
+    /// Picks `index` in the form's dropdown for `choice`, as a click on its row does.
+    fn pick(app: &mut App, choice: FormChoice, index: usize) {
+        let select = app.world_mut().spawn(choice).id();
+        app.world_mut().trigger(Picked { entity: select, index });
+        app.update();
+    }
+
     #[test]
-    fn step_wraps() {
-        assert_eq!(step(&PRIORITIES, &4), 1);
-        assert_eq!(step(&PRIORITIES, &2), 3);
-        assert_eq!(step(&PRIORITIES, &99), 1);
+    fn the_dropdowns_set_the_priority_and_the_status() {
+        let mut app = app();
+        press(&mut app, Act::Edit("TRAIL-7".into()));
+        pick(&mut app, FormChoice::Priority, 0);
+        pick(&mut app, FormChoice::Status, 1);
+        let draft = app.world().resource::<Form>().open.as_ref().unwrap().draft.clone();
+        assert_eq!((draft.priority, draft.status.as_str()), (1, "in_progress"));
+        // A row past the end of the options changes nothing.
+        pick(&mut app, FormChoice::Priority, 99);
+        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.priority, 1);
     }
 
     fn app() -> App {
@@ -684,7 +694,7 @@ mod tests {
         assert_eq!(app.world().resource::<Form>().message, "nothing changed");
         assert!(app.world().resource::<Outbox>().is_empty());
 
-        press(&mut app, Act::CycleStatus);
+        pick(&mut app, FormChoice::Status, 1);
         assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.status, "in_progress");
         press(&mut app, Act::Save);
         assert!(app.world().resource::<Form>().saving);

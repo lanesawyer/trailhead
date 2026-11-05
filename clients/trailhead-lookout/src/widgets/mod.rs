@@ -7,6 +7,8 @@
 //! Which widget for what:
 //! - A button with words (and maybe an icon): [`button`]. Icon only, with a hint: [`tool_button`].
 //! - A button that opens a menu: [`icon_menu`], then fill its popup; [`close_menu_holding`] when an item is done.
+//! - A small chip with an icon and a word (a gate's state): [`badge`].
+//! - A text input, one line or several: [`text_input`], inside a [`field`].
 //! - A choice from a fixed set: [`select`], and observe [`Picked`].
 //! - Text: [`text`], [`text_dim`], [`text_toned`] at a [`size`]. A button's caption: [`button_text`].
 //! - An icon in text: [`icon_text`]; as a button's caption: [`button_icon`].
@@ -14,14 +16,16 @@
 //! - A hint over anything: put a [`Hint`] on it.
 //! - Colors: [`token`] (Lookout's) and `bevy::feathers::tokens` (the controls'); a status column's: [`status_token`].
 //! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`].
-//! - Gaps, padding, margins: [`space`]. Corners: [`radius`].
+//! - Gaps, padding, margins: [`space`]. Corners: [`radius`]. Panel widths and offsets: [`extent`].
 
 use bevy::prelude::*;
 
+mod badge;
 mod buttons;
 mod containers;
 mod hint;
 mod icons;
+mod input;
 pub mod layer;
 mod menu;
 mod scroll;
@@ -30,14 +34,16 @@ mod spacing;
 mod text;
 mod theme;
 
-pub use buttons::{button, button_text, tool_button};
+pub use badge::badge;
+pub use buttons::{button, button_text, danger_button, tool_button};
 pub use containers::{field, panel, row, section};
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
+pub use input::text_input;
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu};
 pub use scroll::ScrollBoth;
 pub use select::{Picked, select};
-pub use spacing::{radius, space};
+pub use spacing::{extent, radius, space};
 pub use text::{size, text, text_dim, text_toned};
 pub use theme::{props as theme_props, status_token, theme, token};
 

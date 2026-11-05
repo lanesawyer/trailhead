@@ -53,6 +53,18 @@ pub mod radius {
     pub const PANEL: f32 = 6.0;
 }
 
+/// How big a panel is and where it sits.
+pub mod extent {
+    /// The inspector's width, down the right of the window.
+    pub const INSPECTOR_WIDTH: f32 = 360.0;
+    /// A task form's width.
+    pub const FORM_WIDTH: f32 = 640.0;
+    /// How far a task form sits from the window's left edge.
+    pub const FORM_LEFT: f32 = 40.0;
+    /// How far a task form sits from the window's top edge.
+    pub const FORM_TOP: f32 = 60.0;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{space, step};
@@ -61,7 +73,7 @@ mod tests {
 
     /// Views written before the kit, each moved onto it by its own task (TRAIL-798 to TRAIL-801). Take a file off
     /// this list when it's moved; nothing new goes on it.
-    const NOT_YET_ON_THE_KIT: [&str; 4] = ["board.rs", "author.rs", "inspector.rs", "connect.rs"];
+    const NOT_YET_ON_THE_KIT: [&str; 1] = ["board.rs"];
 
     #[test]
     fn every_space_is_a_step() {

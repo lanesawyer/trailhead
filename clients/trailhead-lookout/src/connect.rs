@@ -2,15 +2,15 @@
 //! the server asks for one, and copy the `trailhead factory allow` command for this Lookout.
 
 use bevy::clipboard::Clipboard;
-use bevy::feathers::controls::{FeathersButton, FeathersTextInput, FeathersTextInputContainer};
-use bevy::feathers::display::caption;
+use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
-use bevy::scene::{Scene, bsn};
+use bevy::scene::bsn;
 use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
 
 use crate::connection::{Connection, ConnectionStatus, LocalEndpoint, SendNet};
 use crate::net::{NetCommand, Reason};
+use crate::widgets::{Icon, button, field, layer, panel, row, size, text_dim, text_input, tool_button};
 
 /// A text field on the connect panel.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,67 +107,59 @@ struct AllowText;
 
 fn spawn_panel(mut commands: Commands) {
     let panel = commands
-        .spawn((
-            Name::new("connect"),
-            ConnectPanel,
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(0),
-                right: px(0),
-                bottom: px(0),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(8)),
-                row_gap: px(6),
-                ..default()
-            },
-            BackgroundColor(Color::srgb(0.12, 0.12, 0.14)),
+        .spawn_scene(bsn! {
+            @panel()
+            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(0) }
             // Above the board, which fills the window and is spawned later: without this it takes every click here.
-            GlobalZIndex(crate::widgets::layer::CONNECT),
-        ))
+            GlobalZIndex({ layer::CONNECT })
+        })
+        .insert((Name::new("connect"), ConnectPanel))
         .id();
-    let target = commands.spawn((row(), ChildOf(panel))).id();
-    commands.queue_spawn_scene(label("Factory endpoint id".into())).insert(ChildOf(target));
-    commands.queue_spawn_scene(input(ConnectField::Target)).insert(ChildOf(target));
-    commands.queue_spawn_scene(button("Connect".into(), ConnectAct::Dial)).insert(ChildOf(target));
+    let target = input_row(
+        &mut commands,
+        "Factory endpoint id",
+        ConnectField::Target,
+        "Connect",
+        ConnectAct::Dial,
+        ButtonVariant::Primary,
+    );
+    commands.entity(target).insert(ChildOf(panel));
+    let token = input_row(
+        &mut commands,
+        "User token",
+        ConnectField::Token,
+        "Sign in",
+        ConnectAct::SignIn,
+        ButtonVariant::Normal,
+    );
+    commands.entity(token).insert((TokenRow, ChildOf(panel)));
 
-    let token = commands.spawn((row(), TokenRow, ChildOf(panel))).id();
-    commands.queue_spawn_scene(label("User token".into())).insert(ChildOf(token));
-    commands.queue_spawn_scene(input(ConnectField::Token)).insert(ChildOf(token));
-    commands.queue_spawn_scene(button("Sign in".into(), ConnectAct::SignIn)).insert(ChildOf(token));
-
-    let allow = commands.spawn((row(), AllowRow, ChildOf(panel))).id();
-    commands.spawn((Text::new(""), AllowText, ChildOf(allow)));
-    commands.queue_spawn_scene(button("Copy".into(), ConnectAct::CopyAllow)).insert(ChildOf(allow));
+    let allow = commands.spawn_scene(bsn! { @row() }).insert((AllowRow, ChildOf(panel))).id();
+    commands.spawn_scene(bsn! { @text_dim("", size::SECONDARY) }).insert((AllowText, ChildOf(allow)));
+    commands
+        .spawn_scene(bsn! { @tool_button(Icon::Copy, "Copy the command", ButtonVariant::Plain) })
+        .insert((ConnectAct::CopyAllow, ChildOf(allow)));
 }
 
-fn row() -> Node {
-    Node { column_gap: px(6), align_items: AlignItems::Center, ..default() }
-}
-
-fn label(text: String) -> impl Scene {
-    bsn! {
-        @caption(text)
-        Node { width: px(160) }
-    }
-}
-
-fn input(field: ConnectField) -> impl Scene {
-    bsn! {
-        @FeathersTextInputContainer
-        Node { width: px(560), padding: UiRect::all(px(3)) }
-        Children [
-            @FeathersTextInput
-            field
-        ]
-    }
-}
-
-fn button(text: String, act: ConnectAct) -> impl Scene {
-    bsn! {
-        @FeathersButton
-        act
-        Children [ @caption(text) ]
-    }
+/// A field with `label` over its input, and a button beside it, in a row. Returns the row.
+fn input_row(
+    commands: &mut Commands,
+    label: &str,
+    which: ConnectField,
+    caption: &str,
+    act: ConnectAct,
+    variant: ButtonVariant,
+) -> Entity {
+    let line = commands.spawn_scene(bsn! { @row() Node { align_items: AlignItems::FlexEnd } }).id();
+    commands
+        .spawn_scene(bsn! {
+            @field(label.to_string())
+            Node { flex_grow: 1.0 }
+            Children [ @text_input(1.0, bsn! { which }) ]
+        })
+        .insert(ChildOf(line));
+    commands.spawn_scene(bsn! { @button(caption.to_string(), None, variant) act }).insert(ChildOf(line));
+    line
 }
 
 /// Shows the panel while not live, the token row while the server wants one, and the `allow` command once known.
