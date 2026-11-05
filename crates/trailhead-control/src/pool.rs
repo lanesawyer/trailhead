@@ -157,7 +157,7 @@ impl Factory {
             p.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
             if let Some(cp) = &warm {
                 p.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
-                p.daemon.forget(&sandbox.id).await;
+                p.daemon.restored(&sandbox.id).await;
             }
             let restored = began.elapsed();
             p.compute.preflight(&sandbox.id).await?;
@@ -270,7 +270,7 @@ impl Factory {
             p.daemon.forget(&sandbox.id).await;
             return self.destroy_pooled(p, sandbox).await;
         }
-        p.daemon.forget(&sandbox.id).await;
+        p.daemon.restored(&sandbox.id).await;
         // The warm checkpoint was built for the stack the sandbox is labelled with, which isn't the current
         // `[stack]` if the config changed while it was busy: carry the label over rather than recompute it.
         let mut labels = self.pooled(Some(p), label::IDLE, Some(&warm), None);

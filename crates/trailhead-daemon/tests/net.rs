@@ -70,7 +70,10 @@ async fn spawn_daemon(
     let control_plane = trailhead_daemon::net::parse_endpoint_id(&secrets.control_plane).unwrap();
     let ep = endpoint(key, None).await;
     lookup.add_endpoint_info(ep.addr());
-    let protocol = DaemonProtocol::new(local.runner(), control_plane).attach_patience(attach_patience).build(build);
+    let protocol = DaemonProtocol::new(local.runner(), control_plane)
+        .attach_patience(attach_patience)
+        .build(build)
+        .secrets(build_id(&program.files[1].contents));
     Router::builder(ep).accept(ALPN, protocol).spawn()
 }
 
@@ -556,11 +559,31 @@ async fn a_restored_sandbox_whose_daemon_is_current_is_not_started_again() {
     // The restored container's own supervisor started the current build.
     let current = r.daemon("warm", trailhead_daemon::net::ATTACH_PATIENCE, build_id(b"daemon")).await;
     r.routers.push(current);
-    r.remote.forget(&sandbox).await;
+    r.remote.restored(&sandbox).await;
     let req = r.factory().config.prepare_request(Role::Worker, None);
     r.remote.prepare(&sandbox, req).await.unwrap();
     assert!(r.compute.programs("warm").is_empty(), "no start: the daemon was already there");
     assert_eq!(r.local.prepares_started(), 1);
+}
+
+#[tokio::test]
+async fn a_restored_sandbox_whose_daemon_has_other_secrets_is_started_again() {
+    let mut r = Rig::new().await;
+    let sandbox = r.sandbox("warm").await;
+    // The current build, but started with the secrets of an earlier factory run.
+    let program = r.remote.program(&sandbox);
+    let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
+    let ep = endpoint(trailhead_daemon::net::parse_secret_key(&secrets.secret_key).unwrap(), None).await;
+    r.lookup.add_endpoint_info(ep.addr());
+    let control_plane = trailhead_daemon::net::parse_endpoint_id(&secrets.control_plane).unwrap();
+    let protocol = DaemonProtocol::new(r.local.runner(), control_plane)
+        .build(build_id(b"daemon"))
+        .secrets(build_id(b"old secrets"));
+    r.routers.push(Router::builder(ep).accept(ALPN, protocol).spawn());
+    r.remote.restored(&sandbox).await;
+    let req = r.factory().config.prepare_request(Role::Worker, None);
+    r.remote.prepare(&sandbox, req).await.unwrap();
+    assert_eq!(r.compute.programs("warm").len(), 1, "started again, with the current secrets");
 }
 
 #[tokio::test]

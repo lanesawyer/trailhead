@@ -278,13 +278,23 @@ impl DaemonProtocol {
             runs: Arc::default(),
             preparing: Arc::default(),
             attach_patience: ATTACH_PATIENCE,
-            version: DaemonVersion { version: env!("CARGO_PKG_VERSION").into(), build: "unknown".into() },
+            version: DaemonVersion {
+                version: env!("CARGO_PKG_VERSION").into(),
+                build: "unknown".into(),
+                secrets: String::new(),
+            },
         }
     }
 
     /// Sets the build the daemon reports: [`build_id`] of its own executable.
     pub fn build(mut self, build: String) -> DaemonProtocol {
         self.version.build = build;
+        self
+    }
+
+    /// Sets the secrets the daemon reports: [`build_id`] of the secrets file it started with.
+    pub fn secrets(mut self, secrets: String) -> DaemonProtocol {
+        self.version.secrets = secrets;
         self
     }
 
@@ -662,7 +672,7 @@ pub struct RemoteDaemon {
     build: String,
     conns: Mutex<HashMap<SandboxId, Connection>>,
     /// Sandboxes restored since the daemon was last started in them: their image has a daemon that starts with the
-    /// container, which is probably the current build.
+    /// container, which is probably the current build with the secrets it was last started with.
     restored: Mutex<HashSet<SandboxId>>,
     cancels: Mutex<HashMap<SandboxId, mpsc::UnboundedSender<()>>>,
     peers: Peers,
@@ -793,13 +803,15 @@ impl RemoteDaemon {
         // A restored container starts the daemon in its image by itself. When that is the current build, starting
         // another would only upload the same files, kill it and wait for its replacement to publish its address.
         if !connected && self.restored.lock().unwrap().remove(sandbox) {
+            // The daemon reads its secrets file once, at start: reuse it only when that file is what we'd write now.
+            let secrets = self.program(sandbox).files.get(1).map(|f| build_id(&f.contents)).unwrap_or_default();
             match self.running_version(sandbox, RESTORE_PATIENCE).await {
-                Ok(Some(v)) if v.build == self.build => {
+                Ok(Some(v)) if v.build == self.build && v.secrets == secrets => {
                     tracing::info!(sandbox = %sandbox.0, version = %v.version, build = %v.build, "daemon version (started with the restored sandbox)");
                     return Ok(());
                 }
                 other => {
-                    tracing::info!(sandbox = %sandbox.0, found = ?other.map(|v| v.map(|v| v.build)), "the restored sandbox has no current daemon; starting one");
+                    tracing::info!(sandbox = %sandbox.0, found = ?other.map(|v| v.map(|v| (v.build, v.secrets == secrets))), "the restored sandbox has no current daemon with the current secrets; starting one");
                     self.disconnect(sandbox);
                 }
             }
@@ -1014,10 +1026,15 @@ impl Daemon for RemoteDaemon {
     }
 
     async fn forget(&self, sandbox: &SandboxId) {
-        self.restored.lock().unwrap().insert(sandbox.clone());
+        self.restored.lock().unwrap().remove(sandbox);
         if let Some(conn) = self.conns.lock().unwrap().remove(sandbox) {
             conn.close(0u32.into(), b"restarted");
         }
+    }
+
+    async fn restored(&self, sandbox: &SandboxId) {
+        self.forget(sandbox).await;
+        self.restored.lock().unwrap().insert(sandbox.clone());
     }
 
     async fn cancel(&self, sandbox: &SandboxId) -> Result<()> {
