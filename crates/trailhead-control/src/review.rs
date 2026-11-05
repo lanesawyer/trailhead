@@ -77,6 +77,7 @@ impl Factory {
             worker_checks: checks.to_vec(),
             blocked_hosts: self.blocked_hosts(&sandbox),
             allowed_hosts: self.allowed_hosts(),
+            env: self.config.stack.env.clone(),
             credential,
         };
         let prior = self.tracker.show(&task.key).await?.run.spend.unwrap_or_default();

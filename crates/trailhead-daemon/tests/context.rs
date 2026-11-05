@@ -94,6 +94,7 @@ fn request(key: TaskKey, repo: Repo, role: Role, pr: Option<trailhead_factory::P
         worker_checks: Vec::new(),
         blocked_hosts: Vec::new(),
         allowed_hosts: Vec::new(),
+        env: Default::default(),
         credential: Credential { agent: "factory".into(), token: String::new() },
     }
 }
