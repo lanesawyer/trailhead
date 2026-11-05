@@ -8,6 +8,7 @@ pub mod commands;
 pub mod connect;
 pub mod connection;
 pub mod factory;
+pub mod map;
 pub mod mirror;
 pub mod net;
 pub mod sync;
