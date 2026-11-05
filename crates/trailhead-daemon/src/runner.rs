@@ -95,6 +95,9 @@ const MAX_FOLLOW_UPS: usize = 10;
 
 /// The daemon's duties for one run: claim, run the harness, run checks, publish and open the PR, or review it,
 /// and record the result in the tracker as the sandbox's sub-agent.
+/// How long publishing keeps retrying a transient failure before the task is parked.
+const PUBLISH_RETRY_FOR: Duration = Duration::from_secs(10 * 60);
+
 pub struct Runner {
     pub harness: Arc<dyn Harness>,
     pub codehost: Arc<dyn CodeHost>,
@@ -281,7 +284,7 @@ impl Runner {
                 t.strip_suffix(&format!(" [{}]", req.task.key.0)).is_some_and(trailhead_factory::is_conventional)
             })
             .map(str::to_string);
-        self.codehost.publish(&req.repo, start, &req.branch, &commits).await?;
+        self.publish_with_retries(req, start, &commits).await?;
         match &req.pr {
             Some(pr) => {
                 // The PR is already open, so a note on a flaky or skipped check goes on it as a comment.
@@ -300,6 +303,31 @@ impl Runner {
                     body: format!("{summary}{notes}{}", pr_footer(req, agent)),
                 };
                 self.codehost.open_pr(&req.repo, new).await
+            }
+        }
+    }
+
+    /// Publishes, asking again after a transient failure (a 5xx, a timeout) with a growing wait, until the waits add up
+    /// to `PUBLISH_RETRY_FOR`. Anything else the host answers (a 403, a 422, a moved branch) is returned at once.
+    /// Repeating is safe: blobs and trees are content-addressed, an unreferenced commit is harmless, and the branch
+    /// ref moves last, only from `start`.
+    async fn publish_with_retries(
+        &self,
+        req: &RunRequest,
+        start: &str,
+        commits: &[trailhead_factory::Commit],
+    ) -> Result<()> {
+        let mut wait = Duration::from_secs(5);
+        let mut waited = Duration::ZERO;
+        loop {
+            match self.codehost.publish(&req.repo, start, &req.branch, commits).await {
+                Err(Error::Other(e)) if waited < PUBLISH_RETRY_FOR => {
+                    tracing::warn!(task = %req.task.key.0, error = %e, ?wait, "publishing failed; retrying");
+                    tokio::time::sleep(wait).await;
+                    waited += wait;
+                    wait = (wait * 2).min(Duration::from_secs(120));
+                }
+                done => return done,
             }
         }
     }

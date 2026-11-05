@@ -50,6 +50,9 @@ struct State {
     /// How many times `head` was asked for a PR's head.
     head_lookups: usize,
     refuse_publish: Option<String>,
+    /// Publishes still to fail with a transient error, and how many were attempted.
+    flaky_publishes: usize,
+    publish_attempts: usize,
     refuse_merge: Option<String>,
     rate_limit: Option<RateLimit>,
 }
@@ -86,6 +89,16 @@ impl FakeCodeHost {
     /// Makes every later publish fail with this message, like GitHub refusing a push.
     pub fn refuse_publish(&self, why: &str) {
         self.state.lock().unwrap().refuse_publish = Some(why.to_string());
+    }
+
+    /// Makes the next `times` publishes fail with a transient error (`Error::Other`), like a GitHub 500.
+    pub fn flaky_publish(&self, times: usize) {
+        self.state.lock().unwrap().flaky_publishes = times;
+    }
+
+    /// How many times `publish` was called.
+    pub fn publish_attempts(&self) -> usize {
+        self.state.lock().unwrap().publish_attempts
     }
 
     /// Makes every later merge refused with this message, like a required check GitHub is still waiting on, until
@@ -210,6 +223,11 @@ impl CodeHost for FakeCodeHost {
 
     async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let mut s = self.state.lock().unwrap();
+        s.publish_attempts += 1;
+        if s.flaky_publishes > 0 {
+            s.flaky_publishes -= 1;
+            return Err(Error::Other("github 500 Internal Server Error on POST /repos/o/r/git/blobs: \"\"".into()));
+        }
         if let Some(why) = &s.refuse_publish {
             return Err(Error::NotFound(why.clone()));
         }

@@ -321,6 +321,36 @@ async fn a_refused_publish_parks_the_task_instead_of_redoing_the_work() {
     assert_eq!(busy(&r.compute), ["trailhead-w1"], "the sandbox keeps the finished checkout");
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_transient_publish_failure_is_retried_without_redoing_the_work() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Fix CI", "");
+    r.codehost.flaky_publish(3);
+    r.harness.push(Role::Worker, Script::new(changes()));
+
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. } | Outcome::AwaitingReview { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.codehost.publish_attempts(), 4);
+    assert_ne!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publish_that_keeps_failing_transiently_parks_the_task_after_the_retries() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Fix CI", "");
+    r.codehost.flaky_publish(usize::MAX);
+    r.harness.push(Role::Worker, Script::new(changes()));
+
+    let ran = r.factory.tick().await.unwrap();
+    assert!(
+        matches!(&ran[0].1, Outcome::Parked { reason } if reason.contains("publishing to GitHub failed")),
+        "{:?}",
+        ran[0].1
+    );
+    assert!(r.codehost.publish_attempts() > 4);
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
 #[tokio::test]
 async fn a_task_that_keeps_failing_is_parked_after_max_attempts_and_retries_see_the_last_failure() {
     let r = rig();

@@ -3,7 +3,8 @@
 //!
 //! Each stream opens with one framed [`UiRequest`] saying what it wants. [`UiRequest::Api`] turns the stream into a
 //! byte pipe to the Trailhead server's loopback port, so the UI's HTTP client (and the `/v1/events/stream` event
-//! stream) talks to a local port. The factory status snapshot and stream (TRAIL-692) are further requests.
+//! stream) talks to a local port. [`UiRequest::Status`] answers with the factory status snapshot and then its stream
+//! (TRAIL-692, TRAIL-701) as framed [`StatusFrame`]s, from whatever [`StatusFeed`] the control plane gave the protocol.
 //!
 //! Admission is a persisted [`UiAllowlist`] of endpoint ids a person added; it decides who can connect. What they can
 //! do is decided by the user's bearer token, which the server checks on every forwarded request.
@@ -17,7 +18,8 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointId};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
-use trailhead_factory::{Error, Result};
+use tokio::sync::{broadcast, mpsc};
+use trailhead_factory::{Error, FactorySnapshot, Result, Sequenced};
 
 use crate::net::{io_err, parse_endpoint_id, pipe, read_frame, write_frame};
 
@@ -35,6 +37,49 @@ const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 pub enum UiRequest {
     /// The rest of the stream is raw bytes to and from the Trailhead server.
     Api,
+    /// The stream carries [`StatusFrame`]s: a snapshot of every repo, then each event after it, until either side
+    /// closes it.
+    Status,
+}
+
+/// One repo's snapshot in a [`StatusFrame::Snapshot`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepoSnapshot {
+    pub repo: String,
+    #[serde(flatten)]
+    pub snapshot: FactorySnapshot,
+}
+
+/// A frame the control plane sends on a [`UiRequest::Status`] stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "frame", rename_all = "snake_case")]
+pub enum StatusFrame {
+    /// Always first. Each repo's `seq` is the last event it includes.
+    Snapshot { repos: Vec<RepoSnapshot> },
+    Event {
+        repo: String,
+        #[serde(flatten)]
+        event: Sequenced,
+    },
+}
+
+/// One repo's status as the control plane keeps it: a snapshot and the events after it.
+pub struct RepoFeed {
+    pub repo: String,
+    pub snapshot: FactorySnapshot,
+    pub events: broadcast::Receiver<Sequenced>,
+}
+
+/// Where the control plane's status comes from, so this crate needn't know the control plane's types.
+pub trait StatusFeed: Send + Sync + 'static {
+    /// Every repo's snapshot with a receiver for the events after it.
+    fn subscribe(&self) -> Vec<RepoFeed>;
+}
+
+impl std::fmt::Debug for dyn StatusFeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StatusFeed")
+    }
 }
 
 /// Why a stream was reset: the first frame wasn't a request this control plane knows.
@@ -116,12 +161,63 @@ impl UiAllowlist {
 pub struct UiProtocol {
     server: SocketAddr,
     allowed: Arc<UiAllowlist>,
+    status: Option<Arc<dyn StatusFeed>>,
 }
 
 impl UiProtocol {
     pub fn new(server: SocketAddr, allowed: UiAllowlist) -> UiProtocol {
-        UiProtocol { server, allowed: Arc::new(allowed) }
+        UiProtocol { server, allowed: Arc::new(allowed), status: None }
     }
+
+    /// Serves [`UiRequest::Status`] from `feed`; without one that request is refused.
+    pub fn with_status(mut self, feed: Arc<dyn StatusFeed>) -> UiProtocol {
+        self.status = Some(feed);
+        self
+    }
+}
+
+/// Sends the snapshot, then every event, until the UI goes away or the feed ends.
+async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStream) {
+    let feeds = feed.subscribe();
+    let repos = feeds.iter().map(|f| RepoSnapshot { repo: f.repo.clone(), snapshot: f.snapshot.clone() }).collect();
+    if write_frame(&mut send, &StatusFrame::Snapshot { repos }).await.is_err() {
+        return;
+    }
+    let (tx, mut rx) = mpsc::channel(256);
+    // Dropped with this function, which stops the forwarding.
+    let mut forwards = tokio::task::JoinSet::new();
+    for RepoFeed { repo, mut events, .. } in feeds {
+        let tx = tx.clone();
+        forwards.spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(event) => {
+                        if tx.send(StatusFrame::Event { repo: repo.clone(), event }).await.is_err() {
+                            return;
+                        }
+                    }
+                    // Too slow to keep up: it misses some, which shows in the numbering.
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+    }
+    drop(tx);
+    loop {
+        tokio::select! {
+            frame = rx.recv() => match frame {
+                Some(frame) => {
+                    if write_frame(&mut send, &frame).await.is_err() {
+                        return;
+                    }
+                }
+                None => break,
+            },
+            _ = send.stopped() => return,
+        }
+    }
+    let _ = send.finish();
 }
 
 impl ProtocolHandler for UiProtocol {
@@ -132,13 +228,19 @@ impl ProtocolHandler for UiProtocol {
             return Ok(());
         }
         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-            let server = self.server;
+            let (server, status) = (self.server, self.status.clone());
             tokio::spawn(async move {
                 match read_frame::<UiRequest>(&mut recv).await {
                     Ok(Some(UiRequest::Api)) => match TcpStream::connect(server).await {
                         Ok(tcp) => pipe(send, recv, tcp).await,
                         Err(e) => {
                             tracing::warn!(%server, error = %e, "can't reach the Trailhead server");
+                            let _ = send.reset(BAD_REQUEST.into());
+                        }
+                    },
+                    Ok(Some(UiRequest::Status)) => match status {
+                        Some(feed) => serve_status(feed.as_ref(), send).await,
+                        None => {
                             let _ = send.reset(BAD_REQUEST.into());
                         }
                     },
@@ -151,6 +253,37 @@ impl ProtocolHandler for UiProtocol {
             });
         }
         Ok(())
+    }
+}
+
+/// Dials the control plane's `trailhead/ui/0`, giving up after a while.
+pub async fn dial_ui(endpoint: &Endpoint, control_plane: EndpointId) -> Result<Connection> {
+    let dial = endpoint.connect(control_plane, UI_ALPN);
+    tokio::time::timeout(DIAL_TIMEOUT, dial)
+        .await
+        .map_err(|_| Error::Other("dialing the control plane timed out".into()))?
+        .map_err(io_err)
+}
+
+/// A UI's end of a [`UiRequest::Status`] stream.
+pub struct StatusStream {
+    recv: iroh::endpoint::RecvStream,
+    // Held so the connection lives as long as the stream is read.
+    _conn: Connection,
+}
+
+impl StatusStream {
+    /// Asks for the status on a new stream. A control plane with none to serve resets it, which shows up as an error
+    /// from [`next`](Self::next).
+    pub async fn open(conn: Connection) -> Result<StatusStream> {
+        let (mut send, recv) = conn.open_bi().await.map_err(io_err)?;
+        write_frame(&mut send, &UiRequest::Status).await?;
+        Ok(StatusStream { recv, _conn: conn })
+    }
+
+    /// The next frame, or `None` when the control plane ended the stream cleanly.
+    pub async fn next(&mut self) -> Result<Option<StatusFrame>> {
+        read_frame(&mut self.recv).await
     }
 }
 
@@ -223,5 +356,24 @@ mod tests {
     #[test]
     fn requests_are_tagged_so_status_can_join_them() {
         assert_eq!(serde_json::to_string(&UiRequest::Api).unwrap(), r#"{"op":"api"}"#);
+        assert_eq!(serde_json::to_string(&UiRequest::Status).unwrap(), r#"{"op":"status"}"#);
+    }
+
+    #[test]
+    fn status_frames_round_trip() {
+        use trailhead_factory::{ControlState, FactoryEvent, TaskKey};
+        let snapshot =
+            FactorySnapshot { control: ControlState::Up, last_error: None, sandboxes: vec![], runs: vec![], seq: 4 };
+        let frames = [
+            StatusFrame::Snapshot { repos: vec![RepoSnapshot { repo: "a/b".into(), snapshot }] },
+            StatusFrame::Event {
+                repo: "a/b".into(),
+                event: Sequenced { seq: 5, event: FactoryEvent::RunEnded { task: TaskKey("TRAIL-1".into()) } },
+            },
+        ];
+        for frame in frames {
+            let text = serde_json::to_string(&frame).unwrap();
+            assert_eq!(serde_json::from_str::<StatusFrame>(&text).unwrap(), frame, "{text}");
+        }
     }
 }

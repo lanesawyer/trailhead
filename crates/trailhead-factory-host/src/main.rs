@@ -388,7 +388,8 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
         let daemon = RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch).with_peers(peers.clone());
         targets.push((target, compute, Arc::new(daemon)));
     }
-    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths));
+    let feed = surface::BoardFeed::default();
+    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths)).with_status(Arc::new(feed.clone()));
     let tunnel = Router::builder(endpoint.clone())
         .accept(API_ALPN, ApiTunnel::new(opts.server, peers))
         .accept(UI_ALPN, ui)
@@ -437,6 +438,7 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
         }
         repos.push(Entry { factory: Arc::new(factory), slug });
     }
+    feed.set(repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect());
     Ok(Setup { repos, tunnel, _lock: lock, store, ctx })
 }
 
