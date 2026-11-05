@@ -56,6 +56,8 @@ pub struct FakeWorkspace {
     prepare_gate: Mutex<Option<Arc<Notify>>>,
     /// How long each later prepare takes, on tokio's clock.
     prepare_takes: Mutex<Duration>,
+    /// Install hosts `install_hosts` names on top of the real ones, as a confused or compromised daemon would.
+    extra_install_hosts: Mutex<Vec<InstallHost>>,
 }
 
 #[async_trait]
@@ -66,7 +68,9 @@ impl Workspace for FakeWorkspace {
 
     async fn install_hosts(&self, req: &PrepareRequest) -> Result<Vec<InstallHost>> {
         let stack: Vec<String> = req.tools.keys().cloned().collect();
-        trailhead_daemon::install_hosts_for(&stack, &req.tool_hosts, false)
+        let mut hosts = trailhead_daemon::install_hosts_for(&stack, &req.tool_hosts, false)?;
+        hosts.extend(self.extra_install_hosts.lock().unwrap().clone());
+        Ok(hosts)
     }
 
     async fn prepare(&self, req: &PrepareRequest) -> Result<()> {
@@ -339,6 +343,12 @@ impl LocalDaemon {
     /// Makes every later prepare take `takes` on tokio's clock, for a test with paused time.
     pub fn prepare_takes(&self, takes: Duration) {
         *self.workspace.prepare_takes.lock().unwrap() = takes;
+    }
+
+    /// Makes `install_hosts` also ask for `host` on behalf of `tool`, whether or not the control plane allows it.
+    pub fn add_install_host(&self, host: &str, tool: &str) {
+        let need = InstallHost { host: host.into(), tool: tool.into() };
+        self.workspace.extra_install_hosts.lock().unwrap().push(need);
     }
 
     /// Prepares the workspace has begun, including ones still running.
