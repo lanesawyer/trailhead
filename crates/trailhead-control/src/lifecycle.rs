@@ -19,7 +19,7 @@ impl Factory {
     /// One attempt at a task on the first target with room, or `Error::Unavailable` when none has any.
     pub async fn run_task(&self, task: &Task) -> Result<Outcome> {
         let mut survey = self.survey().await;
-        let Some(target) = self.place(&mut survey) else {
+        let Some(target) = self.place_task(&mut survey, task) else {
             return Err(Error::Unavailable(messages::no_target_has_room(&task.key.0)));
         };
         let place = self.hold(&task.key, Role::Worker, target);
