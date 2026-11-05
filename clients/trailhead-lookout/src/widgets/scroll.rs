@@ -37,6 +37,29 @@ pub(super) fn on_both_scroll(
     scroll.propagate(false);
 }
 
+/// Marks an area that scrolls down only, such as a board column. Shift + wheel is left for the area around it (a
+/// [`ScrollBoth`] board), so a column doesn't trap the sideways scroll. Give it `overflow: Overflow::scroll_y()`.
+#[derive(Component, Clone, Default)]
+#[require(ScrollPosition)]
+pub struct ScrollDown;
+
+pub(super) fn on_down_scroll(
+    mut scroll: On<PointerScroll>,
+    keys: Res<ButtonInput<KeyCode>>,
+    per_line: Res<MouseScrollPixelsPerLine>,
+    mut areas: Query<(&ComputedNode, &mut ScrollPosition), With<ScrollDown>>,
+) {
+    if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+        return;
+    }
+    let Ok((computed, mut position)) = areas.get_mut(scroll.entity) else { return };
+    let scale = computed.inverse_scale_factor;
+    let visible = (computed.size() - computed.scrollbar_size) * scale;
+    let range = (computed.content_size() * scale - visible).max(Vec2::ZERO);
+    position.y = scrolled(position.y, scroll.to_pixels(&per_line).y, range.y);
+    scroll.propagate(false);
+}
+
 /// Which way a wheel turn moves the area: with Shift held, a vertical turn goes sideways.
 fn wheel(shift: bool, wheel: Vec2) -> Vec2 {
     if shift && wheel.x == 0.0 { Vec2::new(wheel.y, 0.0) } else { wheel }
