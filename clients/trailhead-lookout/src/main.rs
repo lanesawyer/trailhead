@@ -1,4 +1,6 @@
 use bevy::feathers::FeathersPlugins;
+use bevy::feathers::dark_theme::create_dark_theme;
+use bevy::feathers::theme::UiTheme;
 use bevy::prelude::*;
 use trailhead_lookout::LookoutPlugin;
 use trailhead_lookout::author::{AuthorUiPlugin, Authoring};
@@ -24,6 +26,8 @@ fn main() {
             }),
         )
         .add_plugins(FeathersPlugins)
+        // Without a theme every feathers color is missing, and feathers draws missing ones in fuchsia.
+        .insert_resource(UiTheme(create_dark_theme()))
         .add_plugins(ConnectionPlugin::new(config, target))
         .add_plugins((LookoutPlugin, BoardUiPlugin, AuthorUiPlugin))
         .add_systems(Startup, |mut authoring: ResMut<Authoring>| {
