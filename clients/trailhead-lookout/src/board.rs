@@ -12,7 +12,7 @@ use bevy::feathers::controls::{ButtonVariant, FeathersButton};
 use bevy::feathers::display::caption;
 use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
-use bevy::ui_widgets::Activate;
+use bevy::ui_widgets::{Activate, ControlOrientation};
 use serde_json::Value;
 
 use crate::author::{Act, act_button};
@@ -586,6 +586,7 @@ fn redraw(
             ChildOf(panel),
         ))
         .id();
+    commands.queue_spawn_scene(widgets::scrollbar(columns, ControlOrientation::Horizontal)).insert(ChildOf(panel));
     for column in &view.columns {
         let (cards, hidden) = visible(&column.cards, shown.limit(&column.status));
         let col = widgets::column(

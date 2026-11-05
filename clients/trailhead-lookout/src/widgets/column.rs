@@ -3,20 +3,14 @@
 //! The column is fixed-width and as tall as the board; its body scrolls down on its own, with a feathers scrollbar
 //! laid over its right edge. [`column`] spawns the shell, header and body and returns the body, to put cards in.
 
-use bevy::ecs::template::EntityTemplate;
-use bevy::feathers::controls::FeathersScrollbar;
 use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::prelude::*;
 use bevy::ui_widgets::ControlOrientation;
 
-use super::{ScrollDown, radius, size, space, status_token, text, text_dim};
+use super::{ScrollDown, radius, scrollbar, size, space, status_token, text, text_dim};
 
 /// How wide every column is.
 pub const COLUMN_WIDTH: f32 = 260.0;
-
-/// How wide the scrollbar is, and how far in from the column's edge.
-const SCROLLBAR_WIDTH: f32 = 6.0;
-const SCROLLBAR_EDGE: f32 = 2.0;
 
 /// Spawns the column for `status` under `parent`: the header with `count`, the body scrolled to `scroll`, and the
 /// body's scrollbar. Returns the body, to put cards in.
@@ -54,25 +48,8 @@ pub fn column(commands: &mut Commands, parent: Entity, status: &str, count: usiz
             ChildOf(shell),
         ))
         .id();
-    commands.queue_spawn_scene(column_scrollbar(body)).insert(ChildOf(shell));
+    commands.queue_spawn_scene(scrollbar(body, ControlOrientation::Vertical)).insert(ChildOf(shell));
     body
-}
-
-/// The vertical scrollbar of the column body `target`. Spawn it into the column's shell, after the body.
-fn column_scrollbar(target: Entity) -> impl Scene {
-    bsn! {
-        @FeathersScrollbar {
-            @target: { EntityTemplate::from(target) },
-            @orientation: { ControlOrientation::Vertical },
-        }
-        Node {
-            position_type: PositionType::Absolute,
-            right: { px(SCROLLBAR_EDGE) },
-            top: { px(0) },
-            bottom: { px(0) },
-            width: { px(SCROLLBAR_WIDTH) },
-        }
-    }
 }
 
 /// The header: the status's name and how many cards it holds.
