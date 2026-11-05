@@ -186,6 +186,10 @@ pub struct DaemonVersion {
     /// SHA-256 of the daemon's executable, hex. The control plane compares it with the binary it uploads, so
     /// it catches a stale process as well as a stale protocol.
     pub build: String,
+    /// SHA-256 of the secrets file the daemon started with, hex; empty from a daemon that predates it. The
+    /// control plane compares it with the file it would write, since a daemon reads that file once.
+    #[serde(default)]
+    pub secrets: String,
 }
 
 /// Daemon to control plane: `Event`s while a run streams, then exactly one of the rest.
@@ -298,8 +302,12 @@ pub trait Daemon: Send + Sync {
     async fn unpublished(&self, _sandbox: &SandboxId, _remote_branch: &str) -> Result<bool> {
         Ok(true)
     }
-    /// Drops any connection to the sandbox's daemon, after something (a restore) restarted it.
+    /// Drops any connection to the sandbox's daemon, after something restarted it or is about to destroy it.
     async fn forget(&self, _sandbox: &SandboxId) {}
+    /// Drops any connection to the sandbox's daemon, after a restore: its image may start a daemon by itself.
+    async fn restored(&self, sandbox: &SandboxId) {
+        self.forget(sandbox).await;
+    }
     /// Runs one agent step in the sandbox, streaming events, until it finishes or is cancelled.
     async fn run(&self, sandbox: &SandboxId, req: RunRequest, events: EventSink) -> Result<RunReport>;
     /// Follows a run this control plane didn't start, or lost track of in a restart: the daemon replays the run's
