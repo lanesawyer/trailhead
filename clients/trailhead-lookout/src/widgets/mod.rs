@@ -7,6 +7,8 @@
 //! Which widget for what:
 //! - A button with words (and maybe an icon): [`button`]. Icon only, with a hint: [`tool_button`].
 //! - A button that opens a menu: [`icon_menu`], then fill its popup; [`close_menu_holding`] when an item is done.
+//! - A small chip with an icon and a word (a gate's state): [`badge`].
+//! - A text input, one line or several: [`text_input`], inside a [`field`].
 //! - A choice from a fixed set: [`select`], and observe [`Picked`].
 //! - Text: [`text`], [`text_dim`], [`text_toned`] at a [`size`]. A button's caption: [`button_text`].
 //! - An icon in text: [`icon_text`]; as a button's caption: [`button_icon`].
@@ -20,7 +22,7 @@
 //! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
 //! - A board column: [`column_shell`], [`column_header`], [`column_frame`], [`column_body`], [`column_scrollbar`]; [`column_empty`] for none.
 //! - Children that follow a list of keyed view models without respawning: [`Keyed`].
-//! - Gaps, padding, margins: [`space`]. Corners: [`radius`].
+//! - Gaps, padding, margins: [`space`]. Corners: [`radius`]. Panel widths and offsets: [`extent`].
 
 use bevy::prelude::*;
 
@@ -32,6 +34,7 @@ mod column;
 mod containers;
 mod hint;
 mod icons;
+mod input;
 mod keyed;
 pub mod layer;
 mod menu;
@@ -43,7 +46,7 @@ mod text;
 mod theme;
 
 pub use badge::badge;
-pub use buttons::{button, button_text, tool_button};
+pub use buttons::{button, button_text, danger_button, tool_button};
 pub use card::{TITLE_LINES, card, card_row, card_title, card_under};
 pub use chip::chip;
 pub use column::{
@@ -53,12 +56,13 @@ pub use column::{
 pub use containers::{field, panel, row, section};
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
+pub use input::text_input;
 pub use keyed::Keyed;
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu};
 pub use scroll::{ScrollBoth, ScrollDown};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
 pub use select::{Picked, select};
-pub use spacing::{radius, space};
+pub use spacing::{extent, radius, space};
 pub use text::{size, text, text_dim, text_toned};
 pub use theme::{props as theme_props, status_token, theme, token};
 

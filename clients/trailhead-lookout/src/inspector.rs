@@ -13,20 +13,24 @@
 
 use std::collections::HashMap;
 
-use bevy::feathers::controls::FeathersButton;
-use bevy::feathers::display::caption;
+use bevy::feathers::controls::ButtonVariant;
+use bevy::feathers::tokens;
 use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::Activate;
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::author::{Act, act_button};
+use crate::author::Act;
 use crate::board::Input;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::{Connection, ConnectionStatus};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
 use crate::sync::SyncItem;
+use crate::widgets::{
+    Icon, Picked, badge, button, danger_button, extent, layer, panel, row, section, select, size, text, text_dim,
+    text_toned, token, tool_button,
+};
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -38,7 +42,7 @@ pub enum Subject {
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct Selection(pub Option<Subject>);
 
-/// How far back "revert" goes, in hours; stepped through by its button.
+/// How far back "revert" goes, in hours; one of [`WINDOWS`], picked from a dropdown.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RevertWindow(pub i64);
 
@@ -49,11 +53,6 @@ impl Default for RevertWindow {
 }
 
 const WINDOWS: [i64; 4] = [1, 6, 24, 72];
-
-/// The next window after `hours`, wrapping.
-pub fn next_window(hours: i64) -> i64 {
-    WINDOWS.iter().position(|w| *w == hours).map_or(WINDOWS[0], |i| WINDOWS[(i + 1) % WINDOWS.len()])
-}
 
 /// One thing the inspector can do.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -117,6 +116,8 @@ pub struct InspectorView {
     pub pr: Option<PrPanel>,
     /// Shown instead of a merge control: who finishes the task.
     pub merge_note: Option<String>,
+    /// The task's own status; none for an agent.
+    pub status: Option<String>,
     pub actions: Vec<Action>,
 }
 
@@ -189,6 +190,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
                 questions: Vec::new(),
                 pr: None,
                 merge_note: None,
+                status: None,
                 actions: vec![Action::Revert(1)],
             })
         }
@@ -256,6 +258,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
                 questions,
                 pr,
                 merge_note,
+                status: Some(status.to_string()),
                 actions,
             })
         }
@@ -418,6 +421,7 @@ impl Plugin for InspectorPlugin {
             // Registering a message twice is a no-op, so these are safe beside the mirror's and commands' own.
             .add_message::<SyncItem>()
             .add_message::<CommandDone>()
+            .add_observer(on_pick)
             .add_systems(Update, (track_events, rebuild, settle).chain());
     }
 }
@@ -437,31 +441,57 @@ impl Plugin for InspectorUiPlugin {
 #[derive(Component)]
 struct InspectorPanel;
 
-fn spawn_panel(mut commands: Commands) {
-    commands.spawn((
-        Name::new("inspector"),
-        InspectorPanel,
-        Node {
-            position_type: PositionType::Absolute,
-            right: px(0),
-            top: px(0),
-            width: px(360),
-            height: percent(100),
-            flex_direction: FlexDirection::Column,
-            padding: UiRect::all(px(8)),
-            row_gap: px(6),
-            display: Display::None,
-            ..default()
-        },
-        BackgroundColor(Color::srgb(0.1, 0.1, 0.12)),
-        // Above the board, which fills the window and is spawned later, so it would take every click here; below
-        // the form (10) that "answer" opens.
-        GlobalZIndex(crate::widgets::layer::INSPECTOR),
-    ));
+/// The dropdown that moves a task to another status: `statuses[i]` is what its option `i` means, the task's own
+/// status first. Its answer shows beside it on `source`.
+#[derive(Component, Debug, Clone)]
+struct StatusMove {
+    source: Entity,
+    subject: Subject,
+    statuses: Vec<String>,
 }
 
-fn line(commands: &mut Commands, parent: Entity, text: String, color: Color) {
-    commands.spawn((Text::new(text), TextColor(color), ChildOf(parent)));
+/// The dropdown that sets how far back "revert" goes.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct WindowChoice;
+
+fn spawn_panel(mut commands: Commands) {
+    commands
+        .spawn_scene(bsn! {
+            @panel()
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(0),
+                top: px(0),
+                width: { px(extent::INSPECTOR_WIDTH) },
+                height: percent(100),
+                display: Display::None,
+            }
+            // Above the board, which fills the window and is spawned later, so it would take every click here; below
+            // the form that "answer" opens.
+            GlobalZIndex({ layer::INSPECTOR })
+        })
+        .insert((Name::new("inspector"), InspectorPanel));
+}
+
+/// What a dropdown of the panel picked: a status to move to, or how far back "revert" goes.
+fn on_pick(
+    picked: On<Picked>,
+    moves: Query<&StatusMove>,
+    windows: Query<(), With<WindowChoice>>,
+    mut window: ResMut<RevertWindow>,
+    mut commands: Commands,
+) {
+    if windows.contains(picked.entity) {
+        if let Some(hours) = WINDOWS.get(picked.index) {
+            window.0 = *hours;
+        }
+    } else if let Ok(StatusMove { source, subject, statuses }) = moves.get(picked.entity)
+        && picked.index > 0
+        && let Some(status) = statuses.get(picked.index)
+    {
+        let (source, subject, action) = (*source, subject.clone(), Action::Status(status.clone()));
+        commands.queue(move |world: &mut World| send(world, source, &subject, &action));
+    }
 }
 
 /// Builds the request when the button is pressed, from the mirror as it is then: the version for `If-Match`, the
@@ -492,26 +522,55 @@ fn send(world: &mut World, source: Entity, subject: &Subject, action: &Action) {
     }
 }
 
-fn action_button(label: String, source: Entity, subject: Subject, action: Action) -> impl Scene {
+/// Sends `action` for `subject` when the button it is on is pressed.
+fn sends(source: Entity, subject: Subject, action: Action) -> impl Scene {
     bsn! {
-        @FeathersButton
         on(move |_: On<Activate>, mut commands: Commands| {
             let (subject, action) = (subject.clone(), action.clone());
             commands.queue(move |world: &mut World| send(world, source, &subject, &action));
         })
-        Children [ @caption(label) ]
     }
 }
 
-fn plain_button(label: String, on_click: impl Fn(&mut World) + Clone + Send + Sync + 'static) -> impl Scene {
+/// Runs `on_click` when the button it is on is pressed.
+fn runs(on_click: impl Fn(&mut World) + Clone + Send + Sync + 'static) -> impl Scene {
     bsn! {
-        @FeathersButton
         on(move |_: On<Activate>, mut commands: Commands| {
             let f = on_click.clone();
             commands.queue(move |world: &mut World| f(world));
         })
-        Children [ @caption(label) ]
     }
+}
+
+/// The control for `action` on `subject`, made the first time it is asked for.
+fn control(controls: &mut Controls, commands: &mut Commands, subject: &Subject, action: &Action) -> Entity {
+    *controls.0.entry((subject.clone(), action.clone())).or_insert_with(|| commands.spawn(Control::Idle).id())
+}
+
+/// Says under `parent` where a control's command stands.
+fn note(commands: &mut Commands, parent: Entity, state: Option<&Control>) {
+    let scene: Box<dyn Scene> = match state {
+        Some(Control::Busy) => Box::new(text_dim("sending…", size::SECONDARY)),
+        Some(Control::Done) => Box::new(text_dim("done", size::SECONDARY)),
+        Some(Control::Refused(why)) => Box::new(text_toned(why.clone(), size::SECONDARY, token::DANGER)),
+        _ => return,
+    };
+    commands.spawn_scene(scene).insert(ChildOf(parent));
+}
+
+/// Whether a line of [`InspectorView::lines`] is about the run rather than the task's status.
+fn is_run_line(line: &str) -> bool {
+    line.starts_with("run:")
+}
+
+/// A section of the panel under `heading`, for the caller to fill.
+fn section_in(commands: &mut Commands, panel: Entity, heading: &str) -> Entity {
+    commands.spawn_scene(bsn! { @section(heading.to_string()) }).insert(ChildOf(panel)).id()
+}
+
+/// A row under `parent` whose items wrap onto more lines when they don't fit.
+fn wrapping_row(commands: &mut Commands, parent: Entity) -> Entity {
+    commands.spawn_scene(bsn! { @row() Node { flex_wrap: FlexWrap::Wrap } }).insert(ChildOf(parent)).id()
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -544,88 +603,132 @@ fn redraw(
     };
     node.display = Display::Flex;
     let live = *connection.get() == Connection::Live;
-    let (ink, dim, warn) = if live {
-        (Color::WHITE, Color::srgb(0.7, 0.7, 0.7), Color::srgb(0.9, 0.7, 0.3))
-    } else {
-        (Color::srgb(0.45, 0.45, 0.45), Color::srgb(0.35, 0.35, 0.35), Color::srgb(0.9, 0.7, 0.3))
-    };
+    let c = &mut commands;
 
-    line(&mut commands, panel, view.title.clone(), ink);
-    commands
-        .queue_spawn_scene(plain_button("close".into(), |w: &mut World| w.resource_mut::<Selection>().0 = None))
-        .insert(ChildOf(panel));
-    for l in &view.lines {
-        line(&mut commands, panel, l.clone(), dim);
-    }
-    for q in &view.questions {
-        let row = commands
-            .spawn((Node { column_gap: px(6), align_items: AlignItems::Center, ..default() }, ChildOf(panel)))
-            .id();
-        line(&mut commands, row, format!("? {}", q.body), warn);
-        // The same form the board opens; it saves even after the inspector moves on.
-        let act = Act::Answer { key: q.key.clone(), comment_id: q.id.clone(), question: q.body.clone() };
-        let mut answer = commands.queue_spawn_scene(act_button("answer".into(), act));
-        answer.insert(ChildOf(row));
-        if !live {
-            answer.insert(InteractionDisabled);
+    let header = c.spawn_scene(bsn! { @row() }).insert(ChildOf(panel)).id();
+    c.spawn_scene(bsn! { @text(view.title.clone(), size::HEADING) Node { flex_grow: 1.0, flex_shrink: 1.0 } })
+        .insert(ChildOf(header));
+    c.spawn_scene(bsn! {
+        @tool_button(Icon::X, "Close", ButtonVariant::Plain)
+        @runs(|w: &mut World| w.resource_mut::<Selection>().0 = None)
+    })
+    .insert(ChildOf(header));
+
+    let (run, status_lines): (Vec<&String>, Vec<&String>) = view.lines.iter().partition(|l| is_run_line(l));
+    for (heading, lines) in [("Status", status_lines), ("Run", run)] {
+        if lines.is_empty() {
+            continue;
+        }
+        let section = section_in(c, panel, heading);
+        for l in lines {
+            c.spawn_scene(text(l.clone(), size::BODY)).insert(ChildOf(section));
         }
     }
-    if let Some(pr) = &view.pr {
-        let number = pr.number.map_or(String::new(), |n| format!("#{n} "));
-        line(&mut commands, panel, format!("PR {number}{}", pr.url), ink);
-        let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
-        line(&mut commands, panel, format!("{}{grade}", pr.state), dim);
-        let list = |v: &[String]| if v.is_empty() { "none".to_string() } else { v.join(", ") };
-        if !pr.passed.is_empty() || !pr.waiting.is_empty() || !pr.failing.is_empty() {
-            line(&mut commands, panel, format!("gates passed: {}", list(&pr.passed)), dim);
-            line(&mut commands, panel, format!("gates waiting: {}", list(&pr.waiting)), dim);
-            if !pr.failing.is_empty() {
-                line(&mut commands, panel, format!("failing: {}", list(&pr.failing)), warn);
+
+    if !view.questions.is_empty() {
+        let section = section_in(c, panel, "Questions");
+        for q in &view.questions {
+            let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(section)).id();
+            c.spawn_scene(
+                bsn! { @text_toned(format!("? {}", q.body), size::BODY, token::WARN) Node { flex_grow: 1.0, flex_shrink: 1.0 } },
+            )
+            .insert(ChildOf(line));
+            // The same form the board opens; it saves even after the inspector moves on.
+            let act = Act::Answer { key: q.key.clone(), comment_id: q.id.clone(), question: q.body.clone() };
+            let mut answer = c.spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonVariant::Normal) });
+            answer.insert((act, ChildOf(line)));
+            if !live {
+                answer.insert(InteractionDisabled);
+            }
+            let resolve = Action::Resolve(q.id.clone());
+            let source = control(&mut controls, c, &view.subject, &resolve);
+            let mut button = c.spawn_scene(bsn! {
+                @tool_button(Icon::Check, "Resolve without an answer", ButtonVariant::Normal)
+                @sends(source, view.subject.clone(), resolve.clone())
+            });
+            button.insert(ChildOf(line));
+            if !live {
+                button.insert(InteractionDisabled);
+            }
+            note(c, section, states.get(source).ok());
+        }
+    }
+
+    if view.pr.is_some() || view.merge_note.is_some() {
+        let section = section_in(c, panel, "Pull request");
+        if let Some(pr) = &view.pr {
+            let number = pr.number.map_or(String::new(), |n| format!("#{n} "));
+            c.spawn_scene(text(format!("{number}{}", pr.url), size::BODY)).insert(ChildOf(section));
+            let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
+            c.spawn_scene(text_dim(format!("{}{grade}", pr.state), size::SECONDARY)).insert(ChildOf(section));
+            if !pr.passed.is_empty() || !pr.waiting.is_empty() || !pr.failing.is_empty() {
+                let gates = wrapping_row(c, section);
+                for (names, icon, tone) in [
+                    (&pr.passed, Icon::CircleCheck, token::OK),
+                    (&pr.waiting, Icon::Circle, tokens::TEXT_DIM),
+                    (&pr.failing, Icon::CircleX, token::DANGER),
+                ] {
+                    for name in names {
+                        c.spawn_scene(badge(name.clone(), Some(icon), Some(tone.clone()))).insert(ChildOf(gates));
+                    }
+                }
+            }
+            if let Some(problem) = &pr.problem {
+                c.spawn_scene(text_toned(problem.clone(), size::BODY, token::WARN)).insert(ChildOf(section));
             }
         }
-        if let Some(problem) = &pr.problem {
-            line(&mut commands, panel, problem.clone(), warn);
+        if let Some(merge_note) = &view.merge_note {
+            c.spawn_scene(text_dim(merge_note.clone(), size::SECONDARY)).insert(ChildOf(section));
         }
-    }
-    if let Some(note) = &view.merge_note {
-        line(&mut commands, panel, note.clone(), dim);
     }
 
     if !live {
         let why = status.reason.as_ref().map_or_else(String::new, |r| format!(": {r}"));
-        line(&mut commands, panel, format!("{:?}{why}. Controls are off.", connection.get()), warn);
+        c.spawn_scene(text_toned(format!("{:?}{why}. Controls are off.", connection.get()), size::BODY, token::WARN))
+            .insert(ChildOf(panel));
         return;
     }
 
+    let section = section_in(c, panel, "Actions");
+    // One dropdown for every status the task can move to, the current one showing.
+    let moves: Vec<String> =
+        view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(st.clone()) } else { None }).collect();
+    if let (Some(current), false) = (&view.status, moves.is_empty()) {
+        let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(section)).id();
+        c.spawn_scene(text_dim("Move to", size::SECONDARY)).insert(ChildOf(line));
+        let statuses: Vec<String> = std::iter::once(current.clone()).chain(moves).collect();
+        let source = control(&mut controls, c, &view.subject, &Action::Status(String::new()));
+        let max_visible = statuses.len();
+        c.spawn_scene(select(statuses.clone(), Some(0), max_visible))
+            .insert((StatusMove { source, subject: view.subject.clone(), statuses }, ChildOf(line)));
+        note(c, line, states.get(source).ok());
+    }
     for action in &view.actions {
-        let mut action = action.clone();
-        if let Action::Revert(_) = action {
-            action = Action::Revert(window.0);
+        let action = match action {
+            Action::Status(_) | Action::Resolve(_) => continue,
+            Action::Revert(_) => Action::Revert(window.0),
+            other => other.clone(),
+        };
+        let source = control(&mut controls, c, &view.subject, &action);
+        let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(section)).id();
+        let press = sends(source, view.subject.clone(), action.clone());
+        match action {
+            Action::Release => {
+                c.spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonVariant::Normal) @{press} })
+            }
+            Action::Undo => {
+                c.spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonVariant::Normal) @{press} })
+            }
+            Action::Cancel => c.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} }),
+            _ => c.spawn_scene(bsn! { @danger_button("revert since", Some(Icon::History)) @{press} }),
         }
-        let source = *controls
-            .0
-            .entry((view.subject.clone(), action.clone()))
-            .or_insert_with(|| commands.spawn(Control::Idle).id());
-        let row = commands
-            .spawn((Node { column_gap: px(6), align_items: AlignItems::Center, ..default() }, ChildOf(panel)))
-            .id();
-        commands
-            .queue_spawn_scene(action_button(action.label(), source, view.subject.clone(), action.clone()))
-            .insert(ChildOf(row));
+        .insert(ChildOf(line));
         if matches!(action, Action::Revert(_)) {
-            commands
-                .queue_spawn_scene(plain_button("window".into(), |w: &mut World| {
-                    let mut window = w.resource_mut::<RevertWindow>();
-                    window.0 = next_window(window.0);
-                }))
-                .insert(ChildOf(row));
+            let windows = WINDOWS.iter().map(|h| format!("{h}h ago")).collect();
+            let selected = WINDOWS.iter().position(|h| *h == window.0);
+            c.spawn_scene(select(windows, selected, WINDOWS.len())).insert((WindowChoice, ChildOf(line)));
         }
-        match states.get(source) {
-            Ok(Control::Busy) => line(&mut commands, row, "sending…".into(), dim),
-            Ok(Control::Done) => line(&mut commands, row, "done".into(), dim),
-            Ok(Control::Refused(why)) => line(&mut commands, row, why.clone(), Color::srgb(0.9, 0.3, 0.3)),
-            _ => {}
-        }
+        note(c, line, states.get(source).ok());
     }
 }
 
@@ -764,11 +867,52 @@ mod tests {
     }
 
     #[test]
-    fn times_and_windows() {
+    fn times() {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
-        assert_eq!((next_window(1), next_window(72), next_window(5)), (6, 1, 1));
+    }
+
+    #[test]
+    fn the_window_dropdown_sets_how_far_back_revert_goes() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        let select = app.world_mut().spawn(WindowChoice).id();
+        app.world_mut().trigger(Picked { entity: select, index: 2 });
+        app.update();
+        assert_eq!(app.world().resource::<RevertWindow>().0, 24);
+        // A row past the end changes nothing.
+        app.world_mut().trigger(Picked { entity: select, index: 9 });
+        app.update();
+        assert_eq!(app.world().resource::<RevertWindow>().0, 24);
+    }
+
+    #[test]
+    fn the_status_dropdown_sends_the_move_and_ignores_the_current_status() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.add_message::<Submit>();
+        let f = fixture();
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 5,
+            projects: vec![],
+            tasks: f.tasks,
+            agents: vec![],
+        }));
+        app.update();
+        let source = app.world_mut().spawn(Control::Idle).id();
+        let statuses = vec!["open".to_string(), "in_progress".to_string()];
+        let select = app.world_mut().spawn(StatusMove { source, subject: Subject::Task("t8".into()), statuses }).id();
+        app.world_mut().trigger(Picked { entity: select, index: 0 });
+        app.update();
+        assert_eq!(app.world().get::<Control>(source), Some(&Control::Idle));
+        app.world_mut().trigger(Picked { entity: select, index: 1 });
+        app.update();
+        assert_eq!(app.world().get::<Control>(source), Some(&Control::Busy));
+        let sent: Vec<_> = app.world_mut().resource_mut::<Messages<Submit>>().drain().collect();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].request.path, "/v1/tasks/TRAIL-8");
+        assert_eq!(sent[0].request.body, Some(json!({"status": "in_progress"})));
     }
 
     #[test]
