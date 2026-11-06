@@ -107,7 +107,8 @@ impl Plugin for SearchPlugin {
 /// An emptied query leaves nothing of the last one.
 fn forget_when_empty(filter: Res<Filter>, mut deep: ResMut<Deep>) {
     if filter.is_changed() && filter.query.trim().is_empty() && (!deep.hits.is_empty() || deep.asked.is_some()) {
-        *deep = Deep::default();
+        // Keep the counter: a reply to an ask from before must not match a later ask's number.
+        *deep = Deep { next: deep.next, ..Deep::default() };
     }
 }
 
@@ -258,5 +259,21 @@ mod tests {
         type_query(&mut app, "");
         app.update();
         assert!(app.world().resource::<Deep>().hits.is_empty());
+    }
+
+    #[test]
+    fn an_answer_from_before_a_clear_is_not_taken_for_the_next_query() {
+        let mut app = app();
+        type_query(&mut app, "abc");
+        let (old, _) = pass(&mut app, 6).remove(0);
+        type_query(&mut app, "");
+        app.update();
+        type_query(&mut app, "xyz");
+        let (new, query) = pass(&mut app, 6).remove(0);
+        assert_eq!(query, "xyz");
+        assert_ne!(old, new);
+        app.world_mut().write_message(SearchReply { seq: old, result: Ok(vec![hit("t1", "description")]) });
+        app.update();
+        assert!(app.world().resource::<Deep>().for_query("xyz").is_empty());
     }
 }

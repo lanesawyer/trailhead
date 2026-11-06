@@ -366,6 +366,7 @@ fn matches_key_or_title(query: &str, key: &str, title: &str) -> bool {
 fn found_hint(hit: &DeepHit) -> String {
     let place = match hit.field.as_str() {
         "comment" => "comment",
+        "title" => "title",
         _ => "description",
     };
     format!("in {place}: {}", hit.snippet.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -1356,6 +1357,8 @@ mod tests {
         assert_eq!(found_hint(&hit), "in description: uses the zarr store");
         let comment = DeepHit { field: "comment".into(), ..hit };
         assert_eq!(found_hint(&comment), "in comment: uses the zarr store");
+        let title = DeepHit { field: "title".into(), ..comment };
+        assert_eq!(found_hint(&title), "in title: uses the zarr store");
     }
 
     #[test]
