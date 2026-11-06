@@ -21,6 +21,34 @@ use bevy::input::mouse::MouseScrollPixelsPerLine;
 use bevy::picking::events::PointerScroll;
 use bevy::prelude::*;
 
+use super::{SCROLLBAR_WIDTH, space};
+
+/// The node that holds a panel's scrolling body and its scrollbar, so the bar runs along the body only. It takes the
+/// height the panel has left and may shrink below its content, so the body scrolls (TRAIL-836).
+pub fn scroll_frame() -> impl Bundle {
+    (
+        Name::new("scroll frame"),
+        Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, min_height: px(0), ..default() },
+    )
+}
+
+/// The body of a panel that scrolls down on its own, wheel and touchpad, for [`super::scrollbar`] to sit beside: a
+/// column of rows with a gutter on its right for the bar. Put it in a [`scroll_frame`].
+pub fn scroll_body() -> impl Bundle {
+    (
+        Name::new("scroll body"),
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(space::ROWS),
+            min_height: px(0),
+            padding: UiRect::right(px(SCROLLBAR_WIDTH + space::SCROLLBAR_GAP)),
+            overflow: Overflow::scroll_y(),
+            ..default()
+        },
+        ScrollDown,
+    )
+}
+
 /// Marks an area that scrolls both ways.
 #[derive(Component, Clone, Default)]
 #[require(ScrollPosition)]
@@ -99,6 +127,16 @@ fn scrolled(from: f32, delta: f32, range: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scroll_body_is_held_to_its_frame_and_scrolls_down() {
+        let mut world = World::new();
+        let (frame, body) = (world.spawn(scroll_frame()).id(), world.spawn(scroll_body()).id());
+        assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0));
+        let node = world.get::<Node>(body).unwrap();
+        assert_eq!((node.min_height, node.overflow), (px(0), Overflow::scroll_y()));
+        assert!(world.get::<ScrollDown>(body).is_some());
+    }
 
     #[test]
     fn over_a_column_the_wheel_scrolls_it_down_and_shift_scrolls_the_board_across() {

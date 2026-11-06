@@ -58,7 +58,7 @@ pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
     open_modal,
 };
-pub use scroll::{ScrollBoth, ScrollDown};
+pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
 pub use select::{Picked, select};
 pub use spacing::{check as spacing_check, extent, radius, space};
