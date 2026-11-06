@@ -14,7 +14,7 @@ use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use serde_json::Value;
 
-use crate::author::Act;
+use crate::author::{Act, Authoring};
 use crate::connection::{Connection, ConnectionStatus};
 use crate::inspector::{Selection, Subject};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
@@ -137,6 +137,8 @@ pub fn choose(filter: &mut Filter, key: FilterKey, choices: &[Choice], index: us
 pub enum BadgeKind {
     Priority,
     Grade,
+    /// A task under a factory queue with no grade: the factory skips it until a person grades it.
+    NeedsGrade,
     Holder,
     /// Open questions, with their count.
     Questions,
@@ -211,6 +213,8 @@ pub struct Input<'a> {
     pub claims: &'a [Value],
     pub comments: &'a [Value],
     pub agents: &'a [Value],
+    /// The keys of the factory's queue tasks, whose subtasks the factory works.
+    pub queues: &'a [String],
 }
 
 fn s<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -254,6 +258,13 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
             vec![Badge { kind: BadgeKind::Priority, label: format!("P{priority}"), tone: priority_tone(priority) }];
         if let Some(grade) = t["grade"].as_i64() {
             badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}"), tone: None });
+        } else if !CLOSED.contains(&s(t, "status"))
+            && t["parent_id"]
+                .as_str()
+                .and_then(|p| task_key.get(p))
+                .is_some_and(|k| input.queues.iter().any(|q| q == k))
+        {
+            badges.push(Badge { kind: BadgeKind::NeedsGrade, label: "needs grade".into(), tone: Some(token::WARN) });
         }
         if let Some(holder) = holder_of.get(id) {
             badges.push(Badge { kind: BadgeKind::Holder, label: holder_badge(&holder_label(holder)), tone: None });
@@ -382,18 +393,25 @@ fn rebuild_view(
     claims: Query<&Data, With<IsClaim>>,
     comments: Query<&Data, With<IsComment>>,
     agents: Query<&Data, With<IsAgent>>,
+    authoring: Res<Authoring>,
     mut view: ResMut<BoardView>,
 ) {
     let gone = removed.read().count() > 0;
-    if !(filter.is_changed() || mirror.is_changed() || gone || !changed.is_empty()) {
+    if !(filter.is_changed() || authoring.is_changed() || mirror.is_changed() || gone || !changed.is_empty()) {
         return;
     }
     let (projects, tasks, claims, comments, agents) =
         (collect(&projects), collect(&tasks), collect(&claims), collect(&comments), collect(&agents));
-    let next = build(
-        Input { projects: &projects, tasks: &tasks, claims: &claims, comments: &comments, agents: &agents },
-        &filter,
-    );
+    let queues = [authoring.queue.clone()];
+    let input = Input {
+        projects: &projects,
+        tasks: &tasks,
+        claims: &claims,
+        comments: &comments,
+        agents: &agents,
+        queues: &queues,
+    };
+    let next = build(input, &filter);
     if *view != next {
         *view = next;
     }
@@ -572,6 +590,7 @@ pub struct BoardPlugin;
 impl Plugin for BoardPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Filter>()
+            .init_resource::<Authoring>()
             .init_resource::<BoardView>()
             .init_resource::<Shown>()
             .init_resource::<Tree>()
@@ -997,7 +1016,14 @@ mod tests {
     pub(super) fn run(filter: &Filter) -> BoardView {
         let (projects, tasks, claims, comments, agents) = input();
         build(
-            Input { projects: &projects, tasks: &tasks, claims: &claims, comments: &comments, agents: &agents },
+            Input {
+                projects: &projects,
+                tasks: &tasks,
+                claims: &claims,
+                comments: &comments,
+                agents: &agents,
+                queues: &["TRAIL-102".to_string()],
+            },
             filter,
         )
     }
@@ -1045,6 +1071,19 @@ mod tests {
         assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, "u1")]);
     }
 
+    #[test]
+    fn an_ungraded_task_under_a_factory_queue_is_flagged_and_a_graded_one_is_not() {
+        let view = run(&Filter::default());
+        // TRAIL-105 is open under the queue TRAIL-102 with no grade.
+        let flagged = badges(card(&view, "TRAIL-105"));
+        assert_eq!(flagged.last(), Some(&(BadgeKind::NeedsGrade, "needs grade")));
+        let tone = card(&view, "TRAIL-105").badges.last().unwrap().tone.clone();
+        assert_eq!(tone, Some(token::WARN));
+        // TRAIL-103 is under it too but graded; TRAIL-104 and OPS-1 are not under a queue; the queue itself isn't.
+        for key in ["TRAIL-103", "TRAIL-104", "OPS-1", "TRAIL-102"] {
+            assert!(card(&view, key).badges.iter().all(|b| b.kind != BadgeKind::NeedsGrade), "{key}");
+        }
+    }
     #[test]
     fn the_priority_badge_carries_its_priority_token_and_others_do_not() {
         let view = run(&Filter::default());
