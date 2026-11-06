@@ -223,6 +223,20 @@ pub fn settled_closed(pr_url: &str) -> String {
     format!("{pr_url} was closed")
 }
 
+/// Why a run settled without work: the conflict its rework was for is gone.
+pub fn settled_conflict_gone(pr_url: &str) -> String {
+    format!("{pr_url} no longer conflicts with its base branch")
+}
+
+/// The note on a task sent back to review instead of reworked, since the host stopped reporting its conflict.
+pub fn conflict_gone_note(pr_url: &str, base: &str) -> String {
+    format!(
+        "{pr_url} was reopened for a conflict rework, but the host now says it merges cleanly with `{base}` (the \
+         base moved back or the conflict was fixed), so there was nothing to resolve. No worker ran: the rework \
+         request was dropped and the task went back to review."
+    )
+}
+
 /// The note on a task whose worker gave up, kept as the failure the next attempt is told.
 pub fn agent_gave_up(reason: &str) -> String {
     format!("The agent gave up: {reason}")
