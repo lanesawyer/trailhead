@@ -10,6 +10,8 @@ use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::prelude::*;
 use bevy::ui_widgets::ControlOrientation;
 
+use trailhead_model::Status;
+
 use super::{SCROLLBAR_WIDTH, ScrollDown, radius, scrollbar, size, space, status_label, status_token, text, text_dim};
 
 /// How wide every column is.
@@ -20,7 +22,7 @@ pub const COLUMN_GUTTER: f32 = SCROLLBAR_WIDTH + space::SCROLLBAR_GAP;
 
 /// The shell of the column for `status`: fixed width, on the status's own background, as tall as what is in it but no
 /// taller than the board. Put the header in with [`column_header`], the [`column_frame`] under it.
-pub fn column_shell(status: &str) -> impl Bundle {
+pub fn column_shell(status: Status) -> impl Bundle {
     (
         Name::new(format!("column {status}")),
         Node {
@@ -71,7 +73,7 @@ pub fn column_scrollbar(commands: &mut Commands, frame: Entity, body: Entity) {
 pub struct ColumnCount(pub Entity);
 
 /// Puts the header, with the status's name and `count`, first in `shell`.
-pub fn column_header(commands: &mut Commands, shell: Entity, status: &str, count: usize) {
+pub fn column_header(commands: &mut Commands, shell: Entity, status: Status, count: usize) {
     let header =
         commands.spawn(Node { column_gap: px(space::CONTROLS), align_items: AlignItems::Baseline, ..default() }).id();
     commands.queue_spawn_scene(text(status_label(status), size::HEADING)).insert(ChildOf(header));
@@ -102,7 +104,7 @@ mod tests {
 
     #[test]
     fn a_column_ends_at_its_cards_and_never_passes_the_board() {
-        let node = node_of(column_shell("open"));
+        let node = node_of(column_shell(Status::Open));
         assert_eq!(node.height, Val::Auto);
         assert_eq!(node.max_height, percent(100));
         assert_eq!(node.align_self, AlignSelf::FlexStart);
@@ -114,8 +116,8 @@ mod tests {
         app.add_plugins((MinimalPlugins, AssetPlugin::default(), bevy::scene::ScenePlugin))
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>();
-        let shell = app.world_mut().spawn(column_shell("in_progress")).id();
-        column_header(&mut app.world_mut().commands(), shell, "in_progress", 3);
+        let shell = app.world_mut().spawn(column_shell(Status::InProgress)).id();
+        column_header(&mut app.world_mut().commands(), shell, Status::InProgress, 3);
         app.world_mut().flush();
         for _ in 0..3 {
             app.update();

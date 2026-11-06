@@ -11,32 +11,34 @@
 //! with `allow_newlines` and `visible_lines` set, which is all multiline takes.
 
 use bevy::feathers::controls::ButtonVariant;
-use bevy::feathers::theme::{ThemeBackgroundColor, ThemeToken};
+use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
 use reqwest::Method;
 use serde_json::{Value, json};
+use trailhead_model::{Grade, Priority, Status};
 
-use crate::board::STATUSES;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
-use crate::mirror::{Data, IsTask};
+use crate::mirror::{Data, IsTask, grade_of, priority_of, status_of};
 use crate::widgets::{
     Modal, ModalClosed, ModalLocked, ModalSlots, Picked, button, dot, field, open_modal, priority_tone, row, section,
     select, size, space, status_label, text, text_dim, text_input, token,
 };
 
+/// The priority the form starts a new task at.
+const NEW_PRIORITY: Priority = Priority::new(2).unwrap();
+
 /// The queue task new tasks go under unless the form says otherwise (`queue` in `.trailhead.toml`).
 pub const DEFAULT_QUEUE: &str = "TRAIL-102";
 
-/// Priorities a task can have, most urgent first.
-pub const PRIORITIES: [i64; 4] = [1, 2, 3, 4];
-
 /// What a task's grade can be set to, in the order of the dropdown: none, then 1 to 4.
-pub const GRADES: [Option<i64>; 5] = [None, Some(1), Some(2), Some(3), Some(4)];
+pub fn grade_choices() -> impl Iterator<Item = Option<Grade>> {
+    std::iter::once(None).chain(Grade::ALL.map(Some))
+}
 
-/// The dropdown's rows for [`GRADES`]: each grade with what it is like (`docs/factory/review.md#grades`), and where
+/// The dropdown's rows for [`grade_choices`]: each grade with what it is like (`docs/factory/review.md#grades`), and where
 /// Treeline falls (above grade 2 by default).
 pub fn grade_options() -> Vec<String> {
     [
@@ -52,8 +54,8 @@ pub fn grade_options() -> Vec<String> {
 }
 
 /// The row of [`grade_options`] that shows `grade`.
-pub fn grade_index(grade: Option<i64>) -> Option<usize> {
-    GRADES.iter().position(|g| *g == grade)
+pub fn grade_index(grade: Option<Grade>) -> Option<usize> {
+    grade_choices().position(|g| g == grade)
 }
 
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
@@ -92,10 +94,10 @@ pub enum Target {
 pub struct Draft {
     pub title: String,
     pub description: String,
-    pub priority: i64,
-    pub status: String,
-    /// The risk grade, 1 to 4; none for a task the factory won't pick up.
-    pub grade: Option<i64>,
+    pub priority: Priority,
+    pub status: Status,
+    /// None for a task the factory won't pick up.
+    pub grade: Option<Grade>,
     /// The parent's key when creating; empty for none.
     pub parent: String,
     /// A comment or an answer.
@@ -107,8 +109,8 @@ impl Default for Draft {
         Draft {
             title: String::new(),
             description: String::new(),
-            priority: 2,
-            status: "open".into(),
+            priority: NEW_PRIORITY,
+            status: Status::Open,
             grade: None,
             parent: String::new(),
             body: String::new(),
@@ -141,9 +143,9 @@ impl Open {
         let draft = Draft {
             title: text("title"),
             description: text("description"),
-            priority: task["priority"].as_i64().unwrap_or(2),
-            status: text("status"),
-            grade: task["grade"].as_i64(),
+            priority: priority_of(task).unwrap_or(NEW_PRIORITY),
+            status: status_of(task).unwrap_or(Status::Open),
+            grade: grade_of(task),
             ..Draft::default()
         };
         Open::new(target, draft)
@@ -510,11 +512,6 @@ fn text_field(commands: &mut Commands, parent: Entity, label: &str, input: impl 
     commands.queue_spawn_scene(field(label.to_string(), input)).insert(ChildOf(parent));
 }
 
-/// The tone of priority `p`, or the badge background for a number with none.
-fn priority_color(p: i64) -> ThemeToken {
-    priority_tone(p).unwrap_or(token::BADGE_BG)
-}
-
 /// A dropdown of the form for `choice`, labelled, with `selected` showing.
 fn choice_field(
     commands: &mut Commands,
@@ -527,7 +524,7 @@ fn choice_field(
     let max_visible = options.len();
     let control: Box<dyn SceneList> = match choice {
         FormChoice::Priority => {
-            let tone = priority_color(selected.and_then(|i| PRIORITIES.get(i)).copied().unwrap_or_default());
+            let tone = selected.and_then(|i| Priority::ALL.get(i)).map_or(token::BADGE_BG, |p| priority_tone(*p));
             Box::new(bsn_list! {
                 Node { align_items: AlignItems::Center, column_gap: { px(space::ICON_LABEL) } }
                 Children [
@@ -554,21 +551,21 @@ fn on_pick(
     let Some(open) = &mut form.open else { return };
     match choice {
         FormChoice::Priority => {
-            if let Some(priority) = PRIORITIES.get(picked.index) {
+            if let Some(priority) = Priority::ALL.get(picked.index) {
                 open.draft.priority = *priority;
                 for dot in &dots {
-                    commands.entity(dot).insert(ThemeBackgroundColor(priority_color(*priority)));
+                    commands.entity(dot).insert(ThemeBackgroundColor(priority_tone(*priority)));
                 }
             }
         }
         FormChoice::Status => {
-            if let Some(status) = STATUSES.get(picked.index) {
-                open.draft.status = status.to_string();
+            if let Some(status) = Status::ALL.get(picked.index) {
+                open.draft.status = *status;
             }
         }
         FormChoice::Grade => {
-            if let Some(grade) = GRADES.get(picked.index) {
-                open.draft.grade = *grade;
+            if let Some(grade) = grade_choices().nth(picked.index) {
+                open.draft.grade = grade;
             }
         }
     }
@@ -609,12 +606,12 @@ fn fill_form(new: Query<&ModalSlots, (With<FormPanel>, Added<ModalSlots>)>, form
                 }
                 text_field(c, body, "Title", input(FieldKind::Title, generation, d.title.clone(), 1.0));
                 let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(body)).id();
-                let priorities = PRIORITIES.iter().map(|p| format!("P{p}")).collect();
-                let priority = PRIORITIES.iter().position(|p| *p == d.priority);
+                let priorities = Priority::ALL.iter().map(|p| format!("P{p}")).collect();
+                let priority = Priority::ALL.iter().position(|p| *p == d.priority);
                 choice_field(c, line, "Priority", FormChoice::Priority, priorities, priority);
                 if !creating {
-                    let statuses = STATUSES.iter().map(|s| status_label(s)).collect();
-                    let status = STATUSES.iter().position(|s| *s == d.status);
+                    let statuses = Status::ALL.iter().map(|s| status_label(*s).to_string()).collect();
+                    let status = Status::ALL.iter().position(|s| *s == d.status);
                     choice_field(c, line, "Status", FormChoice::Status, statuses, status);
                 }
                 choice_field(c, line, "Grade", FormChoice::Grade, grade_options(), grade_index(d.grade));
@@ -696,7 +693,7 @@ mod tests {
         assert_eq!(request(&open).unwrap_err(), "a task needs a title");
         open.draft.title = " Do it ".into();
         open.draft.description = "line 1\nline 2".into();
-        open.draft.priority = 1;
+        open.draft.priority = Priority::ALL[0];
         let r = request(&open).unwrap();
         assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::POST, "/v1/tasks", None));
         assert_eq!(
@@ -713,7 +710,7 @@ mod tests {
         let mut open = Open::edit(&task());
         assert_eq!(request(&open).unwrap_err(), "nothing changed");
         open.draft.description = "a\nb\nc".into();
-        open.draft.status = "cancelled".into();
+        open.draft.status = Status::Cancelled;
         let r = request(&open).unwrap();
         assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4)));
         assert_eq!(body(&r), &json!({"description": "a\nb\nc", "status": "cancelled"}));
@@ -752,10 +749,10 @@ mod tests {
         pick(&mut app, FormChoice::Priority, 0);
         pick(&mut app, FormChoice::Status, 1);
         let draft = app.world().resource::<Form>().open.as_ref().unwrap().draft.clone();
-        assert_eq!((draft.priority, draft.status.as_str()), (1, "in_progress"));
+        assert_eq!((draft.priority, draft.status), (Priority::ALL[0], Status::InProgress));
         // A row past the end of the options changes nothing.
         pick(&mut app, FormChoice::Priority, 99);
-        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.priority, 1);
+        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.priority, Priority::ALL[0]);
     }
 
     #[test]
@@ -763,14 +760,14 @@ mod tests {
         let mut open = Open::create("TRAIL-102");
         open.draft.title = "Do it".into();
         assert!(body(&request(&open).unwrap()).get("grade").is_none());
-        open.draft.grade = Some(2);
+        open.draft.grade = Grade::new(2);
         assert_eq!(body(&request(&open).unwrap())["grade"], json!(2));
 
         let mut graded = task();
         graded["grade"] = json!(3);
         let mut open = Open::edit(&graded);
         assert_eq!(request(&open).unwrap_err(), "nothing changed");
-        open.draft.grade = Some(4);
+        open.draft.grade = Grade::new(4);
         let r = request(&open).unwrap();
         assert_eq!((r.path.as_str(), r.if_match), ("/v1/tasks/TRAIL-7", Some(4)));
         assert_eq!(body(&r), &json!({"grade": 4}));
@@ -783,10 +780,10 @@ mod tests {
         let mut app = app();
         press(&mut app, Act::Edit("TRAIL-7".into()));
         pick(&mut app, FormChoice::Grade, 3);
-        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.grade, Some(3));
+        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.grade, Grade::new(3));
         pick(&mut app, FormChoice::Grade, 0);
         assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.grade, None);
-        assert_eq!(grade_options().len(), GRADES.len());
+        assert_eq!(grade_options().len(), grade_choices().count());
     }
 
     #[test]
@@ -841,7 +838,7 @@ mod tests {
         assert!(app.world().resource::<Outbox>().is_empty());
 
         pick(&mut app, FormChoice::Status, 1);
-        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.status, "in_progress");
+        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.status, Status::InProgress);
         press(&mut app, Act::Save);
         assert!(app.world().resource::<Form>().saving);
         assert_eq!(app.world().resource::<Outbox>().len(), 1);
@@ -944,11 +941,11 @@ mod tests {
         settle(&mut app);
         let world = app.world_mut();
         let shown: Vec<String> = world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect();
-        for status in STATUSES {
-            let word = status_label(status);
+        for status in Status::ALL {
+            let word = status_label(status).to_string();
             assert!(shown.contains(&word), "{word} in {shown:?}");
         }
-        assert!(!shown.iter().any(|s| STATUSES.contains(&s.as_str()) && s.contains('_')), "{shown:?}");
+        assert!(!shown.iter().any(|s| Status::ALL.iter().any(|st| st.as_str() == s) && s.contains('_')), "{shown:?}");
     }
 
     #[test]

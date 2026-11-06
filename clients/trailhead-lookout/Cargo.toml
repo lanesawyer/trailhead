@@ -31,6 +31,7 @@ bevy = { version = "0.20", default-features = false, features = [
 ] }
 trailhead-ui.workspace = true
 trailhead-client.workspace = true
+trailhead-model.workspace = true
 trailhead-daemon = { workspace = true, features = ["net"] }
 iroh.workspace = true
 tokio = { workspace = true, features = ["time"] }
