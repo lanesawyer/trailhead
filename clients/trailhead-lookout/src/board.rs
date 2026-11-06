@@ -6,7 +6,7 @@
 //! keeps a [`BoardView`] from the mirror and the [`Filter`]; [`BoardUiPlugin`] draws it with feathers, greyed out
 //! with the reason whenever the connection isn't [`Connection::Live`].
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::author::{Act, Authoring};
 use crate::connection::{Connection, ConnectionStatus};
-use crate::factory::{FactoryLink, FactoryStatus};
+use crate::factory::{FactoryLink, FactoryStatus, Run};
 use crate::inspector::{Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::widgets;
@@ -214,6 +214,8 @@ pub struct Input<'a> {
     pub claims: &'a [Claim],
     pub comments: &'a [Comment],
     pub agents: &'a [Agent],
+    /// The runs in flight, which name a holder the agent list hasn't caught up with.
+    pub runs: &'a [Run],
     /// The keys of the factory's queue tasks, whose subtasks the factory works.
     pub queues: &'a [String],
     /// The time claims are judged against: core expires them lazily, so one past its `expires_at` may still be
@@ -236,7 +238,16 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
     // The claim is keyed by its task.
     let holder_of: HashMap<Uuid, Uuid> =
         input.claims.iter().filter(|c| c.is_live(input.now)).map(|c| (c.task_id, c.holder_id)).collect();
-    let holder_label = |id: Uuid| agent_name.get(&id).map_or_else(|| short(id), |n| n.to_string());
+    let running: HashSet<&str> = input.runs.iter().map(|r| r.status.task.0.as_str()).collect();
+    // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
+    // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
+    let holder_label = |task: Uuid, id: Uuid| match agent_name.get(&id) {
+        Some(n) => n.to_string(),
+        None => match task_key.get(&task) {
+            Some(k) if running.contains(k) => format!("factory/{}", k.to_lowercase()),
+            _ => short(id),
+        },
+    };
     let parent_key = |t: &Task| t.parent_id.and_then(|p| task_key.get(&p).copied());
 
     let mut questions: HashMap<Uuid, Vec<&Comment>> = HashMap::new();
@@ -271,7 +282,11 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
             badges.push(Badge { kind: BadgeKind::NeedsGrade, label: "needs grade".into(), tone: Some(token::WARN) });
         }
         if let Some(holder) = holder_of.get(&t.id) {
-            badges.push(Badge { kind: BadgeKind::Holder, label: holder_badge(&holder_label(*holder)), tone: None });
+            badges.push(Badge {
+                kind: BadgeKind::Holder,
+                label: holder_badge(&holder_label(t.id, *holder)),
+                tone: None,
+            });
         }
         if !open.is_empty() {
             badges.push(Badge {
@@ -331,8 +346,8 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         keys.into_iter().map(|(k, t)| choice(k, parent_label(k, t))).collect()
     };
     let holders = {
-        let ids: BTreeSet<Uuid> = holder_of.values().copied().collect();
-        let mut v: Vec<Choice> = ids.into_iter().map(|id| choice(&id.to_string(), holder_label(id))).collect();
+        let ids: BTreeMap<Uuid, Uuid> = holder_of.iter().map(|(t, h)| (*h, *t)).collect();
+        let mut v: Vec<Choice> = ids.into_iter().map(|(id, t)| choice(&id.to_string(), holder_label(t, id))).collect();
         v.sort_by(|a, b| a.label.cmp(&b.label));
         v
     };
@@ -393,12 +408,15 @@ fn rebuild_view(
     claims: Query<&Mirrored<Claim>>,
     comments: Query<&Mirrored<Comment>>,
     agents: Query<&Mirrored<Agent>>,
+    runs: Query<&Run>,
+    runs_changed: Query<(), Changed<Run>>,
+    mut removed_runs: RemovedComponents<Run>,
     authoring: Res<Authoring>,
     factory: Option<Res<FactoryStatus>>,
     mut view: ResMut<BoardView>,
     mut expiry: Local<Option<Timestamp>>,
 ) {
-    let gone = removed.read().count() > 0;
+    let gone = removed.read().count() + removed_runs.read().count() > 0;
     let now = Timestamp::now();
     let expired = expiry.is_some_and(|at| at <= now);
     if !(filter.is_changed()
@@ -407,12 +425,14 @@ fn rebuild_view(
         || mirror.is_changed()
         || gone
         || !changed.is_empty()
+        || !runs_changed.is_empty()
         || expired)
     {
         return;
     }
     let (projects, tasks, claims, comments, agents) =
         (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
+    let runs: Vec<Run> = runs.iter().cloned().collect();
     let queues = queue_keys(&authoring, factory.as_deref());
     let input = Input {
         projects: &projects,
@@ -420,6 +440,7 @@ fn rebuild_view(
         claims: &claims,
         comments: &comments,
         agents: &agents,
+        runs: &runs,
         queues: &queues,
         now,
     };
@@ -1118,6 +1139,7 @@ mod tests {
                 claims,
                 comments: &comments,
                 agents: &agents,
+                runs: &[],
                 queues: &[],
                 now: at_now(),
             };
@@ -1134,6 +1156,10 @@ mod tests {
     }
 
     pub(super) fn run(filter: &Filter) -> BoardView {
+        run_with(filter, &[])
+    }
+
+    fn run_with(filter: &Filter, runs: &[Run]) -> BoardView {
         let (projects, tasks, claims, comments, agents) = input_json();
         let (projects, tasks, claims, comments, agents) = (
             typed::<Project>(projects),
@@ -1149,6 +1175,7 @@ mod tests {
                 claims: &claims,
                 comments: &comments,
                 agents: &agents,
+                runs,
                 queues: &["TRAIL-102".to_string()],
                 now: at_now(),
             },
@@ -1183,6 +1210,28 @@ mod tests {
 
     fn badges(card: &Card) -> Vec<(BadgeKind, &str)> {
         card.badges.iter().map(|b| (b.kind, b.label.as_str())).collect()
+    }
+
+    #[test]
+    fn a_holder_the_agent_list_lacks_is_named_for_its_run() {
+        use trailhead_factory::{RunPhase, RunStatus, TaskKey, Usd};
+        let runs = [Run {
+            repo: "o/r".into(),
+            status: RunStatus {
+                task: TaskKey("OPS-1".into()),
+                phase: RunPhase::Agent,
+                sandbox: None,
+                steps: 1,
+                tool_calls: 1,
+                spend: Usd::dollars(0.0),
+                last_tool: None,
+                started: 0,
+            },
+        }];
+        let view = run_with(&Filter::default(), &runs);
+        assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, "ops-1")]);
+        let holders: Vec<&str> = view.options.holders.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(holders, ["factory/ops-1", "factory/trail-103-a1"]);
     }
 
     #[test]
