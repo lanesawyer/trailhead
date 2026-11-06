@@ -64,12 +64,8 @@ pub mod radius {
 pub mod extent {
     /// The inspector's width, down the right of the window.
     pub const INSPECTOR_WIDTH: f32 = 360.0;
-    /// A task form's width.
-    pub const FORM_WIDTH: f32 = 640.0;
-    /// How far a task form sits from the window's left edge.
-    pub const FORM_LEFT: f32 = 40.0;
-    /// How far a task form sits from the window's top edge.
-    pub const FORM_TOP: f32 = 60.0;
+    /// A modal's width, unless its kind says otherwise.
+    pub const MODAL_WIDTH: f32 = 640.0;
 }
 
 #[cfg(test)]

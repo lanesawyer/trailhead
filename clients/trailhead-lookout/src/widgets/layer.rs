@@ -9,8 +9,8 @@ pub const BOARD: i32 = 0;
 pub const CONNECT: i32 = 1;
 /// The inspector down the right.
 pub const INSPECTOR: i32 = 2;
-/// The task forms (new, edit, comment, answer).
-pub const FORM: i32 = 10;
+/// Modals: every form and dialog (new task, edit, comment, answer), over a backdrop covering the window.
+pub const MODAL: i32 = 10;
 /// Menu and dropdown popups, over whatever opened them.
 pub const MENU: i32 = 20;
 /// The hint over a hovered button, over everything.

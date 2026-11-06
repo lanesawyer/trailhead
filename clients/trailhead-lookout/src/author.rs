@@ -23,8 +23,8 @@ use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
 use crate::mirror::{Data, IsTask};
 use crate::widgets::{
-    Picked, button, dot, extent, field, layer, panel, priority_tone, row, select, size, space, text, text_dim,
-    text_input, text_toned, token,
+    Modal, ModalClosed, ModalLocked, ModalSlots, Picked, button, dot, field, open_modal, priority_tone, row, section,
+    select, size, space, text, text_dim, text_input, token,
 };
 
 /// The queue task new tasks go under unless the form says otherwise (`queue` in `.trailhead.toml`).
@@ -120,6 +120,16 @@ impl Open {
             ..Draft::default()
         };
         Open::new(target, draft)
+    }
+
+    /// What the modal's heading says.
+    pub fn title(&self) -> String {
+        match &self.target {
+            Target::Create => "New task".to_string(),
+            Target::Edit { key, .. } => format!("Edit {key}"),
+            Target::Comment { key } => format!("Comment on {key}"),
+            Target::Answer { key, .. } => format!("Answer on {key}"),
+        }
     }
 
     pub fn comment(key: &str) -> Open {
@@ -311,9 +321,17 @@ pub struct FormMessage;
 const SPEC_LINES: f32 = 12.0;
 const BODY_LINES: f32 = 6.0;
 
-/// The form's root node, and the source of its commands.
-#[derive(Component)]
-pub struct FormPanel;
+/// The form's modal, and the source of its commands. `title` is what the modal's heading says.
+#[derive(Component, Default)]
+pub struct FormPanel {
+    pub title: String,
+}
+
+impl Modal for FormPanel {
+    fn title(&self) -> String {
+        self.title.clone()
+    }
+}
 
 fn field_value(draft: &mut Draft, kind: FieldKind) -> &mut String {
     match kind {
@@ -419,6 +437,7 @@ impl Plugin for AuthorPlugin {
             .init_resource::<Authoring>()
             .add_observer(on_act)
             .add_observer(on_pick)
+            .add_observer(on_modal_closed)
             .add_systems(Update, (init_text, read_fields, finish).chain());
     }
 }
@@ -428,8 +447,14 @@ pub struct AuthorUiPlugin;
 
 impl Plugin for AuthorUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(AuthorPlugin).add_systems(Update, (redraw_form, update_message).chain());
+        app.add_plugins(AuthorPlugin);
+        add_drawing(app);
     }
+}
+
+/// The systems that draw the form, apart from the plugin so a test can add them to an app that has the logic.
+fn add_drawing(app: &mut App) {
+    app.add_systems(Update, (redraw_form, fill_form, lock_while_saving, update_message).chain());
 }
 
 /// A button for `act`: a normal one, with no icon.
@@ -524,62 +549,72 @@ fn redraw_form(
         commands.entity(e).despawn();
     }
     let Some(open) = &form.open else { return };
+    open_modal(&mut commands, FormPanel { title: open.title() });
+}
+
+/// Fills a new form's modal: the fields in its body, the buttons and message in its footer.
+fn fill_form(new: Query<&ModalSlots, (With<FormPanel>, Added<ModalSlots>)>, form: Res<Form>, mut commands: Commands) {
+    let Some(open) = &form.open else { return };
     let d = &open.draft;
     let generation = form.generation;
-    let root = commands
-        .spawn_scene(bsn! {
-            @panel()
-            Node {
-                position_type: PositionType::Absolute,
-                left: { px(extent::FORM_LEFT) },
-                top: { px(extent::FORM_TOP) },
-                width: { px(extent::FORM_WIDTH) },
-            }
-            GlobalZIndex({ layer::FORM })
-        })
-        .insert((Name::new("form"), FormPanel))
-        .id();
     let c = &mut commands;
-
-    let heading = match &open.target {
-        Target::Create => "New task".to_string(),
-        Target::Edit { key, .. } => format!("Edit {key}"),
-        Target::Comment { key } => format!("Comment on {key}"),
-        Target::Answer { key, .. } => format!("Answer on {key}"),
-    };
-    c.spawn_scene(text(heading, size::HEADING)).insert(ChildOf(root));
-
-    match &open.target {
-        Target::Create | Target::Edit { .. } => {
-            let creating = open.target == Target::Create;
-            if creating {
-                text_field(c, root, "Parent", input(FieldKind::Parent, generation, d.parent.clone(), 1.0));
+    for slots in &new {
+        let body = slots.body;
+        match &open.target {
+            Target::Create | Target::Edit { .. } => {
+                let creating = open.target == Target::Create;
+                if creating {
+                    text_field(c, body, "Parent", input(FieldKind::Parent, generation, d.parent.clone(), 1.0));
+                }
+                text_field(c, body, "Title", input(FieldKind::Title, generation, d.title.clone(), 1.0));
+                let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(body)).id();
+                let priorities = PRIORITIES.iter().map(|p| format!("P{p}")).collect();
+                let priority = PRIORITIES.iter().position(|p| *p == d.priority);
+                choice_field(c, line, "Priority", FormChoice::Priority, priorities, priority);
+                if !creating {
+                    let statuses = STATUSES.iter().map(|s| s.to_string()).collect();
+                    let status = STATUSES.iter().position(|s| *s == d.status);
+                    choice_field(c, line, "Status", FormChoice::Status, statuses, status);
+                }
+                let spec = input(FieldKind::Description, generation, d.description.clone(), SPEC_LINES);
+                text_field(c, body, "Spec", spec);
             }
-            text_field(c, root, "Title", input(FieldKind::Title, generation, d.title.clone(), 1.0));
-            let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(root)).id();
-            let priorities = PRIORITIES.iter().map(|p| format!("P{p}")).collect();
-            let priority = PRIORITIES.iter().position(|p| *p == d.priority);
-            choice_field(c, line, "Priority", FormChoice::Priority, priorities, priority);
-            if !creating {
-                let statuses = STATUSES.iter().map(|s| s.to_string()).collect();
-                let status = STATUSES.iter().position(|s| *s == d.status);
-                choice_field(c, line, "Status", FormChoice::Status, statuses, status);
+            Target::Comment { .. } | Target::Answer { .. } => {
+                if let Target::Answer { question, .. } = &open.target {
+                    // The question wraps to the dialog's width and is styled like the rest of the kit's text.
+                    let quoted = c.spawn_scene(bsn! { @section("Question") }).insert(ChildOf(body)).id();
+                    c.spawn_scene(text(question.clone(), size::BODY)).insert(ChildOf(quoted));
+                }
+                let label = if matches!(open.target, Target::Answer { .. }) { "Answer" } else { "Comment" };
+                text_field(c, body, label, input(FieldKind::Body, generation, String::new(), BODY_LINES));
             }
-            text_field(c, root, "Spec", input(FieldKind::Description, generation, d.description.clone(), SPEC_LINES));
         }
-        Target::Comment { .. } | Target::Answer { .. } => {
-            if let Target::Answer { question, .. } = &open.target {
-                c.spawn_scene(text_toned(format!("? {question}"), size::BODY, token::WARN)).insert(ChildOf(root));
-            }
-            let label = if matches!(open.target, Target::Answer { .. }) { "Answer" } else { "Comment" };
-            text_field(c, root, label, input(FieldKind::Body, generation, String::new(), BODY_LINES));
+        let footer = slots.footer;
+        c.spawn_scene(bsn! { @button("Save", None, ButtonVariant::Primary) Act::Save }).insert(ChildOf(footer));
+        c.spawn_scene(bsn! { @button("Cancel", None, ButtonVariant::Normal) Act::Cancel }).insert(ChildOf(footer));
+        c.spawn_scene(text_dim(form.message.clone(), size::SECONDARY)).insert((FormMessage, ChildOf(footer)));
+    }
+}
+
+/// A close request (the X, Escape, a click outside) closes the form too; the modal is already going.
+fn on_modal_closed(closed: On<ModalClosed>, forms: Query<(), With<FormPanel>>, mut form: ResMut<Form>) {
+    if forms.contains(closed.modal) {
+        form.close();
+    }
+}
+
+/// A save in flight can't be withdrawn, so the form's modal stays open until it is answered.
+fn lock_while_saving(form: Res<Form>, forms: Query<Entity, With<FormPanel>>, mut commands: Commands) {
+    if !form.is_changed() {
+        return;
+    }
+    for e in &forms {
+        if form.saving {
+            commands.entity(e).insert(ModalLocked);
+        } else {
+            commands.entity(e).remove::<ModalLocked>();
         }
     }
-
-    let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(root)).id();
-    c.spawn_scene(bsn! { @button("Save", None, ButtonVariant::Primary) Act::Save }).insert(ChildOf(line));
-    c.spawn_scene(bsn! { @button("Cancel", None, ButtonVariant::Normal) Act::Cancel }).insert(ChildOf(line));
-    c.spawn_scene(text_dim(form.message.clone(), size::SECONDARY)).insert((FormMessage, ChildOf(line)));
 }
 
 fn update_message(form: Res<Form>, mut messages: Query<&mut Text, With<FormMessage>>) {
@@ -721,7 +756,7 @@ mod tests {
     #[test]
     fn a_form_opens_saves_and_closes_on_ok_but_stays_on_a_refusal() {
         let mut app = app();
-        let panel = app.world_mut().spawn(FormPanel).id();
+        let panel = app.world_mut().spawn(FormPanel::default()).id();
         go_live(&mut app);
 
         press(&mut app, Act::Edit("TRAIL-7".into()));
@@ -761,7 +796,7 @@ mod tests {
     #[test]
     fn saving_while_offline_says_so_and_sends_nothing() {
         let mut app = app();
-        app.world_mut().spawn(FormPanel);
+        app.world_mut().spawn(FormPanel::default());
         press(&mut app, Act::Comment("TRAIL-7".into()));
         app.world_mut().resource_mut::<Form>().open.as_mut().unwrap().draft.body = "hi".into();
         press(&mut app, Act::Save);
@@ -806,6 +841,74 @@ mod tests {
         let open = app.world().resource::<Form>().open.clone().unwrap();
         assert_eq!(open.target, Target::Comment { key: "TRAIL-2".into() });
         assert_eq!(open.draft.body, "");
+    }
+
+    /// The form with its drawing, headless: scenes need the asset and scene plugins, and the kit's modal its observer.
+    fn ui_app() -> App {
+        let mut app = app();
+        app.add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>()
+            .add_plugins(crate::widgets::ModalPlugin);
+        add_drawing(&mut app);
+        app
+    }
+
+    fn modals(app: &mut App) -> usize {
+        app.world_mut().query_filtered::<(), With<crate::widgets::ModalRoot>>().iter(app.world()).count()
+    }
+
+    fn settle(app: &mut App) {
+        for _ in 0..4 {
+            app.update();
+        }
+    }
+
+    #[test]
+    fn every_form_opens_one_modal_and_closing_it_closes_the_form() {
+        let acts = [
+            Act::New,
+            Act::Edit("TRAIL-7".into()),
+            Act::Comment("TRAIL-7".into()),
+            Act::Answer { key: "TRAIL-7".into(), comment_id: "c1".into(), question: "which db?".into() },
+        ];
+        for act in acts {
+            // Cancel, then the modal's own ways out: Escape and a click outside both send `RequestClose` for the
+            // backdrop, and the X sends it from inside.
+            for from_backdrop in [None, Some(true), Some(false)] {
+                let mut app = ui_app();
+                settle(&mut app);
+                press(&mut app, act.clone());
+                settle(&mut app);
+                assert_eq!(modals(&mut app), 1, "{act:?}");
+                let root = app.world_mut().query_filtered::<Entity, With<FormPanel>>().single(app.world()).unwrap();
+                match from_backdrop {
+                    None => press(&mut app, Act::Cancel),
+                    Some(backdrop) => {
+                        let slots = *app.world().get::<ModalSlots>(root).unwrap();
+                        let source = if backdrop { root } else { slots.footer };
+                        app.world_mut().trigger(bevy::ui_widgets::RequestClose { source });
+                    }
+                }
+                settle(&mut app);
+                assert_eq!(modals(&mut app), 0, "{act:?} {from_backdrop:?}");
+                assert!(app.world().resource::<Form>().open.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn a_form_with_a_save_in_flight_ignores_a_click_outside() {
+        let mut app = ui_app();
+        press(&mut app, Act::Comment("TRAIL-7".into()));
+        settle(&mut app);
+        app.world_mut().resource_mut::<Form>().saving = true;
+        settle(&mut app);
+        let root = app.world_mut().query_filtered::<Entity, With<FormPanel>>().single(app.world()).unwrap();
+        app.world_mut().trigger(bevy::ui_widgets::RequestClose { source: root });
+        settle(&mut app);
+        assert_eq!(modals(&mut app), 1);
+        assert!(app.world().resource::<Form>().open.is_some());
     }
 
     #[test]
