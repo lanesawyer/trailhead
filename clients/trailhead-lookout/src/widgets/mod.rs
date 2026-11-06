@@ -15,6 +15,7 @@
 //! - A chip of small text: [`badge`]. A task's card: [`card`], with [`card_title`], [`card_under`] and [`card_row`].
 //! - A panel over the board: [`panel`], with a [`layer`]. Inside it: [`section`], [`row`], [`field`].
 //! - A dot and a few words of state: [`chip`].
+//! - A form or dialog: a [`Modal`] marker type and [`open_modal`]; fill its [`ModalBody`], buttons in its [`ModalFooter`].
 //! - A hint over anything: put a [`Hint`] on it.
 //! - Colors: [`token`] (Lookout's) and `bevy::feathers::tokens` (the controls'); a status column's: [`status_token`].
 //! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`]; one that scrolls down only,
@@ -38,6 +39,7 @@ mod input;
 mod keyed;
 pub mod layer;
 mod menu;
+mod modal;
 mod scroll;
 mod scrollbar;
 mod select;
@@ -59,6 +61,10 @@ pub use icons::{Icon, button_icon, icon_text};
 pub use input::text_input;
 pub use keyed::Keyed;
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu};
+pub use modal::{
+    MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
+    open_modal,
+};
 pub use scroll::{ScrollBoth, ScrollDown};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
 pub use select::{Picked, select};
@@ -71,7 +77,7 @@ pub struct WidgetsPlugin;
 
 impl Plugin for WidgetsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((icons::IconsPlugin, hint::HintPlugin))
+        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin))
             .add_observer(scroll::on_scroll)
             .add_systems(PostUpdate, scrollbar::hide_when_fits.after(bevy::ui::UiSystems::Layout));
     }
