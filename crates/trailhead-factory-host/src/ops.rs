@@ -484,6 +484,7 @@ mod tests {
                 cap: Usd::dollars(5.0),
                 capped: true,
             }],
+            queue: Vec::new(),
             seq: 12,
         };
         let out = render_live(&snapshot);
