@@ -74,7 +74,7 @@ impl Action {
         match self {
             Action::Release => "release claim".into(),
             Action::Cancel => "cancel task".into(),
-            Action::Status(s) => format!("move to {s}"),
+            Action::Status(s) => format!("move to {}", status_label(s)),
             Action::Resolve(_) => "resolve".into(),
             Action::Undo => "undo last change".into(),
             Action::Revert(h) => format!("revert last {h}h"),
@@ -581,7 +581,6 @@ fn is_run_line(line: &str) -> bool {
     line.starts_with("run:")
 }
 
-/// A section of the panel under `heading`, for the caller to fill.
 /// The status dropdown: its options read as words, while the [`StatusMove`] keeps the API values it sends.
 fn status_select(c: &mut Commands, parent: Entity, source: Entity, subject: Subject, statuses: Vec<String>) {
     let labels: Vec<String> = statuses.iter().map(|s| status_label(s)).collect();
@@ -590,6 +589,7 @@ fn status_select(c: &mut Commands, parent: Entity, source: Entity, subject: Subj
         .insert((StatusMove { source, subject, statuses }, ChildOf(parent)));
 }
 
+/// A section of the panel under `heading`, for the caller to fill.
 fn section_in(commands: &mut Commands, panel: Entity, heading: &str) -> Entity {
     commands.spawn_scene(bsn! { @section(heading.to_string()) }).insert(ChildOf(panel)).id()
 }

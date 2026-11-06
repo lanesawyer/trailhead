@@ -456,7 +456,6 @@ fn redraw(
     for w in &map.0.waypoints {
         let node = commands.spawn((Terrain, plot(w.pos, WAY_SIZE, Color::srgb(0.16, 0.16, 0.18)), ChildOf(panel))).id();
         line(&mut commands, node, format!("{} {}", w.key, w.title), ink);
-        line(&mut commands, node, status_label(&w.status), ink);
         for (l, c) in w.markers.iter().map(marker_line) {
             line(&mut commands, node, l, c);
         }
