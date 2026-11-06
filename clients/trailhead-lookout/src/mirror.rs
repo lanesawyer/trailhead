@@ -9,7 +9,8 @@
 //!   ordered, and an undo puts a comment back to an earlier state, so its state can't rank it), and a snapshot's
 //!   copy, which has no event, gives way to any event for it;
 //! - a deleted entity is despawned, as a snapshot leaves it out, so the stream and a snapshot agree; an undo of the
-//!   delete brings it back;
+//!   delete brings it back. A deleted task takes its claim and comments with it, which the stream sends no events
+//!   for; an undo restores the task, and its claim and comments come back with the next snapshot or event for them;
 //! - agents have no events yet, so they change only with a snapshot.
 //!
 //! Each entity holds its data as its `trailhead-model` type in a [`Mirrored`] component, read once as it arrives.
@@ -89,6 +90,8 @@ impl Record {
 #[derive(Resource, Default, Debug)]
 pub struct Mirror {
     index: HashMap<(Kind, String), (Entity, Rev)>,
+    /// The task each claim and comment belongs to, to despawn them with it.
+    owner: HashMap<(Kind, String), String>,
     last_event: i64,
     snapshots: u32,
 }
@@ -125,6 +128,11 @@ impl Mirror {
                 return;
             }
         };
+        match &record {
+            Record::Comment(c) => self.owner.insert(key.clone(), c.task_id.to_string()),
+            Record::Claim(c) => self.owner.insert(key.clone(), c.task_id.to_string()),
+            _ => None,
+        };
         match self.index.get(&key) {
             Some(&(entity, _)) => {
                 let mut entity = commands.entity(entity);
@@ -141,12 +149,20 @@ impl Mirror {
     }
 
     fn remove(&mut self, commands: &mut Commands, kind: Kind, id: &str) {
+        self.owner.remove(&(kind, id.to_string()));
         if let Some((entity, _)) = self.index.remove(&(kind, id.to_string())) {
             commands.entity(entity).despawn();
+        }
+        if kind == Kind::Task {
+            let owned: Vec<_> = self.owner.iter().filter(|(_, task)| *task == id).map(|(k, _)| k.clone()).collect();
+            for (kind, owned_id) in owned {
+                self.remove(commands, kind, &owned_id);
+            }
         }
     }
 
     fn apply_snapshot(&mut self, commands: &mut Commands, snapshot: Snapshot) {
+        self.owner.clear();
         for (entity, _) in self.index.drain().map(|(_, v)| v) {
             commands.entity(entity).despawn();
         }
@@ -294,7 +310,8 @@ mod tests {
 
     fn comment_event(id: i64, resolved: bool, deleted: bool) -> SyncItem {
         let at = |on: bool| if on { json!("2026-01-01T00:00:00Z") } else { Value::Null };
-        let after = comment_json(json!({"id": "c1", "resolved_at": at(resolved), "deleted_at": at(deleted)}));
+        let after =
+            comment_json(json!({"id": "c1", "task_id": "t1", "resolved_at": at(resolved), "deleted_at": at(deleted)}));
         SyncItem::Event(
             json!({"id": id, "entity": "comment", "entity_id": sid("c1"), "kind": "comment.updated", "after": after}),
         )
@@ -322,9 +339,9 @@ mod tests {
         let gone = SyncItem::Event(
             json!({"id": 12, "entity": "task", "entity_id": sid("t1"), "kind": "task.deleted", "after": after}),
         );
-        send(&mut app, [gone, comment_event(13, false, true)]);
+        send(&mut app, [gone]);
         assert!(data_of::<Task>(&mut app).is_empty());
-        assert!(data_of::<Comment>(&mut app).is_empty());
+        assert!(data_of::<Comment>(&mut app).is_empty(), "the task's comments go with it");
         send(&mut app, [task_event(14, 3, "back"), comment_event(15, false, false)]);
         assert_eq!(title(&mut app), "back");
         assert_eq!(data_of::<Comment>(&mut app).len(), 1);

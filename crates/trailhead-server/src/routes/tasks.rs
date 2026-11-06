@@ -24,6 +24,8 @@ pub(crate) struct TaskListQuery {
     /// Comma-separated. Defaults to everything not done or cancelled.
     status: Option<String>,
     parent: Option<String>,
+    /// Only tasks with this title, ignoring case and surrounding space.
+    title: Option<String>,
     #[param(format = DateTime)]
     due_before: Option<String>,
     /// Tasks scheduled on or before this day (`YYYY-MM-DD`): pass today for today's plan,
@@ -72,6 +74,7 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
         project: q.project,
         statuses: parse_list(q.status.as_deref())?,
         parent: q.parent,
+        title: q.title,
         due_before: parse_opt_time(q.due_before.as_deref())?,
         scheduled_through: parse_opt_date(q.scheduled_through.as_deref())?,
         grade: parse_grade_filter(q.grade.as_deref())?,

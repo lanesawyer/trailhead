@@ -102,15 +102,26 @@ impl CoreTracker {
     /// Converts the listed tasks, skipping any whose factory metadata won't parse, so one bad value doesn't
     /// stop the factory for the whole project. A skipped task gets a note naming the problem, once.
     async fn tasks(&self, ctx: &Ctx, tasks: impl IntoIterator<Item = trailhead_core::Task>) -> Result<Vec<Task>> {
-        let mut out = Vec::new();
+        let mut good = Vec::new();
         for t in tasks {
             if let Err(e) = RunUpdate::of(&t) {
                 self.flag_bad_metadata(ctx, &t, &e.to_string()).await;
                 continue;
             }
-            out.push(self.task(ctx, t).await?);
+            good.push(t);
         }
-        Ok(out)
+        if good.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One query for every task's claim, so a listing costs the same however many tasks it holds (TRAIL-258).
+        let ids: Vec<_> = good.iter().map(|t| t.id).collect();
+        let claims = self.store.live_claims(ctx, &ids).await.map_err(map_err)?;
+        good.into_iter()
+            .map(|t| {
+                let holder = claims.get(&t.id).map(|c| c.holder.clone());
+                Task::from_model(t, holder)
+            })
+            .collect()
     }
 
     /// Raises each task's priority to the highest among itself and the open tasks it blocks, directly or through a
@@ -462,7 +473,11 @@ impl Tracker for CoreTracker {
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let filter = TaskFilter {
+            project: Some(project.to_string()),
+            title: Some(title.trim().to_string()),
+            ..TaskFilter::default()
+        };
         let tasks = self.list_all(&ctx, filter).await?;
         Ok(tasks.into_iter().find(|t| same_title(&t.title, title)).map(|t| TaskKey(t.key)))
     }

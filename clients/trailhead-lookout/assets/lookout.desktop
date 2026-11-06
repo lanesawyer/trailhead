@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Lookout
+Comment=Trailhead's factory, on a board
+Exec=lookout
+Icon=lookout
+Terminal=false
+Categories=Development;
+StartupWMClass=lookout
