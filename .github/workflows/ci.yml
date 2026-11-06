@@ -71,8 +71,8 @@ jobs:
           # restored a stale cache that was an exact hit, so every run rebuilt every dependency and nothing was saved.
           key: ${{ hashFiles('Cargo.toml') }}
       # No system packages: it builds without alsa, udev or wayland headers (see its README).
-      - run: cargo clippy --profile ci -p trailhead-lookout --all-targets --locked -- -D warnings
-      - run: cargo test --profile ci -p trailhead-lookout --locked
+      - run: cargo clippy --profile ci -p trailhead-ui -p trailhead-lookout --all-targets --locked -- -D warnings
+      - run: cargo test --profile ci -p trailhead-ui -p trailhead-lookout --locked
 
   package:
     runs-on: ubuntu-latest

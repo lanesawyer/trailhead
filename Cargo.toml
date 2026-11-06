@@ -49,6 +49,7 @@ trailhead-compute-docker = { path = "crates/trailhead-compute-docker" }
 trailhead-codehost-github = { path = "crates/trailhead-codehost-github" }
 trailhead-provider-anthropic = { path = "crates/trailhead-provider-anthropic" }
 trailhead-factory-host = { path = "crates/trailhead-factory-host" }
+trailhead-ui = { path = "clients/trailhead-ui" }
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 http = "1"
 bytes = "1"

@@ -14,7 +14,7 @@ use bevy::feathers::tokens;
 use bevy::prelude::*;
 use bevy::text::{FontSourceTemplate, FontWeight};
 
-const FONT: &str = "embedded://trailhead_lookout/widgets/assets/lucide.ttf";
+const FONT: &str = "embedded://trailhead_ui/assets/lucide.ttf";
 const SIZE: f32 = 15.0;
 
 /// Embeds the icon font, at the path [`icon_text`] loads it from.

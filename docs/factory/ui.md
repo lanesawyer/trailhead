@@ -18,7 +18,7 @@ The factory's own client for people: watch runs live, steer them, and author tas
 | Transport | Embedded iroh, dialing the control plane on its own UI protocol, not the daemons' API tunnel | Decided (2026-10-28) |
 | Platforms | Linux first, matching Trailhead; macOS and Windows later through Bevy's own targets (TRAIL-131) | Decided (2026-11-02) |
 | Name | Lookout: crate `trailhead-lookout` in `clients/trailhead-lookout`, binary `lookout` | Decided (2026-11-02) |
-| Look | One shared feathers component kit in `src/widgets/` used by every view; kanban board of cards; dropdown filters; Lucide icon buttons ([Look and components](#look-and-components)) | Decided (2026-11-05) |
+| Look | One shared feathers component kit in the `trailhead-ui` crate (`clients/trailhead-ui`, MIT OR Apache-2.0, nothing Trailhead in it) used by every view; kanban board of cards; dropdown filters; Lucide icon buttons ([Look and components](#look-and-components)) | Decided (2026-11-05) |
 | API types | A hand-written client crate, not generated from the OpenAPI document; the API is ours and the UI reaches it through the iroh tunnel anyway | Decided (2026-11-02) |
 
 ## Views
@@ -39,7 +39,7 @@ Views are Bevy `States`; the inspector is a panel that both views spawn.
 
 Decided 2026-11-05 (TRAIL-796), after Lane's first real use: Lookout worked but read as a debug overlay of raw text rows. The look is built from one small component kit, and every view uses it.
 
-**One component, used everywhere.** Each kind of control or surface is built once in `clients/trailhead-lookout/src/widgets/`, one widget to a file, and every view calls it. A second, slightly different button, card or dropdown is a bug, even when it's quicker to write. If a widget doesn't do what a view needs, the widget grows the option. The rules agents follow are in the `lookout-ui` skill (`.claude/skills/lookout-ui/SKILL.md`).
+**One component, used everywhere.** Each kind of control or surface is built once in the `trailhead-ui` crate (`clients/trailhead-ui/src`), one widget to a file, and every view calls it; only widgets about tasks and the board (the card, the column, the status tokens) live in `clients/trailhead-lookout/src/widgets/`, which re-exports the kit so views import from `crate::widgets`. An app adds its own colors by painting tokens onto the kit's theme (`trailhead_ui::paint`). A second, slightly different button, card or dropdown is a bug, even when it's quicker to write. If a widget doesn't do what a view needs, the widget grows the option. The rules agents follow are in the `lookout-ui` skill (`.claude/skills/lookout-ui/SKILL.md`).
 
 **Built on feathers.** Buttons, menus, dropdowns (`FeathersSelect`), text inputs, scrollbars, list views and panes come from `bevy_feathers` 0.20, wrapped by the kit so their props are set in one place. The kit doesn't draw its own controls where feathers has one. Much of it is ported from Lane's `bevy-data-explorer` (`src/widgets/`, `src/app/theme.rs`), whose rules have already paid for themselves:
 
@@ -54,7 +54,7 @@ Decided 2026-11-05 (TRAIL-796), after Lane's first real use: Lookout worked but 
 
 **Panels.** The inspector, the forms and the connect panel use the same pane, section, field (label above input) and button widgets. Choices with a fixed set of values, such as a task's priority or status in the form, are dropdowns too.
 
-**Modals.** Every form and dialog is one kit widget, `widgets/modal.rs` (TRAIL-840): feathers' `FeathersDialog` on a backdrop over the window, centered, with a title and a close X. It closes on the X, Escape or a click outside, by default for every modal; a save in flight locks it (`ModalLocked`). The dialog is never taller than `MAX_HEIGHT_VH` of the window: the body scrolls with the kit's scrollbar and the footer (Save, Cancel) stays in view. A kind of modal is a marker type implementing `Modal` (title, width).
+**Modals.** Every form and dialog is one kit widget, `clients/trailhead-ui/src/modal.rs` (TRAIL-840): feathers' `FeathersDialog` on a backdrop over the window, centered, with a title and a close X. It closes on the X, Escape or a click outside, by default for every modal; a save in flight locks it (`ModalLocked`). The dialog is never taller than `MAX_HEIGHT_VH` of the window: the body scrolls with the kit's scrollbar and the footer (Save, Cancel) stays in view. A kind of modal is a marker type implementing `Modal` (title, width).
 
 **Checking the look.** A sandbox can't open a window, so the look gets a human review (the `clients/**` grade rule). TRAIL-796's follow-ups include rendering screenshots headlessly, with a software Vulkan driver, so a worker and its reviewer can see what they built.
 
