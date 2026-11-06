@@ -10,7 +10,7 @@
 //! - A task's card: [`card`], with [`card_title`], [`card_under`] and [`card_row`].
 //! - A board column: [`column_shell`], [`column_header`], [`column_frame`], [`column_body`], [`column_scrollbar`];
 //!   [`column_empty`] for none.
-//! - Colors: [`token`] (the kit's and Lookout's), a status column's: [`status_token`]; a priority's: [`priority_tone`].
+//! - Colors: [`token`] (the kit's and Lookout's), a status column's: [`status_token`]; a status in words: [`status_label`]; a priority's: [`priority_tone`].
 
 mod card;
 mod column;
@@ -21,5 +21,5 @@ pub use column::{
     COLUMN_GUTTER, COLUMN_WIDTH, ColumnCount, column_body, column_empty, column_frame, column_header, column_scrollbar,
     column_shell,
 };
-pub use theme::{priority_tone, props as theme_props, status_token, theme, token};
+pub use theme::{priority_tone, props as theme_props, status_label, status_token, theme, token};
 pub use trailhead_ui::*;

@@ -29,7 +29,7 @@ use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror
 use crate::sync::SyncItem;
 use crate::widgets::{
     Icon, Picked, badge, button, danger_button, extent, layer, panel, priority_tone, row, scroll_body, scroll_frame,
-    scrollbar, section, select, size, text, text_dim, text_toned, token, tool_button,
+    scrollbar, section, select, size, status_label, text, text_dim, text_toned, token, tool_button,
 };
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
@@ -205,7 +205,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
             let holder = input.claims.iter().find(|c| s(c, "task_id") == id).map(|c| s(c, "holder_id").to_string());
             let holder_agent = holder.as_deref().and_then(|h| agent_name(h).map(|n| (h.to_string(), n)));
 
-            let mut lines = vec![format!("status: {status}")];
+            let mut lines = vec![format!("status: {}", status_label(status))];
             if let Some(grade) = task["grade"].as_i64() {
                 lines.push(format!("grade: {grade}"));
             }
@@ -731,7 +731,8 @@ fn redraw(
         let statuses: Vec<String> = std::iter::once(current.clone()).chain(moves).collect();
         let source = control(&mut controls, c, &view.subject, &Action::Status(String::new()));
         let max_visible = statuses.len();
-        c.spawn_scene(select(statuses.clone(), Some(0), max_visible))
+        let labels: Vec<String> = statuses.iter().map(|s| status_label(s)).collect();
+        c.spawn_scene(select(labels, Some(0), max_visible))
             .insert((StatusMove { source, subject: view.subject.clone(), statuses }, ChildOf(line)));
         note(c, line, states.get(source).ok());
     }

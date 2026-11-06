@@ -50,6 +50,21 @@ pub fn status_token(status: &str) -> ThemeToken {
     }
 }
 
+/// A status as words, the one way every view shows it: "In Progress" for `in_progress`. A status the API adds later is
+/// title-cased from its snake_case ("on_hold" is "On Hold"), so it still reads well. Only for display: requests,
+/// filters and the mirror keep the API value.
+pub fn status_label(status: &str) -> String {
+    status
+        .split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            chars.next().map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The tone of priority `p` (1 to 4), the same wherever a priority is shown. Any other number has none.
 pub fn priority_tone(p: i64) -> Option<ThemeToken> {
     match p {
@@ -148,6 +163,40 @@ mod tests {
         let distinct: std::collections::HashSet<_> = colors.iter().collect();
         assert_eq!(distinct.len(), statuses.len(), "{colors:?}");
         assert_eq!(status_token("nonsense"), token::BOARD_BG);
+    }
+
+    #[test]
+    fn statuses_read_as_words() {
+        let words: Vec<_> = crate::board::STATUSES.iter().map(|s| status_label(s)).collect();
+        assert_eq!(words, ["Open", "In Progress", "Needs Input", "In Review", "Approved", "Done", "Cancelled"]);
+        assert_eq!(status_label("on_hold"), "On Hold");
+    }
+
+    #[test]
+    fn no_view_formats_a_status_itself() {
+        // A status shown to a person goes through `status_label`; these are the shapes that skip it.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let skipping = [
+            "{status}",
+            "{st}",
+            "text(status,",
+            "text(status.",
+            "select(statuses",
+            "select(STATUSES",
+            "STATUSES.iter().map(|s| s.to_string())",
+        ];
+        let mut bad = Vec::new();
+        for file in ["board.rs", "inspector.rs", "author.rs", "map.rs", "widgets/column.rs", "widgets/card.rs"] {
+            let source = std::fs::read_to_string(root.join(file)).unwrap();
+            let source = source.split("#[cfg(test)]").next().unwrap();
+            for (n, line) in source.lines().enumerate() {
+                let line = line.trim();
+                if !line.starts_with("//") && !line.contains("Name::new") && skipping.iter().any(|p| line.contains(p)) {
+                    bad.push(format!("{file}:{}: {line}", n + 1));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "show a status with widgets::status_label:\n{}", bad.join("\n"));
     }
 
     #[test]

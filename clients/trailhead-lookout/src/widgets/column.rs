@@ -10,7 +10,7 @@ use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::prelude::*;
 use bevy::ui_widgets::ControlOrientation;
 
-use super::{SCROLLBAR_WIDTH, ScrollDown, radius, scrollbar, size, space, status_token, text, text_dim};
+use super::{SCROLLBAR_WIDTH, ScrollDown, radius, scrollbar, size, space, status_label, status_token, text, text_dim};
 
 /// How wide every column is.
 pub const COLUMN_WIDTH: f32 = 260.0;
@@ -74,7 +74,7 @@ pub struct ColumnCount(pub Entity);
 pub fn column_header(commands: &mut Commands, shell: Entity, status: &str, count: usize) {
     let header =
         commands.spawn(Node { column_gap: px(space::CONTROLS), align_items: AlignItems::Baseline, ..default() }).id();
-    commands.queue_spawn_scene(text(status.to_string(), size::HEADING)).insert(ChildOf(header));
+    commands.queue_spawn_scene(text(status_label(status), size::HEADING)).insert(ChildOf(header));
     commands.queue_spawn_scene(text_dim(count.to_string(), size::SMALL)).insert((ColumnCount(shell), ChildOf(header)));
     commands.entity(shell).insert_children(0, &[header]);
 }

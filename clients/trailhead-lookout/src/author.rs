@@ -24,7 +24,7 @@ use crate::connection::Connection;
 use crate::mirror::{Data, IsTask};
 use crate::widgets::{
     Modal, ModalClosed, ModalLocked, ModalSlots, Picked, button, dot, field, open_modal, priority_tone, row, section,
-    select, size, space, text, text_dim, text_input, token,
+    select, size, space, status_label, text, text_dim, text_input, token,
 };
 
 /// The queue task new tasks go under unless the form says otherwise (`queue` in `.trailhead.toml`).
@@ -572,7 +572,7 @@ fn fill_form(new: Query<&ModalSlots, (With<FormPanel>, Added<ModalSlots>)>, form
                 let priority = PRIORITIES.iter().position(|p| *p == d.priority);
                 choice_field(c, line, "Priority", FormChoice::Priority, priorities, priority);
                 if !creating {
-                    let statuses = STATUSES.iter().map(|s| s.to_string()).collect();
+                    let statuses = STATUSES.iter().map(|s| status_label(s)).collect();
                     let status = STATUSES.iter().position(|s| *s == d.status);
                     choice_field(c, line, "Status", FormChoice::Status, statuses, status);
                 }

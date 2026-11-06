@@ -21,7 +21,7 @@ use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror
 use crate::widgets;
 use crate::widgets::{
     Icon, Keyed, Picked, ScrollBoth, badge, button, card as card_shell, card_row, card_title, card_under, chip, field,
-    priority_tone, select, size, space, text as label_text, token, tool_button,
+    priority_tone, select, size, space, status_label, text as label_text, token, tool_button,
 };
 use bevy::feathers::theme::ThemeToken;
 
@@ -878,7 +878,8 @@ fn redraw_header(
         let control = bsn_list! { @select(names, Some(at), 8) FilterSelect({ key }) };
         commands.queue_spawn_scene(field(key.name(), control)).insert(ChildOf(bar));
     }
-    let caption = if filter.closed { "closed: shown" } else { "closed: hidden" };
+    let closed = CLOSED.iter().map(|s| status_label(s)).collect::<Vec<_>>().join(" & ");
+    let caption = format!("{closed}: {}", if filter.closed { "shown" } else { "hidden" });
     commands.queue_spawn_scene(button(caption, None, ButtonVariant::Normal)).insert((ClosedToggle, ChildOf(bar)));
     commands
         .queue_spawn_scene(button("Trail map", None, ButtonVariant::Normal))
