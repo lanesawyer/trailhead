@@ -30,6 +30,10 @@
 //! - A section that opens and closes: [`spawn_accordion`], a pane or a group by [`SectionLevel`]; fill its body, add
 //!   controls to its header with [`spawn_header_button`].
 //! - Text cut to a width with an ellipsis: [`truncate_to_width`], measured by the same estimate as [`width_of`].
+//! - A number picked on a track: [`spawn_slider`]. Its value is written back for you.
+//! - A search box with a hint while empty and a clear button: [`spawn_search_field`]; match items with
+//!   [`matches_search`]. A text field straight on a pane or menu goes in a [`field_well`] to be seen.
+//! - A button that opens a URL in the browser: [`link_button`].
 //! - Writing a `Node` or `Text` only when it changes: [`patch_node`], [`set_display`], [`set_text`].
 //!
 //! The kit's per-frame systems run in [`UiPlace`] in `Update`; order an app's own systems around it.
@@ -41,18 +45,22 @@ mod badge;
 mod buttons;
 mod chip;
 mod containers;
+mod field_well;
 mod hint;
 mod icons;
 mod input;
 mod keyed;
 pub mod layer;
+mod link;
 mod menu;
 mod modal;
 mod panel_header;
 mod patch;
 mod scroll;
 mod scrollbar;
+mod search;
 mod select;
+mod slider;
 mod spacing;
 mod tabs;
 mod text;
@@ -67,10 +75,12 @@ pub use badge::badge;
 pub use buttons::{button, button_text, danger_button, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{field, panel, row, section};
+pub use field_well::field_well;
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
 pub use input::text_input;
 pub use keyed::Keyed;
+pub use link::{ExternalLink, link_button};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu};
 pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
@@ -80,7 +90,9 @@ pub use panel_header::panel_header;
 pub use patch::{display, patch_node, set_display, set_text};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
+pub use search::{ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field};
 pub use select::{Picked, SelectEdit, SelectOptions, select};
+pub use slider::spawn_slider;
 pub use spacing::{check as spacing_check, extent, radius, space};
 pub use tabs::{TabCaption, fit_tabs, style_tabs, tab, tab_strip};
 pub use text::{size, text, text_dim, text_toned};
@@ -92,13 +104,15 @@ pub use truncate::{truncate_to_width, width_of};
 #[derive(SystemSet, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct UiPlace;
 
-/// What the widgets need at run time: the embedded icon font, the hint, modals, and the systems in [`UiPlace`].
+/// What the widgets need at run time: the embedded icon font, the hint, modals, sliders that write their value back,
+/// and the systems in [`UiPlace`].
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin))
             .add_observer(scroll::on_scroll)
+            .add_observer(bevy::ui_widgets::slider_self_update)
             .add_systems(PostUpdate, scrollbar::hide_when_fits.after(bevy::ui::UiSystems::Layout))
             .add_systems(
                 Update,
@@ -106,6 +120,8 @@ impl Plugin for UiPlugin {
                     accordion::sync_accordions,
                     accordion::pad_accordion_headers,
                     accordion::truncate_accordion_titles,
+                    search::sync_search_hints,
+                    slider::repaint_sliders.run_if(resource_changed::<bevy::feathers::theme::UiTheme>),
                     tabs::fit_tabs,
                     tabs::style_tabs,
                 )
