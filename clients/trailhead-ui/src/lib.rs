@@ -34,10 +34,14 @@
 //! - A search box with a hint while empty and a clear button: [`spawn_search_field`]; match items with
 //!   [`matches_search`]. A text field straight on a pane or menu goes in a [`field_well`] to be seen.
 //! - A button that opens a URL in the browser: [`link_button`].
+//! - A line saying how something went, with an icon for its [`Tone`]: [`notice`], then write a [`Notice`] onto it;
+//!   an empty message hides it.
+//! - Placeholder bars where content is on its way: [`spawn_skeleton`].
 //! - Writing a `Node` or `Text` only when it changes: [`patch_node`], [`set_display`], [`set_text`].
 //!
 //! The kit's per-frame systems run in [`UiPlace`] in `Update`; order an app's own systems around it.
 
+use bevy::feathers::theme::UiTheme;
 use bevy::prelude::*;
 
 mod accordion;
@@ -54,12 +58,14 @@ pub mod layer;
 mod link;
 mod menu;
 mod modal;
+mod notice;
 mod panel_header;
 mod patch;
 mod scroll;
 mod scrollbar;
 mod search;
 mod select;
+mod skeleton;
 mod slider;
 mod spacing;
 mod tabs;
@@ -86,12 +92,14 @@ pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
     open_modal,
 };
+pub use notice::{Notice, Tone, notice};
 pub use panel_header::panel_header;
 pub use patch::{display, patch_node, set_display, set_text};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
 pub use search::{ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field};
 pub use select::{Picked, SelectEdit, SelectOptions, select};
+pub use skeleton::{SkeletonBar, spawn_skeleton};
 pub use slider::spawn_slider;
 pub use spacing::{check as spacing_check, extent, radius, space};
 pub use tabs::{TabCaption, fit_tabs, style_tabs, tab, tab_strip};
@@ -121,7 +129,9 @@ impl Plugin for UiPlugin {
                     accordion::pad_accordion_headers,
                     accordion::truncate_accordion_titles,
                     search::sync_search_hints,
-                    slider::repaint_sliders.run_if(resource_changed::<bevy::feathers::theme::UiTheme>),
+                    slider::repaint_sliders.run_if(resource_exists_and_changed::<UiTheme>),
+                    notice::sync_notices.run_if(resource_exists::<UiTheme>),
+                    skeleton::pulse_skeletons.run_if(resource_exists::<UiTheme>),
                     tabs::fit_tabs,
                     tabs::style_tabs,
                 )

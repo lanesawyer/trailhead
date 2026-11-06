@@ -26,6 +26,8 @@ pub mod space {
     pub const ICON_LABEL: f32 = step::XS;
     /// Controls side by side in a row: a card's icon buttons, the badges on a card.
     pub const CONTROLS: f32 = step::XS;
+    /// Rows of a list that read as one block: placeholder bars.
+    pub const LIST_ITEMS: f32 = step::XS;
     /// Cards stacked in one column.
     pub const CARDS: f32 = step::S;
     /// Rows of controls in a section or panel.
@@ -137,6 +139,7 @@ mod tests {
             space::STACKED,
             space::ICON_LABEL,
             space::CONTROLS,
+            space::LIST_ITEMS,
             space::CARDS,
             space::ROWS,
             space::GROUPS,

@@ -33,6 +33,10 @@ pub mod token {
     pub const DANGER: ThemeToken = ThemeToken::new_static("ui.danger");
     /// Something that went well: a passed gate, a live connection.
     pub const OK: ThemeToken = ThemeToken::new_static("ui.ok");
+    /// Something under way, or worth knowing: a notice that isn't good or bad news.
+    pub const INFO: ThemeToken = ThemeToken::new_static("ui.info");
+    /// A placeholder bar where content is on its way, at its brightest.
+    pub const SKELETON: ThemeToken = ThemeToken::new_static("ui.skeleton");
 }
 
 /// The kit's theme, for an app that adds no colors of its own.
@@ -56,6 +60,8 @@ pub fn props() -> ThemeProps {
     paint(&mut theme, &token::WARN, Color::oklch(0.80, 0.14, 75.0));
     paint(&mut theme, &token::DANGER, Color::oklch(0.68, 0.17, 25.0));
     paint(&mut theme, &token::OK, Color::oklch(0.75, 0.14, 150.0));
+    paint(&mut theme, &token::INFO, Color::srgb(0.45, 0.68, 0.95));
+    paint(&mut theme, &token::SKELETON, palette::GRAY_3);
     theme
 }
 
@@ -74,8 +80,17 @@ mod tests {
     #[test]
     fn every_kit_token_resolves_rather_than_falling_back_to_fuchsia() {
         let theme = props();
-        let all =
-            [token::PANEL_BG, token::DIVIDER, token::BADGE_BG, token::HINT_BG, token::WARN, token::DANGER, token::OK];
+        let all = [
+            token::PANEL_BG,
+            token::DIVIDER,
+            token::BADGE_BG,
+            token::HINT_BG,
+            token::WARN,
+            token::DANGER,
+            token::OK,
+            token::INFO,
+            token::SKELETON,
+        ];
         for t in all {
             assert!(theme.token_assignments.contains_key(&t), "{t} isn't in the theme");
         }
