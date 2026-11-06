@@ -669,15 +669,36 @@ async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
     let names = git(dir, &["diff", "--cached", "--name-only", "--no-renames", "-z", start]).await?;
     let mut changes = Vec::new();
     for path in names.split(|b| *b == 0).filter(|p| !p.is_empty()) {
-        let path = String::from_utf8_lossy(path).into_owned();
-        let contents = match tokio::fs::read(dir.join(&path)).await {
+        read_change(dir, String::from_utf8_lossy(path).into_owned(), &mut changes).await?;
+    }
+    Ok(changes)
+}
+
+/// Reads one changed path into `changes`. A path that is now a directory (git lists a symlink to one;
+/// the link target is read) is replaced by the files under it.
+async fn read_change(dir: &Path, path: String, changes: &mut Vec<FileChange>) -> Result<()> {
+    let mut pending = vec![path];
+    while let Some(path) = pending.pop() {
+        let full = dir.join(&path);
+        if tokio::fs::metadata(&full).await.is_ok_and(|m| m.is_dir()) {
+            let fail = |e: std::io::Error| Error::Other(format!("{path}: {e}"));
+            let mut entries = tokio::fs::read_dir(&full).await.map_err(fail)?;
+            while let Some(entry) = entries.next_entry().await.map_err(fail)? {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name != ".git" {
+                    pending.push(format!("{path}/{name}"));
+                }
+            }
+            continue;
+        }
+        let contents = match tokio::fs::read(&full).await {
             Ok(bytes) => Some(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(Error::Other(format!("{path}: {e}"))),
         };
         changes.push(FileChange { path, contents });
     }
-    Ok(changes)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -730,5 +751,36 @@ mod tests {
             }
         }
         assert_eq!((calls, results), (3, 3));
+    }
+
+    #[tokio::test]
+    async fn a_symlink_to_a_new_directory_is_read_as_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str], at: &Path| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(at)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"], dir.path());
+        run(&["commit", "-q", "--allow-empty", "-m", "start"], dir.path());
+        let start = git_head(dir.path()).await.unwrap();
+        let skill = dir.path().join(".claude/skills/trailhead-ui");
+        std::fs::create_dir_all(skill.join("refs")).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "a").unwrap();
+        std::fs::write(skill.join("refs/b.md"), "b").unwrap();
+        std::os::unix::fs::symlink(&skill, dir.path().join("link")).unwrap();
+        let mut paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
+        paths.sort();
+        let want = [
+            ".claude/skills/trailhead-ui/SKILL.md",
+            ".claude/skills/trailhead-ui/refs/b.md",
+            "link/SKILL.md",
+            "link/refs/b.md",
+        ];
+        assert_eq!(paths, want);
     }
 }
