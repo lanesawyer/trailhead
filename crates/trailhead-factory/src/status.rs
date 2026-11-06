@@ -128,6 +128,10 @@ pub struct FactorySnapshot {
     /// placement pass.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<TargetSpend>,
+    /// The repo's queue tasks (`queue` in `[factory]`), whose subtasks the factory works. Lookout's Factory filter
+    /// uses them to tell the factory's tasks from the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queue: Vec<TaskKey>,
     /// The sequence number of the last event the snapshot includes, so a client can join the stream after it.
     pub seq: u64,
 }

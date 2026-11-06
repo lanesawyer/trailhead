@@ -19,8 +19,7 @@ mod theme;
 
 pub use card::{TITLE_LINES, card, card_row, card_title, card_under};
 pub use column::{
-    COLUMN_GUTTER, COLUMN_WIDTH, ColumnCount, column_body, column_empty, column_frame, column_header, column_scrollbar,
-    column_shell,
+    COLUMN_WIDTH, ColumnCount, column_body, column_empty, column_frame, column_header, column_scrollbar, column_shell,
 };
 pub use theme::{priority_tone, props as theme_props, status_label, status_token, theme, token};
 pub use trailhead_ui::*;

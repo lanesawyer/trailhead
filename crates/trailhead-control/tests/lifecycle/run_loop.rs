@@ -699,3 +699,25 @@ async fn a_rework_of_an_open_pr_starts_before_older_fresh_tasks_of_its_priority(
     assert_eq!(keys, [&key], "the rework starts before the fresh task");
     assert_eq!(r.tracker.task(&fresh).status, Status::Open);
 }
+
+#[tokio::test]
+async fn polling_never_looks_up_a_parked_task_but_still_releases_one_that_was_cancelled() {
+    let r = rig();
+    let parked = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Already implemented?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&parked).status, Status::NeedsInput);
+    assert_eq!(busy(&r.compute), ["trailhead-w1"]);
+
+    let before = r.tracker.shows(&parked);
+    for _ in 0..3 {
+        r.factory.tick().await.unwrap();
+    }
+    assert_eq!(r.tracker.shows(&parked), before, "the in-flight listing answered for it");
+    assert_eq!(busy(&r.compute), ["trailhead-w1"], "still parked");
+
+    r.tracker.set_status(&parked, Status::Cancelled);
+    r.factory.tick().await.unwrap();
+    assert!(r.tracker.shows(&parked) > before, "a task out of the listing is looked up");
+    assert!(busy(&r.compute).is_empty(), "its sandbox was released");
+}
