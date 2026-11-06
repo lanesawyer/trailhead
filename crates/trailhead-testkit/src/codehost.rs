@@ -178,13 +178,13 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.mergeable = mergeable).unwrap();
     }
 
-    /// Makes `pr_state` report `head` as the PR's head (`None`: the real one), as a host that hasn't caught up with a
-    /// push yet does.
     /// Makes a conflict outlast the next push, as when the base moves again during a rework.
     pub fn keep_conflict_on_push(&self, pr: &PrRef) {
         self.find(pr, |p, _| p.conflict_survives_push = true).unwrap();
     }
 
+    /// Makes `pr_state` report `head` as the PR's head (`None`: the real one), as a host that hasn't caught up with a
+    /// push yet does.
     pub fn set_lagging_head(&self, pr: &PrRef, head: Option<&str>) {
         self.find(pr, |p, _| p.lagging_head = head.map(str::to_string)).unwrap();
     }

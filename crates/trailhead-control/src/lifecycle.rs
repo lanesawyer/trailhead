@@ -12,6 +12,7 @@ use trailhead_factory::{
 };
 
 use crate::place::Placement;
+use crate::review::CI_REVIEWER;
 use crate::timing::{backoff, unix_now, until};
 use crate::{CANCEL_GRACE, Factory, Outcome, Placed};
 
@@ -33,6 +34,13 @@ impl Factory {
         // (TRAIL-304). The sub-agent isn't made yet, so the factory's own identity holds the task while it's settled.
         if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) {
             match codehost.pr_state(pr).await? {
+                PrState::Open { mergeable: Some(true), .. }
+                    if task.run.pending_changes().is_some_and(|c| c.conflict && c.reviewer != CI_REVIEWER) =>
+                {
+                    tracing::info!(task = %task.key.0, pr = %pr.url, "the host no longer reports a conflict; back to review");
+                    self.settle_gone_conflict(task, pr).await?;
+                    return Ok(Outcome::Settled { reason: messages::settled_conflict_gone(&pr.url) });
+                }
                 PrState::Merged { commit } => {
                     self.tracker.claim(&task.key).await?;
                     let by = self.merged_by(task, pr).await?;
@@ -115,7 +123,7 @@ impl Factory {
                 },
                 None => None,
             };
-            let merge_base = task.run.pending_changes().is_some_and(|c| c.conflict) && !self.conflict_gone(task).await;
+            let merge_base = task.run.pending_changes().is_some_and(|c| c.conflict);
             let (sandbox, setup_failure) =
                 self.acquire_worker(target, task, rework.then(|| Self::branch(task)), merge_base).await?;
             // The agent starts with the output so it can fix what broke, after whatever the review asked for.
@@ -682,23 +690,22 @@ impl Factory {
         }
     }
 
-    /// Whether the host now says the PR merges cleanly, though a review asked for a rework over a conflict: the base
-    /// moved back or the conflict was fixed meanwhile (TRAIL-243). Merging the base would leave the agent nothing to
-    /// resolve and the run would fail as 'changed nothing', so the rework starts without the merge, on the review's
-    /// other feedback. Only a definite answer counts; an unknown one, or a host error, keeps the merge.
-    async fn conflict_gone(&self, task: &Task) -> bool {
-        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return false };
-        match codehost.pr_state(pr).await {
-            Ok(PrState::Open { mergeable: Some(true), .. }) => {
-                tracing::info!(task = %task.key.0, "the host no longer reports a conflict; reworking without merging the base");
-                true
-            }
-            Ok(_) => false,
-            Err(e) => {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't re-check the PR's conflict; merging the base");
-                false
-            }
+    /// A rework the factory asked for over a conflict that the host no longer reports: the base moved back or the
+    /// conflict was fixed meanwhile (TRAIL-243). The merge would leave the agent nothing to resolve and the run would
+    /// fail as 'changed nothing', using up an attempt, so no worker runs: the request is dropped and the task goes
+    /// back to review, where the gates look at the PR as it is. A CI failure's rework isn't one of these, since it
+    /// wants the base merged in whether or not the PR conflicts.
+    async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef) -> Result<()> {
+        // A fresh conflict count, which is how reconcile tells a request that was settled from one still to act on.
+        let settled = RunUpdate { conflict_reworks: Some(0), ..RunUpdate::default() };
+        self.tracker.report(&task.key, settled).await?;
+        self.tracker.claim(&task.key).await?;
+        self.tracker.request_review(&task.key).await?;
+        let note = messages::conflict_gone_note(&pr.url, &self.config.repo.base_branch);
+        if let Err(e) = self.tracker.note(&task.key, &note).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't note the conflict that went away");
         }
+        Ok(())
     }
 
     /// Whether the PR a worker just pushed already conflicts with the base branch, which moved while the run worked

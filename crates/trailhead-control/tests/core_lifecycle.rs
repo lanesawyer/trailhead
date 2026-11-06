@@ -635,7 +635,7 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
 }
 
 #[tokio::test]
-async fn a_conflict_the_host_no_longer_reports_is_reworked_without_merging_the_base() {
+async fn a_conflict_the_host_no_longer_reports_goes_back_to_review_without_a_worker() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
 
@@ -645,15 +645,17 @@ async fn a_conflict_the_host_no_longer_reports_is_reworked_without_merging_the_b
 
     // The base moved back, or the conflict was fixed, before the rework started.
     r.codehost.set_mergeable(&pr, Some(true));
-    r.harness.push(Role::Worker, Script::new(changes()));
-    r.harness.push(Role::Reviewer, Script::new(approve()));
-    r.factory.tick().await.unwrap();
+    let sandboxes = r.daemon.prepared().len();
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.daemon.prepared().len(), sandboxes, "no sandbox for a rework with nothing to resolve");
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.attempt, Some(1), "no attempt used up");
 
-    let prepared = r.daemon.prepared();
-    let rework: Vec<_> =
-        prepared.iter().filter(|(id, p)| p.branch.is_some() && id.0.starts_with("trailhead-w")).collect();
-    assert_eq!(rework.len(), 1);
-    assert!(!rework[0].1.merge_base, "nothing to merge, so the base isn't merged in");
+    // Reconcile doesn't take the dropped request up again.
+    r.factory.reconcile().await.unwrap();
+    assert_ne!(r.show(&key).await.status, Status::Open);
 }
 
 fn reviewers_started(r: &Rig) -> usize {
@@ -724,7 +726,6 @@ async fn conflict_and_rework(r: &Rig, key: &TaskKey, pr: &trailhead_factory::PrR
         r.codehost.set_mergeable(pr, Some(false));
         assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
         assert_eq!(r.show(key).await.status, Status::Open);
-        r.codehost.set_mergeable(pr, Some(true));
         r.harness.push(Role::Worker, Script::new(changes()));
         r.harness.push(Role::Reviewer, Script::new(approve()));
         r.factory.tick().await.unwrap();
@@ -765,7 +766,6 @@ async fn a_request_for_changes_after_conflicts_counts_as_one_round() {
     let (key, pr) = in_review(&r, "Add a greeting").await;
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
-    r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(
         Role::Reviewer,
