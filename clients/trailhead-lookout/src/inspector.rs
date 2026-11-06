@@ -31,9 +31,11 @@ use crate::connection::{Connection, ConnectionStatus};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
 use crate::sync::SyncItem;
 use crate::widgets::{
-    Icon, ModalRoot, Picked, badge, button, danger_button, extent, layer, panel, panel_header, priority_tone, row,
-    scroll_body, scroll_frame, scrollbar, section, select, size, text, text_dim, text_toned, token, tool_button,
+    Icon, Keyed, ModalRoot, PanelTitle, Picked, SelectEdit, badge, button, danger_button, extent, layer, panel,
+    panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, text,
+    text_dim, text_toned, token, tool_button,
 };
+use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -443,7 +445,7 @@ impl Plugin for InspectorUiPlugin {
         app.add_plugins(InspectorPlugin)
             .init_resource::<Controls>()
             .add_systems(Startup, spawn_panel)
-            .add_systems(Update, redraw);
+            .add_systems(Update, (sync_panel, dress).chain());
     }
 }
 
@@ -569,6 +571,11 @@ fn send(world: &mut World, source: Entity, subject: &Subject, action: &Action) {
         rows::<IsAgent>(world),
     );
     let input = Input { projects: &projects, tasks: &tasks, claims: &claims, comments: &comments, agents: &agents };
+    // A revert's control is one however far back it goes; the window is read as the button is pressed.
+    let action = &match action {
+        Action::Revert(_) => Action::Revert(world.resource::<RevertWindow>().0),
+        other => other.clone(),
+    };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     let request = plan(action, input, &world.resource::<Latest>().0, subject, now);
     let outcome = match request {
@@ -598,34 +605,430 @@ fn control(controls: &mut Controls, commands: &mut Commands, subject: &Subject, 
     *controls.0.entry((subject.clone(), action.clone())).or_insert_with(|| commands.spawn(Control::Idle).id())
 }
 
-/// Says under `parent` where a control's command stands.
-fn note(commands: &mut Commands, parent: Entity, state: Option<&Control>) {
-    let scene: Box<dyn Scene> = match state {
-        Some(Control::Busy) => Box::new(text_dim("sending…", size::SECONDARY)),
-        Some(Control::Done) => Box::new(text_dim("done", size::SECONDARY)),
-        Some(Control::Refused(why)) => Box::new(text_toned(why.clone(), size::SECONDARY, token::DANGER)),
-        _ => return,
-    };
-    commands.spawn_scene(scene).insert(ChildOf(parent));
-}
-
 /// Whether a line of [`InspectorView::lines`] is about the run rather than the task's status.
 fn is_run_line(line: &str) -> bool {
     line.starts_with("run:")
 }
 
-/// A section of the panel under `heading`, for the caller to fill.
-fn section_in(commands: &mut Commands, panel: Entity, heading: &str) -> Entity {
-    commands.spawn_scene(bsn! { @section(heading.to_string()) }).insert(ChildOf(panel)).id()
+/// How a [`Block::Text`] is colored; fixed for the item that holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tone {
+    Body,
+    Dim,
+    Warn,
 }
 
-/// A row under `parent` whose items wrap onto more lines when they don't fit.
-fn wrapping_row(commands: &mut Commands, parent: Entity) -> Entity {
-    commands.spawn_scene(bsn! { @row() Node { flex_wrap: FlexWrap::Wrap } }).insert(ChildOf(parent)).id()
+/// One thing in a section of the panel. Items are keyed (`status/line/0`, `q/<comment id>`, `act/Release`), so a
+/// change in the task changes the entities of what changed and nothing else.
+#[derive(Debug, Clone, PartialEq)]
+enum Block {
+    /// A line of text; only the words change while the key stays.
+    Text { text: String, size: f32, tone: Tone },
+    /// The `P1` badge. Its key holds the priority, so a new priority is a new badge.
+    Priority(i64),
+    /// The wrapping row of a PR's gates, which are [`Gate`]s keyed under it.
+    Gates,
+    /// An open question, with its answer and resolve buttons and what became of the last resolve.
+    Question { key: String, id: String, body: String, live: bool, note: Option<Control> },
+    /// The status dropdown: the task's own status first.
+    Move { statuses: Vec<String>, note: Option<Control> },
+    /// A button for `action` (a revert has its window's dropdown, `window` hours).
+    Act { action: Action, window: Option<i64>, note: Option<Control> },
 }
 
+/// One of a PR's gates: its key holds the state, so a gate that changes state is a new badge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Gate {
+    name: String,
+    state: GateState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateState {
+    Passed,
+    Waiting,
+    Failing,
+}
+
+/// A block on its entity, which [`dress`] brings in line with it when it changes.
+#[derive(Component, Debug, Clone)]
+struct Shown(Block);
+
+/// The parts of a block's entity that are set in place.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct Parts {
+    text: Option<Entity>,
+    answer: Option<Entity>,
+    resolve: Option<Entity>,
+    select: Option<Entity>,
+    note: Option<Entity>,
+}
+
+type Plan = Vec<(String, Vec<(String, Block)>)>;
+
+fn text_block(text: impl Into<String>, size: f32, tone: Tone) -> Block {
+    Block::Text { text: text.into(), size, tone }
+}
+
+/// The panel's sections and their items, in order. `note` is where a control's command stands, by action.
+fn layout(
+    view: &InspectorView,
+    live: bool,
+    offline: &str,
+    window: i64,
+    note: &dyn Fn(&Action) -> Option<Control>,
+) -> Plan {
+    let mut plan: Plan = Vec::new();
+    let mut section = |key: &str, heading: &str, mut items: Vec<(String, Block)>| {
+        if !heading.is_empty() {
+            items.insert(0, (format!("{key}/heading"), text_block(heading, size::SECONDARY, Tone::Dim)));
+        }
+        plan.push((key.to_string(), items));
+    };
+
+    let (run, status): (Vec<&String>, Vec<&String>) = view.lines.iter().partition(|l| is_run_line(l));
+    for (key, heading, lines) in [("status", "Status", status), ("run", "Run", run)] {
+        if lines.is_empty() {
+            continue;
+        }
+        let mut items = Vec::new();
+        if let (true, Some(p)) = (key == "status", view.priority) {
+            items.push((format!("{key}/priority/{p}"), Block::Priority(p)));
+        }
+        items.extend(
+            lines
+                .into_iter()
+                .enumerate()
+                .map(|(i, l)| (format!("{key}/line/{i}"), text_block(l, size::BODY, Tone::Body))),
+        );
+        section(key, heading, items);
+    }
+
+    if !view.questions.is_empty() {
+        let items = view
+            .questions
+            .iter()
+            .map(|q| {
+                let block = Block::Question {
+                    key: q.key.clone(),
+                    id: q.id.clone(),
+                    body: q.body.clone(),
+                    live,
+                    note: note(&Action::Resolve(q.id.clone())),
+                };
+                (format!("q/{}", q.id), block)
+            })
+            .collect();
+        section("questions", "Questions", items);
+    }
+
+    if view.pr.is_some() || view.merge_note.is_some() {
+        let mut items = Vec::new();
+        if let Some(pr) = &view.pr {
+            let number = pr.number.map_or(String::new(), |n| format!("#{n} "));
+            items.push(("pr/url".to_string(), text_block(format!("{number}{}", pr.url), size::BODY, Tone::Body)));
+            let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
+            items
+                .push(("pr/state".to_string(), text_block(format!("{}{grade}", pr.state), size::SECONDARY, Tone::Dim)));
+            if !gates(pr).is_empty() {
+                items.push(("pr/gates".to_string(), Block::Gates));
+            }
+            if let Some(problem) = &pr.problem {
+                items.push(("pr/problem".to_string(), text_block(problem, size::BODY, Tone::Warn)));
+            }
+        }
+        if let Some(merge_note) = &view.merge_note {
+            items.push(("pr/note".to_string(), text_block(merge_note, size::SECONDARY, Tone::Dim)));
+        }
+        section("pr", "Pull request", items);
+    }
+
+    if !live {
+        let items = vec![("offline/text".to_string(), text_block(offline, size::BODY, Tone::Warn))];
+        section("offline", "", items);
+        return plan;
+    }
+
+    let mut items = Vec::new();
+    // One dropdown for every status the task can move to, the current one showing.
+    let moves: Vec<String> =
+        view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(st.clone()) } else { None }).collect();
+    if let (Some(current), false) = (&view.status, moves.is_empty()) {
+        let statuses = std::iter::once(current.clone()).chain(moves).collect();
+        items.push(("move".to_string(), Block::Move { statuses, note: note(&Action::Status(String::new())) }));
+    }
+    for action in &view.actions {
+        let action = match action {
+            Action::Status(_) | Action::Resolve(_) => continue,
+            // One control however far back, so the answer finds it when the window changes.
+            Action::Revert(_) => Action::Revert(0),
+            other => other.clone(),
+        };
+        let window = matches!(action, Action::Revert(_)).then_some(window);
+        let block = Block::Act { note: note(&action), window, action: action.clone() };
+        items.push((format!("act/{action:?}"), block));
+    }
+    section("actions", "Actions", items);
+    plan
+}
+
+/// A PR's gates, in the order the panel shows them.
+fn gates(pr: &PrPanel) -> Vec<(String, Gate)> {
+    [
+        (&pr.passed, GateState::Passed, "passed"),
+        (&pr.waiting, GateState::Waiting, "waiting"),
+        (&pr.failing, GateState::Failing, "failing"),
+    ]
+    .into_iter()
+    .flat_map(|(names, state, word)| {
+        names.iter().map(move |name| (format!("{word}/{name}"), Gate { name: name.clone(), state }))
+    })
+    .collect()
+}
+
+fn window_labels() -> Vec<String> {
+    WINDOWS.iter().map(|h| format!("{h}h ago")).collect()
+}
+
+/// The words beside a control for where its command stands, and their color; no words for none.
+fn note_look(note: &Option<Control>) -> (String, ThemeToken) {
+    match note {
+        Some(Control::Busy) => ("sending…".into(), tokens::TEXT_DIM),
+        Some(Control::Done) => ("done".into(), tokens::TEXT_DIM),
+        Some(Control::Refused(why)) => (why.clone(), token::DANGER),
+        _ => (String::new(), tokens::TEXT_DIM),
+    }
+}
+
+fn spawn_note(commands: &mut Commands, parent: Entity, note: &Option<Control>) -> Entity {
+    let (words, tone) = note_look(note);
+    let display = if words.is_empty() { Display::None } else { Display::Flex };
+    commands
+        .spawn_scene(bsn! { @text_toned(words, size::SECONDARY, tone) Node { display: { display } } })
+        .insert(ChildOf(parent))
+        .id()
+}
+
+/// Disables a button while the connection is not live.
+fn gate_button(commands: &mut Commands, button: Entity, live: bool) {
+    if live {
+        commands.entity(button).remove::<InteractionDisabled>();
+    } else {
+        commands.entity(button).insert(InteractionDisabled);
+    }
+}
+
+/// Makes the entity for a new block, not yet parented.
+fn spawn_block(commands: &mut Commands, controls: &mut Controls, subject: &Subject, block: &Block) -> Entity {
+    let item = match block {
+        Block::Text { text: words, size, tone } => {
+            let scene: Box<dyn Scene> = match tone {
+                Tone::Body => Box::new(text(words.clone(), *size)),
+                Tone::Dim => Box::new(text_dim(words.clone(), *size)),
+                Tone::Warn => Box::new(text_toned(words.clone(), *size, token::WARN)),
+            };
+            commands.spawn_scene(scene).id()
+        }
+        Block::Priority(p) => commands.spawn_scene(badge(format!("P{p}"), None, priority_tone(*p))).id(),
+        Block::Gates => commands.spawn_scene(bsn! { @row() Node { flex_wrap: FlexWrap::Wrap } }).id(),
+        Block::Question { key, id, body, live, note } => {
+            let item = commands
+                .spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::ROWS), ..default() })
+                .id();
+            let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
+            let words = commands
+                .spawn_scene(
+                    bsn! { @text_toned(format!("? {body}"), size::BODY, token::WARN) Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0) } },
+                )
+                .insert(ChildOf(line))
+                .id();
+            // The same form the board opens; it saves even after the inspector moves on.
+            let act = Act::Answer { key: key.clone(), comment_id: id.clone(), question: body.clone() };
+            let answer = commands
+                .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonVariant::Normal) })
+                .insert((act, ChildOf(line)))
+                .id();
+            let resolve_action = Action::Resolve(id.clone());
+            let source = control(controls, commands, subject, &resolve_action);
+            let resolve = commands
+                .spawn_scene(bsn! {
+                    @tool_button(Icon::Check, "Resolve without an answer", ButtonVariant::Normal)
+                    @sends(source, subject.clone(), resolve_action.clone())
+                })
+                .insert(ChildOf(line))
+                .id();
+            gate_button(commands, answer, *live);
+            gate_button(commands, resolve, *live);
+            let note = spawn_note(commands, item, note);
+            commands.entity(item).insert(Parts {
+                text: Some(words),
+                answer: Some(answer),
+                resolve: Some(resolve),
+                note: Some(note),
+                ..default()
+            });
+            item
+        }
+        Block::Move { statuses, note } => {
+            let line = commands.spawn_scene(bsn! { @row() }).id();
+            commands.spawn_scene(text_dim("Move to", size::SECONDARY)).insert(ChildOf(line));
+            let source = control(controls, commands, subject, &Action::Status(String::new()));
+            let max_visible = statuses.len();
+            let picker = commands
+                .spawn_scene(select(statuses.clone(), Some(0), max_visible))
+                .insert((StatusMove { source, subject: subject.clone(), statuses: statuses.clone() }, ChildOf(line)))
+                .id();
+            let note = spawn_note(commands, line, note);
+            commands.entity(line).insert(Parts { select: Some(picker), note: Some(note), ..default() });
+            line
+        }
+        Block::Act { action, window, note } => {
+            let line = commands.spawn_scene(bsn! { @row() }).id();
+            let source = control(controls, commands, subject, action);
+            let press = sends(source, subject.clone(), action.clone());
+            match action {
+                Action::Release => commands
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonVariant::Normal) @{press} }),
+                Action::Undo => commands
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonVariant::Normal) @{press} }),
+                Action::Cancel => {
+                    commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} })
+                }
+                _ => commands.spawn_scene(bsn! { @danger_button("revert since", Some(Icon::History)) @{press} }),
+            }
+            .insert(ChildOf(line));
+            let mut parts = Parts::default();
+            if let Some(hours) = window {
+                let selected = WINDOWS.iter().position(|h| h == hours);
+                parts.select = Some(
+                    commands
+                        .spawn_scene(select(window_labels(), selected, WINDOWS.len()))
+                        .insert((WindowChoice, ChildOf(line)))
+                        .id(),
+                );
+            }
+            parts.note = Some(spawn_note(commands, line, note));
+            commands.entity(line).insert(parts);
+            line
+        }
+    };
+    commands.entity(item).insert(Shown(block.clone()));
+    item
+}
+
+/// Sets a note's words, color and whether it takes room.
+fn dress_note(
+    commands: &mut Commands,
+    texts: &mut Query<&mut Text>,
+    nodes: &mut Query<&mut Node>,
+    note: Entity,
+    state: &Option<Control>,
+) {
+    let (words, tone) = note_look(state);
+    let display = if words.is_empty() { Display::None } else { Display::Flex };
+    if let Ok(mut t) = texts.get_mut(note)
+        && t.0 != words
+    {
+        t.0 = words;
+    }
+    if let Ok(mut node) = nodes.get_mut(note)
+        && node.display != display
+    {
+        node.display = display;
+    }
+    commands.entity(note).insert(ThemeTextColor(tone));
+}
+
+/// Brings the parts of changed blocks in line with them: words, notes, disabled buttons, dropdown rows.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn redraw(
+fn dress(
+    shown: Query<(&Shown, Option<&Parts>)>,
+    changed: Query<Entity, Changed<Shown>>,
+    mut texts: Query<&mut Text>,
+    mut nodes: Query<&mut Node>,
+    mut moves: Query<&mut StatusMove>,
+    mut edit: SelectEdit,
+    mut again: Local<Vec<Entity>>,
+    mut commands: Commands,
+) {
+    let mut todo: Vec<Entity> = std::mem::take(&mut *again);
+    todo.extend(changed.iter());
+    todo.dedup();
+    for entity in todo {
+        let Ok((Shown(block), parts)) = shown.get(entity) else { continue };
+        if let Block::Text { text: words, .. } = block {
+            if let Ok(mut t) = texts.get_mut(entity)
+                && t.0 != *words
+            {
+                t.0 = words.clone();
+            }
+            continue;
+        }
+        let Some(parts) = parts else { continue };
+        match block {
+            Block::Question { key, id, body, live, note } => {
+                let words = format!("? {body}");
+                if let Some(Ok(mut t)) = parts.text.map(|e| texts.get_mut(e))
+                    && t.0 != words
+                {
+                    t.0 = words;
+                }
+                for button in [parts.answer, parts.resolve].into_iter().flatten() {
+                    gate_button(&mut commands, button, *live);
+                }
+                if let Some(answer) = parts.answer {
+                    let act = Act::Answer { key: key.clone(), comment_id: id.clone(), question: body.clone() };
+                    commands.entity(answer).insert(act);
+                }
+                if let Some(n) = parts.note {
+                    dress_note(&mut commands, &mut texts, &mut nodes, n, note);
+                }
+            }
+            Block::Move { statuses, note } => {
+                if let Some(picker) = parts.select {
+                    if let Ok(mut m) = moves.get_mut(picker)
+                        && m.statuses != *statuses
+                    {
+                        m.statuses = statuses.clone();
+                    }
+                    if !edit.set(picker, statuses, Some(0)) {
+                        again.push(entity);
+                    }
+                }
+                if let Some(n) = parts.note {
+                    dress_note(&mut commands, &mut texts, &mut nodes, n, note);
+                }
+            }
+            Block::Act { window, note, .. } => {
+                if let (Some(picker), Some(hours)) = (parts.select, window)
+                    && !edit.set(picker, &window_labels(), WINDOWS.iter().position(|h| h == hours))
+                {
+                    again.push(entity);
+                }
+                if let Some(n) = parts.note {
+                    dress_note(&mut commands, &mut texts, &mut nodes, n, note);
+                }
+            }
+            Block::Text { .. } | Block::Priority(_) | Block::Gates => {}
+        }
+    }
+}
+
+/// What the panel has on its entities: the sections of the body, the items in them and a PR's gates.
+#[derive(Default)]
+struct Drawn {
+    subject: Option<Subject>,
+    header: Option<Entity>,
+    sections: Keyed<()>,
+    items: Keyed<Block>,
+    gates: Keyed<Gate>,
+}
+
+/// Keeps the panel's entities in step with [`InspectorState`]. Selecting a different subject builds the header and
+/// sections anew, once; while the same one stays selected, only what changed is set: text through its `Text`, a list's
+/// new rows appended, the rest left as the same entities (and the body's scroll position where it was).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn sync_panel(
     state: Res<InspectorState>,
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,
@@ -634,9 +1037,10 @@ fn redraw(
     states: Query<&Control>,
     changed_controls: Query<(), Changed<Control>>,
     mut panel_node: Single<&mut Node, With<InspectorPanel>>,
-    header: Single<(Entity, Option<&Children>), With<InspectorHeader>>,
-    body: Single<(Entity, Option<&Children>, &mut ScrollPosition), With<InspectorBody>>,
-    mut shown: Local<Option<Subject>>,
+    header: Single<Entity, With<InspectorHeader>>,
+    body: Single<(Entity, &mut ScrollPosition), With<InspectorBody>>,
+    mut titles: Query<&mut Text, With<PanelTitle>>,
+    mut drawn: Local<Drawn>,
     mut commands: Commands,
 ) {
     if !(state.is_changed()
@@ -647,146 +1051,77 @@ fn redraw(
     {
         return;
     }
-    let (header, header_children) = header.into_inner();
-    let (panel, body_children, mut scroll) = body.into_inner();
-    for child in header_children.into_iter().chain(body_children).flatten() {
-        commands.entity(*child).despawn();
+    let (body, mut scroll) = body.into_inner();
+    let drawn = &mut *drawn;
+    let subject = state.0.as_ref().map(|v| v.subject.clone());
+    if subject != drawn.subject {
+        // A different subject (or none) starts over, at the top.
+        if let Some(old) = drawn.header.take() {
+            commands.entity(old).try_despawn();
+        }
+        drawn.sections.clear(&mut commands);
+        drawn.items.forget();
+        drawn.gates.forget();
+        scroll.0 = Vec2::ZERO;
+        drawn.subject = subject;
     }
     let Some(view) = &state.0 else {
         panel_node.display = Display::None;
-        *shown = None;
         return;
     };
     panel_node.display = Display::Flex;
-    // A different task opens at the top; a redraw of the same one stays where it was.
-    if shown.as_ref() != Some(&view.subject) {
-        scroll.0 = Vec2::ZERO;
-        *shown = Some(view.subject.clone());
+    if drawn.header.is_none() {
+        let root = commands.spawn_scene(panel_header(view.title.clone(), true)).insert(ChildOf(*header)).id();
+        drawn.header = Some(root);
     }
+    for mut title in &mut titles {
+        if title.0 != view.title {
+            title.0 = view.title.clone();
+        }
+    }
+
     let live = *connection.get() == Connection::Live;
-    let c = &mut commands;
+    let why = status.reason.as_ref().map_or_else(String::new, |r| format!(": {r}"));
+    let offline = format!("{:?}{why}. Controls are off.", connection.get());
+    let subject = &view.subject;
+    let note =
+        |action: &Action| controls.0.get(&(subject.clone(), action.clone())).and_then(|e| states.get(*e).ok()).cloned();
+    let plan = layout(view, live, &offline, window.0, &note);
 
-    c.spawn_scene(panel_header(view.title.clone(), true)).insert(ChildOf(header));
-
-    let (run, status_lines): (Vec<&String>, Vec<&String>) = view.lines.iter().partition(|l| is_run_line(l));
-    for (heading, lines) in [("Status", status_lines), ("Run", run)] {
-        if lines.is_empty() {
-            continue;
-        }
-        let section = section_in(c, panel, heading);
-        if let (true, Some(p)) = (heading == "Status", view.priority) {
-            c.spawn_scene(badge(format!("P{p}"), None, priority_tone(p))).insert(ChildOf(section));
-        }
-        for l in lines {
-            c.spawn_scene(text(l.clone(), size::BODY)).insert(ChildOf(section));
-        }
-    }
-
-    if !view.questions.is_empty() {
-        let section = section_in(c, panel, "Questions");
-        for q in &view.questions {
-            let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(section)).id();
-            c.spawn_scene(
-                bsn! { @text_toned(format!("? {}", q.body), size::BODY, token::WARN) Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0) } },
-            )
-            .insert(ChildOf(line));
-            // The same form the board opens; it saves even after the inspector moves on.
-            let act = Act::Answer { key: q.key.clone(), comment_id: q.id.clone(), question: q.body.clone() };
-            let mut answer = c.spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonVariant::Normal) });
-            answer.insert((act, ChildOf(line)));
-            if !live {
-                answer.insert(InteractionDisabled);
-            }
-            let resolve = Action::Resolve(q.id.clone());
-            let source = control(&mut controls, c, &view.subject, &resolve);
-            let mut button = c.spawn_scene(bsn! {
-                @tool_button(Icon::Check, "Resolve without an answer", ButtonVariant::Normal)
-                @sends(source, view.subject.clone(), resolve.clone())
-            });
-            button.insert(ChildOf(line));
-            if !live {
-                button.insert(InteractionDisabled);
-            }
-            note(c, section, states.get(source).ok());
-        }
-    }
-
-    if view.pr.is_some() || view.merge_note.is_some() {
-        let section = section_in(c, panel, "Pull request");
-        if let Some(pr) = &view.pr {
-            let number = pr.number.map_or(String::new(), |n| format!("#{n} "));
-            c.spawn_scene(text(format!("{number}{}", pr.url), size::BODY)).insert(ChildOf(section));
-            let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
-            c.spawn_scene(text_dim(format!("{}{grade}", pr.state), size::SECONDARY)).insert(ChildOf(section));
-            if !pr.passed.is_empty() || !pr.waiting.is_empty() || !pr.failing.is_empty() {
-                let gates = wrapping_row(c, section);
-                for (names, icon, tone) in [
-                    (&pr.passed, Icon::CircleCheck, token::OK),
-                    (&pr.waiting, Icon::Circle, tokens::TEXT_DIM),
-                    (&pr.failing, Icon::CircleX, token::DANGER),
-                ] {
-                    for name in names {
-                        c.spawn_scene(badge(name.clone(), Some(icon), Some(tone.clone()))).insert(ChildOf(gates));
-                    }
-                }
-            }
-            if let Some(problem) = &pr.problem {
-                c.spawn_scene(text_toned(problem.clone(), size::BODY, token::WARN)).insert(ChildOf(section));
-            }
-        }
-        if let Some(merge_note) = &view.merge_note {
-            c.spawn_scene(text_dim(merge_note.clone(), size::SECONDARY)).insert(ChildOf(section));
-        }
-    }
-
-    if !live {
-        let why = status.reason.as_ref().map_or_else(String::new, |r| format!(": {r}"));
-        c.spawn_scene(text_toned(format!("{:?}{why}. Controls are off.", connection.get()), size::BODY, token::WARN))
-            .insert(ChildOf(panel));
-        return;
-    }
-
-    let section = section_in(c, panel, "Actions");
-    // One dropdown for every status the task can move to, the current one showing.
-    let moves: Vec<String> =
-        view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(st.clone()) } else { None }).collect();
-    if let (Some(current), false) = (&view.status, moves.is_empty()) {
-        let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(section)).id();
-        c.spawn_scene(text_dim("Move to", size::SECONDARY)).insert(ChildOf(line));
-        let statuses: Vec<String> = std::iter::once(current.clone()).chain(moves).collect();
-        let source = control(&mut controls, c, &view.subject, &Action::Status(String::new()));
-        let max_visible = statuses.len();
-        c.spawn_scene(select(statuses.clone(), Some(0), max_visible))
-            .insert((StatusMove { source, subject: view.subject.clone(), statuses }, ChildOf(line)));
-        note(c, line, states.get(source).ok());
-    }
-    for action in &view.actions {
-        let action = match action {
-            Action::Status(_) | Action::Resolve(_) => continue,
-            Action::Revert(_) => Action::Revert(window.0),
-            other => other.clone(),
-        };
-        let source = control(&mut controls, c, &view.subject, &action);
-        let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(section)).id();
-        let press = sends(source, view.subject.clone(), action.clone());
-        match action {
-            Action::Release => {
-                c.spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonVariant::Normal) @{press} })
-            }
-            Action::Undo => {
-                c.spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonVariant::Normal) @{press} })
-            }
-            Action::Cancel => c.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} }),
-            _ => c.spawn_scene(bsn! { @danger_button("revert since", Some(Icon::History)) @{press} }),
-        }
-        .insert(ChildOf(line));
-        if matches!(action, Action::Revert(_)) {
-            let windows = WINDOWS.iter().map(|h| format!("{h}h ago")).collect();
-            let selected = WINDOWS.iter().position(|h| *h == window.0);
-            c.spawn_scene(select(windows, selected, WINDOWS.len())).insert((WindowChoice, ChildOf(line)));
-        }
-        note(c, line, states.get(source).ok());
-    }
+    let wanted: Vec<(String, ())> = plan.iter().map(|(key, _)| (key.clone(), ())).collect();
+    drawn.sections.sync(
+        &mut commands,
+        &[(body, wanted)],
+        |commands, _, _| commands.spawn_scene(section_frame()).id(),
+        |_, _, _| {},
+    );
+    let wanted: Vec<(Entity, Vec<(String, Block)>)> =
+        plan.into_iter().filter_map(|(key, items)| Some((drawn.sections.entity(&key)?, items))).collect();
+    let controls = &mut *controls;
+    drawn.items.sync(
+        &mut commands,
+        &wanted,
+        |commands, _, block| spawn_block(commands, controls, subject, block),
+        |commands, entity, block| {
+            commands.entity(entity).insert(Shown(block.clone()));
+        },
+    );
+    let rows = view.pr.as_ref().map(gates).unwrap_or_default();
+    let wanted: Vec<(Entity, Vec<(String, Gate)>)> =
+        drawn.items.entity("pr/gates").map(|row| (row, rows)).into_iter().collect();
+    drawn.gates.sync(
+        &mut commands,
+        &wanted,
+        |commands, _, gate| {
+            let (icon, tone) = match gate.state {
+                GateState::Passed => (Icon::CircleCheck, token::OK),
+                GateState::Waiting => (Icon::Circle, tokens::TEXT_DIM),
+                GateState::Failing => (Icon::CircleX, token::DANGER),
+            };
+            commands.spawn_scene(badge(gate.name.clone(), Some(icon), Some(tone))).id()
+        },
+        |_, _, _| {},
+    );
 }
 
 #[cfg(test)]
@@ -1117,5 +1452,129 @@ mod tests {
         assert_eq!(world.get::<ChildOf>(frame).unwrap().parent(), panel);
         assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0));
         assert_eq!(world.get::<ChildOf>(header).unwrap().parent(), panel);
+    }
+}
+
+#[cfg(test)]
+mod in_place_tests {
+    use bevy::state::app::StatesPlugin;
+
+    use super::*;
+    use crate::sync::Snapshot;
+
+    fn question(id: &str, body: &str) -> SyncItem {
+        SyncItem::Event(json!({
+            "id": id.trim_start_matches('c').parse::<i64>().unwrap() + 100, "entity": "comment", "entity_id": id,
+            "kind": "comment.created",
+            "after": {"id": id, "task_id": "t7", "kind": "question", "body": body, "resolved_at": null,
+                      "created_at": id},
+        }))
+    }
+
+    fn settle(app: &mut App) {
+        for _ in 0..5 {
+            app.update();
+        }
+    }
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>()
+            .init_state::<Connection>()
+            .init_resource::<ConnectionStatus>()
+            .add_plugins((crate::mirror::MirrorPlugin, InspectorUiPlugin));
+        let tasks = vec![
+            json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_progress", "priority": 1, "version": 4}),
+            json!({"id": "t8", "key": "TRAIL-8", "title": "other", "status": "open", "version": 1}),
+        ];
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 5, projects: vec![], tasks, agents: vec![] }));
+        app.world_mut().write_message(question("c1", "which db?"));
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
+        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task("t7".into()));
+        settle(&mut app);
+        app
+    }
+
+    /// Every entity under the panel's body, in order.
+    fn body(app: &mut App) -> Vec<Entity> {
+        let world = app.world_mut();
+        let body = world.query_filtered::<Entity, With<InspectorBody>>().single(world).unwrap();
+        let mut found = vec![body];
+        let mut at = 0;
+        while at < found.len() {
+            if let Some(children) = world.get::<Children>(found[at]) {
+                found.extend(children.iter());
+            }
+            at += 1;
+        }
+        found
+    }
+
+    fn texts(app: &mut App) -> Vec<String> {
+        let world = app.world_mut();
+        world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect()
+    }
+
+    #[test]
+    fn a_new_comment_adds_its_row_and_leaves_every_other_entity_as_it_was() {
+        let mut app = app();
+        let before = body(&mut app);
+        assert!(texts(&mut app).iter().any(|t| t == "? which db?"));
+
+        app.world_mut().write_message(question("c2", "and the cache?"));
+        settle(&mut app);
+        let after = body(&mut app);
+        assert!(texts(&mut app).iter().any(|t| t == "? and the cache?"));
+        let added: Vec<_> = after.iter().filter(|e| !before.contains(e)).collect();
+        assert!(!added.is_empty(), "the new question has entities");
+        // Everything that was there still is, in the same place.
+        let kept: Vec<_> = after.iter().filter(|e| before.contains(e)).copied().collect();
+        assert_eq!(kept.len(), before.len());
+        // Each entity added hangs off the new question's row or the Questions section it joined.
+        let world = app.world();
+        let old_questions =
+            before.iter().filter(|e| world.get::<Shown>(**e).is_some_and(|s| matches!(s.0, Block::Question { .. })));
+        assert_eq!(old_questions.count(), 1);
+        let new_questions =
+            after.iter().filter(|e| world.get::<Shown>(**e).is_some_and(|s| matches!(s.0, Block::Question { .. })));
+        assert_eq!(new_questions.count(), 2);
+    }
+
+    #[test]
+    fn a_changed_title_and_a_pressed_control_leave_the_panel_as_it_was() {
+        let mut app = app();
+        let before = body(&mut app);
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 300, "entity": "task", "entity_id": "t7", "kind": "task.updated",
+            "after": {"id": "t7", "key": "TRAIL-7", "title": "renamed", "status": "in_progress", "priority": 1,
+                      "version": 5},
+        })));
+        settle(&mut app);
+        assert!(texts(&mut app).iter().any(|t| t == "TRAIL-7 renamed"));
+        let controls: Vec<Entity> = {
+            let world = app.world_mut();
+            world.query_filtered::<Entity, With<Control>>().iter(world).collect()
+        };
+        assert!(!controls.is_empty());
+        for c in controls {
+            *app.world_mut().get_mut::<Control>(c).unwrap() = Control::Refused("nope".into());
+        }
+        settle(&mut app);
+        assert_eq!(body(&mut app), before);
+        assert!(texts(&mut app).iter().any(|t| t == "nope"));
+    }
+
+    #[test]
+    fn a_different_subject_rebuilds_the_panel() {
+        let mut app = app();
+        let before = body(&mut app);
+        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task("t8".into()));
+        settle(&mut app);
+        let after = body(&mut app);
+        assert!(after.iter().skip(1).all(|e| !before.contains(e)), "nothing is carried over");
+        assert!(texts(&mut app).iter().any(|t| t == "TRAIL-8 other"));
+        assert!(!texts(&mut app).iter().any(|t| t == "? which db?"));
     }
 }

@@ -11,6 +11,10 @@ use bevy::ui_widgets::{Activate, RequestClose};
 
 use super::{Icon, size, space, text, tool_button};
 
+/// Marks the title's text, so a title that changes is set in place.
+#[derive(Component, Default, Clone)]
+pub struct PanelTitle;
+
 /// A panel's title row; with `closable`, the close X at its right.
 pub fn panel_header(title: impl Into<String>, closable: bool) -> impl Scene {
     let title = title.into();
@@ -33,7 +37,7 @@ pub fn panel_header(title: impl Into<String>, closable: bool) -> impl Scene {
             flex_shrink: 0.0,
         }
         Children [
-            @text(title, size::HEADING) Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0) }
+            @text(title, size::HEADING) PanelTitle Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0) }
             --
             {close}
         ]

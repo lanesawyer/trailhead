@@ -48,6 +48,14 @@ impl<M: Clone + PartialEq> Keyed<M> {
         self.orders.clear();
     }
 
+    /// Despawns every entity (and what is under them) and forgets them, for when the whole surface changes subject.
+    pub fn clear(&mut self, commands: &mut Commands) {
+        for (entity, _) in self.entries.values() {
+            commands.entity(*entity).try_despawn();
+        }
+        self.forget();
+    }
+
     /// Brings the children of each parent to `wanted`: `(parent, [(key, model)])`.
     ///
     /// `spawn` makes the entity for a new key (it should not parent it); `update` runs when a known key's model

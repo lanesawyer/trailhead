@@ -50,7 +50,7 @@ mod theme;
 pub use badge::badge;
 pub use buttons::{button, button_text, danger_button, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
-pub use containers::{field, panel, row, section};
+pub use containers::{field, panel, row, section, section_frame};
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
 pub use input::text_input;
@@ -60,7 +60,7 @@ pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
     open_modal,
 };
-pub use panel_header::panel_header;
+pub use panel_header::{PanelTitle, panel_header};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
 pub use select::{Picked, SelectEdit, SelectOptions, select};
