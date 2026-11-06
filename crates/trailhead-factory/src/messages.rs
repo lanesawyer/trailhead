@@ -7,7 +7,8 @@
 //! and the feedback a rework's worker is given.
 
 use crate::{
-    CheckResult, GateKind, MergeDecision, MergedBy, ModelId, PrGrade, TaskKey, Usd, Verdict, VerdictKind, raised_by,
+    CheckResult, GateKind, Grade, MergeDecision, MergedBy, ModelId, PrGrade, TaskKey, Usd, Verdict, VerdictKind,
+    raised_by,
 };
 
 // ---- On the PR ----
@@ -158,12 +159,12 @@ pub fn cannot_approve(why: &str) -> String {
 // ---- On the task ----
 
 /// The reason a PR's grade carries when a person raised the task above what its files matched.
-pub fn task_raised_reason(grade: u8) -> String {
+pub fn task_raised_reason(grade: Grade) -> String {
     format!("the task was raised to {grade}")
 }
 
 /// The note that says what raised the task's grade, and why.
-pub fn grade_raised_note(grade: u8, was: u8, why: &str) -> String {
+pub fn grade_raised_note(grade: Grade, was: Grade, why: &str) -> String {
     format!("Raised to grade {grade} (task was {was}): {why}")
 }
 
@@ -552,7 +553,7 @@ mod tests {
 
     fn decision() -> MergeDecision {
         MergeDecision {
-            grade: 1,
+            grade: Grade::ALL[0],
             head: "abc".into(),
             passed: vec![GateKind::Checks, GateKind::Ci, GateKind::AgentReview],
             waiting: vec![],
@@ -568,6 +569,7 @@ mod tests {
     }
 
     fn grade(g: u8) -> PrGrade {
+        let g = Grade::new(g).unwrap();
         PrGrade { grade: g, task: Some(g), reasons: vec![] }
     }
 

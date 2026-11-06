@@ -113,8 +113,12 @@ fn approve_with(follow_ups: Vec<FollowUp>) -> RunOutcome {
     RunOutcome::Verdict { kind: VerdictKind::Approve, body: "Fine.".into(), follow_ups, raise_grade: None }
 }
 
-fn follow_up(title: &str, priority: Option<i64>) -> FollowUp {
-    FollowUp { title: title.into(), description: format!("Details of {title}."), priority }
+fn follow_up(title: &str, priority: Option<u8>) -> FollowUp {
+    FollowUp {
+        title: title.into(),
+        description: format!("Details of {title}."),
+        priority: priority.and_then(Priority::new),
+    }
 }
 
 #[tokio::test]
@@ -131,7 +135,7 @@ async fn an_approval_files_its_follow_ups_as_unqueued_tasks_linked_to_the_source
     let filed: Vec<_> = r.tracker.tasks_in("TRAIL").into_iter().filter(|t| t.key != key).collect();
     assert_eq!(filed.len(), 2);
     assert_eq!(filed[0].title, "Cover the edge");
-    assert_eq!(r.tracker.priority(&filed[0].key), Some(2));
+    assert_eq!(r.tracker.priority(&filed[0].key), Priority::new(2));
     assert_eq!(filed[1].title, "Rename it");
     for t in &filed {
         assert_eq!(t.status, Status::Open);

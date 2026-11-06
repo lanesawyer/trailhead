@@ -8172,6 +8172,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing-subscriber",
+ "trailhead-model",
 ]
 
 [[package]]

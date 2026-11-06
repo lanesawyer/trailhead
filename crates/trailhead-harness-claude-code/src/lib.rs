@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use trailhead_factory::{
-    CheckResult, Commit, Error, EventSink, Feedback, FileChange, FollowUp, Harness, ModelId, RaiseGrade, Result, Role,
-    RunContext, RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
+    CheckResult, Commit, Error, EventSink, Feedback, FileChange, FollowUp, Harness, ModelId, Priority, RaiseGrade,
+    Result, Role, RunContext, RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
 };
 
 /// The `adapter` name profiles use for this harness.
@@ -586,7 +586,7 @@ fn answer(result: &Value) -> Option<Value> {
 /// The reviewer's call for a higher grade, if it made a well-formed one.
 fn raise_grade(answer: &Value) -> Option<RaiseGrade> {
     let raise = serde_json::from_value::<RaiseGrade>(answer["raise_grade"].clone()).ok()?;
-    ((1..=4).contains(&raise.grade) && !raise.reason.trim().is_empty()).then_some(raise)
+    (!raise.reason.trim().is_empty()).then_some(raise)
 }
 
 /// The reviewer's follow-ups, leaving out any without a title. A priority outside 1 to 4 is dropped, so the task is
@@ -594,12 +594,16 @@ fn raise_grade(answer: &Value) -> Option<RaiseGrade> {
 fn follow_ups(answer: &Value) -> Vec<FollowUp> {
     let items = answer["follow_ups"].as_array().into_iter().flatten();
     items
-        .filter_map(|v| serde_json::from_value::<FollowUp>(v.clone()).ok())
-        .filter(|f| !f.title.trim().is_empty())
-        .map(|mut f| {
-            f.priority = f.priority.filter(|p| (1..=4).contains(p));
-            f
+        .filter_map(|v| {
+            let mut v = v.clone();
+            if v["priority"].as_i64().and_then(|p| Priority::try_from(p).ok()).is_none()
+                && let Some(fields) = v.as_object_mut()
+            {
+                fields.remove("priority");
+            }
+            serde_json::from_value::<FollowUp>(v).ok()
         })
+        .filter(|f| !f.title.trim().is_empty())
         .collect()
 }
 

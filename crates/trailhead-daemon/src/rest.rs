@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
-    Credential, Error, FollowUpTask, HumanContext, METADATA_KEY, Result, RunUpdate, Status, Task, TaskKey, Tracker,
-    Verdict, VerdictKind,
+    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Priority, Result, RunUpdate, Status, Task,
+    TaskKey, Tracker, Verdict, VerdictKind,
 };
 
 #[derive(Clone)]
@@ -66,7 +66,7 @@ impl RestTracker {
 }
 
 fn status(s: &str) -> Result<Status> {
-    Status::parse(s).ok_or_else(|| Error::Other(format!("unknown status {s}")))
+    s.parse::<Status>().map_err(|e| Error::Other(e.to_string()))
 }
 
 /// A task from the API's JSON. `holder` is the claim holder's name when the response includes it (`include=claim`
@@ -85,8 +85,8 @@ fn task(t: &Value, claim: &Value) -> Result<Task> {
         title: t["title"].as_str().unwrap_or_default().to_string(),
         description: t["description"].as_str().unwrap_or_default().to_string(),
         status: status(t["status"].as_str().unwrap_or_default())?,
-        grade: t["grade"].as_u64().and_then(|g| u8::try_from(g).ok()),
-        priority: t["priority"].as_i64().unwrap_or(3),
+        grade: t["grade"].as_i64().and_then(|g| Grade::try_from(g).ok()),
+        priority: t["priority"].as_i64().and_then(|p| Priority::try_from(p).ok()).unwrap_or_default(),
         holder,
         run,
         key: TaskKey(key),
@@ -202,7 +202,7 @@ impl Tracker for RestTracker {
         self.patch(key, json!({ "status": Status::Open.as_str() })).await
     }
 
-    async fn raise_grade(&self, key: &TaskKey, grade: u8) -> Result<()> {
+    async fn raise_grade(&self, key: &TaskKey, grade: Grade) -> Result<()> {
         self.patch(key, json!({ "grade": grade })).await
     }
 
@@ -233,7 +233,7 @@ impl Tracker for RestTracker {
         project: &str,
         title: &str,
         description: &str,
-        priority: Option<i64>,
+        priority: Option<Priority>,
     ) -> Result<TaskKey> {
         let body = json!({ "project": project, "title": title, "description": description, "priority": priority });
         let created = self.post("/tasks", body).await?;

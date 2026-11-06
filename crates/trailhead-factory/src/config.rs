@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Check, DEFAULT_TARGET, Error, Grader, ModelAlias, PrepareRequest, Repo, Result, Usd};
+use crate::{Check, DEFAULT_TARGET, Error, Grade, Grader, ModelAlias, PrepareRequest, Repo, Result, Usd};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -144,7 +144,7 @@ impl GradesConfig {
     /// The classifier for these rules. Keys are checked when the file is parsed.
     pub fn grader(&self) -> Grader<'_> {
         let rules =
-            self.rules.iter().filter_map(|(k, globs)| Some((k.parse::<u8>().ok()?, globs.as_slice()))).collect();
+            self.rules.iter().filter_map(|(k, globs)| Some((k.parse::<Grade>().ok()?, globs.as_slice()))).collect();
         Grader { rules, max_lines: self.max_lines }
     }
 }
@@ -913,13 +913,13 @@ impl FactoryConfig {
     }
 
     /// The gate a PR of this grade must pass: the repo's `[factory.gates.N]`, or the table in `docs/factory/review.md#grades`.
-    pub fn gate(&self, grade: u8) -> Gate {
+    pub fn gate(&self, grade: Grade) -> Gate {
         use GateKind::{AgentReview, Checks, Ci, Human};
         if let Some(gate) = self.gates.get(&grade.to_string()) {
             return gate.clone();
         }
-        let (require, auto_merge): (&[GateKind], bool) = match grade {
-            0 | 1 => (&[Checks, Ci], true),
+        let (require, auto_merge): (&[GateKind], bool) = match grade.get() {
+            1 => (&[Checks, Ci], true),
             2 => (&[Checks, Ci, AgentReview], true),
             3 => (&[Checks, Ci, AgentReview, Human], false),
             _ => (&[Checks, Ci, Human], false),
@@ -965,6 +965,10 @@ impl FactoryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gr(n: u8) -> Grade {
+        Grade::new(n).unwrap()
+    }
 
     #[test]
     fn stack_env_reaches_the_workers_prepare_and_the_tag_only_when_set() {
@@ -1055,10 +1059,10 @@ mod tests {
             "this repo's rules are the documented example, plus clients/** (TRAIL-703)"
         );
         assert_eq!(config.merge.mode, MergeMode::On);
-        assert!(config.gate(1).auto_merge);
-        assert!(config.gate(2).auto_merge);
-        assert!(!config.gate(3).auto_merge);
-        assert_eq!(config.gate(3).require, ["checks", "ci", "agent_review", "human"]);
+        assert!(config.gate(gr(1)).auto_merge);
+        assert!(config.gate(gr(2)).auto_merge);
+        assert!(!config.gate(gr(3)).auto_merge);
+        assert_eq!(config.gate(gr(3)).require, ["checks", "ci", "agent_review", "human"]);
         let raised = |path: &str| {
             config
                 .grades
@@ -1262,17 +1266,17 @@ require = ["checks", "agent_review", "human"]
         let mut c =
             parse(&SAMPLE.replace("[gates.1]\nrequire = [\"checks\", \"agent_review\", \"human\"]", "")).unwrap();
         assert_eq!(c.merge.mode, MergeMode::Off);
-        assert_eq!(c.gate(1).require, ["checks", "ci"]);
-        assert!(c.gate(2).auto_merge);
-        assert_eq!(c.gate(3).require, ["checks", "ci", "agent_review", "human"]);
-        assert!(!c.gate(3).auto_merge);
-        assert_eq!(c.gate(4).require, ["checks", "ci", "human"]);
+        assert_eq!(c.gate(gr(1)).require, ["checks", "ci"]);
+        assert!(c.gate(gr(2)).auto_merge);
+        assert_eq!(c.gate(gr(3)).require, ["checks", "ci", "agent_review", "human"]);
+        assert!(!c.gate(gr(3)).auto_merge);
+        assert_eq!(c.gate(gr(4)).require, ["checks", "ci", "human"]);
 
         let custom =
             format!("{SAMPLE}\n[gates.2]\nrequire = [\"ci\"]\nauto_merge = true\n[merge]\nmode = \"shadow\"\n");
         c = parse(&custom).unwrap();
-        assert_eq!(c.gate(2).require, ["ci"]);
-        assert_eq!(c.gate(1).require, ["checks", "agent_review", "human"]);
+        assert_eq!(c.gate(gr(2)).require, ["ci"]);
+        assert_eq!(c.gate(gr(1)).require, ["checks", "agent_review", "human"]);
         assert_eq!(c.merge.mode, MergeMode::Shadow);
     }
 

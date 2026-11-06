@@ -287,7 +287,11 @@ async fn approving_review_carries_follow_ups() {
     let r = rig();
     let (out, _) = play(&r, "approve", ctx(&r, Role::Reviewer, 10)).await;
     let follow_ups = vec![
-        FollowUp { title: "Cover the edge".into(), description: "No test for empty input.".into(), priority: Some(2) },
+        FollowUp {
+            title: "Cover the edge".into(),
+            description: "No test for empty input.".into(),
+            priority: trailhead_factory::Priority::new(2),
+        },
         FollowUp { title: "Rename it".into(), description: String::new(), priority: None },
         FollowUp { title: "Split it".into(), description: String::new(), priority: None },
     ];

@@ -44,7 +44,7 @@ async fn shadow_mode_waits_for_ci_then_approves_and_says_each_change_once() {
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Approved);
     let decision = task.run.merge.expect("recorded");
-    assert_eq!((decision.grade, decision.would_merge), (1, true));
+    assert_eq!((decision.grade, decision.would_merge), (gr(1), true));
     assert_eq!(decision.passed, ["checks", "ci", "agent_review"]);
     assert!(decision.waiting.is_empty());
     assert!(!r.codehost.prs()[0].merged, "shadow mode never merges");
@@ -786,7 +786,7 @@ async fn a_grade_raise_leaves_lanes_own_approval_in_place() {
     assert_eq!(task.status, Status::Approved, "only the control plane's own approval is withdrawn");
     assert!(!r.codehost.prs()[0].merged);
     let decision = task.run.merge.unwrap();
-    assert_eq!(decision.grade, 3);
+    assert_eq!(decision.grade, gr(3));
     assert_eq!(decision.approved_head, None);
     assert!(!decision.waiting.is_empty(), "the raised grade's gates don't pass");
 }

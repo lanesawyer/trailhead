@@ -70,9 +70,9 @@ async fn a_grade_one_task_that_changes_cargo_toml_is_raised_to_three() {
     r.factory.tick().await.unwrap();
 
     let task = r.tracker.task(&key);
-    assert_eq!(task.grade, Some(3), "the task is raised to match the PR");
+    assert_eq!(task.grade, Grade::new(3), "the task is raised to match the PR");
     let grade = task.run.grade.expect("recorded in the factory metadata");
-    assert_eq!((grade.grade, grade.task), (3, Some(1)));
+    assert_eq!((grade.grade, grade.task), (gr(3), Grade::new(1)));
     assert_eq!(grade.reasons, ["Cargo.toml changed"]);
     assert_eq!(notes(&r, &key), ["Raised to grade 3 (task was 1): Cargo.toml changed"]);
     let comment = r.codehost.prs()[0].comments[0].clone();
@@ -95,7 +95,7 @@ async fn a_docs_only_change_keeps_the_tasks_grade() {
     r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
-    assert_eq!(r.tracker.task(&key).grade, Some(1));
+    assert_eq!(r.tracker.task(&key).grade, Grade::new(1));
     assert!(notes(&r, &key).is_empty());
     assert!(r.codehost.prs()[0].comments[0].ends_with("\n\nGrade 1"));
 }
@@ -106,7 +106,7 @@ async fn a_reviewer_can_raise_the_grade() {
     let key = r.tracker.add_subtask(&queue, "Document it", "");
     r.tracker.set_grade(&key, 1);
     r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
-    let raise = RaiseGrade { grade: 4, reason: "the docs change the token policy".into() };
+    let raise = RaiseGrade { grade: gr(4), reason: "the docs change the token policy".into() };
     let verdict = RunOutcome::Verdict {
         kind: VerdictKind::Approve,
         body: "Fine.".into(),
@@ -117,8 +117,8 @@ async fn a_reviewer_can_raise_the_grade() {
     r.factory.tick().await.unwrap();
 
     let task = r.tracker.task(&key);
-    assert_eq!(task.grade, Some(4));
-    assert_eq!(task.run.grade.map(|g| (g.grade, g.task)), Some((4, Some(1))));
+    assert_eq!(task.grade, Grade::new(4));
+    assert_eq!(task.run.grade.map(|g| (g.grade, g.task)), Some((gr(4), Grade::new(1))));
     assert_eq!(
         notes(&r, &key),
         ["Raised to grade 4 (task was 1): the reviewer raised it: the docs change the token policy"]
@@ -136,7 +136,7 @@ async fn a_reviewer_cant_lower_the_grade() {
     let key = r.tracker.add_subtask(&queue, "Bump a dependency", "");
     r.tracker.set_grade(&key, 3);
     r.harness.push(Role::Worker, Script::new(changes_to("Cargo.toml")));
-    let lower = RaiseGrade { grade: 1, reason: "trivial".into() };
+    let lower = RaiseGrade { grade: gr(1), reason: "trivial".into() };
     let verdict = RunOutcome::Verdict {
         kind: VerdictKind::Approve,
         body: "Fine.".into(),
@@ -145,7 +145,7 @@ async fn a_reviewer_cant_lower_the_grade() {
     };
     r.harness.push(Role::Reviewer, Script::new(verdict));
     r.factory.tick().await.unwrap();
-    assert_eq!(r.tracker.task(&key).grade, Some(3));
+    assert_eq!(r.tracker.task(&key).grade, Grade::new(3));
     assert!(r.codehost.prs()[0].comments[0].ends_with("\n\nGrade 3"));
 }
 
@@ -155,7 +155,7 @@ async fn a_failed_reviewer_revoke_doesnt_drop_the_verdict() {
     let key = r.tracker.add_subtask(&queue, "Document it", "");
     r.tracker.set_grade(&key, 1);
     r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
-    let raise = RaiseGrade { grade: 4, reason: "the docs change the token policy".into() };
+    let raise = RaiseGrade { grade: gr(4), reason: "the docs change the token policy".into() };
     let verdict = RunOutcome::Verdict {
         kind: VerdictKind::Approve,
         body: "Fine.".into(),
@@ -167,5 +167,5 @@ async fn a_failed_reviewer_revoke_doesnt_drop_the_verdict() {
     r.tracker.fail_next("factory", "revoke_sub_agent", 2);
     r.factory.tick().await.unwrap();
 
-    assert_eq!(r.tracker.task(&key).grade, Some(4), "the verdict was still acted on");
+    assert_eq!(r.tracker.task(&key).grade, Grade::new(4), "the verdict was still acted on");
 }

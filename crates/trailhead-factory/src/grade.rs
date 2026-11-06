@@ -1,6 +1,7 @@
 //! Risk grades for a PR (`docs/factory/review.md#grades`): the task's grade, raised by what the diff touches.
 
 use serde::{Deserialize, Serialize};
+use trailhead_model::Grade;
 
 /// How a PR changed one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,10 +36,10 @@ impl ChangedFile {
 /// A PR's grade, and what raised it above the task's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrGrade {
-    pub grade: u8,
+    pub grade: Grade,
     /// The task's own grade; none for a task that was never graded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<u8>,
+    pub task: Option<Grade>,
     /// Why the grade is above the task's: the files or rules that did it, and the reviewer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<String>,
@@ -46,8 +47,8 @@ pub struct PrGrade {
 
 impl PrGrade {
     /// Raises the grade to `grade` on the reviewer's say-so. Returns whether it was a raise; a reviewer can't lower.
-    pub fn raise(&mut self, grade: u8, reason: &str) -> bool {
-        if !(1..=4).contains(&grade) || grade <= self.grade {
+    pub fn raise(&mut self, grade: Grade, reason: &str) -> bool {
+        if grade <= self.grade {
             return false;
         }
         self.grade = grade;
@@ -57,7 +58,7 @@ impl PrGrade {
 
     /// Whether the grade is above the task's, so the task should be raised to match.
     pub fn raised(&self) -> bool {
-        self.grade > self.task.unwrap_or(0)
+        self.task.is_none_or(|t| self.grade > t)
     }
 
     /// `Grade 3 (task was 1; Cargo.lock changed)`.
@@ -121,7 +122,10 @@ pub fn is_check_definition(path: &str) -> bool {
 }
 
 /// Floor of a deleted or renamed test, or an edited check's definition: never grade 1.
-const TEST_OR_CHECK_GRADE: u8 = 2;
+const TEST_OR_CHECK_GRADE: Grade = Grade::new(2).unwrap();
+
+/// Floor of a diff over the line limit.
+const OVER_LINES_GRADE: Grade = Grade::new(3).unwrap();
 
 /// Reasons shown in full before the rest are counted.
 const SHOWN_REASONS: usize = 3;
@@ -130,16 +134,16 @@ const SHOWN_REASONS: usize = 3;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grader<'a> {
     /// (grade, globs), any order.
-    pub rules: Vec<(u8, &'a [String])>,
+    pub rules: Vec<(Grade, &'a [String])>,
     pub max_lines: u32,
 }
 
 impl Grader<'_> {
     /// The PR's grade: the highest of the task's, any rule a changed file matches, the line limit and the floor for
     /// touching tests and checks. `reasons` name what put it above the task's, if anything did.
-    pub fn grade(&self, task: Option<u8>, files: &[ChangedFile]) -> PrGrade {
+    pub fn grade(&self, task: Option<Grade>, files: &[ChangedFile]) -> PrGrade {
         // (grade, reason) per finding.
-        let mut found: Vec<(u8, String)> = Vec::new();
+        let mut found: Vec<(Grade, String)> = Vec::new();
         for f in files {
             let rule = self
                 .rules
@@ -166,11 +170,11 @@ impl Grader<'_> {
         }
         let lines: u64 = files.iter().map(ChangedFile::lines).sum();
         if lines > u64::from(self.max_lines) {
-            found.push((3, format!("{lines} lines changed, over {}", self.max_lines)));
+            found.push((OVER_LINES_GRADE, format!("{lines} lines changed, over {}", self.max_lines)));
         }
 
-        let base = task.unwrap_or(1);
-        let top = found.iter().map(|(g, _)| *g).max().unwrap_or(0).max(base);
+        let base = task.unwrap_or(Grade::ALL[0]);
+        let top = found.iter().map(|(g, _)| *g).max().unwrap_or(base).max(base);
         let mut reasons: Vec<String> = Vec::new();
         if top > base {
             for (_, why) in found.iter().filter(|(g, _)| *g == top) {
@@ -191,6 +195,10 @@ impl Grader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gr(n: u8) -> Grade {
+        Grade::new(n).unwrap()
+    }
 
     fn file(path: &str, status: FileStatus, lines: u32) -> ChangedFile {
         ChangedFile { path: path.into(), status, additions: lines, deletions: 0, previous_path: None }
@@ -216,7 +224,7 @@ mod tests {
     }
 
     fn grader(r: &Rules) -> Grader<'_> {
-        Grader { rules: vec![(2, &r.two), (3, &r.three), (4, &r.four)], max_lines: 600 }
+        Grader { rules: vec![(gr(2), &r.two), (gr(3), &r.three), (gr(4), &r.four)], max_lines: 600 }
     }
 
     #[test]
@@ -240,8 +248,8 @@ mod tests {
     #[test]
     fn docs_only_stays_at_the_tasks_grade() {
         let r = rules();
-        let g = grader(&r).grade(Some(1), &[modified("docs/a.md")]);
-        assert_eq!(g, PrGrade { grade: 1, task: Some(1), reasons: vec![] });
+        let g = grader(&r).grade(Some(gr(1)), &[modified("docs/a.md")]);
+        assert_eq!(g, PrGrade { grade: gr(1), task: Some(gr(1)), reasons: vec![] });
         assert_eq!(g.describe(), "Grade 1");
         assert!(!g.raised());
     }
@@ -249,49 +257,49 @@ mod tests {
     #[test]
     fn the_highest_matching_rule_raises() {
         let r = rules();
-        let g = grader(&r).grade(Some(1), &[modified("crates/a/src/lib.rs"), modified("Cargo.lock")]);
-        assert_eq!(g.grade, 3);
+        let g = grader(&r).grade(Some(gr(1)), &[modified("crates/a/src/lib.rs"), modified("Cargo.lock")]);
+        assert_eq!(g.grade, gr(3));
         assert_eq!(g.describe(), "Grade 3 (task was 1; Cargo.lock changed)");
-        let g = grader(&r).grade(Some(1), &[modified("crates/a/src/lib.rs")]);
+        let g = grader(&r).grade(Some(gr(1)), &[modified("crates/a/src/lib.rs")]);
         assert_eq!(g.describe(), "Grade 2 (task was 1; crates/a/src/lib.rs changed)");
-        let g = grader(&r).grade(Some(3), &[modified("crates/a/src/lib.rs")]);
-        assert_eq!((g.grade, g.reasons.is_empty()), (3, true), "a higher task grade stands");
-        let g = grader(&r).grade(Some(2), &[modified(".trailhead.toml")]);
-        assert_eq!(g.grade, 4);
+        let g = grader(&r).grade(Some(gr(3)), &[modified("crates/a/src/lib.rs")]);
+        assert_eq!((g.grade, g.reasons.is_empty()), (gr(3), true), "a higher task grade stands");
+        let g = grader(&r).grade(Some(gr(2)), &[modified(".trailhead.toml")]);
+        assert_eq!(g.grade, gr(4));
     }
 
     #[test]
     fn a_big_diff_is_at_least_grade_three() {
         let r = rules();
         let big = [file("docs/a.md", FileStatus::Modified, 400), file("docs/b.md", FileStatus::Added, 201)];
-        let g = grader(&r).grade(Some(1), &big);
-        assert_eq!(g.grade, 3);
+        let g = grader(&r).grade(Some(gr(1)), &big);
+        assert_eq!(g.grade, gr(3));
         assert_eq!(g.reasons, ["601 lines changed, over 600"]);
         let ok = [file("docs/a.md", FileStatus::Modified, 600)];
-        assert_eq!(grader(&r).grade(Some(1), &ok).grade, 1, "the limit itself is fine");
+        assert_eq!(grader(&r).grade(Some(gr(1)), &ok).grade, gr(1), "the limit itself is fine");
     }
 
     #[test]
     fn deleting_a_test_or_editing_a_check_is_never_grade_one() {
         let r = Rules { two: vec![], three: vec![], four: vec![] };
-        let g = grader(&r).grade(Some(1), &[file("crates/a/tests/it.rs", FileStatus::Removed, 0)]);
-        assert_eq!((g.grade, g.reasons), (2, vec!["test crates/a/tests/it.rs deleted".to_string()]));
+        let g = grader(&r).grade(Some(gr(1)), &[file("crates/a/tests/it.rs", FileStatus::Removed, 0)]);
+        assert_eq!((g.grade, g.reasons), (gr(2), vec!["test crates/a/tests/it.rs deleted".to_string()]));
         let renamed =
             ChangedFile { previous_path: Some("src/test_a.py".into()), ..file("src/a.py", FileStatus::Renamed, 0) };
-        assert_eq!(grader(&r).grade(Some(1), &[renamed]).grade, 2);
-        let g = grader(&r).grade(Some(1), &[modified("mise.toml")]);
-        assert_eq!(g.grade, 2);
-        assert_eq!(grader(&r).grade(Some(1), &[modified(".github/workflows/ci.yml")]).grade, 2);
+        assert_eq!(grader(&r).grade(Some(gr(1)), &[renamed]).grade, gr(2));
+        let g = grader(&r).grade(Some(gr(1)), &[modified("mise.toml")]);
+        assert_eq!(g.grade, gr(2));
+        assert_eq!(grader(&r).grade(Some(gr(1)), &[modified(".github/workflows/ci.yml")]).grade, gr(2));
         // Adding or editing a test is grade 1.
         let edit = [modified("crates/a/tests/it.rs"), file("tests/new.rs", FileStatus::Added, 5)];
-        assert_eq!(grader(&r).grade(Some(1), &edit).grade, 1);
+        assert_eq!(grader(&r).grade(Some(gr(1)), &edit).grade, gr(1));
     }
 
     #[test]
     fn many_reasons_are_counted() {
         let r = rules();
         let files: Vec<_> = (0..6).map(|i| modified(&format!("crates/f{i}.rs"))).collect();
-        let g = grader(&r).grade(Some(1), &files);
+        let g = grader(&r).grade(Some(gr(1)), &files);
         assert_eq!(g.reasons.len(), 4);
         assert_eq!(g.reasons[3], "and 3 more");
     }
@@ -306,10 +314,9 @@ mod tests {
     #[test]
     fn a_reviewer_can_raise_but_not_lower() {
         let r = rules();
-        let mut g = grader(&r).grade(Some(1), &[modified("Cargo.lock")]);
-        assert!(!g.raise(2, "meh"));
-        assert!(!g.raise(9, "nonsense"));
-        assert!(g.raise(4, "touches auth"));
+        let mut g = grader(&r).grade(Some(gr(1)), &[modified("Cargo.lock")]);
+        assert!(!g.raise(gr(2), "meh"));
+        assert!(g.raise(gr(4), "touches auth"));
         assert_eq!(g.describe(), "Grade 4 (task was 1; Cargo.lock changed; the reviewer raised it: touches auth)");
     }
 }

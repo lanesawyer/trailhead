@@ -6,62 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{GateKind, PrGrade, PrRef, Result, Usd, Verdict};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TaskKey(pub String);
-
-/// Mirrors Trailhead's task statuses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Status {
-    Open,
-    InProgress,
-    NeedsInput,
-    InReview,
-    Approved,
-    Done,
-    Cancelled,
-}
-
-impl Status {
-    /// Every status, in lifecycle order.
-    pub const ALL: [Status; 7] = [
-        Status::Open,
-        Status::InProgress,
-        Status::NeedsInput,
-        Status::InReview,
-        Status::Approved,
-        Status::Done,
-        Status::Cancelled,
-    ];
-
-    /// The name the Trailhead API uses (the serde form).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Status::Open => "open",
-            Status::InProgress => "in_progress",
-            Status::NeedsInput => "needs_input",
-            Status::InReview => "in_review",
-            Status::Approved => "approved",
-            Status::Done => "done",
-            Status::Cancelled => "cancelled",
-        }
-    }
-
-    /// The status for an API name, or `None` if it isn't one.
-    pub fn parse(s: &str) -> Option<Status> {
-        Status::ALL.into_iter().find(|status| status.as_str() == s)
-    }
-
-    /// The name for people to read: the API name with spaces for underscores.
-    pub fn label(self) -> &'static str {
-        match self {
-            Status::InProgress => "in progress",
-            Status::NeedsInput => "needs input",
-            Status::InReview => "in review",
-            other => other.as_str(),
-        }
-    }
-}
+pub use trailhead_model::{Grade, Priority, Status, TaskKey};
 
 /// The key in task metadata that the factory's run fields ([`RunUpdate`]) live under.
 pub const METADATA_KEY: &str = "factory";
@@ -73,11 +18,11 @@ pub struct Task {
     pub title: String,
     pub description: String,
     pub status: Status,
-    /// The task's risk grade, 1 to 4. The factory works only graded tasks.
-    pub grade: Option<u8>,
-    /// The task's priority (1 is highest). `Tracker::ready` raises it to the highest among the task and the open tasks
+    /// The factory works only graded tasks.
+    pub grade: Option<Grade>,
+    /// `Tracker::ready` raises it to the highest among the task and the open tasks
     /// it blocks, directly or through a chain, so a low-priority blocker is listed as urgent as the work it holds up.
-    pub priority: i64,
+    pub priority: Priority,
     /// The agent holding the claim, if any.
     pub holder: Option<String>,
     /// The `factory` object in the task's metadata ([`RunUpdate`] fields).
@@ -187,7 +132,7 @@ pub struct RunUpdate {
 /// optional fields serialize as `null` when unset so that a write clears them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeDecision {
-    pub grade: u8,
+    pub grade: Grade,
     /// The head commit the gates were evaluated on.
     pub head: String,
     /// The gates that passed: `checks`, `ci`, `agent_review`, `human`.
@@ -471,7 +416,7 @@ pub trait Tracker: Send + Sync {
     /// Sends a task in review back to the queue, unheld, for a rework run to pick up.
     async fn reopen(&self, task: &TaskKey) -> Result<()>;
     /// Raises the task's grade. Trailhead lets an agent raise a grade but never set the first or lower it.
-    async fn raise_grade(&self, task: &TaskKey, grade: u8) -> Result<()>;
+    async fn raise_grade(&self, task: &TaskKey, grade: Grade) -> Result<()>;
     async fn record_verdict(&self, task: &TaskKey, verdict: &Verdict) -> Result<()>;
     async fn ask(&self, task: &TaskKey, question: &str) -> Result<()>;
     /// A note on the task, such as why an attempt failed, without changing it.
@@ -483,7 +428,7 @@ pub trait Tracker: Send + Sync {
         project: &str,
         title: &str,
         description: &str,
-        priority: Option<i64>,
+        priority: Option<Priority>,
     ) -> Result<TaskKey>;
     /// The unfinished follow-ups that reviews of `task` filed: tasks in its project whose description says
     /// ([`is_raised_by`]) that its review raised them.
@@ -496,33 +441,4 @@ pub trait Tracker: Send + Sync {
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential>;
     /// Revokes a sub-agent and its tokens. Revoking one that's already gone is fine.
     async fn revoke_sub_agent(&self, name: &str) -> Result<()>;
-}
-
-#[cfg(test)]
-mod status_tests {
-    use super::*;
-
-    #[test]
-    fn every_status_round_trips_through_its_name() {
-        for status in Status::ALL {
-            assert_eq!(Status::parse(status.as_str()), Some(status));
-            assert_eq!(serde_json::to_value(status).unwrap(), serde_json::json!(status.as_str()));
-            assert_eq!(status.label(), status.as_str().replace('_', " "));
-        }
-        assert_eq!(Status::parse("nope"), None);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn raised_by_matches_whole_keys_only() {
-        let one = TaskKey("TRAIL-1".into());
-        assert!(is_raised_by("Why.\n\nRaised by the reviewer of TRAIL-1 (https://x/pull/1).", &one));
-        assert!(is_raised_by("Raised by the reviewer of TRAIL-1.", &one));
-        assert!(!is_raised_by("Raised by the reviewer of TRAIL-12.", &one));
-        assert!(!is_raised_by("Nothing to see.", &one));
-    }
 }

@@ -7,7 +7,12 @@ use trailhead_factory::{
     Commit, Compute, FactoryConfig, FileChange, Role, RunOutcome, SandboxSpec, TaskKey, Tracker, Usd, VerdictKind,
     conventional_title, label, run_name,
 };
+pub use trailhead_factory::{Grade, Priority};
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
+
+pub fn gr(n: u8) -> Grade {
+    Grade::new(n).unwrap()
+}
 
 pub const CONFIG: &str = r#"
 [repo]

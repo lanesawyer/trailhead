@@ -112,6 +112,23 @@ string_enum!(ProjectStatus {
     Archived => "archived",
 });
 
+/// A task's key, `TRAIL-42`: its project's key, a dash and its number.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TaskKey(pub String);
+
+impl TaskKey {
+    /// The project's key: everything before the last dash, or the whole key if it has none.
+    pub fn project(&self) -> &str {
+        self.0.rsplit_once('-').map_or(self.0.as_str(), |(p, _)| p)
+    }
+}
+
+impl std::fmt::Display for TaskKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// A 1-to-4 scale serialized as its number, for [`Grade`] and [`Priority`].
 macro_rules! scale {
     ($(#[$doc:meta])* $name:ident, $what:literal, $range:literal) => {
@@ -396,6 +413,14 @@ mod tests {
             assert_eq!(Status::Done.can_transition_to(to), matches!(to, Status::Open | Status::Done));
         }
         assert!(!Status::NeedsInput.can_transition_to(Status::Done));
+    }
+
+    #[test]
+    fn a_task_keys_project_is_before_its_last_dash() {
+        assert_eq!(TaskKey("TRAIL-42".into()).project(), "TRAIL");
+        assert_eq!(TaskKey("MY-APP-7".into()).project(), "MY-APP");
+        assert_eq!(TaskKey("nodash".into()).project(), "nodash");
+        assert_eq!(serde_json::to_value(TaskKey("TRAIL-1".into())).unwrap(), "TRAIL-1");
     }
 
     #[test]

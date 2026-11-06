@@ -9,7 +9,7 @@ use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use trailhead_control::{CoreTracker, Factory, Host, Outcome};
-use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Store, TaskFilter};
+use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Priority, Store, TaskFilter};
 use trailhead_daemon::net::{
     ALPN, API_ALPN, ApiTunnel, DaemonProtocol, Launch, RemoteDaemon, build_id, open_api_tunnel, parse_endpoint_id,
     parse_secret_key,
@@ -190,7 +190,7 @@ async fn work_flows_from_trailhead_over_the_tunnel() {
             follow_ups: vec![FollowUp {
                 title: "Cover the edge".into(),
                 description: "No test for empty input.".into(),
-                priority: Some(2),
+                priority: Priority::new(2),
             }],
             raise_grade: None,
         })
@@ -246,7 +246,7 @@ async fn a_follow_up_already_open_is_found_through_the_tunnel() {
             follow_ups: vec![FollowUp {
                 title: "Cover the edge".into(),
                 description: "No test for empty input.".into(),
-                priority: Some(2),
+                priority: Priority::new(2),
             }],
             raise_grade: None,
         })
