@@ -450,7 +450,7 @@ impl Factory {
             Status::InReview => {
                 let PrSettle::Open { mergeable } = self.pr_settled(task, done).await? else { return Ok(false) };
                 let attempt = task.run.attempt.unwrap_or(1);
-                // Changes were requested on this attempt but the task never left review: finish reopening it.
+                // Changes were requested on this attempt but never recorded as a review (the request was cut short): finish it.
                 // A park resets the counts to zero, so a request still recorded beside zero counts was parked on and
                 // then settled by a person: it's stale, and the PR is looked at as it is now (TRAIL-304).
                 let parked = |c: &ChangesRequested| {
@@ -467,6 +467,15 @@ impl Factory {
                     && codehost.head(pr).await? != *recorded
                 {
                     applicable = None;
+                }
+                if task.changes_requested {
+                    // Waiting for a worker: the task is listed as ready, and the worker's handoff answers the request.
+                    // One that no longer applies (the PR was pushed to, or a person settled the park) is answered
+                    // here, and the PR is looked at as it stands.
+                    let stale =
+                        task.run.pending_changes().is_some_and(|c| c.attempt == attempt) && applicable.is_none();
+                    let (Some(pr), true) = (&task.run.pr, stale) else { return Ok(false) };
+                    self.tracker.handoff(&task.key, &messages::stale_request_handoff(&pr.url)).await?;
                 }
                 if let Some(requested) = applicable {
                     let round = if requested.conflict {

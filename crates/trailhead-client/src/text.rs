@@ -165,7 +165,12 @@ impl Text {
     pub fn detail(&self, d: &TaskDetail, names: &dyn Fn(Uuid) -> String, now: Timestamp) -> String {
         let t = &d.task;
         let mut out = vec![format!("{}  {}", t.key, t.title)];
-        let mut meta = vec![t.status.to_string(), format!("p{}", t.priority)];
+        let status = if d.changes_requested.is_some() {
+            format!("{} (changes requested)", t.status)
+        } else {
+            t.status.to_string()
+        };
+        let mut meta = vec![status, format!("p{}", t.priority)];
         if let Some(g) = t.grade {
             meta.push(format!("grade {g}"));
         }

@@ -3,7 +3,7 @@ use std::time::Duration;
 use trailhead_factory::messages;
 use trailhead_factory::{
     ChangesRequested, CheckResult, Error, PrRef, Result, ReviewBreach, Role, RunPhase, RunReport, RunRequest,
-    RunResult, RunUpdate, Task, TaskKey, VerdictKind, review_name,
+    RunResult, RunUpdate, Status, Task, TaskKey, Verdict, VerdictKind, review_name,
 };
 
 use crate::lifecycle::{Begin, Run, spec, token_ttl};
@@ -304,15 +304,15 @@ impl Factory {
         Ok(())
     }
 
-    /// A review asked for changes: the task goes back to the queue with the review in its metadata, so the next run
-    /// starts a fresh sandbox from the PR branch and is told what to fix. The task is parked instead once `round`
+    /// A review asked for changes: the task stays in review, now with changes requested, and has the review in its
+    /// metadata, so the next run starts a fresh sandbox from the PR branch and is told what to fix. The task is parked instead once `round`
     /// reviews have asked for changes, which is when a human should look. Reconcile finishes this if it's cut short.
     pub(crate) async fn request_rework(&self, task: &Task, requested: ChangesRequested, round: u32) -> Result<()> {
         // `round` counts what the request is: review rounds, or conflict reworks for a conflict (TRAIL-221).
         let max =
             if requested.conflict { self.config.repo.max_conflict_reworks } else { self.config.repo.max_review_rounds };
         let (reviewer, body, conflict) = (requested.reviewer.clone(), requested.body.clone(), requested.conflict);
-        // Recorded before the task is reopened, so the run that picks it up can't miss the review.
+        // Recorded before the request is made visible, so the run that picks it up can't miss the review.
         let update = RunUpdate {
             reviewed: Some(requested.attempt),
             attempt_base: Some(requested.attempt),
@@ -346,8 +346,20 @@ impl Factory {
             }
             return Ok(());
         }
-        tracing::info!(task = %task.key.0, round, "changes requested; reopening for a rework");
-        self.tracker.reopen(&task.key).await
+        // The task stays in review: a reviewer's verdict is already its newest review comment, and a conflict or
+        // CI failure gets one from the factory, so it is listed as having changes requested until a worker's
+        // handoff answers it (TRAIL-963).
+        if conflict {
+            // An approval doesn't survive the request. `task` may be older than the merger's own approval, or newer than
+            // a caller's unapprove, so the tracker is asked.
+            if self.tracker.show(&task.key).await?.status == Status::Approved {
+                self.tracker.unapprove(&task.key).await?;
+            }
+            let verdict = Verdict { kind: VerdictKind::RequestChanges, body, reviewer, model: None, raise_grade: None };
+            self.tracker.record_verdict(&task.key, &verdict).await?;
+        }
+        tracing::info!(task = %task.key.0, round, "changes requested; left in review for a rework");
+        Ok(())
     }
 }
 

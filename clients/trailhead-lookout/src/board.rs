@@ -144,6 +144,9 @@ pub enum BadgeKind {
     Factory,
     /// Open questions, with their count.
     Questions,
+    /// An in-review task whose newest review asks for changes, with no handoff since: the rework is the factory's
+    /// move (or a person's), not the reviewer's.
+    ChangesRequested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +261,13 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         }
     }
 
+    // The comments of each in-review task, which decide whether it is waiting on a rework.
+    let in_review: HashSet<Uuid> = input.tasks.iter().filter(|t| t.status == Status::InReview).map(|t| t.id).collect();
+    let mut reviews: HashMap<Uuid, Vec<&Comment>> = HashMap::new();
+    for c in input.comments.iter().filter(|c| in_review.contains(&c.task_id)) {
+        reviews.entry(c.task_id).or_default().push(c);
+    }
+
     let in_queue = |t: &Task| parent_key(t).is_some_and(|k| input.queues.iter().any(|q| q == k));
     let is_factory = |t: &Task| in_queue(t) || has_run(t);
 
@@ -287,6 +297,13 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
                 kind: BadgeKind::Holder,
                 label: holder_badge(&holder_label(t.id, *holder)),
                 tone: None,
+            });
+        }
+        if trailhead_model::changes_requested(t.status, reviews.get(&t.id).into_iter().flatten().copied()).is_some() {
+            badges.push(Badge {
+                kind: BadgeKind::ChangesRequested,
+                label: "changes requested".into(),
+                tone: Some(token::WARN),
             });
         }
         if !open.is_empty() {
@@ -1216,6 +1233,33 @@ mod tests {
         card.badges.iter().map(|b| (b.kind, b.label.as_str())).collect()
     }
 
+    #[test]
+    fn an_in_review_task_with_changes_requested_says_so_and_stays_in_review() {
+        use crate::fixture::{comment, task};
+        let first = "01900000-0000-7000-8000-000000000001";
+        let second = "01900000-0000-7000-8000-000000000002";
+        let tasks = [
+            task(json!({"id": "t1", "key": "TRAIL-1", "status": "in_review"})),
+            task(json!({"id": "t2", "key": "TRAIL-2", "status": "in_review"})),
+            task(json!({"id": "t3", "key": "TRAIL-3", "status": "open"})),
+        ];
+        let comments = [
+            comment(json!({"id": first, "task_id": "t1", "kind": "review", "verdict": "request_changes"})),
+            // TRAIL-2's request was answered by a handoff after it.
+            comment(json!({"id": first, "task_id": "t2", "kind": "review", "verdict": "request_changes"})),
+            comment(json!({"id": second, "task_id": "t2", "kind": "handoff"})),
+            // Not in review, so nothing to wait on.
+            comment(json!({"id": first, "task_id": "t3", "kind": "review", "verdict": "request_changes"})),
+        ];
+        let projects = [crate::fixture::project(json!({"id": "p1", "key": "TRAIL"}))];
+        let view = build(
+            Input { projects: &projects, tasks: &tasks, comments: &comments, now: at_now(), ..Default::default() },
+            &Filter::default(),
+        );
+        let flagged = |key: &str| card(&view, key).badges.iter().any(|b| b.kind == BadgeKind::ChangesRequested);
+        assert_eq!(keys(&view, Status::InReview), [("TRAIL-1".into(), 0), ("TRAIL-2".into(), 0)]);
+        assert!(flagged("TRAIL-1") && !flagged("TRAIL-2") && !flagged("TRAIL-3"));
+    }
     #[test]
     fn a_holder_the_agent_list_lacks_is_named_for_its_run() {
         use trailhead_factory::{RunPhase, RunStatus, TaskKey, Usd};

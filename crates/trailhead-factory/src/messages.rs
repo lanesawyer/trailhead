@@ -228,10 +228,23 @@ pub fn settled_conflict_gone(pr_url: &str) -> String {
     format!("{pr_url} no longer conflicts with its base branch")
 }
 
-/// The note on a task sent back to review instead of reworked, since the host stopped reporting its conflict.
+/// The handoff on a task whose worker pushed its PR for review, which answers the changes a review asked for.
+pub fn pushed_for_review_handoff(pr_url: &str) -> String {
+    format!("Pushed {pr_url} for review.")
+}
+
+/// The handoff on a task whose rework request no longer applies, because the PR was pushed to from outside the
+/// factory since: the PR is looked at as it stands.
+pub fn stale_request_handoff(pr_url: &str) -> String {
+    format!(
+        "The changes requested on {pr_url} no longer apply: it was pushed to since (or the request was settled by a person), so it is reviewed as it stands."
+    )
+}
+
+/// The handoff on a task sent back to review instead of reworked, since the host stopped reporting its conflict.
 pub fn conflict_gone_note(pr_url: &str, base: &str) -> String {
     format!(
-        "{pr_url} was reopened for a conflict rework, but the host now says it merges cleanly with `{base}` (the \
+        "{pr_url} was sent for a conflict rework, but the host now says it merges cleanly with `{base}` (the \
          base moved back or the conflict was fixed), so there was nothing to resolve. No worker ran: the rework \
          request was dropped and the task went back to review."
     )

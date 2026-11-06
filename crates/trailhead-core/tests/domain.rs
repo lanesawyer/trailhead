@@ -1385,3 +1385,54 @@ async fn listing_by_title_ignores_case_and_surrounding_space() {
     }
     assert!(env.store.list_tasks(&env.human, by("cover")).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn changes_requested_is_computed_from_the_latest_verdict_and_handoff() {
+    let env = Env::new().await;
+    let s = &env.store;
+    let a = env.agent("a").await;
+    let wanting = TaskFilter { changes_requested: Some(true), statuses: vec![Status::InReview], ..Default::default() };
+    let t = env.task("reworked").await;
+    s.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
+    assert_eq!(s.task_detail(&env.human, &t.key).await.unwrap().changes_requested, None);
+
+    // A request_changes verdict is the flag; the status stays in_review.
+    let ask =
+        s.add_comment(&env.human, &t.key, NewComment::review(Verdict::RequestChanges, "fix the tests")).await.unwrap();
+    let d = s.task_detail(&env.human, &t.key).await.unwrap();
+    assert_eq!((d.task.status, d.changes_requested), (Status::InReview, Some(ask.id)));
+    let listed: Vec<_> = s.list_tasks(&env.human, wanting.clone()).await.unwrap().into_iter().map(|t| t.key).collect();
+    assert_eq!(listed, std::slice::from_ref(&t.key));
+
+    // A rework that is claimed and given back, or whose lease lapses, returns to review, not to open.
+    s.claim(&a, &t.key, None).await.unwrap();
+    assert_eq!(s.task_detail(&env.human, &t.key).await.unwrap().changes_requested, None);
+    assert_eq!(s.release(&a, &t.key).await.unwrap().status, Status::InReview);
+    s.claim(&a, &t.key, Some(60)).await.unwrap();
+    env.advance(120);
+    s.reap_expired_claims(&env.human).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::InReview);
+
+    // A handoff after the verdict answers it.
+    s.claim(&a, &t.key, None).await.unwrap();
+    s.add_comment(&a, &t.key, comment(CommentKind::Handoff, "fixed")).await.unwrap();
+    s.update_task(&a, &t.key, status(Status::InReview), None).await.unwrap();
+    assert_eq!(s.task_detail(&env.human, &t.key).await.unwrap().changes_requested, None);
+    assert!(s.list_tasks(&env.human, wanting.clone()).await.unwrap().is_empty());
+    let answered =
+        TaskFilter { changes_requested: Some(false), statuses: vec![Status::InReview], ..Default::default() };
+    assert_eq!(s.list_tasks(&env.human, answered).await.unwrap().len(), 1);
+
+    // Only the newest verdict counts: an approval after a request clears it, and a later request sets it again.
+    s.add_comment(&env.human, &t.key, NewComment::review(Verdict::RequestChanges, "again")).await.unwrap();
+    s.add_comment(&env.human, &t.key, NewComment::review(Verdict::Approve, "fine")).await.unwrap();
+    assert_eq!(s.task_detail(&env.human, &t.key).await.unwrap().changes_requested, None);
+    let again = s.add_comment(&env.human, &t.key, NewComment::review(Verdict::RequestChanges, "no")).await.unwrap();
+    assert_eq!(s.task_detail(&env.human, &t.key).await.unwrap().changes_requested, Some(again.id));
+
+    // Outside review there is no flag, and a task never claimed from review goes back to open.
+    s.update_task(&env.human, &t.key, status(Status::Open), None).await.unwrap();
+    assert_eq!(s.task_detail(&env.human, &t.key).await.unwrap().changes_requested, None);
+    s.claim(&a, &t.key, None).await.unwrap();
+    assert_eq!(s.release(&a, &t.key).await.unwrap().status, Status::Open);
+}

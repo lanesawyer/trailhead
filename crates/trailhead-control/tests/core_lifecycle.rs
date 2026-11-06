@@ -419,14 +419,15 @@ fn request_changes(body: &str) -> RunOutcome {
 }
 
 #[tokio::test]
-async fn requested_changes_reopen_then_rework_on_the_real_engine() {
+async fn requested_changes_stay_in_review_then_rework_on_the_real_engine() {
     let r = rig().await;
     let key = r.task("Add a greeting").await;
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
     let task = r.show(&key).await;
-    assert_eq!(task.status, Status::Open, "the control plane can reopen a task in review");
+    assert_eq!(task.status, Status::InReview, "a rework waits in review, not in the backlog");
+    assert!(task.changes_requested, "the reviewer's verdict is the newest review comment, with no handoff after it");
     assert_eq!(task.run.reviewed, Some(1));
 
     r.harness.push(Role::Worker, Script::new(changes()));
@@ -511,7 +512,7 @@ async fn a_merged_pr_finishes_its_task_and_unblocks_what_is_chained_behind_it() 
     assert_eq!(merged.by, trailhead_factory::MergedBy::Human);
     assert_eq!(merged.commit.as_deref(), Some(FakeCodeHost::merge_commit(&pr).as_str()));
     let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
-    let handoff = comments.iter().find(|c| c.kind == CommentKind::Handoff).expect("a handoff");
+    let handoff = comments.iter().rev().find(|c| c.kind == CommentKind::Handoff).expect("a handoff");
     assert!(handoff.body.contains(&pr.url) && handoff.body.contains("merge-1"), "{}", handoff.body);
     assert!(r.store.blockers(&r.human, &next.0).await.unwrap().is_empty(), "the chained task is unblocked");
 
@@ -556,12 +557,12 @@ async fn a_parked_task_whose_pr_was_closed_is_not_asked_about_again() {
 }
 
 #[tokio::test]
-async fn an_open_task_waiting_for_a_rework_whose_pr_is_merged_is_finished() {
+async fn a_task_waiting_in_review_for_a_rework_whose_pr_is_merged_is_finished() {
     let r = rig().await;
     let (key, pr) = in_review(&r, "Add a greeting").await;
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
-    assert_eq!(r.show(&key).await.status, Status::Open);
+    assert_eq!(r.show(&key).await.status, Status::InReview);
     let next = r.task("Use the greeting").await;
     r.store.add_dependency(&r.human, &key.0, &next.0).await.unwrap();
 
@@ -608,7 +609,7 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.conflicted, std::slice::from_ref(&key.0));
     let task = r.show(&key).await;
-    assert_eq!(task.status, Status::Open, "back in the queue for a rework");
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true), "waiting in review for a rework");
     assert_eq!(task.run.review_rounds, Some(1), "a conflict leaves the review rounds alone");
     assert_eq!(task.run.conflict_reworks, Some(1));
     let wanted = task.run.changes_requested.expect("the rework is told why");
@@ -629,7 +630,11 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     assert!(commits[0].merges.is_empty());
     assert_eq!(commits.last().unwrap().merges, [FAKE_BASE_MERGE], "published as a merge commit");
     let task = r.show(&key).await;
-    assert_eq!(task.status, Status::InReview, "reviewed again");
+    assert_eq!(
+        (task.status, task.changes_requested),
+        (Status::InReview, false),
+        "reviewed again, the handoff answering the request"
+    );
     assert_eq!(task.run.review_rounds, Some(1), "the re-review after a conflict rework uses no round");
     assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
 }
@@ -641,7 +646,7 @@ async fn a_conflict_the_host_no_longer_reports_goes_back_to_review_without_a_wor
 
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
-    assert_eq!(r.show(&key).await.status, Status::Open);
+    assert_eq!(r.show(&key).await.status, Status::InReview);
 
     // The base moved back, or the conflict was fixed, before the rework started.
     r.codehost.set_mergeable(&pr, Some(true));
@@ -677,7 +682,7 @@ async fn a_rework_that_conflicts_with_a_base_that_moved_during_it_is_reworked_ag
     assert_eq!(ran[0].1, Outcome::Conflicted { pr: pr.clone() });
     assert_eq!(reviewers_started(&r), reviewed, "no reviewer for a PR that already conflicts");
     let task = r.show(&key).await;
-    assert_eq!(task.status, Status::Open, "back in the queue for another rework");
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true), "waiting in review for another rework");
     assert_eq!(task.run.conflict_reworks, Some(2));
     assert_eq!(task.run.review_rounds, Some(1));
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
@@ -725,7 +730,7 @@ async fn conflict_and_rework(r: &Rig, key: &TaskKey, pr: &trailhead_factory::PrR
     for _ in 0..times {
         r.codehost.set_mergeable(pr, Some(false));
         assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
-        assert_eq!(r.show(key).await.status, Status::Open);
+        assert_eq!(r.show(key).await.status, Status::InReview);
         r.harness.push(Role::Worker, Script::new(changes()));
         r.harness.push(Role::Reviewer, Script::new(approve()));
         r.factory.tick().await.unwrap();
@@ -778,7 +783,7 @@ async fn a_request_for_changes_after_conflicts_counts_as_one_round() {
     );
     r.factory.tick().await.unwrap();
     let task = r.show(&key).await;
-    assert_eq!(task.status, Status::Open, "reworked, not parked");
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true), "reworked, not parked");
     assert_eq!(task.run.review_rounds, Some(2), "the first review and this one");
     assert_eq!(task.run.conflict_reworks, Some(1), "a review doesn't reset the conflict count");
 }
@@ -1003,7 +1008,7 @@ async fn the_factory_cant_approve_work_it_did_and_says_so_without_asking_for_a_r
     let back = TaskPatch { status: Some(trailhead_core::Status::Open), ..TaskPatch::default() };
     r.store.update_task(&r.human, &key.0, back, None).await.unwrap();
     r.tracker.claim(&key).await.unwrap();
-    r.tracker.request_review(&key).await.unwrap();
+    r.tracker.request_review(&key, "pushed").await.unwrap();
 
     r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
     r.factory.reconcile().await.unwrap();
@@ -1037,7 +1042,7 @@ async fn an_approved_pr_that_starts_conflicting_is_unapproved_and_reworked() {
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.conflicted, std::slice::from_ref(&key.0));
     let task = r.show(&key).await;
-    assert_eq!(task.status, Status::Open, "back in the queue for a rework");
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true), "waiting in review for a rework");
     let wanted = task.run.changes_requested.expect("the rework is told why");
     assert!(wanted.conflict && wanted.body.contains(&pr.url), "{wanted:?}");
 }
@@ -1047,7 +1052,7 @@ async fn approve_is_refused_when_the_factory_isnt_a_delegated_reviewer() {
     let r = rig().await;
     let key = r.task("Add a greeting").await;
     r.tracker.claim(&key).await.unwrap();
-    r.tracker.request_review(&key).await.unwrap();
+    r.tracker.request_review(&key, "pushed").await.unwrap();
 
     let err = r.tracker.approve(&key).await.expect_err("the factory isn't in the project's reviewers");
     let trailhead_factory::Error::Forbidden(why) = err else { panic!("expected Forbidden, got {err:?}") };
@@ -1062,7 +1067,7 @@ async fn approve_is_refused_for_work_the_factory_did_without_asking_for_a_review
     r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
     let key = r.task("Add a greeting").await;
     r.tracker.claim(&key).await.unwrap();
-    r.tracker.request_review(&key).await.unwrap();
+    r.tracker.request_review(&key, "pushed").await.unwrap();
 
     let err = r.tracker.approve(&key).await.expect_err("the factory sent this task to review");
     let trailhead_factory::Error::Forbidden(why) = err else { panic!("expected Forbidden, got {err:?}") };

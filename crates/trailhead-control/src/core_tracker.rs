@@ -96,7 +96,9 @@ impl CoreTracker {
     async fn task(&self, ctx: &Ctx, t: trailhead_core::Task) -> Result<Task> {
         let claims = self.store.live_claims(ctx, &[t.id]).await.map_err(map_err)?;
         let holder = claims.get(&t.id).map(|c| c.holder.clone());
-        Task::from_model(t, holder)
+        let flag = t.status == trailhead_core::Status::InReview
+            && self.store.task_detail(ctx, &t.key).await.map_err(map_err)?.changes_requested.is_some();
+        Task::from_model(t, holder).map(|task| Task { changes_requested: flag, ..task })
     }
 
     /// Converts the listed tasks, skipping any whose factory metadata won't parse, so one bad value doesn't
@@ -116,12 +118,65 @@ impl CoreTracker {
         // One query for every task's claim, so a listing costs the same however many tasks it holds (TRAIL-258).
         let ids: Vec<_> = good.iter().map(|t| t.id).collect();
         let claims = self.store.live_claims(ctx, &ids).await.map_err(map_err)?;
+        let waiting = if good.iter().any(|t| t.status == trailhead_core::Status::InReview) {
+            self.waiting_on_rework(ctx).await?
+        } else {
+            Default::default()
+        };
         good.into_iter()
             .map(|t| {
                 let holder = claims.get(&t.id).map(|c| c.holder.clone());
-                Task::from_model(t, holder)
+                let flag = waiting.contains(&t.id);
+                Task::from_model(t, holder).map(|task| Task { changes_requested: flag, ..task })
             })
             .collect()
+    }
+
+    /// The ids of the in-review tasks whose newest review asks for changes and that no handoff has answered.
+    async fn waiting_on_rework(&self, ctx: &Ctx) -> Result<std::collections::HashSet<Uuid>> {
+        let filter = TaskFilter {
+            statuses: vec![trailhead_core::Status::InReview],
+            changes_requested: Some(true),
+            ..TaskFilter::default()
+        };
+        Ok(self.list_all(ctx, filter).await?.into_iter().map(|t| t.id).collect())
+    }
+
+    /// The unheld, unblocked in-review tasks of `project` (of the `queue`'s subtasks, when there is one) waiting on a
+    /// rework, in priority order.
+    async fn reworks(&self, ctx: &Ctx, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
+        let filter = TaskFilter {
+            project: Some(project.to_string()),
+            statuses: vec![trailhead_core::Status::InReview],
+            changes_requested: Some(true),
+            ..TaskFilter::default()
+        };
+        let mut waiting = self.list_all(ctx, filter).await?;
+        if !queue.is_empty() {
+            let mut queued = std::collections::HashSet::new();
+            for q in queue {
+                let filter = TaskFilter {
+                    project: Some(project.to_string()),
+                    parent: Some(q.0.clone()),
+                    ..TaskFilter::default()
+                };
+                queued.extend(self.list_all(ctx, filter).await?.into_iter().map(|t| t.id));
+            }
+            waiting.retain(|t| queued.contains(&t.id));
+        }
+        let ids: Vec<_> = waiting.iter().map(|t| t.id).collect();
+        let claims = self.store.live_claims(ctx, &ids).await.map_err(map_err)?;
+        let mut free = Vec::new();
+        for t in waiting.into_iter().filter(|t| !claims.contains_key(&t.id)) {
+            // A blocked task can't be claimed, so it isn't ready.
+            let detail = self.store.task_detail(ctx, &t.key).await.map_err(map_err)?;
+            if detail.blocked_by.is_empty() {
+                free.push(t);
+            }
+        }
+        let mut tasks = self.tasks(ctx, free).await?;
+        tasks.sort_by_key(|t| t.priority);
+        Ok(tasks)
     }
 
     /// Raises each task's priority to the highest among itself and the open tasks it blocks, directly or through a
@@ -255,6 +310,11 @@ impl Tracker for CoreTracker {
             }
         };
         let mut tasks = self.tasks(&ctx, tasks).await?;
+        // Reworks wait in review with changes requested: they are listed ahead of new work.
+        let mut reworks = self.reworks(&ctx, project, queue).await?;
+        reworks.append(&mut tasks);
+        let mut tasks = reworks;
+        tasks.truncate(limit);
         self.raise_to_blocked_priority(&ctx, &mut tasks).await;
         Ok(tasks)
     }
@@ -380,8 +440,13 @@ impl Tracker for CoreTracker {
         Ok(())
     }
 
-    async fn request_review(&self, task: &TaskKey) -> Result<()> {
+    async fn request_review(&self, task: &TaskKey, handoff: &str) -> Result<()> {
+        self.comment(task, CommentKind::Handoff, handoff).await?;
         self.set_status(task, trailhead_core::Status::InReview).await
+    }
+
+    async fn handoff(&self, task: &TaskKey, body: &str) -> Result<()> {
+        self.comment(task, CommentKind::Handoff, body).await
     }
 
     async fn approve(&self, task: &TaskKey) -> Result<()> {

@@ -70,6 +70,10 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 - **Fresh sandboxes and contexts**, no access to the author's transcript.
 - **Blind first pass.** Each reviewer records a verdict before seeing the others; disagreement escalates.
 
+## Changes requested
+
+A review that asks for changes doesn't send the task back to `open`: the task has a PR in flight, and `open` means nobody has started it (TRAIL-963). It stays `in_review`, and "changes requested" is computed from the review history ([PLAN.md](../PLAN.md#statuses)): the newest `review` comment with a verdict is `request_changes` and no `handoff` comment came after it. A reviewer's verdict is that comment already; for a conflict or a CI failure the factory writes a `request_changes` verdict itself, from what the code host reports, so the rule needs no special case. `Tracker::ready` lists these tasks ahead of new work, the worker's claim makes the task `in_progress`, and the handoff the worker leaves when it pushes answers the review and puts the task back in the ordinary review state. A merger never approves or merges a task that has changes requested. Lookout keeps the card in the In Review column with a "changes requested" badge.
+
 ## What counts as a review round
 
 `max_review_rounds` (`[factory.repo]`, default 3) caps review rounds, approvals included: an approving review takes a round too, so if a review approves and a later push sends the task back to review, only two more requests for changes fit under the default cap of 3. A reviewer run counts as a round unless it was not the PR's fault:

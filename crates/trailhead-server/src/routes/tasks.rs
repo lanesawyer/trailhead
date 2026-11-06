@@ -34,6 +34,9 @@ pub(crate) struct TaskListQuery {
     scheduled_through: Option<String>,
     /// `1` to `4`, `graded` or `ungraded`.
     grade: Option<String>,
+    /// `true`: only `in_review` tasks waiting on a rework (the newest review asks for changes, no handoff since);
+    /// `false`: leave those out.
+    changes_requested: Option<bool>,
     /// `key:value` pairs, comma-separated.
     metadata: Option<String>,
     /// `priority` (the default: priority, then due date, then oldest), `updated_at` or
@@ -78,6 +81,7 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
         due_before: parse_opt_time(q.due_before.as_deref())?,
         scheduled_through: parse_opt_date(q.scheduled_through.as_deref())?,
         grade: parse_grade_filter(q.grade.as_deref())?,
+        changes_requested: q.changes_requested,
         metadata,
         sort: q.sort.as_deref().map(str::parse).transpose()?.unwrap_or_default(),
         limit: q.limit,
