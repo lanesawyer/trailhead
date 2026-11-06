@@ -522,7 +522,7 @@ impl Compute for DockerCompute {
         let dir = format!("{home}/.trailhead/programs/{}", program.name);
         let run = run_script(&program.cmd, &program.args);
         let mut files: Vec<(&str, &[u8], u32)> =
-            program.files.iter().map(|f| (f.path.as_str(), f.contents.as_slice(), f.mode)).collect();
+            program.files.iter().map(|f| (f.path.as_str(), f.contents.as_ref(), f.mode)).collect();
         let run_path = format!("{dir}/run");
         files.push((&run_path, run.as_bytes(), 0o755));
 

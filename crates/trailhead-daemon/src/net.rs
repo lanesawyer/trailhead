@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
 use iroh::endpoint::{Connection, ReadExactError, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -628,11 +629,20 @@ pub async fn open_api_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> R
     Ok(addr)
 }
 
+/// Lets an `Arc<Vec<u8>>` back a [`Bytes`], so each program shares the binary rather than copying it.
+struct SharedBinary(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedBinary {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// Where the daemon lives inside a sandbox and how it's started.
 #[derive(Debug, Clone)]
 pub struct Launch {
     /// The daemon binary for the sandbox's platform.
-    pub binary: Arc<Vec<u8>>,
+    pub binary: Bytes,
     pub dir: String,
     pub workdir: String,
     /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`.
@@ -650,7 +660,7 @@ pub struct Launch {
 impl Launch {
     pub fn new(binary: impl Into<Arc<Vec<u8>>>, target: &Target) -> Launch {
         Launch {
-            binary: binary.into(),
+            binary: Bytes::from_owner(SharedBinary(binary.into())),
             dir: target.dir.clone(),
             workdir: target.workdir.clone(),
             log: None,
@@ -724,10 +734,10 @@ impl RemoteDaemon {
         Program {
             name: "trailhead-daemon".into(),
             files: vec![
-                SandboxFile { path: bin.clone(), contents: self.launch.binary.to_vec(), mode: 0o755 },
+                SandboxFile { path: bin.clone(), contents: self.launch.binary.clone(), mode: 0o755 },
                 SandboxFile {
                     path: secrets_path.clone(),
-                    contents: serde_json::to_vec(&secrets).expect("secrets serialize"),
+                    contents: serde_json::to_vec(&secrets).expect("secrets serialize").into(),
                     mode: 0o600,
                 },
             ],
