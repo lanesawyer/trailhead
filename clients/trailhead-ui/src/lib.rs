@@ -61,7 +61,7 @@ pub use modal::{
     open_modal,
 };
 pub use panel_header::panel_header;
-pub use scroll::{ScrollBoth, ScrollDown};
+pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
 pub use select::{Picked, select};
 pub use spacing::{check as spacing_check, extent, radius, space};

@@ -20,7 +20,7 @@ use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
-use bevy::ui_widgets::{Activate, RequestClose};
+use bevy::ui_widgets::{Activate, ControlOrientation, RequestClose};
 use reqwest::Method;
 use serde_json::{Value, json};
 
@@ -32,7 +32,7 @@ use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror
 use crate::sync::SyncItem;
 use crate::widgets::{
     Icon, ModalRoot, Picked, badge, button, danger_button, extent, layer, panel, panel_header, priority_tone, row,
-    section, select, size, text, text_dim, text_toned, token, tool_button,
+    scroll_body, scroll_frame, scrollbar, section, select, size, text, text_dim, text_toned, token, tool_button,
 };
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
@@ -450,6 +450,14 @@ impl Plugin for InspectorUiPlugin {
 #[derive(Component)]
 struct InspectorPanel;
 
+/// The panel's fixed header: the title and the close button, above the scrolling body.
+#[derive(Component)]
+struct InspectorHeader;
+
+/// The panel's scrolling body, which lives as long as the panel so its scroll position survives redraws.
+#[derive(Component)]
+struct InspectorBody;
+
 /// The dropdown that moves a task to another status: `statuses[i]` is what its option `i` means, the task's own
 /// status first. Its answer shows beside it on `source`.
 #[derive(Component, Debug, Clone)]
@@ -464,7 +472,7 @@ struct StatusMove {
 struct WindowChoice;
 
 fn spawn_panel(mut commands: Commands) {
-    commands
+    let panel = commands
         .spawn_scene(bsn! {
             @panel()
             Node {
@@ -479,7 +487,15 @@ fn spawn_panel(mut commands: Commands) {
             // the form that "answer" opens.
             GlobalZIndex({ layer::INSPECTOR })
         })
-        .insert((Name::new("inspector"), InspectorPanel));
+        .insert((Name::new("inspector"), InspectorPanel))
+        .id();
+    // The header stays put; the body under it scrolls, held to the window's height by the panel and its frame.
+    commands
+        .spawn(Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0, ..default() })
+        .insert((InspectorHeader, ChildOf(panel)));
+    let frame = commands.spawn(scroll_frame()).insert(ChildOf(panel)).id();
+    let body = commands.spawn((scroll_body(), InspectorBody)).insert(ChildOf(frame)).id();
+    commands.queue_spawn_scene(scrollbar(body, ControlOrientation::Vertical)).insert(ChildOf(frame));
 }
 
 /// The X in the panel's header (or anything else inside it) asked to close it.
@@ -617,7 +633,10 @@ fn redraw(
     mut controls: ResMut<Controls>,
     states: Query<&Control>,
     changed_controls: Query<(), Changed<Control>>,
-    panel: Single<(Entity, Option<&Children>, &mut Node), With<InspectorPanel>>,
+    mut panel_node: Single<&mut Node, With<InspectorPanel>>,
+    header: Single<(Entity, Option<&Children>), With<InspectorHeader>>,
+    body: Single<(Entity, Option<&Children>, &mut ScrollPosition), With<InspectorBody>>,
+    mut shown: Local<Option<Subject>>,
     mut commands: Commands,
 ) {
     if !(state.is_changed()
@@ -628,19 +647,26 @@ fn redraw(
     {
         return;
     }
-    let (panel, children, mut node) = panel.into_inner();
-    for child in children.into_iter().flatten() {
+    let (header, header_children) = header.into_inner();
+    let (panel, body_children, mut scroll) = body.into_inner();
+    for child in header_children.into_iter().chain(body_children).flatten() {
         commands.entity(*child).despawn();
     }
     let Some(view) = &state.0 else {
-        node.display = Display::None;
+        panel_node.display = Display::None;
+        *shown = None;
         return;
     };
-    node.display = Display::Flex;
+    panel_node.display = Display::Flex;
+    // A different task opens at the top; a redraw of the same one stays where it was.
+    if shown.as_ref() != Some(&view.subject) {
+        scroll.0 = Vec2::ZERO;
+        *shown = Some(view.subject.clone());
+    }
     let live = *connection.get() == Connection::Live;
     let c = &mut commands;
 
-    c.spawn_scene(panel_header(view.title.clone(), true)).insert(ChildOf(panel));
+    c.spawn_scene(panel_header(view.title.clone(), true)).insert(ChildOf(header));
 
     let (run, status_lines): (Vec<&String>, Vec<&String>) = view.lines.iter().partition(|l| is_run_line(l));
     for (heading, lines) in [("Status", status_lines), ("Run", run)] {
@@ -661,7 +687,7 @@ fn redraw(
         for q in &view.questions {
             let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(section)).id();
             c.spawn_scene(
-                bsn! { @text_toned(format!("? {}", q.body), size::BODY, token::WARN) Node { flex_grow: 1.0, flex_shrink: 1.0 } },
+                bsn! { @text_toned(format!("? {}", q.body), size::BODY, token::WARN) Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0) } },
             )
             .insert(ChildOf(line));
             // The same form the board opens; it saves even after the inspector moves on.
@@ -769,6 +795,7 @@ mod tests {
 
     use super::*;
     use crate::sync::Snapshot;
+    use crate::widgets::ScrollDown;
 
     struct Fixture {
         projects: Vec<Value>,
@@ -1070,5 +1097,25 @@ mod tests {
         let field = app.world_mut().spawn(EditableText::new("x")).id();
         escape(&mut app, field);
         assert!(app.world().resource::<Selection>().0.is_some());
+    }
+
+    #[test]
+    fn the_body_is_a_scroll_area_held_to_the_window_under_a_fixed_header() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .add_systems(Update, spawn_panel);
+        app.update();
+        let world = app.world_mut();
+        let panel = world.query_filtered::<Entity, With<InspectorPanel>>().single(world).unwrap();
+        assert_eq!(world.get::<Node>(panel).unwrap().height, percent(100));
+        let header = world.query_filtered::<Entity, With<InspectorHeader>>().single(world).unwrap();
+        let (body, node) = world.query_filtered::<(Entity, &Node), With<InspectorBody>>().single(world).unwrap();
+        assert_eq!((node.overflow, node.min_height), (Overflow::scroll_y(), px(0)));
+        assert!(world.get::<ScrollDown>(body).is_some());
+        // The body's frame is the panel's child beside the header, and may shrink below its content.
+        let frame = world.get::<ChildOf>(body).unwrap().parent();
+        assert_eq!(world.get::<ChildOf>(frame).unwrap().parent(), panel);
+        assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0));
+        assert_eq!(world.get::<ChildOf>(header).unwrap().parent(), panel);
     }
 }
