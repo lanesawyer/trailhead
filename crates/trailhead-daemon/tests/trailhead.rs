@@ -219,7 +219,7 @@ async fn work_flows_from_trailhead_over_the_tunnel() {
     assert!(!comment.contains("(already open)"), "{comment}");
     let filed = r.store.task_detail(&r.human, &filed_key.0).await.unwrap().task;
     assert_eq!(filed.title, "Cover the edge");
-    assert_eq!(filed.priority, 2);
+    assert_eq!(filed.priority.get(), 2);
     assert_eq!(filed.status, trailhead_core::Status::Open);
     assert!(filed.description.starts_with("No test for empty input."), "{}", filed.description);
     assert!(filed.description.contains(&key.0), "{}", filed.description);

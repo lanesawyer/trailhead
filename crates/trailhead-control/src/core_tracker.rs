@@ -103,8 +103,8 @@ impl CoreTracker {
             title: t.title,
             description: t.description,
             status: status(t.status),
-            grade: t.grade.and_then(|g| u8::try_from(g).ok()),
-            priority: t.priority,
+            grade: t.grade.map(u8::from),
+            priority: t.priority.into(),
             holder: claims.get(&t.id).map(|c| c.holder.clone()),
             run,
         })
@@ -145,7 +145,7 @@ impl CoreTracker {
                                 trailhead_core::Status::Done | trailhead_core::Status::Cancelled
                             ) =>
                         {
-                            Some((d.task.priority, d.blocks))
+                            Some((d.task.priority.into(), d.blocks))
                         }
                         _ => None,
                     };
@@ -439,7 +439,9 @@ impl Tracker for CoreTracker {
 
     async fn raise_grade(&self, task: &TaskKey, grade: u8) -> Result<()> {
         let ctx = self.ctx().await?;
-        let patch = TaskPatch { grade: Some(Some(i64::from(grade))), ..TaskPatch::default() };
+        let grade =
+            trailhead_core::Grade::new(grade).ok_or_else(|| Error::Other(format!("grade {grade} is not 1 to 4")))?;
+        let patch = TaskPatch { grade: Some(Some(grade)), ..TaskPatch::default() };
         self.store.update_task(&ctx, &task.0, patch, None).await.map_err(map_err)?;
         Ok(())
     }
@@ -483,7 +485,10 @@ impl Tracker for CoreTracker {
             project: project.to_string(),
             title: title.to_string(),
             description: description.to_string(),
-            priority,
+            priority: priority
+                .map(trailhead_core::Priority::try_from)
+                .transpose()
+                .map_err(|e| Error::Other(e.to_string()))?,
             ..Default::default()
         };
         let task = self.store.create_task(&ctx, new).await.map_err(map_err)?;

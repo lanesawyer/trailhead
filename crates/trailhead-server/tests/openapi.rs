@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 use trailhead_server::{AppState, open_local, router};
 
@@ -133,7 +133,13 @@ async fn update_task_documents_a_nullable_grade() {
     let doc = fetch_doc().await;
     let grade = &doc["components"]["schemas"]["UpdateTask"]["properties"]["grade"];
     let text = serde_json::to_string(grade).unwrap();
-    assert!(text.contains("integer") && text.contains("null"), "{text}");
+    assert!(text.contains("#/components/schemas/Grade") && text.contains("null"), "{text}");
+    let schema = &doc["components"]["schemas"]["Grade"];
+    assert_eq!(
+        (&schema["type"], &schema["minimum"], &schema["maximum"]),
+        (&json!("integer"), &json!(1), &json!(4)),
+        "{schema}"
+    );
     let create = &doc["components"]["schemas"]["CreateTask"]["properties"]["grade"];
     assert!(create.is_object(), "{create}");
     let params = doc["paths"]["/v1/ready"]["get"]["parameters"].as_array().unwrap();

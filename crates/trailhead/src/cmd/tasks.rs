@@ -275,7 +275,7 @@ fn check_factory_field(path: &str, value: &Value) -> Result<()> {
 }
 
 /// A grade is 1 to 4; "none" clears it. The rules live in core.
-fn parse_grade(g: &str) -> Result<Option<i64>> {
+fn parse_grade(g: &str) -> Result<Option<trailhead_core::Grade>> {
     trailhead_core::parse_grade(g).context("--grade")
 }
 

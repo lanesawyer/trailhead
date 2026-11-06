@@ -112,6 +112,88 @@ string_enum!(ProjectStatus {
     Archived => "archived",
 });
 
+/// A 1-to-4 scale serialized as its number, for [`Grade`] and [`Priority`].
+macro_rules! scale {
+    ($(#[$doc:meta])* $name:ident, $what:literal, $range:literal) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+        #[cfg_attr(feature = "openapi", schema(value_type = u8, minimum = 1, maximum = 4))]
+        #[serde(try_from = "i64", into = "u8")]
+        pub struct $name(u8);
+
+        impl $name {
+            /// Every value, 1 first.
+            pub const ALL: [$name; 4] = [$name(1), $name(2), $name(3), $name(4)];
+
+            /// `n` if it is 1 to 4.
+            pub const fn new(n: u8) -> Option<$name> {
+                if n >= 1 && n <= 4 { Some($name(n)) } else { None }
+            }
+
+            pub const fn get(self) -> u8 {
+                self.0
+            }
+        }
+
+        impl TryFrom<i64> for $name {
+            type Error = ParseError;
+            fn try_from(n: i64) -> Result<Self, ParseError> {
+                u8::try_from(n).ok().and_then($name::new).ok_or_else(|| ParseError(concat!($what, " must be ", $range).into()))
+            }
+        }
+
+        impl From<$name> for u8 {
+            fn from(v: $name) -> u8 {
+                v.0
+            }
+        }
+
+        impl From<$name> for i64 {
+            fn from(v: $name) -> i64 {
+                v.0.into()
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = ParseError;
+            fn from_str(s: &str) -> Result<Self, ParseError> {
+                s.trim()
+                    .parse::<i64>()
+                    .map_err(|_| ParseError(concat!($what, " must be ", $range).into()))
+                    .and_then($name::try_from)
+            }
+        }
+    };
+}
+
+scale!(
+    /// A task's risk grade (`docs/factory/review.md#grades`), 1 (lowest risk) to 4. A human sets, lowers or clears
+    /// it; an agent can only raise it.
+    Grade,
+    "grade",
+    "1 to 4"
+);
+
+scale!(
+    /// How urgent a task is, 1 (urgent) to 4 (low).
+    Priority,
+    "priority",
+    "1 (urgent) to 4 (low)"
+);
+
+impl Default for Priority {
+    fn default() -> Self {
+        Priority(3)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Workspace {
@@ -181,11 +263,9 @@ pub struct Task {
     pub title: String,
     pub description: String,
     pub status: Status,
-    /// 1 (urgent) to 4 (low).
-    pub priority: i64,
-    /// Optional risk grade, 1 (lowest) to 4. A human sets, lowers or clears it; an agent can only raise it.
+    pub priority: Priority,
     #[serde(default)]
-    pub grade: Option<i64>,
+    pub grade: Option<Grade>,
     /// Set on a cancelled task that duplicates another: the one to look at instead.
     #[serde(default)]
     pub duplicate_of: Option<Uuid>,
@@ -316,5 +396,19 @@ mod tests {
             assert_eq!(Status::Done.can_transition_to(to), matches!(to, Status::Open | Status::Done));
         }
         assert!(!Status::NeedsInput.can_transition_to(Status::Done));
+    }
+
+    #[test]
+    fn grades_and_priorities_are_1_to_4_and_serialize_as_numbers() {
+        assert_eq!(Grade::ALL.map(Grade::get), [1, 2, 3, 4]);
+        assert_eq!(serde_json::to_value(Grade::new(3).unwrap()).unwrap(), 3);
+        assert_eq!(serde_json::from_value::<Priority>(serde_json::json!(2)).unwrap(), Priority::new(2).unwrap());
+        for bad in [0, 5, -1, 300] {
+            assert!(serde_json::from_value::<Grade>(serde_json::json!(bad)).is_err(), "{bad}");
+        }
+        assert_eq!(" 4 ".parse::<Grade>().unwrap(), Grade::ALL[3]);
+        assert_eq!("9".parse::<Priority>().unwrap_err().to_string(), "priority must be 1 (urgent) to 4 (low)");
+        assert_eq!(Priority::default().get(), 3);
+        assert!(Grade::ALL[0] < Grade::ALL[1]);
     }
 }

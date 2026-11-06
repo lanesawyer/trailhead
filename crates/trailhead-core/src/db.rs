@@ -149,6 +149,20 @@ pub(crate) fn get_opt_json(row: &Row, i: i32) -> Result<Option<Value>> {
     Ok(s.as_deref().map(serde_json::from_str).transpose()?)
 }
 
+/// A 1-to-4 [`trailhead_model::Grade`] or [`trailhead_model::Priority`] column.
+pub(crate) fn get_scale<T: TryFrom<i64, Error = trailhead_model::ParseError>>(row: &Row, i: i32) -> Result<T> {
+    let n: i64 = row.get(i)?;
+    Ok(T::try_from(n)?)
+}
+
+pub(crate) fn get_opt_scale<T: TryFrom<i64, Error = trailhead_model::ParseError>>(
+    row: &Row,
+    i: i32,
+) -> Result<Option<T>> {
+    let n: Option<i64> = row.get(i)?;
+    Ok(n.map(T::try_from).transpose()?)
+}
+
 pub(crate) fn get_enum<T: std::str::FromStr<Err = trailhead_model::ParseError>>(row: &Row, i: i32) -> Result<T> {
     let s: String = row.get(i)?;
     Ok(s.parse()?)

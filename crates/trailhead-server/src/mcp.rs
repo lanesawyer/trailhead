@@ -24,9 +24,9 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use trailhead_core::{
-    Claim, Comment, CommentKind, Ctx, Error, EventFilter, GradeFilter, NewComment, NewProject, NewTask, Project,
-    ProjectPatch, ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch, TaskSort, Verdict,
-    idempotency_fingerprint, parse_grade,
+    Claim, Comment, CommentKind, Ctx, Error, EventFilter, Grade, GradeFilter, NewComment, NewProject, NewTask,
+    Priority, Project, ProjectPatch, ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch,
+    TaskSort, Verdict, idempotency_fingerprint, parse_grade,
 };
 use uuid::Uuid;
 
@@ -507,8 +507,8 @@ impl TrailheadMcp {
             project: a.project,
             title: a.title,
             description: a.description.unwrap_or_default(),
-            priority: a.priority,
-            grade: a.grade,
+            priority: attempt!(a.priority.map(Priority::try_from).transpose()),
+            grade: attempt!(a.grade.map(Grade::try_from).transpose()),
             due_on: attempt!(parse_opt_date(a.due_on.as_deref())),
             due_at,
             due_tz: a.due_tz,
@@ -695,7 +695,7 @@ impl TrailheadMcp {
             title: a.title,
             description: a.description,
             status,
-            priority: a.priority,
+            priority: attempt!(a.priority.map(Priority::try_from).transpose()),
             grade: attempt!(a.grade.as_deref().map(parse_grade).transpose()),
             duplicate_of: attempt!(clearable(a.duplicate_of.as_deref(), |d| Ok(d.to_owned()))),
             due_on: attempt!(clearable(a.due_on.as_deref(), parse_date)),
