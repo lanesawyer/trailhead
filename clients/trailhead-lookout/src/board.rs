@@ -12,6 +12,7 @@ use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
+use jiff::Timestamp;
 use trailhead_model::{Agent, Claim, Comment, CommentKind, Project, Status, Task};
 use uuid::Uuid;
 
@@ -217,6 +218,14 @@ pub struct Input<'a> {
     pub runs: &'a [Run],
     /// The keys of the factory's queue tasks, whose subtasks the factory works.
     pub queues: &'a [String],
+    /// The time claims are judged against: core expires them lazily, so one past its `expires_at` may still be
+    /// in the mirror.
+    pub now: Timestamp,
+}
+
+/// The first moment a claim still live at `now` runs out, if any does.
+fn next_expiry(claims: &[Claim], now: Timestamp) -> Option<Timestamp> {
+    claims.iter().filter(|c| c.is_live(now)).filter_map(|c| c.expires_at).min()
 }
 
 /// Groups the tasks passing `filter` into one column per status (empty ones included; done and cancelled
@@ -227,7 +236,8 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
     let task_key: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.key.as_str())).collect();
     let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
     // The claim is keyed by its task.
-    let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
+    let holder_of: HashMap<Uuid, Uuid> =
+        input.claims.iter().filter(|c| c.is_live(input.now)).map(|c| (c.task_id, c.holder_id)).collect();
     let running: HashSet<&str> = input.runs.iter().map(|r| r.status.task.0.as_str()).collect();
     // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
     // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
@@ -404,15 +414,19 @@ fn rebuild_view(
     authoring: Res<Authoring>,
     factory: Option<Res<FactoryStatus>>,
     mut view: ResMut<BoardView>,
+    mut expiry: Local<Option<Timestamp>>,
 ) {
     let gone = removed.read().count() + removed_runs.read().count() > 0;
+    let now = Timestamp::now();
+    let expired = expiry.is_some_and(|at| at <= now);
     if !(filter.is_changed()
         || authoring.is_changed()
         || factory.as_ref().is_some_and(|f| f.is_changed())
         || mirror.is_changed()
         || gone
         || !changed.is_empty()
-        || !runs_changed.is_empty())
+        || !runs_changed.is_empty()
+        || expired)
     {
         return;
     }
@@ -428,7 +442,9 @@ fn rebuild_view(
         agents: &agents,
         runs: &runs,
         queues: &queues,
+        now,
     };
+    *expiry = next_expiry(&claims, now);
     let next = build(input, &filter);
     if *view != next {
         *view = next;
@@ -1105,6 +1121,40 @@ mod tests {
         values.into_iter().map(|v| serde_json::from_value(v).unwrap()).collect()
     }
 
+    fn at_now() -> Timestamp {
+        "2026-10-15T00:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn an_expired_claim_is_not_a_holder() {
+        let live = typed::<Claim>(vec![claim_json(json!({"task_id": "t103", "expires_at": "2026-10-16T00:00:00Z"}))]);
+        let gone = typed::<Claim>(vec![claim_json(json!({"task_id": "t103", "expires_at": "2026-10-14T00:00:00Z"}))]);
+        let (projects, tasks, _, comments, agents) = input_json();
+        let (projects, tasks, comments, agents) =
+            (typed::<Project>(projects), typed::<Task>(tasks), typed::<Comment>(comments), typed::<Agent>(agents));
+        let holders = |claims: &[Claim], filter: &Filter| {
+            let input = Input {
+                projects: &projects,
+                tasks: &tasks,
+                claims,
+                comments: &comments,
+                agents: &agents,
+                runs: &[],
+                queues: &[],
+                now: at_now(),
+            };
+            build(input, filter)
+        };
+        assert_eq!(holders(&live, &Filter::default()).options.holders.len(), 1);
+        let view = holders(&gone, &Filter::default());
+        assert!(view.options.holders.is_empty(), "an expired claim isn't offered as a holder");
+        let by_holder = Filter { holder: Some(sid("a1")), ..Default::default() };
+        let view = holders(&gone, &by_holder);
+        assert!(view.columns.iter().all(|c| c.cards.is_empty()), "nor does it match the filter");
+        assert_eq!(next_expiry(&live, at_now()), Some("2026-10-16T00:00:00Z".parse().unwrap()));
+        assert_eq!(next_expiry(&gone, at_now()), None);
+    }
+
     pub(super) fn run(filter: &Filter) -> BoardView {
         run_with(filter, &[])
     }
@@ -1127,6 +1177,7 @@ mod tests {
                 agents: &agents,
                 runs,
                 queues: &["TRAIL-102".to_string()],
+                now: at_now(),
             },
             filter,
         )
