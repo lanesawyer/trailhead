@@ -778,10 +778,14 @@ mod tests {
     #[tokio::test]
     async fn server_check_sees_whether_something_listens() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        assert_eq!(server_check(addr)().await, Ok(()));
-        drop(listener);
-        assert!(server_check(addr)().await.unwrap_err().contains("can't connect"));
+        assert_eq!(server_check(listener.local_addr().unwrap())().await, Ok(()));
+        // Bound but not listening: it refuses connections, and holding the port keeps another test from listening on
+        // it, as one could on a port this test had just let go of.
+        let quiet = tokio::net::TcpSocket::new_v4().unwrap();
+        quiet.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = quiet.local_addr().unwrap();
+        let refused = server_check(addr)().await;
+        assert!(refused.as_ref().is_err_and(|e| e.contains("can't connect")), "{addr}: {refused:?}");
     }
 
     #[test]
