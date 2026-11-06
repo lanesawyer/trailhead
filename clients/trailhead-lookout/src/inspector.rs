@@ -252,7 +252,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
             if holder.is_some() {
                 actions.push(Action::Release);
             }
-            if status.can_transition_to(Status::Cancelled) {
+            if status != Status::Cancelled && status.can_transition_to(Status::Cancelled) {
                 actions.push(Action::Cancel);
             }
             actions.extend(status_moves(status, is_factory));
@@ -1310,6 +1310,16 @@ mod tests {
         let mut f = fixture();
         f.tasks.push(task(json!({"id": "t9", "key": "TRAIL-9", "title": "finished", "status": "done", "version": 1})));
         let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t9"))).unwrap();
+        assert!(!v.actions.contains(&Action::Cancel));
+    }
+
+    #[test]
+    fn a_cancelled_task_offers_no_cancel() {
+        let mut f = fixture();
+        f.tasks.push(task(
+            json!({"id": "t10", "key": "TRAIL-10", "title": "dropped", "status": "cancelled", "version": 1}),
+        ));
+        let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t10"))).unwrap();
         assert!(!v.actions.contains(&Action::Cancel));
     }
 
