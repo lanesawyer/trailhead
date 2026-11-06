@@ -19,6 +19,7 @@ use crate::author::{Act, Authoring};
 use crate::connection::{Connection, ConnectionStatus};
 use crate::inspector::{Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
+use crate::settings::SettingsButton;
 use crate::widgets;
 use crate::widgets::{
     ChipEdit, ChipWords, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_row,
@@ -882,6 +883,9 @@ fn dress_header(
         let (tone, words, hint) = connection_chip(*connection.get(), &status);
         commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(bar)));
         commands.queue_spawn_scene(chip(tone, words, hint)).insert((ConnectionChip, ChildOf(bar)));
+        commands
+            .queue_spawn_scene(tool_button(Icon::Settings, "Settings", ButtonVariant::Plain))
+            .insert((SettingsButton, ChildOf(bar)));
     }
 }
 
