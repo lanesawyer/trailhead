@@ -28,8 +28,8 @@ use crate::connection::{Connection, ConnectionStatus};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
 use crate::sync::SyncItem;
 use crate::widgets::{
-    Icon, Picked, badge, button, danger_button, extent, layer, panel, row, section, select, size, text, text_dim,
-    text_toned, token, tool_button,
+    Icon, Picked, badge, button, danger_button, extent, layer, panel, priority_tone, row, section, select, size, text,
+    text_dim, text_toned, token, tool_button,
 };
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
@@ -118,6 +118,8 @@ pub struct InspectorView {
     pub merge_note: Option<String>,
     /// The task's own status; none for an agent.
     pub status: Option<String>,
+    /// The task's priority; none for an agent.
+    pub priority: Option<i64>,
     pub actions: Vec<Action>,
 }
 
@@ -191,6 +193,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
                 pr: None,
                 merge_note: None,
                 status: None,
+                priority: None,
                 actions: vec![Action::Revert(1)],
             })
         }
@@ -259,6 +262,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
                 pr,
                 merge_note,
                 status: Some(status.to_string()),
+                priority: task["priority"].as_i64(),
                 actions,
             })
         }
@@ -620,6 +624,9 @@ fn redraw(
             continue;
         }
         let section = section_in(c, panel, heading);
+        if let (true, Some(p)) = (heading == "Status", view.priority) {
+            c.spawn_scene(badge(format!("P{p}"), None, priority_tone(p))).insert(ChildOf(section));
+        }
         for l in lines {
             c.spawn_scene(text(l.clone(), size::BODY)).insert(ChildOf(section));
         }
@@ -770,7 +777,7 @@ mod tests {
         Fixture {
             projects: vec![],
             tasks: vec![
-                json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_review", "version": 4,
+                json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_review", "priority": 1, "version": 4,
                        "metadata": {"factory": factory}}),
                 json!({"id": "t8", "key": "TRAIL-8", "title": "plain", "status": "open", "version": 1}),
             ],
@@ -785,6 +792,15 @@ mod tests {
 
     fn latest() -> HashMap<String, i64> {
         HashMap::from([("t7".to_string(), 41)])
+    }
+
+    #[test]
+    fn a_task_view_carries_its_priority_and_an_agent_has_none() {
+        let f = fixture();
+        let v = build(f.input(), &latest(), &Subject::Task("t7".into())).unwrap();
+        assert_eq!(v.priority, Some(1));
+        let a = build(f.input(), &latest(), &Subject::Agent("a1".into())).unwrap();
+        assert_eq!(a.priority, None);
     }
 
     #[test]
