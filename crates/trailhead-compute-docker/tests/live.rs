@@ -4,6 +4,7 @@
 //! `mise run test-live-docker` (starts from `mise run docker-up` and `mise run docker-image`), or with any Docker
 //! socket: `DOCKER_HOST=unix://... TRAILHEAD_DAEMON_BIN=... cargo test -p trailhead-compute-docker --test live -- --ignored`
 
+use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -116,11 +117,14 @@ async fn lifecycle_against_docker() {
 
         let script = SandboxFile {
             path: format!("{HOME}/.trailhead/sleeper.sh"),
-            contents: b"#!/bin/sh\necho up\nexec sleep 600\n".to_vec(),
+            contents: Bytes::from_static(b"#!/bin/sh\necho up\nexec sleep 600\n"),
             mode: 0o755,
         };
-        let secret =
-            SandboxFile { path: format!("{HOME}/.trailhead/secret"), contents: b"s3cret".to_vec(), mode: 0o600 };
+        let secret = SandboxFile {
+            path: format!("{HOME}/.trailhead/secret"),
+            contents: Bytes::from_static(b"s3cret"),
+            mode: 0o600,
+        };
         let sleeper = Program {
             name: "sleeper".into(),
             files: vec![script, secret],
@@ -449,8 +453,11 @@ async fn programs_run_as_the_sandbox_user() {
 
     let (c, n) = (compute.clone(), name.clone());
     let result = async move {
-        let secret =
-            SandboxFile { path: format!("{HOME}/.trailhead/secrets.json"), contents: b"{}".to_vec(), mode: 0o600 };
+        let secret = SandboxFile {
+            path: format!("{HOME}/.trailhead/secrets.json"),
+            contents: Bytes::from_static(b"{}"),
+            mode: 0o600,
+        };
         let whoami = Program {
             name: "whoami".into(),
             files: vec![secret],

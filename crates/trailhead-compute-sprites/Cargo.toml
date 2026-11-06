@@ -20,6 +20,7 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
+bytes.workspace = true
 axum.workspace = true
 futures-util.workspace = true
 http.workspace = true
