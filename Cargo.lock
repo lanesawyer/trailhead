@@ -8106,6 +8106,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "trailhead-core",
  "trailhead-factory",
  "trailhead-testkit",
