@@ -730,7 +730,7 @@ fn dress_cards(
             commands.entity(*child).despawn();
         }
         commands.entity(shell).apply_scene(card_shell(card.depth));
-        commands.queue_spawn_scene(badge(card.key.clone(), None)).insert(ChildOf(shell));
+        commands.queue_spawn_scene(badge(card.key.clone(), None, None)).insert(ChildOf(shell));
         commands.queue_spawn_scene(card_title(card.title.clone())).insert(ChildOf(shell));
         if let Some(parent) = &card.parent {
             commands.queue_spawn_scene(card_under(parent.clone())).insert(ChildOf(shell));
@@ -738,7 +738,7 @@ fn dress_cards(
         let badges = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
         for b in &card.badges {
             let tone = (b.kind == BadgeKind::Questions).then_some(token::WARN);
-            commands.queue_spawn_scene(badge(b.label.clone(), tone)).insert(ChildOf(badges));
+            commands.queue_spawn_scene(badge(b.label.clone(), None, tone)).insert(ChildOf(badges));
         }
         let tools = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
         for action in &card.actions {
