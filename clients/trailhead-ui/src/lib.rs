@@ -1,7 +1,7 @@
 //! The Trailhead UI kit: every control and surface an app's views are built from, one widget to a file. It knows
 //! nothing of Trailhead; Lookout, the factory's Bevy app, is its first user.
 //!
-//! The rules (use a widget or grow one, theme tokens, named sizes and spacing, icons, layers) are in the `lookout-ui`
+//! The rules (use a widget or grow one, theme tokens, named sizes and spacing, icons, layers) are in the `trailhead-ui`
 //! skill and `docs/factory/ui.md#look-and-components`. Much of this is ported from Lane's bevy-data-explorer. A
 //! widget never imports a view module.
 //!
@@ -96,7 +96,7 @@ pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
-pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
+pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
 pub use search::{ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field};
 pub use select::{Picked, SelectEdit, SelectOptions, select};
 pub use skeleton::{SkeletonBar, spawn_skeleton};

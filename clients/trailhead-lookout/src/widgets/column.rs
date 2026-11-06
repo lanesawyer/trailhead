@@ -2,7 +2,7 @@
 //!
 //! The column is fixed-width and as tall as its cards, up to the board's height; past that its body scrolls down on its
 //! own. The body and its scrollbar sit in a [`column_frame`] under the header, so the bar runs along the body only,
-//! in a gutter at the body's right edge that the cards stay out of. The parts are separate so a view can keep one
+//! in the shell's padding just outside the body, so the cards have the same margin on both sides. The parts are separate so a view can keep one
 //! column entity across redraws: [`column_shell`], [`column_frame`] and [`column_body`] are bundles, and
 //! [`column_header`] and [`column_scrollbar`] add the rest.
 
@@ -12,13 +12,10 @@ use bevy::ui_widgets::ControlOrientation;
 
 use trailhead_model::Status;
 
-use super::{SCROLLBAR_WIDTH, ScrollDown, radius, scrollbar, size, space, status_label, status_token, text, text_dim};
+use super::{ScrollDown, radius, scrollbar, size, space, status_label, status_token, text, text_dim};
 
 /// How wide every column is.
 pub const COLUMN_WIDTH: f32 = 260.0;
-
-/// How wide the gutter on the right of a column's body is: the scrollbar and a gap, so the bar sits beside the cards.
-pub const COLUMN_GUTTER: f32 = SCROLLBAR_WIDTH + space::SCROLLBAR_GAP;
 
 /// The shell of the column for `status`: fixed width, on the status's own background, as tall as what is in it but no
 /// taller than the board. Put the header in with [`column_header`], the [`column_frame`] under it.
@@ -46,8 +43,7 @@ pub fn column_frame() -> impl Bundle {
     (Name::new("column frame"), Node { flex_direction: FlexDirection::Column, min_height: px(0), ..default() })
 }
 
-/// The body of a column, which holds its cards and scrolls down on its own. It leaves a gutter on its right for the
-/// scrollbar.
+/// The body of a column, which holds its cards and scrolls down on its own. Its scrollbar lies in the shell's padding.
 pub fn column_body() -> impl Bundle {
     (
         Name::new("column body"),
@@ -55,7 +51,6 @@ pub fn column_body() -> impl Bundle {
             flex_direction: FlexDirection::Column,
             min_height: px(0),
             row_gap: px(space::CARDS),
-            padding: UiRect::right(px(COLUMN_GUTTER)),
             overflow: Overflow::scroll_y(),
             ..default()
         },
@@ -89,6 +84,7 @@ pub fn column_empty() -> impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH};
 
     fn node_of(bundle: impl Bundle) -> Node {
         let mut world = World::new();
@@ -97,9 +93,9 @@ mod tests {
     }
 
     #[test]
-    fn the_gutter_holds_the_scrollbar_and_a_gap() {
-        assert_eq!(COLUMN_GUTTER, SCROLLBAR_WIDTH + space::SCROLLBAR_GAP);
-        assert_eq!(node_of(column_body()).padding.right, px(COLUMN_GUTTER));
+    fn the_scrollbar_lies_in_the_shell_padding_so_the_body_has_none_of_its_own() {
+        const { assert!(SCROLLBAR_WIDTH + SCROLLBAR_EDGE <= space::CONTROL_INSET) };
+        assert_eq!(node_of(column_body()).padding, UiRect::ZERO);
     }
 
     #[test]
