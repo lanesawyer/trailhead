@@ -967,10 +967,13 @@ async fn reviewers_cannot_approve_their_own_work() {
         Err(Error::Forbidden(_))
     ));
 
-    // A reviewer holding in-progress work still finishes it where the plan allows.
+    // A reviewer holding in-progress work can't skip review either.
     let w = env.task("held").await;
     env.store.claim(&lead, &w.key, None).await.unwrap();
-    assert!(env.store.update_task(&lead, &w.key, status(Status::Done), None).await.is_ok());
+    assert!(matches!(
+        env.store.update_task(&lead, &w.key, status(Status::Done), None).await,
+        Err(Error::ReviewRequired)
+    ));
 }
 
 #[tokio::test]
