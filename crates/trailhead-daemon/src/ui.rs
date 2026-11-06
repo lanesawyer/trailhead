@@ -477,6 +477,7 @@ mod tests {
             runs: vec![],
             holding: None,
             targets: Vec::new(),
+            queue: Vec::new(),
             seq: 4,
         };
         let frames = [
