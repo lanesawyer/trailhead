@@ -2,7 +2,9 @@
 //! `FeathersDialog` on a backdrop covering the window, centered, with a title and a close X.
 //!
 //! - **Closing.** The X, Escape and a click outside all end as feathers' `RequestClose`, and [`ModalPlugin`] answers it
-//!   by despawning the modal. That is the default for every modal, so no form can opt out by accident; one that can't
+//!   by despawning the modal. Feathers' own Escape reaches the backdrop only while something in the modal has the
+//!   keyboard, and a click on the modal's text takes the keyboard away, so an Escape that starts outside every modal
+//!   asks the newest one to close too (from bevy-data-explorer). That is the default for every modal, so no form can opt out by accident; one that can't
 //!   close right now (a save in flight) says so with [`ModalLocked`] and stays. [`ModalClosed`] is sent first, for the
 //!   owner to drop what it holds.
 //! - **Focus.** Feathers' dialog takes focus when it opens and keeps Tab inside it.
@@ -13,6 +15,8 @@
 //!   despawning the root. Layering is [`super::layer::MODAL`].
 
 use bevy::feathers::controls::FeathersDialog;
+use bevy::input::keyboard::KeyboardInput;
+use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, RequestClose};
 
@@ -126,6 +130,31 @@ fn on_request_close(
     }
 }
 
+/// An Escape that starts outside every modal (nothing has the keyboard, so it goes to the window) asks the newest modal
+/// to close. One that starts inside a modal is feathers', which sends the same request from the backdrop.
+fn close_on_escape(
+    key: On<FocusedInput<KeyboardInput>>,
+    roots: Query<Entity, With<ModalRoot>>,
+    parents: Query<&ChildOf>,
+    mut commands: Commands,
+) {
+    // The press bubbles up from where it started; act once, there.
+    let start = key.original_event_target();
+    if key.event_target() != start {
+        return;
+    }
+    let pressed = &key.input;
+    if pressed.key_code != KeyCode::Escape || !pressed.state.is_pressed() || pressed.repeat {
+        return;
+    }
+    if roots.contains(start) || parents.iter_ancestors(start).any(|e| roots.contains(e)) {
+        return;
+    }
+    if let Some(newest) = roots.iter().max_by_key(|root| root.index()) {
+        commands.trigger(RequestClose { source: newest });
+    }
+}
+
 /// Finds a new modal's body and footer, and gives the body its scrollbar.
 fn link_slots(
     bodies: Query<Entity, Added<ModalBody>>,
@@ -149,7 +178,7 @@ pub struct ModalPlugin;
 
 impl Plugin for ModalPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_request_close).add_systems(Update, link_slots);
+        app.add_observer(on_request_close).add_observer(close_on_escape).add_systems(Update, link_slots);
     }
 }
 
@@ -227,6 +256,48 @@ mod tests {
         app.world_mut().trigger(RequestClose { source: modal });
         app.update();
         assert_eq!(count(&mut app), 0);
+    }
+
+    fn escape(app: &mut App, from: Entity) {
+        let input = KeyboardInput {
+            key_code: KeyCode::Escape,
+            logical_key: bevy::input::keyboard::Key::Escape,
+            state: bevy::input::ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: from,
+        };
+        let window = app.world_mut().spawn_empty().id();
+        app.world_mut().trigger(FocusedInput::new(from, input, window));
+        app.update();
+    }
+
+    #[test]
+    fn escape_with_nothing_focused_closes_the_newest_modal_and_says_so_once() {
+        let mut app = app();
+        let closed = Arc::new(AtomicUsize::new(0));
+        let seen = closed.clone();
+        app.add_observer(move |_: On<ModalClosed>| {
+            seen.fetch_add(1, Ordering::SeqCst);
+        });
+        let older = open(&mut app);
+        let newer = open(&mut app);
+        // With nothing focused, the press goes to the window.
+        let window = app.world_mut().spawn_empty().id();
+        escape(&mut app, window);
+        assert!(app.world().get_entity(newer).is_err());
+        assert!(app.world().get_entity(older).is_ok());
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn escape_inside_a_modal_is_left_to_feathers() {
+        let mut app = app();
+        let modal = open(&mut app);
+        let slots = *app.world().get::<ModalSlots>(modal).unwrap();
+        escape(&mut app, slots.body);
+        // Feathers' barrier isn't in this app, so the modal stays: the kit sent nothing of its own.
+        assert_eq!(count(&mut app), 1);
     }
 
     #[test]
