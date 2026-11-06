@@ -8030,11 +8030,14 @@ dependencies = [
 name = "trailhead-client"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "keyring",
  "libc",
  "serde",
  "serde_json",
  "tempfile",
+ "trailhead-model",
+ "uuid",
 ]
 
 [[package]]
