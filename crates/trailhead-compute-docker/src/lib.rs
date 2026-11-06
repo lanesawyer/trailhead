@@ -386,19 +386,25 @@ impl DockerCompute {
         Ok(())
     }
 
-    /// The size in bytes of the largest `trailhead-checkpoint` image on the host, or 0 if there is none or they
-    /// can't be listed (the check then falls back to the container's own size).
-    async fn largest_checkpoint(&self) -> u64 {
+    /// The size in bytes and the name of the largest `trailhead-checkpoint` image on the host, or `None` if there is
+    /// none or they can't be listed (the check then falls back to the container's own size).
+    async fn largest_checkpoint(&self) -> Option<(u64, String)> {
         let filter = vec![CHECKPOINT_REPO.to_string()];
         let opts = ListImagesOptions {
             filters: Some(HashMap::from([("reference".to_string(), filter)])),
             ..Default::default()
         };
         match self.docker.list_images(Some(opts)).await {
-            Ok(images) => images.iter().map(|i| i.size.max(0) as u64).max().unwrap_or(0),
+            Ok(images) => images
+                .iter()
+                .map(|i| {
+                    let name = i.repo_tags.iter().find(|t| t.starts_with(CHECKPOINT_REPO)).unwrap_or(&i.id);
+                    (i.size.max(0) as u64, name.clone())
+                })
+                .max_by_key(|(size, _)| *size),
             Err(e) => {
                 tracing::warn!(error = %e, "couldn't list checkpoint images to size the disk a run needs");
-                0
+                None
             }
         }
     }
@@ -605,11 +611,16 @@ impl Compute for DockerCompute {
         let size = info.size_root_fs.unwrap_or(0).max(0) as u64;
         // A new sandbox's filesystem is small, but its checkpoint after prepare is not: size the need by the largest
         // checkpoint image the host holds too.
-        let size = size.max(self.largest_checkpoint().await);
+        let mut sized_by = String::new();
+        let mut size = size;
+        if let Some((big, name)) = self.largest_checkpoint().await.filter(|(big, _)| *big > size) {
+            size = big;
+            sized_by = format!(", set by the checkpoint image {name}, which `docker rmi` frees if it is stale");
+        }
         let need = disk_needed(self.config.min_free_bytes, size);
         if free < need {
             return Err(Error::Unavailable(format!(
-                "sandbox {}: only {} MiB of disk free, below the {} MiB a task and its checkpoint need (filesystem {} MiB); free up space on the Docker host (docker system df)",
+                "sandbox {}: only {} MiB of disk free, below the {} MiB a task and its checkpoint need (filesystem {} MiB{sized_by}); free up space on the Docker host (docker system df)",
                 id.0,
                 free >> 20,
                 need >> 20,
