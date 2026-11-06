@@ -144,7 +144,7 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
             follow_ups: vec![FollowUp {
                 title: "Cover the edge".into(),
                 description: "No test for empty input.".into(),
-                priority: Some(2),
+                priority: Some(pr(2)),
             }],
             raise_grade: None,
         }),
@@ -373,12 +373,12 @@ async fn the_factory_can_raise_a_grade_a_human_set_but_not_lower_it() {
     let r = rig().await;
     let new = NewTask { project: "TRAIL".into(), title: "Graded".into(), grade: Some(gr(2)), ..Default::default() };
     let key = TaskKey(r.store.create_task(&r.human, new).await.unwrap().key);
-    assert_eq!(r.show(&key).await.grade, Some(2));
-    r.tracker.raise_grade(&key, 3).await.unwrap();
-    assert_eq!(r.show(&key).await.grade, Some(3));
-    assert!(r.tracker.raise_grade(&key, 1).await.is_err());
+    assert_eq!(r.show(&key).await.grade, Some(gr(2)));
+    r.tracker.raise_grade(&key, gr(3)).await.unwrap();
+    assert_eq!(r.show(&key).await.grade, Some(gr(3)));
+    assert!(r.tracker.raise_grade(&key, gr(1)).await.is_err());
     let ungraded = r.task("Ungraded").await;
-    assert!(r.tracker.raise_grade(&ungraded, 2).await.is_err(), "the first grade is a human's");
+    assert!(r.tracker.raise_grade(&ungraded, gr(2)).await.is_err(), "the first grade is a human's");
 }
 
 #[tokio::test]
@@ -1148,8 +1148,8 @@ async fn a_task_that_blocks_urgent_work_is_listed_as_urgent_too() {
 
     let ready = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 10).await.unwrap();
     let priority = |k: &TaskKey| ready.iter().find(|t| &t.key == k).unwrap().priority;
-    assert_eq!(priority(&blocker), 2, "through a chain, a p3 blocker of a p2 task runs as p2");
-    assert_eq!(priority(&older), 3);
+    assert_eq!(priority(&blocker), pr(2), "through a chain, a p3 blocker of a p2 task runs as p2");
+    assert_eq!(priority(&older), pr(3));
 
     r.factory.config.repo.max_sandboxes = 1;
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));

@@ -12,8 +12,8 @@ use trailhead_core::{
 };
 use trailhead_factory::messages;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, HumanContext, METADATA_KEY, ModelId, Result, RunUpdate, Status, Task,
-    TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Priority, Result, RunUpdate,
+    Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 use uuid::Uuid;
 
@@ -96,15 +96,15 @@ impl CoreTracker {
     async fn task(&self, ctx: &Ctx, t: trailhead_core::Task) -> Result<Task> {
         let claims = self.store.live_claims(ctx, &[t.id]).await.map_err(map_err)?;
         let run = run_update(&t)?;
-        let project = t.key.rsplit_once('-').map(|(p, _)| p.to_string()).unwrap_or_default();
+        let key = TaskKey(t.key);
         Ok(Task {
-            key: TaskKey(t.key),
-            project,
+            project: key.project().to_string(),
+            key,
             title: t.title,
             description: t.description,
-            status: status(t.status),
-            grade: t.grade.map(u8::from),
-            priority: t.priority.into(),
+            status: t.status,
+            grade: t.grade,
+            priority: t.priority,
             holder: claims.get(&t.id).map(|c| c.holder.clone()),
             run,
         })
@@ -129,7 +129,7 @@ impl CoreTracker {
     /// left out of the walk.
     async fn raise_to_blocked_priority(&self, ctx: &Ctx, tasks: &mut [Task]) {
         // Each task's own priority and the keys it blocks, or None for one that is finished or can't be read.
-        let mut seen: HashMap<String, Option<(i64, Vec<String>)>> = HashMap::new();
+        let mut seen: HashMap<String, Option<(Priority, Vec<String>)>> = HashMap::new();
         for task in tasks.iter_mut() {
             let mut stack = vec![task.key.0.clone()];
             let mut visited = std::collections::HashSet::new();
@@ -139,14 +139,7 @@ impl CoreTracker {
                 }
                 if !seen.contains_key(&key) {
                     let read = match self.store.task_detail(ctx, &key).await {
-                        Ok(d)
-                            if !matches!(
-                                d.task.status,
-                                trailhead_core::Status::Done | trailhead_core::Status::Cancelled
-                            ) =>
-                        {
-                            Some((d.task.priority.into(), d.blocks))
-                        }
+                        Ok(d) if !d.task.status.is_closed() => Some((d.task.priority, d.blocks)),
                         _ => None,
                     };
                     seen.insert(key.clone(), read);
@@ -215,19 +208,6 @@ fn bad_fields(t: &trailhead_core::Task) -> Vec<String> {
 
 fn same_title(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
-}
-
-fn status(s: trailhead_core::Status) -> Status {
-    use trailhead_core::Status as S;
-    match s {
-        S::Open => Status::Open,
-        S::InProgress => Status::InProgress,
-        S::NeedsInput => Status::NeedsInput,
-        S::InReview => Status::InReview,
-        S::Approved => Status::Approved,
-        S::Done => Status::Done,
-        S::Cancelled => Status::Cancelled,
-    }
 }
 
 fn map_err(e: trailhead_core::Error) -> Error {
@@ -437,10 +417,8 @@ impl Tracker for CoreTracker {
         self.set_status(task, trailhead_core::Status::Open).await
     }
 
-    async fn raise_grade(&self, task: &TaskKey, grade: u8) -> Result<()> {
+    async fn raise_grade(&self, task: &TaskKey, grade: Grade) -> Result<()> {
         let ctx = self.ctx().await?;
-        let grade =
-            trailhead_core::Grade::new(grade).ok_or_else(|| Error::Other(format!("grade {grade} is not 1 to 4")))?;
         let patch = TaskPatch { grade: Some(Some(grade)), ..TaskPatch::default() };
         self.store.update_task(&ctx, &task.0, patch, None).await.map_err(map_err)?;
         Ok(())
@@ -478,17 +456,14 @@ impl Tracker for CoreTracker {
         project: &str,
         title: &str,
         description: &str,
-        priority: Option<i64>,
+        priority: Option<Priority>,
     ) -> Result<TaskKey> {
         let ctx = self.ctx().await?;
         let new = trailhead_core::NewTask {
             project: project.to_string(),
             title: title.to_string(),
             description: description.to_string(),
-            priority: priority
-                .map(trailhead_core::Priority::try_from)
-                .transpose()
-                .map_err(|e| Error::Other(e.to_string()))?,
+            priority,
             ..Default::default()
         };
         let task = self.store.create_task(&ctx, new).await.map_err(map_err)?;
@@ -497,7 +472,7 @@ impl Tracker for CoreTracker {
 
     async fn follow_ups(&self, task: &TaskKey) -> Result<Vec<FollowUpTask>> {
         let ctx = self.ctx().await?;
-        let project = task.0.rsplit_once('-').map_or(task.0.as_str(), |(p, _)| p);
+        let project = task.project();
         let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
         let tasks = self.list_all(&ctx, filter).await?;
         Ok(tasks

@@ -296,7 +296,7 @@ fn render_status(sandboxes: &[Row], tasks: &[Task], waiting: &[Task], max_sandbo
 
 fn task_line(t: &Task) -> String {
     let run = &t.run;
-    let mut line = format!("{} [{}]", t.key.0, t.status.label());
+    let mut line = format!("{} [{}]", t.key.0, t.status.as_str().replace('_', " "));
     line.push_str(&format!(" attempt {}", run.attempt.unwrap_or(0)));
     line.push_str(&format!(", spend {}", run.spend.unwrap_or_default()));
     if let Some(pr) = &run.pr {
@@ -336,7 +336,7 @@ async fn list_everywhere(
 
 #[cfg(test)]
 mod tests {
-    use trailhead_factory::{PrRef, Repo, RunUpdate, SandboxId, Usd};
+    use trailhead_factory::{Grade, PrRef, Priority, Repo, RunUpdate, SandboxId, Usd};
 
     use super::*;
 
@@ -359,8 +359,8 @@ mod tests {
             title: format!("title of {key}"),
             description: String::new(),
             status,
-            grade: Some(2),
-            priority: 3,
+            grade: Grade::new(2),
+            priority: Priority::default(),
             holder: None,
             run,
         }

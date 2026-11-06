@@ -352,7 +352,7 @@ impl Runner {
         pr: Option<&PrRef>,
         follow_ups: &[FollowUp],
     ) -> Vec<Filed> {
-        let project = source.0.rsplit_once('-').map_or(source.0.as_str(), |(p, _)| p);
+        let project = source.project();
         let mut filed: Vec<Filed> = Vec::new();
         for f in follow_ups.iter().take(MAX_FOLLOW_UPS) {
             let title = f.title.trim().to_string();

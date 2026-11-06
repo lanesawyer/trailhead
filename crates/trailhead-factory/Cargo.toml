@@ -11,6 +11,7 @@ publish = false
 description = "Trailhead factory: domain types, daemon contract, the five plugin traits, config schema"
 
 [dependencies]
+trailhead-model.workspace = true
 async-trait.workspace = true
 globset.workspace = true
 serde.workspace = true

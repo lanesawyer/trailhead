@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{CheckResult, CheckpointId, Commit, Endpoint, HumanContext, ModelId, Result, Role, TaskKey, Usage};
+use crate::{
+    CheckResult, CheckpointId, Commit, Endpoint, Grade, HumanContext, ModelId, Priority, Result, Role, TaskKey, Usage,
+};
 
 /// What the agent is asked to do: the task's spec as Trailhead holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,9 +65,9 @@ pub struct FollowUp {
     pub title: String,
     #[serde(default)]
     pub description: String,
-    /// Trailhead's scale, 1 (most urgent) to 4; the project's default when absent.
+    /// The project's default when absent.
     #[serde(default)]
-    pub priority: Option<i64>,
+    pub priority: Option<Priority>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,7 +84,7 @@ pub struct Verdict {
 /// A reviewer's call that a PR deserves a higher grade, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RaiseGrade {
-    pub grade: u8,
+    pub grade: Grade,
     pub reason: String,
 }
 

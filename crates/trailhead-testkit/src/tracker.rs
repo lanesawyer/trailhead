@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, HumanContext, Result, RunUpdate, Status, Task, TaskKey, TaskNote,
-    Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, Priority, Result, RunUpdate, Status, Task, TaskKey,
+    TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +28,7 @@ struct State {
     agents: HashMap<String, Agent>,
     next: HashMap<String, u32>,
     parents: HashMap<TaskKey, TaskKey>,
-    priorities: HashMap<TaskKey, i64>,
+    priorities: HashMap<TaskKey, Priority>,
     context_fails: bool,
     /// Agents refused when they approve, as ones a human hasn't listed as the project's reviewers would be.
     undelegated: HashSet<String>,
@@ -69,7 +69,7 @@ impl FakeTracker {
 
     /// A subtask of `parent`, as handed to a factory with a queue.
     pub fn add_subtask(&self, parent: &TaskKey, title: &str, description: &str) -> TaskKey {
-        let project = parent.0.rsplit_once('-').map(|(p, _)| p.to_string()).unwrap_or_default();
+        let project = parent.project().to_string();
         let key = self.add_task(&project, title, description);
         self.state.lock().unwrap().parents.insert(key.clone(), parent.clone());
         key
@@ -89,7 +89,7 @@ impl FakeTracker {
                 description: description.to_string(),
                 status: Status::Open,
                 grade: None,
-                priority: 3,
+                priority: Priority::default(),
                 holder: None,
                 run: RunUpdate::default(),
             },
@@ -139,12 +139,14 @@ impl FakeTracker {
 
     /// A human grades a task, which is what makes it the factory's work.
     pub fn set_grade(&self, key: &TaskKey, grade: u8) {
-        self.state.lock().unwrap().tasks.get_mut(key).unwrap().grade = Some(grade);
+        self.state.lock().unwrap().tasks.get_mut(key).unwrap().grade =
+            Some(Grade::new(grade).expect("a grade is 1 to 4"));
     }
 
     /// Sets a task's priority (1 is highest), as a person editing it would.
-    pub fn set_priority(&self, key: &TaskKey, priority: i64) {
-        self.state.lock().unwrap().tasks.get_mut(key).unwrap().priority = priority;
+    pub fn set_priority(&self, key: &TaskKey, priority: u8) {
+        self.state.lock().unwrap().tasks.get_mut(key).unwrap().priority =
+            Priority::new(priority).expect("a priority is 1 to 4");
     }
 
     /// Sets the factory fields of a task as they stand: a PR and changes requested on it make a rework.
@@ -187,7 +189,7 @@ impl FakeTracker {
     }
 
     /// The priority a task was filed with, if it was given one.
-    pub fn priority(&self, key: &TaskKey) -> Option<i64> {
+    pub fn priority(&self, key: &TaskKey) -> Option<Priority> {
         self.state.lock().unwrap().priorities.get(key).copied()
     }
 
@@ -496,7 +498,7 @@ impl Tracker for FakeTracker {
         })
     }
 
-    async fn raise_grade(&self, task: &TaskKey, grade: u8) -> Result<()> {
+    async fn raise_grade(&self, task: &TaskKey, grade: Grade) -> Result<()> {
         self.write(task, |t, _| match t.grade {
             None => Err(Error::Forbidden("only a human can set a task's first grade".into())),
             Some(g) if grade < g => Err(Error::Forbidden("only a human can lower or clear a task's grade".into())),
@@ -571,7 +573,7 @@ impl Tracker for FakeTracker {
         project: &str,
         title: &str,
         description: &str,
-        priority: Option<i64>,
+        priority: Option<Priority>,
     ) -> Result<TaskKey> {
         self.check_live()?;
         let key = self.add_task(project, title, description);
