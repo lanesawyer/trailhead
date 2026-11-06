@@ -13,8 +13,10 @@ description = "Trailhead factory: domain types, daemon contract, the five plugin
 [dependencies]
 trailhead-model.workspace = true
 async-trait.workspace = true
+bytes = { workspace = true, features = ["serde"] }
 globset.workspace = true
 serde.workspace = true
+
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

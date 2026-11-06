@@ -396,8 +396,16 @@ async fn start_uploads_files_and_starts_a_service() {
     let program = Program {
         name: "trailhead-daemon".into(),
         files: vec![
-            SandboxFile { path: "/home/sprite/.trailhead/daemon".into(), contents: b"\x7fELF".to_vec(), mode: 0o755 },
-            SandboxFile { path: "/home/sprite/.trailhead/secrets.json".into(), contents: b"{}".to_vec(), mode: 0o600 },
+            SandboxFile {
+                path: "/home/sprite/.trailhead/daemon".into(),
+                contents: Bytes::from_static(b"\x7fELF"),
+                mode: 0o755,
+            },
+            SandboxFile {
+                path: "/home/sprite/.trailhead/secrets.json".into(),
+                contents: Bytes::from_static(b"{}"),
+                mode: 0o600,
+            },
         ],
         cmd: "/home/sprite/.trailhead/daemon".into(),
         args: vec!["--secrets".into(), "/home/sprite/.trailhead/secrets.json".into()],

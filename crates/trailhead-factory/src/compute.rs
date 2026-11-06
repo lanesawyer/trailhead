@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
@@ -73,7 +74,7 @@ pub struct Sandbox {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxFile {
     pub path: String,
-    pub contents: Vec<u8>,
+    pub contents: Bytes,
     /// Unix permissions, e.g. `0o755` for a binary or `0o600` for a secret.
     pub mode: u32,
 }
