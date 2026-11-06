@@ -11,8 +11,9 @@ use serde_json::Value;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use trailhead_core::{Ctx, NewComment, NewProject, NewTask, Principal, Store, TaskPatch};
-use trailhead_lookout::mirror::{Data, IsClaim, IsComment, IsProject, IsTask, Mirror, MirrorPlugin, Rev};
+use trailhead_lookout::mirror::{Mirror, MirrorPlugin, Mirrored, Rev};
 use trailhead_lookout::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
+use trailhead_model::{Claim, Comment, Project, Task};
 
 struct Rig {
     _dir: tempfile::TempDir,
@@ -173,11 +174,8 @@ fn feed(app: &mut App, items: impl IntoIterator<Item = SyncItem>) {
 /// Each task's title and version, sorted by title.
 fn tasks(app: &mut App) -> Vec<(String, i64)> {
     let world = app.world_mut();
-    let mut out: Vec<_> = world
-        .query_filtered::<(&Data, &Rev), With<IsTask>>()
-        .iter(world)
-        .map(|(d, r)| (d.0["title"].as_str().unwrap().to_string(), r.0))
-        .collect();
+    let mut out: Vec<_> =
+        world.query::<(&Mirrored<Task>, &Rev)>().iter(world).map(|(t, r)| (t.0.title.clone(), r.0)).collect();
     out.sort();
     out
 }
@@ -229,7 +227,7 @@ async fn writes_during_the_snapshot_are_neither_lost_nor_applied_twice() {
     feed(&mut app, events);
     assert_eq!(tasks(&mut app), [("A3".to_string(), 3), ("B".to_string(), 1), ("C".to_string(), 1)]);
     let world = app.world_mut();
-    assert_eq!(world.query::<&IsTask>().iter(world).count(), 3);
+    assert_eq!(world.query::<&Mirrored<Task>>().iter(world).count(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -313,9 +311,9 @@ async fn claims_comments_and_projects_are_mirrored() {
     feed(&mut app, run.seen.clone());
     {
         let world = app.world_mut();
-        assert_eq!(world.query::<&IsProject>().iter(world).count(), 1);
-        assert_eq!(world.query::<&IsClaim>().iter(world).count(), 1);
-        assert_eq!(world.query::<&IsComment>().iter(world).count(), 1);
+        assert_eq!(world.query::<&Mirrored<Project>>().iter(world).count(), 1);
+        assert_eq!(world.query::<&Mirrored<Claim>>().iter(world).count(), 1);
+        assert_eq!(world.query::<&Mirrored<Comment>>().iter(world).count(), 1);
     }
 
     // Resolving the question and releasing the claim arrive on the stream.
@@ -325,9 +323,8 @@ async fn claims_comments_and_projects_are_mirrored() {
         .await;
     feed(&mut app, run.seen.clone());
     let world = app.world_mut();
-    assert_eq!(world.query::<&IsClaim>().iter(world).count(), 0);
-    let resolved =
-        world.query_filtered::<&Data, With<IsComment>>().iter(world).filter(|d| !d.0["resolved_at"].is_null()).count();
+    assert_eq!(world.query::<&Mirrored<Claim>>().iter(world).count(), 0);
+    let resolved = world.query::<&Mirrored<Comment>>().iter(world).filter(|c| c.0.resolved_at.is_some()).count();
     assert_eq!(resolved, 1);
     run.task.abort();
 }

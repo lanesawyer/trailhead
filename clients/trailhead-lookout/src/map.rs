@@ -21,13 +21,13 @@ use bevy::feathers::controls::FeathersButton;
 use bevy::feathers::display::caption;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
-use serde_json::Value;
 use trailhead_factory::{RunPhase, SandboxState};
-use trailhead_model::Status;
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Status, Task};
+use uuid::Uuid;
 
 use crate::board::View;
 use crate::factory::{Campsite, FactoryStatus, Run};
-use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsTask, status_of};
+use crate::mirror::{Mirrored, Rev, rows};
 use crate::widgets::{space, status_label};
 
 /// Campsites sit on a grid on the left, this many to a row.
@@ -43,8 +43,8 @@ const ORIGIN: Vec2 = Vec2::new(16.0, 56.0);
 const STAND: Vec2 = Vec2::new(6.0, 52.0);
 
 /// Whether a task in `status` gets a waypoint: work under way or a decision waiting.
-fn active(status: Option<Status>) -> bool {
-    status.is_some_and(|s| !s.is_closed() && s != Status::Open)
+fn active(status: Status) -> bool {
+    !status.is_closed() && status != Status::Open
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,7 +82,7 @@ pub enum Marker {
 pub struct Waypoint {
     pub key: String,
     pub title: String,
-    pub status: Option<Status>,
+    pub status: Status,
     pub markers: Vec<Marker>,
     pub pos: Vec2,
 }
@@ -116,16 +116,12 @@ pub struct MapModel {
 /// Everything [`build`] reads, as the mirrors hold it.
 #[derive(Default, Clone, Copy)]
 pub struct Input<'a> {
-    pub tasks: &'a [Value],
-    pub claims: &'a [Value],
-    pub comments: &'a [Value],
-    pub agents: &'a [Value],
+    pub tasks: &'a [Task],
+    pub claims: &'a [Claim],
+    pub comments: &'a [Comment],
+    pub agents: &'a [Agent],
     pub campsites: &'a [Campsite],
     pub runs: &'a [Run],
-}
-
-fn s<'a>(v: &'a Value, key: &str) -> &'a str {
-    v[key].as_str().unwrap_or_default()
 }
 
 fn key_number(key: &str) -> i64 {
@@ -165,50 +161,50 @@ pub fn build(input: Input) -> MapModel {
         })
         .collect();
 
-    let agent_name: HashMap<&str, &str> = input.agents.iter().map(|a| (s(a, "id"), s(a, "name"))).collect();
-    let holder_of: HashMap<&str, &str> = input.claims.iter().map(|c| (s(c, "task_id"), s(c, "holder_id"))).collect();
+    let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
+    let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
     // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
     // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
-    let holder_name = |holder: &str, key: &str| -> Option<String> {
-        match agent_name.get(holder) {
+    let holder_name = |holder: Uuid, key: &str| -> Option<String> {
+        match agent_name.get(&holder) {
             Some(n) => Some(n.to_string()),
             None => run_of.contains_key(key).then(|| format!("factory/{}", key.to_lowercase())),
         }
     };
-    let mut questions: HashMap<&str, usize> = HashMap::new();
-    let mut handoffs: HashMap<&str, &Value> = HashMap::new();
+    let mut questions: HashMap<Uuid, usize> = HashMap::new();
+    let mut handoffs: HashMap<Uuid, &Comment> = HashMap::new();
     for c in input.comments {
-        let task = s(c, "task_id");
-        match s(c, "kind") {
-            "question" if c["resolved_at"].is_null() => *questions.entry(task).or_default() += 1,
-            "handoff" if handoffs.get(task).is_none_or(|h| s(h, "created_at") <= s(c, "created_at")) => {
-                handoffs.insert(task, c);
+        match c.kind {
+            CommentKind::Question if c.resolved_at.is_none() => *questions.entry(c.task_id).or_default() += 1,
+            CommentKind::Handoff if handoffs.get(&c.task_id).is_none_or(|h| h.created_at <= c.created_at) => {
+                handoffs.insert(c.task_id, c);
             }
             _ => {}
         }
     }
 
-    let mut tasks: Vec<&Value> =
-        input.tasks.iter().filter(|t| active(status_of(t)) || run_of.contains_key(s(t, "key"))).collect();
-    tasks.sort_by_key(|t| (key_number(s(t, "key")), s(t, "key").to_string()));
+    let mut tasks: Vec<&Task> =
+        input.tasks.iter().filter(|t| active(t.status) || run_of.contains_key(t.key.as_str())).collect();
+    tasks.sort_by_key(|t| (key_number(&t.key), t.key.clone()));
     let origin = way_origin();
     let mut waypoints = Vec::new();
     for (i, t) in tasks.iter().enumerate() {
-        let (id, key, status) = (s(t, "id"), s(t, "key"), status_of(t));
+        let (key, status) = (t.key.as_str(), t.status);
         let run = run_of.get(key);
         let mut markers = Vec::new();
-        if let Some(holder) = holder_of.get(id) {
-            markers.push(Marker::Claim(holder_name(holder, key).unwrap_or_else(|| holder.chars().take(8).collect())));
+        if let Some(holder) = holder_of.get(&t.id) {
+            let short = || holder.to_string().chars().take(8).collect();
+            markers.push(Marker::Claim(holder_name(*holder, key).unwrap_or_else(short)));
         }
-        if let Some(n) = questions.get(id) {
+        if let Some(n) = questions.get(&t.id) {
             markers.push(Marker::Questions(*n));
         }
-        if let Some(h) = handoffs.get(id) {
-            markers.push(Marker::Handoff(s(h, "body").lines().next().unwrap_or_default().to_string()));
+        if let Some(h) = handoffs.get(&t.id) {
+            markers.push(Marker::Handoff(h.body.lines().next().unwrap_or_default().to_string()));
         }
         match status {
-            Some(Status::InReview) => markers.push(Marker::InReview),
-            Some(Status::Approved) => markers.push(Marker::Approved),
+            Status::InReview => markers.push(Marker::InReview),
+            Status::Approved => markers.push(Marker::Approved),
             _ => {}
         }
         if let Some(run) = run {
@@ -219,7 +215,7 @@ pub fn build(input: Input) -> MapModel {
         }
         waypoints.push(Waypoint {
             key: key.to_string(),
-            title: s(t, "title").to_string(),
+            title: t.title.clone(),
             status,
             markers,
             pos: grid(i, WAY_COLUMNS, WAY_CELL, origin),
@@ -228,10 +224,10 @@ pub fn build(input: Input) -> MapModel {
 
     // Each claim holder that is an agent, at its run's camp if the run has one that is on the map, else at its task.
     let mut walkers = Vec::new();
-    let mut claimed: Vec<(&str, &str)> = holder_of.iter().map(|(t, h)| (*t, *h)).collect();
+    let mut claimed: Vec<(Uuid, Uuid)> = holder_of.iter().map(|(t, h)| (*t, *h)).collect();
     claimed.sort();
     for (task_id, holder) in claimed {
-        let Some(wp) = waypoints.iter().zip(&tasks).find(|(_, t)| s(t, "id") == task_id).map(|(w, _)| w) else {
+        let Some(wp) = waypoints.iter().zip(&tasks).find(|(_, t)| t.id == task_id).map(|(w, _)| w) else {
             continue;
         };
         let Some(name) = holder_name(holder, &wp.key) else { continue };
@@ -286,21 +282,17 @@ fn camp_lines(c: &Camp) -> Vec<String> {
     lines
 }
 
-fn collect<C: Component>(q: &Query<&Data, With<C>>) -> Vec<Value> {
-    q.iter().map(|d| d.0.clone()).collect()
-}
-
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 fn rebuild_map(
-    changed: Query<(), Or<(Changed<Data>, Changed<Campsite>, Changed<Run>)>>,
-    mut removed_data: RemovedComponents<Data>,
+    changed: Query<(), Or<(Changed<Rev>, Changed<Campsite>, Changed<Run>)>>,
+    mut removed_data: RemovedComponents<Rev>,
     mut removed_camps: RemovedComponents<Campsite>,
     mut removed_runs: RemovedComponents<Run>,
-    tasks: Query<&Data, With<IsTask>>,
-    claims: Query<&Data, With<IsClaim>>,
-    comments: Query<&Data, With<IsComment>>,
-    agents: Query<&Data, With<IsAgent>>,
+    tasks: Query<&Mirrored<Task>>,
+    claims: Query<&Mirrored<Claim>>,
+    comments: Query<&Mirrored<Comment>>,
+    agents: Query<&Mirrored<Agent>>,
     campsites: Query<&Campsite>,
     runs: Query<&Run>,
     mut map: ResMut<TrailMap>,
@@ -309,7 +301,7 @@ fn rebuild_map(
     if !(gone || !changed.is_empty() || map.is_added()) {
         return;
     }
-    let (tasks, claims, comments, agents) = (collect(&tasks), collect(&claims), collect(&comments), collect(&agents));
+    let (tasks, claims, comments, agents) = (rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
     let (campsites, runs): (Vec<_>, Vec<_>) = (campsites.iter().cloned().collect(), runs.iter().cloned().collect());
     let next = build(Input {
         tasks: &tasks,
@@ -502,10 +494,11 @@ fn glide(time: Res<Time>, mut tokens: Query<(&Token, &mut Node)>) {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
     use trailhead_factory::{RunStatus, SandboxStatus, TaskKey, Usd};
 
     use super::*;
+    use crate::fixture::{self, at, claim_json, sid};
 
     fn camp(name: &str, state: SandboxState, task: Option<&str>) -> Campsite {
         let status = SandboxStatus {
@@ -536,15 +529,15 @@ mod tests {
         }
     }
 
-    fn task(id: &str, key: &str, status: &str) -> Value {
-        json!({"id": id, "key": key, "title": format!("title {key}"), "status": status})
+    fn task(id: &str, key: &str, status: &str) -> Task {
+        fixture::task(json!({"id": id, "key": key, "title": format!("title {key}"), "status": status}))
     }
 
     struct World {
-        tasks: Vec<Value>,
-        claims: Vec<Value>,
-        comments: Vec<Value>,
-        agents: Vec<Value>,
+        tasks: Vec<Task>,
+        claims: Vec<Claim>,
+        comments: Vec<Comment>,
+        agents: Vec<Agent>,
         campsites: Vec<Campsite>,
         runs: Vec<Run>,
     }
@@ -572,19 +565,25 @@ mod tests {
                 task("t9", "TRAIL-9", "in_review"),
             ],
             claims: vec![
-                json!({"task_id": "t42", "holder_id": "a1"}),
-                json!({"task_id": "t43", "holder_id": "a2"}),
-                json!({"task_id": "t44", "holder_id": "u1"}),
+                fixture::claim(json!({"task_id": "t42", "holder_id": "a1"})),
+                fixture::claim(json!({"task_id": "t43", "holder_id": "a2"})),
+                fixture::claim(json!({"task_id": "t44", "holder_id": "u1"})),
             ],
             comments: vec![
-                json!({"id": "c1", "task_id": "t43", "kind": "question", "resolved_at": null, "created_at": "1"}),
-                json!({"id": "c2", "task_id": "t43", "kind": "question", "resolved_at": "2", "created_at": "1"}),
-                json!({"id": "c3", "task_id": "t42", "kind": "handoff", "body": "old", "created_at": "1"}),
-                json!({"id": "c4", "task_id": "t42", "kind": "handoff", "body": "new\nmore", "created_at": "2"}),
+                fixture::comment(json!({"id": "c1", "task_id": "t43", "kind": "question", "created_at": at(1)})),
+                fixture::comment(
+                    json!({"id": "c2", "task_id": "t43", "kind": "question", "resolved_at": at(2), "created_at": at(1)}),
+                ),
+                fixture::comment(
+                    json!({"id": "c3", "task_id": "t42", "kind": "handoff", "body": "old", "created_at": at(1)}),
+                ),
+                fixture::comment(
+                    json!({"id": "c4", "task_id": "t42", "kind": "handoff", "body": "new\nmore", "created_at": at(2)}),
+                ),
             ],
             agents: vec![
-                json!({"id": "a1", "name": "factory/trail-42-a1"}),
-                json!({"id": "a2", "name": "factory/trail-43-a1"}),
+                fixture::agent(json!({"id": "a1", "name": "factory/trail-42-a1"})),
+                fixture::agent(json!({"id": "a2", "name": "factory/trail-43-a1"})),
             ],
             campsites: vec![
                 camp("b", SandboxState::Idle, None),
@@ -679,9 +678,8 @@ mod tests {
         let tasks: Vec<Value> = w
             .tasks
             .iter()
-            .cloned()
-            .map(|mut t| {
-                t["version"] = json!(1);
+            .map(|t| {
+                let mut t = serde_json::to_value(t).unwrap();
                 t["claim"] = Value::Null;
                 t["open_questions"] = json!([]);
                 t
@@ -705,14 +703,14 @@ mod tests {
         assert!(app.world().resource::<TrailMap>().0.walkers.is_empty());
         // The claim arrives as an event; its holder is in no agent list.
         app.world_mut().write_message(SyncItem::Event(json!({
-            "id": 2, "entity": "claim", "entity_id": "cl1", "kind": "claim.created",
-            "after": {"id": "cl1", "task_id": "t42", "holder_id": "a-new"},
+            "id": 2, "entity": "claim", "entity_id": sid("t42"), "kind": "claim.created",
+            "after": claim_json(json!({"task_id": "t42", "holder_id": "a-new"})),
         })));
         for _ in 0..3 {
             app.update();
         }
         let map = &app.world().resource::<TrailMap>().0;
-        let walker = map.walkers.iter().find(|k| k.id == "a-new").expect("a walker for the new holder");
+        let walker = map.walkers.iter().find(|k| k.id == sid("a-new")).expect("a walker for the new holder");
         assert_eq!(walker.name, "factory/trail-42");
         assert_eq!(walker.at, Spot::Camp("o/r".into(), "a".into()));
         let wp = map.waypoints.iter().find(|p| p.key == "TRAIL-42").unwrap();
@@ -757,12 +755,12 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins((MirrorPlugin, FactoryPlugin, MapPlugin));
         let w = world();
-        let mut tasks = w.tasks.clone();
-        tasks[0]["claim"] = json!({"task_id": "t42", "holder_id": "a1"});
+        let mut tasks: Vec<Value> = w.tasks.iter().map(|t| serde_json::to_value(t).unwrap()).collect();
+        tasks[0]["claim"] = claim_json(json!({"task_id": "t42", "holder_id": "a1"}));
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
             at: 1,
             tasks,
-            agents: w.agents.clone(),
+            agents: w.agents.iter().map(|a| serde_json::to_value(a).unwrap()).collect(),
             ..Default::default()
         }));
         let snapshot = FactorySnapshot {

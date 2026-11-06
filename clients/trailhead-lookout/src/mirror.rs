@@ -11,12 +11,16 @@
 //! - a deleted entity is despawned, as a snapshot leaves it out, so the stream and a snapshot agree; an undo of the
 //!   delete brings it back;
 //! - agents have no events yet, so they change only with a snapshot.
+//!
+//! Each entity holds its data as its `trailhead-model` type in a [`Mirrored`] component, read once as it arrives.
+//! Data that doesn't read (a status a newer server added, say) is left out with a warning rather than shown half-read.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
-use trailhead_model::{Grade, Priority, Status};
+use trailhead_model::{Agent, Claim, Comment, Project, Task};
 
 use crate::sync::{Snapshot, SyncItem};
 
@@ -37,36 +41,49 @@ pub struct TrailheadId(pub String);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rev(pub i64);
 
-/// The entity as the API sent it. A task has no `claim`, `open_questions` or `last_handoff` here: those are
-/// entities of their own.
+/// The entity as the API sent it, read into its model type: a [`Task`], [`Project`], [`Comment`], [`Claim`] or
+/// [`Agent`]. A task's `claim`, `open_questions` and `last_handoff` are entities of their own.
 #[derive(Component, Debug, Clone, PartialEq)]
-pub struct Data(pub Value);
+pub struct Mirrored<T: Send + Sync + 'static>(pub T);
 
-/// A task's status, if it has a known one.
-pub fn status_of(task: &Value) -> Option<Status> {
-    task["status"].as_str()?.parse().ok()
+/// The `T`s in the mirror, for a view to build from.
+pub fn rows<T: Clone + Send + Sync + 'static>(q: &Query<&Mirrored<T>>) -> Vec<T> {
+    q.iter().map(|m| m.0.clone()).collect()
 }
 
-/// A task's priority, if it has a valid one.
-pub fn priority_of(task: &Value) -> Option<Priority> {
-    Priority::try_from(task["priority"].as_i64()?).ok()
+/// What one kind of entity reads into.
+enum Record {
+    Task(Task),
+    Project(Project),
+    Comment(Comment),
+    Claim(Claim),
+    Agent(Agent),
 }
 
-/// A task's grade, if it has one.
-pub fn grade_of(task: &Value) -> Option<Grade> {
-    Grade::try_from(task["grade"].as_i64()?).ok()
-}
+impl Record {
+    fn read(kind: Kind, data: Value) -> serde_json::Result<Record> {
+        fn of<T: DeserializeOwned>(data: Value) -> serde_json::Result<T> {
+            serde_json::from_value(data)
+        }
+        Ok(match kind {
+            Kind::Task => Record::Task(of(data)?),
+            Kind::Project => Record::Project(of(data)?),
+            Kind::Comment => Record::Comment(of(data)?),
+            Kind::Claim => Record::Claim(of(data)?),
+            Kind::Agent => Record::Agent(of(data)?),
+        })
+    }
 
-#[derive(Component)]
-pub struct IsTask;
-#[derive(Component)]
-pub struct IsProject;
-#[derive(Component)]
-pub struct IsComment;
-#[derive(Component)]
-pub struct IsClaim;
-#[derive(Component)]
-pub struct IsAgent;
+    fn insert(self, entity: &mut EntityCommands) {
+        match self {
+            Record::Task(t) => entity.insert(Mirrored(t)),
+            Record::Project(p) => entity.insert(Mirrored(p)),
+            Record::Comment(c) => entity.insert(Mirrored(c)),
+            Record::Claim(c) => entity.insert(Mirrored(c)),
+            Record::Agent(a) => entity.insert(Mirrored(a)),
+        };
+    }
+}
 
 /// Which entity holds what, and how far the stream has been applied.
 #[derive(Resource, Default, Debug)]
@@ -91,24 +108,33 @@ impl Mirror {
         self.snapshots
     }
 
-    /// Writes the entity if it is new or `rev` is newer than what is there (or `force`).
+    /// Writes the entity if it is new or `rev` is newer than what is there (or `force`). Data that doesn't read as
+    /// its kind (from a newer server, say) is left out with a warning, and an older copy stays.
     fn put(&mut self, commands: &mut Commands, kind: Kind, id: &str, rev: Rev, data: Value, force: bool) {
         let key = (kind, id.to_string());
+        if let Some((_, have)) = self.index.get(&key)
+            && !force
+            && have.0 >= rev.0
+        {
+            return;
+        }
+        let record = match Record::read(kind, data) {
+            Ok(record) => record,
+            Err(e) => {
+                warn!(?kind, id, error = %e, "left out of the mirror: it doesn't read as its kind");
+                return;
+            }
+        };
         match self.index.get(&key) {
-            Some((_, have)) if !force && have.0 >= rev.0 => {}
             Some(&(entity, _)) => {
-                commands.entity(entity).insert((rev, Data(data)));
-                self.index.insert(key, (entity, rev));
+                let mut entity = commands.entity(entity);
+                entity.insert(rev);
+                record.insert(&mut entity);
+                self.index.insert(key, (entity.id(), rev));
             }
             None => {
-                let mut entity = commands.spawn((TrailheadId(id.to_string()), rev, Data(data)));
-                match kind {
-                    Kind::Task => entity.insert(IsTask),
-                    Kind::Project => entity.insert(IsProject),
-                    Kind::Comment => entity.insert(IsComment),
-                    Kind::Claim => entity.insert(IsClaim),
-                    Kind::Agent => entity.insert(IsAgent),
-                };
+                let mut entity = commands.spawn((TrailheadId(id.to_string()), rev));
+                record.insert(&mut entity);
                 self.index.insert(key, (entity.id(), rev));
             }
         }
@@ -207,6 +233,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::fixture::{comment_json, sid, task_json};
 
     fn app() -> App {
         let mut app = App::new();
@@ -216,20 +243,21 @@ mod tests {
 
     fn task_event(id: i64, version: i64, title: &str) -> SyncItem {
         SyncItem::Event(json!({
-            "id": id, "entity": "task", "entity_id": "t1", "kind": "task.updated",
-            "after": {"id": "t1", "title": title, "version": version},
+            "id": id, "entity": "task", "entity_id": sid("t1"), "kind": "task.updated",
+            "after": task_json(json!({"id": "t1", "title": title, "version": version})),
         }))
     }
 
     fn snapshot(at: i64, version: i64, title: &str) -> SyncItem {
-        let task = json!({"id": "t1", "title": title, "version": version, "claim": null, "open_questions": []});
+        let mut task = task_json(json!({"id": "t1", "title": title, "version": version}));
+        task["claim"] = Value::Null;
+        task["open_questions"] = json!([]);
         SyncItem::Snapshot(Snapshot { at, tasks: vec![task], ..Default::default() })
     }
 
     fn title(app: &mut App) -> String {
         let world = app.world_mut();
-        let data = world.query_filtered::<&Data, With<IsTask>>().single(world).unwrap();
-        data.0["title"].as_str().unwrap().to_string()
+        world.query::<&Mirrored<Task>>().single(world).unwrap().0.title.clone()
     }
 
     fn send(app: &mut App, items: impl IntoIterator<Item = SyncItem>) {
@@ -261,45 +289,45 @@ mod tests {
         send(&mut app, [task_event(11, 2, "b"), task_event(10, 1, "a")]);
         assert_eq!(title(&mut app), "b");
         let world = app.world_mut();
-        assert_eq!(world.query::<&IsTask>().iter(world).count(), 1);
+        assert_eq!(world.query::<&Mirrored<Task>>().iter(world).count(), 1);
     }
 
     fn comment_event(id: i64, resolved: bool, deleted: bool) -> SyncItem {
         let at = |on: bool| if on { json!("2026-01-01T00:00:00Z") } else { Value::Null };
-        SyncItem::Event(json!({
-            "id": id, "entity": "comment", "entity_id": "c1", "kind": "comment.updated",
-            "after": {"id": "c1", "resolved_at": at(resolved), "deleted_at": at(deleted)},
-        }))
+        let after = comment_json(json!({"id": "c1", "resolved_at": at(resolved), "deleted_at": at(deleted)}));
+        SyncItem::Event(
+            json!({"id": id, "entity": "comment", "entity_id": sid("c1"), "kind": "comment.updated", "after": after}),
+        )
     }
 
-    fn data_of<C: Component>(app: &mut App) -> Vec<Value> {
+    fn data_of<T: Clone + Send + Sync + 'static>(app: &mut App) -> Vec<T> {
         let world = app.world_mut();
-        world.query_filtered::<&Data, With<C>>().iter(world).map(|d| d.0.clone()).collect()
+        world.query::<&Mirrored<T>>().iter(world).map(|m| m.0.clone()).collect()
     }
 
     #[test]
     fn undoing_a_resolve_reopens_the_question() {
         let mut app = app();
         send(&mut app, [snapshot(10, 1, "a"), comment_event(11, false, false), comment_event(12, true, false)]);
-        assert!(!data_of::<IsComment>(&mut app)[0]["resolved_at"].is_null());
+        assert!(data_of::<Comment>(&mut app)[0].resolved_at.is_some());
         send(&mut app, [comment_event(13, false, false)]);
-        assert!(data_of::<IsComment>(&mut app)[0]["resolved_at"].is_null());
+        assert!(data_of::<Comment>(&mut app)[0].resolved_at.is_none());
     }
 
     #[test]
     fn deleted_entities_are_despawned_and_undo_restores_them() {
         let mut app = app();
         send(&mut app, [snapshot(10, 1, "a"), comment_event(11, false, false)]);
-        let gone = SyncItem::Event(json!({
-            "id": 12, "entity": "task", "entity_id": "t1", "kind": "task.deleted",
-            "after": {"id": "t1", "title": "a", "version": 2, "deleted_at": "2026-01-01T00:00:00Z"},
-        }));
+        let after = task_json(json!({"id": "t1", "title": "a", "version": 2, "deleted_at": "2026-01-01T00:00:00Z"}));
+        let gone = SyncItem::Event(
+            json!({"id": 12, "entity": "task", "entity_id": sid("t1"), "kind": "task.deleted", "after": after}),
+        );
         send(&mut app, [gone, comment_event(13, false, true)]);
-        assert!(data_of::<IsTask>(&mut app).is_empty());
-        assert!(data_of::<IsComment>(&mut app).is_empty());
+        assert!(data_of::<Task>(&mut app).is_empty());
+        assert!(data_of::<Comment>(&mut app).is_empty());
         send(&mut app, [task_event(14, 3, "back"), comment_event(15, false, false)]);
         assert_eq!(title(&mut app), "back");
-        assert_eq!(data_of::<IsComment>(&mut app).len(), 1);
+        assert_eq!(data_of::<Comment>(&mut app).len(), 1);
     }
 
     #[test]
@@ -311,5 +339,16 @@ mod tests {
         assert_eq!(title(&mut app), "restored");
         let mirror = app.world().resource::<Mirror>();
         assert_eq!((mirror.last_event(), mirror.snapshots()), (3, 2));
+    }
+
+    #[test]
+    fn data_that_does_not_read_is_left_out_and_the_older_copy_stays() {
+        let mut app = app();
+        send(&mut app, [snapshot(10, 1, "a")]);
+        let mut bad = task_json(json!({"id": "t1", "version": 2}));
+        bad["status"] = json!("on_hold");
+        send(&mut app, [SyncItem::Event(json!({"id": 11, "entity": "task", "entity_id": sid("t1"), "after": bad}))]);
+        assert_eq!(title(&mut app), "a");
+        assert_eq!(app.world().resource::<Mirror>().last_event(), 11);
     }
 }

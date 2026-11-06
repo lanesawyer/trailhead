@@ -23,14 +23,15 @@ use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation, RequestClose};
 use reqwest::Method;
 use serde_json::{Value, json};
-use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunUpdate};
-use trailhead_model::{Grade, Priority, Status};
+use trailhead_factory::{GateKind, METADATA_KEY, MergeDecision, MergedBy, RunUpdate};
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task};
+use uuid::Uuid;
 
 use crate::author::{Act, grade_choices, grade_index, grade_options};
 use crate::board::Input;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::{Connection, ConnectionStatus};
-use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror, grade_of, priority_of, status_of};
+use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::sync::SyncItem;
 use crate::widgets::{
     Icon, Keyed, ModalRoot, PanelTitle, Picked, SelectEdit, badge, button, danger_button, extent, layer, panel,
@@ -136,13 +137,8 @@ pub struct InspectorView {
     pub actions: Vec<Action>,
 }
 
-fn s<'a>(v: &'a Value, key: &str) -> &'a str {
-    v[key].as_str().unwrap_or_default()
-}
-
-/// The PR panel from the `factory` metadata; none when the task has no PR yet, or the metadata isn't the factory's.
-pub fn pr_panel(factory: &Value) -> Option<PrPanel> {
-    let run: RunUpdate = serde_json::from_value(factory.clone()).ok()?;
+/// The PR panel from the task's run; none when it has no PR yet.
+pub fn pr_panel(run: &RunUpdate) -> Option<PrPanel> {
     let merged = run.merged.as_ref();
     let pr = merged.map(|m| &m.pr).or(run.pr.as_ref())?;
     let state = match merged {
@@ -188,17 +184,14 @@ fn status_moves(current: Status, factory: bool) -> Vec<Action> {
 /// The panel for `subject`, or none when it isn't in the mirror (deleted, or not synced yet). `latest` maps a task
 /// id to the id of the event that last changed it.
 pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> Option<InspectorView> {
-    let agent_name = |id: &str| input.agents.iter().find(|a| s(a, "id") == id).map(|a| s(a, "name").to_string());
-    let task_key = |id: &str| input.tasks.iter().find(|t| s(t, "id") == id).map(|t| s(t, "key").to_string());
+    let agent_name = |id: Uuid| input.agents.iter().find(|a| a.id == id).map(|a| a.name.clone());
+    let task_key = |id: Uuid| input.tasks.iter().find(|t| t.id == id).map(|t| t.key.clone());
     match subject {
         Subject::Agent(id) => {
+            let id = Uuid::parse_str(id).ok()?;
             let name = agent_name(id)?;
-            let held: Vec<String> = input
-                .claims
-                .iter()
-                .filter(|c| s(c, "holder_id") == id)
-                .filter_map(|c| task_key(s(c, "task_id")))
-                .collect();
+            let held: Vec<String> =
+                input.claims.iter().filter(|c| c.holder_id == id).filter_map(|c| task_key(c.task_id)).collect();
             let lines =
                 vec![if held.is_empty() { "holds nothing".into() } else { format!("holds {}", held.join(", ")) }];
             Some(InspectorView {
@@ -215,36 +208,38 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
             })
         }
         Subject::Task(id) => {
-            let task = input.tasks.iter().find(|t| s(t, "id") == id)?;
-            let status = status_of(task)?;
-            let factory = &task["metadata"]["factory"];
-            let is_factory = factory.is_object();
-            let holder = input.claims.iter().find(|c| s(c, "task_id") == id).map(|c| s(c, "holder_id").to_string());
-            let holder_agent = holder.as_deref().and_then(|h| agent_name(h).map(|n| (h.to_string(), n)));
+            let task = input.tasks.iter().find(|t| t.id.to_string() == *id)?;
+            let status = task.status;
+            let is_factory = task.metadata.get(METADATA_KEY).is_some_and(Value::is_object);
+            let run = RunUpdate::of(task).ok();
+            let holder = input.claims.iter().find(|c| c.task_id == task.id).map(|c| c.holder_id);
+            let holder_agent = holder.and_then(agent_name);
 
             let mut lines = vec![format!("status: {}", status_label(status))];
-            match (&holder_agent, &holder) {
-                (Some((_, name)), _) => lines.push(format!("held by {name}")),
-                (None, Some(h)) => lines.push(format!("held by {}", h.chars().take(8).collect::<String>())),
+            match (&holder_agent, holder) {
+                (Some(name), _) => lines.push(format!("held by {name}")),
+                (None, Some(h)) => lines.push(format!("held by {}", h.to_string().chars().take(8).collect::<String>())),
                 (None, None) => {}
             }
-            if let Some(sandbox) = factory["sandbox"].as_str() {
-                let attempt = factory["attempt"].as_u64().map_or(String::new(), |a| format!(", attempt {a}"));
+            if let Some(run) = &run
+                && let Some(sandbox) = &run.sandbox
+            {
+                let attempt = run.attempt.map_or(String::new(), |a| format!(", attempt {a}"));
                 lines.push(format!("run: {sandbox}{attempt}"));
             }
 
-            let mut questions: Vec<&Value> = input
+            let mut questions: Vec<&Comment> = input
                 .comments
                 .iter()
-                .filter(|c| s(c, "task_id") == id && s(c, "kind") == "question" && c["resolved_at"].is_null())
+                .filter(|c| c.task_id == task.id && c.kind == CommentKind::Question && c.resolved_at.is_none())
                 .collect();
-            questions.sort_by(|a, b| s(a, "created_at").cmp(s(b, "created_at")));
+            questions.sort_by_key(|c| c.created_at);
             let questions: Vec<Question> = questions
                 .into_iter()
-                .map(|q| Question { key: s(task, "key").into(), id: s(q, "id").into(), body: s(q, "body").into() })
+                .map(|q| Question { key: task.key.clone(), id: q.id.to_string(), body: q.body.clone() })
                 .collect();
 
-            let pr = pr_panel(factory);
+            let pr = run.as_ref().and_then(pr_panel);
             let merge_note = (is_factory && !status.is_closed()).then(|| match &pr {
                 Some(p) if p.state == "open" => {
                     "Merge on GitHub (or let the merger): the factory approves it and closes the task once the PR merges.".to_string()
@@ -270,14 +265,14 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
             }
             Some(InspectorView {
                 subject: subject.clone(),
-                title: format!("{} {}", s(task, "key"), s(task, "title")),
+                title: format!("{} {}", task.key, task.title),
                 lines,
                 questions,
                 pr,
                 merge_note,
                 status: Some(status),
-                priority: priority_of(task),
-                grade: grade_of(task),
+                priority: Some(task.priority),
+                grade: task.grade,
                 actions,
             })
         }
@@ -293,11 +288,11 @@ pub fn plan(
     now: i64,
 ) -> Option<Request> {
     let task = match subject {
-        Subject::Task(id) => input.tasks.iter().find(|t| s(t, "id") == id),
+        Subject::Task(id) => input.tasks.iter().find(|t| t.id.to_string() == *id),
         Subject::Agent(_) => None,
     };
-    let key = task.map(|t| s(t, "key"));
-    let version = task.and_then(|t| t["version"].as_i64());
+    let key = task.map(|t| t.key.as_str());
+    let version = task.map(|t| t.version);
     let path = |tail: &str| format!("/v1/tasks/{}{tail}", key.unwrap_or_default());
     Some(match action {
         Action::Release => Request::new(Method::POST, path("/release"), None, None),
@@ -313,7 +308,7 @@ pub fn plan(
             let actor = match subject {
                 Subject::Agent(id) => id.clone(),
                 Subject::Task(id) => {
-                    input.claims.iter().find(|c| s(c, "task_id") == id).map(|c| s(c, "holder_id").to_string())?
+                    input.claims.iter().find(|c| c.task_id.to_string() == *id).map(|c| c.holder_id.to_string())?
                 }
             };
             let body = json!({"actor_id": actor, "since": rfc3339(now - hours * 3600)});
@@ -388,22 +383,18 @@ fn track_events(mut items: MessageReader<SyncItem>, mut latest: ResMut<Latest>) 
     }
 }
 
-fn collect<C: Component>(q: &Query<&Data, With<C>>) -> Vec<Value> {
-    q.iter().map(|d| d.0.clone()).collect()
-}
-
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn rebuild(
     selection: Res<Selection>,
     latest: Res<Latest>,
     mirror: Res<Mirror>,
-    changed: Query<(), Or<(Added<Data>, Changed<Data>)>>,
-    mut removed: RemovedComponents<Data>,
-    projects: Query<&Data, With<IsProject>>,
-    tasks: Query<&Data, With<IsTask>>,
-    claims: Query<&Data, With<IsClaim>>,
-    comments: Query<&Data, With<IsComment>>,
-    agents: Query<&Data, With<IsAgent>>,
+    changed: Query<(), Changed<Rev>>,
+    mut removed: RemovedComponents<Rev>,
+    projects: Query<&Mirrored<Project>>,
+    tasks: Query<&Mirrored<Task>>,
+    claims: Query<&Mirrored<Claim>>,
+    comments: Query<&Mirrored<Comment>>,
+    agents: Query<&Mirrored<Agent>>,
     mut state: ResMut<InspectorState>,
 ) {
     let gone = removed.read().count() > 0;
@@ -412,7 +403,7 @@ fn rebuild(
     }
     let next = selection.0.as_ref().and_then(|subject| {
         let (projects, tasks, claims, comments, agents) =
-            (collect(&projects), collect(&tasks), collect(&claims), collect(&comments), collect(&agents));
+            (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
         let input = Input {
             projects: &projects,
             tasks: &tasks,
@@ -591,16 +582,10 @@ fn on_pick(
 /// Builds the request when the button is pressed, from the mirror as it is then: the version for `If-Match`, the
 /// event to undo and the `since` of a revert must not be those of the last redraw.
 fn send(world: &mut World, source: Entity, subject: &Subject, action: &Action) {
-    fn rows<C: Component>(world: &mut World) -> Vec<Value> {
-        world.query_filtered::<&Data, With<C>>().iter(world).map(|d| d.0.clone()).collect()
+    fn all<T: Clone + Send + Sync + 'static>(world: &mut World) -> Vec<T> {
+        world.query::<&Mirrored<T>>().iter(world).map(|m| m.0.clone()).collect()
     }
-    let (projects, tasks, claims, comments, agents) = (
-        rows::<IsProject>(world),
-        rows::<IsTask>(world),
-        rows::<IsClaim>(world),
-        rows::<IsComment>(world),
-        rows::<IsAgent>(world),
-    );
+    let (projects, tasks, claims, comments, agents) = (all(world), all(world), all(world), all(world), all(world));
     let input = Input {
         projects: &projects,
         tasks: &tasks,
@@ -1215,15 +1200,20 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::fixture::{agent, at, claim, comment, comment_json, sid, task};
     use crate::sync::Snapshot;
     use crate::widgets::ScrollDown;
 
     struct Fixture {
-        projects: Vec<Value>,
-        tasks: Vec<Value>,
-        claims: Vec<Value>,
-        comments: Vec<Value>,
-        agents: Vec<Value>,
+        projects: Vec<Project>,
+        tasks: Vec<Task>,
+        claims: Vec<Claim>,
+        comments: Vec<Comment>,
+        agents: Vec<Agent>,
+    }
+
+    fn as_json<T: serde::Serialize>(items: &[T]) -> Vec<Value> {
+        items.iter().map(|i| serde_json::to_value(i).unwrap()).collect()
     }
 
     impl Fixture {
@@ -1250,36 +1240,42 @@ mod tests {
         Fixture {
             projects: vec![],
             tasks: vec![
-                json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_review", "priority": 1, "version": 4,
+                task(
+                    json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_review", "priority": 1, "version": 4,
                        "metadata": {"factory": factory}}),
-                json!({"id": "t8", "key": "TRAIL-8", "title": "plain", "status": "open", "version": 1}),
+                ),
+                task(json!({"id": "t8", "key": "TRAIL-8", "title": "plain", "status": "open", "version": 1})),
             ],
-            claims: vec![json!({"task_id": "t7", "holder_id": "a1"})],
+            claims: vec![claim(json!({"task_id": "t7", "holder_id": "a1"}))],
             comments: vec![
-                json!({"id": "c1", "task_id": "t7", "kind": "question", "body": "which db?", "resolved_at": null, "created_at": "1"}),
-                json!({"id": "c2", "task_id": "t7", "kind": "question", "body": "old", "resolved_at": "2", "created_at": "1"}),
+                comment(
+                    json!({"id": "c1", "task_id": "t7", "kind": "question", "body": "which db?", "created_at": at(1)}),
+                ),
+                comment(
+                    json!({"id": "c2", "task_id": "t7", "kind": "question", "body": "old", "resolved_at": at(2), "created_at": at(1)}),
+                ),
             ],
-            agents: vec![json!({"id": "a1", "name": "factory/trail-7-a1"})],
+            agents: vec![agent(json!({"id": "a1", "name": "factory/trail-7-a1"}))],
         }
     }
 
     fn latest() -> HashMap<String, i64> {
-        HashMap::from([("t7".to_string(), 41)])
+        HashMap::from([(sid("t7"), 41)])
     }
 
     #[test]
     fn a_task_view_carries_its_priority_and_an_agent_has_none() {
         let f = fixture();
-        let v = build(f.input(), &latest(), &Subject::Task("t7".into())).unwrap();
+        let v = build(f.input(), &latest(), &Subject::Task(sid("t7"))).unwrap();
         assert_eq!(v.priority, Priority::new(1));
-        let a = build(f.input(), &latest(), &Subject::Agent("a1".into())).unwrap();
+        let a = build(f.input(), &latest(), &Subject::Agent(sid("a1"))).unwrap();
         assert_eq!(a.priority, None);
     }
 
     #[test]
     fn a_factory_task_shows_its_pr_and_gates_and_has_no_path_to_done() {
         let f = fixture();
-        let v = build(f.input(), &latest(), &Subject::Task("t7".into())).unwrap();
+        let v = build(f.input(), &latest(), &Subject::Task(sid("t7"))).unwrap();
         assert_eq!(v.title, "TRAIL-7 do it");
         assert!(v.lines.contains(&"held by factory/trail-7-a1".to_string()));
         assert!(v.lines.contains(&"run: trail-7-a1, attempt 2".to_string()));
@@ -1294,7 +1290,7 @@ mod tests {
             assert!(!matches!(a, Action::Status(Status::Done | Status::Approved)), "{a:?}");
         }
         assert_eq!(v.questions.len(), 1);
-        for want in [Action::Release, Action::Cancel, Action::Undo, Action::Revert(1), Action::Resolve("c1".into())] {
+        for want in [Action::Release, Action::Cancel, Action::Undo, Action::Revert(1), Action::Resolve(sid("c1"))] {
             assert!(v.actions.contains(&want), "{want:?}");
         }
         assert!(!v.actions.contains(&Action::Status(Status::InReview)));
@@ -1303,7 +1299,7 @@ mod tests {
     #[test]
     fn a_plain_task_has_no_claim_controls_and_no_merge_note() {
         let f = fixture();
-        let v = build(f.input(), &HashMap::new(), &Subject::Task("t8".into())).unwrap();
+        let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t8"))).unwrap();
         assert!(v.pr.is_none() && v.merge_note.is_none());
         assert!(!v.actions.contains(&Action::Release) && !v.actions.contains(&Action::Undo));
         assert!(v.actions.contains(&Action::Status(Status::Done)));
@@ -1313,23 +1309,24 @@ mod tests {
     fn a_merged_pr_says_who_merged_it() {
         let factory = json!({"merged": {"by": "human", "commit": "abcdef0123",
                                          "pr": {"repo": {"owner": "o", "name": "r"}, "number": 3, "url": "https://x/pull/3"}}});
-        assert_eq!(pr_panel(&factory).unwrap().state, "merged by a person as abcdef01");
-        assert!(pr_panel(&json!({})).is_none());
+        let run: RunUpdate = serde_json::from_value(factory).unwrap();
+        assert_eq!(pr_panel(&run).unwrap().state, "merged by a person as abcdef01");
+        assert!(pr_panel(&RunUpdate::default()).is_none());
     }
 
     #[test]
     fn an_agent_offers_revert() {
         let f = fixture();
-        let v = build(f.input(), &latest(), &Subject::Agent("a1".into())).unwrap();
+        let v = build(f.input(), &latest(), &Subject::Agent(sid("a1"))).unwrap();
         assert_eq!((v.title.as_str(), v.lines[0].as_str()), ("factory/trail-7-a1", "holds TRAIL-7"));
         assert_eq!(v.actions, [Action::Revert(1)]);
-        assert!(build(f.input(), &latest(), &Subject::Agent("nope".into())).is_none());
+        assert!(build(f.input(), &latest(), &Subject::Agent(sid("nope"))).is_none());
     }
 
     #[test]
     fn actions_become_the_requests_the_api_takes() {
         let f = fixture();
-        let t = Subject::Task("t7".into());
+        let t = Subject::Task(sid("t7"));
         let p = |a: &Action| plan(a, f.input(), &latest(), &t, 1_700_000_000).unwrap();
         let r = p(&Action::Release);
         assert_eq!((r.method, r.path.as_str(), r.if_match), (Method::POST, "/v1/tasks/TRAIL-7/release", None));
@@ -1337,16 +1334,16 @@ mod tests {
         assert_eq!((r.method, r.path.as_str(), r.if_match), (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4)));
         assert_eq!(r.body, Some(json!({"status": "cancelled"})));
         assert_eq!(p(&Action::Status(Status::Open)).body, Some(json!({"status": "open"})));
-        let r = p(&Action::Resolve("c1".into()));
-        assert_eq!((r.path.as_str(), r.body), ("/v1/comments/c1/resolve", None));
+        let r = p(&Action::Resolve(sid("c1")));
+        assert_eq!((r.path, r.body), (format!("/v1/comments/{}/resolve", sid("c1")), None));
         assert_eq!(p(&Action::Undo).body, Some(json!({"event_id": 41})));
         let r = p(&Action::Revert(1));
         assert_eq!(
             (r.path.as_str(), r.body),
-            ("/v1/revert", Some(json!({"actor_id": "a1", "since": "2023-11-14T21:13:20Z"})))
+            ("/v1/revert", Some(json!({"actor_id": sid("a1"), "since": "2023-11-14T21:13:20Z"})))
         );
         // From the agent itself.
-        let r = plan(&Action::Revert(24), f.input(), &latest(), &Subject::Agent("a1".into()), 1_700_000_000).unwrap();
+        let r = plan(&Action::Revert(24), f.input(), &latest(), &Subject::Agent(sid("a1")), 1_700_000_000).unwrap();
         assert_eq!(r.body.unwrap()["since"], "2023-11-13T22:13:20Z");
         // No event to undo.
         assert!(plan(&Action::Undo, f.input(), &HashMap::new(), &t, 0).is_none());
@@ -1382,13 +1379,13 @@ mod tests {
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
             at: 5,
             projects: vec![],
-            tasks: f.tasks,
+            tasks: as_json(&f.tasks),
             agents: vec![],
         }));
         app.update();
         let source = app.world_mut().spawn(Control::Idle).id();
         let statuses = vec![Status::Open, Status::InProgress];
-        let select = app.world_mut().spawn(StatusMove { source, subject: Subject::Task("t8".into()), statuses }).id();
+        let select = app.world_mut().spawn(StatusMove { source, subject: Subject::Task(sid("t8")), statuses }).id();
         app.world_mut().trigger(Picked { entity: select, index: 0 });
         app.update();
         assert_eq!(app.world().get::<Control>(source), Some(&Control::Idle));
@@ -1426,21 +1423,20 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
         let f = fixture();
-        let tasks = f.tasks.clone();
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
             at: 5,
             projects: vec![],
-            tasks,
-            agents: f.agents,
+            tasks: as_json(&f.tasks),
+            agents: as_json(&f.agents),
         }));
         app.world_mut().write_message(SyncItem::Event(json!({
-            "id": 6, "entity": "comment", "entity_id": "c1", "kind": "comment.created",
-            "after": {"id": "c1", "task_id": "t7", "kind": "question", "body": "q", "resolved_at": null},
+            "id": 6, "entity": "comment", "entity_id": sid("c1"), "kind": "comment.created",
+            "after": comment_json(json!({"id": "c1", "task_id": "t7", "kind": "question", "body": "q", "resolved_at": null})),
         })));
-        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task("t7".into()));
+        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t7")));
         app.update();
         app.update();
-        assert_eq!(app.world().resource::<Latest>().0.get("t7"), Some(&6));
+        assert_eq!(app.world().resource::<Latest>().0.get(&sid("t7")), Some(&6));
         let view = app.world().resource::<InspectorState>().0.clone().unwrap();
         assert_eq!(view.title, "TRAIL-7 do it");
         assert!(view.actions.contains(&Action::Undo));
@@ -1476,7 +1472,7 @@ mod tests {
     }
 
     fn open_inspector(app: &mut App) -> Entity {
-        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task("t7".into()));
+        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t7")));
         app.world_mut().spawn(InspectorPanel).id()
     }
 
@@ -1553,11 +1549,11 @@ mod tests {
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
             at: 5,
             projects: vec![],
-            tasks: f.tasks.clone(),
-            agents: f.agents,
+            tasks: as_json(&f.tasks),
+            agents: as_json(&f.agents),
         }));
         app.update();
-        let subject = Subject::Task("t8".into());
+        let subject = Subject::Task(sid("t8"));
         let source = app.world_mut().spawn(Control::Idle).id();
         let select = app.world_mut().spawn(GradeChoice { source, subject }).id();
         // Row 3 of the dropdown is grade 3 (none, 1, 2, 3, 4).
@@ -1588,7 +1584,7 @@ mod tests {
             Some(&Control::Refused("not allowed: only a human can set the first grade".into()))
         );
         let f = fixture();
-        let v = build(f.input(), &latest(), &Subject::Task("t8".into())).unwrap();
+        let v = build(f.input(), &latest(), &Subject::Task(sid("t8"))).unwrap();
         assert_eq!(v.grade, None);
     }
 }
@@ -1598,14 +1594,15 @@ mod in_place_tests {
     use bevy::state::app::StatesPlugin;
 
     use super::*;
+    use crate::fixture::{at, comment_json, sid, task_json};
     use crate::sync::Snapshot;
 
     fn question(id: &str, body: &str) -> SyncItem {
         SyncItem::Event(json!({
-            "id": id.trim_start_matches('c').parse::<i64>().unwrap() + 100, "entity": "comment", "entity_id": id,
+            "id": id.trim_start_matches('c').parse::<i64>().unwrap() + 100, "entity": "comment", "entity_id": sid(id),
             "kind": "comment.created",
-            "after": {"id": id, "task_id": "t7", "kind": "question", "body": body, "resolved_at": null,
-                      "created_at": id},
+            "after": comment_json(json!({"id": id, "task_id": "t7", "kind": "question", "body": body,
+                      "created_at": at(id.trim_start_matches('c').parse().unwrap())})),
         }))
     }
 
@@ -1624,13 +1621,15 @@ mod in_place_tests {
             .init_resource::<ConnectionStatus>()
             .add_plugins((crate::mirror::MirrorPlugin, InspectorUiPlugin));
         let tasks = vec![
-            json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_progress", "priority": 1, "version": 4}),
-            json!({"id": "t8", "key": "TRAIL-8", "title": "other", "status": "open", "version": 1}),
+            task_json(
+                json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_progress", "priority": 1, "version": 4}),
+            ),
+            task_json(json!({"id": "t8", "key": "TRAIL-8", "title": "other", "status": "open", "version": 1})),
         ];
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 5, projects: vec![], tasks, agents: vec![] }));
         app.world_mut().write_message(question("c1", "which db?"));
         app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
-        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task("t7".into()));
+        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t7")));
         settle(&mut app);
         app
     }
@@ -1685,9 +1684,9 @@ mod in_place_tests {
         let mut app = app();
         let before = body(&mut app);
         app.world_mut().write_message(SyncItem::Event(json!({
-            "id": 300, "entity": "task", "entity_id": "t7", "kind": "task.updated",
-            "after": {"id": "t7", "key": "TRAIL-7", "title": "renamed", "status": "in_progress", "priority": 1,
-                      "version": 5},
+            "id": 300, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
+            "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "renamed", "status": "in_progress", "priority": 1,
+                      "version": 5})),
         })));
         settle(&mut app);
         assert!(texts(&mut app).iter().any(|t| t == "TRAIL-7 renamed"));
@@ -1710,9 +1709,9 @@ mod in_place_tests {
         let modal = app.world_mut().commands().spawn_scene(panel_header("Answer TRAIL-7", true)).id();
         settle(&mut app);
         app.world_mut().write_message(SyncItem::Event(json!({
-            "id": 301, "entity": "task", "entity_id": "t7", "kind": "task.updated",
-            "after": {"id": "t7", "key": "TRAIL-7", "title": "renamed", "status": "in_progress", "priority": 1,
-                      "version": 5},
+            "id": 301, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
+            "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "renamed", "status": "in_progress", "priority": 1,
+                      "version": 5})),
         })));
         settle(&mut app);
         assert!(texts(&mut app).iter().any(|t| t == "TRAIL-7 renamed"));
@@ -1730,7 +1729,7 @@ mod in_place_tests {
     fn a_different_subject_rebuilds_the_panel() {
         let mut app = app();
         let before = body(&mut app);
-        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task("t8".into()));
+        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t8")));
         settle(&mut app);
         let after = body(&mut app);
         assert!(after.iter().skip(1).all(|e| !before.contains(e)), "nothing is carried over");

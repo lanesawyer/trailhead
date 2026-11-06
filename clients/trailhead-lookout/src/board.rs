@@ -12,13 +12,13 @@ use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
-use serde_json::Value;
-use trailhead_model::Status;
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Project, Status, Task};
+use uuid::Uuid;
 
 use crate::author::{Act, Authoring};
 use crate::connection::{Connection, ConnectionStatus};
 use crate::inspector::{Selection, Subject};
-use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror, grade_of, priority_of, status_of};
+use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::widgets;
 use crate::widgets::{
     ChipEdit, ChipWords, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_row,
@@ -203,67 +203,53 @@ pub struct BoardView {
 /// Everything [`build`] reads, as the mirror holds it.
 #[derive(Default, Clone, Copy)]
 pub struct Input<'a> {
-    pub projects: &'a [Value],
-    pub tasks: &'a [Value],
-    pub claims: &'a [Value],
-    pub comments: &'a [Value],
-    pub agents: &'a [Value],
+    pub projects: &'a [Project],
+    pub tasks: &'a [Task],
+    pub claims: &'a [Claim],
+    pub comments: &'a [Comment],
+    pub agents: &'a [Agent],
     /// The keys of the factory's queue tasks, whose subtasks the factory works.
     pub queues: &'a [String],
-}
-
-fn s<'a>(v: &'a Value, key: &str) -> &'a str {
-    v[key].as_str().unwrap_or_default()
 }
 
 /// Groups the tasks passing `filter` into one column per status (empty ones included; done and cancelled
 /// only when `closed`), with subtasks under their parent, and works out
 /// what each filter can offer.
 pub fn build(input: Input, filter: &Filter) -> BoardView {
-    let project_key: HashMap<&str, &str> = input.projects.iter().map(|p| (s(p, "id"), s(p, "key"))).collect();
-    let task_key: HashMap<&str, &str> = input.tasks.iter().map(|t| (s(t, "id"), s(t, "key"))).collect();
-    let agent_name: HashMap<&str, &str> = input.agents.iter().map(|a| (s(a, "id"), s(a, "name"))).collect();
+    let project_key: HashMap<Uuid, &str> = input.projects.iter().map(|p| (p.id, p.key.as_str())).collect();
+    let task_key: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.key.as_str())).collect();
+    let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
     // The claim is keyed by its task.
-    let holder_of: HashMap<&str, &str> = input.claims.iter().map(|c| (s(c, "task_id"), s(c, "holder_id"))).collect();
-    let holder_label = |id: &str| agent_name.get(id).map_or_else(|| short(id), |n| n.to_string());
+    let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
+    let holder_label = |id: Uuid| agent_name.get(&id).map_or_else(|| short(id), |n| n.to_string());
+    let parent_key = |t: &Task| t.parent_id.and_then(|p| task_key.get(&p).copied());
 
-    let mut questions: HashMap<&str, Vec<&Value>> = HashMap::new();
+    let mut questions: HashMap<Uuid, Vec<&Comment>> = HashMap::new();
     for c in input.comments {
-        if s(c, "kind") == "question" && c["resolved_at"].is_null() {
-            questions.entry(s(c, "task_id")).or_default().push(c);
+        if c.kind == CommentKind::Question && c.resolved_at.is_none() {
+            questions.entry(c.task_id).or_default().push(c);
         }
     }
 
-    let passes = |t: &Value| {
-        let id = s(t, "id");
-        filter.project.as_deref().is_none_or(|k| project_key.get(s(t, "project_id")) == Some(&k))
-            && filter
-                .parent
-                .as_deref()
-                .is_none_or(|k| t["parent_id"].as_str().and_then(|p| task_key.get(p)) == Some(&k))
-            && filter.holder.as_deref().is_none_or(|h| holder_of.get(id) == Some(&h))
+    let passes = |t: &Task| {
+        filter.project.as_deref().is_none_or(|k| project_key.get(&t.project_id) == Some(&k))
+            && filter.parent.as_deref().is_none_or(|k| parent_key(t) == Some(k))
+            && filter.holder.as_deref().is_none_or(|h| holder_of.get(&t.id).is_some_and(|id| id.to_string() == h))
     };
 
-    let card = |t: &Value, depth: usize, with_parent: bool| {
-        let id = s(t, "id");
-        let mut open: Vec<&Value> = questions.get(id).cloned().unwrap_or_default();
-        open.sort_by(|a, b| s(a, "created_at").cmp(s(b, "created_at")));
-        let mut badges: Vec<Badge> = priority_of(t)
-            .map(|p| Badge { kind: BadgeKind::Priority, label: format!("P{p}"), tone: Some(priority_tone(p)) })
-            .into_iter()
-            .collect();
-        if let Some(grade) = grade_of(t) {
+    let card = |t: &Task, depth: usize, with_parent: bool| {
+        let mut open: Vec<&Comment> = questions.get(&t.id).cloned().unwrap_or_default();
+        open.sort_by_key(|c| c.created_at);
+        let p = t.priority;
+        let mut badges =
+            vec![Badge { kind: BadgeKind::Priority, label: format!("P{p}"), tone: Some(priority_tone(p)) }];
+        if let Some(grade) = t.grade {
             badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}"), tone: None });
-        } else if !status_of(t).is_some_and(Status::is_closed)
-            && t["parent_id"]
-                .as_str()
-                .and_then(|p| task_key.get(p))
-                .is_some_and(|k| input.queues.iter().any(|q| q == k))
-        {
+        } else if !t.status.is_closed() && parent_key(t).is_some_and(|k| input.queues.iter().any(|q| q == k)) {
             badges.push(Badge { kind: BadgeKind::NeedsGrade, label: "needs grade".into(), tone: Some(token::WARN) });
         }
-        if let Some(holder) = holder_of.get(id) {
-            badges.push(Badge { kind: BadgeKind::Holder, label: holder_badge(&holder_label(holder)), tone: None });
+        if let Some(holder) = holder_of.get(&t.id) {
+            badges.push(Badge { kind: BadgeKind::Holder, label: holder_badge(&holder_label(*holder)), tone: None });
         }
         if !open.is_empty() {
             badges.push(Badge {
@@ -274,39 +260,34 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         }
         let mut actions = vec![CardAction::Edit, CardAction::Comment];
         if let Some(q) = open.first() {
-            actions.push(CardAction::Answer { comment_id: s(q, "id").to_string(), question: s(q, "body").to_string() });
+            actions.push(CardAction::Answer { comment_id: q.id.to_string(), question: q.body.clone() });
         }
         Card {
-            id: id.to_string(),
-            key: s(t, "key").to_string(),
-            title: s(t, "title").to_string(),
-            parent: t["parent_id"]
-                .as_str()
-                .and_then(|p| task_key.get(p))
-                .filter(|_| with_parent)
-                .map(|k| k.to_string()),
+            id: t.id.to_string(),
+            key: t.key.clone(),
+            title: t.title.clone(),
+            parent: parent_key(t).filter(|_| with_parent).map(str::to_string),
             depth,
             badges,
             actions,
         }
     };
 
-    let shown: Vec<&Value> = input.tasks.iter().filter(|t| passes(t)).collect();
+    let shown: Vec<&Task> = input.tasks.iter().filter(|t| passes(t)).collect();
     let mut columns = Vec::new();
     for status in Status::ALL {
         if !filter.closed && status.is_closed() {
             continue;
         }
-        let mut here: Vec<&Value> = shown.iter().copied().filter(|t| status_of(t) == Some(status)).collect();
+        let mut here: Vec<&Task> = shown.iter().copied().filter(|t| t.status == status).collect();
         // Urgent first, then by key number, so the order doesn't shuffle with every update.
-        here.sort_by_key(|t| (priority_of(t), key_number(s(t, "key")), s(t, "key").to_string()));
-        let ids: HashSet<&str> = here.iter().map(|t| s(t, "id")).collect();
-        let nested = |t: &Value| t["parent_id"].as_str().is_some_and(|p| ids.contains(p));
+        here.sort_by_key(|t| (t.priority, key_number(&t.key), t.key.clone()));
+        let ids: HashSet<Uuid> = here.iter().map(|t| t.id).collect();
+        let nested = |t: &Task| t.parent_id.is_some_and(|p| ids.contains(&p));
         let mut cards = Vec::new();
         for t in here.iter().filter(|t| !nested(t)) {
             cards.push(card(t, 0, true));
-            let id = s(t, "id");
-            cards.extend(here.iter().filter(|c| c["parent_id"].as_str() == Some(id)).map(|c| card(c, 1, false)));
+            cards.extend(here.iter().filter(|c| c.parent_id == Some(t.id)).map(|c| card(c, 1, false)));
         }
         columns.push(Column { status, cards });
     }
@@ -318,8 +299,8 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         keys.into_iter().map(|k| choice(k, k.to_string())).collect()
     };
     let parents = {
-        let ids: BTreeSet<&str> = input.tasks.iter().filter_map(|t| t["parent_id"].as_str()).collect();
-        let title: HashMap<&str, &str> = input.tasks.iter().map(|t| (s(t, "id"), s(t, "title"))).collect();
+        let ids: BTreeSet<Uuid> = input.tasks.iter().filter_map(|t| t.parent_id).collect();
+        let title: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.title.as_str())).collect();
         let mut keys: Vec<(&str, &str)> = ids
             .iter()
             .filter_map(|id| Some((*task_key.get(id)?, title.get(id).copied().unwrap_or_default())))
@@ -328,16 +309,16 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         keys.into_iter().map(|(k, t)| choice(k, parent_label(k, t))).collect()
     };
     let holders = {
-        let ids: BTreeSet<&str> = holder_of.values().copied().collect();
-        let mut v: Vec<Choice> = ids.into_iter().map(|id| choice(id, holder_label(id))).collect();
+        let ids: BTreeSet<Uuid> = holder_of.values().copied().collect();
+        let mut v: Vec<Choice> = ids.into_iter().map(|id| choice(&id.to_string(), holder_label(id))).collect();
         v.sort_by(|a, b| a.label.cmp(&b.label));
         v
     };
     BoardView { columns, options: Options { projects, parents, holders } }
 }
 
-fn short(id: &str) -> String {
-    id.chars().take(8).collect()
+fn short(id: Uuid) -> String {
+    id.to_string().chars().take(8).collect()
 }
 
 /// How many characters of a holder's name a badge shows.
@@ -373,22 +354,18 @@ fn key_number(key: &str) -> i64 {
     key.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
 }
 
-fn collect<C: Component>(q: &Query<&Data, With<C>>) -> Vec<Value> {
-    q.iter().map(|d| d.0.clone()).collect()
-}
-
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 fn rebuild_view(
     filter: Res<Filter>,
     mirror: Res<Mirror>,
-    changed: Query<(), Or<(Added<Data>, Changed<Data>)>>,
-    mut removed: RemovedComponents<Data>,
-    projects: Query<&Data, With<IsProject>>,
-    tasks: Query<&Data, With<IsTask>>,
-    claims: Query<&Data, With<IsClaim>>,
-    comments: Query<&Data, With<IsComment>>,
-    agents: Query<&Data, With<IsAgent>>,
+    changed: Query<(), Changed<Rev>>,
+    mut removed: RemovedComponents<Rev>,
+    projects: Query<&Mirrored<Project>>,
+    tasks: Query<&Mirrored<Task>>,
+    claims: Query<&Mirrored<Claim>>,
+    comments: Query<&Mirrored<Comment>>,
+    agents: Query<&Mirrored<Agent>>,
     authoring: Res<Authoring>,
     mut view: ResMut<BoardView>,
 ) {
@@ -397,7 +374,7 @@ fn rebuild_view(
         return;
     }
     let (projects, tasks, claims, comments, agents) =
-        (collect(&projects), collect(&tasks), collect(&claims), collect(&comments), collect(&agents));
+        (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
     let queues = [authoring.queue.clone()];
     let input = Input {
         projects: &projects,
@@ -980,16 +957,21 @@ fn update_header(
 mod tests {
     use serde_json::json;
 
-    use super::*;
-    use crate::sync::{Snapshot, SyncItem};
+    use serde_json::Value;
     use trailhead_model::Priority;
 
+    use super::*;
+    use crate::fixture::{agent_json, at, claim_json, comment_json, project_json, sid, task_json};
+    use crate::sync::{Snapshot, SyncItem};
+
+    /// The board's fixture as the API's JSON.
     #[allow(clippy::type_complexity)]
-    pub(super) fn input() -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
-        let projects = vec![json!({"id": "p1", "key": "TRAIL"}), json!({"id": "p2", "key": "OPS"})];
+    fn input_json() -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
+        let projects =
+            vec![project_json(json!({"id": "p1", "key": "TRAIL"})), project_json(json!({"id": "p2", "key": "OPS"}))];
         let task = |id: &str, key: &str, project: &str, status: &str, parent: Option<&str>, prio: i64| {
-            json!({"id": id, "key": key, "title": format!("title {key}"), "project_id": project, "status": status,
-                   "parent_id": parent, "priority": prio})
+            task_json(json!({"id": id, "key": key, "title": format!("title {key}"), "project_id": project,
+                             "status": status, "parent_id": parent, "priority": prio}))
         };
         let mut tasks = vec![
             task("t102", "TRAIL-102", "p1", "open", None, 2),
@@ -999,19 +981,41 @@ mod tests {
             task("t200", "OPS-1", "p2", "in_progress", None, 2),
         ];
         tasks[1]["grade"] = json!(3);
-        let claims = vec![json!({"task_id": "t103", "holder_id": "a1"}), json!({"task_id": "t200", "holder_id": "u1"})];
-        let comments = vec![
-            json!({"id": "c1", "task_id": "t103", "kind": "question", "body": "which db?", "resolved_at": null, "created_at": "1"}),
-            json!({"id": "c2", "task_id": "t103", "kind": "question", "body": "old", "resolved_at": "2", "created_at": "1"}),
-            json!({"id": "c3", "task_id": "t103", "kind": "handoff", "body": "first", "created_at": "1"}),
-            json!({"id": "c4", "task_id": "t103", "kind": "handoff", "body": "second\nmore", "created_at": "2"}),
+        let claims = vec![
+            claim_json(json!({"task_id": "t103", "holder_id": "a1"})),
+            claim_json(json!({"task_id": "t200", "holder_id": "u1"})),
         ];
-        let agents = vec![json!({"id": "a1", "name": "factory/trail-103-a1"})];
+        let comments = vec![
+            comment_json(
+                json!({"id": "c1", "task_id": "t103", "kind": "question", "body": "which db?", "created_at": at(1)}),
+            ),
+            comment_json(
+                json!({"id": "c2", "task_id": "t103", "kind": "question", "body": "old", "resolved_at": at(2), "created_at": at(1)}),
+            ),
+            comment_json(
+                json!({"id": "c3", "task_id": "t103", "kind": "handoff", "body": "first", "created_at": at(1)}),
+            ),
+            comment_json(
+                json!({"id": "c4", "task_id": "t103", "kind": "handoff", "body": "second\nmore", "created_at": at(2)}),
+            ),
+        ];
+        let agents = vec![agent_json(json!({"id": "a1", "name": "factory/trail-103-a1"}))];
         (projects, tasks, claims, comments, agents)
     }
 
+    fn typed<T: serde::de::DeserializeOwned>(values: Vec<Value>) -> Vec<T> {
+        values.into_iter().map(|v| serde_json::from_value(v).unwrap()).collect()
+    }
+
     pub(super) fn run(filter: &Filter) -> BoardView {
-        let (projects, tasks, claims, comments, agents) = input();
+        let (projects, tasks, claims, comments, agents) = input_json();
+        let (projects, tasks, claims, comments, agents) = (
+            typed::<Project>(projects),
+            typed::<Task>(tasks),
+            typed::<Claim>(claims),
+            typed::<Comment>(comments),
+            typed::<Agent>(agents),
+        );
         build(
             Input {
                 projects: &projects,
@@ -1068,7 +1072,8 @@ mod tests {
         );
         // No grade, no holder, no question: only the priority. A holder that isn't an agent shows as a short id.
         assert_eq!(badges(card(&view, "TRAIL-102")), [(BadgeKind::Priority, "P2")]);
-        assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, "u1")]);
+        let short = &sid("u1")[..8];
+        assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, short)]);
     }
 
     #[test]
@@ -1108,14 +1113,14 @@ mod tests {
         let view = run(&Filter::default());
         assert_eq!(card(&view, "TRAIL-102").actions, [CardAction::Edit, CardAction::Comment]);
         let asked = card(&view, "TRAIL-103");
-        let answer = CardAction::Answer { comment_id: "c1".into(), question: "which db?".into() };
+        let answer = CardAction::Answer { comment_id: sid("c1"), question: "which db?".into() };
         assert_eq!(asked.actions, [CardAction::Edit, CardAction::Comment, answer.clone()]);
         // The buttons send the commands the forms already handle.
         assert_eq!(asked.actions[0].act(&asked.key), Act::Edit("TRAIL-103".into()));
         assert_eq!(asked.actions[1].act(&asked.key), Act::Comment("TRAIL-103".into()));
         assert_eq!(
             answer.act(&asked.key),
-            Act::Answer { key: "TRAIL-103".into(), comment_id: "c1".into(), question: "which db?".into() }
+            Act::Answer { key: "TRAIL-103".into(), comment_id: sid("c1"), question: "which db?".into() }
         );
     }
 
@@ -1174,8 +1179,8 @@ mod tests {
         };
         assert_eq!(by(Filter { project: Some("OPS".into()), ..Default::default() }), ["OPS-1"]);
         assert_eq!(by(Filter { parent: Some("TRAIL-102".into()), ..Default::default() }), ["TRAIL-105", "TRAIL-103"]);
-        assert_eq!(by(Filter { holder: Some("a1".into()), ..Default::default() }), ["TRAIL-103"]);
-        let none = Filter { project: Some("OPS".into()), holder: Some("a1".into()), ..Default::default() };
+        assert_eq!(by(Filter { holder: Some(sid("a1")), ..Default::default() }), ["TRAIL-103"]);
+        let none = Filter { project: Some("OPS".into()), holder: Some(sid("a1")), ..Default::default() };
         assert!(by(none).is_empty());
     }
 
@@ -1186,7 +1191,8 @@ mod tests {
         assert_eq!(labels(&view.options.projects), ["OPS", "TRAIL"]);
         assert_eq!(labels(&view.options.parents), ["TRAIL-102 title TRAIL-102", "TRAIL-103 title TRAIL-103"]);
         assert_eq!(view.options.parents[0].value, "TRAIL-102", "the filter still takes the key");
-        assert_eq!(labels(&view.options.holders), ["factory/trail-103-a1", "u1"]);
+        // A holder that isn't an agent is its short id, which sorts first here.
+        assert_eq!(labels(&view.options.holders), [&sid("u1")[..8], "factory/trail-103-a1"]);
     }
 
     #[test]
@@ -1245,7 +1251,7 @@ mod tests {
     fn the_view_follows_the_mirror() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(BoardPlugin);
-        let (projects, tasks, claims, comments, agents) = input();
+        let (projects, tasks, claims, comments, agents) = input_json();
         let snapshot = Snapshot { at: 5, projects, tasks, agents };
         let _ = (claims, comments);
         app.world_mut().write_message(SyncItem::Snapshot(snapshot));
@@ -1262,8 +1268,8 @@ mod tests {
         // An event moves the task to another column.
         app.world_mut().resource_mut::<Filter>().closed = true;
         app.world_mut().write_message(SyncItem::Event(json!({
-            "id": 6, "entity": "task", "entity_id": "t200", "kind": "task.updated",
-            "after": {"id": "t200", "key": "OPS-1", "project_id": "p2", "status": "done", "priority": 2, "version": 2},
+            "id": 6, "entity": "task", "entity_id": sid("t200"), "kind": "task.updated",
+            "after": task_json(json!({"id": "t200", "key": "OPS-1", "project_id": "p2", "status": "done", "priority": 2, "version": 2})),
         })));
         app.update();
         app.update();
@@ -1274,9 +1280,10 @@ mod tests {
 
 #[cfg(test)]
 mod in_place_tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
+    use crate::fixture::{project_json, sid, task_json};
     use crate::mirror::MirrorPlugin;
     use crate::sync::{Snapshot, SyncItem};
 
@@ -1284,9 +1291,14 @@ mod in_place_tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins((MirrorPlugin, BoardPlugin));
         app.world_mut().spawn(BoardColumns);
-        let task = |id: &str, status: &str| json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p1", "status": status, "priority": 2});
+        let task = |id: &str, status: &str| {
+            task_json(
+                json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p1", "status": status, "priority": 2}),
+            )
+        };
         let tasks = vec![task("t1", "open"), task("t2", "open"), task("t3", "in_progress"), task("t4", "in_progress")];
-        let projects = vec![json!({"id": "p1", "key": "TRAIL"}), json!({"id": "p2", "key": "OPS"})];
+        let projects =
+            vec![project_json(json!({"id": "p1", "key": "TRAIL"})), project_json(json!({"id": "p2", "key": "OPS"}))];
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, agents: vec![] }));
         settle(&mut app);
         app
@@ -1300,16 +1312,17 @@ mod in_place_tests {
 
     fn update_task(app: &mut App, id: &str, status: &str) {
         app.world_mut().write_message(SyncItem::Event(json!({
-            "id": 9, "entity": "task", "entity_id": id, "kind": "task.updated",
-            "after": {"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p1", "status": status,
-                      "priority": 2, "version": 2},
+            "id": 9, "entity": "task", "entity_id": sid(id), "kind": "task.updated",
+            "after": task_json(json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p1", "status": status,
+                      "priority": 2, "version": 2})),
         })));
         settle(app);
     }
 
     fn cards(app: &mut App) -> HashMap<String, Entity> {
         let mut q = app.world_mut().query::<(Entity, &BoardCard)>();
-        q.iter(app.world()).map(|(e, c)| (c.0.id.clone(), e)).collect()
+        // By the task's short name: these tasks' keys are their names in capitals.
+        q.iter(app.world()).map(|(e, c)| (c.0.key.to_lowercase(), e)).collect()
     }
 
     fn column_of(app: &mut App, card: Entity) -> Status {
@@ -1331,9 +1344,9 @@ mod in_place_tests {
         let columns: Vec<Entity> = q.iter(app.world()).map(|(e, _)| e).collect();
 
         app.world_mut().write_message(SyncItem::Event(json!({
-            "id": 9, "entity": "task", "entity_id": "t1", "kind": "task.updated",
-            "after": {"id": "t1", "key": "T1", "title": "renamed", "project_id": "p1", "status": "open",
-                      "priority": 2, "version": 2},
+            "id": 9, "entity": "task", "entity_id": sid("t1"), "kind": "task.updated",
+            "after": task_json(json!({"id": "t1", "key": "T1", "title": "renamed", "project_id": "p1", "status": "open",
+                      "priority": 2, "version": 2})),
         })));
         settle(&mut app);
         let after = cards(&mut app);
@@ -1366,11 +1379,11 @@ mod in_place_tests {
         let mut app = app();
         let before = cards(&mut app);
         // Give two of the tasks to the other project.
-        for id in ["t2", "t4"] {
+        for (n, id, status) in [(9, "t2", "open"), (10, "t4", "in_progress")] {
+            let after = task_json(json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p2",
+                                         "status": status, "priority": 2, "version": 2}));
             app.world_mut().write_message(SyncItem::Event(json!({
-                "id": if id == "t2" { 9 } else { 10 }, "entity": "task", "entity_id": id, "kind": "task.updated",
-                "after": {"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p2",
-                          "status": if id == "t2" { "open" } else { "in_progress" }, "priority": 2, "version": 2},
+                "id": n, "entity": "task", "entity_id": sid(id), "kind": "task.updated", "after": after,
             })));
         }
         settle(&mut app);
@@ -1417,11 +1430,11 @@ mod in_place_tests {
         app.world_mut().spawn(BoardColumns);
         let tasks: Vec<Value> = (0..PAGE + 5)
             .map(|i| {
-                json!({"id": format!("t{i}"), "key": format!("TRAIL-{i}"), "title": "", "project_id": "p1",
-                            "status": "open", "priority": 2})
+                task_json(json!({"id": format!("t{i}"), "key": format!("TRAIL-{i}"), "title": "", "project_id": "p1",
+                            "status": "open", "priority": 2}))
             })
             .collect();
-        let projects = vec![json!({"id": "p1", "key": "TRAIL"})];
+        let projects = vec![project_json(json!({"id": "p1", "key": "TRAIL"}))];
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, agents: vec![] }));
         settle(&mut app);
         let before = cards(&mut app);

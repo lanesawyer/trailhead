@@ -8230,6 +8230,7 @@ dependencies = [
  "directories",
  "iroh",
  "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

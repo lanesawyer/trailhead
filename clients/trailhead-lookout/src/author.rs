@@ -17,11 +17,11 @@ use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
 use reqwest::Method;
 use serde_json::{Value, json};
-use trailhead_model::{Grade, Priority, Status};
+use trailhead_model::{Grade, Priority, Status, Task};
 
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
-use crate::mirror::{Data, IsTask, grade_of, priority_of, status_of};
+use crate::mirror::Mirrored;
 use crate::widgets::{
     Modal, ModalClosed, ModalLocked, ModalSlots, Picked, button, dot, field, open_modal, priority_tone, row, section,
     select, size, space, status_label, text, text_dim, text_input, token,
@@ -137,15 +137,14 @@ impl Open {
     }
 
     /// An edit of `task`, a task as the mirror holds it.
-    pub fn edit(task: &Value) -> Open {
-        let text = |k: &str| task[k].as_str().unwrap_or_default().to_string();
-        let target = Target::Edit { key: text("key"), version: task["version"].as_i64().unwrap_or(0) };
+    pub fn edit(task: &Task) -> Open {
+        let target = Target::Edit { key: task.key.clone(), version: task.version };
         let draft = Draft {
-            title: text("title"),
-            description: text("description"),
-            priority: priority_of(task).unwrap_or(NEW_PRIORITY),
-            status: status_of(task).unwrap_or(Status::Open),
-            grade: grade_of(task),
+            title: task.title.clone(),
+            description: task.description.clone(),
+            priority: task.priority,
+            status: task.status,
+            grade: task.grade,
             ..Draft::default()
         };
         Open::new(target, draft)
@@ -386,7 +385,7 @@ fn on_act(
     mut form: ResMut<Form>,
     authoring: Res<Authoring>,
     connection: Res<State<Connection>>,
-    tasks: Query<&Data, With<IsTask>>,
+    tasks: Query<&Mirrored<Task>>,
     panel: Query<Entity, With<FormPanel>>,
     mut submit: MessageWriter<Submit>,
 ) {
@@ -396,7 +395,7 @@ fn on_act(
     match act {
         Act::New => form.open(Open::create(&authoring.queue)),
         Act::Edit(key) => {
-            if let Some(task) = tasks.iter().find(|d| d.0["key"].as_str() == Some(key)) {
+            if let Some(task) = tasks.iter().find(|t| t.0.key == *key) {
                 form.open(Open::edit(&task.0));
             }
         }
@@ -675,12 +674,17 @@ mod tests {
 
     use super::*;
     use crate::commands::{CommandId, CommandsPlugin, Outbox};
+    use crate::fixture::{sid, task_json};
     use crate::mirror::MirrorPlugin;
     use crate::sync::SyncItem;
 
     fn task() -> Value {
-        json!({"id": "t1", "key": "TRAIL-7", "title": "old", "description": "a\nb", "priority": 2,
-               "status": "open", "version": 4})
+        task_json(json!({"id": "t1", "key": "TRAIL-7", "title": "old", "description": "a\nb", "priority": 2,
+               "status": "open", "version": 4}))
+    }
+
+    fn edit(task: &Value) -> Open {
+        Open::edit(&serde_json::from_value(task.clone()).unwrap())
     }
 
     fn body(r: &Request) -> &Value {
@@ -707,7 +711,7 @@ mod tests {
 
     #[test]
     fn edit_sends_only_what_changed_with_the_version_it_saw() {
-        let mut open = Open::edit(&task());
+        let mut open = edit(&task());
         assert_eq!(request(&open).unwrap_err(), "nothing changed");
         open.draft.description = "a\nb\nc".into();
         open.draft.status = Status::Cancelled;
@@ -765,7 +769,7 @@ mod tests {
 
         let mut graded = task();
         graded["grade"] = json!(3);
-        let mut open = Open::edit(&graded);
+        let mut open = edit(&graded);
         assert_eq!(request(&open).unwrap_err(), "nothing changed");
         open.draft.grade = Grade::new(4);
         let r = request(&open).unwrap();
@@ -806,7 +810,7 @@ mod tests {
         ));
         app.world_mut().resource_mut::<Outbox>().backoff = Duration::ZERO;
         app.world_mut().write_message(SyncItem::Event(json!({
-            "id": 1, "entity": "task", "entity_id": "t1", "kind": "task.updated", "after": task(),
+            "id": 1, "entity": "task", "entity_id": sid("t1"), "kind": "task.updated", "after": task(),
         })));
         app.update();
         app
