@@ -23,10 +23,11 @@ use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 use serde_json::Value;
 use trailhead_factory::{RunPhase, SandboxState};
+use trailhead_model::Status;
 
 use crate::board::View;
 use crate::factory::{Campsite, FactoryStatus, Run};
-use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsTask};
+use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsTask, status_of};
 use crate::widgets::{space, status_label};
 
 /// Campsites sit on a grid on the left, this many to a row.
@@ -41,8 +42,10 @@ const ORIGIN: Vec2 = Vec2::new(16.0, 56.0);
 /// A walker stands this far from the corner of its spot, below the text.
 const STAND: Vec2 = Vec2::new(6.0, 52.0);
 
-/// Task statuses that get a waypoint: the ones with work under way or a decision waiting.
-const ACTIVE: [&str; 4] = ["in_progress", "needs_input", "in_review", "approved"];
+/// Whether a task in `status` gets a waypoint: work under way or a decision waiting.
+fn active(status: Option<Status>) -> bool {
+    status.is_some_and(|s| !s.is_closed() && s != Status::Open)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Camp {
@@ -79,7 +82,7 @@ pub enum Marker {
 pub struct Waypoint {
     pub key: String,
     pub title: String,
-    pub status: String,
+    pub status: Option<Status>,
     pub markers: Vec<Marker>,
     pub pos: Vec2,
 }
@@ -186,12 +189,12 @@ pub fn build(input: Input) -> MapModel {
     }
 
     let mut tasks: Vec<&Value> =
-        input.tasks.iter().filter(|t| ACTIVE.contains(&s(t, "status")) || run_of.contains_key(s(t, "key"))).collect();
+        input.tasks.iter().filter(|t| active(status_of(t)) || run_of.contains_key(s(t, "key"))).collect();
     tasks.sort_by_key(|t| (key_number(s(t, "key")), s(t, "key").to_string()));
     let origin = way_origin();
     let mut waypoints = Vec::new();
     for (i, t) in tasks.iter().enumerate() {
-        let (id, key, status) = (s(t, "id"), s(t, "key"), s(t, "status"));
+        let (id, key, status) = (s(t, "id"), s(t, "key"), status_of(t));
         let run = run_of.get(key);
         let mut markers = Vec::new();
         if let Some(holder) = holder_of.get(id) {
@@ -204,8 +207,8 @@ pub fn build(input: Input) -> MapModel {
             markers.push(Marker::Handoff(s(h, "body").lines().next().unwrap_or_default().to_string()));
         }
         match status {
-            "in_review" => markers.push(Marker::InReview),
-            "approved" => markers.push(Marker::Approved),
+            Some(Status::InReview) => markers.push(Marker::InReview),
+            Some(Status::Approved) => markers.push(Marker::Approved),
             _ => {}
         }
         if let Some(run) = run {
@@ -217,7 +220,7 @@ pub fn build(input: Input) -> MapModel {
         waypoints.push(Waypoint {
             key: key.to_string(),
             title: s(t, "title").to_string(),
-            status: status.to_string(),
+            status,
             markers,
             pos: grid(i, WAY_COLUMNS, WAY_CELL, origin),
         });
@@ -264,8 +267,8 @@ fn marker_line(m: &Marker) -> (String, Color) {
         Marker::Questions(n) => (format!("? {n} open question{}", if *n == 1 { "" } else { "s" }), warn),
         Marker::Handoff(h) => (format!("handoff: {h}"), dim),
         Marker::Reviewing => ("reviewing".into(), Color::srgb(0.6, 0.8, 1.0)),
-        Marker::InReview => (status_label("in_review"), Color::srgb(0.6, 0.8, 1.0)),
-        Marker::Approved => (status_label("approved"), Color::srgb(0.5, 0.9, 0.5)),
+        Marker::InReview => (status_label(Status::InReview).into(), Color::srgb(0.6, 0.8, 1.0)),
+        Marker::Approved => (status_label(Status::Approved).into(), Color::srgb(0.5, 0.9, 0.5)),
         Marker::Spend(d) => (format!("${d:.2}"), dim),
     }
 }

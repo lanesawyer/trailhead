@@ -13,11 +13,12 @@ use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use serde_json::Value;
+use trailhead_model::Status;
 
 use crate::author::{Act, Authoring};
 use crate::connection::{Connection, ConnectionStatus};
 use crate::inspector::{Selection, Subject};
-use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
+use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror, grade_of, priority_of, status_of};
 use crate::widgets;
 use crate::widgets::{
     ChipEdit, ChipWords, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_row,
@@ -33,12 +34,6 @@ pub enum View {
     Board,
     Map,
 }
-
-/// Status columns in lifecycle order.
-pub const STATUSES: [&str; 7] = ["open", "in_progress", "needs_input", "in_review", "approved", "done", "cancelled"];
-
-/// The statuses nothing more happens in; their columns are hidden unless asked for.
-pub const CLOSED: [&str; 2] = ["done", "cancelled"];
 
 /// How many cards a column builds at first, and how many more each "show more" adds. A column holds hundreds
 /// (`open` held 366 on 2026-11-05) and every card is a dozen entities, so building them all would make each redraw
@@ -195,7 +190,7 @@ pub struct Card {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
-    pub status: String,
+    pub status: Status,
     pub cards: Vec<Card>,
 }
 
@@ -253,12 +248,13 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         let id = s(t, "id");
         let mut open: Vec<&Value> = questions.get(id).cloned().unwrap_or_default();
         open.sort_by(|a, b| s(a, "created_at").cmp(s(b, "created_at")));
-        let priority = t["priority"].as_i64().unwrap_or(0);
-        let mut badges =
-            vec![Badge { kind: BadgeKind::Priority, label: format!("P{priority}"), tone: priority_tone(priority) }];
-        if let Some(grade) = t["grade"].as_i64() {
+        let mut badges: Vec<Badge> = priority_of(t)
+            .map(|p| Badge { kind: BadgeKind::Priority, label: format!("P{p}"), tone: Some(priority_tone(p)) })
+            .into_iter()
+            .collect();
+        if let Some(grade) = grade_of(t) {
             badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}"), tone: None });
-        } else if !CLOSED.contains(&s(t, "status"))
+        } else if !status_of(t).is_some_and(Status::is_closed)
             && t["parent_id"]
                 .as_str()
                 .and_then(|p| task_key.get(p))
@@ -297,13 +293,13 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
 
     let shown: Vec<&Value> = input.tasks.iter().filter(|t| passes(t)).collect();
     let mut columns = Vec::new();
-    for status in STATUSES {
-        if !filter.closed && CLOSED.contains(&status) {
+    for status in Status::ALL {
+        if !filter.closed && status.is_closed() {
             continue;
         }
-        let mut here: Vec<&Value> = shown.iter().copied().filter(|t| s(t, "status") == status).collect();
+        let mut here: Vec<&Value> = shown.iter().copied().filter(|t| status_of(t) == Some(status)).collect();
         // Urgent first, then by key number, so the order doesn't shuffle with every update.
-        here.sort_by_key(|t| (t["priority"].as_i64().unwrap_or(0), key_number(s(t, "key")), s(t, "key").to_string()));
+        here.sort_by_key(|t| (priority_of(t), key_number(s(t, "key")), s(t, "key").to_string()));
         let ids: HashSet<&str> = here.iter().map(|t| s(t, "id")).collect();
         let nested = |t: &Value| t["parent_id"].as_str().is_some_and(|p| ids.contains(p));
         let mut cards = Vec::new();
@@ -312,7 +308,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
             let id = s(t, "id");
             cards.extend(here.iter().filter(|c| c["parent_id"].as_str() == Some(id)).map(|c| card(c, 1, false)));
         }
-        columns.push(Column { status: status.to_string(), cards });
+        columns.push(Column { status, cards });
     }
 
     let choice = |value: &str, label: String| Choice { value: value.to_string(), label };
@@ -445,14 +441,14 @@ pub struct BoardColumns;
 /// A column's shell, one entity per status for as long as the status is on the board.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct BoardColumn {
-    pub status: String,
+    pub status: Status,
     /// How many cards the column holds, shown or not.
     pub count: usize,
 }
 
 /// The scrolling body of the column for this status, a child of its [`BoardColumn`].
 #[derive(Component)]
-pub struct ColumnBody(pub String);
+pub struct ColumnBody(pub Status);
 
 /// A card, one entity per task for as long as the task is on the board. It carries the view model it was drawn from,
 /// so it is redrawn when, and only when, that changes.
@@ -466,7 +462,7 @@ pub struct ColumnEmpty;
 /// The "Show more" button at the foot of a column with cards past its page. `next` is how many one press adds.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ColumnMore {
-    pub status: String,
+    pub status: Status,
     pub next: usize,
 }
 
@@ -484,22 +480,22 @@ struct Tree {
     /// The [`BoardColumns`] node these belong to; a new one (the panel was rebuilt) starts them over.
     root: Option<Entity>,
     columns: Keyed<BoardColumn>,
-    bodies: HashMap<String, Entity>,
+    bodies: HashMap<Status, Entity>,
     slots: Keyed<Slot>,
 }
 
 /// How many cards each column has been asked to build, by status; a column not in it builds [`PAGE`].
 #[derive(Resource, Default)]
-struct Shown(HashMap<String, usize>);
+struct Shown(HashMap<Status, usize>);
 
 impl Shown {
-    fn limit(&self, status: &str) -> usize {
-        self.0.get(status).copied().unwrap_or(PAGE)
+    fn limit(&self, status: Status) -> usize {
+        self.0.get(&status).copied().unwrap_or(PAGE)
     }
 
-    fn more(&mut self, status: &str) {
+    fn more(&mut self, status: Status) {
         let next = self.limit(status) + PAGE;
-        self.0.insert(status.to_string(), next);
+        self.0.insert(status, next);
     }
 }
 
@@ -530,16 +526,16 @@ fn sync_tree(
         root,
         view.columns
             .iter()
-            .map(|c| (c.status.clone(), BoardColumn { status: c.status.clone(), count: c.cards.len() }))
+            .map(|c| (c.status.as_str().to_string(), BoardColumn { status: c.status, count: c.cards.len() }))
             .collect(),
     )];
     columns.sync(
         &mut commands,
         &wanted,
-        |commands, status, model| {
+        |commands, _, model| {
             let shell = commands.spawn(model.clone()).id();
-            let body = commands.spawn((ColumnBody(status.to_string()), ChildOf(shell))).id();
-            bodies.insert(status.to_string(), body);
+            let body = commands.spawn((ColumnBody(model.status), ChildOf(shell))).id();
+            bodies.insert(model.status, body);
             shell
         },
         |commands, shell, model| {
@@ -551,14 +547,14 @@ fn sync_tree(
         .columns
         .iter()
         .filter_map(|column| {
-            let (cards, hidden) = visible(&column.cards, shown.limit(&column.status));
+            let (cards, hidden) = visible(&column.cards, shown.limit(column.status));
             let mut items = Vec::new();
             if column.cards.is_empty() {
                 items.push((format!("empty/{}", column.status), Slot::Empty));
             }
             items.extend(cards.iter().map(|c| (c.id.clone(), Slot::Card(c.clone()))));
             if hidden > 0 {
-                let more = ColumnMore { status: column.status.clone(), next: hidden.min(PAGE) };
+                let more = ColumnMore { status: column.status, next: hidden.min(PAGE) };
                 items.push((format!("more/{}", column.status), Slot::More(more)));
             }
             Some((*bodies.get(&column.status)?, items))
@@ -701,7 +697,7 @@ pub fn visible(cards: &[Card], limit: usize) -> (&[Card], usize) {
 #[derive(Resource, Default)]
 struct BoardScroll {
     board: Vec2,
-    columns: HashMap<String, f32>,
+    columns: HashMap<Status, f32>,
 }
 
 fn save_scroll(
@@ -713,7 +709,7 @@ fn save_scroll(
         kept.board = position.0;
     }
     for (column, position) in &columns {
-        kept.columns.insert(column.0.clone(), position.y);
+        kept.columns.insert(column.0, position.y);
     }
 }
 
@@ -728,13 +724,13 @@ fn dress_columns(
         let shell = parent.parent();
         let count = columns.get(shell).map_or(0, |c| c.count);
         let at = kept.columns.get(status).copied().unwrap_or_default();
-        commands.entity(shell).insert(widgets::column_shell(status));
+        commands.entity(shell).insert(widgets::column_shell(*status));
         commands.entity(body).insert((widgets::column_body(), ScrollPosition(Vec2::new(0.0, at))));
         // The body and its bar share a frame under the header, so the bar's track is the body's.
         let frame = commands.spawn((widgets::column_frame(), ChildOf(shell))).id();
         commands.entity(body).insert(ChildOf(frame));
         widgets::column_scrollbar(&mut commands, frame, body);
-        widgets::column_header(&mut commands, shell, status, count);
+        widgets::column_header(&mut commands, shell, *status, count);
     }
 }
 
@@ -838,7 +834,7 @@ fn on_card_press(activate: On<Activate>, cards: Query<&BoardCard>, mut selection
 
 fn on_more_press(activate: On<Activate>, more: Query<&ColumnMore>, mut shown: ResMut<Shown>) {
     if let Ok(more) = more.get(activate.entity) {
-        shown.more(&more.status);
+        shown.more(more.status);
     }
 }
 
@@ -873,7 +869,7 @@ fn select_state(key: FilterKey, filter: &Filter, options: &Options) -> (Vec<Stri
 }
 
 fn closed_caption(filter: &Filter) -> String {
-    let closed = CLOSED.iter().map(|s| status_label(s)).collect::<Vec<_>>().join(" & ");
+    let closed = Status::ALL.into_iter().filter(|s| s.is_closed()).map(status_label).collect::<Vec<_>>().join(" & ");
     format!("{closed}: {}", if filter.closed { "shown" } else { "hidden" })
 }
 
@@ -986,6 +982,7 @@ mod tests {
 
     use super::*;
     use crate::sync::{Snapshot, SyncItem};
+    use trailhead_model::Priority;
 
     #[allow(clippy::type_complexity)]
     pub(super) fn input() -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
@@ -1028,7 +1025,7 @@ mod tests {
         )
     }
 
-    fn keys(view: &BoardView, status: &str) -> Vec<(String, usize)> {
+    fn keys(view: &BoardView, status: Status) -> Vec<(String, usize)> {
         let col = view.columns.iter().find(|c| c.status == status).unwrap();
         col.cards.iter().map(|c| (c.key.clone(), c.depth)).collect()
     }
@@ -1036,12 +1033,15 @@ mod tests {
     #[test]
     fn groups_by_status_with_subtasks_under_their_parent() {
         let view = run(&Filter { closed: true, ..Default::default() });
-        assert_eq!(view.columns.len(), STATUSES.len());
+        assert_eq!(view.columns.len(), Status::ALL.len());
         // TRAIL-105 is a subtask of TRAIL-102 in the same column, so it nests under it.
-        assert_eq!(keys(&view, "open"), [("TRAIL-102".into(), 0), ("TRAIL-105".into(), 1)]);
+        assert_eq!(keys(&view, Status::Open), [("TRAIL-102".into(), 0), ("TRAIL-105".into(), 1)]);
         // TRAIL-104 nests under TRAIL-103; TRAIL-103's parent is in another column, so it names it instead.
-        assert_eq!(keys(&view, "in_progress"), [("OPS-1".into(), 0), ("TRAIL-103".into(), 0), ("TRAIL-104".into(), 1)]);
-        let col = view.columns.iter().find(|c| c.status == "in_progress").unwrap();
+        assert_eq!(
+            keys(&view, Status::InProgress),
+            [("OPS-1".into(), 0), ("TRAIL-103".into(), 0), ("TRAIL-104".into(), 1)]
+        );
+        let col = view.columns.iter().find(|c| c.status == Status::InProgress).unwrap();
         let parents: Vec<_> = col.cards.iter().map(|c| c.parent.as_deref()).collect();
         assert_eq!(parents, [None, Some("TRAIL-102"), None]);
     }
@@ -1092,11 +1092,8 @@ mod tests {
         assert_eq!(badge("TRAIL-103", BadgeKind::Priority), Some(token::PRIORITY_2));
         assert_eq!(badge("TRAIL-103", BadgeKind::Grade), None);
         assert_eq!(badge("TRAIL-103", BadgeKind::Questions), Some(token::WARN));
-        for (i, want) in
-            [token::PRIORITY_1, token::PRIORITY_2, token::PRIORITY_3, token::PRIORITY_4].into_iter().enumerate()
-        {
-            assert_eq!(priority_tone(i as i64 + 1), Some(want));
-        }
+        let tones = Priority::ALL.map(priority_tone);
+        assert_eq!(tones, [token::PRIORITY_1, token::PRIORITY_2, token::PRIORITY_3, token::PRIORITY_4]);
     }
 
     #[test]
@@ -1133,8 +1130,9 @@ mod tests {
     #[test]
     fn done_and_cancelled_are_hidden_until_asked_for() {
         let names = |f: Filter| run(&f).columns.into_iter().map(|c| c.status).collect::<Vec<_>>();
-        assert_eq!(names(Filter::default()), ["open", "in_progress", "needs_input", "in_review", "approved"]);
-        assert_eq!(names(Filter { closed: true, ..Default::default() }), STATUSES);
+        use Status::*;
+        assert_eq!(names(Filter::default()), [Open, InProgress, NeedsInput, InReview, Approved]);
+        assert_eq!(names(Filter { closed: true, ..Default::default() }), Status::ALL);
     }
 
     fn many(n: usize) -> Vec<Card> {
@@ -1159,13 +1157,13 @@ mod tests {
         assert_eq!(shown[0].key, "TRAIL-0");
         // Show more adds a page, in the same order.
         let mut asked = Shown::default();
-        assert_eq!(asked.limit("open"), PAGE);
-        asked.more("open");
-        let (shown, hidden) = visible(&cards, asked.limit("open"));
+        assert_eq!(asked.limit(Status::Open), PAGE);
+        asked.more(Status::Open);
+        let (shown, hidden) = visible(&cards, asked.limit(Status::Open));
         assert_eq!((shown.len(), hidden), (2 * PAGE, 366 - 2 * PAGE));
         assert_eq!(shown[PAGE].key, format!("TRAIL-{PAGE}"));
         // Other columns are untouched, and a short one has nothing hidden.
-        assert_eq!(asked.limit("done"), PAGE);
+        assert_eq!(asked.limit(Status::Done), PAGE);
         assert_eq!(visible(&many(3), PAGE).1, 0);
         assert!(visible(&[], PAGE).0.is_empty());
     }
@@ -1234,11 +1232,11 @@ mod tests {
         let toggle = app.world_mut().spawn(ClosedToggle).id();
         let closed_columns = |app: &App| {
             let columns = run(app.world().resource::<Filter>()).columns;
-            columns.into_iter().map(|c| c.status).filter(|s| CLOSED.contains(&s.as_str())).collect::<Vec<_>>()
+            columns.into_iter().map(|c| c.status).filter(|s| s.is_closed()).collect::<Vec<_>>()
         };
         assert!(closed_columns(&app).is_empty());
         app.world_mut().trigger(Activate { entity: toggle });
-        assert_eq!(closed_columns(&app), ["done", "cancelled"]);
+        assert_eq!(closed_columns(&app), [Status::Done, Status::Cancelled]);
         app.world_mut().trigger(Activate { entity: toggle });
         assert!(closed_columns(&app).is_empty());
     }
@@ -1270,7 +1268,7 @@ mod tests {
         app.update();
         app.update();
         let view = app.world().resource::<BoardView>();
-        assert_eq!(keys(view, "done"), [("OPS-1".into(), 0)]);
+        assert_eq!(keys(view, Status::Done), [("OPS-1".into(), 0)]);
     }
 }
 
@@ -1314,9 +1312,9 @@ mod in_place_tests {
         q.iter(app.world()).map(|(e, c)| (c.0.id.clone(), e)).collect()
     }
 
-    fn column_of(app: &mut App, card: Entity) -> String {
+    fn column_of(app: &mut App, card: Entity) -> Status {
         let body = app.world().get::<ChildOf>(card).expect("a card has a column").parent();
-        app.world().get::<ColumnBody>(body).expect("in a column body").0.clone()
+        app.world().get::<ColumnBody>(body).expect("in a column body").0
     }
 
     fn count_cards(app: &mut App) -> usize {
@@ -1350,17 +1348,17 @@ mod in_place_tests {
     fn a_card_that_changes_column_keeps_its_entity_and_leaves_no_copy() {
         let mut app = app();
         let before = cards(&mut app);
-        assert_eq!(column_of(&mut app, before["t1"]), "open");
+        assert_eq!(column_of(&mut app, before["t1"]), Status::Open);
 
         update_task(&mut app, "t1", "in_progress");
         let after = cards(&mut app);
         assert_eq!(after, before);
         assert_eq!(count_cards(&mut app), 4, "no stale copy in the old column");
-        assert_eq!(column_of(&mut app, after["t1"]), "in_progress");
+        assert_eq!(column_of(&mut app, after["t1"]), Status::InProgress);
         // The columns' children are what the view says.
         let mut q = app.world_mut().query::<(&ColumnBody, &Children)>();
-        let held: HashMap<String, usize> = q.iter(app.world()).map(|(b, c)| (b.0.clone(), c.len())).collect();
-        assert_eq!((held["open"], held["in_progress"]), (1, 3));
+        let held: HashMap<Status, usize> = q.iter(app.world()).map(|(b, c)| (b.0, c.len())).collect();
+        assert_eq!((held[&Status::Open], held[&Status::InProgress]), (1, 3));
     }
 
     #[test]
@@ -1406,7 +1404,7 @@ mod in_place_tests {
         settle(&mut app);
         let shown = cards(&mut app);
         assert_eq!(shown.len(), 4);
-        assert_eq!(column_of(&mut app, shown["t1"]), "done");
+        assert_eq!(column_of(&mut app, shown["t1"]), Status::Done);
         for id in ["t2", "t3", "t4"] {
             assert_eq!(shown[id], before[id]);
         }
@@ -1431,7 +1429,7 @@ mod in_place_tests {
         let mut q = app.world_mut().query::<&ColumnMore>();
         assert_eq!(q.single(app.world()).unwrap().next, 5);
 
-        app.world_mut().resource_mut::<Shown>().more("open");
+        app.world_mut().resource_mut::<Shown>().more(Status::Open);
         settle(&mut app);
         let after = cards(&mut app);
         assert_eq!(after.len(), PAGE + 5);

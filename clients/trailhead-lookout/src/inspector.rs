@@ -23,12 +23,14 @@ use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation, RequestClose};
 use reqwest::Method;
 use serde_json::{Value, json};
+use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunUpdate};
+use trailhead_model::{Grade, Priority, Status};
 
-use crate::author::{Act, GRADES, grade_index, grade_options};
+use crate::author::{Act, grade_choices, grade_index, grade_options};
 use crate::board::Input;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::{Connection, ConnectionStatus};
-use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
+use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror, grade_of, priority_of, status_of};
 use crate::sync::SyncItem;
 use crate::widgets::{
     Icon, Keyed, ModalRoot, PanelTitle, Picked, SelectEdit, badge, button, danger_button, extent, layer, panel,
@@ -65,7 +67,7 @@ pub enum Action {
     Release,
     Cancel,
     /// Move the task to this status.
-    Status(String),
+    Status(Status),
     /// Resolve this question (a comment id) without an answer. Answering opens the form instead.
     Resolve(String),
     /// Undo the event that last changed the task.
@@ -73,7 +75,7 @@ pub enum Action {
     /// Revert what the holder (an agent id) did in the last `n` hours.
     Revert(i64),
     /// Set the task's grade; none clears it.
-    Grade(Option<i64>),
+    Grade(Option<Grade>),
 }
 
 impl Action {
@@ -81,7 +83,7 @@ impl Action {
         match self {
             Action::Release => "release claim".into(),
             Action::Cancel => "cancel task".into(),
-            Action::Status(s) => format!("move to {}", status_label(s)),
+            Action::Status(s) => format!("move to {}", status_label(*s)),
             Action::Resolve(_) => "resolve".into(),
             Action::Undo => "undo last change".into(),
             Action::Revert(h) => format!("revert last {h}h"),
@@ -103,10 +105,10 @@ pub struct Question {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrPanel {
     pub url: String,
-    pub number: Option<u64>,
+    pub number: u64,
     /// `open`, or `merged by a person` / `merged by the merger` with the commit.
     pub state: String,
-    pub grade: Option<u64>,
+    pub grade: Option<Grade>,
     pub passed: Vec<String>,
     pub waiting: Vec<String>,
     pub failing: Vec<String>,
@@ -126,11 +128,11 @@ pub struct InspectorView {
     /// Shown instead of a merge control: who finishes the task.
     pub merge_note: Option<String>,
     /// The task's own status; none for an agent.
-    pub status: Option<String>,
+    pub status: Option<Status>,
     /// The task's priority; none for an agent.
-    pub priority: Option<i64>,
+    pub priority: Option<Priority>,
     /// The task's risk grade; none for an agent, or a task with none.
-    pub grade: Option<i64>,
+    pub grade: Option<Grade>,
     pub actions: Vec<Action>,
 }
 
@@ -138,46 +140,49 @@ fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or_default()
 }
 
-fn strings(v: &Value) -> Vec<String> {
-    v.as_array().into_iter().flatten().filter_map(|g| g.as_str().map(str::to_string)).collect()
-}
-
-/// The PR panel from the `factory` metadata; none when the task has no PR yet.
+/// The PR panel from the `factory` metadata; none when the task has no PR yet, or the metadata isn't the factory's.
 pub fn pr_panel(factory: &Value) -> Option<PrPanel> {
-    let merged = &factory["merged"];
-    let pr = if merged["pr"].is_object() { &merged["pr"] } else { &factory["pr"] };
-    let url = pr["url"].as_str()?.to_string();
-    let state = if merged.is_object() {
-        let by = if s(merged, "by") == "merger" { "the merger" } else { "a person" };
-        let commit = merged["commit"]
-            .as_str()
-            .map_or(String::new(), |c| format!(" as {}", c.chars().take(8).collect::<String>()));
-        format!("merged by {by}{commit}")
-    } else {
-        "open".to_string()
+    let run: RunUpdate = serde_json::from_value(factory.clone()).ok()?;
+    let merged = run.merged.as_ref();
+    let pr = merged.map(|m| &m.pr).or(run.pr.as_ref())?;
+    let state = match merged {
+        Some(m) => {
+            let by = match m.by {
+                MergedBy::Merger => "the merger",
+                MergedBy::Human => "a person",
+            };
+            let commit =
+                m.commit.as_ref().map_or(String::new(), |c| format!(" as {}", c.chars().take(8).collect::<String>()));
+            format!("merged by {by}{commit}")
+        }
+        None => "open".to_string(),
     };
-    let decision = &factory["merge"];
+    let decision = run.merge.as_ref();
+    let gates = |of: fn(&MergeDecision) -> &Vec<GateKind>| {
+        decision.map(|d| of(d).iter().map(|g| g.as_str().to_string()).collect()).unwrap_or_default()
+    };
     Some(PrPanel {
-        url,
-        number: pr["number"].as_u64(),
+        url: pr.url.clone(),
+        number: pr.number,
         state,
-        grade: factory["grade"]["grade"].as_u64().or_else(|| decision["grade"].as_u64()),
-        passed: strings(&decision["passed"]),
-        waiting: strings(&decision["waiting"]),
-        failing: strings(&decision["failing"]),
-        would_merge: decision["would_merge"].as_bool().unwrap_or(false),
-        problem: decision["problem"].as_str().or_else(|| decision["refused"].as_str()).map(str::to_string),
+        grade: run.grade.as_ref().map(|g| g.grade).or(decision.map(|d| d.grade)),
+        passed: gates(|d| &d.passed),
+        waiting: gates(|d| &d.waiting),
+        failing: decision.map(|d| d.failing.clone()).unwrap_or_default(),
+        would_merge: decision.is_some_and(|d| d.would_merge),
+        problem: decision.and_then(|d| d.problem.clone().or_else(|| d.refused.clone())),
     })
 }
 
-/// The statuses a task can be moved to by hand from the panel.
-fn status_moves(current: &str, factory: bool) -> Vec<Action> {
-    let all: &[&str] = if factory {
-        &["open", "in_progress", "needs_input", "in_review"]
-    } else {
-        &["open", "in_progress", "needs_input", "in_review", "approved", "done"]
-    };
-    all.iter().filter(|st| **st != current).map(|st| Action::Status(st.to_string())).collect()
+/// The statuses a task can be moved to by hand from the panel: any the task can go to next, but not cancelled (its
+/// own action) and, on the factory's tasks, not approved or done (the factory finishes those).
+fn status_moves(current: Status, factory: bool) -> Vec<Action> {
+    Status::ALL
+        .into_iter()
+        .filter(|to| *to != current && *to != Status::Cancelled && current.can_transition_to(*to))
+        .filter(|to| !factory || !matches!(to, Status::Approved | Status::Done))
+        .map(Action::Status)
+        .collect()
 }
 
 /// The panel for `subject`, or none when it isn't in the mirror (deleted, or not synced yet). `latest` maps a task
@@ -211,7 +216,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
         }
         Subject::Task(id) => {
             let task = input.tasks.iter().find(|t| s(t, "id") == id)?;
-            let status = s(task, "status");
+            let status = status_of(task)?;
             let factory = &task["metadata"]["factory"];
             let is_factory = factory.is_object();
             let holder = input.claims.iter().find(|c| s(c, "task_id") == id).map(|c| s(c, "holder_id").to_string());
@@ -240,7 +245,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
                 .collect();
 
             let pr = pr_panel(factory);
-            let merge_note = (is_factory && !matches!(status, "done" | "cancelled")).then(|| match &pr {
+            let merge_note = (is_factory && !status.is_closed()).then(|| match &pr {
                 Some(p) if p.state == "open" => {
                     "Merge on GitHub (or let the merger): the factory approves it and closes the task once the PR merges.".to_string()
                 }
@@ -252,7 +257,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
             if holder.is_some() {
                 actions.push(Action::Release);
             }
-            if status != "cancelled" {
+            if status != Status::Cancelled {
                 actions.push(Action::Cancel);
             }
             actions.extend(status_moves(status, is_factory));
@@ -270,9 +275,9 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
                 questions,
                 pr,
                 merge_note,
-                status: Some(status.to_string()),
-                priority: task["priority"].as_i64(),
-                grade: task["grade"].as_i64(),
+                status: Some(status),
+                priority: priority_of(task),
+                grade: grade_of(task),
                 actions,
             })
         }
@@ -296,7 +301,7 @@ pub fn plan(
     let path = |tail: &str| format!("/v1/tasks/{}{tail}", key.unwrap_or_default());
     Some(match action {
         Action::Release => Request::new(Method::POST, path("/release"), None, None),
-        Action::Cancel => Request::new(Method::PATCH, path(""), Some(json!({"status": "cancelled"})), version),
+        Action::Cancel => Request::new(Method::PATCH, path(""), Some(json!({"status": Status::Cancelled})), version),
         Action::Status(st) => Request::new(Method::PATCH, path(""), Some(json!({"status": st})), version),
         Action::Grade(g) => Request::new(Method::PATCH, path(""), Some(json!({"grade": g})), version),
         Action::Resolve(comment) => Request::new(Method::POST, format!("/v1/comments/{comment}/resolve"), None, None),
@@ -479,7 +484,7 @@ struct InspectorBody;
 struct StatusMove {
     source: Entity,
     subject: Subject,
-    statuses: Vec<String>,
+    statuses: Vec<Status>,
 }
 
 /// The dropdown that sets the task's grade: option `i` is `GRADES[i]`. Its answer shows beside it on `source`.
@@ -570,15 +575,15 @@ fn on_pick(
             window.0 = *hours;
         }
     } else if let Ok(GradeChoice { source, subject }) = grades.get(picked.entity) {
-        if let Some(grade) = GRADES.get(picked.index) {
-            let (source, subject, action) = (*source, subject.clone(), Action::Grade(*grade));
+        if let Some(grade) = grade_choices().nth(picked.index) {
+            let (source, subject, action) = (*source, subject.clone(), Action::Grade(grade));
             commands.queue(move |world: &mut World| send(world, source, &subject, &action));
         }
     } else if let Ok(StatusMove { source, subject, statuses }) = moves.get(picked.entity)
         && picked.index > 0
         && let Some(status) = statuses.get(picked.index)
     {
-        let (source, subject, action) = (*source, subject.clone(), Action::Status(status.clone()));
+        let (source, subject, action) = (*source, subject.clone(), Action::Status(*status));
         commands.queue(move |world: &mut World| send(world, source, &subject, &action));
     }
 }
@@ -639,9 +644,12 @@ fn control(controls: &mut Controls, commands: &mut Commands, subject: &Subject, 
 }
 
 /// The status dropdown's options, read as words; its [`StatusMove`] keeps the API values it sends.
-fn status_labels(statuses: &[String]) -> Vec<String> {
-    statuses.iter().map(|s| status_label(s)).collect()
+fn status_labels(statuses: &[Status]) -> Vec<String> {
+    statuses.iter().map(|s| status_label(*s).to_string()).collect()
 }
+
+/// The key of the one control every status move shares, whichever status it moves to.
+const MOVE_CONTROL: Action = Action::Status(Status::Open);
 
 /// Whether a line of [`InspectorView::lines`] is about the run rather than the task's status.
 fn is_run_line(line: &str) -> bool {
@@ -663,15 +671,15 @@ enum Block {
     /// A line of text; only the words change while the key stays.
     Text { text: String, size: f32, tone: Tone },
     /// The `P1` badge. Its key holds the priority, so a new priority is a new badge.
-    Priority(i64),
+    Priority(Priority),
     /// The wrapping row of a PR's gates, which are [`Gate`]s keyed under it.
     Gates,
     /// An open question, with its answer and resolve buttons and what became of the last resolve.
     Question { key: String, id: String, body: String, live: bool, note: Option<Control> },
     /// The grade dropdown (live only); the offline grade is a [`Block::Text`].
-    Grade { grade: Option<i64>, note: Option<Control> },
+    Grade { grade: Option<Grade>, note: Option<Control> },
     /// The status dropdown: the task's own status first.
-    Move { statuses: Vec<String>, note: Option<Control> },
+    Move { statuses: Vec<Status>, note: Option<Control> },
     /// A button for `action` (a revert has its window's dropdown, `window` hours).
     Act { action: Action, window: Option<i64>, note: Option<Control> },
 }
@@ -777,8 +785,8 @@ fn layout(
     if view.pr.is_some() || view.merge_note.is_some() {
         let mut items = Vec::new();
         if let Some(pr) = &view.pr {
-            let number = pr.number.map_or(String::new(), |n| format!("#{n} "));
-            items.push(("pr/url".to_string(), text_block(format!("{number}{}", pr.url), size::BODY, Tone::Body)));
+            items
+                .push(("pr/url".to_string(), text_block(format!("#{} {}", pr.number, pr.url), size::BODY, Tone::Body)));
             let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
             items
                 .push(("pr/state".to_string(), text_block(format!("{}{grade}", pr.state), size::SECONDARY, Tone::Dim)));
@@ -803,11 +811,11 @@ fn layout(
 
     let mut items = Vec::new();
     // One dropdown for every status the task can move to, the current one showing.
-    let moves: Vec<String> =
-        view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(st.clone()) } else { None }).collect();
-    if let (Some(current), false) = (&view.status, moves.is_empty()) {
-        let statuses = std::iter::once(current.clone()).chain(moves).collect();
-        items.push(("move".to_string(), Block::Move { statuses, note: note(&Action::Status(String::new())) }));
+    let moves: Vec<Status> =
+        view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(*st) } else { None }).collect();
+    if let (Some(current), false) = (view.status, moves.is_empty()) {
+        let statuses = std::iter::once(current).chain(moves).collect();
+        items.push(("move".to_string(), Block::Move { statuses, note: note(&MOVE_CONTROL) }));
     }
     for action in &view.actions {
         let action = match action {
@@ -882,7 +890,7 @@ fn spawn_block(commands: &mut Commands, controls: &mut Controls, subject: &Subje
             };
             commands.spawn_scene(scene).id()
         }
-        Block::Priority(p) => commands.spawn_scene(badge(format!("P{p}"), None, priority_tone(*p))).id(),
+        Block::Priority(p) => commands.spawn_scene(badge(format!("P{p}"), None, Some(priority_tone(*p)))).id(),
         Block::Gates => commands.spawn_scene(bsn! { @row() Node { flex_wrap: FlexWrap::Wrap } }).id(),
         Block::Question { key, id, body, live, note } => {
             let item = commands
@@ -939,7 +947,7 @@ fn spawn_block(commands: &mut Commands, controls: &mut Controls, subject: &Subje
         Block::Move { statuses, note } => {
             let line = commands.spawn_scene(bsn! { @row() }).id();
             commands.spawn_scene(text_dim("Move to", size::SECONDARY)).insert(ChildOf(line));
-            let source = control(controls, commands, subject, &Action::Status(String::new()));
+            let source = control(controls, commands, subject, &MOVE_CONTROL);
             let max_visible = statuses.len();
             let picker = commands
                 .spawn_scene(select(status_labels(statuses), Some(0), max_visible))
@@ -1234,10 +1242,10 @@ mod tests {
     fn fixture() -> Fixture {
         let factory = json!({
             "sandbox": "trail-7-a1", "attempt": 2,
-            "pr": {"number": 12, "url": "https://github.com/o/r/pull/12"},
+            "pr": {"repo": {"owner": "o", "name": "r"}, "number": 12, "url": "https://github.com/o/r/pull/12"},
             "grade": {"grade": 2},
-            "merge": {"grade": 2, "passed": ["checks", "ci"], "waiting": ["agent_review"], "failing": [],
-                      "would_merge": false, "problem": null},
+            "merge": {"grade": 2, "head": "abc", "passed": ["checks", "ci"], "waiting": ["agent_review"], "failing": [],
+                      "would_merge": false, "problem": null, "message": "Grade 2: waiting for agent review."},
         });
         Fixture {
             projects: vec![],
@@ -1263,7 +1271,7 @@ mod tests {
     fn a_task_view_carries_its_priority_and_an_agent_has_none() {
         let f = fixture();
         let v = build(f.input(), &latest(), &Subject::Task("t7".into())).unwrap();
-        assert_eq!(v.priority, Some(1));
+        assert_eq!(v.priority, Priority::new(1));
         let a = build(f.input(), &latest(), &Subject::Agent("a1".into())).unwrap();
         assert_eq!(a.priority, None);
     }
@@ -1276,23 +1284,20 @@ mod tests {
         assert!(v.lines.contains(&"held by factory/trail-7-a1".to_string()));
         assert!(v.lines.contains(&"run: trail-7-a1, attempt 2".to_string()));
         let pr = v.pr.unwrap();
-        assert_eq!(
-            (pr.url.as_str(), pr.number, pr.state.as_str()),
-            ("https://github.com/o/r/pull/12", Some(12), "open")
-        );
+        assert_eq!((pr.url.as_str(), pr.number, pr.state.as_str()), ("https://github.com/o/r/pull/12", 12, "open"));
         assert_eq!(
             (pr.passed, pr.waiting, pr.grade),
-            (vec!["checks".into(), "ci".into()], vec!["agent_review".into()], Some(2))
+            (vec!["checks".into(), "ci".into()], vec!["agent_review".into()], Grade::new(2))
         );
         assert!(v.merge_note.unwrap().contains("Merge on GitHub"));
         for a in &v.actions {
-            assert!(!matches!(a, Action::Status(s) if s == "done" || s == "approved"), "{a:?}");
+            assert!(!matches!(a, Action::Status(Status::Done | Status::Approved)), "{a:?}");
         }
         assert_eq!(v.questions.len(), 1);
         for want in [Action::Release, Action::Cancel, Action::Undo, Action::Revert(1), Action::Resolve("c1".into())] {
             assert!(v.actions.contains(&want), "{want:?}");
         }
-        assert!(!v.actions.contains(&Action::Status("in_review".into())));
+        assert!(!v.actions.contains(&Action::Status(Status::InReview)));
     }
 
     #[test]
@@ -1301,13 +1306,13 @@ mod tests {
         let v = build(f.input(), &HashMap::new(), &Subject::Task("t8".into())).unwrap();
         assert!(v.pr.is_none() && v.merge_note.is_none());
         assert!(!v.actions.contains(&Action::Release) && !v.actions.contains(&Action::Undo));
-        assert!(v.actions.contains(&Action::Status("done".into())));
+        assert!(v.actions.contains(&Action::Status(Status::Done)));
     }
 
     #[test]
     fn a_merged_pr_says_who_merged_it() {
         let factory = json!({"merged": {"by": "human", "commit": "abcdef0123",
-                                         "pr": {"number": 3, "url": "https://x/pull/3"}}});
+                                         "pr": {"repo": {"owner": "o", "name": "r"}, "number": 3, "url": "https://x/pull/3"}}});
         assert_eq!(pr_panel(&factory).unwrap().state, "merged by a person as abcdef01");
         assert!(pr_panel(&json!({})).is_none());
     }
@@ -1331,7 +1336,7 @@ mod tests {
         let r = p(&Action::Cancel);
         assert_eq!((r.method, r.path.as_str(), r.if_match), (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4)));
         assert_eq!(r.body, Some(json!({"status": "cancelled"})));
-        assert_eq!(p(&Action::Status("open".into())).body, Some(json!({"status": "open"})));
+        assert_eq!(p(&Action::Status(Status::Open)).body, Some(json!({"status": "open"})));
         let r = p(&Action::Resolve("c1".into()));
         assert_eq!((r.path.as_str(), r.body), ("/v1/comments/c1/resolve", None));
         assert_eq!(p(&Action::Undo).body, Some(json!({"event_id": 41})));
@@ -1382,7 +1387,7 @@ mod tests {
         }));
         app.update();
         let source = app.world_mut().spawn(Control::Idle).id();
-        let statuses = vec!["open".to_string(), "in_progress".to_string()];
+        let statuses = vec![Status::Open, Status::InProgress];
         let select = app.world_mut().spawn(StatusMove { source, subject: Subject::Task("t8".into()), statuses }).id();
         app.world_mut().trigger(Picked { entity: select, index: 0 });
         app.update();
@@ -1398,7 +1403,7 @@ mod tests {
 
     #[test]
     fn the_status_dropdown_shows_words_for_the_api_values() {
-        let statuses = vec!["needs_input".to_string(), "in_progress".to_string()];
+        let statuses = vec![Status::NeedsInput, Status::InProgress];
         assert_eq!(status_labels(&statuses), ["Needs Input", "In Progress"]);
     }
 

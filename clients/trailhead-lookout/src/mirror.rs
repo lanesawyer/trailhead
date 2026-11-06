@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use serde_json::Value;
+use trailhead_model::{Grade, Priority, Status};
 
 use crate::sync::{Snapshot, SyncItem};
 
@@ -40,6 +41,21 @@ pub struct Rev(pub i64);
 /// entities of their own.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct Data(pub Value);
+
+/// A task's status, if it has a known one.
+pub fn status_of(task: &Value) -> Option<Status> {
+    task["status"].as_str()?.parse().ok()
+}
+
+/// A task's priority, if it has a valid one.
+pub fn priority_of(task: &Value) -> Option<Priority> {
+    Priority::try_from(task["priority"].as_i64()?).ok()
+}
+
+/// A task's grade, if it has one.
+pub fn grade_of(task: &Value) -> Option<Grade> {
+    Grade::try_from(task["grade"].as_i64()?).ok()
+}
 
 #[derive(Component)]
 pub struct IsTask;

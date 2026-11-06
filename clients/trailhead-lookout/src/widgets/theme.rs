@@ -7,6 +7,7 @@
 use bevy::feathers::palette;
 use bevy::feathers::theme::{ThemeProps, ThemeToken, UiTheme};
 use bevy::prelude::*;
+use trailhead_model::{Priority, Status};
 use trailhead_ui::paint;
 
 /// The kit's tokens and Lookout's own. Feathers' (`bevy::feathers::tokens`) cover the controls.
@@ -36,43 +37,40 @@ pub mod token {
     pub const STATUS_CANCELLED: ThemeToken = ThemeToken::new_static("lookout.status.cancelled");
 }
 
-/// The background token of a status column, by the status's API name. An unknown status gets the board's own.
-pub fn status_token(status: &str) -> ThemeToken {
+/// The background token of a status column.
+pub fn status_token(status: Status) -> ThemeToken {
     match status {
-        "open" => token::STATUS_OPEN,
-        "in_progress" => token::STATUS_IN_PROGRESS,
-        "needs_input" => token::STATUS_NEEDS_INPUT,
-        "in_review" => token::STATUS_IN_REVIEW,
-        "approved" => token::STATUS_APPROVED,
-        "done" => token::STATUS_DONE,
-        "cancelled" => token::STATUS_CANCELLED,
-        _ => token::BOARD_BG,
+        Status::Open => token::STATUS_OPEN,
+        Status::InProgress => token::STATUS_IN_PROGRESS,
+        Status::NeedsInput => token::STATUS_NEEDS_INPUT,
+        Status::InReview => token::STATUS_IN_REVIEW,
+        Status::Approved => token::STATUS_APPROVED,
+        Status::Done => token::STATUS_DONE,
+        Status::Cancelled => token::STATUS_CANCELLED,
     }
 }
 
-/// A status as words, the one way every view shows it: "In Progress" for `in_progress`. A status the API adds later is
-/// title-cased from its snake_case ("on_hold" is "On Hold"), so it still reads well. Only for display: requests,
+/// A status as words, the one way every view shows it: "In Progress" for `in_progress`. Only for display: requests,
 /// filters and the mirror keep the API value.
-pub fn status_label(status: &str) -> String {
-    status
-        .split('_')
-        .filter(|w| !w.is_empty())
-        .map(|w| {
-            let mut chars = w.chars();
-            chars.next().map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+pub fn status_label(status: Status) -> &'static str {
+    match status {
+        Status::Open => "Open",
+        Status::InProgress => "In Progress",
+        Status::NeedsInput => "Needs Input",
+        Status::InReview => "In Review",
+        Status::Approved => "Approved",
+        Status::Done => "Done",
+        Status::Cancelled => "Cancelled",
+    }
 }
 
-/// The tone of priority `p` (1 to 4), the same wherever a priority is shown. Any other number has none.
-pub fn priority_tone(p: i64) -> Option<ThemeToken> {
-    match p {
-        1 => Some(token::PRIORITY_1),
-        2 => Some(token::PRIORITY_2),
-        3 => Some(token::PRIORITY_3),
-        4 => Some(token::PRIORITY_4),
-        _ => None,
+/// The tone of a priority, the same wherever a priority is shown.
+pub fn priority_tone(p: Priority) -> ThemeToken {
+    match p.get() {
+        1 => token::PRIORITY_1,
+        2 => token::PRIORITY_2,
+        3 => token::PRIORITY_3,
+        _ => token::PRIORITY_4,
     }
 }
 
@@ -146,30 +144,26 @@ mod tests {
     fn each_priority_has_its_own_token_and_color() {
         let theme = props();
         let colors: Vec<Color> =
-            (1..=4).map(|p| theme.semantic_base[&theme.token_assignments[&priority_tone(p).unwrap()]]).collect();
+            Priority::ALL.map(|p| theme.semantic_base[&theme.token_assignments[&priority_tone(p)]]).to_vec();
         for (i, a) in colors.iter().enumerate() {
             for b in &colors[i + 1..] {
                 assert_ne!(a, b);
             }
         }
-        assert!(priority_tone(0).is_none() && priority_tone(5).is_none());
     }
 
     #[test]
     fn each_status_has_its_own_column_color() {
         let theme = props();
-        let statuses = ["open", "in_progress", "needs_input", "in_review", "approved", "done", "cancelled"];
-        let colors: Vec<_> = statuses.iter().map(|s| format!("{:?}", theme.color(&status_token(s)))).collect();
+        let colors: Vec<_> = Status::ALL.iter().map(|s| format!("{:?}", theme.color(&status_token(*s)))).collect();
         let distinct: std::collections::HashSet<_> = colors.iter().collect();
-        assert_eq!(distinct.len(), statuses.len(), "{colors:?}");
-        assert_eq!(status_token("nonsense"), token::BOARD_BG);
+        assert_eq!(distinct.len(), Status::ALL.len(), "{colors:?}");
     }
 
     #[test]
     fn statuses_read_as_words() {
-        let words: Vec<_> = crate::board::STATUSES.iter().map(|s| status_label(s)).collect();
+        let words = Status::ALL.map(status_label);
         assert_eq!(words, ["Open", "In Progress", "Needs Input", "In Review", "Approved", "Done", "Cancelled"]);
-        assert_eq!(status_label("on_hold"), "On Hold");
     }
 
     #[test]
@@ -182,8 +176,7 @@ mod tests {
             "text(status,",
             "text(status.",
             "select(statuses",
-            "select(STATUSES",
-            "STATUSES.iter().map(|s| s.to_string())",
+            "Status::ALL.iter().map(|s| s.to_string())",
         ];
         let mut bad = Vec::new();
         for file in ["board.rs", "inspector.rs", "author.rs", "map.rs", "widgets/column.rs", "widgets/card.rs"] {
@@ -194,7 +187,7 @@ mod tests {
                 if line.starts_with("//") || line.contains("Name::new") {
                     continue;
                 }
-                let own_words = crate::board::STATUSES.iter().flat_map(|s| {
+                let own_words = Status::ALL.iter().map(|s| s.as_str()).flat_map(|s| {
                     let spaced = s.replace('_', " ");
                     // A single word is the API value too (`column_shell("open")`), so only a (text, color) pair is a label.
                     let spelled = if spaced == *s { format!("(\"{s}\".into(),") } else { format!("\"{spaced}\"") };

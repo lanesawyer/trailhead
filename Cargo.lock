@@ -8235,6 +8235,7 @@ dependencies = [
  "trailhead-core",
  "trailhead-daemon",
  "trailhead-factory",
+ "trailhead-model",
  "trailhead-server",
  "trailhead-ui",
  "uuid",

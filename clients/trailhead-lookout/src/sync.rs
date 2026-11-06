@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use trailhead_model::Status;
 
 /// What the sync hands to the app, in order. The mirror (`crate::mirror`) is the only thing that applies them.
 #[derive(bevy::prelude::Message, Debug, Clone, PartialEq, Eq)]
@@ -67,8 +68,6 @@ impl Default for SyncTimings {
 
 const PAGE: usize = 100;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Every status, so a task finishing while the pages load can't shift the next page's first task out of view.
-const ALL_STATUSES: &str = "open,in_progress,needs_input,in_review,approved,done,cancelled";
 
 /// The API as the sync reads it: a base URL and the user's token.
 pub struct Remote {
@@ -134,11 +133,13 @@ impl Remote {
     }
 
     async fn load_tasks(&self) -> Result<Vec<Value>, String> {
+        // Every status, so a task finishing while the pages load can't shift the next page's first task out of view.
+        let all_statuses = Status::ALL.map(Status::as_str).join(",");
         let mut tasks = Vec::new();
         loop {
             let page = self
                 .list(&format!(
-                    "/v1/tasks?include=claim,open_questions,last_handoff&status={ALL_STATUSES}\
+                    "/v1/tasks?include=claim,open_questions,last_handoff&status={all_statuses}\
                      &sort=created_at&limit={PAGE}&offset={}",
                     tasks.len()
                 ))
