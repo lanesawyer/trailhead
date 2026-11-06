@@ -30,6 +30,7 @@
   - [UI](factory/ui.md)
   - [The control plane inside the server](factory/server-control-plane.md)
   - [Engine changes](factory/engine-changes.md)
+  - [Order within a priority](factory/ordering.md)
 
 # History and undecided
 
