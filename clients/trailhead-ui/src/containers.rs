@@ -23,12 +23,20 @@ pub fn panel() -> impl Scene {
 pub fn section(heading: impl Into<String>) -> impl Scene {
     let heading = heading.into();
     bsn! {
+        @section_frame()
+        Children [ @text_dim(heading, size::SECONDARY) ]
+    }
+}
+
+/// A section's box without its heading, for a caller that keeps the heading among the section's items and updates
+/// them in place.
+pub fn section_frame() -> impl Scene {
+    bsn! {
         Node {
             flex_direction: FlexDirection::Column,
             row_gap: { px(space::ROWS) },
             margin: { UiRect::top(px(space::GROUPS - space::ROWS)) },
         }
-        Children [ @text_dim(heading, size::SECONDARY) ]
     }
 }
 

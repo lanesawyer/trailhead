@@ -80,7 +80,7 @@ pub use accordion::{
 pub use badge::badge;
 pub use buttons::{button, button_text, danger_button, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
-pub use containers::{field, panel, row, section};
+pub use containers::{field, panel, row, section, section_frame};
 pub use field_well::field_well;
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
@@ -93,7 +93,7 @@ pub use modal::{
     open_modal,
 };
 pub use notice::{Notice, Tone, notice};
-pub use panel_header::panel_header;
+pub use panel_header::{PanelTitle, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
