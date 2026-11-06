@@ -311,6 +311,8 @@ pub struct TaskFilter {
     /// Empty means every status that isn't done or cancelled.
     pub statuses: Vec<Status>,
     pub parent: Option<String>,
+    /// Only tasks with this title, ignoring case (ASCII) and surrounding whitespace.
+    pub title: Option<String>,
     pub due_before: Option<Timestamp>,
     /// Only tasks with exactly this grade, or only graded / ungraded ones.
     pub grade: GradeFilter,
@@ -758,6 +760,9 @@ impl Store {
         if let Some(p) = &filter.parent {
             let parent = find_task(&conn, ctx, p, false).await?;
             push(&mut sql, " AND parent_id = ?", parent.id.to_string().into());
+        }
+        if let Some(t) = &filter.title {
+            push(&mut sql, " AND lower(trim(title, ' ' || char(9, 10, 13))) = ?", t.trim().to_ascii_lowercase().into());
         }
         if let Some(d) = filter.due_before {
             push(&mut sql, " AND due_by IS NOT NULL AND due_by < ?", fmt_ts(d).into());

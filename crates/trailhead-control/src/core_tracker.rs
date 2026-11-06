@@ -462,7 +462,11 @@ impl Tracker for CoreTracker {
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
         let ctx = self.ctx().await?;
-        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let filter = TaskFilter {
+            project: Some(project.to_string()),
+            title: Some(title.trim().to_string()),
+            ..TaskFilter::default()
+        };
         let tasks = self.list_all(&ctx, filter).await?;
         Ok(tasks.into_iter().find(|t| same_title(&t.title, title)).map(|t| TaskKey(t.key)))
     }
