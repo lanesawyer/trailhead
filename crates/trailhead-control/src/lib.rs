@@ -8,6 +8,7 @@ pub mod daemon_binary;
 mod decide;
 mod lifecycle;
 mod merger;
+mod person;
 mod place;
 mod pool;
 mod reconcile;
@@ -72,6 +73,10 @@ pub struct Host {
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// The reset a pause was last logged for, so a pause is logged once per host rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
+    /// Every repo's queue task keys, so a factory can tell a run re-parented out of its own queue from another repo's.
+    queues: Mutex<HashSet<String>>,
+    /// The stray runs already warned about, so each is logged once.
+    strays_logged: Mutex<HashSet<String>>,
 }
 
 impl Host {
@@ -129,6 +134,8 @@ pub struct Factory {
     /// (a 202), so until the head moves the PR is still behind and asking again would only queue another, unless the
     /// update never lands: after `UPDATE_PATIENCE` the merger asks again (TRAIL-490).
     updating: Mutex<HashMap<TaskKey, (String, Instant)>>,
+    /// The person's PR with auto-merge on that the merger is holding its merges for (TRAIL-804).
+    held: Mutex<Option<person::Held>>,
     /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
     host: Arc<Host>,
     /// The ready tasks last reported as starved by parked sandboxes, so a poll says it once per change.
@@ -163,6 +170,9 @@ pub enum Outcome {
     Reviewed { pr: PrRef, verdict: Verdict },
     /// The PR is open but the review didn't finish; the reconciler retries it.
     AwaitingReview { pr: PrRef },
+    /// The worker's PR already conflicted with a base branch that moved during the run, so it went straight back for
+    /// a conflict rework without a review.
+    Conflicted { pr: PrRef },
     /// The task is parked for a human; its sandbox is kept for resuming.
     Parked { reason: String },
     /// The attempt failed and the task went back to the queue.
@@ -227,6 +237,7 @@ impl Factory {
         assert!(!targets.is_empty(), "a factory needs a target to run on");
         targets.sort_by(|a, b| (a.target.priority, &a.target.name).cmp(&(b.target.priority, &b.target.name)));
         assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
+        host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
         let merge_mode = Mutex::new(config.merge.mode);
         Factory {
             config,
@@ -241,6 +252,7 @@ impl Factory {
             setbacks: Mutex::default(),
             listed: Mutex::default(),
             updating: Mutex::default(),
+            held: Mutex::default(),
             host,
             starved: Mutex::default(),
             parked_since: Mutex::default(),

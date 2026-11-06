@@ -89,6 +89,7 @@ impl FakeTracker {
                 description: description.to_string(),
                 status: Status::Open,
                 grade: None,
+                priority: 3,
                 holder: None,
                 run: RunUpdate::default(),
             },
@@ -101,7 +102,7 @@ impl FakeTracker {
         self.state.lock().unwrap().context_fails = fails;
     }
 
-    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report`, `release`, `ask`, `finish` or `revoke_sub_agent`) fail, as a tracker outage would.
+    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report`, `release`, `ask`, `request_review`, `finish` or `revoke_sub_agent`) fail, as a tracker outage would.
     pub fn fail_next(&self, agent: &str, op: &'static str, times: usize) {
         self.state.lock().unwrap().failing.insert((agent.to_string(), op), times);
     }
@@ -139,6 +140,16 @@ impl FakeTracker {
     /// A human grades a task, which is what makes it the factory's work.
     pub fn set_grade(&self, key: &TaskKey, grade: u8) {
         self.state.lock().unwrap().tasks.get_mut(key).unwrap().grade = Some(grade);
+    }
+
+    /// Sets a task's priority (1 is highest), as a person editing it would.
+    pub fn set_priority(&self, key: &TaskKey, priority: i64) {
+        self.state.lock().unwrap().tasks.get_mut(key).unwrap().priority = priority;
+    }
+
+    /// Sets the factory fields of a task as they stand: a PR and changes requested on it make a rework.
+    pub fn set_run(&self, key: &TaskKey, run: RunUpdate) {
+        self.state.lock().unwrap().tasks.get_mut(key).unwrap().run = run;
     }
 
     /// A human takes a task's grade away again.
@@ -384,11 +395,25 @@ impl Tracker for FakeTracker {
             .collect())
     }
 
+    async fn strays(&self, project: &str, queues: &[TaskKey]) -> Result<Vec<Task>> {
+        self.check_live()?;
+        let s = self.state.lock().unwrap();
+        Ok(s.tasks
+            .values()
+            .filter(|t| {
+                t.project == project && !t.run.is_empty() && !matches!(t.status, Status::Done | Status::Cancelled)
+            })
+            .filter(|t| !s.parents.get(&t.key).is_some_and(|p| queues.contains(p)))
+            .cloned()
+            .collect())
+    }
+
     async fn claim(&self, task: &TaskKey) -> Result<()> {
         self.inject("claim")?;
         self.write(task, |t, me| match (&t.holder, t.status) {
             (Some(h), _) if h == me => Ok(()),
-            (None, Status::Open) => {
+            // As in core, parked and in-review work is claimable without passing through `open`.
+            (None, Status::Open | Status::NeedsInput | Status::InReview) => {
                 t.holder = Some(me.to_string());
                 t.status = Status::InProgress;
                 Ok(())
@@ -423,6 +448,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn request_review(&self, task: &TaskKey) -> Result<()> {
+        self.inject("request_review")?;
         self.write(task, |t, me| {
             held_by_me(t, me)?;
             t.holder = None;

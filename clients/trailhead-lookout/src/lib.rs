@@ -9,6 +9,7 @@ pub mod connect;
 pub mod connection;
 pub mod factory;
 pub mod inspector;
+pub mod map;
 pub mod mirror;
 pub mod net;
 pub mod sync;
@@ -25,8 +26,6 @@ impl Plugin for LookoutPlugin {
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d);
-    // An empty full-window view; the board and inspector go inside it.
-    commands.spawn((Name::new("root"), Node { width: percent(100), height: percent(100), ..default() }));
 }
 
 #[cfg(test)]
@@ -40,7 +39,8 @@ mod tests {
         app.update();
 
         let world = app.world_mut();
-        let roots = world.query::<&Name>().iter(world).filter(|n| n.as_str() == "root").count();
-        assert_eq!(roots, 1);
+        assert_eq!(world.query::<&Camera2d>().iter(world).count(), 1);
+        // An empty full-window node would sit over the board whenever it spawned after it, and take every click.
+        assert_eq!(world.query::<&Node>().iter(world).count(), 0);
     }
 }

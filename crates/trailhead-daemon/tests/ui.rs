@@ -20,8 +20,15 @@ struct TestFeed(broadcast::Sender<Sequenced>);
 
 impl StatusFeed for TestFeed {
     fn subscribe(&self) -> Vec<RepoFeed> {
-        let snapshot =
-            FactorySnapshot { control: ControlState::Up, last_error: None, sandboxes: vec![], runs: vec![], seq: 7 };
+        let snapshot = FactorySnapshot {
+            control: ControlState::Up,
+            last_error: None,
+            sandboxes: vec![],
+            runs: vec![],
+            holding: None,
+            targets: Vec::new(),
+            seq: 7,
+        };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
     }
 }

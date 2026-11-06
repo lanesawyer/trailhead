@@ -104,6 +104,7 @@ impl CoreTracker {
             description: t.description,
             status: status(t.status),
             grade: t.grade.and_then(|g| u8::try_from(g).ok()),
+            priority: t.priority,
             holder: claims.get(&t.id).map(|c| c.holder.clone()),
             run,
         })
@@ -121,6 +122,41 @@ impl CoreTracker {
             out.push(self.task(ctx, t).await?);
         }
         Ok(out)
+    }
+
+    /// Raises each task's priority to the highest among itself and the open tasks it blocks, directly or through a
+    /// chain, so work that holds up urgent work is listed as urgent. A task that can't be read (out of scope, say) is
+    /// left out of the walk.
+    async fn raise_to_blocked_priority(&self, ctx: &Ctx, tasks: &mut [Task]) {
+        // Each task's own priority and the keys it blocks, or None for one that is finished or can't be read.
+        let mut seen: HashMap<String, Option<(i64, Vec<String>)>> = HashMap::new();
+        for task in tasks.iter_mut() {
+            let mut stack = vec![task.key.0.clone()];
+            let mut visited = std::collections::HashSet::new();
+            while let Some(key) = stack.pop() {
+                if !visited.insert(key.clone()) {
+                    continue;
+                }
+                if !seen.contains_key(&key) {
+                    let read = match self.store.task_detail(ctx, &key).await {
+                        Ok(d)
+                            if !matches!(
+                                d.task.status,
+                                trailhead_core::Status::Done | trailhead_core::Status::Cancelled
+                            ) =>
+                        {
+                            Some((d.task.priority, d.blocks))
+                        }
+                        _ => None,
+                    };
+                    seen.insert(key.clone(), read);
+                }
+                if let Some((priority, blocks)) = &seen[&key] {
+                    task.priority = task.priority.min(*priority);
+                    stack.extend(blocks.iter().cloned());
+                }
+            }
+        }
     }
 
     /// Notes on the task, and logs, that its factory metadata is skipped, unless this note is already there.
@@ -249,7 +285,9 @@ impl Tracker for CoreTracker {
                 ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
             }
         };
-        self.tasks(&ctx, tasks).await
+        let mut tasks = self.tasks(&ctx, tasks).await?;
+        self.raise_to_blocked_priority(&ctx, &mut tasks).await;
+        Ok(tasks)
     }
 
     async fn show(&self, task: &TaskKey) -> Result<Task> {
@@ -328,6 +366,23 @@ impl Tracker for CoreTracker {
             tasks.extend(self.list_all(&ctx, filter).await?.into_iter().filter(|t| seen.insert(t.id)));
         }
         self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
+    }
+
+    async fn strays(&self, project: &str, queues: &[TaskKey]) -> Result<Vec<Task>> {
+        let ctx = self.ctx().await?;
+        let filter = TaskFilter { project: Some(project.to_string()), ..TaskFilter::default() };
+        let all = self.list_all(&ctx, filter).await?;
+        let mut inside = std::collections::HashSet::new();
+        for queue in queues {
+            let filter = TaskFilter {
+                project: Some(project.to_string()),
+                parent: Some(queue.0.clone()),
+                ..TaskFilter::default()
+            };
+            inside.extend(self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id));
+        }
+        self.tasks(&ctx, all.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some() && !inside.contains(&t.id)))
+            .await
     }
 
     async fn claim(&self, task: &TaskKey) -> Result<()> {

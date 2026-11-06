@@ -740,6 +740,24 @@ async fn a_worker_that_cant_record_its_failed_check_still_counts_the_attempt_and
     }
 }
 
+/// The PR is open and the checks passed, so a worker that can't ask for review doesn't make a failed attempt (TRAIL-441).
+#[tokio::test]
+async fn a_worker_that_cant_ask_for_review_after_opening_the_pr_still_gets_it_reviewed() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    // The daemon tries three times; the control plane's own request goes through.
+    r.tracker.fail_next("factory/trail-1-a1", "request_review", 3);
+
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    assert!(matches!(ran, Ok(Outcome::Reviewed { .. })), "{ran:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(r.codehost.prs().len(), 1);
+    assert!(task.run.pr.is_some());
+}
+
 #[tokio::test]
 async fn a_task_parked_for_infrastructure_failures_starts_without_a_wait_when_reopened() {
     let r = rig_with(
@@ -839,7 +857,7 @@ async fn a_rework_whose_setup_fails_starts_the_agent_and_keeps_the_sandbox() {
 }
 
 #[tokio::test]
-async fn a_fresh_run_whose_setup_fails_is_still_an_infrastructure_failure() {
+async fn a_fresh_run_whose_setup_fails_is_retried_once_then_parked_with_the_output() {
     let r = with_setup();
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
     r.daemon.fail_setups(1, "error[E0063]: broken base");
@@ -849,6 +867,35 @@ async fn a_fresh_run_whose_setup_fails_is_still_an_infrastructure_failure() {
     assert_eq!(task.run.infra_failures, Some(1));
     assert_eq!(task.run.attempt.unwrap_or(0), 0, "no attempt was used");
     assert!(r.daemon.requests().is_empty(), "no agent started");
+    assert_eq!(task.status, Status::Open, "the first failure is retried");
+
+    r.daemon.fail_setups(1, "error[E0063]: broken base");
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "the same setup error twice parks the task");
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("base branch") && questions[0].body.contains("E0063"), "{}", questions[0].body);
+    assert!(r.compute.get("trailhead-w1").is_none(), "a new sandbox has no warm checkpoint, so release destroys it");
+}
+
+#[tokio::test]
+async fn a_fresh_run_whose_setup_fails_returns_a_warm_idle_sandbox_to_the_pool() {
+    let r = with_setup();
+    let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&first)).await.unwrap();
+    let warm = r.compute.get("trailhead-w1").unwrap().labels.get(label::WARM).cloned().expect("warmed");
+
+    let second = r.tracker.add_task("TRAIL", "Hits a broken base", "");
+    r.daemon.fail_setups(1, "error[E0063]: broken base");
+    let err = r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
+    assert!(err.to_string().contains("setup failed"), "{err}");
+    assert_eq!(r.tracker.task(&second).run.infra_failures, Some(1));
+    let sandbox = r.compute.get("trailhead-w1").expect("the warm sandbox is kept");
+    assert_eq!(sandbox.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert_eq!(sandbox.labels.get(label::WARM), Some(&warm), "still on its warm checkpoint");
 }
 
 #[tokio::test]
@@ -1109,4 +1156,21 @@ async fn a_give_up_from_before_a_question_doesnt_count_toward_two_in_a_row() {
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
     assert_eq!(r.tracker.task(&key).status, Status::Open, "one give-up since the question is retried");
+}
+
+#[tokio::test]
+async fn a_permanent_rejection_parks_the_task_at_once() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Refused", "");
+    r.daemon.reject_runs("sprites api 400 Bad Request: bad size");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(matches!(err, trailhead_factory::Error::Rejected(_)), "{err:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked on the first rejection");
+    assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+    assert_eq!(task.run.infra_failures, Some(0));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("400 Bad Request: bad size"), "{}", questions[0].body);
+    assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
 }

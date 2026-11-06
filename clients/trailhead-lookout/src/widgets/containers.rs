@@ -39,11 +39,14 @@ pub fn row() -> impl Scene {
     }
 }
 
-/// A field: `label` above whatever the caller puts in it (an input, a select).
-pub fn field(label: impl Into<String>) -> impl Scene {
+/// A field: `label` above `control` (an input, a select).
+///
+/// The control is part of the scene rather than a child added after it: the scene's own `Children` replace any added
+/// before it spawns, which left a select orphaned at the window's top left (TRAIL-850).
+pub fn field(label: impl Into<String>, control: impl SceneList) -> impl Scene {
     let label = label.into();
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: { px(space::STACKED) } }
-        Children [ @text_dim(label, size::SECONDARY) ]
+        Children [ @text_dim(label, size::SECONDARY) -- {control} ]
     }
 }

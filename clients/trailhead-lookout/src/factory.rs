@@ -213,6 +213,8 @@ impl FactoryMirror {
         match event.event {
             FactoryEvent::Control { control } => state.control = control,
             FactoryEvent::Error { message } => state.last_error = Some((unix_now(), message)),
+            // Shown in the activity log only for now.
+            FactoryEvent::Holding { .. } => {}
             FactoryEvent::SandboxChanged { sandbox } => self.set_campsite(commands, repo, sandbox),
             FactoryEvent::SandboxGone { name } => {
                 if let Some((entity, _)) = self.campsites.remove(&(repo.to_string(), name)) {
@@ -338,7 +340,15 @@ mod tests {
     }
 
     fn snapshot(seq: u64, sandboxes: Vec<SandboxStatus>) -> FactoryUpdate {
-        let snapshot = FactorySnapshot { control: ControlState::Up, last_error: None, sandboxes, runs: vec![], seq };
+        let snapshot = FactorySnapshot {
+            control: ControlState::Up,
+            last_error: None,
+            sandboxes,
+            runs: vec![],
+            holding: None,
+            targets: Vec::new(),
+            seq,
+        };
         FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])
     }
 

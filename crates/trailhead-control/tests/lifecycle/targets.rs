@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use trailhead_control::{Factory, Host, Placed};
 use trailhead_factory::{
-    Compute, FactoryConfig, Labels, Role, SandboxSpec, Status, Target, TaskKey, Tracker, label, run_name,
+    Compute, FactoryConfig, Labels, Role, SandboxSpec, Status, Target, TaskKey, Tracker, Usd, label, run_name,
 };
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
 
@@ -294,6 +294,10 @@ async fn a_target_at_its_daily_cap_takes_no_new_runs() {
     assert_eq!(ran(&t.local, Role::Worker), vec![first.0.clone()]);
     assert!(ran(&t.cloud, Role::Worker).is_empty(), "the cap kept the second task off the cloud");
     assert_eq!(t.tracker.task(&second).status, Status::Open);
+    let board = t.factory.status().snapshot().targets;
+    assert_eq!(board.len(), 1, "{board:?}");
+    assert_eq!((board[0].target.as_str(), board[0].capped), ("cloud", true));
+    assert_eq!((board[0].spent, board[0].cap), (Usd(5_000_000), Usd(5_000_000)));
 }
 
 #[tokio::test]
@@ -310,4 +314,31 @@ async fn a_target_under_its_cap_or_with_yesterdays_spend_still_takes_runs() {
         t.factory.tick().await.unwrap();
         assert_eq!(ran(&t.cloud, Role::Worker), vec![second.0.clone()]);
     }
+}
+
+#[tokio::test]
+async fn a_reworked_task_stays_on_the_target_that_holds_its_sandbox() {
+    let t = two();
+    // Cloud holds the task's sandbox; local, first by priority, has room.
+    let key = going_on_target(&t, &t.cloud.compute, "cloud", "trailhead-cloud-w1").await;
+    t.tracker.set_status(&key, Status::Open);
+    for side in [&t.local, &t.cloud] {
+        side.harness.push(Role::Worker, Script::new(changes()));
+        side.harness.push(Role::Reviewer, Script::new(approve()));
+    }
+    t.factory.run_task(&t.tracker.task(&key)).await.unwrap();
+    assert_eq!(ran(&t.cloud, Role::Worker), vec![key.0.clone()]);
+    assert!(ran(&t.local, Role::Worker).is_empty());
+}
+
+#[tokio::test]
+async fn a_task_whose_sandbox_is_gone_is_placed_by_priority_again() {
+    let t = two();
+    let key = going_on_target(&t, &t.cloud.compute, "cloud", "trailhead-cloud-w1").await;
+    t.cloud.compute.destroy(&t.cloud.compute.get("trailhead-cloud-w1").unwrap().id).await.unwrap();
+    t.tracker.set_status(&key, Status::Open);
+    t.local.harness.push(Role::Worker, Script::new(changes()));
+    t.local.harness.push(Role::Reviewer, Script::new(approve()));
+    t.factory.tick().await.unwrap();
+    assert_eq!(ran(&t.local, Role::Worker), vec![key.0.clone()]);
 }

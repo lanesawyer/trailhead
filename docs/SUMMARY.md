@@ -28,6 +28,7 @@
   - [Observability](factory/observability.md)
   - [Local models](factory/local-models.md)
   - [UI](factory/ui.md)
+  - [The control plane inside the server](factory/server-control-plane.md)
   - [Engine changes](factory/engine-changes.md)
 
 # History and undecided

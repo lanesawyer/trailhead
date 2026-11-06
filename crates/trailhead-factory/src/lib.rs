@@ -20,7 +20,8 @@ pub mod target;
 pub mod tracker;
 
 pub use codehost::{
-    BranchUpdate, Ci, CiState, CodeHost, Commit, FileChange, MergeOutcome, NewPr, PrRef, PrState, RateLimit, Repo,
+    BranchUpdate, Ci, CiState, CodeHost, Commit, FileChange, MergeOutcome, NewPr, OpenPr, PrRef, PrState, RateLimit,
+    Repo,
 };
 pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
@@ -49,6 +50,7 @@ pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
 pub use status::{
     ControlState, FactoryEvent, FactorySnapshot, RunPhase, RunStatus, SandboxState, SandboxStatus, Sequenced,
+    TargetSpend,
 };
 pub use target::{DEFAULT_TARGET, Spend, Target};
 pub use tracker::{

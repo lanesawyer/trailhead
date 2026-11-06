@@ -32,6 +32,8 @@ impl StatusFeed for TestFeed {
             last_error: None,
             sandboxes: vec![sandbox("camp-1", SandboxState::Idle)],
             runs: vec![],
+            holding: None,
+            targets: Vec::new(),
             seq: 1,
         };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
@@ -63,6 +65,10 @@ struct Rig {
     allowed: UiAllowlist,
     token: String,
     agent_token: String,
+    /// The server's state and the user's context, to revoke the token while Lookout is signed in.
+    state: Arc<trailhead_server::AppState>,
+    human: Ctx,
+    token_id: uuid::Uuid,
     events: broadcast::Sender<Sequenced>,
 }
 
@@ -75,15 +81,26 @@ impl Rig {
         let human = Ctx::user(ws.id, user.id);
         let project = NewProject { key: "TRAIL".into(), name: "Trailhead".into(), ..Default::default() };
         store.create_project(&human, project).await.unwrap();
-        let (_, token) = store.create_token(&human, Principal::User(user.id), "ui").await.unwrap();
+        let (token_row, token) = store.create_token(&human, Principal::User(user.id), "ui").await.unwrap();
         let agent = store.create_agent(&human, "bot").await.unwrap();
         let (_, agent_token) = store.create_token(&human, Principal::Agent(agent.id), "bot").await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server = listener.local_addr().unwrap();
-        let app = trailhead_server::router(Arc::new(trailhead_server::AppState::new(store)));
+        let state = Arc::new(trailhead_server::AppState::new(store));
+        let app = trailhead_server::router(state.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let allowed = UiAllowlist::new(dir.path().join("ui-allowed"));
-        Rig { dir, server, allowed, token, agent_token, events: broadcast::channel(16).0 }
+        Rig {
+            dir,
+            server,
+            allowed,
+            token,
+            agent_token,
+            state,
+            human,
+            token_id: token_row.id,
+            events: broadcast::channel(16).0,
+        }
     }
 
     fn config(&self, lookup: &Arc<MemoryLookup>) -> NetConfig {
@@ -162,6 +179,19 @@ async fn connects_signs_in_and_goes_live() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_token_revoked_while_live_is_noticed() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+
+    rig.state.store.revoke_token(&rig.human, rig.token_id).await.unwrap();
+    until(&mut app, "token rejected", |a| reason(a) == Some(Reason::TokenRejected)).await;
+    assert_eq!(state(&app), Connection::Offline);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_saved_login_and_target_are_used_on_the_next_start() {
     let rig = Rig::new().await;
     let lookup = Arc::new(MemoryLookup::new());
@@ -211,6 +241,28 @@ async fn a_bad_endpoint_id_is_explained() {
     send(&mut app, NetCommand::Connect("not an id".into()));
     until(&mut app, "bad target", |a| matches!(reason(a), Some(Reason::BadTarget(_)))).await;
     assert_eq!(state(&app), Connection::Offline);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_connect_replaces_the_old_target_and_its_error_stays() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    until(&mut app, "endpoint id", |a| a.world().resource::<LocalEndpoint>().0.is_some()).await;
+    rig.allowed.add(app.world().resource::<LocalEndpoint>().0.clone().unwrap().parse().unwrap()).unwrap();
+    send(&mut app, NetCommand::Login(rig.token.clone()));
+    until(&mut app, "live", |a| state(a) == Connection::Live).await;
+
+    send(&mut app, NetCommand::Connect("not an id".into()));
+    until(&mut app, "bad target", |a| matches!(reason(a), Some(Reason::BadTarget(_)))).await;
+    // Past a probe (every 2s), the old control plane hasn't taken the link back.
+    for _ in 0..100 {
+        app.update();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(state(&app), Connection::Offline);
+    assert!(matches!(reason(&app), Some(Reason::BadTarget(_))), "{:?}", reason(&app));
 }
 
 fn campsites(app: &mut App) -> Vec<(String, SandboxState)> {
