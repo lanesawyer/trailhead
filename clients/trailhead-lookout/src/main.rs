@@ -37,7 +37,7 @@ fn main() {
         })
         // Without a theme every feathers color is missing, and feathers draws missing ones in fuchsia.
         .insert_resource(trailhead_lookout::widgets::theme())
-        .add_plugins(trailhead_lookout::widgets::WidgetsPlugin)
+        .add_plugins(trailhead_lookout::widgets::UiPlugin)
         .add_plugins(ConnectionPlugin::new(config, target))
         .add_plugins((LookoutPlugin, BoardUiPlugin, MapUiPlugin, AuthorUiPlugin, InspectorUiPlugin, ConnectUiPlugin))
         .add_systems(Startup, |mut authoring: ResMut<Authoring>| {

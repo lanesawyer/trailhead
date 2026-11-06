@@ -1,0 +1,22 @@
+[package]
+name = "trailhead-ui"
+description = "A Bevy UI kit: feathers controls, theme tokens, named sizes and spacing, Lucide icons"
+publish = false
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Default features pull in audio (alsa), gamepads (udev), 3D and more; take only what a UI needs.
+bevy = { version = "0.20", default-features = false, features = [
+    "std",
+    "bevy_state",
+    "multi_threaded",
+    "ui_bevy_render",
+    "bevy_ui_widgets",
+    "bevy_feathers",
+    "bevy_scene",
+    "default_font",
+] }

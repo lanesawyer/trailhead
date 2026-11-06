@@ -1,6 +1,6 @@
 ---
 name: lookout-ui
-description: 'Build or change UI in Lookout (clients/trailhead-lookout), the factory''s Bevy app, the way it is meant to look and work: shared feathers widgets used everywhere, theme tokens, named sizes and spacing, Lucide icons, layering, and how to check it. Use when: adding or restyling a button, card, column, dropdown, field, panel, menu or view in Lookout, or anything under clients/trailhead-lookout/src.'
+description: 'Build or change UI in Lookout (clients/trailhead-lookout), the factory''s Bevy app, the way it is meant to look and work: shared feathers widgets used everywhere, theme tokens, named sizes and spacing, Lucide icons, layering, and how to check it. Use when: adding or restyling a button, card, column, dropdown, field, panel, menu or view in Lookout, or anything under clients/trailhead-lookout/src or clients/trailhead-ui/src.'
 argument-hint: 'What the UI does, and which view it lives in'
 ---
 
@@ -11,17 +11,19 @@ bugs that built cleanly and failed silently.
 
 ## 1. Use the kit, or grow it
 
-Every control and surface comes from `clients/trailhead-lookout/src/widgets/`, one widget to a file, re-exported from
-`widgets/mod.rs`. Before you write a `Node` with a background, a button, a dropdown or a text style in a view, look
+Every control and surface comes from the `trailhead-ui` kit crate, `clients/trailhead-ui/src/`, one widget to a file,
+re-exported from its `lib.rs`. Lookout's `src/widgets/mod.rs` re-exports the kit (so views import `crate::widgets`) and
+adds the widgets only Lookout has: the task card, the board column, the status and priority tokens. Before you write a
+`Node` with a background, a button, a dropdown or a text style in a view, look there.
 there.
 
 - **The kit has it:** call it. Don't copy its insides into the view and tweak them.
 - **It nearly fits:** add an option to the widget (a variant, a prop) and use that. Two similar buttons, cards or
   fields that drift apart are a bug.
-- **It doesn't exist:** add a widget file to `widgets/`, built on feathers, with a doc comment saying what it's for.
+- **It doesn't exist:** add a widget file to the kit (`clients/trailhead-ui/src/`; Lookout's `widgets/` only if it is about tasks or the board), built on feathers, with a doc comment saying what it's for.
   Then use it in the view. A widget never imports a view module.
 - **Layouts that repeat are widgets too.** A panel header, a section with a heading, a label-and-value row, a form's
-  button bar: if more than one surface has or will have it, it's a widget in `widgets/`, even while only one uses it.
+  button bar: if more than one surface has or will have it, it's a widget in the kit, even while only one uses it.
   Composing kit pieces inline the same way in two views drifts just like two hand-made buttons (TRAIL-861). Before
   building one, check the other views (inspector, forms, connect panel, modal) for the same shape.
 
@@ -43,7 +45,7 @@ wraps these; it doesn't draw its own where feathers has one.
 ## 3. Colors, sizes, spacing, icons
 
 - **Colors are theme tokens** (`ThemeBackgroundColor`, `ThemeTextColor`, `ThemeBorderColor`), never `Color::srgb(..)`
-  literals. Lookout's own colors (one per status column, grades, priorities, warnings) are tokens defined once where
+  literals. The kit's base palette is in `clients/trailhead-ui/src/theme.rs`; an app's own colors (Lookout's: one per status column, priorities) are tokens it paints onto that with `trailhead_ui::paint`, defined once where
   the theme is built. A missing token renders fuchsia (TRAIL-777): if you see magenta, a token isn't in the theme.
 - **Text sizes** come from the kit's `size` scale and **gaps, padding and margins** from its `space` scale, named for
   what they're for. A test fails on a literal. If no name fits, add one with a doc comment.

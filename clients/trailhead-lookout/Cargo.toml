@@ -29,6 +29,7 @@ bevy = { version = "0.20", default-features = false, features = [
     "custom_cursor",
     "x11",
 ] }
+trailhead-ui.workspace = true
 trailhead-client.workspace = true
 trailhead-daemon = { workspace = true, features = ["net"] }
 iroh.workspace = true

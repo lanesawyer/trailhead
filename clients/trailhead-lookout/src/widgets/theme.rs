@@ -1,39 +1,24 @@
-//! The colors Lookout wears, in one place.
+//! The colors Lookout adds on top of the kit's theme.
 //!
-//! Feathers' dark theme is the base. Its button hover is widened (as bevy-data-explorer found, feathers' own is too
-//! faint to read as a response), and Lookout's own colors are added as tokens: one background per status column,
-//! the surfaces cards and panels sit on, and the tones for badges and warnings. A view names a token, never a color,
-//! so the theme is one edit and a missing token shows up as fuchsia rather than as a wrong color nobody notices.
+//! The kit's ([`trailhead_ui::theme_props`]) is the base; Lookout paints its own tokens onto it with
+//! [`trailhead_ui::paint`]: one background per status column, the board and card surfaces, and a tone per priority.
+//! A view names a token, never a color.
 
-use bevy::feathers::dark_theme::create_dark_theme;
 use bevy::feathers::palette;
-use bevy::feathers::theme::{SemanticToken, ThemeProps, ThemeToken, UiTheme};
-use bevy::feathers::tokens;
+use bevy::feathers::theme::{ThemeProps, ThemeToken, UiTheme};
 use bevy::prelude::*;
+use trailhead_ui::paint;
 
-/// Lookout's own tokens. Feathers' (`bevy::feathers::tokens`) cover the controls.
+/// The kit's tokens and Lookout's own. Feathers' (`bevy::feathers::tokens`) cover the controls.
 pub mod token {
+    pub use trailhead_ui::token::*;
+
     use bevy::feathers::theme::ThemeToken;
 
     /// What the board's columns and the panels sit on.
     pub const BOARD_BG: ThemeToken = ThemeToken::new_static("lookout.board.bg");
-    /// A panel over the board: the inspector, the connect panel, a form.
-    pub const PANEL_BG: ThemeToken = ThemeToken::new_static("lookout.panel.bg");
     /// A task card.
     pub const CARD_BG: ThemeToken = ThemeToken::new_static("lookout.card.bg");
-    /// A card's border, and the rule between sections of a panel.
-    pub const DIVIDER: ThemeToken = ThemeToken::new_static("lookout.divider");
-    /// A small badge's background (priority, grade, holder).
-    pub const BADGE_BG: ThemeToken = ThemeToken::new_static("lookout.badge.bg");
-    /// The hint shown over a hovered tool button.
-    pub const HINT_BG: ThemeToken = ThemeToken::new_static("lookout.hint.bg");
-
-    /// Something that wants a person: an open question, a refusal to look at.
-    pub const WARN: ThemeToken = ThemeToken::new_static("lookout.warn");
-    /// Something destructive (cancel, revert) or failed (a failing gate).
-    pub const DANGER: ThemeToken = ThemeToken::new_static("lookout.danger");
-    /// Something that went well: a passed gate, a live connection.
-    pub const OK: ThemeToken = ThemeToken::new_static("lookout.ok");
 
     /// One tone per priority, the same wherever a priority shows: P1 red, P2 orange, P3 blue, P4 gray.
     pub const PRIORITY_1: ThemeToken = ThemeToken::new_static("lookout.priority.1");
@@ -81,23 +66,11 @@ pub fn theme() -> UiTheme {
     UiTheme(props())
 }
 
-/// Feathers' dark theme with Lookout's tokens added. Public so a test can check every token resolves.
+/// The kit's theme with Lookout's tokens added. Public so a test can check every token resolves.
 pub fn props() -> ThemeProps {
-    let mut theme = create_dark_theme();
-    paint(&mut theme, &tokens::BUTTON_BG_HOVER, palette::GRAY_3.lighter(0.14));
-    paint(&mut theme, &tokens::BUTTON_BG_PRESSED, palette::ACCENT.darker(0.12));
-    paint(&mut theme, &tokens::BUTTON_PRIMARY_BG_HOVER, palette::ACCENT.lighter(0.08));
-
+    let mut theme = trailhead_ui::theme_props();
     paint(&mut theme, &token::BOARD_BG, palette::GRAY_0);
-    paint(&mut theme, &token::PANEL_BG, palette::GRAY_1);
     paint(&mut theme, &token::CARD_BG, palette::GRAY_2);
-    paint(&mut theme, &token::DIVIDER, palette::GRAY_3);
-    paint(&mut theme, &token::BADGE_BG, palette::GRAY_3);
-    paint(&mut theme, &token::HINT_BG, palette::GRAY_3.darker(0.05));
-
-    paint(&mut theme, &token::WARN, Color::oklch(0.80, 0.14, 75.0));
-    paint(&mut theme, &token::DANGER, Color::oklch(0.68, 0.17, 25.0));
-    paint(&mut theme, &token::OK, Color::oklch(0.75, 0.14, 150.0));
 
     paint(&mut theme, &token::PRIORITY_1, Color::oklch(0.68, 0.17, 25.0));
     paint(&mut theme, &token::PRIORITY_2, Color::oklch(0.76, 0.15, 60.0));
@@ -116,16 +89,10 @@ pub fn props() -> ThemeProps {
     theme
 }
 
-/// Give `token` a color of its own, on a semantic slot named after it, so changing it repaints nothing else.
-fn paint(theme: &mut ThemeProps, token: &ThemeToken, color: Color) -> SemanticToken {
-    let own = SemanticToken::new(token.to_string().into());
-    theme.token_assignments.insert(token.clone(), own.clone());
-    theme.semantic_base.insert(own.clone(), color);
-    own
-}
-
 #[cfg(test)]
 mod tests {
+    use bevy::feathers::tokens;
+
     use super::*;
 
     #[test]
@@ -181,5 +148,14 @@ mod tests {
         let distinct: std::collections::HashSet<_> = colors.iter().collect();
         assert_eq!(distinct.len(), statuses.len(), "{colors:?}");
         assert_eq!(status_token("nonsense"), token::BOARD_BG);
+    }
+
+    #[test]
+    fn a_spacing_is_named_rather_than_typed() {
+        // `board.rs` predates the kit; each view moves onto it in its own task (TRAIL-798 to TRAIL-801). Take it off
+        // this list when it's moved; nothing new goes on it.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let typed = trailhead_ui::spacing_check::typed_spacings(&root, &["board.rs"]);
+        assert!(typed.is_empty(), "name these spacings with widgets::space instead:\n{}", typed.join("\n"));
     }
 }
