@@ -22,3 +22,5 @@ bevy = { version = "0.20", default-features = false, features = [
     "bevy_scene",
     "default_font",
 ] }
+# link_button opens URLs in the system's browser.
+open = "5"
