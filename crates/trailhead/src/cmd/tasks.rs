@@ -5,7 +5,7 @@ use trailhead_core::{CommentKind, Status};
 use super::{Ctx, names, params, print_json};
 use crate::cli::{AddArgs, EditArgs};
 use crate::dates::{Field, local_today, parse_day_time};
-use crate::output::{self, comment_line, s, short_time, task_line, task_list};
+use crate::output::{self, s, task_line, task_list};
 
 pub(crate) async fn ready(cx: &Ctx, project: Option<String>, grade: Option<String>, limit: Option<i64>) -> Result<()> {
     let q = params([
@@ -63,50 +63,7 @@ pub(crate) async fn show(cx: &Ctx, task: &str) -> Result<()> {
         print_json(&v);
         return Ok(());
     }
-    let names = names(&cx.c).await?;
-    let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.chars().take(8).collect());
-    let t = &v["task"];
-    println!("{}  {}", s(t, "key"), s(t, "title"));
-    let mut meta = vec![s(t, "status").to_string(), format!("p{}", t["priority"]), format!("v{}", t["version"])];
-    if let Some(g) = t["grade"].as_i64() {
-        meta.insert(2, format!("grade {g}"));
-    }
-    if let Some(w) = output::when(t, "scheduled", short_time) {
-        meta.push(format!("scheduled {w}"));
-    }
-    if let Some(w) = output::when(t, "due", short_time) {
-        meta.push(format!("due {w}"));
-    }
-    println!("{}", meta.join(" · "));
-    if v["claim"].is_object() {
-        println!("claimed by {} {}", name(s(&v["claim"], "holder_id")), output::lease(&v["claim"]));
-    }
-    let keys = |k: &str| v[k].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));
-    if let Some(b) = keys("blocked_by").filter(|b| !b.is_empty()) {
-        println!("blocked by {b}");
-    }
-    if let Some(b) = keys("blocks").filter(|b| !b.is_empty()) {
-        println!("blocks {b}");
-    }
-    if let Some(d) = v["duplicate_of"].as_str() {
-        println!("duplicate of {d}");
-    }
-    if let Some(d) = keys("duplicates").filter(|d| !d.is_empty()) {
-        println!("duplicates {d}");
-    }
-    if t["metadata"].as_object().is_some_and(|m| !m.is_empty()) {
-        println!("metadata {}", t["metadata"]);
-    }
-    if !s(t, "description").is_empty() {
-        println!("\n{}", s(t, "description"));
-    }
-    let comments = v["comments"].as_array().cloned().unwrap_or_default();
-    if !comments.is_empty() {
-        println!();
-        for cm in &comments {
-            println!("{}", comment_line(cm, &name));
-        }
-    }
+    println!("{}", output::detail(&v, &names(&cx.c).await?));
     Ok(())
 }
 

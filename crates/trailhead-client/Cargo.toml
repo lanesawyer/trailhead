@@ -1,6 +1,6 @@
 [package]
 name = "trailhead-client"
-description = "What a client of the Trailhead API shares: wire types and saved credentials"
+description = "What a client of the Trailhead API shares: wire types, saved credentials and the text the CLI and MCP show"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -12,6 +12,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+trailhead-model.workspace = true
+jiff.workspace = true
+uuid.workspace = true
 serde.workspace = true
 keyring.workspace = true
 libc = "0.2"

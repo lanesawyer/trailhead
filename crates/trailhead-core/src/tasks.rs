@@ -17,7 +17,7 @@ use crate::metadata::{merge_patch, validate_path};
 use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 use crate::when;
-use trailhead_model::{Claim, Comment, Entity, Grade, Priority, Status, Task};
+use trailhead_model::{Claim, Entity, Grade, Priority, Status, Task, TaskDetail};
 
 pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on, grade, duplicate_of";
 
@@ -437,22 +437,6 @@ pub enum MatchField {
     Title,
     Description,
     Comment,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct TaskDetail {
-    pub task: Task,
-    pub claim: Option<Claim>,
-    /// Keys of unfinished tasks blocking this one.
-    pub blocked_by: Vec<String>,
-    /// Keys of tasks this one blocks.
-    pub blocks: Vec<String>,
-    pub comments: Vec<Comment>,
-    /// Key of the task this one was cancelled as a duplicate of.
-    pub duplicate_of: Option<String>,
-    /// Keys of tasks cancelled as duplicates of this one.
-    pub duplicates: Vec<String>,
 }
 
 impl Store {
