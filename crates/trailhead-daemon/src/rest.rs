@@ -12,6 +12,7 @@ use trailhead_factory::{
     Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Priority, Result, RunUpdate, Status, Task,
     TaskKey, Tracker, Verdict, VerdictKind,
 };
+use trailhead_model::{self as model, CommentKind};
 
 #[derive(Clone)]
 pub struct RestTracker {
@@ -65,32 +66,13 @@ impl RestTracker {
     }
 }
 
-fn status(s: &str) -> Result<Status> {
-    s.parse::<Status>().map_err(|e| Error::Other(e.to_string()))
-}
-
 /// A task from the API's JSON. `holder` is the claim holder's name when the response includes it (`include=claim`
 /// on lists), else its id.
 fn task(t: &Value, claim: &Value) -> Result<Task> {
-    let key = t["key"].as_str().ok_or_else(|| Error::Other(format!("task without a key: {t}")))?.to_string();
-    let run = match t["metadata"].get(METADATA_KEY) {
-        Some(v) => {
-            serde_json::from_value(v.clone()).map_err(|e| Error::Other(format!("{key}: bad factory metadata: {e}")))?
-        }
-        None => RunUpdate::default(),
-    };
+    let model: model::Task =
+        serde_json::from_value(t.clone()).map_err(|e| Error::Other(format!("a task the API sent didn't read: {e}")))?;
     let holder = claim["holder"].as_str().or(claim["holder_id"].as_str()).map(str::to_string);
-    Ok(Task {
-        project: key.rsplit_once('-').map(|(p, _)| p.to_string()).unwrap_or_default(),
-        title: t["title"].as_str().unwrap_or_default().to_string(),
-        description: t["description"].as_str().unwrap_or_default().to_string(),
-        status: status(t["status"].as_str().unwrap_or_default())?,
-        grade: t["grade"].as_i64().and_then(|g| Grade::try_from(g).ok()),
-        priority: t["priority"].as_i64().and_then(|p| Priority::try_from(p).ok()).unwrap_or_default(),
-        holder,
-        run,
-        key: TaskKey(key),
-    })
+    Task::from_model(model, holder)
 }
 
 fn unsupported(what: &str) -> Error {
@@ -148,15 +130,13 @@ impl Tracker for RestTracker {
     async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
         let parents: Vec<Option<&str>> =
             if queue.is_empty() { vec![None] } else { queue.iter().map(|q| Some(q.0.as_str())).collect() };
+        let unfinished: Vec<&str> = Status::ALL.into_iter().filter(|s| !s.is_closed()).map(Status::as_str).collect();
+        let unfinished = unfinished.join(",");
         let mut seen = std::collections::HashSet::new();
         let mut found = Vec::new();
         for parent in parents {
-            let mut query = vec![
-                ("project", project),
-                ("status", "open,in_progress,needs_input,in_review,approved"),
-                ("include", "claim"),
-                ("limit", "1000"),
-            ];
+            let mut query =
+                vec![("project", project), ("status", unfinished.as_str()), ("include", "claim"), ("limit", "1000")];
             if let Some(p) = parent {
                 query.push(("parent", p));
             }
@@ -187,19 +167,19 @@ impl Tracker for RestTracker {
     }
 
     async fn request_review(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": Status::InReview.as_str() })).await
+        self.patch(key, json!({ "status": Status::InReview })).await
     }
 
     async fn approve(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": Status::Approved.as_str() })).await
+        self.patch(key, json!({ "status": Status::Approved })).await
     }
 
     async fn unapprove(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": Status::InReview.as_str() })).await
+        self.patch(key, json!({ "status": Status::InReview })).await
     }
 
     async fn reopen(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": Status::Open.as_str() })).await
+        self.patch(key, json!({ "status": Status::Open })).await
     }
 
     async fn raise_grade(&self, key: &TaskKey, grade: Grade) -> Result<()> {
@@ -207,25 +187,26 @@ impl Tracker for RestTracker {
     }
 
     async fn record_verdict(&self, key: &TaskKey, verdict: &Verdict) -> Result<()> {
-        let kind = match verdict.kind {
-            VerdictKind::Approve => "approve",
-            VerdictKind::RequestChanges => "request_changes",
+        let decision = match verdict.kind {
+            VerdictKind::Approve => model::Verdict::Approve,
+            VerdictKind::RequestChanges => model::Verdict::RequestChanges,
         };
-        let model = verdict.model.as_ref().map(|m| m.0.clone());
-        self.comment(key, json!({ "kind": "review", "body": verdict.body, "verdict": kind, "model": model })).await
+        let by = verdict.model.as_ref().map(|m| m.0.clone());
+        let body = json!({ "kind": CommentKind::Review, "body": verdict.body, "verdict": decision, "model": by });
+        self.comment(key, body).await
     }
 
     async fn ask(&self, key: &TaskKey, question: &str) -> Result<()> {
-        self.comment(key, json!({ "kind": "question", "body": question })).await
+        self.comment(key, json!({ "kind": CommentKind::Question, "body": question })).await
     }
 
     async fn note(&self, key: &TaskKey, body: &str) -> Result<()> {
-        self.comment(key, json!({ "kind": "note", "body": body })).await
+        self.comment(key, json!({ "kind": CommentKind::Note, "body": body })).await
     }
 
     async fn finish(&self, key: &TaskKey, handoff: &str) -> Result<()> {
-        self.comment(key, json!({ "kind": "handoff", "body": handoff })).await?;
-        self.patch(key, json!({ "status": Status::Done.as_str() })).await
+        self.comment(key, json!({ "kind": CommentKind::Handoff, "body": handoff })).await?;
+        self.patch(key, json!({ "status": Status::Done })).await
     }
 
     async fn create_task(

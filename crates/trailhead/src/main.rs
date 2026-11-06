@@ -8,6 +8,7 @@ mod repo;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use trailhead_core::{CommentKind, Status};
 
 use cli::{Cli, Cmd};
 use client::{ApiError, Client, Identity};
@@ -87,15 +88,15 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Mine => claims::mine(&cx).await,
         Cmd::Renew { task, ttl } => claims::renew(&cx, &task, ttl).await,
         Cmd::Release { task } => claims::release(&cx, &task).await,
-        Cmd::Done { task, message } => tasks::finish(&cx, &task, "done", message).await,
-        Cmd::Review { task, message } => tasks::finish(&cx, &task, "in_review", message).await,
-        Cmd::Approve { task, message } => tasks::finish(&cx, &task, "approved", message).await,
+        Cmd::Done { task, message } => tasks::finish(&cx, &task, Status::Done, message).await,
+        Cmd::Review { task, message } => tasks::finish(&cx, &task, Status::InReview, message).await,
+        Cmd::Approve { task, message } => tasks::finish(&cx, &task, Status::Approved, message).await,
         Cmd::Cancel { task, duplicate_of } => tasks::cancel(&cx, &task, duplicate_of).await,
-        Cmd::Reopen { task } => tasks::finish(&cx, &task, "open", None).await,
+        Cmd::Reopen { task } => tasks::finish(&cx, &task, Status::Open, None).await,
         Cmd::Rm { task } => tasks::rm(&cx, &task).await,
-        Cmd::Comment { task, body, kind, to } => comments::comment(&cx, &task, &kind, &body, to).await,
-        Cmd::Handoff { task, body } => comments::comment(&cx, &task, "handoff", &body, None).await,
-        Cmd::Ask { task, body, to } => comments::comment(&cx, &task, "question", &body, to).await,
+        Cmd::Comment { task, body, kind, to } => comments::comment(&cx, &task, kind, &body, to).await,
+        Cmd::Handoff { task, body } => comments::comment(&cx, &task, CommentKind::Handoff, &body, None).await,
+        Cmd::Ask { task, body, to } => comments::comment(&cx, &task, CommentKind::Question, &body, to).await,
         Cmd::Verdict { task, verdict, body, model } => comments::verdict(&cx, &task, &verdict, &body, model).await,
         Cmd::Answer { comment_id, body } => comments::answer(&cx, &comment_id, body).await,
         Cmd::Block { blocker, blocked } => tasks::block(&cx, &blocker, &blocked).await,

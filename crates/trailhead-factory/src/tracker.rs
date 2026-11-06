@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{GateKind, PrGrade, PrRef, Result, Usd, Verdict};
+use crate::{Error, GateKind, PrGrade, PrRef, Result, Usd, Verdict};
 
 pub use trailhead_model::{Grade, Priority, Status, TaskKey};
 
@@ -27,6 +27,25 @@ pub struct Task {
     pub holder: Option<String>,
     /// The `factory` object in the task's metadata ([`RunUpdate`] fields).
     pub run: RunUpdate,
+}
+
+impl Task {
+    /// The factory's view of a Trailhead task. `holder` is the name of the agent holding its claim, if any.
+    pub fn from_model(task: trailhead_model::Task, holder: Option<String>) -> Result<Task> {
+        let run = RunUpdate::of(&task).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", task.key)))?;
+        let key = TaskKey(task.key);
+        Ok(Task {
+            project: key.project().to_string(),
+            key,
+            title: task.title,
+            description: task.description,
+            status: task.status,
+            grade: task.grade,
+            priority: task.priority,
+            holder,
+            run,
+        })
+    }
 }
 
 /// The factory's fields in task metadata. Writes merge: `None` leaves a field as it is.
@@ -126,6 +145,16 @@ pub struct RunUpdate {
     /// it (TRAIL-601).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released: Option<i64>,
+}
+
+impl RunUpdate {
+    /// The factory's fields in `task`'s metadata; the defaults for a task it hasn't touched.
+    pub fn of(task: &trailhead_model::Task) -> serde_json::Result<RunUpdate> {
+        match task.metadata.get(METADATA_KEY) {
+            Some(v) => serde_json::from_value(v.clone()),
+            None => Ok(RunUpdate::default()),
+        }
+    }
 }
 
 /// The merger's decision on a PR's current head (`docs/factory/review.md#the-merger`). Written whole, and its

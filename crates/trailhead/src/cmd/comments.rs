@@ -1,10 +1,11 @@
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
+use trailhead_core::CommentKind;
 
 use super::Ctx;
 use crate::output::s;
 
-pub(crate) async fn comment(cx: &Ctx, task: &str, kind: &str, body: &str, to: Option<String>) -> Result<()> {
+pub(crate) async fn comment(cx: &Ctx, task: &str, kind: CommentKind, body: &str, to: Option<String>) -> Result<()> {
     let v =
         cx.c.post(&format!("tasks/{task}/comments"), json!({ "kind": kind, "body": body, "addressed_to": to })).await?;
     cx.show(&v, |v| format!("{} {}", s(v, "kind"), s(v, "id")));
@@ -29,7 +30,7 @@ pub(crate) async fn answer(cx: &Ctx, comment_id: &str, body: Option<String>) -> 
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|q| q["kind"] == "question" && q["resolved_at"].is_null())
+                .filter(|q| q["kind"] == CommentKind::Question.as_str() && q["resolved_at"].is_null())
                 .collect();
             match open.as_slice() {
                 [q] => s(q, "id").to_string(),
