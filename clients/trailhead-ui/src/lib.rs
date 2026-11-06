@@ -1,7 +1,7 @@
 //! The Trailhead UI kit: every control and surface an app's views are built from, one widget to a file. It knows
 //! nothing of Trailhead; Lookout, the factory's Bevy app, is its first user.
 //!
-//! The rules (use a widget or grow one, theme tokens, named sizes and spacing, icons, layers) are in the `lookout-ui`
+//! The rules (use a widget or grow one, theme tokens, named sizes and spacing, icons, layers) are in the `trailhead-ui`
 //! skill and `docs/factory/ui.md#look-and-components`. Much of this is ported from Lane's bevy-data-explorer. A
 //! widget never imports a view module.
 //!

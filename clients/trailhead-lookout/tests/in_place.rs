@@ -76,7 +76,7 @@ fn no_view_redraws_a_surface_wholesale() {
     assert!(
         bad.is_empty(),
         "these despawn a parent's children to redraw it; spawn once and update in place, or use widgets::keyed \
-         (see the lookout-ui skill, section 4): {bad:?}"
+         (see the trailhead-ui skill, section 4): {bad:?}"
     );
     for (file, name, _) in ALLOWED {
         assert!(
