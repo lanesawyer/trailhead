@@ -68,6 +68,15 @@ wraps these; it doesn't draw its own where feathers has one.
 - **Scrolling goes through the kit's `ScrollBoth` / `ScrollDown`,** whose one observer walks up from what the pointer
   is over to the nearest of each. Don't add a second wheel observer per area: a bubbling `PointerScroll` keeps naming
   the entity it was fired on, so an ancestor's handler never sees its own entity.
+- **A surface is spawned once and updated in place** (TRAIL-880). Despawning a parent's children and spawning them
+  again on a change is a bug, however small the surface: the dropdown you just used is despawned under you, the
+  header flashes, scroll positions go. The only despawns are opening and closing the surface itself (a panel, a
+  modal). On a change, set what changed: a select's chosen row and, only when its options changed, its rows
+  (`SelectEdit`; never while its popup is open), a button's caption, a chip's tone and words (`ChipEdit`), a
+  disabled state. Lists that gain, lose and reorder items go through `widgets::keyed`. `tests/in_place.rs` fails on
+  a new wholesale redraw (`despawn_children`, a loop despawning `child`, a `redraw*` function that despawns) unless
+  it is in its `ALLOWED` list, and each view carries a headless test that an update leaves every other entity the
+  same `Entity` (see `header_tests` in `board.rs`).
 - Presses arrive as feathers `Activate` events, not `Interaction`.
 - `system_clipboard` must stay in the Bevy features, or no text field can paste.
 

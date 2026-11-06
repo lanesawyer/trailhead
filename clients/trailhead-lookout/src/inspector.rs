@@ -15,9 +15,12 @@ use std::collections::HashMap;
 
 use bevy::feathers::controls::ButtonVariant;
 use bevy::feathers::tokens;
+use bevy::input::keyboard::KeyboardInput;
+use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
+use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
-use bevy::ui_widgets::{Activate, ControlOrientation};
+use bevy::ui_widgets::{Activate, ControlOrientation, RequestClose};
 use reqwest::Method;
 use serde_json::{Value, json};
 
@@ -28,8 +31,9 @@ use crate::connection::{Connection, ConnectionStatus};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
 use crate::sync::SyncItem;
 use crate::widgets::{
-    Icon, Picked, badge, button, danger_button, extent, layer, panel, priority_tone, row, scroll_body, scroll_frame,
-    scrollbar, section, select, size, status_label, text, text_dim, text_toned, token, tool_button,
+    Icon, ModalRoot, Picked, badge, button, danger_button, extent, layer, panel, panel_header, priority_tone, row,
+    scroll_body, scroll_frame, scrollbar, section, select, size, status_label, text, text_dim, text_toned, token,
+    tool_button,
 };
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
@@ -426,6 +430,8 @@ impl Plugin for InspectorPlugin {
             .add_message::<SyncItem>()
             .add_message::<CommandDone>()
             .add_observer(on_pick)
+            .add_observer(on_close_request)
+            .add_observer(on_escape)
             .add_systems(Update, (track_events, rebuild, settle).chain());
     }
 }
@@ -485,10 +491,48 @@ fn spawn_panel(mut commands: Commands) {
         .insert((Name::new("inspector"), InspectorPanel))
         .id();
     // The header stays put; the body under it scrolls, held to the window's height by the panel and its frame.
-    commands.spawn_scene(bsn! { @row() }).insert((InspectorHeader, ChildOf(panel)));
+    commands
+        .spawn(Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0, ..default() })
+        .insert((InspectorHeader, ChildOf(panel)));
     let frame = commands.spawn(scroll_frame()).insert(ChildOf(panel)).id();
     let body = commands.spawn((scroll_body(), InspectorBody)).insert(ChildOf(frame)).id();
     commands.queue_spawn_scene(scrollbar(body, ControlOrientation::Vertical)).insert(ChildOf(frame));
+}
+
+/// The X in the panel's header (or anything else inside it) asked to close it.
+fn on_close_request(
+    close: On<RequestClose>,
+    panels: Query<(), With<InspectorPanel>>,
+    mut selection: ResMut<Selection>,
+) {
+    if panels.contains(close.event_target()) {
+        selection.0 = None;
+    }
+}
+
+/// Escape closes the inspector, unless a modal is open (its own Escape closes it, and only it) or the press came from
+/// a text input (whose Escape just leaves the field).
+fn on_escape(
+    key: On<FocusedInput<KeyboardInput>>,
+    modals: Query<(), With<ModalRoot>>,
+    inputs: Query<(), With<EditableText>>,
+    panels: Query<Entity, With<InspectorPanel>>,
+    mut commands: Commands,
+) {
+    // The press bubbles up from the focused entity; act once, where it starts.
+    if key.event_target() != key.original_event_target() {
+        return;
+    }
+    let pressed = &key.input;
+    if pressed.key_code != KeyCode::Escape || !pressed.state.is_pressed() || pressed.repeat {
+        return;
+    }
+    if !modals.is_empty() || inputs.contains(key.original_event_target()) {
+        return;
+    }
+    for panel in &panels {
+        commands.trigger(RequestClose { source: panel });
+    }
 }
 
 /// What a dropdown of the panel picked: a status to move to, or how far back "revert" goes.
@@ -546,16 +590,6 @@ fn sends(source: Entity, subject: Subject, action: Action) -> impl Scene {
         on(move |_: On<Activate>, mut commands: Commands| {
             let (subject, action) = (subject.clone(), action.clone());
             commands.queue(move |world: &mut World| send(world, source, &subject, &action));
-        })
-    }
-}
-
-/// Runs `on_click` when the button it is on is pressed.
-fn runs(on_click: impl Fn(&mut World) + Clone + Send + Sync + 'static) -> impl Scene {
-    bsn! {
-        on(move |_: On<Activate>, mut commands: Commands| {
-            let f = on_click.clone();
-            commands.queue(move |world: &mut World| f(world));
         })
     }
 }
@@ -641,15 +675,7 @@ fn redraw(
     let live = *connection.get() == Connection::Live;
     let c = &mut commands;
 
-    c.spawn_scene(
-        bsn! { @text(view.title.clone(), size::HEADING) Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0) } },
-    )
-    .insert(ChildOf(header));
-    c.spawn_scene(bsn! {
-        @tool_button(Icon::X, "Close", ButtonVariant::Plain)
-        @runs(|w: &mut World| w.resource_mut::<Selection>().0 = None)
-    })
-    .insert(ChildOf(header));
+    c.spawn_scene(panel_header(view.title.clone(), true)).insert(ChildOf(header));
 
     let (run, status_lines): (Vec<&String>, Vec<&String>) = view.lines.iter().partition(|l| is_run_line(l));
     for (heading, lines) in [("Status", status_lines), ("Run", run)] {
@@ -1015,6 +1041,69 @@ mod tests {
         app.world_mut().resource_mut::<Selection>().0 = None;
         app.update();
         assert!(app.world().resource::<InspectorState>().0.is_none());
+    }
+
+    fn escape(app: &mut App, from: Entity) {
+        let input = KeyboardInput {
+            key_code: KeyCode::Escape,
+            logical_key: bevy::input::keyboard::Key::Escape,
+            state: bevy::input::ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: from,
+        };
+        let window = app.world_mut().spawn_empty().id();
+        app.world_mut().trigger(FocusedInput::new(from, input, window));
+        app.update();
+    }
+
+    fn open_inspector(app: &mut App) -> Entity {
+        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task("t7".into()));
+        app.world_mut().spawn(InspectorPanel).id()
+    }
+
+    fn closing_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app
+    }
+
+    #[test]
+    fn the_x_closes_the_inspector() {
+        let mut app = closing_app();
+        let panel = open_inspector(&mut app);
+        let x = app.world_mut().spawn(ChildOf(panel)).id();
+        app.world_mut().trigger(RequestClose { source: x });
+        app.update();
+        assert_eq!(app.world().resource::<Selection>().0, None);
+    }
+
+    #[test]
+    fn escape_closes_the_inspector() {
+        let mut app = closing_app();
+        open_inspector(&mut app);
+        let target = app.world_mut().spawn_empty().id();
+        escape(&mut app, target);
+        assert_eq!(app.world().resource::<Selection>().0, None);
+    }
+
+    #[test]
+    fn escape_with_a_modal_open_leaves_the_inspector() {
+        let mut app = closing_app();
+        open_inspector(&mut app);
+        app.world_mut().spawn(ModalRoot);
+        let target = app.world_mut().spawn_empty().id();
+        escape(&mut app, target);
+        assert!(app.world().resource::<Selection>().0.is_some());
+    }
+
+    #[test]
+    fn escape_in_a_text_input_leaves_the_inspector() {
+        let mut app = closing_app();
+        open_inspector(&mut app);
+        let field = app.world_mut().spawn(EditableText::new("x")).id();
+        escape(&mut app, field);
+        assert!(app.world().resource::<Selection>().0.is_some());
     }
 
     #[test]

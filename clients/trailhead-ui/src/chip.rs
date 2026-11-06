@@ -2,6 +2,7 @@
 //!
 //! For state that is always there and rarely needs reading, such as the connection in the header bar.
 
+use bevy::ecs::system::SystemParam;
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemeToken};
 use bevy::prelude::*;
 
@@ -16,6 +17,7 @@ pub fn dot(tone: ThemeToken) -> impl Scene {
             border_radius: { BorderRadius::all(px(radius::PANEL)) },
         }
         ThemeBackgroundColor({ tone })
+        ChipDot
     }
 }
 
@@ -32,7 +34,47 @@ pub fn chip(tone: ThemeToken, words: impl Into<String>, hint: impl Into<String>)
         Hint({ hint })
         Children [
                 @dot(tone)
-            -- @text(words, size::SECONDARY)
+            -- @text(words, size::SECONDARY) ChipWords
         ]
+    }
+}
+
+/// A chip's dot, which [`ChipEdit`] recolors.
+#[derive(Component, Default, Clone)]
+pub struct ChipDot;
+
+/// A chip's words, which [`ChipEdit`] rewrites.
+#[derive(Component, Default, Clone)]
+pub struct ChipWords;
+
+/// Changes a spawned [`chip`] in place: the dot's tone, the words and the hint. Writes only what differs.
+#[derive(SystemParam)]
+pub struct ChipEdit<'w, 's> {
+    children: Query<'w, 's, &'static Children>,
+    dots: Query<'w, 's, &'static ThemeBackgroundColor, With<ChipDot>>,
+    words: Query<'w, 's, &'static mut Text, With<ChipWords>>,
+    hints: Query<'w, 's, &'static mut Hint>,
+    commands: Commands<'w, 's>,
+}
+
+impl ChipEdit<'_, '_> {
+    pub fn set(&mut self, chip: Entity, tone: ThemeToken, words: &str, hint: &str) {
+        if let Ok(mut h) = self.hints.get_mut(chip)
+            && h.0 != hint
+        {
+            h.0 = hint.to_string();
+        }
+        for e in self.children.iter_descendants(chip) {
+            if let Ok(dot) = self.dots.get(e)
+                && dot.0 != tone
+            {
+                self.commands.entity(e).insert(ThemeBackgroundColor(tone.clone()));
+            }
+            if let Ok(mut text) = self.words.get_mut(e)
+                && text.0 != words
+            {
+                text.0 = words.to_string();
+            }
+        }
     }
 }

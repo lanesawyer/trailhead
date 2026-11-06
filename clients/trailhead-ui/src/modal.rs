@@ -12,11 +12,11 @@
 //!   [`ModalSlots`] on the root names the [`ModalBody`] to fill and the [`ModalFooter`] for its buttons. Close it by
 //!   despawning the root. Layering is [`super::layer::MODAL`].
 
-use bevy::feathers::controls::{FeathersDialog, FeathersDialogClose};
+use bevy::feathers::controls::FeathersDialog;
 use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, RequestClose};
 
-use super::{SCROLLBAR_WIDTH, ScrollDown, extent, layer, scrollbar, size, space, text};
+use super::{SCROLLBAR_WIDTH, ScrollDown, extent, layer, panel_header, scrollbar, space};
 
 /// How much of the window's height the modal may take, with the barrier's margin around it.
 pub const MAX_HEIGHT_VH: f32 = 80.0;
@@ -89,8 +89,7 @@ fn frame(title: String, width: f32) -> Box<dyn SceneList> {
         }
         ModalFrame
         Children [
-            Node { justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center }
-            Children [ @text(title, size::HEADING) -- @FeathersDialogClose ]
+            @panel_header(title, true)
             --
             // The body's box may shrink below its content, so the body scrolls and the footer keeps its place.
             Node { flex_direction: FlexDirection::Column, min_height: px(0), flex_shrink: 1.0 }
