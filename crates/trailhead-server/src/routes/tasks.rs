@@ -5,7 +5,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use trailhead_core::{GradeFilter, NewTask, SearchFilter, SearchHit, Status, Task, TaskDetail, TaskFilter, TaskPatch};
+use trailhead_core::{
+    Grade, GradeFilter, NewTask, Priority, SearchFilter, SearchHit, Status, Task, TaskDetail, TaskFilter, TaskPatch,
+};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::auth::Auth;
@@ -111,7 +113,8 @@ pub(crate) struct CreateTask {
     title: String,
     #[serde(default)]
     description: String,
-    priority: Option<i64>,
+    /// 1 (urgent) to 4 (low). Defaults to 3.
+    priority: Option<Priority>,
     /// The day it's due. Optional when `due_at` is set.
     #[schema(format = Date)]
     due_on: Option<String>,
@@ -131,7 +134,7 @@ pub(crate) struct CreateTask {
     scheduled_tz: Option<String>,
     parent: Option<String>,
     /// 1 to 4. Only a human can create a task with a grade.
-    grade: Option<i64>,
+    grade: Option<Grade>,
     metadata: Option<Value>,
     source: Option<String>,
     external_id: Option<String>,
@@ -205,10 +208,10 @@ pub(crate) struct UpdateTask {
     title: Option<String>,
     description: Option<String>,
     status: Option<Status>,
-    priority: Option<i64>,
+    priority: Option<Priority>,
     /// 1 to 4. A human can set, raise, lower or `null` it; an agent can only raise an existing grade.
     #[serde(default, deserialize_with = "nullable")]
-    grade: Option<Option<i64>>,
+    grade: Option<Option<Grade>>,
     /// Key of the task this one duplicates. Needs `status` `cancelled` (in this request or already);
     /// `null` clears it, and so does leaving `cancelled`.
     #[serde(default, deserialize_with = "nullable")]

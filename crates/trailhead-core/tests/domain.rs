@@ -6,9 +6,17 @@ use jiff::civil::date;
 use serde_json::json;
 use trailhead_core::parse_at;
 use trailhead_core::{
-    CommentKind, Error, EventFilter, GradeFilter, MatchField, NewComment, NewProject, NewTask, ProjectPatch,
-    ProjectStatus, SearchFilter, Status, TaskFilter, TaskPatch, TaskSort, Verdict,
+    CommentKind, Error, EventFilter, Grade, GradeFilter, MatchField, NewComment, NewProject, NewTask, Priority,
+    ProjectPatch, ProjectStatus, SearchFilter, Status, TaskFilter, TaskPatch, TaskSort, Verdict,
 };
+
+fn gr(n: u8) -> Grade {
+    Grade::new(n).unwrap()
+}
+
+fn pr(n: u8) -> Priority {
+    Priority::new(n).unwrap()
+}
 
 fn status(s: Status) -> TaskPatch {
     TaskPatch { status: Some(s), ..Default::default() }
@@ -35,11 +43,11 @@ async fn task_keys_are_sequential_per_project() {
 #[tokio::test]
 async fn ready_queue_orders_and_filters() {
     let env = Env::new().await;
-    let low = env.task_with(NewTask { title: "low".into(), priority: Some(4), ..Default::default() }).await;
+    let low = env.task_with(NewTask { title: "low".into(), priority: Some(pr(4)), ..Default::default() }).await;
     let late = env
         .task_with(NewTask {
             title: "late".into(),
-            priority: Some(2),
+            priority: Some(pr(2)),
             due_at: Some(env.at_in(SignedDuration::from_hours(9 * 24))),
             ..Default::default()
         })
@@ -47,13 +55,13 @@ async fn ready_queue_orders_and_filters() {
     let soon = env
         .task_with(NewTask {
             title: "soon".into(),
-            priority: Some(2),
+            priority: Some(pr(2)),
             due_at: Some(env.at_in(SignedDuration::from_hours(24))),
             ..Default::default()
         })
         .await;
-    let undated = env.task_with(NewTask { title: "undated".into(), priority: Some(2), ..Default::default() }).await;
-    let urgent = env.task_with(NewTask { title: "urgent".into(), priority: Some(1), ..Default::default() }).await;
+    let undated = env.task_with(NewTask { title: "undated".into(), priority: Some(pr(2)), ..Default::default() }).await;
+    let urgent = env.task_with(NewTask { title: "urgent".into(), priority: Some(pr(1)), ..Default::default() }).await;
     assert_eq!(
         env.ready_keys().await,
         [urgent.key.clone(), soon.key.clone(), late.key.clone(), undated.key.clone(), low.key.clone()]
@@ -749,7 +757,7 @@ async fn scheduled_sort_puts_timed_tasks_in_order_within_a_day() {
     let env = Env::new().await;
     let new = |title: &str| NewTask { title: title.into(), ..Default::default() };
     let day = Some(date(2026, 10, 17));
-    env.task_with(NewTask { scheduled_on: day, priority: Some(1), ..new("untimed urgent") }).await;
+    env.task_with(NewTask { scheduled_on: day, priority: Some(pr(1)), ..new("untimed urgent") }).await;
     env.task_with(NewTask { scheduled_at: Some(parse_at("2026-10-17T15:00:00Z").unwrap()), ..new("3pm") }).await;
     env.task_with(NewTask { scheduled_at: Some(parse_at("2026-10-17T09:00:00Z").unwrap()), ..new("9am") }).await;
     env.task_with(NewTask { scheduled_on: Some(date(2026, 10, 16)), ..new("yesterday") }).await;
@@ -769,7 +777,7 @@ fn snapshots_from_before_scheduling_still_load() {
         title: "t".into(),
         description: String::new(),
         status: Status::Open,
-        priority: 3,
+        priority: pr(3),
         grade: None,
         duplicate_of: None,
         due_on: None,
@@ -1027,11 +1035,11 @@ async fn undo_reverses_approval() {
 #[tokio::test]
 async fn list_tasks_sorts_and_pages() {
     let env = Env::new().await;
-    let a = env.task_with(NewTask { title: "a".into(), priority: Some(1), ..Default::default() }).await;
+    let a = env.task_with(NewTask { title: "a".into(), priority: Some(pr(1)), ..Default::default() }).await;
     env.advance(1);
-    let b = env.task_with(NewTask { title: "b".into(), priority: Some(3), ..Default::default() }).await;
+    let b = env.task_with(NewTask { title: "b".into(), priority: Some(pr(3)), ..Default::default() }).await;
     env.advance(1);
-    let c = env.task_with(NewTask { title: "c".into(), priority: Some(2), ..Default::default() }).await;
+    let c = env.task_with(NewTask { title: "c".into(), priority: Some(pr(2)), ..Default::default() }).await;
     env.advance(1);
     env.store.update_task(&env.human, &a.key, status(Status::Done), None).await.unwrap();
     let list = async |sort: &str, limit, offset| {
@@ -1201,33 +1209,34 @@ async fn reviews_need_a_verdict_and_only_reviews_have_one() {
 async fn only_humans_can_set_lower_or_clear_a_grade() {
     let env = Env::new().await;
     let a = env.agent("a").await;
-    let graded = |g: Option<Option<i64>>| TaskPatch { grade: g, ..Default::default() };
+    let graded = |g: Option<Option<Grade>>| TaskPatch { grade: g, ..Default::default() };
     let new = |title: &str, grade| NewTask { project: "AUTH".into(), title: title.into(), grade, ..Default::default() };
 
     // An agent can't create a graded task, though an ungraded one is fine.
-    assert!(matches!(env.store.create_task(&a.next_batch(), new("graded", Some(2))).await, Err(Error::Forbidden(_))));
+    assert!(matches!(
+        env.store.create_task(&a.next_batch(), new("graded", Some(gr(2)))).await,
+        Err(Error::Forbidden(_))
+    ));
     let task = env.store.create_task(&a.next_batch(), new("plain", None)).await.unwrap();
     assert_eq!(task.grade, None);
 
     // Nor set the first grade; a human can, and validates the range.
     let update =
         async |ctx: &trailhead_core::Ctx, g| env.store.update_task(&ctx.next_batch(), &task.key, graded(g), None).await;
-    assert!(matches!(update(&a, Some(Some(1))).await, Err(Error::Forbidden(_))));
-    assert!(matches!(update(&env.human, Some(Some(5))).await, Err(Error::Invalid(_))));
-    assert!(matches!(update(&env.human, Some(Some(0))).await, Err(Error::Invalid(_))));
-    assert_eq!(update(&env.human, Some(Some(2))).await.unwrap().grade, Some(2));
+    assert!(matches!(update(&a, Some(Some(gr(1)))).await, Err(Error::Forbidden(_))));
+    assert_eq!(update(&env.human, Some(Some(gr(2)))).await.unwrap().grade, Some(gr(2)));
 
     // An agent can raise it, restate it, and change other fields, but not lower or clear it.
-    update(&a, Some(Some(2))).await.unwrap();
-    assert_eq!(update(&a, Some(Some(3))).await.unwrap().grade, Some(3));
-    assert!(matches!(update(&a, Some(Some(2))).await, Err(Error::Forbidden(_))));
+    update(&a, Some(Some(gr(2)))).await.unwrap();
+    assert_eq!(update(&a, Some(Some(gr(3)))).await.unwrap().grade, Some(gr(3)));
+    assert!(matches!(update(&a, Some(Some(gr(2)))).await, Err(Error::Forbidden(_))));
     assert!(matches!(update(&a, Some(None)).await, Err(Error::Forbidden(_))));
     let retitled = TaskPatch { title: Some("renamed".into()), ..Default::default() };
     env.store.update_task(&a.next_batch(), &task.key, retitled, None).await.unwrap();
-    assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(3));
+    assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(gr(3)));
 
     // A human can lower and clear it.
-    assert_eq!(update(&env.human, Some(Some(1))).await.unwrap().grade, Some(1));
+    assert_eq!(update(&env.human, Some(Some(gr(1)))).await.unwrap().grade, Some(gr(1)));
     assert_eq!(update(&env.human, Some(None)).await.unwrap().grade, None);
 
     // The event log records the change.
@@ -1240,15 +1249,15 @@ async fn only_humans_can_set_lower_or_clear_a_grade() {
 async fn agents_cannot_undo_or_revert_a_humans_grade_change() {
     let env = Env::new().await;
     let a = env.agent("a").await;
-    let task = env.task_with(NewTask { title: "t".into(), grade: Some(1), ..Default::default() }).await;
-    assert_eq!(task.grade, Some(1));
+    let task = env.task_with(NewTask { title: "t".into(), grade: Some(gr(1)), ..Default::default() }).await;
+    assert_eq!(task.grade, Some(gr(1)));
     let patch = |g| TaskPatch { grade: Some(g), ..Default::default() };
 
     // The human raises 1 to 3. An agent undoing that would lower it.
     let raise = env.human.next_batch();
-    env.store.update_task(&raise, &task.key, patch(Some(3)), None).await.unwrap();
+    env.store.update_task(&raise, &task.key, patch(Some(gr(3))), None).await.unwrap();
     assert!(matches!(env.store.undo_batch(&a.next_batch(), raise.batch_id).await, Err(Error::Forbidden(_))));
-    assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(3));
+    assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(gr(3)));
 
     // Likewise undoing the human clearing it would set a grade.
     let clear = env.human.next_batch();
@@ -1258,23 +1267,23 @@ async fn agents_cannot_undo_or_revert_a_humans_grade_change() {
 
     // A human can undo it, and an agent can undo its own raise only by being human, so it can't.
     env.store.undo_batch(&env.human.next_batch(), clear.batch_id).await.unwrap();
-    assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(3));
+    assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(gr(3)));
     let own = a.next_batch();
-    env.store.update_task(&own, &task.key, patch(Some(4)), None).await.unwrap();
+    env.store.update_task(&own, &task.key, patch(Some(gr(4))), None).await.unwrap();
     assert!(matches!(env.store.undo_batch(&a.next_batch(), own.batch_id).await, Err(Error::Forbidden(_))));
     env.store.undo_batch(&env.human.next_batch(), own.batch_id).await.unwrap();
-    assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(3));
+    assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(gr(3)));
 
     // Reverting an agent's work: a human can, another agent's revert is refused with Forbidden, not skipped.
     let b = env.agent("b").await;
-    let other = env.task_with(NewTask { title: "other".into(), grade: Some(2), ..Default::default() }).await;
+    let other = env.task_with(NewTask { title: "other".into(), grade: Some(gr(2)), ..Default::default() }).await;
     let since = env.now() - jiff::SignedDuration::from_secs(60);
-    env.store.update_task(&a.next_batch(), &other.key, patch(Some(4)), None).await.unwrap();
+    env.store.update_task(&a.next_batch(), &other.key, patch(Some(gr(4))), None).await.unwrap();
     let report = env.store.revert_actor(&b.next_batch(), a.actor_id(), since).await;
     assert!(matches!(report, Err(Error::Forbidden(_))), "lowering a grade aborts the whole revert: {report:?}");
-    assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(4));
+    assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(gr(4)));
     env.store.revert_actor(&env.human.next_batch(), a.actor_id(), since).await.unwrap();
-    assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(2));
+    assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(gr(2)));
 }
 
 #[tokio::test]
@@ -1282,8 +1291,8 @@ async fn ready_and_list_filter_by_grade() {
     let env = Env::new().await;
     let graded = |title: &str, g| NewTask { title: title.into(), grade: Some(g), ..Default::default() };
     env.task("none").await;
-    env.task_with(graded("one", 1)).await;
-    env.task_with(graded("three", 3)).await;
+    env.task_with(graded("one", gr(1))).await;
+    env.task_with(graded("three", gr(3))).await;
     let titles = |tasks: Vec<trailhead_core::Task>| tasks.into_iter().map(|t| t.title).collect::<Vec<_>>();
     let ready = async |g| titles(env.store.ready(&env.human, None, None, g).await.unwrap());
     let list = async |g| {
@@ -1292,10 +1301,10 @@ async fn ready_and_list_filter_by_grade() {
     };
     assert_eq!(ready(GradeFilter::Any).await.len(), 3);
     assert_eq!(ready(GradeFilter::Ungraded).await, ["none"]);
-    assert_eq!(ready(GradeFilter::Is(3)).await, ["three"]);
+    assert_eq!(ready(GradeFilter::Is(gr(3))).await, ["three"]);
     assert_eq!(list(GradeFilter::Graded).await, ["one", "three"]);
     assert_eq!(list(GradeFilter::Ungraded).await, ["none"]);
-    assert_eq!(list(GradeFilter::Is(1)).await, ["one"]);
+    assert_eq!(list(GradeFilter::Is(gr(1))).await, ["one"]);
     assert!(GradeFilter::parse("9").is_err());
     assert_eq!(GradeFilter::parse("graded").unwrap(), GradeFilter::Graded);
 }

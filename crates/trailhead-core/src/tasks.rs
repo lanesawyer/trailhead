@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::claims::{drop_claim, live_claim, reap_expired};
 use crate::comments::list_comments_for;
 use crate::db::{
-    collect, first, fmt_ts, get_enum, get_json, get_opt_date, get_opt_ts, get_opt_uuid, get_ts, get_uuid, json_ids,
-    opt_date_value, opt_ts_value, opt_uuid_value,
+    collect, first, fmt_ts, get_enum, get_json, get_opt_date, get_opt_scale, get_opt_ts, get_opt_uuid, get_scale,
+    get_ts, get_uuid, json_ids, opt_date_value, opt_ts_value, opt_uuid_value,
 };
 use crate::deps::{unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
@@ -17,7 +17,7 @@ use crate::metadata::{merge_patch, validate_path};
 use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 use crate::when;
-use trailhead_model::{Claim, Comment, Entity, Status, Task};
+use trailhead_model::{Claim, Comment, Entity, Grade, Priority, Status, Task};
 
 pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on, grade, duplicate_of";
 
@@ -34,7 +34,7 @@ pub(crate) fn task_from_row(row: &Row) -> Result<Task> {
         title: row.get(4)?,
         description: row.get(5)?,
         status: get_enum(row, 6)?,
-        priority: row.get(7)?,
+        priority: get_scale(row, 7)?,
         due_at: get_opt_ts(row, 8)?,
         due_tz: row.get(9)?,
         parent_id: get_opt_uuid(row, 10)?,
@@ -50,7 +50,7 @@ pub(crate) fn task_from_row(row: &Row) -> Result<Task> {
         scheduled_at: get_opt_ts(row, 20)?,
         scheduled_tz: row.get(21)?,
         due_on: get_opt_date(row, 22)?,
-        grade: row.get(23)?,
+        grade: get_opt_scale(row, 23)?,
         duplicate_of: get_opt_uuid(row, 24)?,
     })
 }
@@ -119,7 +119,7 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result
                 after.title,
                 after.description,
                 after.status.as_str(),
-                after.priority,
+                i64::from(after.priority),
                 opt_ts_value(after.due_at),
                 after.due_tz,
                 opt_uuid_value(after.parent_id),
@@ -133,7 +133,7 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result
                 after.scheduled_tz,
                 opt_date_value(after.due_on),
                 opt_ts_value(due_by),
-                after.grade,
+                after.grade.map(i64::from),
                 opt_uuid_value(after.duplicate_of),
             ],
         )
@@ -153,26 +153,19 @@ pub(crate) async fn update_status(tx: &Tx, before: &Task, status: Status, kind: 
     Ok(after)
 }
 
-fn validate_grade(g: i64) -> Result<()> {
-    if (1..=4).contains(&g) { Ok(()) } else { Err(Error::Invalid("grade must be 1 to 4".into())) }
-}
-
 /// Parses a grade for an update: `1` to `4`, or `none` to clear it.
-pub fn parse_grade(s: &str) -> Result<Option<i64>> {
+pub fn parse_grade(s: &str) -> Result<Option<Grade>> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("none") {
         return Ok(None);
     }
-    match s.parse::<i64>() {
-        Ok(g) if (1..=4).contains(&g) => Ok(Some(g)),
-        _ => Err(Error::Invalid("grade must be 1 to 4, or none".into())),
-    }
+    s.parse().map(Some).map_err(|_| Error::Invalid("grade must be 1 to 4, or none".into()))
 }
 
 /// A task's grade is a human's call: an agent can only raise an existing grade,
 /// not set the first one, lower it or clear it, whether by an update or by
 /// undoing or reverting someone else's.
-pub(crate) fn check_grade(ctx: &Ctx, before: Option<i64>, after: Option<i64>) -> Result<()> {
+pub(crate) fn check_grade(ctx: &Ctx, before: Option<Grade>, after: Option<Grade>) -> Result<()> {
     if ctx.is_human() || before == after {
         return Ok(());
     }
@@ -181,10 +174,6 @@ pub(crate) fn check_grade(ctx: &Ctx, before: Option<i64>, after: Option<i64>) ->
         (None, Some(_)) => Err(Error::Forbidden("only a human can set a task's first grade".into())),
         _ => Err(Error::Forbidden("only a human can lower or clear a task's grade".into())),
     }
-}
-
-fn validate_priority(p: i64) -> Result<()> {
-    if (1..=4).contains(&p) { Ok(()) } else { Err(Error::Invalid("priority must be 1 (urgent) to 4 (low)".into())) }
 }
 
 /// Agents may only finish work through review when the project requires it, and
@@ -262,9 +251,10 @@ pub struct NewTask {
     pub project: String,
     pub title: String,
     pub description: String,
-    pub priority: Option<i64>,
-    /// 1 to 4. Only a human can create a task with a grade.
-    pub grade: Option<i64>,
+    /// Defaults to [`Priority::default`].
+    pub priority: Option<Priority>,
+    /// Only a human can create a task with a grade.
+    pub grade: Option<Grade>,
     /// The day it's due. Optional when `due_at` is set: it's that time's day.
     pub due_on: Option<Date>,
     /// Times keep the offset they were written with ([`parse_at`](crate::parse_at)): without a
@@ -287,9 +277,9 @@ pub struct TaskPatch {
     pub title: Option<String>,
     pub description: Option<String>,
     pub status: Option<Status>,
-    pub priority: Option<i64>,
+    pub priority: Option<Priority>,
     /// `Some(None)` clears the grade. Agents can only raise an existing one.
-    pub grade: Option<Option<i64>>,
+    pub grade: Option<Option<Grade>>,
     /// The task this one duplicates, which needs it cancelled (set `status` in the same patch).
     /// `Some(None)` clears it. Leaving `cancelled` clears it too.
     pub duplicate_of: Option<Option<String>>,
@@ -338,7 +328,7 @@ pub enum GradeFilter {
     /// Has no grade.
     Ungraded,
     /// Has exactly this grade.
-    Is(i64),
+    Is(Grade),
 }
 
 impl GradeFilter {
@@ -348,10 +338,7 @@ impl GradeFilter {
             "graded" => Ok(Self::Graded),
             "ungraded" | "none" => Ok(Self::Ungraded),
             n => match n.parse::<i64>() {
-                Ok(g) => {
-                    validate_grade(g)?;
-                    Ok(Self::Is(g))
-                }
+                Ok(g) => Ok(Self::Is(Grade::try_from(g)?)),
                 Err(_) => Err(Error::Invalid("grade filter must be 1 to 4, graded or ungraded".into())),
             },
         }
@@ -474,11 +461,7 @@ impl Store {
         if title.is_empty() {
             return Err(Error::Invalid("title is empty".into()));
         }
-        let priority = new.priority.unwrap_or(3);
-        validate_priority(priority)?;
-        if let Some(g) = new.grade {
-            validate_grade(g)?;
-        }
+        let priority = new.priority.unwrap_or_default();
         let mut due_on = new.due_on;
         when::settle("due", &mut due_on, new.due_at.as_ref(), &new.due_tz, false)?;
         let due_at = new.due_at.as_ref().map(Zoned::timestamp);
@@ -538,7 +521,7 @@ impl Store {
                         format!("{}-{seq}", project.key),
                         title.clone(),
                         new.description.clone(),
-                        priority,
+                        i64::from(priority),
                         opt_ts_value(due_at),
                         new.due_tz.clone(),
                         opt_uuid_value(parent_id),
@@ -552,7 +535,7 @@ impl Store {
                         new.scheduled_tz.clone(),
                         opt_date_value(due_on),
                         opt_ts_value(due_by),
-                        new.grade,
+                        new.grade.map(i64::from),
                     ],
                 )
                 .await?;
@@ -590,13 +573,9 @@ impl Store {
                 after.description = d;
             }
             if let Some(p) = patch.priority {
-                validate_priority(p)?;
                 after.priority = p;
             }
             if let Some(g) = patch.grade {
-                if let Some(g) = g {
-                    validate_grade(g)?;
-                }
                 after.grade = g;
             }
             if let Some(d) = patch.due_on {
@@ -1049,7 +1028,7 @@ mod tests {
 
     #[test]
     fn parse_grade_accepts_1_to_4_and_none() {
-        assert_eq!(parse_grade("3").unwrap(), Some(3));
+        assert_eq!(parse_grade("3").unwrap(), Grade::new(3));
         assert_eq!(parse_grade(" None ").unwrap(), None);
     }
 
