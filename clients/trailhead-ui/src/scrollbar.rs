@@ -1,7 +1,7 @@
 //! A scrollbar along one edge of a scrolling area: [`scrollbar`] for the area and the way it scrolls.
 //!
-//! A vertical one lies over the area's right edge (a column's body, which keeps a gutter for it), a horizontal one along the bottom (the board).
-//! Spawn it as a child of the node that holds the area, with that node's padding or the area's own edge leaving room.
+//! A vertical one lies just outside the area's right edge, in the padding of the node that holds the area, so the area is as wide with it as without and the spacing left and right stays equal; a horizontal one along the bottom (the board).
+//! Spawn it as a child of the node that holds the area; that node needs at least `SCROLLBAR_WIDTH + SCROLLBAR_EDGE` of padding on the right.
 //! It takes its color from feathers' scrollbar tokens and hides while the area fits, so there is nothing to scroll.
 
 use bevy::ecs::template::EntityTemplate;
@@ -30,7 +30,7 @@ fn placement(orientation: ControlOrientation) -> Node {
     match orientation {
         ControlOrientation::Vertical => Node {
             position_type: PositionType::Absolute,
-            right: px(SCROLLBAR_EDGE),
+            right: px(-(SCROLLBAR_WIDTH + SCROLLBAR_EDGE)),
             top: px(0),
             bottom: px(0),
             width: px(SCROLLBAR_WIDTH),
@@ -78,6 +78,8 @@ mod tests {
     fn it_is_placed_along_the_edge_it_scrolls() {
         let v = placement(ControlOrientation::Vertical);
         assert_eq!((v.width, v.top, v.bottom), (px(SCROLLBAR_WIDTH), px(0), px(0)));
+        // Outside the area, in its holder's padding.
+        assert_eq!(v.right, px(-(SCROLLBAR_WIDTH + SCROLLBAR_EDGE)));
         let h = placement(ControlOrientation::Horizontal);
         assert_eq!((h.height, h.left, h.right), (px(SCROLLBAR_WIDTH), px(0), px(0)));
     }

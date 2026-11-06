@@ -239,6 +239,8 @@ impl Factory {
         assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
         host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
         let merge_mode = Mutex::new(config.merge.mode);
+        let status = StatusBoard::new();
+        status.queue(config.repo.queue.iter().cloned().map(TaskKey).collect());
         Factory {
             config,
             targets,
@@ -263,7 +265,7 @@ impl Factory {
             placed: Arc::default(),
             ledger: Arc::default(),
             capped: Mutex::default(),
-            status: StatusBoard::new(),
+            status,
         }
     }
 
