@@ -111,6 +111,7 @@ impl Rig {
             keyring: false,
             network: Network::Direct(lookup.clone()),
             server_url: None,
+            status_retry: Duration::from_millis(100),
         }
     }
 }
@@ -127,7 +128,7 @@ fn state(app: &App) -> Connection {
 }
 
 fn reason(app: &App) -> Option<Reason> {
-    app.world().resource::<ConnectionStatus>().reason.clone()
+    app.world().resource::<ConnectionStatus>().reason.as_ref().map(|r| r.cause().clone())
 }
 
 /// Runs the app until `done` holds, or fails with where it got stuck.
@@ -359,12 +360,19 @@ fn the_cli_server_url_comes_from_the_environment_then_the_config_then_the_defaul
 
 /// A control plane from before the status request: it forwards the API, and answers anything else with the error.
 #[derive(Debug, Clone)]
-struct OldFactory(std::net::SocketAddr);
+struct OldFactory {
+    server: std::net::SocketAddr,
+    /// Closes the connection on a status request instead of answering it, as a link that keeps dropping would.
+    drop_status: bool,
+    /// When each status request arrived.
+    asked: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+}
 
 impl iroh::protocol::ProtocolHandler for OldFactory {
     async fn accept(&self, conn: iroh::endpoint::Connection) -> Result<(), iroh::protocol::AcceptError> {
         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-            let server = self.0;
+            let (server, drop_status, asked) = (self.server, self.drop_status, self.asked.clone());
+            let conn = conn.clone();
             tokio::spawn(async move {
                 let request: serde_json::Value = read_frame(&mut recv).await.unwrap().unwrap();
                 if request["op"] == "api" {
@@ -374,7 +382,11 @@ impl iroh::protocol::ProtocolHandler for OldFactory {
                     let down = tokio::io::copy(&mut tcp_read, &mut send);
                     let _ = tokio::join!(up, down);
                     let _ = send.finish();
+                } else if request["op"] == "status" && drop_status {
+                    asked.lock().unwrap().push(std::time::Instant::now());
+                    conn.close(9u32.into(), b"gone");
                 } else {
+                    asked.lock().unwrap().push(std::time::Instant::now());
                     let unsupported = Unsupported {
                         got: request,
                         known: vec!["api".into()],
@@ -405,7 +417,9 @@ async fn a_factory_older_than_lookout_says_so() {
         .unwrap();
     let addr = endpoint.addr();
     lookup.add_endpoint_info(addr.clone());
-    let _router = Router::builder(endpoint).accept(UI_ALPN, OldFactory(rig.server)).spawn();
+    let _router = Router::builder(endpoint)
+        .accept(UI_ALPN, OldFactory { server: rig.server, drop_status: false, asked: Arc::default() })
+        .spawn();
     let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
 
     allowed_and_live(&mut app, &rig).await;
@@ -419,4 +433,113 @@ async fn a_factory_older_than_lookout_says_so() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(matches!(link(&app), FactoryLink::TooOld(_)));
+}
+
+/// Starts a factory that refuses or drops every status request, and an app dialing it. Returns the app, the times of
+/// the status requests, and the router that keeps the factory up.
+async fn app_on_old_factory(
+    rig: &Rig,
+    drop_status: bool,
+) -> (App, Arc<std::sync::Mutex<Vec<std::time::Instant>>>, Router) {
+    let lookup = Arc::new(MemoryLookup::new());
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(SecretKey::generate())
+        .relay_mode(RelayMode::Disabled)
+        .address_lookup(lookup.clone())
+        .bind()
+        .await
+        .unwrap();
+    let addr = endpoint.addr();
+    lookup.add_endpoint_info(addr.clone());
+    let asked = Arc::<std::sync::Mutex<Vec<std::time::Instant>>>::default();
+    let factory = OldFactory { server: rig.server, drop_status, asked: asked.clone() };
+    let router = Router::builder(endpoint).accept(UI_ALPN, factory).spawn();
+    (app(rig.config(&lookup), Some(addr.id.to_string())), asked, router)
+}
+
+/// The gaps between the status requests, once `count` have arrived.
+async fn gaps_after(
+    app: &mut App,
+    asked: &Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    count: usize,
+) -> Vec<Duration> {
+    for _ in 0..400 {
+        app.update();
+        if asked.lock().unwrap().len() >= count {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let times = asked.lock().unwrap().clone();
+    assert!(times.len() >= count, "only {} status requests", times.len());
+    times.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_status_request_is_retried_with_growing_gaps() {
+    let rig = Rig::new().await;
+    let (mut app, asked, _router) = app_on_old_factory(&rig, false).await;
+    allowed_and_live(&mut app, &rig).await;
+    // The retry is 100 ms here, so the gaps are about 100, 200, 400 and 800 ms.
+    let gaps = gaps_after(&mut app, &asked, 5).await;
+    for pair in gaps.windows(2) {
+        assert!(pair[1] > pair[0].mul_f32(1.5), "the gaps grow: {gaps:?}");
+    }
+    let label = app.world().resource::<FactoryStatus>().label();
+    assert!(label.contains("trying again in"), "the next try is shown: {label}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_link_reconnects_quickly() {
+    let rig = Rig::new().await;
+    let (mut app, asked, _router) = app_on_old_factory(&rig, true).await;
+    allowed_and_live(&mut app, &rig).await;
+    let gaps = gaps_after(&mut app, &asked, 5).await;
+    // Refusals would have reached 800 ms by now.
+    assert!(gaps.iter().all(|g| *g < Duration::from_millis(500)), "the retry stays quick: {gaps:?}");
+    assert!(matches!(link(&app), FactoryLink::Stopped));
+}
+
+/// A control plane whose allowlist doesn't have this Lookout: it closes every connection, and notes when.
+#[derive(Debug, Clone)]
+struct StrictFactory {
+    dialed: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+}
+
+impl iroh::protocol::ProtocolHandler for StrictFactory {
+    async fn accept(&self, conn: iroh::endpoint::Connection) -> Result<(), iroh::protocol::AcceptError> {
+        self.dialed.lock().unwrap().push(std::time::Instant::now());
+        conn.close(trailhead_daemon::ui::CLOSE_NOT_ALLOWED.into(), b"not allowed");
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lookout_that_is_not_allowed_is_dialed_with_growing_gaps() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(SecretKey::generate())
+        .relay_mode(RelayMode::Disabled)
+        .address_lookup(lookup.clone())
+        .bind()
+        .await
+        .unwrap();
+    let addr = endpoint.addr();
+    lookup.add_endpoint_info(addr.clone());
+    let dialed = Arc::<std::sync::Mutex<Vec<std::time::Instant>>>::default();
+    let _router = Router::builder(endpoint).accept(UI_ALPN, StrictFactory { dialed: dialed.clone() }).spawn();
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+
+    until(&mut app, "refused", |a| reason(a) == Some(Reason::NotAllowed)).await;
+    let from = dialed.lock().unwrap().len();
+    // Probing every 100 ms for 2 s would dial about 60 times (the probe dials twice, and the status stream once).
+    for _ in 0..40 {
+        app.update();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let dials = dialed.lock().unwrap().len() - from;
+    assert!(dials < 30, "the refusal is retried with growing gaps, but it was dialed {dials} times in 2 s");
+    let shown = app.world().resource::<ConnectionStatus>().reason.clone().unwrap().to_string();
+    assert!(shown.contains("trying again in"), "the next try is shown: {shown}");
 }

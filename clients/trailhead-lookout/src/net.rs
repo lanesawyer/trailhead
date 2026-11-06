@@ -56,6 +56,18 @@ pub enum Reason {
     Loading,
     /// The event stream dropped, and the board may be out of date until it is back.
     Reconnecting,
+    /// A refusal that won't change by itself, so the probe waits this many seconds before asking again.
+    Waiting(Box<Reason>, u64),
+}
+
+impl Reason {
+    /// The reason itself, without the wait before the next try.
+    pub fn cause(&self) -> &Reason {
+        match self {
+            Reason::Waiting(reason, _) => reason.cause(),
+            reason => reason,
+        }
+    }
 }
 
 impl std::fmt::Display for Reason {
@@ -77,6 +89,7 @@ impl std::fmt::Display for Reason {
             Reason::SigningIn => write!(f, "signing in"),
             Reason::Loading => write!(f, "loading tasks and projects"),
             Reason::Reconnecting => write!(f, "the live feed dropped: reconnecting"),
+            Reason::Waiting(reason, secs) => write!(f, "{reason}; trying again in {secs} s"),
         }
     }
 }
@@ -131,6 +144,9 @@ pub struct NetConfig {
     /// The server URL the CLI uses. When the control plane can't be reached, the board talks to the server here
     /// instead of through the tunnel. `None` keeps the tunnel as the only way in.
     pub server_url: Option<String>,
+    /// How often the link is probed, how soon the status stream is retried after a dropped link, and the first gap
+    /// after a refusal of either, which then doubles up to [`STATUS_BACKOFF_STEPS`] times.
+    pub status_retry: Duration,
 }
 
 /// How the endpoint finds the control plane.
@@ -159,6 +175,7 @@ impl NetConfig {
             keyring: CredStore::new(PathBuf::new()).keyring,
             network: Network::Internet,
             server_url: Some(cli_server_url(&trailhead_config_dir, std::env::var("TRAILHEAD_URL").ok())),
+            status_retry: STATUS_RETRY,
         })
     }
 
@@ -256,7 +273,6 @@ impl Drop for NetHandle {
     }
 }
 
-const PROBE_EVERY: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Target {
@@ -273,9 +289,57 @@ enum Via {
     Direct,
 }
 
-const STATUS_RETRY: Duration = Duration::from_secs(2);
-/// How often to ask a factory that is too old, so a reinstall takes effect without restarting Lookout.
-const STATUS_RETRY_OLD: Duration = Duration::from_secs(30);
+/// The default [`NetConfig::status_retry`].
+pub const STATUS_RETRY: Duration = Duration::from_secs(2);
+/// A refused request is asked again after 1x, 2x, 4x ... the retry, up to 2^5 = 32x (64 s by default). It is refused
+/// again until something changes, so asking at the probe rate only fills the factory's logs; a factory that is
+/// reinstalled is still found within the minute.
+pub const STATUS_BACKOFF_STEPS: u32 = 5;
+
+/// Why the factory won't serve the status stream.
+enum Refusal {
+    /// It doesn't know the request: older than this Lookout.
+    TooOld(String),
+    /// It knows the request and says no.
+    Refused(String),
+}
+
+/// What the status task has seen of the current connection.
+#[derive(Default)]
+struct Progress {
+    /// Whether the app was last told the factory is stopped; cleared by anything heard.
+    stopped: bool,
+    /// Whether the connection has served a frame, which means the factory isn't refusing us.
+    heard: bool,
+}
+
+/// The gap before the next try: the retry after a drop, and doubling from it after each refusal in a row.
+struct Backoff {
+    base: Duration,
+    refusals: u32,
+}
+
+impl Backoff {
+    fn new(base: Duration) -> Backoff {
+        Backoff { base, refusals: 0 }
+    }
+
+    fn reset(&mut self) {
+        self.refusals = 0;
+    }
+
+    /// A transient drop: back soon, without lengthening later gaps.
+    fn dropped(&self) -> Duration {
+        self.base
+    }
+
+    /// A refusal: this gap, and a longer one after the next.
+    fn refused(&mut self) -> Duration {
+        let wait = self.base * 2u32.pow(self.refusals);
+        self.refusals = (self.refusals + 1).min(STATUS_BACKOFF_STEPS);
+        wait
+    }
+}
 
 struct Net {
     config: NetConfig,
@@ -291,6 +355,10 @@ struct Net {
     /// The token that signed in, kept while `Live` so a dropped link signs back in without asking again.
     token: Option<String>,
     state: Option<(Link, Option<Reason>)>,
+    /// The gaps between probes of a refusal that will be repeated until something changes.
+    probe_backoff: Backoff,
+    /// When the probe may ask again, and the refusal it is waiting out.
+    probe_hold: Option<(tokio::time::Instant, Reason)>,
     /// The running sync, and which run it is, so a report from one that was replaced is ignored.
     sync: Option<tokio::task::JoinHandle<()>>,
     sync_run: u64,
@@ -317,6 +385,7 @@ async fn run(
     let http = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build().expect("http client");
     let (reports, mut report_rx) = tokio_mpsc::unbounded_channel();
     let mut net = Net {
+        probe_backoff: Backoff::new(config.status_retry),
         config,
         endpoint,
         http,
@@ -327,6 +396,7 @@ async fn run(
         pasted: None,
         token: None,
         state: None,
+        probe_hold: None,
         sync: None,
         sync_run: 0,
         resume: Resume::default(),
@@ -338,13 +408,14 @@ async fn run(
         None => net.set(Link::Offline, Some(Reason::NoTarget)),
     }
 
-    let mut tick = interval(PROBE_EVERY);
+    let mut tick = interval(net.config.status_retry);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             command = commands.recv() => match command {
                 Some(NetCommand::Connect(t)) => net.connect(&t).await,
                 Some(NetCommand::Login(token)) => {
+                    net.release_probe();
                     net.pasted = Some(token.trim().to_string());
                     net.check().await;
                 }
@@ -353,7 +424,9 @@ async fn run(
             },
             Some((run, report)) = report_rx.recv() => net.on_report(run, report),
             _ = tick.tick() => {
-                net.check().await;
+                if net.probe_due() {
+                    net.check().await;
+                }
                 // A slow probe mustn't be followed at once by the next, or an `Offline` is replaced before anyone sees it.
                 tick.reset();
             }
@@ -390,32 +463,58 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// One connection's worth of the status stream: the snapshot, then events until it ends. `stopped` says whether the
-/// app was last told the factory is stopped, and is cleared by anything heard. Returns whether the factory said it
-/// doesn't know the request.
+/// One connection's worth of the status stream: the snapshot, then events until it ends. Returns why the factory
+/// refused, if it did.
 async fn follow_status(
     endpoint: &Endpoint,
     id: EndpointId,
     events: &mpsc::Sender<NetEvent>,
-    stopped: &mut bool,
-) -> Result<bool, trailhead_factory::Error> {
-    let mut stream = StatusStream::open(dial_ui(endpoint, id).await?).await?;
+    progress: &mut Progress,
+) -> Result<Option<Refusal>, trailhead_factory::Error> {
+    let conn = dial_ui(endpoint, id).await?;
+    match stream_status(conn.clone(), events, progress).await {
+        Err(e) => match refusal_of(&conn, &e, progress.heard) {
+            Some(refusal) => Ok(Some(refusal)),
+            None => Err(e),
+        },
+        done => done,
+    }
+}
+
+async fn stream_status(
+    conn: iroh::endpoint::Connection,
+    events: &mpsc::Sender<NetEvent>,
+    progress: &mut Progress,
+) -> Result<Option<Refusal>, trailhead_factory::Error> {
+    let mut stream = StatusStream::open(conn).await?;
     while let Some(frame) = stream.next().await? {
         let update = match frame {
             StatusFrame::Snapshot { repos } => FactoryUpdate::Snapshot(repos),
             StatusFrame::Event { repo, event } => FactoryUpdate::Event { repo, event },
-            StatusFrame::Unsupported(unsupported) => {
-                *stopped = false;
-                let _ = events.send(NetEvent::Factory(FactoryUpdate::TooOld(too_old_message(&unsupported))));
-                return Ok(true);
-            }
+            StatusFrame::Unsupported(unsupported) => return Ok(Some(Refusal::TooOld(too_old_message(&unsupported)))),
         };
-        *stopped = false;
+        progress.stopped = false;
+        progress.heard = true;
         if events.send(NetEvent::Factory(update)).is_err() {
-            return Ok(false);
+            return Ok(None);
         }
     }
-    Ok(false)
+    Ok(None)
+}
+
+/// Whether a failed stream was the factory saying no, rather than the link dropping: the connection closed because
+/// this endpoint isn't allowed, or the stream reset before anything was served.
+fn refusal_of(conn: &iroh::endpoint::Connection, error: &trailhead_factory::Error, heard: bool) -> Option<Refusal> {
+    match conn.close_reason() {
+        Some(ConnectionError::ApplicationClosed(c)) if c.error_code == CLOSE_NOT_ALLOWED.into() => {
+            Some(Refusal::Refused(Reason::NotAllowed.to_string()))
+        }
+        Some(_) => None,
+        None if !heard && error.to_string().contains("stream reset by peer") => {
+            Some(Refusal::Refused("the factory refused the status request".into()))
+        }
+        None => None,
+    }
 }
 
 /// What the map says of a factory that didn't know our request: what it was asked, what it serves, and its build.
@@ -471,7 +570,27 @@ impl Net {
         {
             tracing::warn!(error = %e, "can't remember the control plane for next time");
         }
+        self.release_probe();
         self.check().await;
+    }
+
+    /// Whether the probe may run: not while it waits out a refusal.
+    fn probe_due(&self) -> bool {
+        self.probe_hold.as_ref().is_none_or(|(until, _)| tokio::time::Instant::now() >= *until)
+    }
+
+    /// Forgets a refusal's wait, because the target, the login or the answer changed.
+    fn release_probe(&mut self) {
+        self.probe_backoff.reset();
+        self.probe_hold = None;
+    }
+
+    /// Reports a refusal and holds the probe off for a growing gap, so a Lookout that is refused again doesn't ask
+    /// (and fill the factory's log) at the probe rate.
+    fn refused(&mut self, reason: Reason) {
+        let wait = self.probe_backoff.refused();
+        self.probe_hold = Some((tokio::time::Instant::now() + wait, reason.clone()));
+        self.set(Link::Offline, Some(Reason::Waiting(Box::new(reason), wait.as_secs().max(1))));
     }
 
     /// Forgets the control plane a failed Connect was meant to replace, so the probe doesn't go back to it and bury
@@ -499,6 +618,13 @@ impl Net {
         let mut live =
             matches!(self.state, Some((Link::Live, _) | (Link::Syncing, Some(Reason::Loading | Reason::Reconnecting))))
                 && self.pasted.is_none();
+        // A token turned down stays on show until a new login, even through the probe's "connecting".
+        let refusal = match &self.state {
+            Some((_, Some(reason))) if matches!(reason.cause(), Reason::TokenRejected | Reason::AgentToken) => {
+                Some(reason.clone())
+            }
+            _ => None,
+        };
         if !live {
             self.set(Link::Syncing, Some(Reason::Dialing));
         }
@@ -521,10 +647,15 @@ impl Net {
                 // gone leaves the board working from the server the CLI uses.
                 match (&reason, self.direct_health().await) {
                     (Reason::Unreachable(_), Some(health)) => (health, Via::Direct),
+                    (Reason::NotAllowed, _) => return self.refused(reason),
                     _ => return self.set(Link::Offline, Some(reason)),
                 }
             }
         };
+        // Health answered, so the factory isn't refusing this Lookout any more.
+        if matches!(&self.probe_hold, Some((_, Reason::NotAllowed))) {
+            self.release_probe();
+        }
         if via != self.via {
             // Moving between the tunnel and the server: sign in and sync again on the new address.
             self.via = via;
@@ -535,6 +666,7 @@ impl Net {
             Via::Direct => self.config.server_url.clone().unwrap_or_default(),
         };
         if live {
+            self.release_probe();
             // /v1/health is open to anyone, so a token revoked since sign-in shows only on an authenticated call.
             // Anything but a refusal is left to the sync, which has its own way of coping.
             if let Some(token) = &self.token
@@ -553,10 +685,10 @@ impl Net {
         let pasted = self.pasted.take();
         let Some(token) = pasted.clone().or_else(|| self.token.clone()).or(saved) else {
             // A refusal stays on show until a new login, rather than decaying into "needs login".
-            if matches!(&self.state, Some((_, Some(Reason::TokenRejected | Reason::AgentToken)))) {
-                return;
-            }
-            return self.set(Link::Offline, Some(Reason::NeedsLogin));
+            return match refusal {
+                Some(reason) => self.set(Link::Offline, Some(reason)),
+                None => self.set(Link::Offline, Some(Reason::NeedsLogin)),
+            };
         };
         self.set(Link::Syncing, Some(Reason::SigningIn));
         let me = self.http.get(format!("{base}/v1/me")).bearer_auth(&token).send().await;
@@ -565,7 +697,11 @@ impl Net {
             Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
                 self.token = None;
                 self.resume.clear();
-                return self.set(Link::Offline, Some(Reason::TokenRejected));
+                // A token just pasted is a new answer to wait for; one tried again will be rejected again.
+                return match pasted {
+                    Some(_) => self.set(Link::Offline, Some(Reason::TokenRejected)),
+                    None => self.refused(Reason::TokenRejected),
+                };
             }
             Ok(r) => {
                 return self
@@ -577,8 +713,12 @@ impl Net {
         if me["agent"]["name"].as_str().is_some() {
             self.token = None;
             self.resume.clear();
-            return self.set(Link::Offline, Some(Reason::AgentToken));
+            return match pasted {
+                Some(_) => self.set(Link::Offline, Some(Reason::AgentToken)),
+                None => self.refused(Reason::AgentToken),
+            };
         }
+        self.release_probe();
         if pasted.is_some()
             && let Some(Err(e)) = store.map(|s| s.save(Cred::User, &token))
         {
@@ -614,25 +754,43 @@ impl Net {
     fn start_status(&mut self, id: EndpointId) {
         self.stop_status();
         let (endpoint, events) = (self.endpoint.clone(), self.events.clone());
+        let mut backoff = Backoff::new(self.config.status_retry);
         self.status = Some(tokio::spawn(async move {
-            let mut stopped = false;
+            let mut progress = Progress::default();
             loop {
-                let followed = follow_status(&endpoint, id, &events, &mut stopped).await;
-                let old = matches!(followed, Ok(true));
-                if let Err(e) = followed {
-                    tracing::debug!(error = %e, "the factory status stream ended");
+                progress.heard = false;
+                let followed = follow_status(&endpoint, id, &events, &mut progress).await;
+                if progress.heard {
+                    backoff.reset();
                 }
-                if old {
-                    tokio::time::sleep(STATUS_RETRY_OLD).await;
+                let refusal = match followed {
+                    Ok(refusal) => refusal,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "the factory status stream ended");
+                        None
+                    }
+                };
+                if let Some(refusal) = refusal {
+                    let wait = backoff.refused();
+                    let retry = format!("trying again in {} s", wait.as_secs().max(1));
+                    progress.stopped = false;
+                    let update = match refusal {
+                        Refusal::TooOld(why) => FactoryUpdate::TooOld(format!("{why}; {retry}")),
+                        Refusal::Refused(why) => FactoryUpdate::Refused(format!("{why}; {retry}")),
+                    };
+                    if events.send(NetEvent::Factory(update)).is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
-                if !stopped {
-                    stopped = true;
+                if !progress.stopped {
+                    progress.stopped = true;
                     if events.send(NetEvent::Factory(FactoryUpdate::Stopped)).is_err() {
                         return;
                     }
                 }
-                tokio::time::sleep(STATUS_RETRY).await;
+                tokio::time::sleep(backoff.dropped()).await;
             }
         }));
     }
@@ -704,5 +862,20 @@ impl Net {
             Ok(ConnectionError::ApplicationClosed(c)) if c.error_code == CLOSE_NOT_ALLOWED.into() => Reason::NotAllowed,
             _ => Reason::Unreachable("the control plane is there, but the Trailhead server isn't answering".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refusals_back_off_to_a_cap_and_reset() {
+        let mut backoff = Backoff::new(Duration::from_secs(2));
+        let gaps: Vec<u64> = (0..8).map(|_| backoff.refused().as_secs()).collect();
+        assert_eq!(gaps, [2, 4, 8, 16, 32, 64, 64, 64]);
+        assert_eq!(backoff.dropped(), Duration::from_secs(2), "a drop is retried quickly even after refusals");
+        backoff.reset();
+        assert_eq!(backoff.refused(), Duration::from_secs(2));
     }
 }
