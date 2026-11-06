@@ -5,9 +5,9 @@ use uuid::Uuid;
 use crate::db::{collect, fmt_ts, get_opt_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::events::{EVENT_COLS, event_from_row};
-use crate::model::{Entity, Event, Task};
 use crate::store::{Ctx, EventIn, Store};
 use crate::tasks::{TASK_COLS, task_from_row};
+use trailhead_model::{Entity, Event, Task};
 
 /// How long before a deadline a `task.due_soon` reminder fires.
 pub const DEFAULT_REMINDER_WINDOW: SignedDuration = SignedDuration::from_hours(24);

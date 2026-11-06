@@ -1,10 +1,24 @@
+//! Trailhead's domain types and the rules about them that need no database: what a task, comment or claim is, the
+//! statuses and how they may change. `trailhead-core` re-exports all of it; clients that talk to the API
+//! (Lookout, the factory, the daemon) use it without the store.
+
 use jiff::Timestamp;
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::error::Error;
+/// A value that isn't a valid status, kind or other model value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError(pub String);
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ParseError {}
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $s:literal),+ $(,)? }) => {
@@ -26,11 +40,11 @@ macro_rules! string_enum {
         }
 
         impl std::str::FromStr for $name {
-            type Err = Error;
-            fn from_str(s: &str) -> Result<Self, Error> {
+            type Err = ParseError;
+            fn from_str(s: &str) -> Result<Self, ParseError> {
                 match s {
                     $($s => Ok($name::$variant),)+
-                    _ => Err(Error::Invalid(format!("unknown {}: {s}", stringify!($name).to_lowercase()))),
+                    _ => Err(ParseError(format!("unknown {}: {s}", stringify!($name).to_lowercase()))),
                 }
             }
         }
@@ -48,6 +62,17 @@ string_enum!(Status {
 });
 
 impl Status {
+    /// Every status, in lifecycle order.
+    pub const ALL: [Status; 7] = [
+        Status::Open,
+        Status::InProgress,
+        Status::NeedsInput,
+        Status::InReview,
+        Status::Approved,
+        Status::Done,
+        Status::Cancelled,
+    ];
+
     pub fn is_closed(self) -> bool {
         matches!(self, Status::Done | Status::Cancelled)
     }
@@ -271,3 +296,25 @@ string_enum!(Entity {
     Comment => "comment",
     Dependency => "dependency",
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statuses_round_trip_through_their_api_names() {
+        for status in Status::ALL {
+            assert_eq!(status.as_str().parse::<Status>().unwrap(), status);
+            assert_eq!(serde_json::to_value(status).unwrap(), status.as_str());
+        }
+        assert_eq!("shipped".parse::<Status>().unwrap_err().to_string(), "unknown status: shipped");
+    }
+
+    #[test]
+    fn closed_tasks_can_only_reopen() {
+        for to in Status::ALL {
+            assert_eq!(Status::Done.can_transition_to(to), matches!(to, Status::Open | Status::Done));
+        }
+        assert!(!Status::NeedsInput.can_transition_to(Status::Done));
+    }
+}

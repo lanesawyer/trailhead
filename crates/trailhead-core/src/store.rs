@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::db::{self, fmt_ts, opt_uuid_value};
 use crate::error::Result;
-use crate::model::Entity;
+use trailhead_model::Entity;
 
 pub type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 

@@ -5,8 +5,8 @@ use uuid::Uuid;
 use crate::db::{collect, first, fmt_ts, get_enum, get_json, get_opt_ts, get_ts, get_uuid, opt_ts_value};
 use crate::error::{Error, Result};
 use crate::metadata::merge_patch;
-use crate::model::{Entity, Project, ProjectStatus};
 use crate::store::{Ctx, Store, Tx};
+use trailhead_model::{Entity, Project, ProjectStatus};
 
 pub(crate) const PROJECT_COLS: &str = "id, workspace_id, key, name, brief, status, metadata, claim_ttl, require_review, version, created_at, updated_at, deleted_at, reviewers";
 

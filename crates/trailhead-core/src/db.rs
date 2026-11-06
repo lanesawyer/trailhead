@@ -149,7 +149,7 @@ pub(crate) fn get_opt_json(row: &Row, i: i32) -> Result<Option<Value>> {
     Ok(s.as_deref().map(serde_json::from_str).transpose()?)
 }
 
-pub(crate) fn get_enum<T: std::str::FromStr<Err = Error>>(row: &Row, i: i32) -> Result<T> {
+pub(crate) fn get_enum<T: std::str::FromStr<Err = trailhead_model::ParseError>>(row: &Row, i: i32) -> Result<T> {
     let s: String = row.get(i)?;
-    s.parse()
+    Ok(s.parse()?)
 }

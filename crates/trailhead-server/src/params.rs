@@ -31,6 +31,6 @@ pub fn split_list(s: Option<&str>) -> Vec<String> {
 }
 
 /// A comma-separated list of values like statuses, each parsed.
-pub fn parse_list<T: std::str::FromStr<Err = Error>>(s: Option<&str>) -> Result<Vec<T>> {
-    split_list(s).iter().map(|p| p.parse()).collect()
+pub fn parse_list<T: std::str::FromStr<Err = trailhead_core::ParseError>>(s: Option<&str>) -> Result<Vec<T>> {
+    Ok(split_list(s).iter().map(|p| p.parse()).collect::<Result<_, _>>()?)
 }

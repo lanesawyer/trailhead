@@ -10,10 +10,10 @@ use crate::db::{collect, first, fmt_ts, get_enum, get_opt_ts, get_ts, get_uuid, 
 use crate::deps::{unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
 use crate::identity::load_workspace;
-use crate::model::{Claim, Comment, Entity, Status, Task};
 use crate::projects::{load_project, validate_ttl};
 use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::{find_task, load_task, update_status};
+use trailhead_model::{Claim, Comment, Entity, Status, Task};
 
 const CLAIM_COLS: &str = "task_id, workspace_id, holder_id, on_behalf_of, claimed_at, expires_at";
 

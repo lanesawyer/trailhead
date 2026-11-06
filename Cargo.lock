@@ -8124,6 +8124,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "trailhead-model",
  "utoipa",
  "uuid",
 ]
@@ -8235,6 +8236,17 @@ dependencies = [
  "trailhead-factory",
  "trailhead-server",
  "trailhead-ui",
+ "uuid",
+]
+
+[[package]]
+name = "trailhead-model"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+ "utoipa",
  "uuid",
 ]
 

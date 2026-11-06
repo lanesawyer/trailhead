@@ -3,9 +3,9 @@ use uuid::Uuid;
 
 use crate::db::{collect, fmt_ts};
 use crate::error::{Error, Result};
-use crate::model::{Dependency, Entity, Task};
 use crate::store::{Ctx, Store, Tx};
 use crate::tasks::{TASK_COLS, find_task, task_from_row};
+use trailhead_model::{Dependency, Entity, Task};
 
 pub(crate) fn dep_entity_id(blocker: Uuid, blocked: Uuid) -> String {
     format!("{blocker}:{blocked}")

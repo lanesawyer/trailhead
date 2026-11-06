@@ -14,10 +14,10 @@ use crate::db::{
 use crate::deps::{unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
 use crate::metadata::{merge_patch, validate_path};
-use crate::model::{Claim, Comment, Entity, Status, Task};
 use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 use crate::when;
+use trailhead_model::{Claim, Comment, Entity, Status, Task};
 
 pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on, grade, duplicate_of";
 
