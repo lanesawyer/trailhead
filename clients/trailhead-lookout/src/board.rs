@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bevy::feathers::controls::{ButtonVariant, FeathersMenuPopup};
+use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
@@ -20,8 +20,8 @@ use crate::inspector::{Selection, Subject};
 use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror};
 use crate::widgets;
 use crate::widgets::{
-    Icon, Keyed, Picked, ScrollBoth, badge, button, card as card_shell, card_row, card_title, card_under, chip, field,
-    priority_tone, select, size, space, text as label_text, token, tool_button,
+    ChipEdit, ChipWords, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_row,
+    card_title, card_under, chip, field, priority_tone, select, size, space, text as label_text, token, tool_button,
 };
 use bevy::feathers::theme::ThemeToken;
 
@@ -613,7 +613,15 @@ impl Plugin for BoardUiPlugin {
             .add_observer(on_more_press)
             .add_systems(
                 Update,
-                (dress_columns, dress_cards, dress_slots, update_counts, tools_follow_connection, redraw_header)
+                (
+                    dress_columns,
+                    dress_cards,
+                    dress_slots,
+                    update_counts,
+                    tools_follow_connection,
+                    dress_header,
+                    update_header,
+                )
                     .chain()
                     .after(sync_tree)
                     .run_if(in_state(View::Board)),
@@ -677,7 +685,7 @@ fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<BoardPanel>>)
     }
 }
 
-/// The header bar, which lives across redraws of the columns so an open dropdown isn't closed under the pointer.
+/// The header bar, spawned with the panel; its widgets are spawned once and updated in place.
 #[derive(Component)]
 struct HeaderBar;
 
@@ -833,15 +841,9 @@ fn on_more_press(activate: On<Activate>, more: Query<&ColumnMore>, mut shown: Re
     }
 }
 
-/// What the header bar was last drawn from, so it is rebuilt only when one of these changes.
-#[derive(Clone, PartialEq)]
-struct HeaderDrawn {
-    bar: Entity,
-    filter: Filter,
-    options: Options,
-    connection: Connection,
-    reason: String,
-}
+/// The connection chip in the header.
+#[derive(Component)]
+struct ConnectionChip;
 
 /// The connection chip's tone, words and hint.
 fn connection_chip(
@@ -860,59 +862,120 @@ fn connection_chip(
     }
 }
 
-/// Draws the header bar: the app name, a dropdown per filter, New task, and the connection chip.
-#[allow(clippy::too_many_arguments)]
-fn redraw_header(
+/// The names a filter dropdown lists, and which is chosen. A chosen value that is no longer offered shows as "all".
+fn select_state(key: FilterKey, filter: &Filter, options: &Options) -> (Vec<String>, Option<usize>) {
+    let choices = options.of(key);
+    let mut names = vec!["all".to_string()];
+    names.extend(choices.iter().map(|c| c.label.clone()));
+    let at = filter.get(key).as_ref().and_then(|v| choices.iter().position(|c| &c.value == v)).map_or(0, |i| i + 1);
+    (names, Some(at))
+}
+
+fn closed_caption(filter: &Filter) -> &'static str {
+    if filter.closed { "closed: shown" } else { "closed: hidden" }
+}
+
+/// Spawns the header bar's widgets once, when the bar appears: the app name, a dropdown per filter, New task, and
+/// the connection chip. [`update_header`] changes them in place afterwards.
+fn dress_header(
+    bar: Query<Entity, Added<HeaderBar>>,
     view: Res<BoardView>,
     filter: Res<Filter>,
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,
-    bar: Single<(Entity, Option<&Children>), With<HeaderBar>>,
     mut commands: Commands,
-    popups: Query<&Visibility, With<FeathersMenuPopup>>,
+) {
+    for bar in &bar {
+        commands.queue_spawn_scene(label_text("Lookout", size::APP_TITLE)).insert(ChildOf(bar));
+        for key in FilterKey::ALL {
+            let (names, at) = select_state(key, &filter, &view.options);
+            let control = bsn_list! { @select(names, at, 8) FilterSelect({ key }) };
+            commands.queue_spawn_scene(field(key.name(), control)).insert(ChildOf(bar));
+        }
+        commands
+            .queue_spawn_scene(button(closed_caption(&filter), None, ButtonVariant::Normal))
+            .insert((ClosedToggle, ChildOf(bar)));
+        commands
+            .queue_spawn_scene(button("Trail map", None, ButtonVariant::Normal))
+            .insert(ChildOf(bar))
+            .observe(|_: On<Activate>, mut next: ResMut<NextState<View>>| next.set(View::Map));
+        let mut new = commands.queue_spawn_scene(button("New task", Some(Icon::Plus), ButtonVariant::Primary));
+        new.insert((Act::New, NewTask, ChildOf(bar)));
+        if *connection.get() != Connection::Live {
+            new.insert(InteractionDisabled);
+        }
+        let (tone, words, hint) = connection_chip(*connection.get(), &status);
+        commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(bar)));
+        commands.queue_spawn_scene(chip(tone, words, hint)).insert((ConnectionChip, ChildOf(bar)));
+    }
+}
+
+/// Marks the header's New task button, which is disabled while the connection isn't live.
+#[derive(Component)]
+struct NewTask;
+
+/// What the header was last updated from, so it is touched only when one of these changes.
+#[derive(Clone, PartialEq)]
+struct HeaderDrawn {
+    filter: Filter,
+    options: Options,
+    connection: Connection,
+    reason: String,
+}
+
+/// Brings the header's widgets up to date in place: each select's rows and chosen row, the closed toggle's caption,
+/// the chip, and New task's disabled state. Nothing is despawned, so a dropdown just used stays the same entity. A
+/// select whose popup is open is left alone and tried again once it has closed.
+#[allow(clippy::too_many_arguments)]
+fn update_header(
+    view: Res<BoardView>,
+    filter: Res<Filter>,
+    connection: Res<State<Connection>>,
+    status: Res<ConnectionStatus>,
+    selects: Query<(Entity, &FilterSelect)>,
+    toggle: Single<Entity, With<ClosedToggle>>,
+    new: Single<Entity, With<NewTask>>,
+    chips: Query<Entity, With<ConnectionChip>>,
+    children: Query<&Children>,
+    mut texts: Query<&mut Text, Without<ChipWords>>,
+    mut edit: SelectEdit,
+    mut chip_edit: ChipEdit,
+    mut commands: Commands,
     mut drawn: Local<Option<HeaderDrawn>>,
 ) {
-    let (bar, children) = *bar;
     let now = HeaderDrawn {
-        bar,
         filter: filter.clone(),
         options: view.options.clone(),
         connection: *connection.get(),
         reason: status.reason.as_ref().map(|r| r.to_string()).unwrap_or_default(),
     };
-    // Rebuilding the bar would close a dropdown under the pointer; it is drawn when the dropdown has closed.
-    if drawn.as_ref() == Some(&now) || popups.iter().any(|v| *v != Visibility::Hidden) {
+    if drawn.as_ref() == Some(&now) {
         return;
     }
-    for child in children.into_iter().flatten() {
-        commands.entity(*child).despawn();
+    let mut settled = true;
+    for (select, FilterSelect(key)) in &selects {
+        let (names, at) = select_state(*key, &filter, &view.options);
+        settled &= edit.set(select, &names, at);
     }
-    commands.queue_spawn_scene(label_text("Lookout", size::APP_TITLE)).insert(ChildOf(bar));
-    for key in FilterKey::ALL {
-        let choices = view.options.of(key);
-        let mut names = vec!["all".to_string()];
-        names.extend(choices.iter().map(|c| c.label.clone()));
-        // A chosen value that is no longer offered shows as "all".
-        let at = filter.get(key).as_ref().and_then(|v| choices.iter().position(|c| &c.value == v)).map_or(0, |i| i + 1);
-        let control = bsn_list! { @select(names, Some(at), 8) FilterSelect({ key }) };
-        commands.queue_spawn_scene(field(key.name(), control)).insert(ChildOf(bar));
+    let caption = closed_caption(&filter);
+    for e in children.iter_descendants(*toggle) {
+        if let Ok(mut text) = texts.get_mut(e)
+            && text.0 != caption
+        {
+            text.0 = caption.to_string();
+        }
     }
-    let caption = if filter.closed { "closed: shown" } else { "closed: hidden" };
-    commands.queue_spawn_scene(button(caption, None, ButtonVariant::Normal)).insert((ClosedToggle, ChildOf(bar)));
-    commands
-        .queue_spawn_scene(button("Trail map", None, ButtonVariant::Normal))
-        .insert(ChildOf(bar))
-        .observe(|_: On<Activate>, mut next: ResMut<NextState<View>>| next.set(View::Map));
-    let live = *connection.get() == Connection::Live;
-    let mut new = commands.queue_spawn_scene(button("New task", Some(Icon::Plus), ButtonVariant::Primary));
-    new.insert((Act::New, ChildOf(bar)));
-    if !live {
-        new.insert(InteractionDisabled);
+    if *connection.get() == Connection::Live {
+        commands.entity(*new).remove::<InteractionDisabled>();
+    } else {
+        commands.entity(*new).insert(InteractionDisabled);
     }
     let (tone, words, hint) = connection_chip(*connection.get(), &status);
-    commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(bar)));
-    commands.queue_spawn_scene(chip(tone, words, hint)).insert(ChildOf(bar));
-    *drawn = Some(now);
+    for chip in &chips {
+        chip_edit.set(chip, tone.clone(), words, &hint);
+    }
+    // A select that was open is looked at again next frame.
+    *drawn = settled.then_some(now);
 }
 
 #[cfg(test)]
@@ -923,7 +986,7 @@ mod tests {
     use crate::sync::{Snapshot, SyncItem};
 
     #[allow(clippy::type_complexity)]
-    fn input() -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
+    pub(super) fn input() -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
         let projects = vec![json!({"id": "p1", "key": "TRAIL"}), json!({"id": "p2", "key": "OPS"})];
         let task = |id: &str, key: &str, project: &str, status: &str, parent: Option<&str>, prio: i64| {
             json!({"id": id, "key": key, "title": format!("title {key}"), "project_id": project, "status": status,
@@ -948,7 +1011,7 @@ mod tests {
         (projects, tasks, claims, comments, agents)
     }
 
-    fn run(filter: &Filter) -> BoardView {
+    pub(super) fn run(filter: &Filter) -> BoardView {
         let (projects, tasks, claims, comments, agents) = input();
         build(
             Input {
@@ -1375,5 +1438,145 @@ mod in_place_tests {
         }
         let mut q = app.world_mut().query::<&ColumnMore>();
         assert_eq!(q.iter(app.world()).count(), 0, "nothing left to show");
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use bevy::state::app::StatesPlugin;
+
+    use super::tests::run;
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>()
+            .init_state::<Connection>()
+            .init_resource::<Filter>()
+            .init_resource::<ConnectionStatus>()
+            .insert_resource(run(&Filter::default()))
+            .add_systems(Update, (dress_header, update_header).chain());
+        app.world_mut().spawn(HeaderBar);
+        settle(&mut app);
+        app
+    }
+
+    fn settle(app: &mut App) {
+        for _ in 0..4 {
+            app.update();
+        }
+    }
+
+    /// Every entity under the header bar, in order.
+    fn header(app: &mut App) -> Vec<Entity> {
+        let world = app.world_mut();
+        let bar = world.query_filtered::<Entity, With<HeaderBar>>().single(world).unwrap();
+        let mut found = vec![bar];
+        let mut at = 0;
+        while at < found.len() {
+            if let Some(children) = world.get::<Children>(found[at]) {
+                found.extend(children.iter());
+            }
+            at += 1;
+        }
+        found
+    }
+
+    fn one<C: Component>(app: &mut App) -> Entity {
+        let world = app.world_mut();
+        world.query_filtered::<Entity, With<C>>().single(world).unwrap()
+    }
+
+    #[test]
+    fn the_header_has_its_widgets_once() {
+        let mut app = app();
+        let mut q = app.world_mut().query::<&FilterSelect>();
+        assert_eq!(q.iter(app.world()).count(), FilterKey::ALL.len());
+        one::<ClosedToggle>(&mut app);
+        one::<NewTask>(&mut app);
+        one::<ConnectionChip>(&mut app);
+    }
+
+    #[test]
+    fn picking_a_filter_leaves_every_widget_of_the_header_as_it_was() {
+        let mut app = app();
+        let before = header(&mut app);
+        app.world_mut().resource_mut::<Filter>().project = Some("OPS".into());
+        settle(&mut app);
+        assert_eq!(header(&mut app), before, "the same entities, the selects, toggle, chip and New task among them");
+        // The select shows the pick: its row is marked selected.
+        let mut q = app.world_mut().query::<(&FilterSelect, Entity)>();
+        let project = q.iter(app.world()).find(|(s, _)| s.0 == FilterKey::Project).unwrap().1;
+        let mut rows =
+            app.world_mut().query::<(&bevy::feathers::controls::OptionIndex, Has<bevy::ui::Selected>, Entity)>();
+        let chosen: Vec<usize> = rows
+            .iter(app.world())
+            .filter(|(_, selected, e)| *selected && is_under(app.world(), *e, project))
+            .map(|(i, _, _)| i.0)
+            .collect();
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(
+            chosen[0],
+            1 + run(&Filter::default())
+                .options
+                .of(FilterKey::Project)
+                .iter()
+                .position(|c| c.value == "p2")
+                .unwrap_or(0)
+        );
+    }
+
+    fn is_under(world: &World, mut e: Entity, ancestor: Entity) -> bool {
+        while let Some(parent) = world.get::<ChildOf>(e) {
+            e = parent.parent();
+            if e == ancestor {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn toggling_closed_and_losing_the_connection_leave_the_header_as_it_was() {
+        let mut app = app();
+        let before = header(&mut app);
+        app.world_mut().resource_mut::<Filter>().closed = true;
+        settle(&mut app);
+        assert_eq!(header(&mut app), before);
+
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Offline);
+        settle(&mut app);
+        assert_eq!(header(&mut app), before);
+        let new = one::<NewTask>(&mut app);
+        assert!(app.world().get::<InteractionDisabled>(new).is_some(), "New task is off while offline");
+
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
+        settle(&mut app);
+        assert_eq!(header(&mut app), before);
+        assert!(app.world().get::<InteractionDisabled>(new).is_none());
+    }
+
+    #[test]
+    fn new_options_rebuild_only_that_selects_rows() {
+        let mut app = app();
+        let before = header(&mut app);
+        let mut q = app.world_mut().query::<(Entity, &FilterSelect)>();
+        let project = q.iter(app.world()).find(|(_, s)| s.0 == FilterKey::Project).unwrap().0;
+        let mine: Vec<Entity> = app
+            .world()
+            .entity(project)
+            .get::<Children>()
+            .map_or(vec![], |_| before.iter().copied().filter(|e| is_under(app.world(), *e, project)).collect());
+        app.world_mut().resource_mut::<BoardView>().options.projects.pop();
+        settle(&mut app);
+        let after = header(&mut app);
+        let gone: Vec<_> = before.iter().filter(|e| !after.contains(e)).collect();
+        assert!(!gone.is_empty(), "the select's old rows are replaced");
+        for e in gone {
+            assert!(mine.contains(e), "only rows of the select that changed");
+        }
+        assert!(after.contains(&project) && after.contains(&one::<ClosedToggle>(&mut app)));
     }
 }

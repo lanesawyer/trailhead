@@ -14,6 +14,7 @@
 //! - Text: [`text`], [`text_dim`], [`text_toned`] at a [`size`]. A button's caption: [`button_text`].
 //! - An icon in text: [`icon_text`]; as a button's caption: [`button_icon`].
 //! - A panel over the content: [`panel`], with a [`layer`]. Inside it: [`section`], [`row`], [`field`].
+//! - A panel's or modal's title row with its close X: [`panel_header`]; whoever owns the panel answers the close.
 //! - A dot and a few words of state: [`chip`].
 //! - A form or dialog: a [`Modal`] marker type and [`open_modal`]; fill its [`ModalBody`], buttons in its [`ModalFooter`].
 //! - A hint over anything: put a [`Hint`] on it.
@@ -38,6 +39,7 @@ mod keyed;
 pub mod layer;
 mod menu;
 mod modal;
+mod panel_header;
 mod scroll;
 mod scrollbar;
 mod select;
@@ -47,7 +49,7 @@ mod theme;
 
 pub use badge::badge;
 pub use buttons::{button, button_text, danger_button, tool_button};
-pub use chip::{chip, dot};
+pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{field, panel, row, section};
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
@@ -58,9 +60,10 @@ pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
     open_modal,
 };
+pub use panel_header::panel_header;
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
-pub use select::{Picked, select};
+pub use select::{Picked, SelectEdit, SelectOptions, select};
 pub use spacing::{check as spacing_check, extent, radius, space};
 pub use text::{size, text, text_dim, text_toned};
 pub use theme::{paint, props as theme_props, theme, token};
