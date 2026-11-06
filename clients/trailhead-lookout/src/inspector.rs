@@ -32,8 +32,8 @@ use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror
 use crate::sync::SyncItem;
 use crate::widgets::{
     Icon, Keyed, ModalRoot, PanelTitle, Picked, SelectEdit, badge, button, danger_button, extent, layer, panel,
-    panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, text,
-    text_dim, text_toned, token, tool_button,
+    panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select, size, space,
+    status_label, text, text_dim, text_toned, token, tool_button,
 };
 use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 
@@ -81,7 +81,7 @@ impl Action {
         match self {
             Action::Release => "release claim".into(),
             Action::Cancel => "cancel task".into(),
-            Action::Status(s) => format!("move to {s}"),
+            Action::Status(s) => format!("move to {}", status_label(s)),
             Action::Resolve(_) => "resolve".into(),
             Action::Undo => "undo last change".into(),
             Action::Revert(h) => format!("revert last {h}h"),
@@ -217,7 +217,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
             let holder = input.claims.iter().find(|c| s(c, "task_id") == id).map(|c| s(c, "holder_id").to_string());
             let holder_agent = holder.as_deref().and_then(|h| agent_name(h).map(|n| (h.to_string(), n)));
 
-            let mut lines = vec![format!("status: {status}")];
+            let mut lines = vec![format!("status: {}", status_label(status))];
             match (&holder_agent, &holder) {
                 (Some((_, name)), _) => lines.push(format!("held by {name}")),
                 (None, Some(h)) => lines.push(format!("held by {}", h.chars().take(8).collect::<String>())),
@@ -638,6 +638,11 @@ fn control(controls: &mut Controls, commands: &mut Commands, subject: &Subject, 
     *controls.0.entry((subject.clone(), action.clone())).or_insert_with(|| commands.spawn(Control::Idle).id())
 }
 
+/// The status dropdown's options, read as words; its [`StatusMove`] keeps the API values it sends.
+fn status_labels(statuses: &[String]) -> Vec<String> {
+    statuses.iter().map(|s| status_label(s)).collect()
+}
+
 /// Whether a line of [`InspectorView::lines`] is about the run rather than the task's status.
 fn is_run_line(line: &str) -> bool {
     line.starts_with("run:")
@@ -841,7 +846,8 @@ fn window_labels() -> Vec<String> {
 fn note_look(note: &Option<Control>) -> (String, ThemeToken) {
     match note {
         Some(Control::Busy) => ("sending…".into(), tokens::TEXT_DIM),
-        Some(Control::Done) => ("done".into(), tokens::TEXT_DIM),
+        // The command went through: not the task's status, so not `status_label`'s.
+        Some(Control::Done) => (String::from("done"), tokens::TEXT_DIM),
         Some(Control::Refused(why)) => (why.clone(), token::DANGER),
         _ => (String::new(), tokens::TEXT_DIM),
     }
@@ -936,7 +942,7 @@ fn spawn_block(commands: &mut Commands, controls: &mut Controls, subject: &Subje
             let source = control(controls, commands, subject, &Action::Status(String::new()));
             let max_visible = statuses.len();
             let picker = commands
-                .spawn_scene(select(statuses.clone(), Some(0), max_visible))
+                .spawn_scene(select(status_labels(statuses), Some(0), max_visible))
                 .insert((StatusMove { source, subject: subject.clone(), statuses: statuses.clone() }, ChildOf(line)))
                 .id();
             let note = spawn_note(commands, line, note);
@@ -1062,7 +1068,7 @@ fn dress(
                     {
                         m.statuses = statuses.clone();
                     }
-                    if !edit.set(picker, statuses, Some(0)) {
+                    if !edit.set(picker, &status_labels(statuses), Some(0)) {
                         again.push(entity);
                     }
                 }
@@ -1110,7 +1116,8 @@ fn sync_panel(
     mut panel_node: Single<&mut Node, With<InspectorPanel>>,
     header: Single<Entity, With<InspectorHeader>>,
     body: Single<(Entity, &mut ScrollPosition), With<InspectorBody>>,
-    mut titles: Query<&mut Text, With<PanelTitle>>,
+    mut titles: Query<(Entity, &mut Text), With<PanelTitle>>,
+    parents: Query<&ChildOf>,
     mut drawn: Local<Drawn>,
     mut commands: Commands,
 ) {
@@ -1141,12 +1148,12 @@ fn sync_panel(
         return;
     };
     panel_node.display = Display::Flex;
-    if drawn.header.is_none() {
-        let root = commands.spawn_scene(panel_header(view.title.clone(), true)).insert(ChildOf(*header)).id();
-        drawn.header = Some(root);
-    }
-    for mut title in &mut titles {
-        if title.0 != view.title {
+    let root = *drawn.header.get_or_insert_with(|| {
+        commands.spawn_scene(panel_header(view.title.clone(), true)).insert(ChildOf(*header)).id()
+    });
+    // Only the inspector's own title: every modal's header is a `panel_header` too, with a `PanelTitle` of its own.
+    for (entity, mut title) in &mut titles {
+        if title.0 != view.title && parents.iter_ancestors(entity).any(|a| a == root) {
             title.0 = view.title.clone();
         }
     }
@@ -1387,6 +1394,12 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].request.path, "/v1/tasks/TRAIL-8");
         assert_eq!(sent[0].request.body, Some(json!({"status": "in_progress"})));
+    }
+
+    #[test]
+    fn the_status_dropdown_shows_words_for_the_api_values() {
+        let statuses = vec!["needs_input".to_string(), "in_progress".to_string()];
+        assert_eq!(status_labels(&statuses), ["Needs Input", "In Progress"]);
     }
 
     #[test]
@@ -1684,6 +1697,28 @@ mod in_place_tests {
         settle(&mut app);
         assert_eq!(body(&mut app), before);
         assert!(texts(&mut app).iter().any(|t| t == "nope"));
+    }
+
+    #[test]
+    fn an_update_leaves_an_open_modals_title_alone() {
+        let mut app = app();
+        let modal = app.world_mut().commands().spawn_scene(panel_header("Answer TRAIL-7", true)).id();
+        settle(&mut app);
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 301, "entity": "task", "entity_id": "t7", "kind": "task.updated",
+            "after": {"id": "t7", "key": "TRAIL-7", "title": "renamed", "status": "in_progress", "priority": 1,
+                      "version": 5},
+        })));
+        settle(&mut app);
+        assert!(texts(&mut app).iter().any(|t| t == "TRAIL-7 renamed"));
+        let world = app.world_mut();
+        let titles: Vec<String> = world
+            .query_filtered::<(Entity, &Text), With<PanelTitle>>()
+            .iter(world)
+            .filter(|(e, _)| world.get::<ChildOf>(*e).is_some_and(|c| c.parent() == modal))
+            .map(|(_, t)| t.0.clone())
+            .collect();
+        assert_eq!(titles, ["Answer TRAIL-7"]);
     }
 
     #[test]

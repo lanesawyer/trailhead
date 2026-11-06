@@ -21,7 +21,8 @@ use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror
 use crate::widgets;
 use crate::widgets::{
     ChipEdit, ChipWords, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_row,
-    card_title, card_under, chip, field, priority_tone, select, size, space, text as label_text, token, tool_button,
+    card_title, card_under, chip, field, priority_tone, select, size, space, status_label, text as label_text, token,
+    tool_button,
 };
 use bevy::feathers::theme::ThemeToken;
 
@@ -871,8 +872,9 @@ fn select_state(key: FilterKey, filter: &Filter, options: &Options) -> (Vec<Stri
     (names, Some(at))
 }
 
-fn closed_caption(filter: &Filter) -> &'static str {
-    if filter.closed { "closed: shown" } else { "closed: hidden" }
+fn closed_caption(filter: &Filter) -> String {
+    let closed = CLOSED.iter().map(|s| status_label(s)).collect::<Vec<_>>().join(" & ");
+    format!("{closed}: {}", if filter.closed { "shown" } else { "hidden" })
 }
 
 /// Spawns the header bar's widgets once, when the bar appears: the app name, a dropdown per filter, New task, and
@@ -962,7 +964,7 @@ fn update_header(
         if let Ok(mut text) = texts.get_mut(e)
             && text.0 != caption
         {
-            text.0 = caption.to_string();
+            text.0 = caption.clone();
         }
     }
     if *connection.get() == Connection::Live {
