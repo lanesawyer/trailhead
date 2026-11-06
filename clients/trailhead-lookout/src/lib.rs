@@ -8,6 +8,8 @@ pub mod commands;
 pub mod connect;
 pub mod connection;
 pub mod factory;
+#[doc(hidden)]
+pub mod fixture;
 pub mod inspector;
 pub mod map;
 pub mod mirror;

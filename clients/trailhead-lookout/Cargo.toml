@@ -36,7 +36,9 @@ trailhead-daemon = { workspace = true, features = ["net"] }
 iroh.workspace = true
 tokio = { workspace = true, features = ["time"] }
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 toml.workspace = true
 trailhead-factory.workspace = true
 directories.workspace = true
@@ -47,4 +49,3 @@ trailhead-core.workspace = true
 trailhead-server.workspace = true
 axum.workspace = true
 tempfile.workspace = true
-uuid.workspace = true
