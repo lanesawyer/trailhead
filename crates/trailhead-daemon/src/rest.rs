@@ -228,9 +228,9 @@ impl Tracker for RestTracker {
     }
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
-        let query = [("project", project), ("limit", "1000")];
-        let tasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
         let wanted = title.trim();
+        let query = [("project", project), ("title", wanted), ("limit", "100")];
+        let tasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
         Ok(tasks
             .as_array()
             .into_iter()
