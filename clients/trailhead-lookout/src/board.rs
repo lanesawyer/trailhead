@@ -9,7 +9,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bevy::feathers::controls::ButtonVariant;
+use bevy::input::keyboard::KeyboardInput;
+use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
+use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_model::{Agent, Claim, Comment, CommentKind, Project, Status, Task};
@@ -20,11 +23,12 @@ use crate::connection::{Connection, ConnectionStatus};
 use crate::factory::FactoryStatus;
 use crate::inspector::{Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
+use crate::search::{Deep, DeepHit};
 use crate::widgets;
 use crate::widgets::{
-    ChipEdit, ChipWords, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_row,
-    card_title, card_under, chip, field, priority_tone, select, size, space, status_label, text as label_text, token,
-    tool_button,
+    ChipEdit, ChipWords, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_found,
+    card_row, card_title, card_under, chip, field, priority_tone, select, size, space, spawn_search_field,
+    status_label, text as label_text, token, tool_button,
 };
 use bevy::feathers::theme::ThemeToken;
 
@@ -52,6 +56,9 @@ pub struct Filter {
     pub closed: bool,
     /// Show only the factory's tasks: those under one of its queue tasks and those with `factory` metadata from a run.
     pub factory: bool,
+    /// What the header's search box says. Narrows the board to tasks whose key or title match, and adds the ones the
+    /// server found deeper down.
+    pub query: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -191,6 +198,8 @@ pub struct Card {
     pub badges: Vec<Badge>,
     /// Edit and comment, and answer when a question is open.
     pub actions: Vec<CardAction>,
+    /// Where a search matched this task when its key and title did not: "in description: …".
+    pub found: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +224,8 @@ pub struct Input<'a> {
     pub agents: &'a [Agent],
     /// The keys of the factory's queue tasks, whose subtasks the factory works.
     pub queues: &'a [String],
+    /// What the server found for the filter's query, if it has answered it.
+    pub deep: &'a [DeepHit],
 }
 
 /// Groups the tasks passing `filter` into one column per status (empty ones included; done and cancelled
@@ -245,6 +256,12 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
             && filter.holder.as_deref().is_none_or(|h| holder_of.get(&t.id).is_some_and(|id| id.to_string() == h))
             && (!filter.factory || is_factory(t))
     };
+    let query = filter.query.trim();
+    let deep_hit = |t: &Task| input.deep.iter().find(|h| h.id == t.id.to_string());
+    let local = |t: &Task| matches_key_or_title(query, &t.key, &t.title);
+    // A task only the server found is shown with where it matched.
+    let found = |t: &Task| if query.is_empty() || local(t) { None } else { deep_hit(t).map(found_hint) };
+    let searched = |t: &Task| query.is_empty() || local(t) || deep_hit(t).is_some();
 
     let card = |t: &Task, depth: usize, with_parent: bool| {
         let mut open: Vec<&Comment> = questions.get(&t.id).cloned().unwrap_or_default();
@@ -282,10 +299,11 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
             depth,
             badges,
             actions,
+            found: found(t),
         }
     };
 
-    let shown: Vec<&Task> = input.tasks.iter().filter(|t| passes(t)).collect();
+    let shown: Vec<&Task> = input.tasks.iter().filter(|t| passes(t) && searched(t)).collect();
     let mut columns = Vec::new();
     for status in Status::ALL {
         if !filter.closed && status.is_closed() {
@@ -332,6 +350,25 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
 /// Whether a run left `factory` metadata on the task (in progress, in review, parked or waiting for a rework).
 fn has_run(t: &Task) -> bool {
     t.metadata.get("factory").is_some_and(|v| !v.is_null())
+}
+
+/// Whether every word of `query` matches the task's key or title, ignoring case. A word matches the key when it starts
+/// it (`trail-80`) or its number (`801`), so `801` finds TRAIL-801 and not TRAIL-1801; it matches the title anywhere.
+fn matches_key_or_title(query: &str, key: &str, title: &str) -> bool {
+    let (key, title) = (key.to_lowercase(), title.to_lowercase());
+    let number = key.rsplit('-').next().unwrap_or_default();
+    query.split_whitespace().map(str::to_lowercase).all(|w| {
+        key.starts_with(&w) || (w.chars().all(|c| c.is_ascii_digit()) && number.starts_with(&w)) || title.contains(&w)
+    })
+}
+
+/// The card's line for a task the server found by its description or a comment.
+fn found_hint(hit: &DeepHit) -> String {
+    let place = match hit.field.as_str() {
+        "comment" => "comment",
+        _ => "description",
+    };
+    format!("in {place}: {}", hit.snippet.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 fn short(id: Uuid) -> String {
@@ -385,12 +422,14 @@ fn rebuild_view(
     agents: Query<&Mirrored<Agent>>,
     authoring: Res<Authoring>,
     factory: Option<Res<FactoryStatus>>,
+    deep: Option<Res<Deep>>,
     mut view: ResMut<BoardView>,
 ) {
     let gone = removed.read().count() > 0;
     if !(filter.is_changed()
         || authoring.is_changed()
         || factory.as_ref().is_some_and(|f| f.is_changed())
+        || deep.as_ref().is_some_and(|d| d.is_changed())
         || mirror.is_changed()
         || gone
         || !changed.is_empty())
@@ -407,6 +446,7 @@ fn rebuild_view(
         comments: &comments,
         agents: &agents,
         queues: &queues,
+        deep: deep.as_ref().map_or(&[], |d| d.for_query(filter.query.trim())),
     };
     let next = build(input, &filter);
     if *view != next {
@@ -630,6 +670,7 @@ impl Plugin for BoardUiPlugin {
             .init_resource::<BoardScroll>()
             .add_observer(on_card_press)
             .add_observer(on_more_press)
+            .add_observer(clear_search_on_escape)
             .add_systems(
                 Update,
                 (
@@ -638,6 +679,7 @@ impl Plugin for BoardUiPlugin {
                     dress_slots,
                     update_counts,
                     tools_follow_connection,
+                    read_search_box,
                     dress_header,
                     update_header,
                 )
@@ -789,6 +831,9 @@ fn dress_cards(
         if let Some(parent) = &card.parent {
             commands.queue_spawn_scene(card_under(parent.clone())).insert(ChildOf(shell));
         }
+        if let Some(found) = &card.found {
+            commands.queue_spawn_scene(card_found(found.clone())).insert(ChildOf(shell));
+        }
         let badges = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
         for b in &card.badges {
             commands.queue_spawn_scene(badge(b.label.clone(), None, b.tone.clone())).insert(ChildOf(badges));
@@ -911,6 +956,9 @@ fn dress_header(
 ) {
     for bar in &bar {
         commands.queue_spawn_scene(label_text("Lookout", size::APP_TITLE)).insert(ChildOf(bar));
+        let search = spawn_search_field(&mut commands, "Search tasks");
+        commands.entity(search.field).insert(SearchBox);
+        commands.entity(search.entry).insert(ChildOf(bar));
         for key in FilterKey::ALL {
             let (names, at) = select_state(key, &filter, &view.options);
             let control = bsn_list! { @select(names, at, 8) FilterSelect({ key }) };
@@ -934,6 +982,30 @@ fn dress_header(
         let (tone, words, hint) = connection_chip(*connection.get(), &status);
         commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(bar)));
         commands.queue_spawn_scene(chip(tone, words, hint)).insert((ConnectionChip, ChildOf(bar)));
+    }
+}
+
+/// Tags the header's search field, the text entity that holds what is typed.
+#[derive(Component)]
+struct SearchBox;
+
+/// Copies what the search box says into the [`Filter`].
+fn read_search_box(boxes: Query<&EditableText, With<SearchBox>>, mut filter: ResMut<Filter>) {
+    let Ok(text) = boxes.single() else { return };
+    let typed = text.value().to_string();
+    if filter.query != typed {
+        filter.query = typed;
+    }
+}
+
+/// Escape in the search box empties it.
+fn clear_search_on_escape(key: On<FocusedInput<KeyboardInput>>, mut boxes: Query<&mut EditableText, With<SearchBox>>) {
+    let pressed = &key.input;
+    if pressed.key_code != KeyCode::Escape || !pressed.state.is_pressed() {
+        return;
+    }
+    if let Ok(mut text) = boxes.get_mut(key.original_event_target()) {
+        text.clear();
     }
 }
 
@@ -1079,6 +1151,7 @@ mod tests {
                 comments: &comments,
                 agents: &agents,
                 queues: &["TRAIL-102".to_string()],
+                deep: &[],
             },
             filter,
         )
@@ -1228,6 +1301,75 @@ mod tests {
         assert_eq!(names(Filter { closed: true, ..Default::default() }), Status::ALL);
     }
 
+    /// The keys on the board for a search over TRAIL-801, TRAIL-1801 and OPS-9, with the server's `deep` hits.
+    fn searched(query: &str, filter: Filter, deep: &[DeepHit]) -> Vec<String> {
+        let task = |id: &str, key: &str, title: &str, project: &str| {
+            task_json(json!({"id": id, "key": key, "title": title, "project_id": project}))
+        };
+        let tasks = typed::<Task>(vec![
+            task("t801", "TRAIL-801", "Search the board", "p1"),
+            task("t1801", "TRAIL-1801", "Fix the Migration", "p1"),
+            task("t9", "OPS-9", "Rotate the search keys", "p2"),
+        ]);
+        let projects = typed::<Project>(vec![
+            project_json(json!({"id": "p1", "key": "TRAIL"})),
+            project_json(json!({"id": "p2", "key": "OPS"})),
+        ]);
+        let view = build(
+            Input { projects: &projects, tasks: &tasks, deep, ..Default::default() },
+            &Filter { query: query.into(), ..filter },
+        );
+        let mut keys: Vec<String> = view.columns.iter().flat_map(|c| c.cards.iter().map(|c| c.key.clone())).collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn a_number_finds_that_task_and_not_one_that_merely_ends_in_it() {
+        for q in ["801", "trail-801", "TRAIL-801", " 801 "] {
+            assert_eq!(searched(q, Filter::default(), &[]), ["TRAIL-801"], "{q}");
+        }
+        assert_eq!(searched("1801", Filter::default(), &[]), ["TRAIL-1801"]);
+    }
+
+    #[test]
+    fn a_title_word_matches_in_any_case_and_every_word_must() {
+        assert_eq!(searched("SEARCH", Filter::default(), &[]), ["OPS-9", "TRAIL-801"]);
+        assert_eq!(searched("search keys", Filter::default(), &[]), ["OPS-9"]);
+        assert!(searched("nothing", Filter::default(), &[]).is_empty());
+        assert_eq!(searched("", Filter::default(), &[]).len(), 3);
+    }
+
+    #[test]
+    fn the_query_combines_with_a_filter() {
+        let ops = Filter { project: Some("OPS".into()), ..Default::default() };
+        assert_eq!(searched("search", ops, &[]), ["OPS-9"]);
+    }
+
+    #[test]
+    fn a_task_only_the_server_found_is_added_with_where_it_matched() {
+        let hit = DeepHit { id: sid("t1801"), field: "description".into(), snippet: "uses the\n  zarr  store".into() };
+        assert_eq!(searched("zarr", Filter::default(), std::slice::from_ref(&hit)), ["TRAIL-1801"]);
+        // The filter still applies to it.
+        let ops = Filter { project: Some("OPS".into()), ..Default::default() };
+        assert!(searched("zarr", ops, std::slice::from_ref(&hit)).is_empty());
+        assert_eq!(found_hint(&hit), "in description: uses the zarr store");
+        let comment = DeepHit { field: "comment".into(), ..hit };
+        assert_eq!(found_hint(&comment), "in comment: uses the zarr store");
+    }
+
+    #[test]
+    fn a_task_the_local_match_already_has_carries_no_hint() {
+        let tasks = typed::<Task>(vec![task_json(json!({"id": "t1", "key": "TRAIL-1", "title": "zarr"}))]);
+        let deep = [DeepHit { id: sid("t1"), field: "title".into(), snippet: "zarr".into() }];
+        let view = build(
+            Input { tasks: &tasks, deep: &deep, ..Default::default() },
+            &Filter { query: "zarr".into(), ..Default::default() },
+        );
+        let card = view.columns.iter().flat_map(|c| &c.cards).next().unwrap();
+        assert_eq!(card.found, None);
+    }
+
     fn many(n: usize) -> Vec<Card> {
         (0..n)
             .map(|i| Card {
@@ -1238,6 +1380,7 @@ mod tests {
                 depth: 0,
                 badges: vec![],
                 actions: vec![],
+                found: None,
             })
             .collect()
     }
@@ -1599,6 +1742,19 @@ mod header_tests {
         one::<FactoryToggle>(&mut app);
         one::<NewTask>(&mut app);
         one::<ConnectionChip>(&mut app);
+    }
+
+    #[test]
+    fn the_header_has_a_search_box_that_feeds_the_filter_and_survives_typing() {
+        let mut app = app();
+        let field = one::<SearchBox>(&mut app);
+        let before = header(&mut app);
+        assert!(before.contains(&field));
+        app.add_systems(Update, read_search_box);
+        app.world_mut().entity_mut(field).insert(EditableText::new("trail-8"));
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Filter>().query, "trail-8");
+        assert_eq!(header(&mut app), before);
     }
 
     #[test]

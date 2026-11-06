@@ -9,6 +9,7 @@ use crate::commands::{CommandsPlugin, Reply};
 use crate::factory::{FactoryItem, FactoryPlugin, apply_factory};
 use crate::mirror::{MirrorPlugin, apply_sync};
 use crate::net::{ApiAccess, Link, NetCommand, NetConfig, NetEvent, NetHandle, Reason};
+use crate::search::{SearchPlugin, SearchReply};
 use crate::sync::SyncItem;
 
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,7 +74,7 @@ impl Plugin for ConnectionPlugin {
         app.init_state::<Connection>()
             .init_resource::<ConnectionStatus>()
             .init_resource::<LocalEndpoint>()
-            .add_plugins((MirrorPlugin, FactoryPlugin, CommandsPlugin))
+            .add_plugins((MirrorPlugin, FactoryPlugin, CommandsPlugin, SearchPlugin))
             .add_message::<SendNet>()
             .insert_resource(Net(NetHandle::spawn(self.config.clone(), self.target.clone())))
             .add_systems(PreUpdate, (forward_commands, apply_events.before(apply_sync).before(apply_factory)).chain());
@@ -97,6 +98,7 @@ fn apply_events(
     mut sync: MessageWriter<SyncItem>,
     mut factory: MessageWriter<FactoryItem>,
     mut replies: MessageWriter<Reply>,
+    mut searches: MessageWriter<SearchReply>,
 ) {
     for event in net.0.drain() {
         match event {
@@ -108,6 +110,9 @@ fn apply_events(
             NetEvent::Access(access) => commands.insert_resource(Api(access)),
             NetEvent::Reply(reply) => {
                 replies.write(reply);
+            }
+            NetEvent::Search(reply) => {
+                searches.write(reply);
             }
             NetEvent::Sync(item) => {
                 sync.write(item);
