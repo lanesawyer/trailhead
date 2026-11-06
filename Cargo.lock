@@ -8106,6 +8106,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "trailhead-core",
  "trailhead-factory",
  "trailhead-testkit",
@@ -8229,6 +8230,7 @@ dependencies = [
  "bevy",
  "directories",
  "iroh",
+ "png",
  "reqwest",
  "serde",
  "serde_json",
@@ -8244,6 +8246,7 @@ dependencies = [
  "trailhead-server",
  "trailhead-ui",
  "uuid",
+ "winit",
 ]
 
 [[package]]

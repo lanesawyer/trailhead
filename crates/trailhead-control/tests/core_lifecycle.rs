@@ -1172,3 +1172,110 @@ async fn a_task_that_blocks_urgent_work_is_listed_as_urgent_too() {
     let ran = r.factory.tick().await.unwrap();
     assert_eq!(ran.iter().map(|(t, _)| &t.key).collect::<Vec<_>>(), [&blocker], "before the older p3 task");
 }
+
+/// Gives `key` factory run metadata, as a run leaves on its task.
+async fn with_run(r: &Rig, key: &TaskKey) {
+    let run = RunUpdate { attempt: Some(1), sandbox: Some("run".into()), ..Default::default() };
+    r.tracker.report(key, run).await.unwrap();
+}
+
+async fn subtask(r: &Rig, queue: &TaskKey, title: &str) -> TaskKey {
+    let new =
+        NewTask { project: "TRAIL".into(), title: title.into(), parent: Some(queue.0.clone()), ..Default::default() };
+    TaskKey(r.store.create_task(&r.human, new).await.unwrap().key)
+}
+
+/// A factory for another repo on the rig's store, working `queue` on the given host.
+fn factory_for(r: &Rig, name: &str, queue: &TaskKey, host: Arc<Host>) -> Factory {
+    let config = CONFIG.replace("name = \"trailhead\"", &format!("name = \"{name}\"\nqueue = \"{}\"", queue.0));
+    Factory::new(
+        FactoryConfig::parse_table(&config, "TRAIL", None).unwrap(),
+        Arc::new(r.compute.clone()),
+        Arc::new(r.tracker.clone()),
+        Arc::new(FakeProvider::new(1)),
+        r.daemon.clone(),
+        host,
+    )
+}
+
+#[derive(Clone, Default)]
+struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+    type Writer = Logs;
+    fn make_writer(&'a self) -> Logs {
+        self.clone()
+    }
+}
+
+impl Logs {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+#[tokio::test]
+async fn strays_are_open_factory_tasks_outside_every_queue() {
+    let r = rig().await;
+    let queue = r.task("Queue").await;
+    let other = r.task("Other queue").await;
+    let queues = [queue.clone(), other.clone()];
+
+    let inside = subtask(&r, &queue, "Inside").await;
+    let inside_other = subtask(&r, &other, "Inside the other").await;
+    let outside = r.task("Moved out").await;
+    let closed = r.task("Moved out, then closed").await;
+    let plain = r.task("No factory metadata").await;
+    for key in [&inside, &inside_other, &outside, &closed] {
+        with_run(&r, key).await;
+    }
+    let done = TaskPatch { status: Some(trailhead_core::Status::Done), ..Default::default() };
+    r.store.update_task(&r.human, &closed.0, done, None).await.unwrap();
+
+    let strays = r.tracker.strays("TRAIL", &queues).await.unwrap();
+    assert_eq!(strays.iter().map(|t| &t.key).collect::<Vec<_>>(), [&outside]);
+    assert!(!strays.iter().any(|t| t.key == plain));
+    // Without a queue named, the task that sat outside it is outside nothing: only the queues' own tasks count.
+    let strays = r.tracker.strays("TRAIL", std::slice::from_ref(&queue)).await.unwrap();
+    let mut keys: Vec<_> = strays.iter().map(|t| t.key.clone()).collect();
+    keys.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(keys, [inside_other, outside]);
+}
+
+#[tokio::test]
+async fn a_stray_is_warned_about_once_across_reconciles_and_not_for_a_sibling_repos_queue() {
+    let r = rig().await;
+    let q1 = r.task("Alpha's queue").await;
+    let q2 = r.task("Beta's queue").await;
+    let host = Host::new(None);
+    let alpha = factory_for(&r, "alpha", &q1, host.clone());
+    let _beta = factory_for(&r, "beta", &q2, host);
+
+    // Beta's run is live under beta's queue; alpha sees the shared queues, so it isn't a stray.
+    let beta_task = subtask(&r, &q2, "Beta's task").await;
+    with_run(&r, &beta_task).await;
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    alpha.reconcile().await.unwrap();
+    assert!(!logs.text().contains(&beta_task.0), "{}", logs.text());
+
+    let stray = r.task("Moved out of every queue").await;
+    with_run(&r, &stray).await;
+    alpha.reconcile().await.unwrap();
+    alpha.reconcile().await.unwrap();
+    let text = logs.text();
+    assert_eq!(text.matches(&stray.0).count(), 1, "{text}");
+    assert!(!text.contains(&beta_task.0), "{text}");
+}
