@@ -39,6 +39,9 @@ Decided: gates per grade are configurable per repo, in `.trailhead.toml`. The ta
 4 = [".github/**", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE", "**/Cargo.lock", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/uv.lock", "**/poetry.lock", "**/go.sum", "**/Gemfile.lock"]
 max_lines = 600          # bigger diffs are at least grade 3
 
+# A Cargo.lock whose patch only edits dependency lists (a member gaining a dependency that is already locked) does not
+# match its rule; a new [[package]], or a changed version, source or checksum, or a patch the host omits, does.
+
 [factory.gates.1]
 require = ["checks", "ci"]
 auto_merge = true
