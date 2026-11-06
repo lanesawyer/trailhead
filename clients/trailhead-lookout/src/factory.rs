@@ -33,6 +33,9 @@ pub enum FactoryUpdate {
     /// The control plane answered a request with "I don't know that": it is older than this Lookout. Carries the
     /// message to show.
     TooOld(String),
+    /// The control plane refused the status request (this Lookout isn't allowed, or it serves no status). Carries the
+    /// message to show, which says when the next try is.
+    Refused(String),
 }
 
 /// A [`FactoryUpdate`] on its way to the mirror.
@@ -65,6 +68,9 @@ pub enum FactoryLink {
     Stopped,
     /// Reachable, but older than this Lookout: it doesn't know the status request. The message says what to do.
     TooOld(String),
+    /// The control plane refused the status request (this Lookout isn't allowed, or it serves no status). Carries the
+    /// message to show, which says when the next try is.
+    Refused(String),
 }
 
 /// One repo's control plane state.
@@ -100,7 +106,7 @@ impl FactoryStatus {
             FactoryLink::Unknown => "factory: connecting".into(),
             FactoryLink::Running => "factory running".into(),
             FactoryLink::Stopped => "factory stopped".into(),
-            FactoryLink::TooOld(why) => why.clone(),
+            FactoryLink::TooOld(why) | FactoryLink::Refused(why) => why.clone(),
         }
     }
 
@@ -300,6 +306,7 @@ pub fn apply_factory(
             FactoryUpdate::Event { repo, event } => mirror.apply_event(&mut commands, &mut status, &repo, event),
             FactoryUpdate::Stopped => status.link = FactoryLink::Stopped,
             FactoryUpdate::TooOld(why) => status.link = FactoryLink::TooOld(why),
+            FactoryUpdate::Refused(why) => status.link = FactoryLink::Refused(why),
         }
     }
 }
@@ -444,5 +451,12 @@ mod tests {
         let mut app = app();
         send(&mut app, [FactoryUpdate::TooOld("reinstall it".into())]);
         assert_eq!(app.world().resource::<FactoryStatus>().label(), "reinstall it");
+    }
+
+    #[test]
+    fn a_refused_request_shows_why_and_when_it_is_tried_again() {
+        let mut app = app();
+        send(&mut app, [FactoryUpdate::Refused("not allowed; trying again in 8 s".into())]);
+        assert_eq!(app.world().resource::<FactoryStatus>().label(), "not allowed; trying again in 8 s");
     }
 }

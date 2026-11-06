@@ -36,7 +36,10 @@ pub fn allow_command(endpoint: &LocalEndpoint) -> Option<String> {
 
 /// Whether the server is waiting for a token, so the token field is worth showing.
 pub fn wants_token(status: &ConnectionStatus) -> bool {
-    matches!(status.reason, Some(Reason::NeedsLogin | Reason::TokenRejected | Reason::AgentToken))
+    matches!(
+        status.reason.as_ref().map(Reason::cause),
+        Some(Reason::NeedsLogin | Reason::TokenRejected | Reason::AgentToken)
+    )
 }
 
 /// Sends what was typed when Connect or Sign in is pressed. The fields keep their text, so a typo can be fixed and
