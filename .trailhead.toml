@@ -9,8 +9,8 @@ project = "TRAIL"
 max_sandboxes = 1
 # Until TRAIL-159 and TRAIL-172 stop infrastructure blips counting, leave room for a few.
 max_attempts = 5
-# Only subtasks of these tasks are the factory's work: general work, and the Bevy UI (TRAIL-685).
-queue = ["TRAIL-102", "TRAIL-685"]
+# Only subtasks of these tasks are the factory's work: general work, the Bevy UI (TRAIL-685), and its kit, trailhead-ui (TRAIL-888).
+queue = ["TRAIL-102", "TRAIL-685", "TRAIL-888"]
 
 [factory.compute]
 kind = "docker"

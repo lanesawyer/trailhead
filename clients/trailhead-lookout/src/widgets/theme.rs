@@ -35,6 +35,12 @@ pub mod token {
     /// Something that went well: a passed gate, a live connection.
     pub const OK: ThemeToken = ThemeToken::new_static("lookout.ok");
 
+    /// One tone per priority, the same wherever a priority shows: P1 red, P2 orange, P3 blue, P4 gray.
+    pub const PRIORITY_1: ThemeToken = ThemeToken::new_static("lookout.priority.1");
+    pub const PRIORITY_2: ThemeToken = ThemeToken::new_static("lookout.priority.2");
+    pub const PRIORITY_3: ThemeToken = ThemeToken::new_static("lookout.priority.3");
+    pub const PRIORITY_4: ThemeToken = ThemeToken::new_static("lookout.priority.4");
+
     /// One background per status column, in lifecycle order.
     pub const STATUS_OPEN: ThemeToken = ThemeToken::new_static("lookout.status.open");
     pub const STATUS_IN_PROGRESS: ThemeToken = ThemeToken::new_static("lookout.status.in_progress");
@@ -56,6 +62,17 @@ pub fn status_token(status: &str) -> ThemeToken {
         "done" => token::STATUS_DONE,
         "cancelled" => token::STATUS_CANCELLED,
         _ => token::BOARD_BG,
+    }
+}
+
+/// The tone of priority `p` (1 to 4), the same wherever a priority is shown. Any other number has none.
+pub fn priority_tone(p: i64) -> Option<ThemeToken> {
+    match p {
+        1 => Some(token::PRIORITY_1),
+        2 => Some(token::PRIORITY_2),
+        3 => Some(token::PRIORITY_3),
+        4 => Some(token::PRIORITY_4),
+        _ => None,
     }
 }
 
@@ -81,6 +98,11 @@ pub fn props() -> ThemeProps {
     paint(&mut theme, &token::WARN, Color::oklch(0.80, 0.14, 75.0));
     paint(&mut theme, &token::DANGER, Color::oklch(0.68, 0.17, 25.0));
     paint(&mut theme, &token::OK, Color::oklch(0.75, 0.14, 150.0));
+
+    paint(&mut theme, &token::PRIORITY_1, Color::oklch(0.68, 0.17, 25.0));
+    paint(&mut theme, &token::PRIORITY_2, Color::oklch(0.76, 0.15, 60.0));
+    paint(&mut theme, &token::PRIORITY_3, Color::oklch(0.70, 0.13, 250.0));
+    paint(&mut theme, &token::PRIORITY_4, Color::oklch(0.65, 0.0, 0.0));
 
     // Columns tinted just enough to tell apart, each toward the hue of what the status means.
     let column = |hue: f32| Color::oklch(0.24, 0.025, hue);
@@ -119,6 +141,10 @@ mod tests {
             token::WARN,
             token::DANGER,
             token::OK,
+            token::PRIORITY_1,
+            token::PRIORITY_2,
+            token::PRIORITY_3,
+            token::PRIORITY_4,
             token::STATUS_OPEN,
             token::STATUS_IN_PROGRESS,
             token::STATUS_NEEDS_INPUT,
@@ -132,6 +158,19 @@ mod tests {
         }
         // Feathers' own controls still resolve.
         assert!(theme.token_assignments.contains_key(&tokens::BUTTON_BG));
+    }
+
+    #[test]
+    fn each_priority_has_its_own_token_and_color() {
+        let theme = props();
+        let colors: Vec<Color> =
+            (1..=4).map(|p| theme.semantic_base[&theme.token_assignments[&priority_tone(p).unwrap()]]).collect();
+        for (i, a) in colors.iter().enumerate() {
+            for b in &colors[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert!(priority_tone(0).is_none() && priority_tone(5).is_none());
     }
 
     #[test]
