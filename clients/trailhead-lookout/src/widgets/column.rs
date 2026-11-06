@@ -10,7 +10,7 @@ use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::prelude::*;
 use bevy::ui_widgets::ControlOrientation;
 
-use super::{SCROLLBAR_WIDTH, ScrollDown, radius, scrollbar, size, space, status_token, text, text_dim};
+use super::{SCROLLBAR_WIDTH, ScrollDown, radius, scrollbar, size, space, status_label, status_token, text, text_dim};
 
 /// How wide every column is.
 pub const COLUMN_WIDTH: f32 = 260.0;
@@ -74,7 +74,7 @@ pub struct ColumnCount(pub Entity);
 pub fn column_header(commands: &mut Commands, shell: Entity, status: &str, count: usize) {
     let header =
         commands.spawn(Node { column_gap: px(space::CONTROLS), align_items: AlignItems::Baseline, ..default() }).id();
-    commands.queue_spawn_scene(text(status.to_string(), size::HEADING)).insert(ChildOf(header));
+    commands.queue_spawn_scene(text(status_label(status), size::HEADING)).insert(ChildOf(header));
     commands.queue_spawn_scene(text_dim(count.to_string(), size::SMALL)).insert((ColumnCount(shell), ChildOf(header)));
     commands.entity(shell).insert_children(0, &[header]);
 }
@@ -106,6 +106,24 @@ mod tests {
         assert_eq!(node.height, Val::Auto);
         assert_eq!(node.max_height, percent(100));
         assert_eq!(node.align_self, AlignSelf::FlexStart);
+    }
+
+    #[test]
+    fn the_header_names_the_status_in_words() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let shell = app.world_mut().spawn(column_shell("in_progress")).id();
+        column_header(&mut app.world_mut().commands(), shell, "in_progress", 3);
+        app.world_mut().flush();
+        for _ in 0..3 {
+            app.update();
+        }
+        let world = app.world_mut();
+        let shown: Vec<String> = world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect();
+        assert!(shown.contains(&"In Progress".to_string()), "{shown:?}");
+        assert!(!shown.contains(&"in_progress".to_string()), "{shown:?}");
     }
 
     #[test]
