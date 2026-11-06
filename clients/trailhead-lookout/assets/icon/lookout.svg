@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- The source of the PNGs: src/icon.rs draws the same shapes. Colors are the kit's palette::ACCENT and WHITE. -->
+  <rect width="256" height="256" rx="56.32" fill="#206ec9"/>
+  <g fill="#ffffff">
+    <rect x="43.52" y="64" width="76.8" height="25.6"/>
+    <rect x="69.12" y="64" width="25.6" height="128"/>
+    <rect x="135.68" y="64" width="25.6" height="128"/>
+    <rect x="135.68" y="166.4" width="76.8" height="25.6"/>
+  </g>
+</svg>
