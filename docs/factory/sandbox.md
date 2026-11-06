@@ -54,6 +54,33 @@ build     = "cargo build"
 - **Policy refers to names.** Gates say which checks must pass (`require = ["fmt", "lint", "test"]`), so policy reads the same across stacks.
 - **Onboarding.** An agent can inspect a new repo and propose `[factory.stack]` and `[factory.checks]` for a human to confirm.
 
+### A TypeScript repo
+
+The stack installs Node and pnpm, so the image needs neither (TRAIL-667; it replaces the Node the Docker image carried as a stopgap, TRAIL-650):
+
+```toml
+[factory.stack]
+tools = { node = "26", pnpm = "10" }
+
+[factory.egress]
+install = ["registry.npmjs.org"]
+
+[factory.checks]
+setup     = "pnpm install --frozen-lockfile"
+trim      = "rm -rf node_modules/.cache && pnpm store prune"
+fmt       = "pnpm exec prettier --check ."
+lint      = "pnpm exec eslint ."
+typecheck = "pnpm exec tsc --noEmit"
+test      = "pnpm test"
+build     = "pnpm build"
+```
+
+- **Tool hosts.** `node` opens `nodejs.org` and `pnpm` the GitHub hosts (the table under "Egress policy"), only while the tools install. `registry.npmjs.org` is for the repo's dependencies, and is the repo's to list in `[factory.egress] install`, since the tools' hosts don't cover it.
+- **`setup` installs everything the checks need.** The agent phase has no registry access, so a dependency `setup` didn't install can't be fetched later (unless the repo keeps the registry in `[factory.egress] always`, above). Anything the checks run (a type-checker, a browser for end-to-end tests) has to be in `setup` too. Use the lockfile-exact install so `setup` doesn't rewrite the lockfile, which would be a grade 4 change.
+- **`trim`.** See "Keeping warm images small"; keep `node_modules`.
+- **Not documented: `packageManager` and corepack.** Node 25 and later don't bundle corepack, so the `packageManager` field isn't how pnpm arrives here; the stack's `pnpm` is. That flow is untested, so a repo shouldn't rely on it.
+- **Untested.** That `pnpm` installs through the Docker gateway with only the hosts above hasn't been run (only `node` and `rust` have been tried); the host table's `pnpm` entry comes from reading aqua's registry. Run it with `mise run test-live-docker` or a small TypeScript repo before trusting this page, and correct the table if it needs another host.
+
 This lives in the per-repo factory file, with agent profiles ([agents.md](agents.md)) and gate policy ([review.md](review.md)).
 
 ## Bootstrap and checkpoints
