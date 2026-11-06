@@ -15,6 +15,8 @@ bevy = { version = "0.20", default-features = false, features = [
     "bevy_state",
     "multi_threaded",
     "ui_bevy_render",
+    # Hover, pointer events and Pickable; without it the kit builds only beside an app that turns it on.
+    "ui_picking",
     "bevy_ui_widgets",
     "bevy_feathers",
     "bevy_scene",
