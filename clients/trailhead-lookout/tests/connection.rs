@@ -14,6 +14,7 @@ use trailhead_core::{Ctx, NewProject, Principal, Store};
 use trailhead_daemon::net::{read_frame, write_frame};
 use trailhead_daemon::ui::{RepoFeed, StatusFeed, StatusFrame, UI_ALPN, UiAllowlist, UiProtocol, Unsupported};
 use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, SandboxState, SandboxStatus, Sequenced};
+use trailhead_lookout::board;
 use trailhead_lookout::connection::{Api, Connection, ConnectionPlugin, ConnectionStatus, LocalEndpoint, SendNet};
 use trailhead_lookout::factory::{Campsite, FactoryLink, FactoryStatus};
 use trailhead_lookout::net::{NetCommand, NetConfig, Network, Reason};
@@ -277,6 +278,12 @@ fn link(app: &App) -> FactoryLink {
     app.world().resource::<FactoryStatus>().link.clone()
 }
 
+/// The words on the header's connection chip for the app's current links.
+fn chip_words(app: &App) -> &'static str {
+    let w = app.world();
+    board::connection_chip(state(app), w.resource::<ConnectionStatus>(), &w.resource::<FactoryStatus>().link).1
+}
+
 async fn allowed_and_live(app: &mut App, rig: &Rig) {
     until(app, "endpoint id", |a| a.world().resource::<LocalEndpoint>().0.is_some()).await;
     rig.allowed.add(app.world().resource::<LocalEndpoint>().0.clone().unwrap().parse().unwrap()).unwrap();
@@ -324,6 +331,8 @@ async fn when_the_factory_stops_the_last_state_stays_and_the_board_uses_the_serv
         state(a) == Connection::Live && a.world().resource::<Api>().0.base == direct
     })
     .await;
+    // The server is up but the factory is not: the chip is not green.
+    assert_eq!(chip_words(&app), "Factory down");
     let api = &app.world().resource::<Api>().0;
     let me = reqwest::Client::new().get(format!("{}/v1/me", api.base)).bearer_auth(&api.token).send().await.unwrap();
     assert!(me.status().is_success());
@@ -334,6 +343,7 @@ async fn when_the_factory_stops_the_last_state_stays_and_the_board_uses_the_serv
         link(a) == FactoryLink::Running && state(a) == Connection::Live && a.world().resource::<Api>().0.base == tunnel
     })
     .await;
+    assert_eq!(chip_words(&app), "Live");
 }
 
 #[tokio::test(flavor = "multi_thread")]
