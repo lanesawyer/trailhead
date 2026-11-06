@@ -96,7 +96,7 @@ pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
-pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
+pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
 pub use search::{ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field};
 pub use select::{Picked, SelectEdit, SelectOptions, select};
 pub use skeleton::{SkeletonBar, spawn_skeleton};

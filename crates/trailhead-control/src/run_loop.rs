@@ -455,9 +455,23 @@ impl Factory {
         }
         let mut parked = HashSet::new();
         let mut released = Vec::new();
+        // One listing stands in for a lookup per sandbox: parked tasks, the common case, are in it. Only a task it
+        // lacks (finished, cancelled, re-parented) is looked up on its own (TRAIL-258).
+        let listed: HashMap<TaskKey, Task> = match self.tracker.in_flight(self.project(), &self.queue()).await {
+            Ok(tasks) => tasks.into_iter().map(|t| (t.key.clone(), t)).collect(),
+            Err(e) => {
+                // Debug, not warn: this runs every poll, and the fallback below works, with its own warnings.
+                tracing::debug!(error = %e, "couldn't list the tasks in flight; looking parked ones up one by one");
+                HashMap::new()
+            }
+        };
         for sandbox in candidates {
             let Some(key) = sandbox.labels.get(label::TASK) else { continue };
-            let task = match self.tracker.show(&TaskKey(key.clone())).await {
+            let found = match listed.get(&TaskKey(key.clone())) {
+                Some(task) => Ok(task.clone()),
+                None => self.tracker.show(&TaskKey(key.clone())).await,
+            };
+            let task = match found {
                 Ok(task) if matches!(task.status, Status::Open | Status::Cancelled | Status::Done) => task,
                 Ok(task) => {
                     // The wait before a sandbox is given up (`release_parked_after`) counts from the first look.
