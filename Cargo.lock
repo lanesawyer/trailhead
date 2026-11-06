@@ -8080,6 +8080,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "bytes",
  "futures-util",
  "http 1.5.0",
  "reqwest",
@@ -8106,6 +8107,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "trailhead-core",
  "trailhead-factory",
  "trailhead-testkit",
@@ -8139,6 +8141,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "bytes",
  "clap",
  "hex",
  "hmac",
@@ -8168,6 +8171,7 @@ name = "trailhead-factory"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "globset",
  "serde",
@@ -8229,6 +8233,8 @@ dependencies = [
  "bevy",
  "directories",
  "iroh",
+ "jiff",
+ "png",
  "reqwest",
  "serde",
  "serde_json",
@@ -8244,6 +8250,7 @@ dependencies = [
  "trailhead-server",
  "trailhead-ui",
  "uuid",
+ "winit",
 ]
 
 [[package]]

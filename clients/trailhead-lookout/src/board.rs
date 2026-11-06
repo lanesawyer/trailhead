@@ -6,7 +6,7 @@
 //! keeps a [`BoardView`] from the mirror and the [`Filter`]; [`BoardUiPlugin`] draws it with feathers, greyed out
 //! with the reason whenever the connection isn't [`Connection::Live`].
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bevy::feathers::controls::ButtonVariant;
 use bevy::input::keyboard::KeyboardInput;
@@ -15,12 +15,13 @@ use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
+use jiff::Timestamp;
 use trailhead_model::{Agent, Claim, Comment, CommentKind, Project, Status, Task};
 use uuid::Uuid;
 
 use crate::author::{Act, Authoring};
 use crate::connection::{Connection, ConnectionStatus};
-use crate::factory::FactoryStatus;
+use crate::factory::{FactoryLink, FactoryStatus, Run};
 use crate::inspector::{Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::search::{Deep, DeepHit};
@@ -222,10 +223,20 @@ pub struct Input<'a> {
     pub claims: &'a [Claim],
     pub comments: &'a [Comment],
     pub agents: &'a [Agent],
+    /// The runs in flight, which name a holder the agent list hasn't caught up with.
+    pub runs: &'a [Run],
     /// The keys of the factory's queue tasks, whose subtasks the factory works.
     pub queues: &'a [String],
     /// What the server found for the filter's query, if it has answered it.
     pub deep: &'a [DeepHit],
+    /// The time claims are judged against: core expires them lazily, so one past its `expires_at` may still be
+    /// in the mirror.
+    pub now: Timestamp,
+}
+
+/// The first moment a claim still live at `now` runs out, if any does.
+fn next_expiry(claims: &[Claim], now: Timestamp) -> Option<Timestamp> {
+    claims.iter().filter(|c| c.is_live(now)).filter_map(|c| c.expires_at).min()
 }
 
 /// Groups the tasks passing `filter` into one column per status (empty ones included; done and cancelled
@@ -236,8 +247,18 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
     let task_key: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.key.as_str())).collect();
     let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
     // The claim is keyed by its task.
-    let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
-    let holder_label = |id: Uuid| agent_name.get(&id).map_or_else(|| short(id), |n| n.to_string());
+    let holder_of: HashMap<Uuid, Uuid> =
+        input.claims.iter().filter(|c| c.is_live(input.now)).map(|c| (c.task_id, c.holder_id)).collect();
+    let running: HashSet<&str> = input.runs.iter().map(|r| r.status.task.0.as_str()).collect();
+    // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
+    // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
+    let holder_label = |task: Uuid, id: Uuid| match agent_name.get(&id) {
+        Some(n) => n.to_string(),
+        None => match task_key.get(&task) {
+            Some(k) if running.contains(k) => format!("factory/{}", k.to_lowercase()),
+            _ => short(id),
+        },
+    };
     let parent_key = |t: &Task| t.parent_id.and_then(|p| task_key.get(&p).copied());
 
     let mut questions: HashMap<Uuid, Vec<&Comment>> = HashMap::new();
@@ -278,7 +299,11 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
             badges.push(Badge { kind: BadgeKind::NeedsGrade, label: "needs grade".into(), tone: Some(token::WARN) });
         }
         if let Some(holder) = holder_of.get(&t.id) {
-            badges.push(Badge { kind: BadgeKind::Holder, label: holder_badge(&holder_label(*holder)), tone: None });
+            badges.push(Badge {
+                kind: BadgeKind::Holder,
+                label: holder_badge(&holder_label(t.id, *holder)),
+                tone: None,
+            });
         }
         if !open.is_empty() {
             badges.push(Badge {
@@ -339,8 +364,8 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         keys.into_iter().map(|(k, t)| choice(k, parent_label(k, t))).collect()
     };
     let holders = {
-        let ids: BTreeSet<Uuid> = holder_of.values().copied().collect();
-        let mut v: Vec<Choice> = ids.into_iter().map(|id| choice(&id.to_string(), holder_label(id))).collect();
+        let ids: BTreeMap<Uuid, Uuid> = holder_of.iter().map(|(t, h)| (*h, *t)).collect();
+        let mut v: Vec<Choice> = ids.into_iter().map(|(id, t)| choice(&id.to_string(), holder_label(t, id))).collect();
         v.sort_by(|a, b| a.label.cmp(&b.label));
         v
     };
@@ -415,30 +440,38 @@ fn rebuild_view(
     filter: Res<Filter>,
     mirror: Res<Mirror>,
     changed: Query<(), Changed<Rev>>,
-    mut removed: RemovedComponents<Rev>,
+    (mut removed, mut removed_runs): (RemovedComponents<Rev>, RemovedComponents<Run>),
     projects: Query<&Mirrored<Project>>,
     tasks: Query<&Mirrored<Task>>,
     claims: Query<&Mirrored<Claim>>,
     comments: Query<&Mirrored<Comment>>,
     agents: Query<&Mirrored<Agent>>,
+    runs: Query<&Run>,
+    runs_changed: Query<(), Changed<Run>>,
     authoring: Res<Authoring>,
     factory: Option<Res<FactoryStatus>>,
     deep: Option<Res<Deep>>,
     mut view: ResMut<BoardView>,
+    mut expiry: Local<Option<Timestamp>>,
 ) {
-    let gone = removed.read().count() > 0;
+    let gone = removed.read().count() + removed_runs.read().count() > 0;
+    let now = Timestamp::now();
+    let expired = expiry.is_some_and(|at| at <= now);
     if !(filter.is_changed()
         || authoring.is_changed()
         || factory.as_ref().is_some_and(|f| f.is_changed())
         || deep.as_ref().is_some_and(|d| d.is_changed())
         || mirror.is_changed()
         || gone
-        || !changed.is_empty())
+        || !changed.is_empty()
+        || !runs_changed.is_empty()
+        || expired)
     {
         return;
     }
     let (projects, tasks, claims, comments, agents) =
         (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
+    let runs: Vec<Run> = runs.iter().cloned().collect();
     let queues = queue_keys(&authoring, factory.as_deref());
     let input = Input {
         projects: &projects,
@@ -446,9 +479,12 @@ fn rebuild_view(
         claims: &claims,
         comments: &comments,
         agents: &agents,
+        runs: &runs,
         queues: &queues,
         deep: deep.as_ref().map_or(&[], |d| d.for_query(filter.query.trim())),
+        now,
     };
+    *expiry = next_expiry(&claims, now);
     let next = build(input, &filter);
     if *view != next {
         *view = next;
@@ -910,20 +946,38 @@ fn on_more_press(activate: On<Activate>, more: Query<&ColumnMore>, mut shown: Re
 #[derive(Component)]
 struct ConnectionChip;
 
-/// The connection chip's tone, words and hint.
-fn connection_chip(
+/// The connection chip's tone, words and hint. It shows two links: the Trailhead server, which wins when it isn't
+/// live, and the factory's control plane, which must be running for the chip to be green.
+pub fn connection_chip(
     connection: Connection,
     status: &ConnectionStatus,
+    factory: &FactoryLink,
 ) -> (bevy::feathers::theme::ThemeToken, &'static str, String) {
     let reason = status.reason.as_ref().map(|r| r.to_string());
     match connection {
-        Connection::Live => (token::OK, "Live", "Connected to the factory".into()),
         Connection::Syncing => {
-            (token::WARN, "Syncing", reason.unwrap_or_else(|| "Catching up with the factory".into()))
+            (token::WARN, "Syncing", reason.unwrap_or_else(|| "Catching up with the Trailhead server".into()))
         }
         Connection::Offline => {
-            (token::DANGER, "Offline", reason.unwrap_or_else(|| "Not connected to the factory".into()))
+            (token::DANGER, "Offline", reason.unwrap_or_else(|| "Not connected to the Trailhead server".into()))
         }
+        Connection::Live => match factory {
+            FactoryLink::Running => (token::OK, "Live", "Connected to the Trailhead server and the factory".into()),
+            FactoryLink::Unknown => {
+                (token::WARN, "Factory connecting", "Server connected; the factory hasn't been heard from yet".into())
+            }
+            FactoryLink::Stopped => (
+                token::WARN,
+                "Factory down",
+                "Server connected; the factory can't be reached, so the map shows its last known state".into(),
+            ),
+            FactoryLink::TooOld(why) => {
+                (token::WARN, "Factory too old", format!("Server connected; the factory is too old: {why}"))
+            }
+            FactoryLink::Refused(why) => {
+                (token::WARN, "Factory refused", format!("Server connected; the factory refused Lookout: {why}"))
+            }
+        },
     }
 }
 
@@ -953,6 +1007,7 @@ fn dress_header(
     filter: Res<Filter>,
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,
+    factory: Res<FactoryStatus>,
     mut commands: Commands,
 ) {
     for bar in &bar {
@@ -980,7 +1035,7 @@ fn dress_header(
         if *connection.get() != Connection::Live {
             new.insert(InteractionDisabled);
         }
-        let (tone, words, hint) = connection_chip(*connection.get(), &status);
+        let (tone, words, hint) = connection_chip(*connection.get(), &status, &factory.link);
         commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(bar)));
         commands.queue_spawn_scene(chip(tone, words, hint)).insert((ConnectionChip, ChildOf(bar)));
     }
@@ -1021,6 +1076,7 @@ struct HeaderDrawn {
     options: Options,
     connection: Connection,
     reason: String,
+    factory: FactoryLink,
 }
 
 /// Brings the header's widgets up to date in place: each select's rows and chosen row, the closed toggle's caption,
@@ -1032,6 +1088,7 @@ fn update_header(
     filter: Res<Filter>,
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,
+    factory: Res<FactoryStatus>,
     selects: Query<(Entity, &FilterSelect)>,
     toggle: Single<Entity, With<ClosedToggle>>,
     factory_toggle: Single<Entity, With<FactoryToggle>>,
@@ -1049,6 +1106,7 @@ fn update_header(
         options: view.options.clone(),
         connection: *connection.get(),
         reason: status.reason.as_ref().map(|r| r.to_string()).unwrap_or_default(),
+        factory: factory.link.clone(),
     };
     if drawn.as_ref() == Some(&now) {
         return;
@@ -1072,7 +1130,7 @@ fn update_header(
     } else {
         commands.entity(*new).insert(InteractionDisabled);
     }
-    let (tone, words, hint) = connection_chip(*connection.get(), &status);
+    let (tone, words, hint) = connection_chip(*connection.get(), &status, &factory.link);
     for chip in &chips {
         chip_edit.set(chip, tone.clone(), words, &hint);
     }
@@ -1135,7 +1193,46 @@ mod tests {
         values.into_iter().map(|v| serde_json::from_value(v).unwrap()).collect()
     }
 
+    fn at_now() -> Timestamp {
+        "2026-10-15T00:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn an_expired_claim_is_not_a_holder() {
+        let live = typed::<Claim>(vec![claim_json(json!({"task_id": "t103", "expires_at": "2026-10-16T00:00:00Z"}))]);
+        let gone = typed::<Claim>(vec![claim_json(json!({"task_id": "t103", "expires_at": "2026-10-14T00:00:00Z"}))]);
+        let (projects, tasks, _, comments, agents) = input_json();
+        let (projects, tasks, comments, agents) =
+            (typed::<Project>(projects), typed::<Task>(tasks), typed::<Comment>(comments), typed::<Agent>(agents));
+        let holders = |claims: &[Claim], filter: &Filter| {
+            let input = Input {
+                projects: &projects,
+                tasks: &tasks,
+                claims,
+                comments: &comments,
+                agents: &agents,
+                runs: &[],
+                queues: &[],
+                deep: &[],
+                now: at_now(),
+            };
+            build(input, filter)
+        };
+        assert_eq!(holders(&live, &Filter::default()).options.holders.len(), 1);
+        let view = holders(&gone, &Filter::default());
+        assert!(view.options.holders.is_empty(), "an expired claim isn't offered as a holder");
+        let by_holder = Filter { holder: Some(sid("a1")), ..Default::default() };
+        let view = holders(&gone, &by_holder);
+        assert!(view.columns.iter().all(|c| c.cards.is_empty()), "nor does it match the filter");
+        assert_eq!(next_expiry(&live, at_now()), Some("2026-10-16T00:00:00Z".parse().unwrap()));
+        assert_eq!(next_expiry(&gone, at_now()), None);
+    }
+
     pub(super) fn run(filter: &Filter) -> BoardView {
+        run_with(filter, &[])
+    }
+
+    fn run_with(filter: &Filter, runs: &[Run]) -> BoardView {
         let (projects, tasks, claims, comments, agents) = input_json();
         let (projects, tasks, claims, comments, agents) = (
             typed::<Project>(projects),
@@ -1151,8 +1248,10 @@ mod tests {
                 claims: &claims,
                 comments: &comments,
                 agents: &agents,
+                runs,
                 queues: &["TRAIL-102".to_string()],
                 deep: &[],
+                now: at_now(),
             },
             filter,
         )
@@ -1185,6 +1284,28 @@ mod tests {
 
     fn badges(card: &Card) -> Vec<(BadgeKind, &str)> {
         card.badges.iter().map(|b| (b.kind, b.label.as_str())).collect()
+    }
+
+    #[test]
+    fn a_holder_the_agent_list_lacks_is_named_for_its_run() {
+        use trailhead_factory::{RunPhase, RunStatus, TaskKey, Usd};
+        let runs = [Run {
+            repo: "o/r".into(),
+            status: RunStatus {
+                task: TaskKey("OPS-1".into()),
+                phase: RunPhase::Agent,
+                sandbox: None,
+                steps: 1,
+                tool_calls: 1,
+                spend: Usd::dollars(0.0),
+                last_tool: None,
+                started: 0,
+            },
+        }];
+        let view = run_with(&Filter::default(), &runs);
+        assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, "ops-1")]);
+        let holders: Vec<&str> = view.options.holders.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(holders, ["factory/ops-1", "factory/trail-103-a1"]);
     }
 
     #[test]
@@ -1703,6 +1824,7 @@ mod header_tests {
             .init_state::<Connection>()
             .init_resource::<Filter>()
             .init_resource::<ConnectionStatus>()
+            .init_resource::<FactoryStatus>()
             .insert_resource(run(&Filter::default()))
             .add_systems(Update, (dress_header, update_header).chain());
         app.world_mut().spawn(HeaderBar);
@@ -1817,6 +1939,40 @@ mod header_tests {
         settle(&mut app);
         assert_eq!(header(&mut app), before);
         assert!(app.world().get::<InteractionDisabled>(new).is_none());
+    }
+
+    #[test]
+    fn the_chip_is_green_only_while_both_links_are_up() {
+        let status = ConnectionStatus::default();
+        let words = |c, f: FactoryLink| connection_chip(c, &status, &f).1;
+        assert_eq!(words(Connection::Live, FactoryLink::Running), "Live");
+        assert_eq!(words(Connection::Live, FactoryLink::Stopped), "Factory down");
+        assert_eq!(words(Connection::Live, FactoryLink::Unknown), "Factory connecting");
+        assert_eq!(words(Connection::Live, FactoryLink::TooOld("x".into())), "Factory too old");
+        assert_eq!(words(Connection::Live, FactoryLink::Refused("x".into())), "Factory refused");
+        assert_eq!(words(Connection::Syncing, FactoryLink::Stopped), "Syncing");
+        assert_eq!(words(Connection::Offline, FactoryLink::Running), "Offline");
+        let tone = |f| connection_chip(Connection::Live, &status, &f).0;
+        assert_ne!(tone(FactoryLink::Running), tone(FactoryLink::Stopped));
+    }
+
+    #[test]
+    fn the_header_chip_follows_the_factory_link() {
+        let mut app = app();
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
+        app.world_mut().resource_mut::<FactoryStatus>().link = FactoryLink::Running;
+        settle(&mut app);
+        let before = header(&mut app);
+        let words = |app: &mut App| {
+            let world = app.world_mut();
+            world.query::<(&Text, &ChildOf)>().iter(world).map(|(t, _)| t.0.clone()).collect::<Vec<_>>()
+        };
+        assert!(words(&mut app).contains(&"Live".to_string()));
+        app.world_mut().resource_mut::<FactoryStatus>().link = FactoryLink::Stopped;
+        settle(&mut app);
+        let now = words(&mut app);
+        assert!(now.contains(&"Factory down".to_string()) && !now.contains(&"Live".to_string()), "{now:?}");
+        assert_eq!(header(&mut app), before, "the chip is edited in place");
     }
 
     #[test]

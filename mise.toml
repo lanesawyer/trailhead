@@ -113,3 +113,16 @@ run = "mdbook build"
 description = "Preview the docs with `mdbook serve`, unpacking mermaid.min.js first so a fresh checkout works"
 depends = ["docs-mermaid"]
 run = "mdbook serve"
+
+[tasks.lookout-install]
+description = "Install Lookout with its desktop entry and icons (~/.cargo/bin, ~/.local/share), so the dock shows the TL icon (the desktop entry's name must match the window's app id, `lookout`)"
+run = """
+cargo install --path clients/trailhead-lookout --locked
+install -Dm644 clients/trailhead-lookout/assets/lookout.desktop ~/.local/share/applications/lookout.desktop
+for size in 32 64 128 256; do
+  install -Dm644 clients/trailhead-lookout/assets/icon/$size.png ~/.local/share/icons/hicolor/${size}x${size}/apps/lookout.png
+done
+install -Dm644 clients/trailhead-lookout/assets/icon/lookout.svg ~/.local/share/icons/hicolor/scalable/apps/lookout.svg
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+gtk-update-icon-cache -q -t ~/.local/share/icons/hicolor 2>/dev/null || true
+"""
