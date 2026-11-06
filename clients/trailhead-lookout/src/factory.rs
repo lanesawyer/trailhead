@@ -77,6 +77,8 @@ pub enum FactoryLink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoState {
     pub control: ControlState,
+    /// The repo's queue task keys, when the control plane reports them.
+    pub queue: Vec<String>,
     /// Unix seconds and the message.
     pub last_error: Option<(i64, String)>,
     /// The last event applied, or the snapshot's.
@@ -197,9 +199,15 @@ impl FactoryMirror {
         for run in snapshot.runs {
             self.set_run(commands, &repo, run);
         }
-        status
-            .repos
-            .insert(repo, RepoState { control: snapshot.control, last_error: snapshot.last_error, seq: snapshot.seq });
+        status.repos.insert(
+            repo,
+            RepoState {
+                control: snapshot.control,
+                queue: snapshot.queue.into_iter().map(|k| k.0).collect(),
+                last_error: snapshot.last_error,
+                seq: snapshot.seq,
+            },
+        );
     }
 
     fn apply_event(&mut self, commands: &mut Commands, status: &mut FactoryStatus, repo: &str, event: Sequenced) {
@@ -347,6 +355,7 @@ mod tests {
             runs: vec![],
             holding: None,
             targets: Vec::new(),
+            queue: Vec::new(),
             seq,
         };
         FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])
