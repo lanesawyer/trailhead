@@ -25,9 +25,18 @@
 //! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
 //! - Children that follow a list of keyed view models without respawning: [`Keyed`].
 //! - Gaps, padding, margins: [`space`]. Corners: [`radius`]. Panel widths and offsets: [`extent`].
+//! - Pages picked from a row (or column) of tabs: a [`tab_strip`] holding [`tab`]s; observe
+//!   `ValueChange<Option<Entity>>` on the strip and set its `SelectedTab`.
+//! - A section that opens and closes: [`spawn_accordion`], a pane or a group by [`SectionLevel`]; fill its body, add
+//!   controls to its header with [`spawn_header_button`].
+//! - Text cut to a width with an ellipsis: [`truncate_to_width`], measured by the same estimate as [`width_of`].
+//! - Writing a `Node` or `Text` only when it changes: [`patch_node`], [`set_display`], [`set_text`].
+//!
+//! The kit's per-frame systems run in [`UiPlace`] in `Update`; order an app's own systems around it.
 
 use bevy::prelude::*;
 
+mod accordion;
 mod badge;
 mod buttons;
 mod chip;
@@ -40,13 +49,20 @@ pub mod layer;
 mod menu;
 mod modal;
 mod panel_header;
+mod patch;
 mod scroll;
 mod scrollbar;
 mod select;
 mod spacing;
+mod tabs;
 mod text;
 mod theme;
+mod truncate;
 
+pub use accordion::{
+    ACCORDION_INDENT, Accordion, AccordionCaret, AccordionParts, AccordionTitle, SectionLevel, spawn_accordion,
+    spawn_header_button,
+};
 pub use badge::badge;
 pub use buttons::{button, button_text, danger_button, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
@@ -61,20 +77,40 @@ pub use modal::{
     open_modal,
 };
 pub use panel_header::panel_header;
+pub use patch::{display, patch_node, set_display, set_text};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
 pub use select::{Picked, SelectEdit, SelectOptions, select};
 pub use spacing::{check as spacing_check, extent, radius, space};
+pub use tabs::{TabCaption, fit_tabs, style_tabs, tab, tab_strip};
 pub use text::{size, text, text_dim, text_toned};
 pub use theme::{paint, props as theme_props, theme, token};
+pub use truncate::{truncate_to_width, width_of};
 
-/// What the widgets need at run time: the embedded icon font, and the hint.
+/// Where the kit's per-frame systems run in `Update`: opening and closing accordions, cutting titles and captions to
+/// fit, painting tabs. An app's systems that spawn or change widgets go before it.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct UiPlace;
+
+/// What the widgets need at run time: the embedded icon font, the hint, modals, and the systems in [`UiPlace`].
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin))
             .add_observer(scroll::on_scroll)
-            .add_systems(PostUpdate, scrollbar::hide_when_fits.after(bevy::ui::UiSystems::Layout));
+            .add_systems(PostUpdate, scrollbar::hide_when_fits.after(bevy::ui::UiSystems::Layout))
+            .add_systems(
+                Update,
+                (
+                    accordion::sync_accordions,
+                    accordion::pad_accordion_headers,
+                    accordion::truncate_accordion_titles,
+                    tabs::fit_tabs,
+                    tabs::style_tabs,
+                )
+                    .chain()
+                    .in_set(UiPlace),
+            );
     }
 }
