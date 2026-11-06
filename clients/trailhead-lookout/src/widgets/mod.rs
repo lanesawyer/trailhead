@@ -16,7 +16,7 @@
 //! - A panel over the board: [`panel`], with a [`layer`]. Inside it: [`section`], [`row`], [`field`].
 //! - A dot and a few words of state: [`chip`].
 //! - A hint over anything: put a [`Hint`] on it.
-//! - Colors: [`token`] (Lookout's) and `bevy::feathers::tokens` (the controls'); a status column's: [`status_token`].
+//! - Colors: [`token`] (Lookout's) and `bevy::feathers::tokens` (the controls'); a status column's: [`status_token`]; a priority's: [`priority_tone`].
 //! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`]; one that scrolls down only,
 //!   inside it: [`ScrollDown`].
 //! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
@@ -48,7 +48,7 @@ mod theme;
 pub use badge::badge;
 pub use buttons::{button, button_text, danger_button, tool_button};
 pub use card::{TITLE_LINES, card, card_row, card_title, card_under};
-pub use chip::chip;
+pub use chip::{chip, dot};
 pub use column::{
     COLUMN_GUTTER, COLUMN_WIDTH, ColumnCount, column_body, column_empty, column_frame, column_header, column_scrollbar,
     column_shell,
@@ -64,7 +64,7 @@ pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
 pub use select::{Picked, select};
 pub use spacing::{extent, radius, space};
 pub use text::{size, text, text_dim, text_toned};
-pub use theme::{props as theme_props, status_token, theme, token};
+pub use theme::{priority_tone, props as theme_props, status_token, theme, token};
 
 /// What the widgets need at run time: the embedded icon font, and the hint.
 pub struct WidgetsPlugin;

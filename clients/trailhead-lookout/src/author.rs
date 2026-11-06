@@ -11,6 +11,7 @@
 //! with `allow_newlines` and `visible_lines` set, which is all multiline takes.
 
 use bevy::feathers::controls::ButtonVariant;
+use bevy::feathers::theme::{ThemeBackgroundColor, ThemeToken};
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
@@ -22,7 +23,8 @@ use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
 use crate::mirror::{Data, IsTask};
 use crate::widgets::{
-    Picked, button, extent, field, layer, panel, row, select, size, text, text_dim, text_input, text_toned, token,
+    Picked, button, dot, extent, field, layer, panel, priority_tone, row, select, size, space, text, text_dim,
+    text_input, text_toned, token,
 };
 
 /// The queue task new tasks go under unless the form says otherwise (`queue` in `.trailhead.toml`).
@@ -289,6 +291,10 @@ pub struct Field(pub FieldKind, pub u64);
 #[derive(Component, Debug, Clone, Default)]
 pub struct InitialText(pub String);
 
+/// The dot beside the priority dropdown, tinted with the draft's priority.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct PriorityDot;
+
 /// Which draft field a dropdown of the form sets.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormChoice {
@@ -444,6 +450,11 @@ fn text_field(commands: &mut Commands, parent: Entity, label: &str, input: impl 
     commands.queue_spawn_scene(field(label.to_string(), input)).insert(ChildOf(parent));
 }
 
+/// The tone of priority `p`, or the badge background for a number with none.
+fn priority_color(p: i64) -> ThemeToken {
+    priority_tone(p).unwrap_or(token::BADGE_BG)
+}
+
 /// A dropdown of the form for `choice`, labelled, with `selected` showing.
 fn choice_field(
     commands: &mut Commands,
@@ -455,20 +466,38 @@ fn choice_field(
 ) {
     let max_visible = options.len();
     let control: Box<dyn SceneList> = match choice {
-        FormChoice::Priority => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Priority }),
+        FormChoice::Priority => {
+            let tone = priority_color(selected.and_then(|i| PRIORITIES.get(i)).copied().unwrap_or_default());
+            Box::new(bsn_list! {
+                Node { align_items: AlignItems::Center, column_gap: { px(space::ICON_LABEL) } }
+                Children [
+                    @dot(tone) PriorityDot
+                    -- @select(options, selected, max_visible) FormChoice::Priority
+                ]
+            })
+        }
         FormChoice::Status => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Status }),
     };
     commands.queue_spawn_scene(field(label.to_string(), control)).insert(ChildOf(parent));
 }
 
 /// Sets the draft's priority or status from the dropdown that was used.
-fn on_pick(picked: On<Picked>, choices: Query<&FormChoice>, mut form: ResMut<Form>) {
+fn on_pick(
+    picked: On<Picked>,
+    choices: Query<&FormChoice>,
+    dots: Query<Entity, With<PriorityDot>>,
+    mut form: ResMut<Form>,
+    mut commands: Commands,
+) {
     let Ok(choice) = choices.get(picked.entity) else { return };
     let Some(open) = &mut form.open else { return };
     match choice {
         FormChoice::Priority => {
             if let Some(priority) = PRIORITIES.get(picked.index) {
                 open.draft.priority = *priority;
+                for dot in &dots {
+                    commands.entity(dot).insert(ThemeBackgroundColor(priority_color(*priority)));
+                }
             }
         }
         FormChoice::Status => {
@@ -650,6 +679,17 @@ mod tests {
         // A row past the end of the options changes nothing.
         pick(&mut app, FormChoice::Priority, 99);
         assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.priority, 1);
+    }
+
+    #[test]
+    fn the_priority_dot_follows_the_picked_priority() {
+        let mut app = app();
+        press(&mut app, Act::Edit("TRAIL-7".into()));
+        let dot = app.world_mut().spawn((PriorityDot, ThemeBackgroundColor(token::BADGE_BG))).id();
+        pick(&mut app, FormChoice::Priority, 0);
+        assert_eq!(app.world().get::<ThemeBackgroundColor>(dot).unwrap().0, token::PRIORITY_1);
+        pick(&mut app, FormChoice::Priority, 3);
+        assert_eq!(app.world().get::<ThemeBackgroundColor>(dot).unwrap().0, token::PRIORITY_4);
     }
 
     fn app() -> App {

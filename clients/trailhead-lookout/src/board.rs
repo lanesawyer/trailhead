@@ -21,8 +21,9 @@ use crate::mirror::{Data, IsAgent, IsClaim, IsComment, IsProject, IsTask, Mirror
 use crate::widgets;
 use crate::widgets::{
     Icon, Keyed, Picked, ScrollBoth, badge, button, card as card_shell, card_row, card_title, card_under, chip, field,
-    select, size, space, text as label_text, token, tool_button,
+    priority_tone, select, size, space, text as label_text, token, tool_button,
 };
+use bevy::feathers::theme::ThemeToken;
 
 /// The views of the app: the task board and the trail map.
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -144,6 +145,8 @@ pub enum BadgeKind {
 pub struct Badge {
     pub kind: BadgeKind,
     pub label: String,
+    /// The theme token that tints the badge; none leaves it dim.
+    pub tone: Option<ThemeToken>,
 }
 
 /// A tool button on a card. What each does is [`CardAction::act`].
@@ -245,16 +248,21 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         let id = s(t, "id");
         let mut open: Vec<&Value> = questions.get(id).cloned().unwrap_or_default();
         open.sort_by(|a, b| s(a, "created_at").cmp(s(b, "created_at")));
-        let priority = format!("P{}", t["priority"].as_i64().unwrap_or(0));
-        let mut badges = vec![Badge { kind: BadgeKind::Priority, label: priority }];
+        let priority = t["priority"].as_i64().unwrap_or(0);
+        let mut badges =
+            vec![Badge { kind: BadgeKind::Priority, label: format!("P{priority}"), tone: priority_tone(priority) }];
         if let Some(grade) = t["grade"].as_i64() {
-            badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}") });
+            badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}"), tone: None });
         }
         if let Some(holder) = holder_of.get(id) {
-            badges.push(Badge { kind: BadgeKind::Holder, label: holder_badge(&holder_label(holder)) });
+            badges.push(Badge { kind: BadgeKind::Holder, label: holder_badge(&holder_label(holder)), tone: None });
         }
         if !open.is_empty() {
-            badges.push(Badge { kind: BadgeKind::Questions, label: format!("? {}", open.len()) });
+            badges.push(Badge {
+                kind: BadgeKind::Questions,
+                label: format!("? {}", open.len()),
+                tone: Some(token::WARN),
+            });
         }
         let mut actions = vec![CardAction::Edit, CardAction::Comment];
         if let Some(q) = open.first() {
@@ -737,8 +745,7 @@ fn dress_cards(
         }
         let badges = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
         for b in &card.badges {
-            let tone = (b.kind == BadgeKind::Questions).then_some(token::WARN);
-            commands.queue_spawn_scene(badge(b.label.clone(), None, tone)).insert(ChildOf(badges));
+            commands.queue_spawn_scene(badge(b.label.clone(), None, b.tone.clone())).insert(ChildOf(badges));
         }
         let tools = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
         for action in &card.actions {
@@ -971,6 +978,21 @@ mod tests {
         // No grade, no holder, no question: only the priority. A holder that isn't an agent shows as a short id.
         assert_eq!(badges(card(&view, "TRAIL-102")), [(BadgeKind::Priority, "P2")]);
         assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, "u1")]);
+    }
+
+    #[test]
+    fn the_priority_badge_carries_its_priority_token_and_others_do_not() {
+        let view = run(&Filter::default());
+        let badge =
+            |key: &str, kind: BadgeKind| card(&view, key).badges.iter().find(|b| b.kind == kind).unwrap().tone.clone();
+        assert_eq!(badge("TRAIL-103", BadgeKind::Priority), Some(token::PRIORITY_2));
+        assert_eq!(badge("TRAIL-103", BadgeKind::Grade), None);
+        assert_eq!(badge("TRAIL-103", BadgeKind::Questions), Some(token::WARN));
+        for (i, want) in
+            [token::PRIORITY_1, token::PRIORITY_2, token::PRIORITY_3, token::PRIORITY_4].into_iter().enumerate()
+        {
+            assert_eq!(priority_tone(i as i64 + 1), Some(want));
+        }
     }
 
     #[test]

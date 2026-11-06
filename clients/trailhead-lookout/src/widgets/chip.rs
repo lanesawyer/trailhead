@@ -7,6 +7,18 @@ use bevy::prelude::*;
 
 use super::{Hint, radius, size, space, text};
 
+/// A small round dot in `tone`.
+pub fn dot(tone: ThemeToken) -> impl Scene {
+    bsn! {
+        Node {
+            width: { px(space::DOT) },
+            height: { px(space::DOT) },
+            border_radius: { BorderRadius::all(px(radius::PANEL)) },
+        }
+        ThemeBackgroundColor({ tone })
+    }
+}
+
 /// A chip with a dot in `tone` and `words` beside it; hovering shows `hint`.
 pub fn chip(tone: ThemeToken, words: impl Into<String>, hint: impl Into<String>) -> impl Scene {
     let words = words.into();
@@ -19,12 +31,7 @@ pub fn chip(tone: ThemeToken, words: impl Into<String>, hint: impl Into<String>)
         }
         Hint({ hint })
         Children [
-                Node {
-                    width: { px(space::DOT) },
-                    height: { px(space::DOT) },
-                    border_radius: { BorderRadius::all(px(radius::PANEL)) },
-                }
-                ThemeBackgroundColor({ tone })
+                @dot(tone)
             -- @text(words, size::SECONDARY)
         ]
     }
