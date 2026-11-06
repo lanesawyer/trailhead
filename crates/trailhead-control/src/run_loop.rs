@@ -460,7 +460,8 @@ impl Factory {
         let listed: HashMap<TaskKey, Task> = match self.tracker.in_flight(self.project(), &self.queue()).await {
             Ok(tasks) => tasks.into_iter().map(|t| (t.key.clone(), t)).collect(),
             Err(e) => {
-                tracing::warn!(error = %e, "couldn't list the tasks in flight; looking parked ones up one by one");
+                // Debug, not warn: this runs every poll, and the fallback below works, with its own warnings.
+                tracing::debug!(error = %e, "couldn't list the tasks in flight; looking parked ones up one by one");
                 HashMap::new()
             }
         };

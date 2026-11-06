@@ -39,6 +39,8 @@ struct State {
     finish_unapproved_forbidden: bool,
     /// Whether `create_sub_agent` fails with a plain error, not `Forbidden`.
     sub_agents_fail: bool,
+    /// How many times each task has been read with `show`.
+    shows: HashMap<TaskKey, usize>,
 }
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
@@ -174,6 +176,11 @@ impl FakeTracker {
         let t = s.tasks.get_mut(key).unwrap();
         assert_eq!(t.status, Status::InReview, "{} isn't in review", key.0);
         t.status = Status::Approved;
+    }
+
+    /// How many times `show` has read the task.
+    pub fn shows(&self, key: &TaskKey) -> usize {
+        self.state.lock().unwrap().shows.get(key).copied().unwrap_or(0)
     }
 
     pub fn task(&self, key: &TaskKey) -> Task {
@@ -332,7 +339,8 @@ impl Tracker for FakeTracker {
 
     async fn show(&self, task: &TaskKey) -> Result<Task> {
         self.check_live()?;
-        let s = self.state.lock().unwrap();
+        let mut s = self.state.lock().unwrap();
+        *s.shows.entry(task.clone()).or_default() += 1;
         s.tasks.get(task).cloned().ok_or_else(|| Error::NotFound(task.0.clone()))
     }
 
