@@ -115,7 +115,7 @@ impl Factory {
                 },
                 None => None,
             };
-            let merge_base = task.run.pending_changes().is_some_and(|c| c.conflict);
+            let merge_base = task.run.pending_changes().is_some_and(|c| c.conflict) && !self.conflict_gone(task).await;
             let (sandbox, setup_failure) =
                 self.acquire_worker(target, task, rework.then(|| Self::branch(task)), merge_base).await?;
             // The agent starts with the output so it can fix what broke, after whatever the review asked for.
@@ -679,6 +679,25 @@ impl Factory {
             (Ok(report), _) => Ok(Run::Report(report, total)),
             (Err(Error::Cancelled), None) => Err(Error::Cancelled),
             (Err(e), _) => Ok(Run::Lost(e, total)),
+        }
+    }
+
+    /// Whether the host now says the PR merges cleanly, though a review asked for a rework over a conflict: the base
+    /// moved back or the conflict was fixed meanwhile (TRAIL-243). Merging the base would leave the agent nothing to
+    /// resolve and the run would fail as 'changed nothing', so the rework starts without the merge, on the review's
+    /// other feedback. Only a definite answer counts; an unknown one, or a host error, keeps the merge.
+    async fn conflict_gone(&self, task: &Task) -> bool {
+        let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else { return false };
+        match codehost.pr_state(pr).await {
+            Ok(PrState::Open { mergeable: Some(true), .. }) => {
+                tracing::info!(task = %task.key.0, "the host no longer reports a conflict; reworking without merging the base");
+                true
+            }
+            Ok(_) => false,
+            Err(e) => {
+                tracing::warn!(task = %task.key.0, error = %e, "couldn't re-check the PR's conflict; merging the base");
+                false
+            }
         }
     }
 

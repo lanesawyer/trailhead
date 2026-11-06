@@ -614,7 +614,6 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     let wanted = task.run.changes_requested.expect("the rework is told why");
     assert!(wanted.conflict && wanted.body.contains(&pr.url), "{wanted:?}");
 
-    r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let ran = r.factory.tick().await.unwrap();
@@ -635,6 +634,28 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
 }
 
+#[tokio::test]
+async fn a_conflict_the_host_no_longer_reports_is_reworked_without_merging_the_base() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::Open);
+
+    // The base moved back, or the conflict was fixed, before the rework started.
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let prepared = r.daemon.prepared();
+    let rework: Vec<_> =
+        prepared.iter().filter(|(id, p)| p.branch.is_some() && id.0.starts_with("trailhead-w")).collect();
+    assert_eq!(rework.len(), 1);
+    assert!(!rework[0].1.merge_base, "nothing to merge, so the base isn't merged in");
+}
+
 fn reviewers_started(r: &Rig) -> usize {
     r.daemon.requests().iter().filter(|req| req.role == Role::Reviewer).count()
 }
@@ -648,6 +669,7 @@ async fn a_rework_that_conflicts_with_a_base_that_moved_during_it_is_reworked_ag
     let reviewed = reviewers_started(&r);
 
     // The base moves again while the rework runs, so its push conflicts too.
+    r.codehost.keep_conflict_on_push(&pr);
     r.harness.push(Role::Worker, Script::new(changes()));
     let ran = r.factory.tick().await.unwrap();
     assert_eq!(ran[0].1, Outcome::Conflicted { pr: pr.clone() });
@@ -770,7 +792,6 @@ async fn a_merge_the_agent_started_itself_is_published_as_a_merge_commit() {
 
     // The checkout had no merge under way when prepared; the agent runs `git merge --no-commit` itself.
     r.daemon.agent_merges();
-    r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
@@ -789,7 +810,6 @@ async fn a_merge_the_agent_committed_itself_is_still_published_as_a_merge_commit
 
     // Prepare left the merge uncommitted; the agent's `git commit` removes MERGE_HEAD, but HEAD now has the base.
     r.daemon.agent_commits_merge();
-    r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
@@ -808,7 +828,6 @@ async fn a_merge_the_agent_started_and_committed_itself_is_published_as_a_merge_
 
     // Prepare started no merge, and the agent's `git merge` and `git commit` leave no MERGE_HEAD behind.
     r.daemon.agent_merges_and_commits();
-    r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
@@ -825,7 +844,6 @@ async fn a_merge_the_agent_aborted_is_not_published() {
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
 
-    r.codehost.set_mergeable(&pr, Some(true));
     r.daemon.agent_aborts_merge();
     let before = r.codehost.commits(&pr.repo, "factory/trail-1").len();
     r.harness.push(Role::Worker, Script::new(changes()));
@@ -843,7 +861,6 @@ async fn a_branch_the_agent_rebased_is_not_published() {
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
 
-    r.codehost.set_mergeable(&pr, Some(true));
     r.daemon.agent_rebases();
     let before = r.codehost.commits(&pr.repo, "factory/trail-1").len();
     r.harness.push(Role::Worker, Script::new(changes()));
@@ -861,7 +878,6 @@ async fn a_merge_with_conflict_markers_left_in_it_is_not_published() {
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
 
-    r.codehost.set_mergeable(&pr, Some(true));
     r.daemon.leave_conflict_markers(&["docs/guide.md"]);
     let before = r.codehost.commits(&pr.repo, "factory/trail-1").len();
     r.harness.push(Role::Worker, Script::new(changes()));
