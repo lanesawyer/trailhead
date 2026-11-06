@@ -47,7 +47,7 @@ mod theme;
 
 pub use badge::badge;
 pub use buttons::{button, button_text, danger_button, tool_button};
-pub use chip::{chip, dot};
+pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{field, panel, row, section};
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
@@ -60,7 +60,7 @@ pub use modal::{
 };
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_WIDTH, scrollbar};
-pub use select::{Picked, select};
+pub use select::{Picked, SelectEdit, SelectOptions, select};
 pub use spacing::{check as spacing_check, extent, radius, space};
 pub use text::{size, text, text_dim, text_toned};
 pub use theme::{paint, props as theme_props, theme, token};
