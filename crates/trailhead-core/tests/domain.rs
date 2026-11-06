@@ -1372,3 +1372,16 @@ async fn similar_tasks_finds_unfinished_titles_that_share_most_words() {
     // One shared word isn't enough.
     assert!(env.store.similar_tasks(&env.human, "AUTH", "Notes on main", None).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn listing_by_title_ignores_case_and_surrounding_space() {
+    let env = Env::new().await;
+    let wanted = env.task("Cover the edge").await;
+    env.task("Cover the edge case").await;
+    let by = |t: &str| TaskFilter { title: Some(t.into()), ..Default::default() };
+    for title in ["Cover the edge", "  cover THE edge\n"] {
+        let found = env.store.list_tasks(&env.human, by(title)).await.unwrap();
+        assert_eq!(found.into_iter().map(|t| t.key).collect::<Vec<_>>(), vec![wanted.key.clone()], "{title:?}");
+    }
+    assert!(env.store.list_tasks(&env.human, by("cover")).await.unwrap().is_empty());
+}

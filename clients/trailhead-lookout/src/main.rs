@@ -8,6 +8,7 @@ use trailhead_lookout::author::{AuthorUiPlugin, Authoring};
 use trailhead_lookout::board::BoardUiPlugin;
 use trailhead_lookout::connect::ConnectUiPlugin;
 use trailhead_lookout::connection::{ConnectionPlugin, SendNet};
+use trailhead_lookout::icon::{IconUiPlugin, primary_window};
 use trailhead_lookout::inspector::InspectorUiPlugin;
 use trailhead_lookout::map::MapUiPlugin;
 use trailhead_lookout::net::{NetCommand, NetConfig};
@@ -24,12 +25,7 @@ fn main() {
     let target = std::env::args().nth(1);
     let token = std::env::var("LOOKOUT_TOKEN").ok().filter(|t| !t.is_empty());
     App::new()
-        .add_plugins(
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window { title: "Lookout".into(), ..default() }),
-                ..default()
-            }),
-        )
+        .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(primary_window()), ..default() }))
         .add_plugins(FeathersPlugins)
         // Update on input, and often enough for the net thread's news to show, instead of redrawing every frame.
         .insert_resource(WinitSettings {
@@ -48,6 +44,7 @@ fn main() {
             InspectorUiPlugin,
             ConnectUiPlugin,
             SettingsUiPlugin,
+            IconUiPlugin,
         ))
         .add_systems(Startup, |mut authoring: ResMut<Authoring>| {
             if let Some(queue) = std::env::var("LOOKOUT_QUEUE").ok().filter(|q| !q.is_empty()) {

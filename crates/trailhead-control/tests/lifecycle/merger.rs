@@ -236,6 +236,25 @@ async fn failed_ci_sends_the_task_back_for_a_rework_told_what_failed() {
 }
 
 #[tokio::test]
+async fn a_ci_failure_rework_merges_the_base_though_the_pr_merges_cleanly() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+
+    // The host says the PR merges cleanly (TRAIL-243), but the feedback promises the merge, so the checkout has it.
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let prepared = r.daemon.prepared();
+    let rework: Vec<_> =
+        prepared.iter().filter(|(id, p)| p.branch.is_some() && id.0.starts_with("trailhead-w")).collect();
+    assert_eq!(rework.len(), 1, "{prepared:?}");
+    assert!(rework[0].1.merge_base, "{:?}", rework[0].1);
+}
+
+#[tokio::test]
 async fn red_ci_after_a_branch_update_unapproves_and_reworks_saying_the_merge_brought_it() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
@@ -625,7 +644,6 @@ async fn a_conflict_resolving_rework_doesnt_inherit_the_verdict() {
     assert_eq!(r.tracker.task(&key).status, Status::Open, "back to running for a rework");
 
     // The rework pushes a single commit that merges the base: a merge the host didn't make, holding the resolution.
-    r.codehost.set_conflicts(false);
     let resolution = Commit { message: "fix: resolve".into(), changes: vec![], merges: vec!["base".into()] };
     r.harness
         .push(Role::Worker, Script::new(RunOutcome::Changes { commits: vec![resolution], summary: "Done.".into() }));
