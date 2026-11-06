@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::author::{Act, Authoring};
 use crate::connection::{Connection, ConnectionStatus};
-use crate::factory::{FactoryStatus, Run};
+use crate::factory::{FactoryLink, FactoryStatus, Run};
 use crate::inspector::{Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::widgets;
@@ -885,20 +885,38 @@ fn on_more_press(activate: On<Activate>, more: Query<&ColumnMore>, mut shown: Re
 #[derive(Component)]
 struct ConnectionChip;
 
-/// The connection chip's tone, words and hint.
-fn connection_chip(
+/// The connection chip's tone, words and hint. It shows two links: the Trailhead server, which wins when it isn't
+/// live, and the factory's control plane, which must be running for the chip to be green.
+pub fn connection_chip(
     connection: Connection,
     status: &ConnectionStatus,
+    factory: &FactoryLink,
 ) -> (bevy::feathers::theme::ThemeToken, &'static str, String) {
     let reason = status.reason.as_ref().map(|r| r.to_string());
     match connection {
-        Connection::Live => (token::OK, "Live", "Connected to the factory".into()),
         Connection::Syncing => {
-            (token::WARN, "Syncing", reason.unwrap_or_else(|| "Catching up with the factory".into()))
+            (token::WARN, "Syncing", reason.unwrap_or_else(|| "Catching up with the Trailhead server".into()))
         }
         Connection::Offline => {
-            (token::DANGER, "Offline", reason.unwrap_or_else(|| "Not connected to the factory".into()))
+            (token::DANGER, "Offline", reason.unwrap_or_else(|| "Not connected to the Trailhead server".into()))
         }
+        Connection::Live => match factory {
+            FactoryLink::Running => (token::OK, "Live", "Connected to the Trailhead server and the factory".into()),
+            FactoryLink::Unknown => {
+                (token::WARN, "Factory connecting", "Server connected; the factory hasn't been heard from yet".into())
+            }
+            FactoryLink::Stopped => (
+                token::WARN,
+                "Factory down",
+                "Server connected; the factory can't be reached, so the map shows its last known state".into(),
+            ),
+            FactoryLink::TooOld(why) => {
+                (token::WARN, "Factory too old", format!("Server connected; the factory is too old: {why}"))
+            }
+            FactoryLink::Refused(why) => {
+                (token::WARN, "Factory refused", format!("Server connected; the factory refused Lookout: {why}"))
+            }
+        },
     }
 }
 
@@ -928,6 +946,7 @@ fn dress_header(
     filter: Res<Filter>,
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,
+    factory: Res<FactoryStatus>,
     mut commands: Commands,
 ) {
     for bar in &bar {
@@ -952,7 +971,7 @@ fn dress_header(
         if *connection.get() != Connection::Live {
             new.insert(InteractionDisabled);
         }
-        let (tone, words, hint) = connection_chip(*connection.get(), &status);
+        let (tone, words, hint) = connection_chip(*connection.get(), &status, &factory.link);
         commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(bar)));
         commands.queue_spawn_scene(chip(tone, words, hint)).insert((ConnectionChip, ChildOf(bar)));
     }
@@ -969,6 +988,7 @@ struct HeaderDrawn {
     options: Options,
     connection: Connection,
     reason: String,
+    factory: FactoryLink,
 }
 
 /// Brings the header's widgets up to date in place: each select's rows and chosen row, the closed toggle's caption,
@@ -980,6 +1000,7 @@ fn update_header(
     filter: Res<Filter>,
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,
+    factory: Res<FactoryStatus>,
     selects: Query<(Entity, &FilterSelect)>,
     toggle: Single<Entity, With<ClosedToggle>>,
     factory_toggle: Single<Entity, With<FactoryToggle>>,
@@ -997,6 +1018,7 @@ fn update_header(
         options: view.options.clone(),
         connection: *connection.get(),
         reason: status.reason.as_ref().map(|r| r.to_string()).unwrap_or_default(),
+        factory: factory.link.clone(),
     };
     if drawn.as_ref() == Some(&now) {
         return;
@@ -1020,7 +1042,7 @@ fn update_header(
     } else {
         commands.entity(*new).insert(InteractionDisabled);
     }
-    let (tone, words, hint) = connection_chip(*connection.get(), &status);
+    let (tone, words, hint) = connection_chip(*connection.get(), &status, &factory.link);
     for chip in &chips {
         chip_edit.set(chip, tone.clone(), words, &hint);
     }
@@ -1605,6 +1627,7 @@ mod header_tests {
             .init_state::<Connection>()
             .init_resource::<Filter>()
             .init_resource::<ConnectionStatus>()
+            .init_resource::<FactoryStatus>()
             .insert_resource(run(&Filter::default()))
             .add_systems(Update, (dress_header, update_header).chain());
         app.world_mut().spawn(HeaderBar);
@@ -1706,6 +1729,40 @@ mod header_tests {
         settle(&mut app);
         assert_eq!(header(&mut app), before);
         assert!(app.world().get::<InteractionDisabled>(new).is_none());
+    }
+
+    #[test]
+    fn the_chip_is_green_only_while_both_links_are_up() {
+        let status = ConnectionStatus::default();
+        let words = |c, f: FactoryLink| connection_chip(c, &status, &f).1;
+        assert_eq!(words(Connection::Live, FactoryLink::Running), "Live");
+        assert_eq!(words(Connection::Live, FactoryLink::Stopped), "Factory down");
+        assert_eq!(words(Connection::Live, FactoryLink::Unknown), "Factory connecting");
+        assert_eq!(words(Connection::Live, FactoryLink::TooOld("x".into())), "Factory too old");
+        assert_eq!(words(Connection::Live, FactoryLink::Refused("x".into())), "Factory refused");
+        assert_eq!(words(Connection::Syncing, FactoryLink::Stopped), "Syncing");
+        assert_eq!(words(Connection::Offline, FactoryLink::Running), "Offline");
+        let tone = |f| connection_chip(Connection::Live, &status, &f).0;
+        assert_ne!(tone(FactoryLink::Running), tone(FactoryLink::Stopped));
+    }
+
+    #[test]
+    fn the_header_chip_follows_the_factory_link() {
+        let mut app = app();
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
+        app.world_mut().resource_mut::<FactoryStatus>().link = FactoryLink::Running;
+        settle(&mut app);
+        let before = header(&mut app);
+        let words = |app: &mut App| {
+            let world = app.world_mut();
+            world.query::<(&Text, &ChildOf)>().iter(world).map(|(t, _)| t.0.clone()).collect::<Vec<_>>()
+        };
+        assert!(words(&mut app).contains(&"Live".to_string()));
+        app.world_mut().resource_mut::<FactoryStatus>().link = FactoryLink::Stopped;
+        settle(&mut app);
+        let now = words(&mut app);
+        assert!(now.contains(&"Factory down".to_string()) && !now.contains(&"Live".to_string()), "{now:?}");
+        assert_eq!(header(&mut app), before, "the chip is edited in place");
     }
 
     #[test]
