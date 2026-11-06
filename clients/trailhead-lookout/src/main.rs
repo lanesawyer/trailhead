@@ -12,6 +12,7 @@ use trailhead_lookout::icon::{IconUiPlugin, primary_window};
 use trailhead_lookout::inspector::InspectorUiPlugin;
 use trailhead_lookout::map::MapUiPlugin;
 use trailhead_lookout::net::{NetCommand, NetConfig};
+use trailhead_lookout::settings::SettingsUiPlugin;
 
 /// `lookout [<control plane endpoint id>]`, with `LOOKOUT_TOKEN` to sign in with a pasted user token and
 /// `LOOKOUT_QUEUE` for the task new tasks go under (default `TRAIL-102`). Without an
@@ -42,6 +43,7 @@ fn main() {
             AuthorUiPlugin,
             InspectorUiPlugin,
             ConnectUiPlugin,
+            SettingsUiPlugin,
             IconUiPlugin,
         ))
         .add_systems(Startup, |mut authoring: ResMut<Authoring>| {
