@@ -10,7 +10,6 @@ mod events;
 mod idempotency;
 mod identity;
 mod metadata;
-mod model;
 mod projects;
 mod reminders;
 mod store;
@@ -25,7 +24,6 @@ pub use comments::NewComment;
 pub use error::{Error, Result};
 pub use events::{EventFilter, UNDO_WINDOW};
 pub use idempotency::{StoredResponse, idempotency_fingerprint};
-pub use model::*;
 pub use projects::{NewProject, ProjectPatch};
 pub use reminders::{DEFAULT_REMINDER_WINDOW, DUE_SOON, OVERDUE};
 pub use store::{Clock, Ctx, Store};
@@ -34,6 +32,7 @@ pub use tasks::{
     TaskSort, parse_grade,
 };
 pub use tokens::{Principal, Token, TokenOptions, TokenPatch};
+pub use trailhead_model::*;
 pub use undo::{Reverted, Skipped, UndoReport};
 pub use webhooks::{MAX_FAILURES as WEBHOOK_MAX_FAILURES, Webhook, WebhookDelivery, webhook_signature};
 pub use when::parse_at;

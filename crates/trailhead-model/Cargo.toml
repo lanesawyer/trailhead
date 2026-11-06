@@ -1,0 +1,23 @@
+[package]
+name = "trailhead-model"
+description = "Trailhead's domain types: tasks, comments, claims, statuses, grades and priorities, without the store"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+jiff.workspace = true
+utoipa = { workspace = true, optional = true }
+
+[features]
+# Derives `utoipa::ToSchema` so the server can publish an OpenAPI document.
+openapi = ["dep:utoipa"]

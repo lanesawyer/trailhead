@@ -9,9 +9,9 @@ use crate::db::{
     opt_uuid_value,
 };
 use crate::error::{Error, Result};
-use crate::model::{Comment, CommentKind, Entity, Status, Verdict};
 use crate::store::{Ctx, Store, Tx};
 use crate::tasks::{find_task, load_task, update_status};
+use trailhead_model::{Comment, CommentKind, Entity, Status, Verdict};
 
 pub(crate) const COMMENT_COLS: &str = "id, workspace_id, task_id, author_id, on_behalf_of, kind, addressed_to, body, \
      resolved_at, created_at, deleted_at, verdict, model";

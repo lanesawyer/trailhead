@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::db::{collect, fmt_ts, get_opt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::events::{EVENT_COLS, event_from_row};
-use crate::model::Event;
 use crate::store::{Ctx, Store};
+use trailhead_model::Event;
 
 /// Consecutive failures before a webhook is switched off.
 pub const MAX_FAILURES: i64 = 20;

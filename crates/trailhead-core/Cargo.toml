@@ -12,6 +12,7 @@ categories.workspace = true
 description = "Domain core for Trailhead: schema, claims, ready queue, event log and undo"
 
 [dependencies]
+trailhead-model.workspace = true
 libsql.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -27,7 +28,7 @@ utoipa = { workspace = true, optional = true }
 
 [features]
 # Derives `utoipa::ToSchema` on the public model so the server can publish an OpenAPI document.
-openapi = ["dep:utoipa"]
+openapi = ["dep:utoipa", "trailhead-model/openapi"]
 
 [dev-dependencies]
 tempfile.workspace = true

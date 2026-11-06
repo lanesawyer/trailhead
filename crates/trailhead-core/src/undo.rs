@@ -11,11 +11,11 @@ use crate::db::collect;
 use crate::deps::{insert_dependency, load_dependency, remove_dependency_row};
 use crate::error::{Error, Result};
 use crate::events::{EVENT_COLS, UNDO_WINDOW, event_from_row, scope_sql};
-use crate::model::{Claim, Comment, Dependency, Entity, Event, Project, Task};
 use crate::projects::{check_review_settings, load_project, save_project};
 use crate::reminders::{NOT_NOTIFICATION_SQL, is_notification};
 use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::{check_no_parent_cycle, load_task, save_task};
+use trailhead_model::{Claim, Comment, Dependency, Entity, Event, Project, Task};
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

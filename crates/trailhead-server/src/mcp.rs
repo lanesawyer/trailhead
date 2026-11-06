@@ -92,7 +92,7 @@ macro_rules! attempt {
     ($e:expr) => {
         match $e {
             Ok(v) => v,
-            Err(e) => return fail(e),
+            Err(e) => return fail(e.into()),
         }
     };
 }

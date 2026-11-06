@@ -4,10 +4,10 @@ use uuid::Uuid;
 
 use crate::db::{collect, fmt_ts, get_enum, get_opt_json, get_opt_uuid, get_ts, get_uuid};
 use crate::error::Result;
-use crate::model::Event;
 use crate::projects::find_project;
 use crate::store::{Ctx, Store};
 use crate::tasks::find_task;
+use trailhead_model::Event;
 
 /// Undo and revert reach back this far. Older events move to `events_archive`.
 pub const UNDO_WINDOW: SignedDuration = SignedDuration::from_hours(90 * 24);

@@ -1,4 +1,4 @@
-use crate::model::Status;
+use trailhead_model::{ParseError, Status};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -71,5 +71,11 @@ impl Error {
             Error::RateLimited { .. } => "rate_limited",
             Error::Db(_) | Error::Json(_) | Error::Corrupt(_) => "internal",
         }
+    }
+}
+
+impl From<ParseError> for Error {
+    fn from(e: ParseError) -> Self {
+        Error::Invalid(e.0)
     }
 }

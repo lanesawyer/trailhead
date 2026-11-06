@@ -3,8 +3,8 @@ use uuid::Uuid;
 
 use crate::db::{collect, first, fmt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
-use crate::model::{Agent, User, Workspace};
 use crate::store::{Ctx, Store};
+use trailhead_model::{Agent, User, Workspace};
 
 fn workspace_from_row(row: &Row) -> Result<Workspace> {
     Ok(Workspace {
