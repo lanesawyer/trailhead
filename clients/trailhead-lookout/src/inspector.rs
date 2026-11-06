@@ -24,7 +24,7 @@ use bevy::ui_widgets::{Activate, ControlOrientation, RequestClose};
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::author::Act;
+use crate::author::{Act, GRADES, grade_index, grade_options};
 use crate::board::Input;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::{Connection, ConnectionStatus};
@@ -70,6 +70,8 @@ pub enum Action {
     Undo,
     /// Revert what the holder (an agent id) did in the last `n` hours.
     Revert(i64),
+    /// Set the task's grade; none clears it.
+    Grade(Option<i64>),
 }
 
 impl Action {
@@ -81,6 +83,8 @@ impl Action {
             Action::Resolve(_) => "resolve".into(),
             Action::Undo => "undo last change".into(),
             Action::Revert(h) => format!("revert last {h}h"),
+            Action::Grade(Some(g)) => format!("grade {g}"),
+            Action::Grade(None) => "clear grade".into(),
         }
     }
 }
@@ -123,6 +127,8 @@ pub struct InspectorView {
     pub status: Option<String>,
     /// The task's priority; none for an agent.
     pub priority: Option<i64>,
+    /// The task's risk grade; none for an agent, or a task with none.
+    pub grade: Option<i64>,
     pub actions: Vec<Action>,
 }
 
@@ -197,6 +203,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
                 merge_note: None,
                 status: None,
                 priority: None,
+                grade: None,
                 actions: vec![Action::Revert(1)],
             })
         }
@@ -209,9 +216,6 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
             let holder_agent = holder.as_deref().and_then(|h| agent_name(h).map(|n| (h.to_string(), n)));
 
             let mut lines = vec![format!("status: {status}")];
-            if let Some(grade) = task["grade"].as_i64() {
-                lines.push(format!("grade: {grade}"));
-            }
             match (&holder_agent, &holder) {
                 (Some((_, name)), _) => lines.push(format!("held by {name}")),
                 (None, Some(h)) => lines.push(format!("held by {}", h.chars().take(8).collect::<String>())),
@@ -266,6 +270,7 @@ pub fn build(input: Input, latest: &HashMap<String, i64>, subject: &Subject) -> 
                 merge_note,
                 status: Some(status.to_string()),
                 priority: task["priority"].as_i64(),
+                grade: task["grade"].as_i64(),
                 actions,
             })
         }
@@ -291,6 +296,7 @@ pub fn plan(
         Action::Release => Request::new(Method::POST, path("/release"), None, None),
         Action::Cancel => Request::new(Method::PATCH, path(""), Some(json!({"status": "cancelled"})), version),
         Action::Status(st) => Request::new(Method::PATCH, path(""), Some(json!({"status": st})), version),
+        Action::Grade(g) => Request::new(Method::PATCH, path(""), Some(json!({"grade": g})), version),
         Action::Resolve(comment) => Request::new(Method::POST, format!("/v1/comments/{comment}/resolve"), None, None),
         Action::Undo => {
             let Subject::Task(id) = subject else { return None };
@@ -400,7 +406,14 @@ fn rebuild(
     let next = selection.0.as_ref().and_then(|subject| {
         let (projects, tasks, claims, comments, agents) =
             (collect(&projects), collect(&tasks), collect(&claims), collect(&comments), collect(&agents));
-        let input = Input { projects: &projects, tasks: &tasks, claims: &claims, comments: &comments, agents: &agents };
+        let input = Input {
+            projects: &projects,
+            tasks: &tasks,
+            claims: &claims,
+            comments: &comments,
+            agents: &agents,
+            ..Input::default()
+        };
         build(input, &latest.0, subject)
     });
     if state.0 != next {
@@ -465,6 +478,13 @@ struct StatusMove {
     source: Entity,
     subject: Subject,
     statuses: Vec<String>,
+}
+
+/// The dropdown that sets the task's grade: option `i` is `GRADES[i]`. Its answer shows beside it on `source`.
+#[derive(Component, Debug, Clone)]
+struct GradeChoice {
+    source: Entity,
+    subject: Subject,
 }
 
 /// The dropdown that sets how far back "revert" goes.
@@ -538,6 +558,7 @@ fn on_escape(
 fn on_pick(
     picked: On<Picked>,
     moves: Query<&StatusMove>,
+    grades: Query<&GradeChoice>,
     windows: Query<(), With<WindowChoice>>,
     mut window: ResMut<RevertWindow>,
     mut commands: Commands,
@@ -545,6 +566,11 @@ fn on_pick(
     if windows.contains(picked.entity) {
         if let Some(hours) = WINDOWS.get(picked.index) {
             window.0 = *hours;
+        }
+    } else if let Ok(GradeChoice { source, subject }) = grades.get(picked.entity) {
+        if let Some(grade) = GRADES.get(picked.index) {
+            let (source, subject, action) = (*source, subject.clone(), Action::Grade(*grade));
+            commands.queue(move |world: &mut World| send(world, source, &subject, &action));
         }
     } else if let Ok(StatusMove { source, subject, statuses }) = moves.get(picked.entity)
         && picked.index > 0
@@ -568,7 +594,14 @@ fn send(world: &mut World, source: Entity, subject: &Subject, action: &Action) {
         rows::<IsComment>(world),
         rows::<IsAgent>(world),
     );
-    let input = Input { projects: &projects, tasks: &tasks, claims: &claims, comments: &comments, agents: &agents };
+    let input = Input {
+        projects: &projects,
+        tasks: &tasks,
+        claims: &claims,
+        comments: &comments,
+        agents: &agents,
+        ..Input::default()
+    };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     let request = plan(action, input, &world.resource::<Latest>().0, subject, now);
     let outcome = match request {
@@ -679,6 +712,21 @@ fn redraw(
         }
         for l in lines {
             c.spawn_scene(text(l.clone(), size::BODY)).insert(ChildOf(section));
+        }
+        if heading == "Status" && view.status.is_some() {
+            let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(section)).id();
+            if live {
+                c.spawn_scene(text_dim("Grade", size::SECONDARY)).insert(ChildOf(line));
+                let source = control(&mut controls, c, &view.subject, &Action::Grade(None));
+                let options = grade_options();
+                let max_visible = options.len();
+                c.spawn_scene(select(options, grade_index(view.grade), max_visible))
+                    .insert((GradeChoice { source, subject: view.subject.clone() }, ChildOf(line)));
+                note(c, line, states.get(source).ok());
+            } else {
+                let grade = view.grade.map_or_else(|| "none".to_string(), |g| g.to_string());
+                c.spawn_scene(text(format!("grade: {grade}"), size::BODY)).insert(ChildOf(line));
+            }
         }
     }
 
@@ -813,6 +861,7 @@ mod tests {
                 claims: &self.claims,
                 comments: &self.comments,
                 agents: &self.agents,
+                ..Input::default()
             }
         }
     }
@@ -1117,5 +1166,53 @@ mod tests {
         assert_eq!(world.get::<ChildOf>(frame).unwrap().parent(), panel);
         assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0));
         assert_eq!(world.get::<ChildOf>(header).unwrap().parent(), panel);
+    }
+
+    #[test]
+    fn picking_a_grade_sends_the_patch_with_the_version_and_a_refusal_shows_beside_it() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.add_message::<Submit>();
+        let f = fixture();
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 5,
+            projects: vec![],
+            tasks: f.tasks.clone(),
+            agents: f.agents,
+        }));
+        app.update();
+        let subject = Subject::Task("t8".into());
+        let source = app.world_mut().spawn(Control::Idle).id();
+        let select = app.world_mut().spawn(GradeChoice { source, subject }).id();
+        // Row 3 of the dropdown is grade 3 (none, 1, 2, 3, 4).
+        app.world_mut().trigger(Picked { entity: select, index: 3 });
+        app.update();
+        let sent: Vec<Submit> = app.world_mut().resource_mut::<Messages<Submit>>().drain().collect();
+        assert_eq!(sent.len(), 1);
+        let r = &sent[0].request;
+        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::PATCH, "/v1/tasks/TRAIL-8", Some(1)));
+        assert_eq!(r.body, Some(json!({"grade": 3})));
+        assert_eq!(app.world().get::<Control>(source), Some(&Control::Busy));
+
+        // Clearing sends null.
+        app.world_mut().trigger(Picked { entity: select, index: 0 });
+        app.update();
+        let sent: Vec<Submit> = app.world_mut().resource_mut::<Messages<Submit>>().drain().collect();
+        assert_eq!(sent[0].request.body, Some(json!({"grade": null})));
+
+        // The server's refusal is kept on the control; the task's grade, and so the dropdown, stays as it was.
+        app.world_mut().write_message(CommandDone {
+            source,
+            id: crate::commands::CommandId(1),
+            outcome: Outcome::Forbidden("only a human can set the first grade".into()),
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<Control>(source),
+            Some(&Control::Refused("not allowed: only a human can set the first grade".into()))
+        );
+        let f = fixture();
+        let v = build(f.input(), &latest(), &Subject::Task("t8".into())).unwrap();
+        assert_eq!(v.grade, None);
     }
 }
