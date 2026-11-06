@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+use trailhead_core::{CommentKind, Status};
 
 use super::{Ctx, names, params, print_json};
 use crate::cli::{AddArgs, EditArgs};
@@ -286,9 +287,9 @@ fn merge(body: &mut Value, fields: Value) {
 }
 
 /// Moves a task to `status`, leaving a handoff first if there is one.
-pub(crate) async fn finish(cx: &Ctx, task: &str, status: &str, handoff: Option<String>) -> Result<()> {
+pub(crate) async fn finish(cx: &Ctx, task: &str, status: Status, handoff: Option<String>) -> Result<()> {
     if let Some(m) = handoff {
-        cx.c.post(&format!("tasks/{task}/comments"), json!({ "kind": "handoff", "body": m })).await?;
+        cx.c.post(&format!("tasks/{task}/comments"), json!({ "kind": CommentKind::Handoff, "body": m })).await?;
     }
     cx.show(&cx.c.patch(&format!("tasks/{task}"), json!({ "status": status })).await?, task_line);
     Ok(())

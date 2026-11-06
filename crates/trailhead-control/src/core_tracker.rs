@@ -95,19 +95,8 @@ impl CoreTracker {
 
     async fn task(&self, ctx: &Ctx, t: trailhead_core::Task) -> Result<Task> {
         let claims = self.store.live_claims(ctx, &[t.id]).await.map_err(map_err)?;
-        let run = run_update(&t)?;
-        let key = TaskKey(t.key);
-        Ok(Task {
-            project: key.project().to_string(),
-            key,
-            title: t.title,
-            description: t.description,
-            status: t.status,
-            grade: t.grade,
-            priority: t.priority,
-            holder: claims.get(&t.id).map(|c| c.holder.clone()),
-            run,
-        })
+        let holder = claims.get(&t.id).map(|c| c.holder.clone());
+        Task::from_model(t, holder)
     }
 
     /// Converts the listed tasks, skipping any whose factory metadata won't parse, so one bad value doesn't
@@ -115,7 +104,7 @@ impl CoreTracker {
     async fn tasks(&self, ctx: &Ctx, tasks: impl IntoIterator<Item = trailhead_core::Task>) -> Result<Vec<Task>> {
         let mut out = Vec::new();
         for t in tasks {
-            if let Err(e) = parse_run_update(&t) {
+            if let Err(e) = RunUpdate::of(&t) {
                 self.flag_bad_metadata(ctx, &t, &e.to_string()).await;
                 continue;
             }
@@ -184,17 +173,6 @@ impl CoreTracker {
         let new = NewComment::new(kind, body.to_string());
         self.store.add_comment(&ctx, &task.0, new).await.map_err(map_err)?;
         Ok(())
-    }
-}
-
-fn run_update(t: &trailhead_core::Task) -> Result<RunUpdate> {
-    parse_run_update(t).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", t.key)))
-}
-
-fn parse_run_update(t: &trailhead_core::Task) -> serde_json::Result<RunUpdate> {
-    match t.metadata.get(METADATA_KEY) {
-        Some(v) => serde_json::from_value(v.clone()),
-        None => Ok(RunUpdate::default()),
     }
 }
 

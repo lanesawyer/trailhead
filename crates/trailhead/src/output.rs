@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use jiff::tz::TimeZone;
 use serde_json::Value;
+use trailhead_core::CommentKind;
 
 pub fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("")
@@ -95,7 +96,7 @@ pub fn comment_line(c: &Value, names: &dyn Fn(&str) -> String) -> String {
     if let Some(to) = c["addressed_to"].as_str() {
         tags.push(format!("to {}", names(to)));
     }
-    if c["kind"] == "question" {
+    if c["kind"] == CommentKind::Question.as_str() {
         tags.push(if c["resolved_at"].is_null() { "open".into() } else { "resolved".into() });
     }
     if let Some(v) = c["verdict"].as_str() {

@@ -18,6 +18,7 @@ net = ["dep:iroh", "dep:hmac", "dep:sha2", "dep:hex", "dep:clap", "dep:tracing-s
 [dependencies]
 base64 = "0.22"
 trailhead-factory.workspace = true
+trailhead-model.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

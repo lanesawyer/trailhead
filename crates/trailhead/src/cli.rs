@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use trailhead_core::CommentKind;
 
 /// Trailhead: a headless task engine for humans and agents.
 #[derive(Parser)]
@@ -135,7 +136,7 @@ pub(crate) enum Cmd {
         body: String,
         /// handoff, progress, question, decision or note.
         #[arg(short, long, default_value = "note")]
-        kind: String,
+        kind: CommentKind,
         /// User or agent id to address.
         #[arg(long)]
         to: Option<String>,
