@@ -509,6 +509,26 @@ async fn a_pr_behind_its_base_is_updated_before_it_is_merged() {
 }
 
 #[tokio::test]
+async fn the_mergers_own_update_keeps_the_verdict_and_no_second_review_runs() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let reviewed_head = r.tracker.task(&key).run.reviewed_head.expect("reviewed");
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    // Nothing is scripted for a reviewer, so a second review would fail.
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(r.codehost.update_requests(), 1, "the merger updated the branch");
+    assert!(done.reviewed.is_empty(), "{done:?}");
+
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "the update didn't send the PR back to review: {done:?}");
+    assert_eq!(r.tracker.task(&key).run.reviewed_head.as_deref(), Some(reviewed_head.as_str()));
+    assert!(r.codehost.prs()[0].merged, "merged on the new head with the old verdict");
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
 async fn a_pr_whose_head_hasnt_moved_is_not_listed_again_for_grading() {
     let (r, queue) = queued_rig_with(&merging());
     let (_key, _pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
