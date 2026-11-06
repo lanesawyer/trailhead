@@ -674,27 +674,37 @@ async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
     Ok(changes)
 }
 
-/// Reads one changed path into `changes`. A path that is now a directory (git lists a symlink to one;
-/// the link target is read) is replaced by the files under it.
+/// Reads one changed path into `changes`. Git lists a directory only as an embedded repository (a gitlink),
+/// so a directory is replaced by the files its own git tracks or would add, never `.git`. A symlink to a
+/// directory can't be expressed as a `FileChange`, and following it would read outside the worktree, so it
+/// fails the run naming the path.
 async fn read_change(dir: &Path, path: String, changes: &mut Vec<FileChange>) -> Result<()> {
     let mut pending = vec![path];
     while let Some(path) = pending.pop() {
         let full = dir.join(&path);
-        if tokio::fs::metadata(&full).await.is_ok_and(|m| m.is_dir()) {
-            let fail = |e: std::io::Error| Error::Other(format!("{path}: {e}"));
-            let mut entries = tokio::fs::read_dir(&full).await.map_err(fail)?;
-            while let Some(entry) = entries.next_entry().await.map_err(fail)? {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name != ".git" {
+        let fail = |e: std::io::Error| Error::Other(format!("{path}: {e}"));
+        let meta = match tokio::fs::symlink_metadata(&full).await {
+            Ok(meta) => Some(meta),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(fail(e)),
+        };
+        if meta.as_ref().is_some_and(|m| m.is_dir()) {
+            let listed = git(&full, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"]).await?;
+            for name in listed.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+                let name = String::from_utf8_lossy(name);
+                if name != ".git" && !name.starts_with(".git/") {
                     pending.push(format!("{path}/{name}"));
                 }
             }
             continue;
         }
+        if meta.as_ref().is_some_and(|m| m.is_symlink()) && tokio::fs::metadata(&full).await.is_ok_and(|m| m.is_dir()) {
+            return Err(Error::Other(format!("{path}: a symlink to a directory can't be published")));
+        }
         let contents = match tokio::fs::read(&full).await {
             Ok(bytes) => Some(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(Error::Other(format!("{path}: {e}"))),
+            Err(e) => return Err(fail(e)),
         };
         changes.push(FileChange { path, contents });
     }
@@ -753,34 +763,49 @@ mod tests {
         assert_eq!((calls, results), (3, 3));
     }
 
-    #[tokio::test]
-    async fn a_symlink_to_a_new_directory_is_read_as_its_files() {
+    fn run_git(args: &[&str], at: &Path) {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(at)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    }
+
+    async fn started() -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
-        let run = |args: &[&str], at: &Path| {
-            let out = std::process::Command::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-                .args(args)
-                .current_dir(at)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?}");
-        };
-        run(&["init", "-q"], dir.path());
-        run(&["commit", "-q", "--allow-empty", "-m", "start"], dir.path());
+        run_git(&["init", "-q"], dir.path());
+        run_git(&["commit", "-q", "--allow-empty", "-m", "start"], dir.path());
         let start = git_head(dir.path()).await.unwrap();
+        (dir, start)
+    }
+
+    #[tokio::test]
+    async fn an_embedded_repository_is_read_as_its_files() {
+        let (dir, start) = started().await;
         let skill = dir.path().join(".claude/skills/trailhead-ui");
         std::fs::create_dir_all(skill.join("refs")).unwrap();
         std::fs::write(skill.join("SKILL.md"), "a").unwrap();
         std::fs::write(skill.join("refs/b.md"), "b").unwrap();
-        std::os::unix::fs::symlink(&skill, dir.path().join("link")).unwrap();
+        std::fs::write(skill.join(".gitignore"), "ignored\n").unwrap();
+        std::fs::write(skill.join("ignored"), "x").unwrap();
+        run_git(&["init", "-q"], &skill);
+        run_git(&["add", "--all"], &skill);
+        run_git(&["commit", "-q", "-m", "inner"], &skill);
         let mut paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
         paths.sort();
-        let want = [
-            ".claude/skills/trailhead-ui/SKILL.md",
-            ".claude/skills/trailhead-ui/refs/b.md",
-            "link/SKILL.md",
-            "link/refs/b.md",
-        ];
-        assert_eq!(paths, want);
+        let base = ".claude/skills/trailhead-ui";
+        assert_eq!(paths, [".gitignore", "SKILL.md", "refs/b.md"].map(|p| format!("{base}/{p}")));
+    }
+
+    #[tokio::test]
+    async fn a_symlink_to_a_directory_is_not_followed() {
+        let (dir, start) = started().await;
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "s").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        let err = changes_since(dir.path(), &start).await.unwrap_err().to_string();
+        assert!(err.contains("link") && err.contains("symlink"), "{err}");
     }
 }
