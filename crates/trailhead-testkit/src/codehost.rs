@@ -501,8 +501,14 @@ impl CodeHost for FakeCodeHost {
                         Some(body) => (FileStatus::Added, body.iter().filter(|b| **b == b'\n').count().max(1) as u32),
                         None => (FileStatus::Removed, 0),
                     };
-                    let file =
-                        ChangedFile { path: change.path.clone(), status, additions, deletions: 0, previous_path: None };
+                    let file = ChangedFile {
+                        path: change.path.clone(),
+                        status,
+                        additions,
+                        deletions: 0,
+                        previous_path: None,
+                        patch: None,
+                    };
                     by_path.insert(change.path.clone(), file);
                 }
             }

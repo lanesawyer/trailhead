@@ -555,6 +555,7 @@ async fn prs_open_once_and_take_reviews_and_merges() {
         additions: 1,
         deletions: 0,
         previous_path: None,
+        patch: None,
     };
     let old = ChangedFile {
         path: "old.txt".into(),
@@ -562,6 +563,7 @@ async fn prs_open_once_and_take_reviews_and_merges() {
         additions: 0,
         deletions: 3,
         previous_path: None,
+        patch: None,
     };
     assert_eq!(files, [a, old]);
     let id = gh.comment(&pr, "Looks right.").await.unwrap();
