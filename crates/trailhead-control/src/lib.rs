@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use trailhead_factory::{
-    ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, IROH_DOMAINS, Labels, MergeMode, ModelProvider,
-    PrRef, Sandbox, SandboxId, Target, Task, TaskKey, Tracker, Verdict, label,
+    ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, GateKind, Grade, IROH_DOMAINS, Labels, MergeMode,
+    ModelProvider, PrRef, Sandbox, SandboxId, Target, Task, TaskKey, Tracker, Verdict, label,
 };
 
 use crate::pool::Trouble;
@@ -105,6 +105,11 @@ impl Placed {
         }
         Ok(found)
     }
+}
+
+/// The grades whose gate in `config` requires a person.
+fn human_grades(config: &FactoryConfig) -> Vec<Grade> {
+    Grade::ALL.into_iter().filter(|g| config.gate(*g).require.contains(&GateKind::Human)).collect()
 }
 
 pub struct Factory {
@@ -239,6 +244,8 @@ impl Factory {
         assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
         host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
         let merge_mode = Mutex::new(config.merge.mode);
+        let status = StatusBoard::new();
+        status.human_grades(human_grades(&config));
         Factory {
             config,
             targets,
@@ -263,7 +270,7 @@ impl Factory {
             placed: Arc::default(),
             ledger: Arc::default(),
             capped: Mutex::default(),
-            status: StatusBoard::new(),
+            status,
         }
     }
 
@@ -282,6 +289,7 @@ impl Factory {
 
     /// Publishes to `board` instead of a board of its own, to share one between repos or with a server.
     pub fn with_status(mut self, board: Arc<StatusBoard>) -> Factory {
+        board.human_grades(human_grades(&self.config));
         self.status = board;
         self
     }

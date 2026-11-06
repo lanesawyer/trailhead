@@ -14,7 +14,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bevy::prelude::*;
 use trailhead_daemon::ui::RepoSnapshot;
-use trailhead_factory::{ControlState, FactoryEvent, RunPhase, RunStatus, SandboxStatus, Sequenced, TaskKey, Usd};
+use trailhead_factory::{
+    ControlState, FactoryEvent, Grade, RunPhase, RunStatus, SandboxStatus, Sequenced, TaskKey, Usd,
+};
 
 /// How many lines of live activity are kept.
 const ACTIVITY: usize = 200;
@@ -79,6 +81,8 @@ pub struct RepoState {
     pub control: ControlState,
     /// Unix seconds and the message.
     pub last_error: Option<(i64, String)>,
+    /// The grades whose gate wants a person.
+    pub human_grades: Vec<Grade>,
     /// The last event applied, or the snapshot's.
     pub seq: u64,
 }
@@ -108,6 +112,15 @@ impl FactoryStatus {
             FactoryLink::Stopped => "factory stopped".into(),
             FactoryLink::TooOld(why) | FactoryLink::Refused(why) => why.clone(),
         }
+    }
+
+    /// The grades whose gate wants a person, as the factory says: every repo's, or the default table's (3 and 4) until
+    /// a snapshot has said.
+    pub fn human_grades(&self) -> Vec<Grade> {
+        if self.repos.is_empty() {
+            return Grade::ALL.into_iter().filter(|g| g.get() >= 3).collect();
+        }
+        Grade::ALL.into_iter().filter(|g| self.repos.values().any(|r| r.human_grades.contains(g))).collect()
     }
 
     /// The control plane's state for the map, repo by repo.
@@ -197,9 +210,15 @@ impl FactoryMirror {
         for run in snapshot.runs {
             self.set_run(commands, &repo, run);
         }
-        status
-            .repos
-            .insert(repo, RepoState { control: snapshot.control, last_error: snapshot.last_error, seq: snapshot.seq });
+        status.repos.insert(
+            repo,
+            RepoState {
+                control: snapshot.control,
+                last_error: snapshot.last_error,
+                human_grades: snapshot.human_grades,
+                seq: snapshot.seq,
+            },
+        );
     }
 
     fn apply_event(&mut self, commands: &mut Commands, status: &mut FactoryStatus, repo: &str, event: Sequenced) {
@@ -347,6 +366,7 @@ mod tests {
             runs: vec![],
             holding: None,
             targets: Vec::new(),
+            human_grades: Vec::new(),
             seq,
         };
         FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])
@@ -430,6 +450,17 @@ mod tests {
         let err = FactoryEvent::Error { message: "boom".into() };
         send(&mut app, [event(2, err)]);
         assert_eq!(app.world().resource::<FactoryStatus>().repos["o/r"].last_error.as_ref().unwrap().1, "boom");
+    }
+
+    #[test]
+    fn human_grades_come_from_the_snapshots_and_default_to_the_table_before_one() {
+        let mut app = app();
+        let g = |n| Grade::new(n).unwrap();
+        assert_eq!(app.world().resource::<FactoryStatus>().human_grades(), [g(3), g(4)]);
+        let FactoryUpdate::Snapshot(mut repos) = snapshot(1, vec![]) else { unreachable!() };
+        repos[0].snapshot.human_grades = vec![g(2), g(4)];
+        send(&mut app, [FactoryUpdate::Snapshot(repos)]);
+        assert_eq!(app.world().resource::<FactoryStatus>().human_grades(), [g(2), g(4)]);
     }
 
     #[test]

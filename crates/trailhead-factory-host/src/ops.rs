@@ -484,6 +484,7 @@ mod tests {
                 cap: Usd::dollars(5.0),
                 capped: true,
             }],
+            human_grades: Vec::new(),
             seq: 12,
         };
         let out = render_live(&snapshot);

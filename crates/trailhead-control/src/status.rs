@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 use trailhead_factory::{
-    ControlState, FactoryEvent, FactorySnapshot, RunPhase, RunStatus, Sandbox, SandboxState, SandboxStatus, Sequenced,
-    TargetSpend, TaskKey, Usd, label,
+    ControlState, FactoryEvent, FactorySnapshot, Grade, RunPhase, RunStatus, Sandbox, SandboxState, SandboxStatus,
+    Sequenced, TargetSpend, TaskKey, Usd, label,
 };
 
 use crate::timing::unix_now;
@@ -23,6 +23,7 @@ struct Inner {
     runs: Vec<RunStatus>,
     holding: Option<String>,
     targets: Vec<TargetSpend>,
+    human_grades: Vec<Grade>,
     seq: u64,
 }
 
@@ -41,6 +42,7 @@ impl Default for StatusBoard {
                 runs: Vec::new(),
                 holding: None,
                 targets: Vec::new(),
+                human_grades: Vec::new(),
                 seq: 0,
             }),
             tx: broadcast::channel(BACKLOG).0,
@@ -80,6 +82,7 @@ fn snapshot_locked(inner: &Inner) -> FactorySnapshot {
         runs,
         holding: inner.holding.clone(),
         targets: inner.targets.clone(),
+        human_grades: inner.human_grades.clone(),
         seq: inner.seq,
     }
 }
@@ -129,6 +132,12 @@ impl StatusBoard {
     /// clock and not with an event.
     pub fn targets(&self, targets: Vec<TargetSpend>) {
         self.inner.lock().unwrap().targets = targets;
+    }
+
+    /// Sets the grades whose gate wants a person. It goes in the snapshot and not the stream, because only the config
+    /// changes it.
+    pub fn human_grades(&self, grades: Vec<Grade>) {
+        self.inner.lock().unwrap().human_grades = grades;
     }
 
     pub fn control(&self, control: ControlState) {
@@ -318,6 +327,14 @@ mod tests {
     fn sandbox(name: &str, labels: &[(&str, &str)]) -> Sandbox {
         let labels: Labels = labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         Sandbox { id: SandboxId(name.into()), name: name.into(), labels }
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_grades_that_want_a_person() {
+        let board = StatusBoard::new();
+        assert!(board.snapshot().human_grades.is_empty());
+        board.human_grades(vec![Grade::ALL[1]]);
+        assert_eq!(board.subscribe().0.human_grades, [Grade::ALL[1]]);
     }
 
     #[test]
