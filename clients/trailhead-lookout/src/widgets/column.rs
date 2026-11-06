@@ -109,6 +109,24 @@ mod tests {
     }
 
     #[test]
+    fn the_header_names_the_status_in_words() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let shell = app.world_mut().spawn(column_shell("in_progress")).id();
+        column_header(&mut app.world_mut().commands(), shell, "in_progress", 3);
+        app.world_mut().flush();
+        for _ in 0..3 {
+            app.update();
+        }
+        let world = app.world_mut();
+        let shown: Vec<String> = world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect();
+        assert!(shown.contains(&"In Progress".to_string()), "{shown:?}");
+        assert!(!shown.contains(&"in_progress".to_string()), "{shown:?}");
+    }
+
+    #[test]
     fn the_frame_may_shrink_so_the_body_scrolls() {
         assert_eq!(node_of(column_frame()).min_height, px(0));
         assert_eq!(node_of(column_body()).min_height, px(0));

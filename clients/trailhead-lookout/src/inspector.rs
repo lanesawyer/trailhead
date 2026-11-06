@@ -582,6 +582,14 @@ fn is_run_line(line: &str) -> bool {
 }
 
 /// A section of the panel under `heading`, for the caller to fill.
+/// The status dropdown: its options read as words, while the [`StatusMove`] keeps the API values it sends.
+fn status_select(c: &mut Commands, parent: Entity, source: Entity, subject: Subject, statuses: Vec<String>) {
+    let labels: Vec<String> = statuses.iter().map(|s| status_label(s)).collect();
+    let max_visible = labels.len();
+    c.spawn_scene(select(labels, Some(0), max_visible))
+        .insert((StatusMove { source, subject, statuses }, ChildOf(parent)));
+}
+
 fn section_in(commands: &mut Commands, panel: Entity, heading: &str) -> Entity {
     commands.spawn_scene(bsn! { @section(heading.to_string()) }).insert(ChildOf(panel)).id()
 }
@@ -730,10 +738,7 @@ fn redraw(
         c.spawn_scene(text_dim("Move to", size::SECONDARY)).insert(ChildOf(line));
         let statuses: Vec<String> = std::iter::once(current.clone()).chain(moves).collect();
         let source = control(&mut controls, c, &view.subject, &Action::Status(String::new()));
-        let max_visible = statuses.len();
-        let labels: Vec<String> = statuses.iter().map(|s| status_label(s)).collect();
-        c.spawn_scene(select(labels, Some(0), max_visible))
-            .insert((StatusMove { source, subject: view.subject.clone(), statuses }, ChildOf(line)));
+        status_select(c, line, source, view.subject.clone(), statuses);
         note(c, line, states.get(source).ok());
     }
     for action in &view.actions {
@@ -1030,5 +1035,29 @@ mod tests {
         assert_eq!(world.get::<ChildOf>(frame).unwrap().parent(), panel);
         assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0));
         assert_eq!(world.get::<ChildOf>(header).unwrap().parent(), panel);
+    }
+
+    #[test]
+    fn the_status_dropdown_shows_words_and_keeps_the_api_values() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let parent = app.world_mut().spawn_empty().id();
+        let source = app.world_mut().spawn(Control::Idle).id();
+        let statuses = vec!["needs_input".to_string(), "in_progress".to_string()];
+        status_select(&mut app.world_mut().commands(), parent, source, Subject::Task("t8".into()), statuses);
+        app.world_mut().flush();
+        for _ in 0..4 {
+            app.update();
+        }
+        let world = app.world_mut();
+        let shown: Vec<String> = world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect();
+        for word in ["Needs Input", "In Progress"] {
+            assert!(shown.iter().any(|s| s == word), "{word} in {shown:?}");
+        }
+        assert!(!shown.iter().any(|s| s.contains('_')), "{shown:?}");
+        let moves = world.query::<&StatusMove>().single(world).unwrap();
+        assert_eq!(moves.statuses, ["needs_input", "in_progress"]);
     }
 }

@@ -865,6 +865,20 @@ mod tests {
     }
 
     #[test]
+    fn the_forms_status_dropdown_lists_every_status_in_words() {
+        let mut app = ui_app();
+        press(&mut app, Act::Edit("TRAIL-7".into()));
+        settle(&mut app);
+        let world = app.world_mut();
+        let shown: Vec<String> = world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect();
+        for status in STATUSES {
+            let word = status_label(status);
+            assert!(shown.contains(&word), "{word} in {shown:?}");
+        }
+        assert!(!shown.iter().any(|s| STATUSES.contains(&s.as_str()) && s.contains('_')), "{shown:?}");
+    }
+
+    #[test]
     fn every_form_opens_one_modal_and_closing_it_closes_the_form() {
         let acts = [
             Act::New,

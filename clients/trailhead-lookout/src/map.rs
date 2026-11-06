@@ -264,8 +264,8 @@ fn marker_line(m: &Marker) -> (String, Color) {
         Marker::Questions(n) => (format!("? {n} open question{}", if *n == 1 { "" } else { "s" }), warn),
         Marker::Handoff(h) => (format!("handoff: {h}"), dim),
         Marker::Reviewing => ("reviewing".into(), Color::srgb(0.6, 0.8, 1.0)),
-        Marker::InReview => ("in review".into(), Color::srgb(0.6, 0.8, 1.0)),
-        Marker::Approved => ("approved".into(), Color::srgb(0.5, 0.9, 0.5)),
+        Marker::InReview => (status_label("in_review"), Color::srgb(0.6, 0.8, 1.0)),
+        Marker::Approved => (status_label("approved"), Color::srgb(0.5, 0.9, 0.5)),
         Marker::Spend(d) => (format!("${d:.2}"), dim),
     }
 }

@@ -191,7 +191,16 @@ mod tests {
             let source = source.split("#[cfg(test)]").next().unwrap();
             for (n, line) in source.lines().enumerate() {
                 let line = line.trim();
-                if !line.starts_with("//") && !line.contains("Name::new") && skipping.iter().any(|p| line.contains(p)) {
+                if line.starts_with("//") || line.contains("Name::new") {
+                    continue;
+                }
+                let own_words = crate::board::STATUSES.iter().flat_map(|s| {
+                    let spaced = s.replace('_', " ");
+                    // A single word is the API value too (`column_shell("open")`), so only a (text, color) pair is a label.
+                    let spelled = if spaced == *s { format!("(\"{s}\".into(),") } else { format!("\"{spaced}\"") };
+                    [spelled, format!("\"{}\"", spaced.to_uppercase())]
+                });
+                if skipping.iter().any(|p| line.contains(p)) || own_words.into_iter().any(|p| line.contains(&p)) {
                     bad.push(format!("{file}:{}: {line}", n + 1));
                 }
             }
