@@ -1,8 +1,13 @@
 use std::sync::OnceLock;
 
+use std::collections::HashMap;
+
+use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde_json::Value;
-use trailhead_core::CommentKind;
+use trailhead_client::text::Text;
+use trailhead_core::{Claim, Event, Project, Task, TaskDetail};
+use uuid::Uuid;
 
 pub fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("")
@@ -24,64 +29,27 @@ pub fn short_time(ts: &str) -> String {
     }
 }
 
-/// `2026-10-15 01:04 PDT (in 29m)`, for deadlines like lease expiry.
-pub fn until(ts: &str) -> String {
-    let Ok(t) = ts.parse::<jiff::Timestamp>() else { return ts.to_string() };
-    let secs = t.as_second() - jiff::Timestamp::now().as_second();
-    let rel = if secs >= 0 { format!("in {}", span(secs)) } else { format!("{} ago", span(secs)) };
-    format!("{} ({rel})", short_time(ts))
+/// The shared formatter ([`trailhead_client::text`]), set for a person at this terminal.
+pub fn text() -> &'static Text {
+    static TEXT: OnceLock<Text> = OnceLock::new();
+    TEXT.get_or_init(|| Text::terminal(local_tz().clone()))
 }
 
-fn span(secs: i64) -> String {
-    let (d, h, m) = (secs.abs() / 86_400, secs.abs() % 86_400 / 3600, secs.abs() % 3600 / 60);
-    match (d, h) {
-        (0, 0) => format!("{m}m"),
-        (0, _) => format!("{h}h {m}m"),
-        _ => format!("{d}d {h}h"),
+/// `v` as a `T`, or `v` itself as JSON when it isn't one, so nothing the server sent is hidden.
+fn typed<T: serde::de::DeserializeOwned>(v: &Value, show: impl FnOnce(&T) -> String) -> String {
+    match serde_json::from_value::<T>(v.clone()) {
+        Ok(t) => show(&t),
+        Err(_) => v.to_string(),
     }
 }
 
 /// "until <when>" for a lease, or "since <when>, no expiry" for a claim that never lapses.
 pub fn lease(claim: &Value) -> String {
-    match claim["expires_at"].as_str() {
-        Some(e) => format!("until {}", until(e)),
-        None => {
-            let since = claim["claimed_at"].as_str().unwrap_or_default();
-            let Ok(t) = since.parse::<jiff::Timestamp>() else { return format!("since {since}, no expiry") };
-            let age = (jiff::Timestamp::now().as_second() - t.as_second()).max(0);
-            format!("since {} ({} ago), no expiry", short_time(since), span(age))
-        }
-    }
-}
-
-/// `<field>_at` shown with `time`, else the `<field>_on` day.
-pub fn when(t: &Value, field: &str, time: fn(&str) -> String) -> Option<String> {
-    match (t[format!("{field}_at")].as_str(), t[format!("{field}_on")].as_str()) {
-        (Some(at), _) => Some(time(at)),
-        (None, Some(day)) => Some(day.to_string()),
-        _ => None,
-    }
-}
-
-fn local_minute(ts: &str) -> String {
-    match ts.parse::<jiff::Timestamp>() {
-        Ok(t) => t.to_zoned(local_tz().clone()).strftime("%Y-%m-%d %H:%M").to_string(),
-        Err(_) => ts.to_string(),
-    }
+    typed(claim, |c: &Claim| text().lease(c, Timestamp::now()))
 }
 
 pub fn task_line(t: &Value) -> String {
-    let mut line = format!("{:<10} {:<11} p{}  {}", s(t, "key"), s(t, "status"), t["priority"], s(t, "title"));
-    if let Some(g) = t["grade"].as_i64() {
-        line.push_str(&format!("  (grade {g})"));
-    }
-    if let Some(w) = when(t, "scheduled", local_minute) {
-        line.push_str(&format!("  (on {w})"));
-    }
-    if let Some(w) = when(t, "due", local_minute) {
-        line.push_str(&format!("  (due {w})"));
-    }
-    line
+    typed(t, |t: &Task| text().task_line(t))
 }
 
 pub fn task_list(tasks: &Value, empty: &str) {
@@ -91,44 +59,17 @@ pub fn task_list(tasks: &Value, empty: &str) {
     }
 }
 
-pub fn comment_line(c: &Value, names: &dyn Fn(&str) -> String) -> String {
-    let mut tags = vec![s(c, "kind").to_string()];
-    if let Some(to) = c["addressed_to"].as_str() {
-        tags.push(format!("to {}", names(to)));
-    }
-    if c["kind"] == CommentKind::Question.as_str() {
-        tags.push(if c["resolved_at"].is_null() { "open".into() } else { "resolved".into() });
-    }
-    if let Some(v) = c["verdict"].as_str() {
-        tags.push(v.replace('_', " "));
-    }
-    if let Some(m) = c["model"].as_str() {
-        tags.push(m.to_string());
-    }
-    format!(
-        "[{}] {} {}: {}\n    id {}",
-        tags.join(", "),
-        short_time(s(c, "created_at")),
-        names(s(c, "author_id")),
-        s(c, "body").replace('\n', "\n    "),
-        s(c, "id")
-    )
+/// A task in full, as `GET /v1/tasks/{key}` returns it. `names` maps user and agent ids to names.
+pub fn detail(v: &Value, names: &HashMap<String, String>) -> String {
+    let name =
+        |id: Uuid| names.get(&id.to_string()).cloned().unwrap_or_else(|| id.to_string().chars().take(8).collect());
+    typed(v, |d: &TaskDetail| text().detail(d, &name, Timestamp::now()))
 }
 
 pub fn project_line(p: &Value) -> String {
-    let mut line = format!("{:<8} {}", s(p, "key"), s(p, "name"));
-    if p["status"] == "archived" {
-        line.push_str("  (archived)");
-    }
-    if p["require_review"] == true {
-        line.push_str("  [review]");
-    }
-    line
+    typed(p, |p: &Project| text().project_line(p))
 }
 
 pub fn event_line(e: &Value) -> String {
-    let what = e["task_key"].as_str().or(e["after"]["key"].as_str()).or(e["before"]["key"].as_str()).unwrap_or("");
-    let undo = e["undoes"].as_i64().map(|u| format!(" (undoes #{u})")).unwrap_or_default();
-    let id = format!("#{}", e["id"].as_i64().unwrap_or_default());
-    format!("{id:<6} {}  {:<20} {what}{undo}", short_time(s(e, "at")), s(e, "kind"))
+    typed(e, |e: &Event| text().event_line(e))
 }

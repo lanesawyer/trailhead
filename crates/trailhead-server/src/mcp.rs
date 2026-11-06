@@ -9,7 +9,6 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use http::request::Parts;
 use jiff::Timestamp;
-use jiff::civil::Date;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
@@ -23,10 +22,11 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
+use trailhead_client::text::Text;
 use trailhead_core::{
-    Claim, Comment, CommentKind, Ctx, Error, EventFilter, Grade, GradeFilter, NewComment, NewProject, NewTask,
-    Priority, Project, ProjectPatch, ProjectStatus, Status, StoredResponse, Task, TaskDetail, TaskFilter, TaskPatch,
-    TaskSort, Verdict, idempotency_fingerprint, parse_grade,
+    Claim, CommentKind, Ctx, Error, EventFilter, Grade, GradeFilter, NewComment, NewProject, NewTask, Priority,
+    Project, ProjectPatch, Status, StoredResponse, Task, TaskFilter, TaskPatch, TaskSort, Verdict,
+    idempotency_fingerprint, parse_grade,
 };
 use uuid::Uuid;
 
@@ -97,21 +97,6 @@ macro_rules! attempt {
     };
 }
 
-/// `2026-10-17 13:00 PDT` in the zone it was planned in, else at UTC.
-fn local_time(t: Timestamp, tz: Option<&str>) -> String {
-    let zone = tz.and_then(|z| jiff::tz::TimeZone::get(z).ok()).unwrap_or(jiff::tz::TimeZone::UTC);
-    t.to_zoned(zone).strftime("%Y-%m-%d %H:%M %Z").to_string()
-}
-
-/// A day, or a day and time: `2026-10-17` or `2026-10-17 13:00 PDT`.
-fn when(on: Option<Date>, at: Option<Timestamp>, tz: Option<&str>) -> Option<String> {
-    match (at, on) {
-        (Some(at), _) => Some(local_time(at, tz)),
-        (None, Some(day)) => Some(day.to_string()),
-        (None, None) => None,
-    }
-}
-
 /// An update argument where an empty string clears the field.
 fn clearable<T>(
     s: Option<&str>,
@@ -125,107 +110,19 @@ fn parse_grade_filter(s: Option<&str>) -> trailhead_core::Result<GradeFilter> {
 }
 
 fn task_line(t: &Task) -> String {
-    let mut line = format!("{} {} p{} v{} {}", t.key, t.status, t.priority, t.version, t.title);
-    if let Some(g) = t.grade {
-        line.push_str(&format!(" (grade {g})"));
-    }
-    if let Some(w) = when(t.scheduled_on, t.scheduled_at, t.scheduled_tz.as_deref()) {
-        line.push_str(&format!(" (scheduled {w})"));
-    }
-    if let Some(w) = when(t.due_on, t.due_at, t.due_tz.as_deref()) {
-        line.push_str(&format!(" (due {w})"));
-    }
-    line
+    Text::agent().task_line(t)
 }
 
 fn task_list(tasks: &[Task], empty: &str) -> String {
-    if tasks.is_empty() { empty.to_string() } else { tasks.iter().map(task_line).collect::<Vec<_>>().join("\n") }
+    Text::agent().task_list(tasks, empty)
 }
 
 fn project_line(p: &Project) -> String {
-    let mut line = format!("{} v{} {}", p.key, p.version, p.name);
-    if p.status == ProjectStatus::Archived {
-        line.push_str(" (archived)");
-    }
-    if p.require_review {
-        line.push_str(" [review]");
-    }
-    line
+    Text::agent().project_line(p)
 }
 
-fn project_text(p: &Project) -> String {
-    let brief = if p.brief.is_empty() { "(no brief yet)" } else { &p.brief };
-    format!("{}\n\n{brief}", project_line(p))
-}
-
-/// `2026-10-29 14:03 UTC`, the server having no local zone.
-fn short_time(ts: Timestamp) -> String {
-    ts.strftime("%Y-%m-%d %H:%M UTC").to_string()
-}
-
-/// Same shape as the CLI's comment line, with the time in UTC.
-fn comment_line(c: &Comment, names: &dyn Fn(Uuid) -> String) -> String {
-    let mut tags = vec![c.kind.to_string()];
-    if let Some(to) = c.addressed_to {
-        tags.push(format!("to {}", names(to)));
-    }
-    if c.kind == CommentKind::Question {
-        tags.push(if c.resolved_at.is_some() { "resolved".into() } else { "open".into() });
-    }
-    if let Some(v) = c.verdict {
-        tags.push(v.to_string().replace('_', " "));
-    }
-    if let Some(m) = &c.model {
-        tags.push(m.clone());
-    }
-    format!(
-        "[{}] {} {}: {}\n    id {}",
-        tags.join(", "),
-        short_time(c.created_at),
-        names(c.author_id),
-        c.body.replace('\n', "\n    "),
-        c.id
-    )
-}
-
-/// "until <time>", or "since <time>, no expiry" for a claim that never lapses.
 fn lease(c: &Claim) -> String {
-    match c.expires_at {
-        Some(e) => format!("until {e}"),
-        None => format!("since {}, no expiry", c.claimed_at),
-    }
-}
-
-fn detail_text(d: &TaskDetail, names: &dyn Fn(Uuid) -> String) -> String {
-    let t = &d.task;
-    let mut out = vec![task_line(t)];
-    if let Some(c) = &d.claim {
-        out.push(format!("claimed by {} {}", names(c.holder_id), lease(c)));
-    }
-    if !d.blocked_by.is_empty() {
-        out.push(format!("blocked by {}", d.blocked_by.join(", ")));
-    }
-    if !d.blocks.is_empty() {
-        out.push(format!("blocks {}", d.blocks.join(", ")));
-    }
-    if let Some(k) = &d.duplicate_of {
-        out.push(format!("duplicate of {k}"));
-    }
-    if !d.duplicates.is_empty() {
-        out.push(format!("duplicates {}", d.duplicates.join(", ")));
-    }
-    if t.metadata.as_object().is_some_and(|m| !m.is_empty()) {
-        out.push(format!("metadata {}", t.metadata));
-    }
-    if !t.description.is_empty() {
-        out.push(String::new());
-        out.push(t.description.clone());
-    }
-    if !d.comments.is_empty() {
-        out.push(String::new());
-        out.extend(d.comments.iter().map(|c| comment_line(c, names)));
-    }
-    out.join("\n")
+    Text::agent().lease(c, Timestamp::now())
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -662,7 +559,7 @@ impl TrailheadMcp {
         let detail = attempt!(self.state.store.task_detail(&ctx, &a.task).await);
         let known = self.known_names(&ctx).await;
         let names = |id: Uuid| known.get(&id).cloned().unwrap_or_else(|| id.to_string().chars().take(8).collect());
-        text(detail_text(&detail, &names))
+        text(Text::agent().detail(&detail, &names, Timestamp::now()))
     }
 
     #[tool(
@@ -877,7 +774,7 @@ impl TrailheadMcp {
         Parameters(a): Parameters<ProjectArg>,
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
-        text(project_text(&attempt!(self.state.store.get_project(&ctx, &a.project).await)))
+        text(Text::agent().project(&attempt!(self.state.store.get_project(&ctx, &a.project).await)))
     }
 
     #[tool(

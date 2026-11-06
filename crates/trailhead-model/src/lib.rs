@@ -356,6 +356,23 @@ pub struct Comment {
     pub deleted_at: Option<Timestamp>,
 }
 
+/// A task with its claim, comments and links, as `GET /v1/tasks/{key}` returns it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TaskDetail {
+    pub task: Task,
+    pub claim: Option<Claim>,
+    /// Keys of unfinished tasks blocking this one.
+    pub blocked_by: Vec<String>,
+    /// Keys of tasks this one blocks.
+    pub blocks: Vec<String>,
+    pub comments: Vec<Comment>,
+    /// Key of the task this one was cancelled as a duplicate of.
+    pub duplicate_of: Option<String>,
+    /// Keys of tasks cancelled as duplicates of this one.
+    pub duplicates: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Dependency {
