@@ -471,6 +471,7 @@ impl Compute for DockerCompute {
     /// environment are carried over. Warm checkpoints of the sandbox that no label points at any more are removed
     /// afterwards.
     async fn checkpoint(&self, id: &SandboxId, note: &str) -> Result<CheckpointId> {
+        self.writable()?;
         let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
         let cp = CheckpointId(format!("{CHECKPOINT_REPO}:{}-{millis}", id.0));
         let info = self.docker.inspect_container(&id.0, None::<InspectContainerOptions>).await.map_err(docker_err)?;
@@ -530,6 +531,7 @@ impl Compute for DockerCompute {
     /// can be replaced), writes the program's run script and has the supervisor (re)start it. A program that exits
     /// within the first few seconds is an error carrying its output.
     async fn start(&self, id: &SandboxId, program: &Program) -> Result<()> {
+        self.writable()?;
         let name = &id.0;
         let (code, out) = self.exec(name, None, "id -u; id -g; echo \"$HOME\"").await?;
         let [uid, gid, home] = out.lines().collect::<Vec<_>>()[..] else {
@@ -575,6 +577,7 @@ impl Compute for DockerCompute {
     /// Containers don't pause, but one can be stopped (by hand, or by the Docker host restarting without it), so
     /// this starts it if it isn't running.
     async fn wake(&self, id: &SandboxId) -> Result<()> {
+        self.writable()?;
         let info = self.docker.inspect_container(&id.0, None::<InspectContainerOptions>).await.map_err(docker_err)?;
         if info.state.and_then(|s| s.running) == Some(true) {
             return Ok(());
@@ -857,6 +860,15 @@ mod tests {
         assert!(compute.gateway().await.is_err());
         let err = compute.set_labels(&SandboxId("x".into()), &Labels::default()).await.unwrap_err();
         assert!(err.to_string().contains("read-only"), "{err}");
+        let id = SandboxId("x".into());
+        let program = Program { name: "p".into(), cmd: "true".into(), args: vec![], files: vec![] };
+        for err in [
+            compute.checkpoint(&id, "n").await.unwrap_err(),
+            compute.start(&id, &program).await.unwrap_err(),
+            compute.wake(&id).await.unwrap_err(),
+        ] {
+            assert!(err.to_string().contains("read-only"), "{err}");
+        }
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(seen.lock().unwrap().is_empty(), "{:?}", seen.lock().unwrap());
     }
