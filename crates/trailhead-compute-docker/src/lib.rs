@@ -52,6 +52,8 @@ pub const CHECKPOINT_NOTE: &str = "dev.trailhead.checkpoint-note";
 /// The note of a pool's warm checkpoints, the only ones a later checkpoint may remove: the rest (a parked
 /// sandbox's) stay until the sandbox is destroyed.
 const WARM_NOTE: &str = "warm";
+/// The variable capping cargo's parallelism to the memory limit; set on each container, not carried in checkpoints.
+const BUILD_JOBS_VAR: &str = "CARGO_BUILD_JOBS";
 /// The repository checkpoint images are imported to.
 pub const CHECKPOINT_REPO: &str = "trailhead-checkpoint";
 /// How long a checkpoint's export and import may take: a whole filesystem, far past the client's usual two minutes.
@@ -237,7 +239,7 @@ impl DockerCompute {
     fn sandbox_env(&self) -> Vec<String> {
         let mut env = gateway::proxy_env();
         if let Some(bytes) = self.config.memory_bytes {
-            env.push(format!("CARGO_BUILD_JOBS={}", build_jobs(bytes)));
+            env.push(format!("{BUILD_JOBS_VAR}={}", build_jobs(bytes)));
         }
         env
     }
@@ -703,7 +705,8 @@ fn image_changes(sandbox: &str, note: &str, config: Option<&ContainerConfig>) ->
             out.push(format!("WORKDIR {dir}"));
         }
         for var in config.env.iter().flatten() {
-            if let Some((k, v)) = var.split_once('=') {
+            // Left out so a restore sets it afresh from the current `memory_mib`, and drops it once that is unset.
+            if let Some((k, v)) = var.split_once('=').filter(|(k, _)| *k != BUILD_JOBS_VAR) {
                 out.push(format!("ENV {k}={}", quote(v)));
             }
         }
@@ -909,7 +912,7 @@ mod tests {
         let config = ContainerConfig {
             user: Some("trailhead".into()),
             working_dir: Some("/work".into()),
-            env: Some(vec!["PATH=/usr/bin:/bin".into(), "NOTE=a \"b\" $c".into()]),
+            env: Some(vec!["PATH=/usr/bin:/bin".into(), "NOTE=a \"b\" $c".into(), "CARGO_BUILD_JOBS=2".into()]),
             ..Default::default()
         };
         assert_eq!(
