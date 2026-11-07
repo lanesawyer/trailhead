@@ -67,14 +67,21 @@ pub async fn fetch(http: &reqwest::Client, base: &str, token: &str, query: &str)
     Ok(parse_hits(&body))
 }
 
-/// What the server found, and for which query.
+/// What the server found, and for which query. It changes only when they do, so a view that rebuilds on its change
+/// doesn't rebuild every frame; the bookkeeping that moves every frame is in [`Asking`].
 #[derive(Resource, Default, Debug)]
 pub struct Deep {
     /// The (trimmed) query `hits` answer; empty when none has.
     pub query: String,
     pub hits: Vec<DeepHit>,
+}
+
+/// The debounce and the ask in flight.
+#[derive(Resource, Default, Debug)]
+struct Asking {
     /// The ask in flight, or answered: its number and query.
     asked: Option<(u64, String)>,
+    /// The last ask's number. Never reset, so a reply to an ask from before a clear can't match a later one.
     next: u64,
     /// How long the query has been as it is.
     quiet: Duration,
@@ -95,46 +102,64 @@ pub struct SearchPlugin;
 impl Plugin for SearchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Deep>()
+            .init_resource::<Asking>()
             .init_resource::<Filter>()
             .add_message::<SearchReply>()
             .add_message::<SendNet>()
             .add_systems(Update, (take_replies, ask).chain().run_if(in_state(Connection::Live)))
             .add_systems(Update, forget_when_empty)
-            .add_systems(OnExit(Connection::Live), |mut deep: ResMut<Deep>| deep.asked = None);
+            .add_systems(OnExit(Connection::Live), |mut asking: ResMut<Asking>| asking.asked = None);
     }
 }
 
 /// An emptied query leaves nothing of the last one.
-fn forget_when_empty(filter: Res<Filter>, mut deep: ResMut<Deep>) {
-    if filter.is_changed() && filter.query.trim().is_empty() && (!deep.hits.is_empty() || deep.asked.is_some()) {
+fn forget_when_empty(filter: Res<Filter>, mut deep: ResMut<Deep>, mut asking: ResMut<Asking>) {
+    if !filter.is_changed() || !filter.query.trim().is_empty() {
+        return;
+    }
+    if !deep.query.is_empty() || !deep.hits.is_empty() {
+        *deep = Deep::default();
+    }
+    if asking.asked.is_some() {
         // Keep the counter: a reply to an ask from before must not match a later ask's number.
-        *deep = Deep { next: deep.next, ..Deep::default() };
+        asking.asked = None;
     }
 }
 
 /// Puts the query to the server once it has been left alone for [`DEBOUNCE`].
-fn ask(filter: Res<Filter>, time: Res<Time>, mut deep: ResMut<Deep>, mut net: MessageWriter<SendNet>) {
-    let wanted = filter.query.trim().to_string();
-    if deep.seen != wanted {
-        deep.seen = wanted.clone();
-        deep.quiet = Duration::ZERO;
+fn ask(
+    filter: Res<Filter>,
+    time: Res<Time>,
+    deep: Res<Deep>,
+    mut asking: ResMut<Asking>,
+    mut net: MessageWriter<SendNet>,
+) {
+    let wanted = filter.query.trim();
+    if asking.seen != wanted {
+        asking.seen = wanted.to_string();
+        asking.quiet = Duration::ZERO;
     } else {
-        deep.quiet += time.delta();
+        asking.quiet += time.delta();
     }
-    let answered = deep.query == wanted || deep.asked.as_ref().is_some_and(|(_, q)| *q == wanted);
-    if wanted.is_empty() || answered || deep.quiet < DEBOUNCE {
+    let answered = deep.query == wanted || asking.asked.as_ref().is_some_and(|(_, q)| q == wanted);
+    if wanted.is_empty() || answered || asking.quiet < DEBOUNCE {
         return;
     }
-    deep.next += 1;
-    let seq = deep.next;
-    deep.asked = Some((seq, wanted.clone()));
-    net.write(SendNet(NetCommand::Search { seq, query: wanted }));
+    asking.next += 1;
+    let seq = asking.next;
+    asking.asked = Some((seq, wanted.to_string()));
+    net.write(SendNet(NetCommand::Search { seq, query: wanted.to_string() }));
 }
 
 /// Keeps an answer only if it is to the ask in flight and the query is still the one asked.
-fn take_replies(mut replies: MessageReader<SearchReply>, filter: Res<Filter>, mut deep: ResMut<Deep>) {
+fn take_replies(
+    mut replies: MessageReader<SearchReply>,
+    filter: Res<Filter>,
+    asking: Res<Asking>,
+    mut deep: ResMut<Deep>,
+) {
     for reply in replies.read() {
-        let Some((seq, query)) = deep.asked.clone() else { continue };
+        let Some((seq, query)) = asking.asked.clone() else { continue };
         if seq != reply.seq || query != filter.query.trim() {
             continue;
         }
@@ -275,5 +300,34 @@ mod tests {
         app.world_mut().write_message(SearchReply { seq: old, result: Ok(vec![hit("t1", "description")]) });
         app.update();
         assert!(app.world().resource::<Deep>().for_query("xyz").is_empty());
+    }
+
+    /// Counts the frames in which [`Deep`] changed.
+    #[derive(Resource, Default)]
+    struct DeepChanges(usize);
+
+    fn count_changes(deep: Res<Deep>, mut changes: ResMut<DeepChanges>) {
+        if deep.is_changed() {
+            changes.0 += 1;
+        }
+    }
+
+    #[test]
+    fn deep_changes_only_when_its_hits_do() {
+        let mut app = app();
+        app.init_resource::<DeepChanges>().add_systems(PostUpdate, count_changes);
+        pass(&mut app, 3);
+        app.world_mut().resource_mut::<DeepChanges>().0 = 0;
+        // Live and idle with an empty query: the debounce runs every frame, but nothing a view reads has changed.
+        pass(&mut app, 10);
+        assert_eq!(app.world().resource::<DeepChanges>().0, 0, "idle with no query");
+
+        type_query(&mut app, "migrat");
+        let (seq, _) = pass(&mut app, 6).remove(0);
+        app.world_mut().write_message(SearchReply { seq, result: Ok(vec![hit("t1", "description")]) });
+        app.update();
+        app.world_mut().resource_mut::<DeepChanges>().0 = 0;
+        pass(&mut app, 10);
+        assert_eq!(app.world().resource::<DeepChanges>().0, 0, "idle with the query answered");
     }
 }
