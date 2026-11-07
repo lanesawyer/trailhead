@@ -66,7 +66,7 @@ impl PrGrade {
         self.task.is_none_or(|t| self.grade > t)
     }
 
-    /// `Grade 3 (task was 1; Cargo.lock changed)`.
+    /// `Grade 3 (task was 1; Cargo.toml changed)`.
     pub fn describe(&self) -> String {
         let mut notes = Vec::new();
         if self.raised() {
