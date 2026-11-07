@@ -835,9 +835,13 @@ fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<BoardPanel>>)
 #[derive(Component)]
 struct HeaderBar;
 
-/// What the cards of one column build now: the first `limit` of them, and how many are left out.
+/// What the cards of one column build now: the first `limit` of them, and how many are left out. A page that ends
+/// partway through a parent's subtasks runs on to the last of them, so a parent is never split from its children.
 pub fn visible(cards: &[Card], limit: usize) -> (&[Card], usize) {
-    let shown = limit.min(cards.len());
+    let mut shown = limit.min(cards.len());
+    while shown > 0 && shown < cards.len() && cards[shown].depth > 0 {
+        shown += 1;
+    }
     (&cards[..shown], cards.len() - shown)
 }
 
@@ -1624,6 +1628,21 @@ mod tests {
         assert_eq!(asked.limit(Status::Done), PAGE);
         assert_eq!(visible(&many(3), PAGE).1, 0);
         assert!(visible(&[], PAGE).0.is_empty());
+    }
+
+    #[test]
+    fn a_page_does_not_split_a_parent_from_its_subtasks() {
+        let mut cards = many(PAGE + 5);
+        // The parent is the page's last card; three subtasks follow it.
+        for card in &mut cards[PAGE..PAGE + 3] {
+            card.depth = 1;
+        }
+        let (shown, hidden) = visible(&cards, PAGE);
+        assert_eq!((shown.len(), hidden), (PAGE + 3, 2));
+        assert_eq!(shown[PAGE + 2].depth, 1);
+        // A page that ends on a top-level boundary is cut where it was.
+        let (shown, hidden) = visible(&cards, PAGE - 1);
+        assert_eq!((shown.len(), hidden), (PAGE - 1, 6));
     }
     #[test]
     fn filters_narrow_the_board() {
