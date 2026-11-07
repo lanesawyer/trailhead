@@ -32,7 +32,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use trailhead_client::text::Text as Wording;
 use trailhead_factory::{GateKind, METADATA_KEY, MergeDecision, MergedBy, RunUpdate};
-use trailhead_model::{Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail};
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, User};
 use uuid::Uuid;
 
 use crate::author::{Act, grade_choices, grade_index, grade_options};
@@ -45,10 +45,10 @@ use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::sync::SyncItem;
 use crate::widgets::{
     DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed, ModalRoot,
-    ModalSlots, PanelTitle, Picked, SelectEdit, badge, button, danger_button, display, extent, icon_menu, inline_field,
-    inline_text_sized, layer, menu_item, open_modal, panel, panel_header, priority_tone, row, scroll_body,
-    scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text, text_dim,
-    text_input, text_toned, token, tool_button,
+    ModalSlots, PanelTitle, Picked, SelectEdit, badge, button, danger_button, display, extent, grade_tone, icon_menu,
+    inline_field, inline_text_sized, layer, menu_item, open_modal, panel, panel_header, priority_tone, row,
+    scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text,
+    text_dim, text_input, text_toned, token, tool_button,
 };
 use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 
@@ -139,7 +139,6 @@ pub struct PrPanel {
     pub grade: Option<Grade>,
     pub passed: Vec<String>,
     pub waiting: Vec<String>,
-    pub failing: Vec<String>,
     pub would_merge: bool,
     /// Why the merger couldn't act or the host refused to merge.
     pub problem: Option<String>,
@@ -255,7 +254,6 @@ pub fn pr_panel(run: &RunUpdate) -> Option<PrPanel> {
         grade: run.grade.as_ref().map(|g| g.grade).or(decision.map(|d| d.grade)),
         passed: gates(|d| &d.passed),
         waiting: gates(|d| &d.waiting),
-        failing: decision.map(|d| d.failing.clone()).unwrap_or_default(),
         would_merge: decision.is_some_and(|d| d.would_merge),
         problem: decision.and_then(|d| d.problem.clone().or_else(|| d.refused.clone())),
     })
@@ -281,8 +279,15 @@ pub fn build(
     fetched: Fetched,
 ) -> Option<InspectorView> {
     let Fetched { detail, error: fetch_error, me } = fetched;
-    let agent_name = |id: Uuid| input.agents.iter().find(|a| a.id == id).map(|a| a.name.clone());
-    let task_key = |id: Uuid| input.tasks.iter().find(|t| t.id == id).map(|t| t.key.clone());
+    let agent_name = |id: Uuid| {
+        input
+            .agents
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.name.clone())
+            .or_else(|| input.users.iter().find(|u| u.id == id).map(|u| u.name.clone()))
+    };
+    let task_key = |id: Uuid| input.tasks.iter().find(|t| t.id == id).map(|t| t.key.0.clone());
     match subject {
         Subject::Agent(id) => {
             let id = Uuid::parse_str(id).ok()?;
@@ -338,7 +343,7 @@ pub fn build(
             questions.sort_by_key(|c| c.created_at);
             let questions: Vec<Question> = questions
                 .into_iter()
-                .map(|q| Question { key: task.key.clone(), id: q.id.to_string(), body: q.body.clone() })
+                .map(|q| Question { key: task.key.0.clone(), id: q.id.to_string(), body: q.body.clone() })
                 .collect();
 
             let pr = run.as_ref().and_then(pr_panel);
@@ -407,8 +412,8 @@ fn facts(
     let project_key = input.projects.iter().find(|p| p.id == task.project_id).map(|p| p.key.clone());
     let parent = task.parent_id.and_then(|p| input.tasks.iter().find(|t| t.id == p));
     let mut crumbs: Vec<String> = project_key.iter().cloned().collect();
-    crumbs.extend(parent.map(|p| p.key.clone()));
-    crumbs.push(task.key.clone());
+    crumbs.extend(parent.map(|p| p.key.0.clone()));
+    crumbs.push(task.key.0.clone());
     let project = match (&project_key, parent) {
         (Some(k), Some(p)) => format!("{k} › {} {}", p.key, p.title),
         (Some(k), None) => k.clone(),
@@ -417,10 +422,10 @@ fn facts(
     };
 
     let mut subtasks: Vec<&Task> = input.tasks.iter().filter(|t| t.parent_id == Some(task.id)).collect();
-    subtasks.sort_by_key(|t| (key_number(&t.key), t.key.clone()));
+    subtasks.sort_by_key(|t| (key_number(t.key.as_str()), t.key.0.clone()));
     let subtasks = subtasks
         .into_iter()
-        .map(|t| Subtask { id: t.id.to_string(), key: t.key.clone(), title: t.title.clone(), status: t.status })
+        .map(|t| Subtask { id: t.id.to_string(), key: t.key.0.clone(), title: t.title.clone(), status: t.status })
         .collect();
 
     let claim = match detail {
@@ -439,7 +444,7 @@ fn facts(
     if let Some(d) = detail {
         for (what, keys) in [("blocked by", &d.blocked_by), ("blocks", &d.blocks), ("duplicates", &d.duplicates)] {
             if !keys.is_empty() {
-                links.push(format!("{what} {}", keys.join(", ")));
+                links.push(format!("{what} {}", keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
             }
         }
         if let Some(k) = &d.duplicate_of {
@@ -640,7 +645,7 @@ fn rebuild(
     tasks: Query<&Mirrored<Task>>,
     claims: Query<&Mirrored<Claim>>,
     comments: Query<&Mirrored<Comment>>,
-    agents: Query<&Mirrored<Agent>>,
+    (agents, users): (Query<&Mirrored<Agent>>, Query<&Mirrored<User>>),
     detail: Option<Res<Detail>>,
     api: Option<Res<Api>>,
     mut state: ResMut<InspectorState>,
@@ -652,14 +657,15 @@ fn rebuild(
         return;
     }
     let next = selection.0.as_ref().and_then(|subject| {
-        let (projects, tasks, claims, comments, agents) =
-            (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
+        let (projects, tasks, claims, comments, agents, users) =
+            (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents), rows(&users));
         let input = Input {
             projects: &projects,
             tasks: &tasks,
             claims: &claims,
             comments: &comments,
             agents: &agents,
+            users: &users,
             now: jiff::Timestamp::now(),
             ..Input::default()
         };
@@ -944,6 +950,8 @@ enum Block {
     Text { text: String, size: f32, tone: Tone },
     /// The `P1` badge. Its key holds the priority, so a new priority is a new badge.
     Priority(Priority),
+    /// The `G2` badge, toned by grade. Its key holds the grade, so a new grade is a new badge.
+    GradeBadge(Grade),
     /// The wrapping row of a PR's gates, which are [`Gate`]s keyed under it.
     Gates,
     /// An open question, with its answer and resolve buttons and what became of the last resolve.
@@ -1047,7 +1055,6 @@ struct Gate {
 enum GateState {
     Passed,
     Waiting,
-    Failing,
 }
 
 /// A block on its entity, which [`dress`] brings in line with it when it changes.
@@ -1139,9 +1146,10 @@ fn layout(
         if let Some(pr) = &view.pr {
             items
                 .push(("pr/url".to_string(), text_block(format!("#{} {}", pr.number, pr.url), size::BODY, Tone::Body)));
-            let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
-            items
-                .push(("pr/state".to_string(), text_block(format!("{}{grade}", pr.state), size::SECONDARY, Tone::Dim)));
+            items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
+            if let Some(g) = pr.grade {
+                items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
+            }
             if !gates(pr).is_empty() {
                 items.push(("pr/gates".to_string(), Block::Gates));
             }
@@ -1240,9 +1248,10 @@ fn layout_task(
         if let Some(pr) = &view.pr {
             items
                 .push(("pr/url".to_string(), text_block(format!("#{} {}", pr.number, pr.url), size::BODY, Tone::Body)));
-            let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
-            items
-                .push(("pr/state".to_string(), text_block(format!("{}{grade}", pr.state), size::SECONDARY, Tone::Dim)));
+            items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
+            if let Some(g) = pr.grade {
+                items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
+            }
             if !gates(pr).is_empty() {
                 items.push(("pr/gates".to_string(), Block::Gates));
             }
@@ -1411,16 +1420,12 @@ enum ComposePart {
 
 /// A PR's gates, in the order the panel shows them.
 fn gates(pr: &PrPanel) -> Vec<(String, Gate)> {
-    [
-        (&pr.passed, GateState::Passed, "passed"),
-        (&pr.waiting, GateState::Waiting, "waiting"),
-        (&pr.failing, GateState::Failing, "failing"),
-    ]
-    .into_iter()
-    .flat_map(|(names, state, word)| {
-        names.iter().map(move |name| (format!("{word}/{name}"), Gate { name: name.clone(), state }))
-    })
-    .collect()
+    [(&pr.passed, GateState::Passed, "passed"), (&pr.waiting, GateState::Waiting, "waiting")]
+        .into_iter()
+        .flat_map(|(names, state, word)| {
+            names.iter().map(move |name| (format!("{word}/{name}"), Gate { name: name.clone(), state }))
+        })
+        .collect()
 }
 
 fn window_labels() -> Vec<String> {
@@ -1474,6 +1479,7 @@ fn spawn_block(
             commands.spawn_scene(scene).id()
         }
         Block::Priority(p) => commands.spawn_scene(badge(format!("P{p}"), None, Some(priority_tone(*p)))).id(),
+        Block::GradeBadge(g) => commands.spawn_scene(badge(format!("G{g}"), None, Some(grade_tone(*g)))).id(),
         Block::Gates => commands.spawn_scene(bsn! { @row() Node { flex_wrap: FlexWrap::Wrap } }).id(),
         Block::Question { key, id, body, live, note } => {
             let item = commands
@@ -1663,7 +1669,13 @@ fn spawn_block(
                 Action::Cancel => {
                     commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} })
                 }
-                _ => commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::History)) @{press} }),
+                Action::Revert(_) => {
+                    commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::History)) @{press} })
+                }
+                // Not drawn as an action block: they have their own controls, or none.
+                Action::Status(_) | Action::Resolve(_) | Action::Grade(_) | Action::Comment | Action::Menu => {
+                    commands.spawn_empty()
+                }
             }
             .insert(ChildOf(line));
             let mut parts = Parts::default();
@@ -1857,6 +1869,7 @@ fn dress(
             }
             Block::Text { .. }
             | Block::Priority(_)
+            | Block::GradeBadge(_)
             | Block::Gates
             | Block::Subtask(_)
             | Block::Inline { .. }
@@ -2262,7 +2275,7 @@ fn on_open_composer(
     mut selection: ResMut<Selection>,
     mut compose: ResMut<Compose>,
 ) {
-    let Some(task) = tasks.iter().find(|t| t.0.key == open.key) else { return };
+    let Some(task) = tasks.iter().find(|t| t.0.key == open.key.as_str()) else { return };
     let subject = Subject::Task(task.0.id.to_string());
     if compose.subject.as_ref() != Some(&subject) {
         *compose = Compose::default();
@@ -2510,7 +2523,6 @@ fn sync_panel(
             let (icon, tone) = match gate.state {
                 GateState::Passed => (Icon::CircleCheck, token::OK),
                 GateState::Waiting => (Icon::Circle, tokens::TEXT_DIM),
-                GateState::Failing => (Icon::CircleX, token::DANGER),
             };
             commands.spawn_scene(badge(gate.name.clone(), Some(icon), Some(tone))).id()
         },
@@ -2557,7 +2569,7 @@ mod tests {
             "sandbox": "trail-7-a1", "attempt": 2,
             "pr": {"repo": {"owner": "o", "name": "r"}, "number": 12, "url": "https://github.com/o/r/pull/12"},
             "grade": {"grade": 2},
-            "merge": {"grade": 2, "head": "abc", "passed": ["checks", "ci"], "waiting": ["agent_review"], "failing": [],
+            "merge": {"grade": 2, "head": "abc", "passed": ["checks", "ci"], "waiting": ["agent_review"],
                       "would_merge": false, "problem": null, "message": "Grade 2: waiting for agent review."},
         });
         Fixture {
@@ -2792,6 +2804,7 @@ mod tests {
             projects: vec![],
             tasks: as_json(&f.tasks),
             agents: vec![],
+            ..Default::default()
         }));
         app.update();
         let source = app.world_mut().spawn(Control::Idle).id();
@@ -2839,6 +2852,7 @@ mod tests {
             projects: vec![],
             tasks: as_json(&f.tasks),
             agents: as_json(&f.agents),
+            ..Default::default()
         }));
         app.world_mut().write_message(SyncItem::Event(json!({
             "id": 6, "entity": "comment", "entity_id": sid("c1"), "kind": "comment.created",
@@ -2962,6 +2976,7 @@ mod tests {
             projects: vec![],
             tasks: as_json(&f.tasks),
             agents: as_json(&f.agents),
+            ..Default::default()
         }));
         app.update();
         let subject = Subject::Task(sid("t8"));
@@ -3043,7 +3058,13 @@ mod in_place_tests {
             task_json(json!({"id": "t8", "key": "TRAIL-8", "title": "other", "status": "open", "version": 1})),
             task_json(json!({"id": "t9", "key": "TRAIL-9", "title": "a part", "status": "open", "parent_id": "t7"})),
         ];
-        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 5, projects: vec![], tasks, agents: vec![] }));
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 5,
+            projects: vec![],
+            tasks,
+            agents: vec![],
+            ..Default::default()
+        }));
         app.world_mut().write_message(question("c1", "which db?"));
         app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
         app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t7")));
@@ -3218,6 +3239,7 @@ mod in_place_tests {
             projects: vec![],
             tasks: vec![],
             agents: vec![crate::fixture::agent_json(json!({"id": "a1", "name": "factory/trail-7-a1"}))],
+            ..Default::default()
         }));
         app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Agent(sid("a1")));
         settle(&mut app);
@@ -3303,8 +3325,13 @@ mod in_place_tests {
             json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_progress", "priority": 1, "version": 4}),
         );
         t7["claim"] = claim_json(json!({"task_id": "t7", "holder_id": "a1"}));
-        let snapshot =
-            Snapshot { at: 6, projects: vec![], tasks: vec![t7], agents: vec![agent_json(json!({"id": "a1"}))] };
+        let snapshot = Snapshot {
+            at: 6,
+            projects: vec![],
+            tasks: vec![t7],
+            agents: vec![agent_json(json!({"id": "a1"}))],
+            ..Default::default()
+        };
         app.world_mut().write_message(SyncItem::Snapshot(snapshot));
         app.world_mut().write_message(question("c1", "which db?"));
         settle(&mut app);
@@ -3473,19 +3500,27 @@ mod in_place_tests {
         assert!(app.world().get::<InlineText>(title).unwrap().error().is_empty());
     }
 
+    #[derive(Resource, Default)]
+    struct Refetched(usize);
+
+    fn count_refetches(mut asked: MessageReader<Refetch>, mut n: ResMut<Refetched>) {
+        n.0 += asked.read().count();
+    }
+
     #[test]
     fn a_conflict_fetches_again_says_so_and_keeps_what_was_typed() {
         let mut app = app();
         let description = editor(&mut app, Field::Description);
         app.world_mut().trigger(InlineEdited { entity: description, old: String::new(), new: "mine".into() });
         sent(&mut app);
-        app.world_mut().resource_mut::<Messages<Refetch>>().clear();
+        // Counted by a reader rather than drained afterwards: MinimalPlugins drops messages after fixed-timestep
+        // ticks, which follow wall-clock time, so on a slow runner settle() could outlive the message.
+        app.init_resource::<Refetched>().add_systems(Update, count_refetches);
         answer(&mut app, description, Outcome::Conflict { current_version: Some(5), message: "stale".into() });
         let t = app.world().get::<InlineText>(description).unwrap();
         assert_eq!(t.draft(), Some("mine"));
         assert!(t.error().contains("changed since you looked"), "{}", t.error());
-        let asked = app.world_mut().resource_mut::<Messages<Refetch>>().drain().count();
-        assert_eq!(asked, 1, "the task is fetched again");
+        assert_eq!(app.world().resource::<Refetched>().0, 1, "the task is fetched again");
     }
 
     #[test]

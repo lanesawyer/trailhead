@@ -7,6 +7,7 @@ mod core_tracker;
 pub mod daemon_binary;
 mod decide;
 mod lifecycle;
+pub mod logs;
 mod merger;
 mod person;
 mod place;

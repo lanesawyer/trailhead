@@ -51,6 +51,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/events/stream", get(crate::stream::events))
         .route("/undo", post(events::undo))
         .route("/revert", post(events::revert))
+        .route("/users", get(access::list_users))
         .route("/agents", get(access::list_agents).post(access::create_agent))
         .route("/agents/{agent}/revoke", post(access::revoke_agent))
         .route("/tokens", get(access::list_tokens).post(access::create_token))

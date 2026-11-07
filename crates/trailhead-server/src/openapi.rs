@@ -299,6 +299,7 @@ impl Modify for Common {
         crate::stream::events,
         routes::events::undo,
         routes::events::revert,
+        routes::access::list_users,
         routes::access::list_agents,
         routes::access::create_agent,
         routes::access::list_tokens,
