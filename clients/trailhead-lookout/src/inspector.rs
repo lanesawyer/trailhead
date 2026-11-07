@@ -1310,14 +1310,14 @@ fn layout_task(
         ));
     } else {
         fields.push((
-            "s/fields/status".to_string(),
+            "s/fields/status/text".to_string(),
             text_block(format!("Status: {}", status_label(status)), size::BODY, Tone::Body),
         ));
         if let Some(p) = view.priority {
             fields.push((format!("s/fields/priority/{p}"), Block::Priority(p)));
         }
         let words = view.grade.map_or_else(|| "none".to_string(), |g| format!("G{g}"));
-        fields.push(("s/fields/grade".to_string(), text_block(format!("Grade: {words}"), size::BODY, Tone::Body)));
+        fields.push(("s/fields/grade/text".to_string(), text_block(format!("Grade: {words}"), size::BODY, Tone::Body)));
     }
     if let Some(g) = view.grade {
         let words = if human.contains(&g) {
@@ -3027,7 +3027,12 @@ mod in_place_tests {
             .init_asset::<Image>()
             .init_state::<Connection>()
             .init_resource::<ConnectionStatus>()
-            .add_plugins((crate::mirror::MirrorPlugin, InspectorUiPlugin, crate::widgets::ModalPlugin));
+            .add_plugins((
+                crate::mirror::MirrorPlugin,
+                InspectorUiPlugin,
+                crate::widgets::ModalPlugin,
+                crate::widgets::InlinePlugin,
+            ));
         let tasks = vec![
             task_json(
                 json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_progress", "priority": 1, "version": 4}),
@@ -3161,7 +3166,7 @@ mod in_place_tests {
         assert_eq!(modal_count(&mut app), 1);
         let shown = texts(&mut app);
         for want in
-            ["do it", "No description", "Sub-tasks", "TRAIL-9  a part", "Status", "Priority", "Claim", "Details"]
+            ["do it", "Add a description", "Sub-tasks", "TRAIL-9  a part", "Status", "Priority", "Claim", "Details"]
         {
             assert!(shown.iter().any(|t| t == want), "{want} in {shown:?}");
         }
