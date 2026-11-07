@@ -21,6 +21,7 @@ use trailhead_model::{Grade, Priority, Status, Task};
 
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
+use crate::factory::FactoryStatus;
 use crate::mirror::Mirrored;
 use crate::widgets::{
     Modal, ModalClosed, ModalLocked, ModalSlots, Picked, button, dot, field, open_modal, priority_tone, row, section,
@@ -39,18 +40,15 @@ pub fn grade_choices() -> impl Iterator<Item = Option<Grade>> {
 }
 
 /// The dropdown's rows for [`grade_choices`]: each grade with what it is like (`docs/factory/review.md#grades`), and where
-/// Treeline falls (above grade 2 by default).
-pub fn grade_options() -> Vec<String> {
-    [
-        "none (the factory skips it)",
-        "1 · a walk on a trail",
-        "2 · off-trail",
-        "3 · scrambling, above Treeline",
-        "4 · exposed, above Treeline",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
+/// Treeline falls: the grades in `human` are the ones whose gate wants a person (`FactoryStatus::human_grades`), and
+/// those are above it.
+pub fn grade_options(human: &[Grade]) -> Vec<String> {
+    let like = ["a walk on a trail", "off-trail", "scrambling", "exposed"];
+    let rows = Grade::ALL.iter().zip(like).map(|(g, like)| {
+        let above = if human.contains(g) { ", above Treeline" } else { "" };
+        format!("{g} · {like}{above}")
+    });
+    std::iter::once("none (the factory skips it)".to_string()).chain(rows).collect()
 }
 
 /// The row of [`grade_options`] that shows `grade`.
@@ -490,6 +488,7 @@ impl Plugin for AuthorUiPlugin {
 
 /// The systems that draw the form, apart from the plugin so a test can add them to an app that has the logic.
 fn add_drawing(app: &mut App) {
+    app.init_resource::<FactoryStatus>();
     app.add_systems(Update, (redraw_form, fill_form, lock_while_saving, update_message).chain());
 }
 
@@ -590,7 +589,12 @@ fn redraw_form(
 }
 
 /// Fills a new form's modal: the fields in its body, the buttons and message in its footer.
-fn fill_form(new: Query<&ModalSlots, (With<FormPanel>, Added<ModalSlots>)>, form: Res<Form>, mut commands: Commands) {
+fn fill_form(
+    new: Query<&ModalSlots, (With<FormPanel>, Added<ModalSlots>)>,
+    form: Res<Form>,
+    factory: Res<FactoryStatus>,
+    mut commands: Commands,
+) {
     let Some(open) = &form.open else { return };
     let d = &open.draft;
     let generation = form.generation;
@@ -613,7 +617,14 @@ fn fill_form(new: Query<&ModalSlots, (With<FormPanel>, Added<ModalSlots>)>, form
                     let status = Status::ALL.iter().position(|s| *s == d.status);
                     choice_field(c, line, "Status", FormChoice::Status, statuses, status);
                 }
-                choice_field(c, line, "Grade", FormChoice::Grade, grade_options(), grade_index(d.grade));
+                choice_field(
+                    c,
+                    line,
+                    "Grade",
+                    FormChoice::Grade,
+                    grade_options(&factory.human_grades()),
+                    grade_index(d.grade),
+                );
                 let spec = input(FieldKind::Description, generation, d.description.clone(), SPEC_LINES);
                 text_field(c, body, "Spec", spec);
             }
@@ -787,7 +798,15 @@ mod tests {
         assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.grade, Grade::new(3));
         pick(&mut app, FormChoice::Grade, 0);
         assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.grade, None);
-        assert_eq!(grade_options().len(), grade_choices().count());
+        assert_eq!(grade_options(&[]).len(), grade_choices().count());
+    }
+
+    #[test]
+    fn treeline_is_labelled_where_the_factory_gates_want_a_person() {
+        let g = |n| Grade::new(n).unwrap();
+        let above: Vec<_> = grade_options(&[g(2), g(4)]).iter().map(|r| r.contains("above Treeline")).collect();
+        assert_eq!(above, [false, false, true, false, true]);
+        assert!(grade_options(&[]).iter().all(|r| !r.contains("Treeline")));
     }
 
     #[test]

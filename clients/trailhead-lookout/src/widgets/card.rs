@@ -54,6 +54,11 @@ pub fn card_under(parent: impl Into<String>) -> impl Scene {
     text_dim(format!("under {}", parent.into()), size::SMALL)
 }
 
+/// The dim line saying where a search matched a task that its key and title did not: "in description: …".
+pub fn card_found(hint: impl Into<String>) -> impl Scene {
+    text_dim(hint.into(), size::SMALL)
+}
+
 /// A row of badges or tool buttons on a card, wrapping when they don't fit.
 pub fn card_row() -> impl Scene {
     bsn! {

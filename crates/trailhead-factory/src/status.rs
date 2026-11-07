@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{TaskKey, Usd};
+use crate::{Grade, TaskKey, Usd};
 
 /// What the control plane itself is doing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +128,10 @@ pub struct FactorySnapshot {
     /// placement pass.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<TargetSpend>,
+    /// The grades whose gate (`[factory.gates.N]`, or the default table) wants a person, so a UI can say where Treeline
+    /// is without assuming the table. Not on the stream: it only changes with the config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human_grades: Vec<Grade>,
     /// The repo's queue tasks (`queue` in `[factory]`), whose subtasks the factory works. Lookout's Factory filter
     /// uses them to tell the factory's tasks from the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

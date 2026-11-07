@@ -128,7 +128,11 @@ async fn a_reattached_run_counts_its_wall_clock_from_when_it_started() {
     let key = going(&r, Usd::ZERO, 61 * 60).await;
     r.daemon.ongoing_hung("trail-1-a1", vec![spent(1_000)]);
 
-    let done = r.factory.reconcile().await.unwrap();
+    // On real time, so a regression would wait out the whole budget: fail fast instead.
+    let done = tokio::time::timeout(std::time::Duration::from_secs(10), r.factory.reconcile())
+        .await
+        .expect("reattach gave the run a fresh budget")
+        .unwrap();
     assert_eq!(done.reattached, std::slice::from_ref(&key.0));
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::NeedsInput, "parked, not given another full budget");

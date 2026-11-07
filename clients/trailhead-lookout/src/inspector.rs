@@ -31,6 +31,7 @@ use crate::author::{Act, grade_choices, grade_index, grade_options};
 use crate::board::Input;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::{Connection, ConnectionStatus};
+use crate::factory::FactoryStatus;
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::sync::SyncItem;
 use crate::widgets::{
@@ -453,6 +454,7 @@ impl Plugin for InspectorUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(InspectorPlugin)
             .init_resource::<Controls>()
+            .init_resource::<FactoryStatus>()
             .add_systems(Startup, spawn_panel)
             .add_systems(Update, (sync_panel, dress).chain());
     }
@@ -865,7 +867,13 @@ fn gate_button(commands: &mut Commands, button: Entity, live: bool) {
 }
 
 /// Makes the entity for a new block, not yet parented.
-fn spawn_block(commands: &mut Commands, controls: &mut Controls, subject: &Subject, block: &Block) -> Entity {
+fn spawn_block(
+    commands: &mut Commands,
+    controls: &mut Controls,
+    subject: &Subject,
+    block: &Block,
+    human: &[Grade],
+) -> Entity {
     let item = match block {
         Block::Text { text: words, size, tone } => {
             let scene: Box<dyn Scene> = match tone {
@@ -919,7 +927,7 @@ fn spawn_block(commands: &mut Commands, controls: &mut Controls, subject: &Subje
             let line = commands.spawn_scene(bsn! { @row() }).id();
             commands.spawn_scene(text_dim("Grade", size::SECONDARY)).insert(ChildOf(line));
             let source = control(controls, commands, subject, &Action::Grade(None));
-            let options = grade_options();
+            let options = grade_options(human);
             let max_visible = options.len();
             let picker = commands
                 .spawn_scene(select(options, grade_index(*grade), max_visible))
@@ -1003,6 +1011,8 @@ fn dress_note(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn dress(
     shown: Query<(&Shown, Option<&Parts>)>,
+    every: Query<Entity, With<Shown>>,
+    factory: Res<FactoryStatus>,
     changed: Query<Entity, Changed<Shown>>,
     mut texts: Query<&mut Text>,
     mut nodes: Query<&mut Node>,
@@ -1013,6 +1023,9 @@ fn dress(
 ) {
     let mut todo: Vec<Entity> = std::mem::take(&mut *again);
     todo.extend(changed.iter());
+    if factory.is_changed() {
+        todo.extend(every.iter());
+    }
     todo.dedup();
     for entity in todo {
         let Ok((Shown(block), parts)) = shown.get(entity) else { continue };
@@ -1046,7 +1059,7 @@ fn dress(
             }
             Block::Grade { grade, note } => {
                 if let Some(picker) = parts.select
-                    && !edit.set(picker, &grade_options(), grade_index(*grade))
+                    && !edit.set(picker, &grade_options(&factory.human_grades()), grade_index(*grade))
                 {
                     again.push(entity);
                 }
@@ -1101,6 +1114,7 @@ struct Drawn {
 fn sync_panel(
     state: Res<InspectorState>,
     connection: Res<State<Connection>>,
+    factory: Res<FactoryStatus>,
     status: Res<ConnectionStatus>,
     window: Res<RevertWindow>,
     mut controls: ResMut<Controls>,
@@ -1169,10 +1183,11 @@ fn sync_panel(
     let wanted: Vec<(Entity, Vec<(String, Block)>)> =
         plan.into_iter().filter_map(|(key, items)| Some((drawn.sections.entity(&key)?, items))).collect();
     let controls = &mut *controls;
+    let human = factory.human_grades();
     drawn.items.sync(
         &mut commands,
         &wanted,
-        |commands, _, block| spawn_block(commands, controls, subject, block),
+        |commands, _, block| spawn_block(commands, controls, subject, block, &human),
         |commands, entity, block| {
             commands.entity(entity).insert(Shown(block.clone()));
         },

@@ -14,6 +14,7 @@ use bevy::ui_widgets::Activate;
 
 use crate::icons::{Icon, button_icon};
 use crate::patch::patch_node;
+use crate::spacing::extent;
 
 /// The clear button's size: smaller than feathers' row, so it sits inside the field rather than filling it.
 const CLEAR_SIZE: f32 = 18.0;
@@ -65,6 +66,7 @@ pub fn spawn_search_field(commands: &mut Commands, hint: impl Into<String>) -> S
         .spawn_scene(bsn! {
             @label_dim(hint)
             SearchHint { field: { field } }
+            TextLayout { linebreak: { LineBreak::NoWrap } }
             Node {
                 position_type: { PositionType::Absolute },
                 left: { px(HINT_LEFT) },
@@ -93,7 +95,7 @@ pub fn spawn_search_field(commands: &mut Commands, hint: impl Into<String>) -> S
     let entry = commands
         .spawn_scene(bsn! {
             @FeathersTextInputContainer
-            Node { flex_grow: { 0.0_f32 } }
+            Node { flex_grow: { 0.0_f32 }, flex_shrink: { 0.0_f32 }, width: { px(extent::SEARCH_WIDTH) } }
         })
         .id();
     commands.entity(entry).add_children(&[field, hint, clear]);
@@ -162,6 +164,24 @@ mod tests {
         app.world_mut().entity_mut(parts.field).insert(EditableText::new("deep"));
         app.update();
         assert_eq!(shown(&mut app), (Display::None, Display::Flex));
+    }
+
+    #[test]
+    fn the_box_keeps_its_width_and_the_hint_stays_on_one_line() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let parts = spawn_search_field(&mut app.world_mut().commands(), "Search tasks");
+        app.world_mut().flush();
+        app.update();
+        // The hint is laid over the field, so it gives the box no width: in a row of controls (Lookout's header) the
+        // box shrank to a sliver and the hint wrapped onto the controls beside it.
+        let node = app.world().get::<Node>(parts.entry).unwrap();
+        assert_eq!((node.width, node.flex_shrink), (px(extent::SEARCH_WIDTH), 0.0));
+        let layout = app.world_mut().query_filtered::<&TextLayout, With<SearchHint>>().single(app.world()).unwrap();
+        assert_eq!(layout.linebreak, LineBreak::NoWrap);
     }
 
     #[test]

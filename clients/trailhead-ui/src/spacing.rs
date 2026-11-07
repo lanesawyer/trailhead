@@ -66,6 +66,9 @@ pub mod extent {
     pub const INSPECTOR_WIDTH: f32 = 360.0;
     /// A modal's width, unless its kind says otherwise.
     pub const MODAL_WIDTH: f32 = 640.0;
+    /// A search box's width. Its hint is laid over the field rather than in it, so without one the box shrinks to
+    /// nearly nothing in a row of controls.
+    pub const SEARCH_WIDTH: f32 = 220.0;
 }
 
 /// The check that keeps spacings named, for an app to run over its own sources (see [`check::typed_spacings`]).

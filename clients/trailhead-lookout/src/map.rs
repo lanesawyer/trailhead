@@ -694,6 +694,7 @@ mod tests {
             seq: 1,
             holding: None,
             targets: Vec::new(),
+            human_grades: Vec::new(),
             queue: Vec::new(),
         };
         app.world_mut()
@@ -772,6 +773,7 @@ mod tests {
             seq: 1,
             holding: None,
             targets: Vec::new(),
+            human_grades: Vec::new(),
             queue: Vec::new(),
         };
         app.world_mut()
