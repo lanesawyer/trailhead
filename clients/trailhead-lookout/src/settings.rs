@@ -14,6 +14,7 @@ use trailhead_model::Task;
 use crate::author::Authoring;
 use crate::connection::{Api, Connection, Dialed, LocalEndpoint, SendNet};
 use crate::factory::FactoryStatus;
+use crate::logs::{LogsUiPlugin, logs_page};
 use crate::mirror::{Mirrored, rows};
 use crate::net::NetCommand;
 use crate::widgets::{
@@ -27,15 +28,17 @@ pub enum Page {
     #[default]
     Connection,
     Factory,
+    Logs,
 }
 
 impl Page {
-    pub const ALL: [Page; 2] = [Page::Connection, Page::Factory];
+    pub const ALL: [Page; 3] = [Page::Connection, Page::Factory, Page::Logs];
 
     pub fn label(self) -> &'static str {
         match self {
             Page::Connection => "Connection",
             Page::Factory => "Factory",
+            Page::Logs => "Logs",
         }
     }
 }
@@ -110,7 +113,7 @@ pub fn repos_text(status: &FactoryStatus) -> String {
 
 /// The queue task new tasks go under, and how much is queued beneath it.
 pub fn queue_text(queue: &str, tasks: &[Task]) -> String {
-    let Some(task) = tasks.iter().find(|t| t.key == queue) else {
+    let Some(task) = tasks.iter().find(|t| t.key == *queue) else {
         return format!("{queue} (not loaded)");
     };
     let queued: Vec<&Task> = tasks.iter().filter(|t| t.parent_id == Some(task.id)).collect();
@@ -162,6 +165,7 @@ fn fill(new: Query<&ModalSlots, (With<SettingsModal>, Added<ModalSlots>)>, mut c
             match page {
                 Page::Connection => connection_page(&mut commands, holder),
                 Page::Factory => factory_page(&mut commands, holder),
+                Page::Logs => logs_page(&mut commands, holder),
             }
         }
     }
@@ -278,6 +282,7 @@ impl Plugin for SettingsPlugin {
         app.add_observer(on_gear)
             .add_observer(on_tab)
             .add_observer(on_disconnect)
+            .add_plugins(LogsUiPlugin)
             .add_systems(Update, (fill, refresh).chain());
     }
 }
@@ -435,9 +440,10 @@ mod tests {
             .unwrap()
             .0;
         app.world_mut().trigger(Activate { entity: button });
+        // Drain before settling: messages live two updates, and settle runs more than that.
+        let sent: Vec<_> = app.world_mut().resource_mut::<Messages<SendNet>>().drain().collect();
         settle(&mut app);
         assert_eq!(modals(&mut app), 0);
-        let sent: Vec<_> = app.world_mut().resource_mut::<Messages<SendNet>>().drain().collect();
         assert!(matches!(sent.as_slice(), [SendNet(NetCommand::Disconnect)]));
     }
 
