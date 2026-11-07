@@ -29,7 +29,7 @@ pub fn column_shell(status: Status) -> impl Bundle {
             align_self: AlignSelf::FlexStart,
             max_height: percent(100),
             row_gap: px(space::CARDS),
-            padding: UiRect::all(px(space::CONTROL_INSET)),
+            padding: UiRect::all(px(space::PANEL_INSET)),
             border_radius: BorderRadius::all(px(radius::PANEL)),
             ..default()
         },
@@ -93,8 +93,9 @@ mod tests {
     }
 
     #[test]
-    fn the_scrollbar_lies_in_the_shell_padding_so_the_body_has_none_of_its_own() {
-        const { assert!(SCROLLBAR_WIDTH + SCROLLBAR_EDGE <= space::CONTROL_INSET) };
+    fn the_scrollbar_sits_centered_in_the_shell_padding_so_the_body_has_none_of_its_own() {
+        const { assert!(SCROLLBAR_EDGE + SCROLLBAR_WIDTH + SCROLLBAR_EDGE == space::PANEL_INSET) };
+        assert_eq!(node_of(column_shell(Status::Open)).padding.right, px(space::PANEL_INSET));
         assert_eq!(node_of(column_body()).padding, UiRect::ZERO);
     }
 

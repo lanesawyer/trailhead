@@ -112,7 +112,6 @@ impl Factory {
             head: head.clone(),
             passed: verdict.passed,
             waiting: verdict.waiting,
-            failing: verdict.failing,
             would_merge: verdict.would_merge,
             approved_head,
             human_head,
