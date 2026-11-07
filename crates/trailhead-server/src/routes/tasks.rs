@@ -163,7 +163,7 @@ pub(crate) struct CreateTask {
 #[utoipa::path(
     post, path = "/v1/tasks", tag = "tasks", request_body = CreateTask,
     responses(
-        (status = 201, description = "Created. `possible_duplicates` lists keys of open tasks with a close title, when there are any; it's a warning, not an error.", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 201, description = "Created. `possible_duplicates` lists keys of open tasks with a close title, when there are any; it's a warning, not an error.", body = crate::openapi::CreatedTask, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
         (status = 404, description = "`not_found`: project, parent or dependency", body = ErrorBody),
         (status = 409, description = "`dependency_cycle` from `blocked_by`/`blocks`. Repeating a `source` + `external_id` returns the existing task instead of an error.", body = ErrorBody),
     )
