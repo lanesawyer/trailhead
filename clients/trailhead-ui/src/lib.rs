@@ -10,6 +10,8 @@
 //! - A button that opens a menu: [`icon_menu`], then fill its popup; [`close_menu_holding`] when an item is done.
 //! - A small chip with an icon and a word: [`badge`].
 //! - A text input, one line or several: [`text_input`], inside a [`field`].
+//! - A text edited where it is read (a title, a description): [`inline_text`]; a sidebar label and choice:
+//!   [`inline_field`]. Observe [`InlineEdited`] / [`InlineChosen`]; the caller answers `confirm` or `fail`.
 //! - A choice from a fixed set: [`select`], and observe [`Picked`].
 //! - Text: [`text`], [`text_dim`], [`text_toned`] at a [`size`]. A button's caption: [`button_text`].
 //! - An icon in text: [`icon_text`]; as a button's caption: [`button_icon`].
@@ -55,6 +57,7 @@ mod detail;
 mod field_well;
 mod hint;
 mod icons;
+mod inline;
 mod input;
 mod keyed;
 pub mod layer;
@@ -88,6 +91,9 @@ pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
+pub use inline::{
+    InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
+};
 pub use input::text_input;
 pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button};
@@ -122,7 +128,7 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin))
+        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin))
             .add_observer(scroll::on_scroll)
             .add_observer(bevy::ui_widgets::slider_self_update)
             .add_systems(PostUpdate, scrollbar::hide_when_fits.after(bevy::ui::UiSystems::Layout))
