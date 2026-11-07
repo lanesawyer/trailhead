@@ -173,7 +173,7 @@ async fn no_worker_starts_on_a_task_whose_pr_merged_meanwhile() {
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
     let task = r.tracker.task(&key);
-    assert_eq!(task.status, Status::Open);
+    assert_eq!(task.status, Status::InReview);
     let pr = task.run.pr.clone().expect("a PR");
 
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
@@ -246,15 +246,29 @@ async fn a_rework_request_cut_short_is_finished_by_reconcile() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
     r.harness.push(Role::Worker, Script::new(changes()));
-    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
-    // The review was recorded, but the control plane stopped before the task left review.
-    r.tracker.set_status(&key, Status::InReview);
+    // A conflict rework was requested in the task's metadata, but the control plane stopped before the factory's
+    // request_changes review was recorded, so the task isn't yet waiting on a rework.
+    let cut_short = trailhead_factory::RunUpdate {
+        conflict_reworks: Some(1),
+        changes_requested: Some(trailhead_factory::ChangesRequested {
+            reviewer: "factory".into(),
+            body: "Merge main.".into(),
+            attempt: 1,
+            conflict: true,
+            head: None,
+        }),
+        ..Default::default()
+    };
+    Tracker::report(&r.tracker, &key, cut_short).await.unwrap();
+    assert!(!r.tracker.task(&key).changes_requested);
 
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.reworked, std::slice::from_ref(&key.0));
     assert!(done.reviewed.is_empty(), "the review isn't run again: {done:?}");
-    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    let task = r.tracker.task(&key);
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true), "waiting in review for the rework");
     assert!(r.factory.reconcile().await.unwrap().reworked.is_empty());
 }
 

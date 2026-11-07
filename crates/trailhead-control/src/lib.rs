@@ -195,11 +195,12 @@ pub struct Reconciled {
     pub reattached: Vec<String>,
     pub requeued: Vec<String>,
     pub reviewed: Vec<String>,
-    /// Tasks whose review asked for changes but stayed in review, now reopened for a rework or parked.
+    /// Tasks whose request for changes was cut short before it was recorded, now recorded for a rework or parked.
     pub reworked: Vec<String>,
     /// Tasks whose reviewer breached its budget and whose park was cut short, now parked for a human.
     pub breached: Vec<String>,
-    /// In-review tasks whose PR no longer merges cleanly, now reopened to merge the base branch in or parked.
+    /// In-review tasks whose PR no longer merges cleanly, now marked as having changes requested to merge the base
+    /// branch in, or parked.
     pub conflicted: Vec<String>,
     /// In-review tasks whose PR was merged, now done.
     pub merged: Vec<String>,

@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::identity::load_workspace;
 use crate::projects::{load_project, validate_ttl};
 use crate::store::{Ctx, EventIn, Store, Tx};
-use crate::tasks::{find_task, load_task, update_status};
+use crate::tasks::{find_task, load_task, unclaimed_status, update_status};
 use trailhead_model::{Claim, Comment, Entity, Status, Task};
 
 const CLAIM_COLS: &str = "task_id, workspace_id, holder_id, on_behalf_of, claimed_at, expires_at";
@@ -109,7 +109,8 @@ pub(crate) async fn reap_expired(tx: &Tx, task_id: Option<Uuid>) -> Result<usize
         drop_claim(tx, claim, "claim.expired").await?;
         let task = load_task(&tx.conn, claim.workspace_id, &claim.task_id.to_string(), true).await?;
         if task.status == Status::InProgress {
-            let after = crate::tasks::save_task(tx, &task, Task { status: Status::Open, ..task.clone() }).await?;
+            let back = unclaimed_status(&tx.conn, &task).await?;
+            let after = crate::tasks::save_task(tx, &task, Task { status: back, ..task.clone() }).await?;
             tx.emit(EventIn {
                 entity: Entity::Task,
                 entity_id: task.id.to_string(),
@@ -383,7 +384,8 @@ impl Store {
             }
             drop_claim(tx, &claim, "claim.released").await?;
             if task.status == Status::InProgress {
-                update_status(tx, &task, Status::Open, "task.updated").await
+                let back = unclaimed_status(&tx.conn, &task).await?;
+                update_status(tx, &task, back, "task.updated").await
             } else {
                 Ok(task)
             }

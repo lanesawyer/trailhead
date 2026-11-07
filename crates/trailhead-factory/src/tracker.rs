@@ -25,6 +25,10 @@ pub struct Task {
     pub priority: Priority,
     /// The agent holding the claim, if any.
     pub holder: Option<String>,
+    /// The task is in review and waiting on a rework: its newest review asks for changes and no handoff has come
+    /// since (`trailhead_model::changes_requested`). Computed by the tracker, never stored.
+    #[serde(default)]
+    pub changes_requested: bool,
     /// The `factory` object in the task's metadata ([`RunUpdate`] fields).
     pub run: RunUpdate,
 }
@@ -43,6 +47,7 @@ impl Task {
             grade: task.grade,
             priority: task.priority,
             holder,
+            changes_requested: false,
             run,
         })
     }
@@ -413,7 +418,8 @@ pub trait Tracker: Send + Sync {
     /// A handle acting as one of this agent's sub-agents, by the part after the parent's name.
     fn sub_agent(&self, name: &str) -> Arc<dyn Tracker>;
 
-    /// Ready tasks in `project`; with `queue`, only the direct subtasks of any of those tasks, best first across all of
+    /// Ready tasks in `project`: open and unheld, and in-review ones waiting on a rework ([`Task::changes_requested`]),
+    /// those first. With `queue`, only the direct subtasks of any of those tasks, best first across all of
     /// them and each once, which is how work is handed to the factory.
     async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>>;
     async fn show(&self, task: &TaskKey) -> Result<Task>;
@@ -436,13 +442,17 @@ pub trait Tracker: Send + Sync {
     async fn renew(&self, task: &TaskKey) -> Result<()>;
     async fn release(&self, task: &TaskKey) -> Result<()>;
     async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()>;
-    async fn request_review(&self, task: &TaskKey) -> Result<()>;
+    /// Moves a task to review, leaving `handoff` on it first. The handoff is what answers a review that asked for
+    /// changes, so a task coming back from a rework stops being one waiting on it.
+    async fn request_review(&self, task: &TaskKey, handoff: &str) -> Result<()>;
+    /// Answers a review that asked for changes without a new push, as when the request no longer applies.
+    async fn handoff(&self, task: &TaskKey, body: &str) -> Result<()>;
     /// Moves a task in review to `approved`. Only a human or a project's delegated reviewer can; anyone else gets
     /// `Forbidden`.
     async fn approve(&self, task: &TaskKey) -> Result<()>;
     /// Sends an approved task back to review, as a push after its approval needs a new one.
     async fn unapprove(&self, task: &TaskKey) -> Result<()>;
-    /// Sends a task in review back to the queue, unheld, for a rework run to pick up.
+    /// Sends a task in review back to open, unheld. Reworks don't use it: they stay in review (changes requested).
     async fn reopen(&self, task: &TaskKey) -> Result<()>;
     /// Raises the task's grade. Trailhead lets an agent raise a grade but never set the first or lower it.
     async fn raise_grade(&self, task: &TaskKey, grade: Grade) -> Result<()>;
