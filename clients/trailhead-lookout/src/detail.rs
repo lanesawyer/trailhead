@@ -21,6 +21,10 @@ pub struct DetailReply {
     pub result: Result<Box<TaskDetail>, String>,
 }
 
+/// Fetch the selected task again: an edit lost to a newer change, so the modal should show it.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct Refetch;
+
 /// Asks the server for the task `key` in full.
 pub async fn fetch(http: &reqwest::Client, base: &str, token: &str, key: &str) -> Result<Box<TaskDetail>, String> {
     let res = http.get(format!("{base}/v1/tasks/{key}")).bearer_auth(token).send().await.map_err(|e| e.to_string())?;
@@ -71,6 +75,7 @@ impl Plugin for DetailPlugin {
             .add_message::<DetailReply>()
             .add_message::<SendNet>()
             .add_message::<SyncItem>()
+            .add_message::<Refetch>()
             .add_systems(Update, (follow_selection, mark_stale, take_replies, ask).chain())
             .add_systems(OnEnter(Connection::Live), |mut fetching: ResMut<Fetching>| {
                 // Whatever was asked before the link dropped won't be answered; ask again.
@@ -97,11 +102,20 @@ fn follow_selection(selection: Res<Selection>, mut detail: ResMut<Detail>, mut f
 }
 
 /// An event about the selected task (it, a comment on it, its claim) makes the answer we have out of date.
-fn mark_stale(mut items: MessageReader<SyncItem>, detail: Res<Detail>, mut fetching: ResMut<Fetching>) {
+fn mark_stale(
+    mut items: MessageReader<SyncItem>,
+    mut refetch: MessageReader<Refetch>,
+    detail: Res<Detail>,
+    mut fetching: ResMut<Fetching>,
+) {
+    let asked = refetch.read().count() > 0;
     let Some(id) = detail.id.as_deref() else {
         items.clear();
         return;
     };
+    if asked && !fetching.stale {
+        fetching.stale = true;
+    }
     for item in items.read() {
         let SyncItem::Event(e) = item else { continue };
         if about(e) == Some(id) && !fetching.stale {

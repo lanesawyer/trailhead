@@ -39,15 +39,16 @@ use crate::author::{Act, grade_choices, grade_index, grade_options};
 use crate::board::Input;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::{Api, Connection, ConnectionStatus};
-use crate::detail::Detail;
+use crate::detail::{Detail, Refetch};
 use crate::factory::FactoryStatus;
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::sync::SyncItem;
 use crate::widgets::{
-    DetailPanes, Icon, Keyed, Modal, ModalClosed, ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, badge, button,
-    danger_button, display, extent, icon_menu, layer, menu_item, open_modal, panel, panel_header, priority_tone, row,
-    scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text,
-    text_dim, text_input, text_toned, token, tool_button,
+    DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed, ModalRoot,
+    ModalSlots, PanelTitle, Picked, SelectEdit, badge, button, danger_button, display, extent, icon_menu, inline_field,
+    inline_text_sized, layer, menu_item, open_modal, panel, panel_header, priority_tone, row, scroll_body,
+    scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text, text_dim,
+    text_input, text_toned, token, tool_button,
 };
 use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 
@@ -184,6 +185,8 @@ pub struct TaskFacts {
     pub run: Vec<String>,
     /// Created, updated, version.
     pub details: Vec<String>,
+    /// The version shown, which an edit's `If-Match` names.
+    pub version: i64,
     /// Why the task couldn't be fetched in full.
     pub fetch_error: Option<String>,
     /// Every comment, oldest first: all of them once the task is fetched, until then what the mirror holds (open
@@ -511,6 +514,7 @@ fn facts(
         ],
         fetch_error: fetch_error.map(str::to_string),
         activity,
+        version: task.version,
     }
 }
 
@@ -692,6 +696,7 @@ impl Plugin for InspectorPlugin {
             .add_message::<SyncItem>()
             .add_message::<CommandDone>()
             .add_message::<Submit>()
+            .add_message::<Refetch>()
             .add_observer(on_pick)
             .add_observer(on_close_request)
             .add_observer(on_escape)
@@ -717,7 +722,10 @@ impl Plugin for InspectorUiPlugin {
             .add_observer(on_step)
             .add_observer(on_step_key)
             .add_observer(on_menu_item)
+            .add_observer(on_inline_edited)
+            .add_observer(on_inline_chosen)
             .add_systems(Startup, spawn_panel)
+            .add_systems(Update, answer_edits)
             // After the view is rebuilt: a modal closed from inside must not be reopened from the view it just left.
             .add_systems(
                 Update,
@@ -951,6 +959,80 @@ enum Block {
     Entry { key: String, entry: Entry, live: bool, note: Option<Control> },
     /// The comment box at the foot of the activity, spawned once per task so what is typed survives redraws.
     Composer { answering: Option<String>, live: bool, note: Option<Control> },
+    /// The title or the description, edited where it is read. Its key doesn't hold the words, so an edit in progress
+    /// survives a change from elsewhere.
+    Inline { field: Field, value: String },
+    /// A sidebar field picked from a dropdown where it is read: `options[i]` is shown for what `statuses[i]` (status)
+    /// or the field's scale (priority, grade) means.
+    Choice { field: Field, options: Vec<String>, selected: Option<usize>, statuses: Vec<Status> },
+    /// The button that opens the new-task form under this task.
+    AddSubtask { key: String, live: bool },
+}
+
+/// A field of a task the modal edits in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Field {
+    Title,
+    Description,
+    Status,
+    Priority,
+    Grade,
+}
+
+impl Field {
+    fn label(self) -> &'static str {
+        match self {
+            Field::Title => "Title",
+            Field::Description => "Description",
+            Field::Status => "Status",
+            Field::Priority => "Priority",
+            Field::Grade => "Grade",
+        }
+    }
+}
+
+/// What changed in an edit in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    Text(String),
+    /// The option picked.
+    Pick(usize),
+}
+
+/// On an inline widget of the modal: which field it edits and, while a save is out, what to go back to.
+#[derive(Component, Debug, Clone)]
+struct Edits {
+    field: Field,
+    /// What a status option means, for [`Field::Status`].
+    statuses: Vec<Status>,
+    pending: Option<Pending>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pending {
+    Text { old: String, new: String },
+    Pick { old: Option<usize> },
+}
+
+/// The PATCH an edit in place sends: only the field that changed, on the version the modal shows. `statuses` says what
+/// a status option means.
+pub fn edit_request(
+    key: &str,
+    version: i64,
+    field: Field,
+    change: &Change,
+    statuses: &[Status],
+) -> Result<Request, String> {
+    let body = match (field, change) {
+        (Field::Title, Change::Text(t)) if t.trim().is_empty() => return Err("a task needs a title".into()),
+        (Field::Title, Change::Text(t)) => json!({"title": t.trim()}),
+        (Field::Description, Change::Text(t)) => json!({"description": t}),
+        (Field::Status, Change::Pick(i)) => json!({"status": statuses.get(*i).ok_or("no such status")?}),
+        (Field::Priority, Change::Pick(i)) => json!({"priority": Priority::ALL.get(*i).ok_or("no such priority")?}),
+        (Field::Grade, Change::Pick(i)) => json!({"grade": grade_choices().nth(*i).ok_or("no such grade")?}),
+        _ => return Err("that field isn't edited that way".into()),
+    };
+    Ok(Request::new(Method::PATCH, format!("/v1/tasks/{key}"), Some(body), Some(version)))
 }
 
 /// One of a PR's gates: its key holds the state, so a gate that changes state is a new badge.
@@ -1123,26 +1205,35 @@ fn layout_task(
     };
 
     let mut main: Plan = Vec::new();
-    add(
-        &mut main,
-        "m/title",
-        "",
-        vec![("m/title/text".into(), text_block(&facts.title, size::DETAIL_TITLE, Tone::Body))],
-    );
-    let description = if facts.description.is_empty() {
-        text_block("No description", size::BODY, Tone::Dim)
+    let key = key_of(view);
+    let (title, description) = if live {
+        (
+            ("m/title/edit".to_string(), Block::Inline { field: Field::Title, value: facts.title.clone() }),
+            (
+                "m/description/edit".to_string(),
+                Block::Inline { field: Field::Description, value: facts.description.clone() },
+            ),
+        )
     } else {
-        text_block(&facts.description, size::BODY, Tone::Body)
+        let description = if facts.description.is_empty() {
+            text_block("No description", size::BODY, Tone::Dim)
+        } else {
+            text_block(&facts.description, size::BODY, Tone::Body)
+        };
+        (
+            ("m/title/text".to_string(), text_block(&facts.title, size::DETAIL_TITLE, Tone::Body)),
+            ("m/description/text".to_string(), description),
+        )
     };
-    add(&mut main, "m/description", "", vec![("m/description/text".into(), description)]);
-    if !facts.subtasks.is_empty() {
-        let rows = facts
-            .subtasks
-            .iter()
-            .map(|t| (format!("m/sub/{}/{:?}/{}", t.id, t.status, t.title), Block::Subtask(t.clone())))
-            .collect();
-        add(&mut main, "m/subtasks", "Sub-tasks", rows);
-    }
+    add(&mut main, "m/title", "", vec![title]);
+    add(&mut main, "m/description", "", vec![description]);
+    let mut rows: Vec<(String, Block)> = facts
+        .subtasks
+        .iter()
+        .map(|t| (format!("m/sub/{}/{:?}/{}", t.id, t.status, t.title), Block::Subtask(t.clone())))
+        .collect();
+    rows.push(("m/sub/add".into(), Block::AddSubtask { key: key.clone(), live }));
+    add(&mut main, "m/subtasks", "Sub-tasks", rows);
     if view.pr.is_some() || view.merge_note.is_some() {
         let mut items = Vec::new();
         if let Some(pr) = &view.pr {
@@ -1163,7 +1254,6 @@ fn layout_task(
         }
         add(&mut main, "m/pr", "Pull request", items);
     }
-    let key = key_of(view);
     let mut activity: Vec<(String, Block)> = facts
         .activity
         .iter()
@@ -1194,33 +1284,50 @@ fn layout_task(
         add(&mut side, "s/project", "Project", lines("s/project", std::slice::from_ref(&facts.project)));
     }
     let status = view.status.unwrap_or(Status::Open);
-    let moves: Vec<Status> =
-        view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(*st) } else { None }).collect();
-    let status_item = if live && !moves.is_empty() {
-        let statuses = std::iter::once(status).chain(moves).collect();
-        ("s/status/move".to_string(), Block::Move { statuses, note: note(&MOVE_CONTROL) })
+    let mut fields = Vec::new();
+    if live {
+        let moves = view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(*st) } else { None });
+        let statuses: Vec<Status> = std::iter::once(status).chain(moves).collect();
+        let options = status_labels(&statuses);
+        fields.push((
+            "s/fields/status".to_string(),
+            Block::Choice { field: Field::Status, options, selected: Some(0), statuses },
+        ));
+        let priorities = Priority::ALL.iter().map(|p| format!("P{p}")).collect();
+        let selected = view.priority.and_then(|p| Priority::ALL.iter().position(|q| *q == p));
+        fields.push((
+            "s/fields/priority".to_string(),
+            Block::Choice { field: Field::Priority, options: priorities, selected, statuses: Vec::new() },
+        ));
+        fields.push((
+            "s/fields/grade".to_string(),
+            Block::Choice {
+                field: Field::Grade,
+                options: grade_options(human),
+                selected: grade_index(view.grade),
+                statuses: Vec::new(),
+            },
+        ));
     } else {
-        ("s/status/text".to_string(), text_block(status_label(status), size::BODY, Tone::Body))
-    };
-    add(&mut side, "s/status", "Status", vec![status_item]);
-    if let Some(p) = view.priority {
-        add(&mut side, "s/priority", "Priority", vec![(format!("s/priority/{p}"), Block::Priority(p))]);
-    }
-    let mut grade = if live {
-        vec![("s/grade/pick".to_string(), Block::Grade { grade: view.grade, note: note(&Action::Grade(None)) })]
-    } else {
+        fields.push((
+            "s/fields/status".to_string(),
+            text_block(format!("Status: {}", status_label(status)), size::BODY, Tone::Body),
+        ));
+        if let Some(p) = view.priority {
+            fields.push((format!("s/fields/priority/{p}"), Block::Priority(p)));
+        }
         let words = view.grade.map_or_else(|| "none".to_string(), |g| format!("G{g}"));
-        vec![("s/grade/text".to_string(), text_block(words, size::BODY, Tone::Body))]
-    };
+        fields.push(("s/fields/grade".to_string(), text_block(format!("Grade: {words}"), size::BODY, Tone::Body)));
+    }
     if let Some(g) = view.grade {
         let words = if human.contains(&g) {
             "Above Treeline: a person merges it"
         } else {
             "Below Treeline: merges once its gates pass"
         };
-        grade.push(("s/grade/treeline".to_string(), text_block(words, size::SECONDARY, Tone::Dim)));
+        fields.push(("s/fields/treeline".to_string(), text_block(words, size::SECONDARY, Tone::Dim)));
     }
-    add(&mut side, "s/grade", "Grade", grade);
+    add(&mut side, "s/fields", "", fields);
     let claim = match &facts.claim {
         Some(line) => vec![("s/claim/text".to_string(), text_block(line, size::BODY, Tone::Body))],
         None => vec![("s/claim/none".to_string(), text_block("Nobody holds it", size::BODY, Tone::Dim))],
@@ -1512,6 +1619,28 @@ fn spawn_block(
             // The answering line and the kind's dropdown take turns; `dress` sets which once the parts exist.
             item
         }
+        Block::Inline { field, value } => {
+            let (hint, lines, font) = match field {
+                Field::Title => ("Add a title", 1.0, size::DETAIL_TITLE),
+                _ => ("Add a description", DESCRIPTION_LINES, size::BODY),
+            };
+            commands
+                .spawn_scene(inline_text_sized(value.clone(), hint, lines, font))
+                .insert(Edits { field: *field, statuses: Vec::new(), pending: None })
+                .id()
+        }
+        Block::Choice { field, options, selected, statuses } => commands
+            .spawn_scene(inline_field(field.label(), options.clone(), *selected))
+            .insert(Edits { field: *field, statuses: statuses.clone(), pending: None })
+            .id(),
+        Block::AddSubtask { key, live } => {
+            let button = commands
+                .spawn_scene(bsn! { @button("Add sub-task", Some(Icon::Plus), ButtonVariant::Normal) })
+                .insert(Act::NewSubtask(key.clone()))
+                .id();
+            gate_button(commands, button, *live);
+            button
+        }
         Block::Subtask(sub) => {
             let line = commands.spawn_scene(bsn! { @row() }).id();
             let caption = format!("{}  {}", sub.key, sub.title);
@@ -1589,6 +1718,7 @@ fn dress(
     mut nodes: Query<&mut Node>,
     mut moves: Query<&mut StatusMove>,
     mut edit: SelectEdit,
+    (mut inline, mut fields, mut edits): (Query<&mut InlineText>, Query<&mut InlineField>, Query<&mut Edits>),
     mut again: Local<Vec<Entity>>,
     mut commands: Commands,
 ) {
@@ -1600,6 +1730,33 @@ fn dress(
     todo.dedup();
     for entity in todo {
         let Ok((Shown(block), parts)) = shown.get(entity) else { continue };
+        match block {
+            // A value from elsewhere; the widget leaves it alone while it is being edited or saved.
+            Block::Inline { value, .. } => {
+                if let Ok(mut t) = inline.get_mut(entity)
+                    && t.value() != value
+                {
+                    t.set_value(value);
+                }
+                continue;
+            }
+            Block::Choice { options, selected, statuses, .. } => {
+                if let Ok(mut f) = fields.get_mut(entity) {
+                    f.set(options.clone(), *selected);
+                }
+                if let Ok(mut e) = edits.get_mut(entity)
+                    && e.statuses != *statuses
+                {
+                    e.statuses = statuses.clone();
+                }
+                continue;
+            }
+            Block::AddSubtask { live, .. } => {
+                gate_button(&mut commands, entity, *live);
+                continue;
+            }
+            _ => {}
+        }
         if let Block::Text { text: words, .. } = block {
             if let Ok(mut t) = texts.get_mut(entity)
                 && t.0 != *words
@@ -1697,7 +1854,125 @@ fn dress(
                     dress_note(&mut commands, &mut texts, &mut nodes, n, note);
                 }
             }
-            Block::Text { .. } | Block::Priority(_) | Block::Gates | Block::Subtask(_) => {}
+            Block::Text { .. }
+            | Block::Priority(_)
+            | Block::Gates
+            | Block::Subtask(_)
+            | Block::Inline { .. }
+            | Block::Choice { .. }
+            | Block::AddSubtask { .. } => {}
+        }
+    }
+}
+
+/// How many lines the description's input is while it is edited.
+const DESCRIPTION_LINES: f32 = 6.0;
+
+/// The title or description was edited: send it, or put it back with why not.
+fn on_inline_edited(
+    edited: On<InlineEdited>,
+    mut edits: Query<&mut Edits>,
+    mut texts: Query<&mut InlineText>,
+    state: Res<InspectorState>,
+    connection: Res<State<Connection>>,
+    mut submit: MessageWriter<Submit>,
+) {
+    let Ok(mut e) = edits.get_mut(edited.entity) else { return };
+    let change = Change::Text(edited.new.clone());
+    match edit_for(&state, &connection, e.field, &change, &e.statuses) {
+        Ok(request) => {
+            e.pending = Some(Pending::Text { old: edited.old.clone(), new: edited.new.clone() });
+            submit.write(Submit { source: edited.entity, request });
+        }
+        Err(why) => {
+            if let Ok(mut t) = texts.get_mut(edited.entity) {
+                t.fail_keeping(edited.old.clone(), edited.new.clone(), why);
+            }
+        }
+    }
+}
+
+/// A sidebar field was picked: send it, or put it back with why not.
+fn on_inline_chosen(
+    chosen: On<InlineChosen>,
+    mut edits: Query<&mut Edits>,
+    mut fields: Query<&mut InlineField>,
+    state: Res<InspectorState>,
+    connection: Res<State<Connection>>,
+    mut submit: MessageWriter<Submit>,
+) {
+    let Ok(mut e) = edits.get_mut(chosen.entity) else { return };
+    match edit_for(&state, &connection, e.field, &Change::Pick(chosen.new), &e.statuses) {
+        Ok(request) => {
+            e.pending = Some(Pending::Pick { old: chosen.old });
+            submit.write(Submit { source: chosen.entity, request });
+        }
+        Err(why) => {
+            if let Ok(mut f) = fields.get_mut(chosen.entity) {
+                f.fail(chosen.old, why);
+            }
+        }
+    }
+}
+
+/// The request for an edit of the task shown, if it can be sent now.
+fn edit_for(
+    state: &InspectorState,
+    connection: &State<Connection>,
+    field: Field,
+    change: &Change,
+    statuses: &[Status],
+) -> Result<Request, String> {
+    if *connection.get() != Connection::Live {
+        return Err("Not connected to the server, so not saved.".into());
+    }
+    let view = state.0.as_ref().ok_or("no task is shown")?;
+    let facts = view.task.as_ref().ok_or("no task is shown")?;
+    edit_request(&key_of(view), facts.version, field, change, statuses)
+}
+
+/// The server answered an edit in place: it stays, or goes back with the reason. One that lost to another change
+/// keeps what was typed for the next edit and fetches the task again, so that edit goes on the newer version.
+fn answer_edits(
+    mut done: MessageReader<CommandDone>,
+    mut edits: Query<&mut Edits>,
+    mut texts: Query<&mut InlineText>,
+    mut fields: Query<&mut InlineField>,
+    mut refetch: MessageWriter<Refetch>,
+) {
+    for d in done.read() {
+        let Ok(mut e) = edits.get_mut(d.source) else { continue };
+        let Some(pending) = e.pending.take() else { continue };
+        let conflict = matches!(d.outcome, Outcome::Conflict { .. });
+        if conflict {
+            refetch.write(Refetch);
+        }
+        let why = describe(&d.outcome);
+        match (pending, why) {
+            (Pending::Text { .. }, None) => {
+                if let Ok(mut t) = texts.get_mut(d.source) {
+                    t.confirm();
+                }
+            }
+            (Pending::Pick { .. }, None) => {
+                if let Ok(mut f) = fields.get_mut(d.source) {
+                    f.confirm();
+                }
+            }
+            (Pending::Text { old, new }, Some(why)) => {
+                if let Ok(mut t) = texts.get_mut(d.source) {
+                    if conflict {
+                        t.fail_keeping(old, new, format!("{why}. Yours is kept: edit to save it again."));
+                    } else {
+                        t.fail(old, why);
+                    }
+                }
+            }
+            (Pending::Pick { old }, Some(why)) => {
+                if let Ok(mut f) = fields.get_mut(d.source) {
+                    f.fail(old, why);
+                }
+            }
         }
     }
 }
@@ -3139,5 +3414,91 @@ mod in_place_tests {
         assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))), "nothing before it");
         key(&mut app, from, KeyCode::KeyJ);
         assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t8"))));
+    }
+
+    fn editor(app: &mut App, field: Field) -> Entity {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &Edits)>();
+        q.iter(world).find(|(_, e)| e.field == field).map(|(e, _)| e).expect("the field's editor")
+    }
+
+    fn answer(app: &mut App, source: Entity, outcome: Outcome) {
+        app.world_mut().write_message(CommandDone { source, id: crate::commands::CommandId(0), outcome });
+        settle(app);
+    }
+
+    #[test]
+    fn each_field_sends_only_itself_on_the_version_shown() {
+        let st = [Status::InProgress, Status::InReview];
+        let r = |field, change| edit_request("TRAIL-7", 4, field, &change, &st).unwrap();
+        let title = r(Field::Title, Change::Text("  New title ".into()));
+        assert_eq!(
+            (title.method.clone(), title.path.as_str(), title.if_match),
+            (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4))
+        );
+        assert_eq!(title.body, Some(json!({"title": "New title"})));
+        assert_eq!(r(Field::Description, Change::Text("why".into())).body, Some(json!({"description": "why"})));
+        assert_eq!(r(Field::Status, Change::Pick(1)).body, Some(json!({"status": "in_review"})));
+        assert_eq!(r(Field::Priority, Change::Pick(0)).body, Some(json!({"priority": 1})));
+        assert_eq!(r(Field::Grade, Change::Pick(2)).body, Some(json!({"grade": 2})));
+        assert_eq!(r(Field::Grade, Change::Pick(0)).body, Some(json!({"grade": null})), "none clears it");
+        assert!(edit_request("TRAIL-7", 4, Field::Title, &Change::Text(" ".into()), &st).is_err());
+    }
+
+    #[test]
+    fn an_edited_title_is_sent_and_stays_once_it_went_through() {
+        let mut app = app();
+        let title = editor(&mut app, Field::Title);
+        app.world_mut().trigger(InlineEdited { entity: title, old: "do it".into(), new: "do it well".into() });
+        let sent = sent(&mut app);
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].source, sent[0].request.if_match), (title, Some(4)));
+        assert_eq!(sent[0].request.body, Some(json!({"title": "do it well"})));
+        answer(&mut app, title, Outcome::Ok { version: Some(5) });
+        assert!(app.world().get::<Edits>(title).unwrap().pending.is_none());
+        assert!(app.world().get::<InlineText>(title).unwrap().error().is_empty());
+    }
+
+    #[test]
+    fn a_conflict_fetches_again_says_so_and_keeps_what_was_typed() {
+        let mut app = app();
+        let description = editor(&mut app, Field::Description);
+        app.world_mut().trigger(InlineEdited { entity: description, old: String::new(), new: "mine".into() });
+        sent(&mut app);
+        app.world_mut().resource_mut::<Messages<Refetch>>().clear();
+        answer(&mut app, description, Outcome::Conflict { current_version: Some(5), message: "stale".into() });
+        let t = app.world().get::<InlineText>(description).unwrap();
+        assert_eq!(t.draft(), Some("mine"));
+        assert!(t.error().contains("changed since you looked"), "{}", t.error());
+        let asked = app.world_mut().resource_mut::<Messages<Refetch>>().drain().count();
+        assert_eq!(asked, 1, "the task is fetched again");
+    }
+
+    #[test]
+    fn a_refused_status_move_shows_its_reason_beside_the_field() {
+        let mut app = app();
+        let status = editor(&mut app, Field::Status);
+        let statuses = app.world().get::<Edits>(status).unwrap().statuses.clone();
+        assert_eq!(statuses[0], Status::InProgress, "its own status first");
+        let to = statuses.iter().position(|s| *s == Status::NeedsInput).unwrap();
+        app.world_mut().trigger(InlineChosen { entity: status, old: Some(0), new: to });
+        let sent = sent(&mut app);
+        assert_eq!(sent[0].request.body, Some(json!({"status": "needs_input"})));
+        answer(&mut app, status, Outcome::Failed("say why it's blocked".into()));
+        let f = app.world().get::<InlineField>(status).unwrap();
+        assert_eq!((f.selected(), f.error()), (Some(0), "say why it's blocked"));
+    }
+
+    #[test]
+    fn offline_the_fields_are_text_and_add_sub_task_is_off() {
+        let mut app = app();
+        assert!(app.world_mut().query::<&Edits>().iter(app.world()).count() >= 5);
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Offline);
+        settle(&mut app);
+        assert_eq!(app.world_mut().query::<&Edits>().iter(app.world()).count(), 0);
+        let add = app.world_mut().query_filtered::<Entity, With<Act>>().iter(app.world()).collect::<Vec<_>>();
+        let world = app.world();
+        assert!(add.iter().any(|e| world.get::<Act>(*e) == Some(&Act::NewSubtask("TRAIL-7".into()))
+            && world.get::<InteractionDisabled>(*e).is_some()));
     }
 }
