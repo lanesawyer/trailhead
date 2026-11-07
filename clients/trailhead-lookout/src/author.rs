@@ -32,7 +32,8 @@ use crate::widgets::{
 /// The priority the form starts a new task at.
 const NEW_PRIORITY: Priority = Priority::new(2).unwrap();
 
-/// The queue task new tasks go under unless the form says otherwise (`queue` in `.trailhead.toml`).
+/// The queue task new tasks go under until the factory has said what its queue is (`queue` in `.trailhead.toml`),
+/// unless `LOOKOUT_QUEUE` pins one.
 pub const DEFAULT_QUEUE: &str = "TRAIL-102";
 
 /// What a task's grade can be set to, in the order of the dropdown: none, then 1 to 4.
@@ -61,11 +62,13 @@ pub fn grade_index(grade: Option<Grade>) -> Option<usize> {
 pub struct Authoring {
     /// The key new tasks are made under.
     pub queue: String,
+    /// `queue` was set by the person (`LOOKOUT_QUEUE`), so the factory's queue doesn't replace it.
+    pub pinned: bool,
 }
 
 impl Default for Authoring {
     fn default() -> Self {
-        Authoring { queue: DEFAULT_QUEUE.to_string() }
+        Authoring { queue: DEFAULT_QUEUE.to_string(), pinned: false }
     }
 }
 
@@ -301,6 +304,20 @@ pub enum FormChoice {
     Priority,
     Status,
     Grade,
+    /// The queue a new task goes under.
+    Parent,
+}
+
+/// Follows the factory's queue: until the person pins one, new tasks go under the first queue it reports.
+fn follow_factory_queue(factory: Res<FactoryStatus>, mut authoring: ResMut<Authoring>) {
+    if authoring.pinned || !factory.is_changed() {
+        return;
+    }
+    if let Some(first) = factory.queues().into_iter().next()
+        && authoring.queue != first
+    {
+        authoring.queue = first;
+    }
 }
 
 /// The text showing the form's last message.
@@ -430,11 +447,12 @@ impl Plugin for AuthorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Form>()
             .init_resource::<Authoring>()
+            .init_resource::<FactoryStatus>()
             .init_resource::<Selection>()
             .add_observer(on_act)
             .add_observer(on_pick)
             .add_observer(on_modal_closed)
-            .add_systems(Update, (init_text, read_fields, finish).chain());
+            .add_systems(Update, (follow_factory_queue, init_text, read_fields, finish).chain());
     }
 }
 
@@ -495,6 +513,7 @@ fn choice_field(
         }
         FormChoice::Status => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Status }),
         FormChoice::Grade => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Grade }),
+        FormChoice::Parent => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Parent }),
     };
     commands.queue_spawn_scene(field(label.to_string(), control)).insert(ChildOf(parent));
 }
@@ -505,9 +524,11 @@ fn on_pick(
     choices: Query<&FormChoice>,
     dots: Query<Entity, With<PriorityDot>>,
     mut form: ResMut<Form>,
+    factory: Res<FactoryStatus>,
     mut commands: Commands,
 ) {
     let Ok(choice) = choices.get(picked.entity) else { return };
+    let queues = factory.queues();
     let Some(open) = &mut form.open else { return };
     match choice {
         FormChoice::Priority => {
@@ -526,6 +547,11 @@ fn on_pick(
         FormChoice::Grade => {
             if let Some(grade) = grade_choices().nth(picked.index) {
                 open.draft.grade = grade;
+            }
+        }
+        FormChoice::Parent => {
+            if let Some(queue) = queues.get(picked.index) {
+                open.draft.parent = queue.clone();
             }
         }
     }
@@ -567,7 +593,14 @@ fn fill_form(
             Target::Create | Target::Edit { .. } => {
                 let creating = open.target == Target::Create;
                 if creating {
-                    text_field(c, body, "Parent", input(FieldKind::Parent, generation, d.parent.clone(), 1.0));
+                    let queues = factory.queues();
+                    // A new task under one of the factory's queues picks among them; any other parent is typed.
+                    match queues.iter().position(|q| *q == d.parent) {
+                        Some(at) => choice_field(c, body, "Queue", FormChoice::Parent, queues, Some(at)),
+                        None => {
+                            text_field(c, body, "Parent", input(FieldKind::Parent, generation, d.parent.clone(), 1.0))
+                        }
+                    }
                 }
                 text_field(c, body, "Title", input(FieldKind::Title, generation, d.title.clone(), 1.0));
                 let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(body)).id();
@@ -894,6 +927,34 @@ mod tests {
         assert_eq!((open.target, open.draft.parent.as_str()), (Target::Create, "TRAIL-685"));
         press(&mut app, Act::Cancel);
         assert!(app.world().resource::<Form>().open.is_none());
+    }
+
+    fn report_queues(app: &mut App, queues: &[&str]) {
+        let state = crate::factory::RepoState {
+            control: trailhead_factory::status::ControlState::Up,
+            queue: queues.iter().map(|q| q.to_string()).collect(),
+            last_error: None,
+            human_grades: Vec::new(),
+            seq: 1,
+        };
+        app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), state);
+        app.update();
+    }
+
+    #[test]
+    fn new_follows_the_factory_queue_unless_pinned() {
+        let mut app = app();
+        report_queues(&mut app, &["TRAIL-102", "TRAIL-685"]);
+        assert_eq!(app.world().resource::<FactoryStatus>().queues(), ["TRAIL-102", "TRAIL-685"]);
+        report_queues(&mut app, &["TRAIL-685"]);
+        assert_eq!(app.world().resource::<Authoring>().queue, "TRAIL-685");
+        {
+            let mut authoring = app.world_mut().resource_mut::<Authoring>();
+            authoring.queue = "TRAIL-9".into();
+            authoring.pinned = true;
+        }
+        report_queues(&mut app, &["TRAIL-102"]);
+        assert_eq!(app.world().resource::<Authoring>().queue, "TRAIL-9");
     }
 
     #[test]
