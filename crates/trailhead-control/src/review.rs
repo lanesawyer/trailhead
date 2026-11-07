@@ -305,8 +305,9 @@ impl Factory {
     }
 
     /// A review asked for changes: the task stays in review, now with changes requested, and has the review in its
-    /// metadata, so the next run starts a fresh sandbox from the PR branch and is told what to fix. The task is parked instead once `round`
-    /// reviews have asked for changes, which is when a human should look. Reconcile finishes this if it's cut short.
+    /// metadata, so the next run starts a fresh sandbox from the PR branch and is told what to fix. The task is parked
+    /// instead once `round` reviews have asked for changes, which is when a human should look. Reconcile finishes this
+    /// if it's cut short.
     pub(crate) async fn request_rework(&self, task: &Task, requested: ChangesRequested, round: u32) -> Result<()> {
         // `round` counts what the request is: review rounds, or conflict reworks for a conflict (TRAIL-221).
         let max =
@@ -350,8 +351,8 @@ impl Factory {
         // CI failure gets one from the factory, so it is listed as having changes requested until a worker's
         // handoff answers it (TRAIL-963).
         if conflict {
-            // An approval doesn't survive the request. `task` may be older than the merger's own approval, or newer than
-            // a caller's unapprove, so the tracker is asked.
+            // An approval doesn't survive the request. `task` may be older than the merger's own approval, or newer
+            // than a caller's unapprove, so the tracker is asked.
             if self.tracker.show(&task.key).await?.status == Status::Approved {
                 self.tracker.unapprove(&task.key).await?;
             }

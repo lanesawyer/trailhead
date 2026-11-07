@@ -1284,3 +1284,23 @@ async fn a_stray_is_warned_about_once_across_reconciles_and_not_for_a_sibling_re
     assert_eq!(text.matches(&stray.0).count(), 1, "{text}");
     assert!(!text.contains(&beta_task.0), "{text}");
 }
+
+#[tokio::test]
+async fn ready_lists_reworks_ahead_of_new_work_only_within_a_priority() {
+    let r = rig().await;
+    let (rework, pull) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pull, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert!(r.show(&rework).await.changes_requested);
+
+    let urgent =
+        NewTask { project: "TRAIL".into(), title: "Urgent".into(), priority: Some(pr(1)), ..Default::default() };
+    let urgent = TaskKey(r.store.create_task(&r.human, urgent).await.unwrap().key);
+    let same = r.task("Same priority as the rework").await;
+
+    // The cut to `limit` comes after the merge: the urgent task isn't pushed out by the rework.
+    let ready = r.tracker.ready("TRAIL", &[], 1).await.unwrap();
+    assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&urgent]);
+    let ready = r.tracker.ready("TRAIL", &[], 3).await.unwrap();
+    assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&urgent, &rework, &same]);
+}

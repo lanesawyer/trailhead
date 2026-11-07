@@ -336,8 +336,8 @@ impl Factory {
                         tracing::warn!(task = %task.key.0, error = %e, "couldn't record the head from before the push");
                     }
                 }
-                // MVP: no suspend during review; requested changes leave the task in review as changes requested (`request_rework`) and a new run
-                // starts from the PR branch.
+                // MVP: no suspend during review; requested changes leave the task in review as changes requested
+                // (`request_rework`) and a new run starts from the PR branch.
                 if let Err(e) = self.release_worker(sandbox).await {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile will");
                 }

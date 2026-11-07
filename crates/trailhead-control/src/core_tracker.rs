@@ -310,10 +310,10 @@ impl Tracker for CoreTracker {
             }
         };
         let mut tasks = self.tasks(&ctx, tasks).await?;
-        // Reworks wait in review with changes requested: they are listed ahead of new work.
-        let mut reworks = self.reworks(&ctx, project, queue).await?;
-        reworks.append(&mut tasks);
-        let mut tasks = reworks;
+        // Reworks wait in review with changes requested: within a priority they are listed ahead of new work, and the
+        // merge happens before the cut so a pile of low-priority reworks can't hide a higher-priority new task.
+        tasks.extend(self.reworks(&ctx, project, queue).await?);
+        tasks.sort_by_key(|t| (t.priority, !t.changes_requested));
         tasks.truncate(limit);
         self.raise_to_blocked_priority(&ctx, &mut tasks).await;
         Ok(tasks)

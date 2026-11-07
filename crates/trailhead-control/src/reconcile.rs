@@ -450,7 +450,8 @@ impl Factory {
             Status::InReview => {
                 let PrSettle::Open { mergeable } = self.pr_settled(task, done).await? else { return Ok(false) };
                 let attempt = task.run.attempt.unwrap_or(1);
-                // Changes were requested on this attempt but never recorded as a review (the request was cut short): finish it.
+                // Changes were requested on this attempt but never recorded as a review (the request was cut short):
+                // finish it.
                 // A park resets the counts to zero, so a request still recorded beside zero counts was parked on and
                 // then settled by a person: it's stale, and the PR is looked at as it is now (TRAIL-304).
                 let parked = |c: &ChangesRequested| {

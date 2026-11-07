@@ -237,7 +237,8 @@ pub fn pushed_for_review_handoff(pr_url: &str) -> String {
 /// factory since: the PR is looked at as it stands.
 pub fn stale_request_handoff(pr_url: &str) -> String {
     format!(
-        "The changes requested on {pr_url} no longer apply: it was pushed to since (or the request was settled by a person), so it is reviewed as it stands."
+        "The changes requested on {pr_url} no longer apply: it was pushed to since (or the request was settled by a \
+         person), so it is reviewed as it stands."
     )
 }
 
