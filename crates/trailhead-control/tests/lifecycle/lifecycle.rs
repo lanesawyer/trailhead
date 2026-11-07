@@ -719,13 +719,13 @@ async fn a_sandbox_that_wont_release_after_the_agent_ends_the_run_doesnt_give_th
 
 #[tokio::test]
 async fn a_worker_that_cant_record_its_failed_check_still_counts_the_attempt_and_releases_the_task() {
-    for op in ["note", "release"] {
+    for (op, skip) in [("note", 0), ("report", 2), ("release", 0)] {
         let r = rig();
         let key = r.tracker.add_task("TRAIL", "Lint me", "");
         r.daemon.fail_check("lint", "warning: unused variable");
         r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
-        // Only the worker's own call fails; the control plane's go through.
-        r.tracker.fail_next("factory/trail-1-a1", op, 1);
+        // Only the daemon's call fails, not the control plane's own `report`s as the same sub-agent before it.
+        r.tracker.fail_after("factory/trail-1-a1", op, skip, 1);
 
         let ran = r.factory.run_task(&r.tracker.task(&key)).await;
         let Ok(Outcome::Failed { reason }) = ran else { panic!("{op}: {ran:?}") };
@@ -738,6 +738,42 @@ async fn a_worker_that_cant_record_its_failed_check_still_counts_the_attempt_and
         assert_eq!(task.run.retries.unwrap_or(0), 0);
         assert!(r.codehost.prs().is_empty());
     }
+}
+
+/// The daemon's fallback release fails too, so the task is still held by the sub-agent the control plane revoked.
+/// The attempt counts, and the task waits out its lease (TRAIL-614).
+#[tokio::test]
+async fn a_worker_whose_fallback_release_fails_too_leaves_the_task_for_reconcile() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Lint me", "");
+    r.daemon.fail_check("lint", "warning: unused variable");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.tracker.fail_next("factory/trail-1-a1", "release", 2);
+
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    let Ok(Outcome::Failed { reason }) = ran else { panic!("{ran:?}") };
+    assert!(reason.contains("finishing the run failed"), "{reason}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.attempt, Some(1));
+    assert_eq!(task.run.infra_failures.unwrap_or(0), 0);
+    assert_eq!(task.status, Status::InProgress, "{task:?}");
+    assert_eq!(task.holder.as_deref(), Some("factory/trail-1-a1"));
+    assert!(r.codehost.prs().is_empty());
+
+    // Reconcile can't release it: the revoked sub-agent is the holder and is refused. The task waits for its lease
+    // to lapse, which returns it to the queue, and the next run is the attempt after.
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.requeued.is_empty(), "{done:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!((task.status, task.holder.as_deref()), (Status::InProgress, Some("factory/trail-1-a1")));
+    assert!(r.factory.tick().await.unwrap().is_empty(), "a held task is not picked up");
+
+    r.tracker.set_status(&key, Status::Open);
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(r.tracker.task(&key).run.attempt, Some(2));
 }
 
 /// The PR is open and the checks passed, so a worker that can't ask for review doesn't make a failed attempt (TRAIL-441).
