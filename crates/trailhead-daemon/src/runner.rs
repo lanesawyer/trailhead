@@ -98,11 +98,11 @@ impl Quiet {
 /// The most follow-ups one review may file, so a runaway reviewer can't flood the project.
 const MAX_FOLLOW_UPS: usize = 10;
 
-/// The daemon's duties for one run: claim, run the harness, run checks, publish and open the PR, or review it,
-/// and record the result in the tracker as the sandbox's sub-agent.
 /// How long publishing keeps retrying a transient failure before the task is parked.
 const PUBLISH_RETRY_FOR: Duration = Duration::from_secs(10 * 60);
 
+/// The daemon's duties for one run: claim, run the harness, run checks, publish and open the PR, or review it,
+/// and record the result in the tracker as the sandbox's sub-agent.
 pub struct Runner {
     pub harness: Arc<dyn Harness>,
     pub codehost: Arc<dyn CodeHost>,
