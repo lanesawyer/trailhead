@@ -19,6 +19,7 @@ use trailhead_daemon::net::{parse_endpoint_id, parse_secret_key};
 use trailhead_daemon::ui::{CLOSE_NOT_ALLOWED, StatusFrame, StatusStream, UI_ALPN, dial_ui, open_ui_tunnel};
 
 use crate::commands::{self, CommandId, Reply, Request};
+use crate::detail::{self, DetailReply};
 use crate::factory::FactoryUpdate;
 use crate::search::{self, SearchReply};
 use crate::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
@@ -108,10 +109,12 @@ pub enum NetCommand {
     Request { id: CommandId, attempt: u32, request: Request },
     /// Search tasks and comments for `query` (`GET /v1/search`); `seq` comes back with the answer.
     Search { seq: u64, query: String },
+    /// Fetch the task `key` in full (`GET /v1/tasks/{key}`); `seq` comes back with the answer.
+    Detail { seq: u64, key: String },
 }
 
 /// What the net thread tells the app.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NetEvent {
     /// Lookout's own endpoint id, for `trailhead factory allow`.
     Endpoint(String),
@@ -126,6 +129,8 @@ pub enum NetEvent {
     Factory(FactoryUpdate),
     /// What came of a [`NetCommand::Search`].
     Search(SearchReply),
+    /// What came of a [`NetCommand::Detail`].
+    Detail(DetailReply),
 }
 
 /// Everything the HTTP client needs to talk to the Trailhead API through the control plane.
@@ -429,6 +434,7 @@ async fn run(
                 }
                 Some(NetCommand::Request { id, attempt, request }) => net.request(id, attempt, request),
                 Some(NetCommand::Search { seq, query }) => net.search(seq, query),
+                Some(NetCommand::Detail { seq, key }) => net.detail(seq, key),
                 None => break,
             },
             Some((run, report)) = report_rx.recv() => net.on_report(run, report),
@@ -848,6 +854,19 @@ impl Net {
         tokio::spawn(async move {
             let result = search::fetch(&http, &base, &token, &query).await;
             let _ = events.send(NetEvent::Search(SearchReply { seq, result }));
+        });
+    }
+
+    fn detail(&self, seq: u64, key: String) {
+        let events = self.events.clone();
+        let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
+            let _ = events.send(NetEvent::Detail(DetailReply { seq, result: Err("not connected".into()) }));
+            return;
+        };
+        let (http, token) = (self.http.clone(), token.clone());
+        tokio::spawn(async move {
+            let result = detail::fetch(&http, &base, &token, &key).await;
+            let _ = events.send(NetEvent::Detail(DetailReply { seq, result }));
         });
     }
 
