@@ -719,6 +719,26 @@ async fn a_host_made_update_keeps_lanes_approval_of_a_grade_three_task() {
 }
 
 #[tokio::test]
+async fn a_push_on_top_of_a_host_made_update_unapproves_lanes_approval_of_a_grade_three_task() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.tracker.approve_as_human(&key);
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged, "updated, not merged, while CI starts over");
+
+    r.codehost.push_to(&pr);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "Lane's approval doesn't cover a push on top of the update");
+    assert_eq!(task.run.merge.unwrap().human_head, None);
+}
+
+#[tokio::test]
 async fn a_push_after_lanes_approval_of_a_grade_three_task_unapproves_it() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
