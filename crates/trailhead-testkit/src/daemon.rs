@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,9 +53,9 @@ pub struct FakeWorkspace {
     changed: Mutex<Vec<String>>,
     prepares_started: AtomicUsize,
     /// Errors the next prepares fail with, before they change anything.
-    prepare_errors: Mutex<Vec<String>>,
+    prepare_errors: Mutex<VecDeque<String>>,
     /// Outputs the next prepares that run a `setup` check fail it with, after the checkout is otherwise ready.
-    setup_errors: Mutex<Vec<String>>,
+    setup_errors: Mutex<VecDeque<String>>,
     prepare_gate: Mutex<Option<Arc<Notify>>>,
     /// How long each later prepare takes, on tokio's clock.
     prepare_takes: Mutex<Duration>,
@@ -97,11 +97,11 @@ impl Workspace for FakeWorkspace {
         if !takes.is_zero() {
             tokio::time::sleep(takes).await;
         }
-        if let Some(error) = self.prepare_errors.lock().unwrap().pop() {
+        if let Some(error) = self.prepare_errors.lock().unwrap().pop_front() {
             return Err(Error::Other(error));
         }
         if req.setup.is_some()
-            && let Some(output) = self.setup_errors.lock().unwrap().pop()
+            && let Some(output) = self.setup_errors.lock().unwrap().pop_front()
         {
             *self.branch.lock().unwrap() = req.branch.clone().map(|b| (req.repo.clone(), b));
             return Err(Error::SetupFailed(output));
@@ -195,9 +195,9 @@ pub struct LocalDaemon {
     prepared: Mutex<Vec<(SandboxId, PrepareRequest)>>,
     requests: Mutex<Vec<RunRequest>>,
     /// Errors the next runs fail with before the agent does anything, like a lost daemon.
-    run_errors: Mutex<Vec<trailhead_factory::Error>>,
+    run_errors: Mutex<VecDeque<trailhead_factory::Error>>,
     /// Errors the next runs fail with once the agent has reported usage, like a daemon lost partway through.
-    late_run_errors: Mutex<Vec<String>>,
+    late_run_errors: Mutex<VecDeque<String>>,
     /// Runs that are going in a sandbox from before this control plane: their events so far, and how they end.
     ongoing: Mutex<HashMap<String, Ongoing>>,
     attached: Mutex<Vec<String>>,
@@ -309,14 +309,14 @@ impl LocalDaemon {
 
     /// Makes the next run fail with a permanent rejection, as a request the remote will never accept.
     pub fn reject_runs(&self, error: &str) {
-        self.run_errors.lock().unwrap().push(trailhead_factory::Error::Rejected(error.to_string()));
+        self.run_errors.lock().unwrap().push_back(trailhead_factory::Error::Rejected(error.to_string()));
     }
 
     /// Makes the next `times` runs fail with this error, as a daemon the control plane lost would.
     pub fn fail_runs(&self, times: usize, error: &str) {
         let mut errors = self.run_errors.lock().unwrap();
         for _ in 0..times {
-            errors.push(trailhead_factory::Error::Other(error.to_string()));
+            errors.push_back(trailhead_factory::Error::Other(error.to_string()));
         }
     }
 
@@ -325,7 +325,7 @@ impl LocalDaemon {
     pub fn fail_runs_midway(&self, times: usize, error: &str) {
         let mut errors = self.late_run_errors.lock().unwrap();
         for _ in 0..times {
-            errors.push(error.to_string());
+            errors.push_back(error.to_string());
         }
     }
 
@@ -333,7 +333,7 @@ impl LocalDaemon {
     pub fn fail_prepares(&self, times: usize, error: &str) {
         let mut errors = self.workspace.prepare_errors.lock().unwrap();
         for _ in 0..times {
-            errors.push(error.to_string());
+            errors.push_back(error.to_string());
         }
     }
 
@@ -342,7 +342,7 @@ impl LocalDaemon {
     pub fn fail_setups(&self, times: usize, output: &str) {
         let mut errors = self.workspace.setup_errors.lock().unwrap();
         for _ in 0..times {
-            errors.push(output.to_string());
+            errors.push_back(output.to_string());
         }
     }
 
@@ -350,7 +350,7 @@ impl LocalDaemon {
     pub fn cancel_runs(&self, times: usize) {
         let mut errors = self.run_errors.lock().unwrap();
         for _ in 0..times {
-            errors.push(trailhead_factory::Error::Cancelled);
+            errors.push_back(trailhead_factory::Error::Cancelled);
         }
     }
 
@@ -448,10 +448,10 @@ impl Daemon for LocalDaemon {
 
     async fn run(&self, sandbox: &SandboxId, req: RunRequest, events: EventSink) -> Result<RunReport> {
         self.requests.lock().unwrap().push(req.clone());
-        if let Some(error) = self.run_errors.lock().unwrap().pop() {
+        if let Some(error) = self.run_errors.lock().unwrap().pop_front() {
             return Err(error);
         }
-        let late = self.late_run_errors.lock().unwrap().pop();
+        let late = self.late_run_errors.lock().unwrap().pop_front();
         let Some(error) = late else {
             return self.runner.run(req, events, self.cancel_handle(sandbox)).await;
         };
@@ -505,5 +505,38 @@ impl Daemon for LocalDaemon {
         for sandbox in running {
             let _ = self.cancel(&sandbox).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queued_prepare_errors_come_out_in_the_order_they_were_queued() {
+        let ws = FakeWorkspace::default();
+        {
+            let mut errors = ws.prepare_errors.lock().unwrap();
+            errors.push_back("first".into());
+            errors.push_back("second".into());
+        }
+        let req = PrepareRequest {
+            repo: Repo { owner: "o".into(), name: "r".into() },
+            base_branch: "main".into(),
+            branch: None,
+            merge_base: false,
+            setup: None,
+            tools: Default::default(),
+            tool_hosts: Default::default(),
+            env: Default::default(),
+            trim: None,
+            disk_warn_bytes: None,
+            disk_limit_bytes: None,
+        };
+        for want in ["first", "second"] {
+            let err = ws.prepare(&req).await.unwrap_err();
+            assert!(err.to_string().contains(want), "{err}");
+        }
+        ws.prepare(&req).await.unwrap();
     }
 }
