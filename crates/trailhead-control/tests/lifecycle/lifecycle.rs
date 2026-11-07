@@ -860,6 +860,8 @@ async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a
     r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
     r.factory.run_task(&r.tracker.task(&third)).await.unwrap();
     let fresh = r.compute.get("trailhead-w1").expect("a new sandbox took the freed name");
+    // Release restores the warm checkpoint of the sandbox it returns to the pool; a restore at acquire would be a second.
+    assert_eq!(r.compute.restores("trailhead-w1").len(), 1, "only release restored it, acquire did not: {fresh:?}");
     assert_eq!(r.compute.checkpoints("trailhead-w1").len(), 1, "built from scratch, not restored: {fresh:?}");
 }
 
