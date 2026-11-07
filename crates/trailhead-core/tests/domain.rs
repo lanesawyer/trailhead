@@ -388,9 +388,21 @@ async fn moving_under_an_existing_parent_cycle_is_rejected_without_hanging() {
         .unwrap();
     }
     let under_a = TaskPatch { parent: Some(Some(a.key.clone())), ..Default::default() };
-    let moved = env.store.update_task(&env.human, &c.key, under_a, None);
-    let err = tokio::time::timeout(std::time::Duration::from_secs(10), moved).await.expect("walk must terminate");
-    assert!(matches!(err, Err(Error::Invalid(_))), "{err:?}");
+    // Local queries can finish without yielding, so a looping walk would never let a
+    // `tokio::time::timeout` fire. Run the update on its own thread and wait with a deadline.
+    let env = std::sync::Arc::new(env);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = env.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let res = rt.block_on(worker.store.update_task(&worker.human, &c.key, under_a, None));
+        let _ = tx.send(res);
+    });
+    let res = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("walk must terminate");
+    match res {
+        Err(Error::Invalid(msg)) => assert!(msg.contains("parent cycle that already exists"), "{msg}"),
+        other => panic!("expected the existing-cycle error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
