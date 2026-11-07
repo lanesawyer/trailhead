@@ -347,7 +347,9 @@ impl Factory {
                 self.abandon(sandbox, &e).await;
                 done.abandoned.push(name.clone());
             }
-            Err(e) => tracing::warn!(sandbox = %name, error = %e, "couldn't release a pooled sandbox; will retry"),
+            Err(e) => {
+                tracing::warn!(sandbox = %name, error = %e, took = ?started.elapsed(), "couldn't release a pooled sandbox; will retry");
+            }
         }
     }
 
