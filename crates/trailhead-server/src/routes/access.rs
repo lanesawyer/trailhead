@@ -22,6 +22,14 @@ pub(crate) async fn list_agents(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<
     Ok(Json(json!(s.store.list_agents(&ctx).await?)))
 }
 
+#[utoipa::path(
+    get, path = "/v1/users", tag = "agents",
+    responses((status = 200, description = "People in the workspace", body = Vec<trailhead_core::User>))
+)]
+pub(crate) async fn list_users(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
+    Ok(Json(json!(s.store.list_users(&ctx).await?)))
+}
+
 /// A token's optional project scope and rate limit.
 #[derive(Deserialize, Default, ToSchema)]
 pub(crate) struct TokenLimits {
