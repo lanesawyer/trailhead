@@ -77,4 +77,4 @@ The CLI prints one terse line per task; add `--json` for full detail. MCP answer
 
 ## Errors
 
-Errors carry a stable code: CLI `error[code]: message`, MCP tool errors `error[code]: message`, REST `{"error": {"code", "message"}}`. Common ones: `claim_held`, `claim_lost`, `not_claim_holder`, `blocked_by`, `invalid_transition`, `review_required`, `version_conflict`, `not_found`, `rate_limited`. The full list and the REST API are at `GET /llms.txt` on the server.
+Errors carry a stable code: CLI `error[code]: message`, MCP tool errors `error[code]: message`, REST `{"error": {"code", "message"}}`. Common ones: `claim_held`, `claim_lost`, `not_claim_holder`, `blocked_by`, `invalid_transition`, `review_required`, `forbidden` (a delegated reviewer approving work it claimed or sent to review itself gets this rather than `review_required`; don't retry, hand it to another reviewer or a human), `version_conflict`, `not_found`, `rate_limited`. The full list and the REST API are at `GET /llms.txt` on the server.
