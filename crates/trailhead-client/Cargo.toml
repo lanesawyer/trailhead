@@ -17,7 +17,7 @@ jiff.workspace = true
 uuid.workspace = true
 serde.workspace = true
 keyring.workspace = true
-libc = "0.2"
+libc.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

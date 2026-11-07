@@ -111,7 +111,8 @@ impl Action {
             Action::Status(s) => format!("move to {}", status_label(*s)),
             Action::Resolve(_) => "resolve".into(),
             Action::Undo => "undo last change".into(),
-            Action::Revert(h) => format!("revert last {h}h"),
+            // The window is a dropdown beside the button, so the caption does not name it.
+            Action::Revert(_) => "revert since".into(),
             Action::Grade(Some(g)) => format!("grade {g}"),
             Action::Grade(None) => "clear grade".into(),
             Action::Comment => "comment".into(),
@@ -321,7 +322,7 @@ pub fn build(
             let holder = input.claims.iter().find(|c| c.task_id == task.id).map(|c| c.holder_id);
             let holder_agent = holder.and_then(agent_name);
 
-            let mut lines = vec![format!("status: {}", status_label(status))];
+            let mut lines = Vec::new();
             match (&holder_agent, holder) {
                 (Some(name), _) => lines.push(format!("held by {name}")),
                 (None, Some(h)) => lines.push(format!("held by {}", h.to_string().chars().take(8).collect::<String>())),
@@ -1092,9 +1093,14 @@ fn layout(
         plan.push((key.to_string(), items));
     };
 
-    let (run, status): (Vec<&String>, Vec<&String>) = view.lines.iter().partition(|l| is_run_line(l));
+    let (run, mut status): (Vec<String>, Vec<String>) = view.lines.iter().cloned().partition(|l| is_run_line(l));
+    // The "Move to" dropdown shows the status when it is drawn; otherwise the section says it in words.
+    let has_move = live && view.actions.iter().any(|a| matches!(a, Action::Status(_)));
+    if let (Some(s), false) = (view.status, has_move) {
+        status.insert(0, format!("status: {}", status_label(s)));
+    }
     for (key, heading, lines) in [("status", "Status", status), ("run", "Run", run)] {
-        if lines.is_empty() {
+        if lines.is_empty() && !(key == "status" && (view.priority.is_some() || view.status.is_some())) {
             continue;
         }
         let mut items = Vec::new();
@@ -1669,7 +1675,7 @@ fn spawn_block(
                     commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} })
                 }
                 Action::Revert(_) => {
-                    commands.spawn_scene(bsn! { @danger_button("revert since", Some(Icon::History)) @{press} })
+                    commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::History)) @{press} })
                 }
                 // Not drawn as an action block: they have their own controls, or none.
                 Action::Status(_) | Action::Resolve(_) | Action::Grade(_) | Action::Comment | Action::Menu => {
@@ -2666,6 +2672,23 @@ mod tests {
     }
 
     #[test]
+    fn the_status_line_shows_only_when_the_move_dropdown_does_not() {
+        let f = fixture();
+        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
+        let view = v;
+        let texts = |live: bool| -> Vec<String> {
+            let plan = layout(&view, live, "offline", 0, &|_| None);
+            plan.iter()
+                .flat_map(|(_, items)| items)
+                .filter_map(|(_, b)| if let Block::Text { text, .. } = b { Some(text.clone()) } else { None })
+                .collect()
+        };
+        assert!(!view.lines.iter().any(|l| l.starts_with("status:")));
+        let moves = view.actions.iter().any(|a| matches!(a, Action::Status(_)));
+        assert_eq!(texts(true).iter().any(|t| t.starts_with("status:")), !moves);
+    }
+
+    #[test]
     fn a_task_view_carries_its_priority_and_an_agent_has_none() {
         let f = fixture();
         let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
@@ -2757,6 +2780,8 @@ mod tests {
         let r = p(&Action::Resolve(sid("c1")));
         assert_eq!((r.path, r.body), (format!("/v1/comments/{}/resolve", sid("c1")), None));
         assert_eq!(p(&Action::Undo).body, Some(json!({"event_id": 41})));
+        // The window lives in the dropdown, so every revert captions the same.
+        assert_eq!(Action::Revert(1).label(), Action::Revert(72).label());
         let r = p(&Action::Revert(1));
         assert_eq!(
             (r.path.as_str(), r.body),
