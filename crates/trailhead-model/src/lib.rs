@@ -28,6 +28,9 @@ macro_rules! string_enum {
         pub enum $name { $($variant),+ }
 
         impl $name {
+            /// Every variant, in declaration order (lifecycle order for `Status`).
+            pub const ALL: [$name; [$(stringify!($variant)),+].len()] = [$($name::$variant),+];
+
             pub fn as_str(self) -> &'static str {
                 match self { $($name::$variant => $s),+ }
             }
@@ -66,17 +69,6 @@ string_enum!(Status "status" {
 });
 
 impl Status {
-    /// Every status, in lifecycle order.
-    pub const ALL: [Status; 7] = [
-        Status::Open,
-        Status::InProgress,
-        Status::NeedsInput,
-        Status::InReview,
-        Status::Approved,
-        Status::Done,
-        Status::Cancelled,
-    ];
-
     pub fn is_closed(self) -> bool {
         matches!(self, Status::Done | Status::Cancelled)
     }
@@ -498,6 +490,14 @@ mod tests {
         assert_eq!(
             "x".parse::<ProjectStatus>().unwrap_err().to_string(),
             "unknown project status: x (expected one of: active, archived)"
+        );
+    }
+
+    #[test]
+    fn status_all_is_in_lifecycle_order() {
+        assert_eq!(
+            Status::ALL.map(Status::as_str),
+            ["open", "in_progress", "needs_input", "in_review", "approved", "done", "cancelled"]
         );
     }
 
