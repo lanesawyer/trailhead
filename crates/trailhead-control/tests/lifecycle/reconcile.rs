@@ -324,6 +324,25 @@ async fn a_parked_task_whose_pr_is_merged_is_finished() {
 }
 
 #[tokio::test]
+async fn reconcile_finishes_an_open_task_whose_pr_merged() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    // Review asked for changes and the task went back to the queue, unclaimed.
+    r.tracker.set_status(&key, Status::Open);
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.merged, std::slice::from_ref(&key.0));
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
 async fn reconcile_asks_the_host_once_per_pr_in_review() {
     let mut r = rig();
     r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
