@@ -3400,16 +3400,21 @@ mod in_place_tests {
             repeat: false,
             window: from,
         };
-        let window = app.world_mut().spawn_empty().id();
+        // A real window: the press climbs to it last and stops there. An entity without `Window` would be handed
+        // the press again forever.
+        let window = app.world_mut().spawn(Window::default()).id();
         app.world_mut().trigger(FocusedInput::new(from, input, window));
         settle(app);
     }
 
     #[test]
-    #[ignore = "hangs since the modal edits in place (TRAIL-1014)"]
-    fn j_and_k_step_through_the_column_from_inside_the_modal() {
+    fn j_and_k_step_through_the_column_from_inside_the_modal_but_not_while_typing() {
         let mut app = app();
         next_is_t8(&mut app);
+        let input = composer_input(&mut app);
+        key(&mut app, input, KeyCode::KeyJ);
+        key(&mut app, input, KeyCode::ArrowDown);
+        assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))), "typing in the box");
         let from = arrow(&mut app, Step::Previous);
         key(&mut app, from, KeyCode::KeyK);
         assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))), "nothing before it");
