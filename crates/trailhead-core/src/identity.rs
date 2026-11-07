@@ -266,6 +266,17 @@ impl Store {
         find_agent(&conn, ctx.workspace_id, &target.id.to_string()).await
     }
 
+    pub async fn list_users(&self, ctx: &Ctx) -> Result<Vec<User>> {
+        let conn = self.reader()?;
+        let rows = conn
+            .query(
+                "SELECT id, workspace_id, name, email, created_at FROM users WHERE workspace_id = ?1 ORDER BY name",
+                [ctx.workspace_id.to_string()],
+            )
+            .await?;
+        collect(rows, user_from_row).await
+    }
+
     pub async fn list_agents(&self, ctx: &Ctx) -> Result<Vec<Agent>> {
         let conn = self.reader()?;
         agents_in(&conn, ctx.workspace_id).await
