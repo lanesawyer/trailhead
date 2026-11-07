@@ -18,6 +18,7 @@ categories = ["command-line-utilities", "development-tools", "web-programming::h
 libsql = { version = "0.10", default-features = false, features = ["core", "remote", "tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
+libc = "0.2"
 serde_json = "1"
 globset = "0.4"
 uuid = { version = "1", features = ["v7", "serde"] }
