@@ -85,7 +85,9 @@ pub fn props() -> ThemeProps {
     paint(&mut theme, &token::BOARD_BG, palette::GRAY_0);
     paint(&mut theme, &token::CARD_BG, palette::GRAY_2);
 
-    paint(&mut theme, &token::PRIORITY_1, Color::oklch(0.68, 0.17, 25.0));
+    // The most urgent priority is the kit's danger red, read from the theme so the two can't drift apart.
+    let danger = theme.color(&token::DANGER);
+    paint(&mut theme, &token::PRIORITY_1, danger);
     paint(&mut theme, &token::PRIORITY_2, Color::oklch(0.76, 0.15, 60.0));
     paint(&mut theme, &token::PRIORITY_3, Color::oklch(0.70, 0.13, 250.0));
     paint(&mut theme, &token::PRIORITY_4, Color::oklch(0.65, 0.0, 0.0));
@@ -150,6 +152,12 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    #[test]
+    fn the_top_priority_is_the_danger_color() {
+        let theme = props();
+        assert_eq!(theme.color(&token::PRIORITY_1), theme.color(&token::DANGER));
     }
 
     #[test]
