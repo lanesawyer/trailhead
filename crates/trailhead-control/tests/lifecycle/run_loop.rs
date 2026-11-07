@@ -414,7 +414,7 @@ async fn the_run_loop_wakes_itself_when_the_window_resets() {
 async fn the_run_loop_holds_due_reviews_while_the_window_is_paused() {
     let r = pausing_rig();
     let key = r.tracker.add_task("TRAIL", "Unreviewed", "");
-    let script = Script::new(changes()).quota("five_hour", 90, unix_now() + 2);
+    let script = Script::new(changes()).quota("five_hour", 90, unix_now() + 120);
     r.harness.push(Role::Worker, script);
     r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
     let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
@@ -431,8 +431,7 @@ async fn the_run_loop_holds_due_reviews_while_the_window_is_paused() {
     let tracker = r.tracker.clone();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(tracker.task(&key).run.reviewed, None, "no reviewer starts while the window is paused");
-    // The window resets on the wall clock, which the paused one doesn't move.
-    std::thread::sleep(std::time::Duration::from_millis(2100));
+    tokio::time::advance(std::time::Duration::from_secs(60)).await; // past the window's reset
     until("the review to land once the window resets", || tracker.task(&key).run.reviewed == Some(1)).await;
     stop.send(()).unwrap();
     handle.await.unwrap().unwrap();
