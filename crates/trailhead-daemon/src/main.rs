@@ -66,9 +66,9 @@ struct Args {
     /// Where the repo is checked out.
     #[arg(long)]
     workdir: PathBuf,
-    /// The Claude Code CLI.
-    #[arg(long, default_value = "claude")]
-    claude: PathBuf,
+    /// The chosen harness's executable (the Claude Code CLI by default).
+    #[arg(long, alias = "claude", default_value = "claude")]
+    harness_executable: PathBuf,
     /// Who published commits are attributed to.
     #[arg(long, default_value = "Trailhead Factory")]
     author_name: String,
@@ -208,7 +208,7 @@ async fn main() -> std::process::ExitCode {
             .exit(),
     };
     let filter = log_filter(args.log.as_deref(), std::env::var("RUST_LOG").ok().as_deref());
-    tracing_subscriber::fmt().with_timer(trailhead_factory::logging::local_timer()).with_env_filter(filter).init();
+    trailhead_log::init_stdout(filter);
     match serve(args).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
@@ -235,12 +235,7 @@ async fn gateway_command(command: Command) -> std::process::ExitCode {
     let result: std::result::Result<(), String> = async {
         match command {
             Command::Gateway { listen, socket, log } => {
-                let filter =
-                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| log.as_str().into());
-                tracing_subscriber::fmt()
-                    .with_timer(trailhead_factory::logging::local_timer())
-                    .with_env_filter(filter)
-                    .init();
+                trailhead_log::init_stdout(trailhead_log::env_filter_or(&log));
                 gateway::run(listen, &socket).await.map_err(|e| e.to_string())
             }
             Command::TrimCargo { .. } => unreachable!("handled in main"),
@@ -285,7 +280,7 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     });
     let conns = connections(&secrets.gateway_list).await;
     let harness = (trailhead_daemon::plugins::harnesses().get(&secrets.harness).map_err(|e| e.to_string())?.build)(
-        &HarnessSetup { executable: args.claude, secrets: secrets.harness_secrets.clone() },
+        &HarnessSetup { executable: args.harness_executable, secrets: secrets.harness_secrets.clone() },
     );
     let runner = Runner {
         harness,
@@ -328,6 +323,19 @@ mod tests {
     fn rust_log_then_info_when_no_flag() {
         assert_eq!(log_filter(None, Some("warn")).to_string(), "warn");
         assert_eq!(log_filter(None, None).to_string(), "info");
+    }
+
+    fn executable(flags: &[&str]) -> std::path::PathBuf {
+        let argv = ["trailhead-daemon", "--secrets", "s.json", "--workdir", "w"];
+        let cli = <super::Cli as clap::Parser>::try_parse_from(argv.iter().chain(flags)).unwrap();
+        cli.daemon.unwrap().harness_executable
+    }
+
+    #[test]
+    fn harness_executable_flag_keeps_the_claude_alias() {
+        assert_eq!(executable(&[]), std::path::PathBuf::from("claude"));
+        assert_eq!(executable(&["--harness-executable", "/bin/h"]), std::path::PathBuf::from("/bin/h"));
+        assert_eq!(executable(&["--claude", "/bin/c"]), std::path::PathBuf::from("/bin/c"));
     }
 
     #[test]

@@ -10,7 +10,7 @@ pub mod gateway;
 pub mod grade;
 pub mod harness;
 pub mod host;
-pub mod logging;
+pub mod logs;
 pub mod messages;
 pub mod money;
 pub mod provider;

@@ -17,7 +17,7 @@ use crate::metadata::{merge_patch, validate_path};
 use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 use crate::when;
-use trailhead_model::{Claim, Entity, Grade, Priority, Status, Task, TaskDetail};
+use trailhead_model::{Claim, Entity, Grade, Priority, Status, Task, TaskDetail, TaskKey};
 
 pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on, grade, duplicate_of";
 
@@ -30,7 +30,7 @@ pub(crate) fn task_from_row(row: &Row) -> Result<Task> {
         id: get_uuid(row, 0)?,
         workspace_id: get_uuid(row, 1)?,
         project_id: get_uuid(row, 2)?,
-        key: row.get(3)?,
+        key: TaskKey(row.get(3)?),
         title: row.get(4)?,
         description: row.get(5)?,
         status: get_enum(row, 6)?,
