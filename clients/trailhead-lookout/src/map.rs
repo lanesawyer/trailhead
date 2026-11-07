@@ -186,7 +186,7 @@ pub fn build(input: Input) -> MapModel {
 
     let mut tasks: Vec<&Task> =
         input.tasks.iter().filter(|t| active(t.status) || run_of.contains_key(t.key.as_str())).collect();
-    tasks.sort_by_key(|t| (key_number(&t.key), t.key.clone()));
+    tasks.sort_by_key(|t| (key_number(t.key.as_str()), t.key.clone()));
     let origin = way_origin();
     let mut waypoints = Vec::new();
     for (i, t) in tasks.iter().enumerate() {

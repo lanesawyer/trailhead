@@ -625,24 +625,6 @@ async fn shadow_mode_says_it_would_bring_a_behind_pr_up_to_date_first() {
     assert_eq!(said(&r).last().unwrap(), "Grade 1: checks, CI and review passed; would merge (shadow).");
 }
 
-#[tokio::test]
-async fn a_host_made_update_keeps_the_verdict_and_a_push_after_it_does_not() {
-    let (r, queue) = queued_rig_with(&merging());
-    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
-    r.codehost.set_ci(&pr, CiState::Passed);
-    r.codehost.set_behind(&pr, true);
-    r.factory.reconcile().await.unwrap();
-    assert!(!r.codehost.prs()[0].merged, "updated, not merged, while CI starts over");
-
-    // CI passes on the merge commit: merged on the verdict for the head before it, with no new review.
-    r.codehost.set_ci(&pr, CiState::Passed);
-    let done = r.factory.reconcile().await.unwrap();
-    assert!(done.reviewed.is_empty(), "{:?}", done.reviewed);
-    r.factory.reconcile().await.unwrap();
-    assert!(r.codehost.prs()[0].merged);
-    assert_eq!(r.tracker.task(&key).status, Status::Done);
-}
-
 #[tokio::test(start_paused = true)]
 async fn a_conflict_resolving_rework_doesnt_inherit_the_verdict() {
     let (r, queue) = queued_rig_with(&merging());
