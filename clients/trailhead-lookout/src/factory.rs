@@ -125,6 +125,17 @@ impl FactoryStatus {
         Grade::ALL.into_iter().filter(|g| self.repos.values().any(|r| r.human_grades.contains(g))).collect()
     }
 
+    /// The queue tasks the factory works, as its repos report them, each once.
+    pub fn queues(&self) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        for key in self.repos.values().flat_map(|r| &r.queue) {
+            if !keys.contains(key) {
+                keys.push(key.clone());
+            }
+        }
+        keys
+    }
+
     /// The control plane's state for the map, repo by repo.
     pub fn controls(&self) -> impl Iterator<Item = (&str, String)> {
         self.repos.iter().map(|(repo, s)| (repo.as_str(), trailhead_factory::status::control_label(&s.control)))
