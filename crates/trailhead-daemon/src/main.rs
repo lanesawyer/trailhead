@@ -218,9 +218,14 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-/// The daemon's log filter: an explicit `--log` first, then `RUST_LOG`, then `info`.
+/// The daemon's log filter: an explicit `--log` first, then `RUST_LOG`, then `info`. A value
+/// that doesn't parse falls back to `info`, with a warning on stderr (logging isn't up yet).
 fn log_filter(flag: Option<&str>, env: Option<&str>) -> tracing_subscriber::EnvFilter {
-    tracing_subscriber::EnvFilter::new(flag.or(env).unwrap_or("info"))
+    let spec = flag.or(env).unwrap_or("info");
+    tracing_subscriber::EnvFilter::try_new(spec).unwrap_or_else(|e| {
+        eprintln!("trailhead-daemon: invalid log filter {spec:?} ({e}); using info");
+        tracing_subscriber::EnvFilter::new("info")
+    })
 }
 
 async fn gateway_command(command: Command) -> std::process::ExitCode {
@@ -336,5 +341,11 @@ mod tests {
         assert_eq!(executable(&[]), std::path::PathBuf::from("claude"));
         assert_eq!(executable(&["--harness-executable", "/bin/h"]), std::path::PathBuf::from("/bin/h"));
         assert_eq!(executable(&["--claude", "/bin/c"]), std::path::PathBuf::from("/bin/c"));
+    }
+
+    #[test]
+    fn invalid_rust_log_falls_back_to_info() {
+        assert_eq!(log_filter(None, Some("foo=notalevel")).to_string(), "info");
+        assert_eq!(log_filter(Some("=="), Some("warn")).to_string(), "info");
     }
 }

@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
-use trailhead_factory::messages;
+use trailhead_factory::messages::{self, BreachedSandbox};
 use trailhead_factory::{
     ControlState, Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase,
     RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
@@ -204,16 +204,17 @@ impl Factory {
         self.conclude(task, &sub, sandbox, &name, attempt, run, None).await
     }
 
-    /// Cuts a breached sandbox off, true when it is left suspended. One that can't be cut off is destroyed: reconcile
+    /// Cuts a breached sandbox off, saying what became of it. One that can't be cut off is destroyed: reconcile
     /// leaves a parked task's sandbox alone, so that loses the suspended state, which beats leaving it reachable.
-    pub(crate) async fn cut_off_breached(&self, task: &Task, sandbox: &Sandbox) -> bool {
-        let Err(e) = self.cut_off(sandbox).await else { return true };
+    pub(crate) async fn cut_off_breached(&self, task: &Task, sandbox: &Sandbox) -> BreachedSandbox {
+        let Err(e) = self.cut_off(sandbox).await else { return BreachedSandbox::Suspended };
         tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
         self.daemon_of(sandbox).forget(&sandbox.id).await;
         if let Err(e) = self.target_of(sandbox).compute.destroy(&sandbox.id).await {
             tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile will");
+            return BreachedSandbox::Stuck;
         }
-        false
+        BreachedSandbox::Destroyed
     }
 
     /// Asks a worker breach's question, marking the breach parked first so that a question that was asked can't be
@@ -291,9 +292,9 @@ impl Factory {
                 {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't checkpoint the breached sandbox");
                 }
-                let suspended = self.cut_off_breached(task, sandbox).await;
+                let state = self.cut_off_breached(task, sandbox).await;
                 let breach = WorkerBreach { run: name.to_string(), reason: reason.clone(), parked: false };
-                let question = messages::budget_breach_question(&reason, &sandbox.name, suspended);
+                let question = messages::budget_breach_question(&reason, &sandbox.name, state);
                 let asked = self.park_worker_breach(&task.key, sub, &breach, &question).await;
                 recorded?;
                 asked?;
