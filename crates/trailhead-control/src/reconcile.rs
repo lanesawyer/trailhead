@@ -168,7 +168,10 @@ impl Factory {
     /// was recorded with the breach, so it isn't counted again. A failure is left for the next reconcile.
     async fn finish_worker_breach(&self, task: &Task, breach: &WorkerBreach, live: &[Sandbox], done: &mut Reconciled) {
         let reason = breach.reason.as_str();
-        let (Some(name), Some(host)) = (&task.run.sandbox, task.run.host.as_ref()) else { return };
+        let (Some(name), Some(host)) = (&task.run.sandbox, task.run.host.as_ref()) else {
+            tracing::warn!(task = %task.key.0, %reason, sandbox = ?task.run.sandbox, host = ?task.run.host, "a worker's budget breach has no sandbox or host to finish the park with; leaving the task as it is");
+            return;
+        };
         tracing::warn!(task = %task.key.0, %reason, "finishing the park for a worker's budget breach");
         // A sandbox that's gone was destroyed after the breach, so there's nothing suspended to point at.
         let state = match live.iter().find(|s| s.name == *host) {

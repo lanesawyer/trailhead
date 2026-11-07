@@ -1,7 +1,8 @@
 //! A scrollbar along one edge of a scrolling area: [`scrollbar`] for the area and the way it scrolls.
 //!
 //! A vertical one lies just outside the area's right edge, in the padding of the node that holds the area, so the area is as wide with it as without and the spacing left and right stays equal; a horizontal one along the bottom (the board).
-//! Spawn it as a child of the node that holds the area; that node needs at least `SCROLLBAR_WIDTH + SCROLLBAR_EDGE` of padding on the right.
+//! Spawn it as a child of the node that holds the area; that node needs `space::PANEL_INSET` of padding on the right,
+//! which the bar sits in the middle of, the same gap on either side of it.
 //! It takes its color from feathers' scrollbar tokens and hides while the area fits, so there is nothing to scroll.
 
 use bevy::ecs::template::EntityTemplate;
@@ -9,9 +10,12 @@ use bevy::feathers::controls::FeathersScrollbar;
 use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, Scrollbar};
 
-/// How thick a scrollbar is, and how far in from the edge it lies.
+use crate::space;
+
+/// How thick a scrollbar is.
 pub const SCROLLBAR_WIDTH: f32 = 6.0;
-pub const SCROLLBAR_EDGE: f32 = 2.0;
+/// The gap either side of a scrollbar: between it and the area, and between it and the holder's edge.
+pub const SCROLLBAR_EDGE: f32 = (space::PANEL_INSET - SCROLLBAR_WIDTH) / 2.0;
 
 /// The scrollbar of the scrolling node `target`, for scrolling along `orientation`. Spawn it into the target's
 /// parent, after the target.

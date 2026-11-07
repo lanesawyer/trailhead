@@ -45,10 +45,10 @@ use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::sync::SyncItem;
 use crate::widgets::{
     DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed, ModalRoot,
-    ModalSlots, PanelTitle, Picked, SelectEdit, badge, button, danger_button, display, extent, icon_menu, inline_field,
-    inline_text_sized, layer, menu_item, open_modal, panel, panel_header, priority_tone, row, scroll_body,
-    scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text, text_dim,
-    text_input, text_toned, token, tool_button,
+    ModalSlots, PanelTitle, Picked, SelectEdit, badge, button, danger_button, display, extent, grade_tone, icon_menu,
+    inline_field, inline_text_sized, layer, menu_item, open_modal, panel, panel_header, priority_tone, row,
+    scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text,
+    text_dim, text_input, text_toned, token, tool_button,
 };
 use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 
@@ -279,7 +279,7 @@ pub fn build(
 ) -> Option<InspectorView> {
     let Fetched { detail, error: fetch_error, me } = fetched;
     let agent_name = |id: Uuid| input.agents.iter().find(|a| a.id == id).map(|a| a.name.clone());
-    let task_key = |id: Uuid| input.tasks.iter().find(|t| t.id == id).map(|t| t.key.clone());
+    let task_key = |id: Uuid| input.tasks.iter().find(|t| t.id == id).map(|t| t.key.0.clone());
     match subject {
         Subject::Agent(id) => {
             let id = Uuid::parse_str(id).ok()?;
@@ -335,7 +335,7 @@ pub fn build(
             questions.sort_by_key(|c| c.created_at);
             let questions: Vec<Question> = questions
                 .into_iter()
-                .map(|q| Question { key: task.key.clone(), id: q.id.to_string(), body: q.body.clone() })
+                .map(|q| Question { key: task.key.0.clone(), id: q.id.to_string(), body: q.body.clone() })
                 .collect();
 
             let pr = run.as_ref().and_then(pr_panel);
@@ -404,8 +404,8 @@ fn facts(
     let project_key = input.projects.iter().find(|p| p.id == task.project_id).map(|p| p.key.clone());
     let parent = task.parent_id.and_then(|p| input.tasks.iter().find(|t| t.id == p));
     let mut crumbs: Vec<String> = project_key.iter().cloned().collect();
-    crumbs.extend(parent.map(|p| p.key.clone()));
-    crumbs.push(task.key.clone());
+    crumbs.extend(parent.map(|p| p.key.0.clone()));
+    crumbs.push(task.key.0.clone());
     let project = match (&project_key, parent) {
         (Some(k), Some(p)) => format!("{k} › {} {}", p.key, p.title),
         (Some(k), None) => k.clone(),
@@ -414,10 +414,10 @@ fn facts(
     };
 
     let mut subtasks: Vec<&Task> = input.tasks.iter().filter(|t| t.parent_id == Some(task.id)).collect();
-    subtasks.sort_by_key(|t| (key_number(&t.key), t.key.clone()));
+    subtasks.sort_by_key(|t| (key_number(t.key.as_str()), t.key.0.clone()));
     let subtasks = subtasks
         .into_iter()
-        .map(|t| Subtask { id: t.id.to_string(), key: t.key.clone(), title: t.title.clone(), status: t.status })
+        .map(|t| Subtask { id: t.id.to_string(), key: t.key.0.clone(), title: t.title.clone(), status: t.status })
         .collect();
 
     let claim = match detail {
@@ -436,7 +436,7 @@ fn facts(
     if let Some(d) = detail {
         for (what, keys) in [("blocked by", &d.blocked_by), ("blocks", &d.blocks), ("duplicates", &d.duplicates)] {
             if !keys.is_empty() {
-                links.push(format!("{what} {}", keys.join(", ")));
+                links.push(format!("{what} {}", keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
             }
         }
         if let Some(k) = &d.duplicate_of {
@@ -941,6 +941,8 @@ enum Block {
     Text { text: String, size: f32, tone: Tone },
     /// The `P1` badge. Its key holds the priority, so a new priority is a new badge.
     Priority(Priority),
+    /// The `G2` badge, toned by grade. Its key holds the grade, so a new grade is a new badge.
+    GradeBadge(Grade),
     /// The wrapping row of a PR's gates, which are [`Gate`]s keyed under it.
     Gates,
     /// An open question, with its answer and resolve buttons and what became of the last resolve.
@@ -1135,9 +1137,10 @@ fn layout(
         if let Some(pr) = &view.pr {
             items
                 .push(("pr/url".to_string(), text_block(format!("#{} {}", pr.number, pr.url), size::BODY, Tone::Body)));
-            let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
-            items
-                .push(("pr/state".to_string(), text_block(format!("{}{grade}", pr.state), size::SECONDARY, Tone::Dim)));
+            items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
+            if let Some(g) = pr.grade {
+                items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
+            }
             if !gates(pr).is_empty() {
                 items.push(("pr/gates".to_string(), Block::Gates));
             }
@@ -1236,9 +1239,10 @@ fn layout_task(
         if let Some(pr) = &view.pr {
             items
                 .push(("pr/url".to_string(), text_block(format!("#{} {}", pr.number, pr.url), size::BODY, Tone::Body)));
-            let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
-            items
-                .push(("pr/state".to_string(), text_block(format!("{}{grade}", pr.state), size::SECONDARY, Tone::Dim)));
+            items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
+            if let Some(g) = pr.grade {
+                items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
+            }
             if !gates(pr).is_empty() {
                 items.push(("pr/gates".to_string(), Block::Gates));
             }
@@ -1466,6 +1470,7 @@ fn spawn_block(
             commands.spawn_scene(scene).id()
         }
         Block::Priority(p) => commands.spawn_scene(badge(format!("P{p}"), None, Some(priority_tone(*p)))).id(),
+        Block::GradeBadge(g) => commands.spawn_scene(badge(format!("G{g}"), None, Some(grade_tone(*g)))).id(),
         Block::Gates => commands.spawn_scene(bsn! { @row() Node { flex_wrap: FlexWrap::Wrap } }).id(),
         Block::Question { key, id, body, live, note } => {
             let item = commands
@@ -1849,6 +1854,7 @@ fn dress(
             }
             Block::Text { .. }
             | Block::Priority(_)
+            | Block::GradeBadge(_)
             | Block::Gates
             | Block::Subtask(_)
             | Block::Inline { .. }
@@ -2254,7 +2260,7 @@ fn on_open_composer(
     mut selection: ResMut<Selection>,
     mut compose: ResMut<Compose>,
 ) {
-    let Some(task) = tasks.iter().find(|t| t.0.key == open.key) else { return };
+    let Some(task) = tasks.iter().find(|t| t.0.key == open.key.as_str()) else { return };
     let subject = Subject::Task(task.0.id.to_string());
     if compose.subject.as_ref() != Some(&subject) {
         *compose = Compose::default();

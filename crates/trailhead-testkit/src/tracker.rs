@@ -780,4 +780,17 @@ mod tests {
         assert_eq!(s.tasks[&key].status, Status::Open);
         assert_eq!(s.tasks[&key].holder, None);
     }
+
+    #[test]
+    fn injectable_ops_match_the_inject_call_sites() {
+        let mut called: Vec<&str> = include_str!("tracker.rs")
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("self.inject(\""))
+            .filter_map(|l| l.split('"').next())
+            .collect();
+        called.sort_unstable();
+        let mut listed = INJECTABLE_OPS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(called, listed);
+    }
 }
