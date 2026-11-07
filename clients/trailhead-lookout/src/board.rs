@@ -29,7 +29,7 @@ use crate::settings::SettingsButton;
 use crate::widgets;
 use crate::widgets::{
     ChipEdit, ChipWords, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_found,
-    card_row, card_title, card_under, chip, field, priority_tone, select, size, space, spawn_search_field,
+    card_row, card_title, card_under, chip, field, grade_tone, priority_tone, select, size, space, spawn_search_field,
     status_label, text as label_text, token, tool_button,
 };
 use bevy::feathers::theme::ThemeToken;
@@ -305,7 +305,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
             badges.push(Badge { kind: BadgeKind::Factory, label: "factory".into(), tone: Some(token::INFO) });
         }
         if let Some(grade) = t.grade {
-            badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}"), tone: None });
+            badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}"), tone: Some(grade_tone(grade)) });
         } else if !t.status.is_closed() && in_queue(t) {
             badges.push(Badge { kind: BadgeKind::NeedsGrade, label: "needs grade".into(), tone: Some(token::WARN) });
         }
@@ -1444,7 +1444,7 @@ mod tests {
         let badge =
             |key: &str, kind: BadgeKind| card(&view, key).badges.iter().find(|b| b.kind == kind).unwrap().tone.clone();
         assert_eq!(badge("TRAIL-103", BadgeKind::Priority), Some(token::PRIORITY_2));
-        assert_eq!(badge("TRAIL-103", BadgeKind::Grade), None);
+        assert_eq!(badge("TRAIL-103", BadgeKind::Grade), Some(token::GRADE_3));
         assert_eq!(badge("TRAIL-103", BadgeKind::Questions), Some(token::WARN));
         let tones = Priority::ALL.map(priority_tone);
         assert_eq!(tones, [token::PRIORITY_1, token::PRIORITY_2, token::PRIORITY_3, token::PRIORITY_4]);

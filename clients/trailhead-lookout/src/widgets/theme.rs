@@ -7,7 +7,7 @@
 use bevy::feathers::palette;
 use bevy::feathers::theme::{ThemeProps, ThemeToken, UiTheme};
 use bevy::prelude::*;
-use trailhead_model::{Priority, Status};
+use trailhead_model::{Grade, Priority, Status};
 use trailhead_ui::paint;
 
 /// The kit's tokens and Lookout's own. Feathers' (`bevy::feathers::tokens`) cover the controls.
@@ -26,6 +26,12 @@ pub mod token {
     pub const PRIORITY_2: ThemeToken = ThemeToken::new_static("lookout.priority.2");
     pub const PRIORITY_3: ThemeToken = ThemeToken::new_static("lookout.priority.3");
     pub const PRIORITY_4: ThemeToken = ThemeToken::new_static("lookout.priority.4");
+
+    /// One tone per grade, apart from the priorities' warm-to-cool run: G1 green, G2 teal, G3 purple, G4 magenta.
+    pub const GRADE_1: ThemeToken = ThemeToken::new_static("lookout.grade.1");
+    pub const GRADE_2: ThemeToken = ThemeToken::new_static("lookout.grade.2");
+    pub const GRADE_3: ThemeToken = ThemeToken::new_static("lookout.grade.3");
+    pub const GRADE_4: ThemeToken = ThemeToken::new_static("lookout.grade.4");
 
     /// One background per status column, in lifecycle order.
     pub const STATUS_OPEN: ThemeToken = ThemeToken::new_static("lookout.status.open");
@@ -74,6 +80,16 @@ pub fn priority_tone(p: Priority) -> ThemeToken {
     }
 }
 
+/// The tone of a grade, the same wherever a grade is shown.
+pub fn grade_tone(g: Grade) -> ThemeToken {
+    match g.get() {
+        1 => token::GRADE_1,
+        2 => token::GRADE_2,
+        3 => token::GRADE_3,
+        _ => token::GRADE_4,
+    }
+}
+
 /// The theme `main.rs` inserts.
 pub fn theme() -> UiTheme {
     UiTheme(props())
@@ -89,6 +105,11 @@ pub fn props() -> ThemeProps {
     paint(&mut theme, &token::PRIORITY_2, Color::oklch(0.76, 0.15, 60.0));
     paint(&mut theme, &token::PRIORITY_3, Color::oklch(0.70, 0.13, 250.0));
     paint(&mut theme, &token::PRIORITY_4, Color::oklch(0.65, 0.0, 0.0));
+
+    paint(&mut theme, &token::GRADE_1, Color::oklch(0.74, 0.15, 145.0));
+    paint(&mut theme, &token::GRADE_2, Color::oklch(0.74, 0.11, 190.0));
+    paint(&mut theme, &token::GRADE_3, Color::oklch(0.68, 0.15, 295.0));
+    paint(&mut theme, &token::GRADE_4, Color::oklch(0.68, 0.19, 340.0));
 
     // Columns tinted just enough to tell apart, each toward the hue of what the status means.
     let column = |hue: f32| Color::oklch(0.24, 0.025, hue);
@@ -125,6 +146,10 @@ mod tests {
             token::PRIORITY_2,
             token::PRIORITY_3,
             token::PRIORITY_4,
+            token::GRADE_1,
+            token::GRADE_2,
+            token::GRADE_3,
+            token::GRADE_4,
             token::STATUS_OPEN,
             token::STATUS_IN_PROGRESS,
             token::STATUS_NEEDS_INPUT,
@@ -150,6 +175,16 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    #[test]
+    fn each_grade_has_its_own_color_apart_from_the_priorities() {
+        let theme = props();
+        let color = |t: ThemeToken| format!("{:?}", theme.semantic_base[&theme.token_assignments[&t]]);
+        let grades: Vec<String> = Grade::ALL.map(|g| color(grade_tone(g))).to_vec();
+        let priorities: Vec<String> = Priority::ALL.map(|p| color(priority_tone(p))).to_vec();
+        let all: std::collections::HashSet<_> = grades.iter().chain(&priorities).collect();
+        assert_eq!(all.len(), 8, "{grades:?} {priorities:?}");
     }
 
     #[test]
