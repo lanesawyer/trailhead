@@ -1054,6 +1054,7 @@ async fn a_failed_revoke_doesnt_undo_a_park_or_a_failure() {
             assert!(matches!(ran, Ok(Outcome::Failed { .. })), "{ran:?}");
             assert_eq!(r.tracker.task(&key).status, Status::Open);
         }
+        assert!(!r.tracker.is_revoked("factory/trail-1-a1"), "the injected revoke failure fired on the worker");
     }
 }
 
