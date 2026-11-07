@@ -58,6 +58,7 @@ impl Client {
         if ours
             && let Some(info) = health(&http, &base, Some(&token)).await
             && is_stale(&info)
+            && !would_start_unscoped_under_systemd()
         {
             eprintln!("note: restarting the local server on the updated trailhead binary");
             stop_local(&http, &base).await?;
@@ -453,11 +454,61 @@ fn current_exe() -> Result<std::path::PathBuf> {
     Ok(exe)
 }
 
-/// Whether `systemd-run --user` can plausibly work here.
-fn systemd_scope_available() -> bool {
-    std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|d| !d.is_empty())
-        && std::env::var_os("PATH")
-            .is_some_and(|path| std::env::split_paths(&path).any(|d| d.join("systemd-run").is_file()))
+fn systemd_run_on_path() -> bool {
+    std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| d.join("systemd-run").is_file()))
+}
+
+/// The variables to set on `systemd-run --user` so it can reach the user's systemd manager.
+/// `None` when there is no runtime directory to be found. A cron job has no `XDG_RUNTIME_DIR`,
+/// but `/run/user/<uid>` is still there when the user has a manager, so use it if it is ours.
+fn scope_env(
+    xdg_runtime_dir: Option<&std::ffi::OsStr>,
+    dbus_address: Option<&std::ffi::OsStr>,
+    uid: u32,
+    run_dir_is_ours: impl Fn(&std::path::Path) -> bool,
+) -> Option<Vec<(&'static str, std::ffi::OsString)>> {
+    if xdg_runtime_dir.is_some_and(|d| !d.is_empty()) {
+        return Some(Vec::new());
+    }
+    let dir = std::path::PathBuf::from(format!("/run/user/{uid}"));
+    if !run_dir_is_ours(&dir) {
+        return None;
+    }
+    let mut vars = vec![("XDG_RUNTIME_DIR", dir.clone().into_os_string())];
+    if dbus_address.is_none_or(|d| d.is_empty()) {
+        vars.push(("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}/bus", dir.display()).into()));
+    }
+    Some(vars)
+}
+
+/// The environment for a scoped start from this process, if `systemd-run --user` can plausibly work.
+fn current_scope_env() -> Option<Vec<(&'static str, std::ffi::OsString)>> {
+    use std::os::unix::fs::MetadataExt;
+    if !systemd_run_on_path() {
+        return None;
+    }
+    let uid = std::fs::metadata("/proc/self").ok()?.uid();
+    scope_env(
+        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+        std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
+        uid,
+        |dir| std::fs::metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == uid),
+    )
+}
+
+/// True when a server started from here would run unscoped, in this process's cgroup, although
+/// systemd is around to do better (a cron job with no user manager to reach): it would die with the job.
+fn would_start_unscoped_under_systemd() -> bool {
+    systemd_run_on_path() && current_scope_env().is_none()
+}
+
+/// Says in server.log that the server is running outside its own scope, so a death with its launcher can be traced.
+fn note_unscoped(mut log: &std::fs::File, why: &str) {
+    use std::io::Write;
+    let _ = writeln!(
+        log,
+        "note: starting the server unscoped ({why}); it will stop if the process that started it is killed"
+    );
 }
 
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
@@ -468,9 +519,11 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.server_log())?;
     let bind = format!("{}:{}", base.host_str().unwrap_or("127.0.0.1"), base.port_or_known_default().unwrap_or(7241));
     let exe = current_exe()?;
+    let scope_env = current_scope_env();
     let spawn = |scoped: bool| -> Result<std::process::Child> {
         let mut cmd = if scoped {
             let mut cmd = std::process::Command::new("systemd-run");
+            cmd.envs(scope_env.iter().flatten().map(|(k, v)| (*k, v)));
             cmd.args([
                 "--user",
                 "--scope",
@@ -491,7 +544,10 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     // Under systemd the server would otherwise stay in the launching app's cgroup scope, and
     // systemd-oomd killing that app (an editor, say) would take the server with it. Its own
     // scope keeps it alive; `systemd-run --scope` execs the server, so the pid is unchanged.
-    let mut scoped = systemd_scope_available();
+    let mut scoped = scope_env.is_some();
+    if !scoped && systemd_run_on_path() {
+        note_unscoped(&log, "no user systemd runtime directory found");
+    }
     let mut child = spawn(scoped).context("couldn't start the local server")?;
     // Generous, since a busy machine (a full `cargo test` in a factory sandbox) can take well over 10 s to start it.
     for _ in 0..300 {
@@ -501,11 +557,38 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
         if scoped && child.try_wait()?.is_some() {
             // No usable user manager (a container, a bare ssh session): run it unscoped.
             scoped = false;
+            note_unscoped(&log, "systemd-run --user failed");
             child = spawn(false).context("couldn't start the local server")?;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Err(anyhow!("started a local server but it isn't answering; see {}", paths.server_log().display()))
+}
+
+#[cfg(test)]
+mod scope_env_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn xdg_runtime_dir_set_needs_nothing_more() {
+        assert_eq!(scope_env(Some(OsStr::new("/run/user/7")), None, 7, |_| false), Some(vec![]));
+    }
+
+    #[test]
+    fn cron_falls_back_to_our_run_user_dir() {
+        let vars = scope_env(None, None, 1000, |d| d == std::path::Path::new("/run/user/1000")).unwrap();
+        assert_eq!(vars[0], ("XDG_RUNTIME_DIR", "/run/user/1000".into()));
+        assert_eq!(vars[1], ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus".into()));
+        // An empty XDG_RUNTIME_DIR counts as unset; an existing bus address is kept.
+        let vars = scope_env(Some(OsStr::new("")), Some(OsStr::new("unix:path=/x")), 1000, |_| true).unwrap();
+        assert_eq!(vars.len(), 1);
+    }
+
+    #[test]
+    fn no_run_user_dir_of_ours_means_unscoped() {
+        assert_eq!(scope_env(None, None, 1000, |_| false), None);
+    }
 }
 
 #[cfg(test)]
