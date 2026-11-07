@@ -222,8 +222,25 @@ mod tests {
             "Status::ALL.iter().map(|s| s.to_string())",
         ];
         let mut bad = Vec::new();
-        for file in ["board.rs", "inspector.rs", "author.rs", "map.rs", "widgets/column.rs", "widgets/card.rs"] {
-            let source = std::fs::read_to_string(root.join(file)).unwrap();
+        // Every view file, found by walking `src/`, so a new one is covered without being listed. This file names
+        // the shapes it forbids, so it is the one left out.
+        let mut files = Vec::new();
+        let mut folders = vec![root.clone()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") && !path.ends_with("widgets/theme.rs") {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        assert!(files.len() >= 6, "found only {files:?}");
+        for path in files {
+            let file = path.strip_prefix(&root).unwrap().display().to_string();
+            let source = std::fs::read_to_string(&path).unwrap();
             let source = source.split("#[cfg(test)]").next().unwrap();
             for (n, line) in source.lines().enumerate() {
                 let line = line.trim();

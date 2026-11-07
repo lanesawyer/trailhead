@@ -255,7 +255,8 @@ pub async fn execute(http: &reqwest::Client, base: &str, token: &str, request: &
     }
     let error = &body["error"];
     let code = error["code"].as_str().unwrap_or("");
-    let message = error["message"].as_str().map_or_else(|| format!("the server answered {status}"), str::to_string);
+    let message =
+        error["message"].as_str().map_or_else(|| format!("the server answered {}", status.as_u16()), str::to_string);
     Ok(match (status.as_u16(), code) {
         (_, "idempotency_key_in_flight") => return Err(message),
         (500..=599, _) => return Err(message),
