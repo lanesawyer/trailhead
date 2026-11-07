@@ -108,7 +108,7 @@ Nothing new. Tokens already have a `principal` of user or agent, and every write
 - Built (TRAIL-694): the token is found by the server's instance id from `/v1/health`, in the same place the CLI keeps it; `NetCommand::Login` takes a pasted token, confirms it with `/v1/me`, refuses an agent's, and saves it there. The window has no text input yet, so `lookout <endpoint-id>` and `LOOKOUT_TOKEN` stand in.
 - The UI reads the user token the CLI saved for this server (`<config dir>/servers/<instance>/`, or the keyring entry named after it), or runs the same `trailhead login` flow: paste a printed token, confirm with `/v1/me`.
 - It acts only as the user. No `--as <agent>` equivalent.
-- Proposal: move `trailhead_server::creds` into a small crate so the UI can share it without depending on the server.
+- Decision (done, TRAIL-693): the credential store moved from `trailhead_server::creds` into the small `trailhead-client` crate as `trailhead_client::creds`, so the UI shares it without depending on the server.
 
 ## Transport
 
