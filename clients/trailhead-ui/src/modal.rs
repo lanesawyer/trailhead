@@ -11,7 +11,8 @@
 //! - **Never taller than the window.** The frame is capped to [`MAX_HEIGHT_VH`] of the window and only the body
 //!   scrolls, with the kit's scrollbar, so the footer (Save, Cancel) stays in view.
 //! - **Use.** A marker type implements [`Modal`] (title, width); [`open_modal`] spawns it. Once it has spawned,
-//!   [`ModalSlots`] on the root names the [`ModalBody`] to fill and the [`ModalFooter`] for its buttons. Close it by
+//!   [`ModalSlots`] on the root names the [`ModalBody`] to fill, the [`ModalFooter`] for its buttons and the header's
+//!   tools, for controls beside the X. Close it by
 //!   despawning the root. Layering is [`super::layer::MODAL`].
 
 use bevy::feathers::controls::FeathersDialog;
@@ -20,7 +21,7 @@ use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, RequestClose};
 
-use super::{ScrollDown, extent, layer, panel_header, scrollbar, space};
+use super::{PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
 
 /// How much of the window's height the modal may take, with the barrier's margin around it.
 pub const MAX_HEIGHT_VH: f32 = 80.0;
@@ -65,6 +66,8 @@ pub struct ModalLocked;
 pub struct ModalSlots {
     pub body: Entity,
     pub footer: Entity,
+    /// The header's [`PanelTools`], ending with the X: a modal's own header controls go in at its start.
+    pub tools: Entity,
 }
 
 /// A modal is about to be despawned because it was asked to close.
@@ -168,15 +171,18 @@ fn link_slots(
     parents: Query<&ChildOf>,
     roots: Query<(), With<ModalRoot>>,
     footers: Query<Entity, With<ModalFooter>>,
+    tools: Query<Entity, With<PanelTools>>,
     mut commands: Commands,
 ) {
     for body in &bodies {
         let Some(root) = parents.iter_ancestors(body).find(|e| roots.contains(*e)) else { continue };
-        let Some(footer) = footers.iter().find(|f| parents.iter_ancestors(*f).any(|e| e == root)) else { continue };
+        let inside = |e: &Entity| parents.iter_ancestors(*e).any(|a| a == root);
+        let Some(footer) = footers.iter().find(inside) else { continue };
+        let Some(tools) = tools.iter().find(inside) else { continue };
         if let Ok(holder) = parents.get(body) {
             commands.queue_spawn_scene(scrollbar(body, ControlOrientation::Vertical)).insert(ChildOf(holder.parent()));
         }
-        commands.entity(root).insert(ModalSlots { body, footer });
+        commands.entity(root).insert(ModalSlots { body, footer, tools });
     }
 }
 
@@ -234,7 +240,10 @@ mod tests {
         let modal = open(&mut app);
         assert_eq!(count(&mut app), 1);
         assert!(app.world().get::<Test>(modal).is_some());
-        assert!(app.world().get::<ModalSlots>(modal).is_some());
+        let slots = *app.world().get::<ModalSlots>(modal).unwrap();
+        assert!(app.world().get::<PanelTools>(slots.tools).is_some());
+        let tools = app.world().get::<Children>(slots.tools).map_or(0, |c| c.len());
+        assert_eq!(tools, 1, "the tools hold the X until the modal adds its own");
         assert_eq!(app.world().get::<GlobalZIndex>(modal).map(|z| z.0), Some(layer::MODAL));
     }
 
