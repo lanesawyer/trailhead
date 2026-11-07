@@ -169,7 +169,8 @@ impl Workspace for GitWorkspace {
             self.git(parent, &["clone", "--quiet", "--branch", base, &url, &dir]).await?;
         }
         if let Some(branch) = &req.branch {
-            // A rework builds on the PR branch's head, so what it publishes lands on top of it.
+            // A rework builds on the PR branch's head, so what it publishes lands on top of it; a
+            // reviewer checks out the same head, so it reads the code the PR proposes.
             self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await?;
             self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")]).await?;
         }
