@@ -96,6 +96,7 @@ impl DockerCompute {
                     link,
                     daemon_digest: daemon_digest.clone(),
                     watching: Default::default(),
+                    swept: Default::default(),
                     read_only: false,
                 };
                 if let Err(e) = compute.sync().await {
