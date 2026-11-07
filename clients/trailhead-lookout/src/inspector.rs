@@ -3475,11 +3475,20 @@ mod in_place_tests {
         app.world_mut().trigger(InlineEdited { entity: description, old: String::new(), new: "mine".into() });
         sent(&mut app);
         app.world_mut().resource_mut::<Messages<Refetch>>().clear();
-        answer(&mut app, description, Outcome::Conflict { current_version: Some(5), message: "stale".into() });
+        app.world_mut().write_message(CommandDone {
+            source: description,
+            id: crate::commands::CommandId(0),
+            outcome: Outcome::Conflict { current_version: Some(5), message: "stale".into() },
+        });
+        // Count after every frame: a message only lives for two of them.
+        let mut asked = 0;
+        for _ in 0..5 {
+            app.update();
+            asked += app.world_mut().resource_mut::<Messages<Refetch>>().drain().count();
+        }
         let t = app.world().get::<InlineText>(description).unwrap();
         assert_eq!(t.draft(), Some("mine"));
         assert!(t.error().contains("changed since you looked"), "{}", t.error());
-        let asked = app.world_mut().resource_mut::<Messages<Refetch>>().drain().count();
         assert_eq!(asked, 1, "the task is fetched again");
     }
 
