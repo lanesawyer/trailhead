@@ -221,7 +221,7 @@ impl Runner {
                 {
                     tracing::warn!(task = %key, error = %e, "couldn't release the task");
                 }
-                (RunResult::Failed(format!("finishing the run failed: {e}")), vec![])
+                (RunResult::Failed(messages::finishing_failed(&e)), vec![])
             }
         };
         Ok(RunReport { result, checks, usage })

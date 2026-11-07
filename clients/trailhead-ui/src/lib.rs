@@ -7,7 +7,8 @@
 //!
 //! Which widget for what:
 //! - A button with words (and maybe an icon): [`button`]. Icon only, with a hint: [`tool_button`].
-//! - A button that opens a menu: [`icon_menu`], then fill its popup; [`close_menu_holding`] when an item is done.
+//! - A button that opens a menu: [`icon_menu`], then fill its popup with [`menu_item`]s; [`close_menu_holding`] when
+//!   something else in it is done.
 //! - A small chip with an icon and a word: [`badge`].
 //! - A text input, one line or several: [`text_input`], inside a [`field`].
 //! - A text edited where it is read (a title, a description): [`inline_text`]; a sidebar label and choice:
@@ -93,17 +94,18 @@ pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
 pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
+    inline_text_sized,
 };
 pub use input::text_input;
 pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button};
-pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu};
+pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu, menu_item};
 pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
     open_modal,
 };
 pub use notice::{Notice, Tone, notice};
-pub use panel_header::{PanelTitle, panel_header};
+pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
