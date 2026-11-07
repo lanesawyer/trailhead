@@ -11,8 +11,10 @@ use tokio::sync::broadcast;
 use trailhead_core::{Ctx, NewProject, NewTask, Principal, Store};
 use trailhead_daemon::net::{API_ALPN, ApiTunnel, Peers, read_frame, write_frame};
 use trailhead_daemon::ui::{
-    RepoFeed, StatusFeed, StatusFrame, StatusStream, UI_ALPN, UiAllowlist, UiProtocol, dial_ui, open_ui_tunnel,
+    LogFeed, LogFrame, LogStream, RepoFeed, StatusFeed, StatusFrame, StatusStream, UI_ALPN, UiAllowlist, UiProtocol,
+    dial_ui, open_ui_tunnel,
 };
+use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, Sequenced, TaskKey};
 
 /// One repo whose events the test sends.
@@ -32,6 +34,19 @@ impl StatusFeed for TestFeed {
             seq: 7,
         };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
+    }
+}
+
+/// A log with two lines kept, and the lines the test sends after.
+struct TestLogs(broadcast::Sender<LogLine>);
+
+fn log_line(message: &str) -> LogLine {
+    LogLine { ts_ms: 1, level: LogLevel::Info, target: "t".into(), repo: None, task: None, message: message.into() }
+}
+
+impl LogFeed for TestLogs {
+    fn subscribe(&self) -> (Vec<LogLine>, broadcast::Receiver<LogLine>) {
+        (vec![log_line("one"), log_line("two")], self.0.subscribe())
     }
 }
 
@@ -55,6 +70,7 @@ struct Rig {
     allowed: UiAllowlist,
     peers: Peers,
     events: broadcast::Sender<Sequenced>,
+    logs: broadcast::Sender<LogLine>,
     _router: Router,
 }
 
@@ -78,13 +94,19 @@ impl Rig {
         let allowed = UiAllowlist::new(dir.path().join("ui-allowed"));
         let peers = Peers::default();
         let events = broadcast::channel(16).0;
+        let logs = broadcast::channel(16).0;
         let control_ep = endpoint(SecretKey::generate(), Arc::new(MemoryLookup::new()), vec![]).await;
         let control = control_ep.addr();
         let router = Router::builder(control_ep)
-            .accept(UI_ALPN, UiProtocol::new(server, allowed.clone()).with_status(Arc::new(TestFeed(events.clone()))))
+            .accept(
+                UI_ALPN,
+                UiProtocol::new(server, allowed.clone())
+                    .with_status(Arc::new(TestFeed(events.clone())))
+                    .with_logs(Arc::new(TestLogs(logs.clone()))),
+            )
             .accept(API_ALPN, ApiTunnel::new(server, peers.clone()))
             .spawn();
-        Rig { _dir: dir, store, human, token, control, allowed, peers, events, _router: router }
+        Rig { _dir: dir, store, human, token, control, allowed, peers, events, logs, _router: router }
     }
 
     /// An endpoint that knows how to find the control plane.
@@ -206,6 +228,21 @@ async fn status_is_a_snapshot_then_the_events_after_it() {
 }
 
 #[tokio::test]
+async fn logs_are_the_kept_lines_then_each_new_one() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let client = r.client(key).await;
+    let mut stream = LogStream::open(dial_ui(&client, r.control.id).await.unwrap()).await.unwrap();
+    let mut next = async || tokio::time::timeout(Duration::from_secs(10), stream.next()).await.unwrap().unwrap();
+
+    assert_eq!(next().await, Some(LogFrame::Backlog { lines: vec![log_line("one"), log_line("two")] }));
+    // The receiver is made when the stream opens, so a send after the backlog is not missed.
+    r.logs.send(log_line("three")).unwrap();
+    assert_eq!(next().await, Some(LogFrame::Line(log_line("three"))));
+}
+
+#[tokio::test]
 async fn status_is_refused_to_an_endpoint_that_is_not_allowed() {
     let r = Rig::new().await;
     r.allowed.add(SecretKey::generate().public()).unwrap();
@@ -234,7 +271,7 @@ async fn an_unknown_request_is_answered_with_what_the_factory_knows() {
             panic!("an unknown request should be answered with the error");
         };
         assert_eq!(u.got["op"], "from_the_future");
-        assert_eq!(u.known, ["api", "status"]);
+        assert_eq!(u.known, ["api", "status", "logs"]);
         assert_eq!(u.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(u.build, "unknown");
         // And then the stream ends.

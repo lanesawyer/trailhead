@@ -16,7 +16,10 @@ use tokio::time::{MissedTickBehavior, interval, timeout};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
 use trailhead_daemon::net::{parse_endpoint_id, parse_secret_key};
-use trailhead_daemon::ui::{CLOSE_NOT_ALLOWED, StatusFrame, StatusStream, UI_ALPN, dial_ui, open_ui_tunnel};
+use trailhead_daemon::ui::{
+    CLOSE_NOT_ALLOWED, LogFrame, LogStream, StatusFrame, StatusStream, UI_ALPN, dial_ui, open_ui_tunnel,
+};
+use trailhead_factory::logs::LogLine;
 
 use crate::commands::{self, CommandId, Reply, Request};
 use crate::detail::{self, DetailReply};
@@ -109,6 +112,8 @@ pub enum NetCommand {
     Request { id: CommandId, attempt: u32, request: Request },
     /// Search tasks and comments for `query` (`GET /v1/search`); `seq` comes back with the answer.
     Search { seq: u64, query: String },
+    /// Follow the control plane's log, or stop. Sent as the Logs page opens and closes.
+    Logs(bool),
     /// Fetch the task `key` in full (`GET /v1/tasks/{key}`); `seq` comes back with the answer.
     Detail { seq: u64, key: String },
 }
@@ -129,8 +134,22 @@ pub enum NetEvent {
     Factory(FactoryUpdate),
     /// What came of a [`NetCommand::Search`].
     Search(SearchReply),
+    /// The control plane's log, while it is followed.
+    Logs(LogUpdate),
     /// What came of a [`NetCommand::Detail`].
     Detail(DetailReply),
+}
+
+/// What the log stream brings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogUpdate {
+    /// The lines the control plane has kept, replacing what was shown; first on every connection.
+    Backlog(Vec<LogLine>),
+    Line(LogLine),
+    /// The stream dropped; it is being retried.
+    Dropped,
+    /// The control plane doesn't serve logs, so it is older than this Lookout. Carries the message to show.
+    TooOld(String),
 }
 
 /// Everything the HTTP client needs to talk to the Trailhead API through the control plane.
@@ -364,6 +383,10 @@ struct Net {
     via: Via,
     /// Follows the control plane's status stream, redialing until it is back.
     status: Option<tokio::task::JoinHandle<()>>,
+    /// Follows the log while the Logs page is open.
+    logs: Option<tokio::task::JoinHandle<()>>,
+    /// Whether the Logs page is open, so a new control plane gets its log too.
+    logs_wanted: bool,
     /// A token pasted in, not yet confirmed (and so not yet saved).
     pasted: Option<String>,
     /// The token that signed in, kept while `Live` so a dropped link signs back in without asking again.
@@ -407,6 +430,8 @@ async fn run(
         target: None,
         via: Via::Tunnel,
         status: None,
+        logs: None,
+        logs_wanted: false,
         pasted: None,
         token: None,
         state: None,
@@ -436,6 +461,7 @@ async fn run(
                 }
                 Some(NetCommand::Request { id, attempt, request }) => net.request(id, attempt, request),
                 Some(NetCommand::Search { seq, query }) => net.search(seq, query),
+                Some(NetCommand::Logs(on)) => net.set_logs(on),
                 Some(NetCommand::Detail { seq, key }) => net.detail(seq, key),
                 None => break,
             },
@@ -450,6 +476,7 @@ async fn run(
         }
     }
     net.stop_sync();
+    net.stop_logs();
     net.stop_status();
     net.endpoint.close().await;
 }
@@ -519,6 +546,37 @@ async fn stream_status(
     Ok(None)
 }
 
+/// One connection's worth of the log stream. Returns the message to show when the factory doesn't serve logs.
+async fn follow_logs(
+    endpoint: &Endpoint,
+    id: EndpointId,
+    events: &mpsc::Sender<NetEvent>,
+) -> Result<Option<String>, trailhead_factory::Error> {
+    let mut stream = LogStream::open(dial_ui(endpoint, id).await?).await?;
+    let mut heard = false;
+    loop {
+        let frame = match stream.next().await {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Ok(None),
+            // Reset before anything was served: a control plane that has no log feed.
+            Err(e) if !heard && e.to_string().contains("stream reset by peer") => return Ok(Some(NO_LOGS.into())),
+            Err(e) => return Err(e),
+        };
+        heard = true;
+        let update = match frame {
+            LogFrame::Backlog { lines } => LogUpdate::Backlog(lines),
+            LogFrame::Line(line) => LogUpdate::Line(line),
+            LogFrame::Unsupported(_) => return Ok(Some(NO_LOGS.into())),
+        };
+        if events.send(NetEvent::Logs(update)).is_err() {
+            return Ok(None);
+        }
+    }
+}
+
+/// What the Logs page says of a factory that doesn't send logs.
+pub const NO_LOGS: &str = "this factory is too old to send logs";
+
 /// Whether a failed stream was the factory saying no, rather than the link dropping: the connection closed because
 /// this endpoint isn't allowed, or the stream reset before anything was served.
 fn refusal_of(conn: &iroh::endpoint::Connection, error: &trailhead_factory::Error, heard: bool) -> Option<Refusal> {
@@ -577,6 +635,7 @@ impl Net {
             }
             self.via = Via::Tunnel;
             self.start_status(id);
+            self.restart_logs();
             self.token = None;
             self.state = None;
             self.stop_sync();
@@ -824,6 +883,41 @@ impl Net {
                 tokio::time::sleep(backoff.dropped()).await;
             }
         }));
+    }
+
+    /// Follows (or stops following) the control plane's log, for the Logs page.
+    fn set_logs(&mut self, on: bool) {
+        self.logs_wanted = on;
+        self.restart_logs();
+    }
+
+    fn restart_logs(&mut self) {
+        self.stop_logs();
+        let (Some(Target { id, .. }), true) = (self.target.as_ref(), self.logs_wanted) else { return };
+        let (endpoint, events, id) = (self.endpoint.clone(), self.events.clone(), *id);
+        let retry = self.config.status_retry;
+        self.logs = Some(tokio::spawn(async move {
+            loop {
+                match follow_logs(&endpoint, id, &events).await {
+                    Ok(Some(why)) => {
+                        let _ = events.send(NetEvent::Logs(LogUpdate::TooOld(why)));
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!(error = %e, "the factory log stream ended"),
+                }
+                if events.send(NetEvent::Logs(LogUpdate::Dropped)).is_err() {
+                    return;
+                }
+                tokio::time::sleep(retry).await;
+            }
+        }));
+    }
+
+    fn stop_logs(&mut self) {
+        if let Some(task) = self.logs.take() {
+            task.abort();
+        }
     }
 
     fn stop_status(&mut self) {
