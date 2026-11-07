@@ -138,6 +138,9 @@ async fn a_breached_sandbox_that_cant_be_relabelled_is_still_cut_off_and_destroy
         let question = r.tracker.comments(&key).into_iter().find(|c| c.kind == "question").unwrap().body;
         assert!(question.contains("fresh checkout"), "{question}");
         assert!(!question.contains("is suspended"), "{question}");
+        // Only claim the sandbox was destroyed when it was.
+        assert_eq!(question.contains("was destroyed"), !destroy_fails, "{question}");
+        assert_eq!(question.contains("being torn down"), destroy_fails, "{question}");
         if destroy_fails {
             assert_eq!(
                 r.compute.egress("trailhead-w1"),

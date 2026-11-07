@@ -347,15 +347,29 @@ pub fn follow_up_description(written: &str, source: &TaskKey, pr_url: Option<&st
 // ---- Questions that park a task ----
 
 /// Why a task is parked when a run overran its budget. `reason` is one of the `*_breach` texts.
-/// `suspended` is whether the sandbox was kept; otherwise it could not be cut off and was destroyed.
-pub fn budget_breach_question(reason: &str, sandbox: &str, suspended: bool) -> String {
-    if suspended {
-        format!("Budget breached: {reason}. The sandbox {sandbox} is suspended; raise the budget or cancel.")
-    } else {
-        format!(
+pub fn budget_breach_question(reason: &str, sandbox: &str, state: BreachedSandbox) -> String {
+    match state {
+        BreachedSandbox::Suspended => {
+            format!("Budget breached: {reason}. The sandbox {sandbox} is suspended; raise the budget or cancel.")
+        }
+        BreachedSandbox::Destroyed => format!(
             "Budget breached: {reason}. The sandbox {sandbox} couldn't be suspended and was destroyed, so the next run starts from a fresh checkout; raise the budget or cancel."
-        )
+        ),
+        BreachedSandbox::Stuck => format!(
+            "Budget breached: {reason}. The sandbox {sandbox} couldn't be suspended or destroyed and is being torn down, so the next run starts from a fresh checkout; raise the budget or cancel."
+        ),
     }
+}
+
+/// What became of a breached run's sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreachedSandbox {
+    /// Cut off and kept suspended.
+    Suspended,
+    /// Couldn't be cut off, and was destroyed.
+    Destroyed,
+    /// Couldn't be cut off or destroyed; reconcile will tear it down.
+    Stuck,
 }
 
 /// A run that spent more than its budget.
@@ -703,7 +717,9 @@ mod tests {
 
     #[test]
     fn questions_say_what_to_raise() {
-        assert!(budget_breach_question("r", "sb", false).contains("destroyed"));
+        assert!(budget_breach_question("r", "sb", BreachedSandbox::Destroyed).contains("was destroyed"));
+        let stuck = budget_breach_question("r", "sb", BreachedSandbox::Stuck);
+        assert!(stuck.contains("being torn down") && !stuck.contains("was destroyed"), "{stuck}");
         assert!(infra_question(3, 3, "boom").contains("`max_infra_failures`"));
         assert!(review_infra_question(3, 3, "boom").contains("while reviewing the PR"));
         let q = review_no_verdict_question(3, 3, "boom");
@@ -713,7 +729,7 @@ mod tests {
         assert!(review_rework_limit_question(2, 2, "r", "b").contains("`max_review_rounds`"));
         assert!(gave_up_question(3, 3, "why", "last").contains("`max_attempts`"));
         assert_eq!(
-            budget_breach_question("took more than 5 steps", "trail-1-a1", true),
+            budget_breach_question("took more than 5 steps", "trail-1-a1", BreachedSandbox::Suspended),
             "Budget breached: took more than 5 steps. The sandbox trail-1-a1 is suspended; raise the budget or cancel."
         );
     }
