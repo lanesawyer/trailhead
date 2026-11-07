@@ -35,6 +35,7 @@ impl StatusFeed for TestFeed {
             runs: vec![],
             holding: None,
             targets: Vec::new(),
+            human_grades: Vec::new(),
             queue: Vec::new(),
             seq: 1,
         };
