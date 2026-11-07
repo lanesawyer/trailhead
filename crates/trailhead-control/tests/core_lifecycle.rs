@@ -167,6 +167,14 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
     assert!(filed.description.starts_with("No test for empty input."), "{}", filed.description);
     assert!(filed.description.contains(&key.0), "{}", filed.description);
 
+    // The real engine lists only unfinished follow-ups (TaskFilter::default()).
+    let listed = r.tracker.follow_ups(&key).await.unwrap();
+    assert_eq!(listed.iter().map(|f| &f.key).collect::<Vec<_>>(), [&filed_key]);
+    assert_eq!(listed[0].title, "Cover the edge");
+    let finish = TaskPatch { status: Some(trailhead_core::Status::Done), ..Default::default() };
+    r.store.update_task(&r.human, &filed_key.0, finish, None).await.unwrap();
+    assert!(r.tracker.follow_ups(&key).await.unwrap().is_empty(), "a finished follow-up is no longer listed");
+
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
     assert_eq!(task.holder, None, "moving to review releases the claim");
