@@ -520,8 +520,9 @@ impl Tracker for FakeTracker {
         self.write(task, |t, me| {
             if !delegated {
                 return Err(Error::Forbidden(format!(
-                    "{me} can't approve {}: it isn't a delegated reviewer, so a person has to list it as one",
-                    t.key.0
+                    "{me} can't approve {}: it isn't a delegated reviewer, so a person has to list it as a reviewer of project {}",
+                    t.key.0,
+                    t.key.0.rsplit_once('-').map_or(t.key.0.as_str(), |(project, _)| project)
                 )));
             }
             if t.status != Status::InReview {
