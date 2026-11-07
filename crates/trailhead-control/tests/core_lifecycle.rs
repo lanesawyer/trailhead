@@ -1016,7 +1016,7 @@ async fn the_factory_cant_approve_work_it_did_and_says_so_without_asking_for_a_r
     assert_eq!(task.status, Status::InReview, "{:?}", task.run.merge);
     let problem = task.run.merge.unwrap().problem.expect("the approval was refused");
     assert!(problem.contains("can't approve or finish work it did"), "{problem}");
-    assert!(!problem.contains("list it as one") && !problem.contains("delegated reviewer, so"), "{problem}");
+    assert!(!problem.contains("list it as a reviewer") && !problem.contains("delegated reviewer, so"), "{problem}");
 }
 
 #[tokio::test]
@@ -1056,7 +1056,10 @@ async fn approve_is_refused_when_the_factory_isnt_a_delegated_reviewer() {
 
     let err = r.tracker.approve(&key).await.expect_err("the factory isn't in the project's reviewers");
     let trailhead_factory::Error::Forbidden(why) = err else { panic!("expected Forbidden, got {err:?}") };
-    assert!(why.contains("isn't a delegated reviewer, so a person has to list it as one"), "{why}");
+    assert!(
+        why.contains("isn't a delegated reviewer, so a person has to list it as a reviewer of project TRAIL"),
+        "{why}"
+    );
     assert_eq!(r.show(&key).await.status, Status::InReview);
 }
 
@@ -1072,7 +1075,7 @@ async fn approve_is_refused_for_work_the_factory_did_without_asking_for_a_review
     let err = r.tracker.approve(&key).await.expect_err("the factory sent this task to review");
     let trailhead_factory::Error::Forbidden(why) = err else { panic!("expected Forbidden, got {err:?}") };
     assert!(why.contains("can't approve or finish work it did"), "{why}");
-    assert!(!why.contains("list it as one") && !why.contains("delegated reviewer, so"), "{why}");
+    assert!(!why.contains("list it as a reviewer") && !why.contains("delegated reviewer, so"), "{why}");
     assert_eq!(r.show(&key).await.status, Status::InReview);
 }
 
