@@ -56,10 +56,6 @@ impl Factory {
                 self.status.control(ControlState::Reconciling);
                 match self.reconcile_deferring(&keys.values().cloned().collect()).await {
                     Ok((done, due)) => {
-                        if done != Reconciled::default() || !due.reviews.is_empty() {
-                            let reviewing: Vec<&str> = due.reviews.iter().map(|t| t.key.0.as_str()).collect();
-                            tracing::info!(?done, ?reviewing, "reconciled");
-                        }
                         // Due reviews are new work, picked up again by the next start. Due runs are runs the daemon is
                         // still working on, so a drain keeps following them and waits for them too.
                         let due = if draining { Due { reviews: Vec::new(), ..due } } else { due };
@@ -76,6 +72,11 @@ impl Factory {
                         // held: the daemon already has them, and runs in flight carry on through an outage.
                         let hold = !due.reviews.is_empty() && (self.usage_paused() || !self.server_up().await);
                         let reviews_due = if hold { Vec::new() } else { due.reviews };
+                        // Logged after the hold, so a pause doesn't list reviews that never start on every poll.
+                        if done != Reconciled::default() || !reviews_due.is_empty() {
+                            let reviewing: Vec<&str> = reviews_due.iter().map(|t| t.key.0.as_str()).collect();
+                            tracing::info!(?done, ?reviewing, "reconciled");
+                        }
                         for task in reviews_due {
                             let key = task.key.clone();
                             let factory = self.clone();
