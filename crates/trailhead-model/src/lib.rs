@@ -21,7 +21,7 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 macro_rules! string_enum {
-    ($name:ident { $($variant:ident => $s:literal),+ $(,)? }) => {
+    ($name:ident $label:literal { $($variant:ident => $s:literal),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
         #[serde(rename_all = "snake_case")]
@@ -47,14 +47,18 @@ macro_rules! string_enum {
             fn from_str(s: &str) -> Result<Self, ParseError> {
                 match s {
                     $($s => Ok($name::$variant),)+
-                    _ => Err(ParseError(format!("unknown {}: {s}", stringify!($name).to_lowercase()))),
+                    _ => Err(ParseError(format!(
+                        "unknown {}: {s} (expected one of: {})",
+                        $label,
+                        [$($s),+].join(", ")
+                    ))),
                 }
             }
         }
     };
 }
 
-string_enum!(Status {
+string_enum!(Status "status" {
     Open => "open",
     InProgress => "in_progress",
     NeedsInput => "needs_input",
@@ -85,7 +89,7 @@ impl Status {
     }
 }
 
-string_enum!(CommentKind {
+string_enum!(CommentKind "comment kind" {
     Handoff => "handoff",
     Progress => "progress",
     Question => "question",
@@ -94,30 +98,69 @@ string_enum!(CommentKind {
     Review => "review",
 });
 
-string_enum!(Verdict {
+string_enum!(Verdict "verdict" {
     Approve => "approve",
     RequestChanges => "request_changes",
 });
 
-string_enum!(ProjectStatus {
+string_enum!(ProjectStatus "project status" {
     Active => "active",
     Archived => "archived",
 });
 
 /// A task's key, `TRAIL-42`: its project's key, a dash and its number.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = String, example = "TRAIL-42"))]
 pub struct TaskKey(pub String);
 
 impl TaskKey {
+    /// The key as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// The project's key: everything before the last dash, or the whole key if it has none.
     pub fn project(&self) -> &str {
         self.0.rsplit_once('-').map_or(self.0.as_str(), |(p, _)| p)
     }
 }
 
+impl PartialEq<str> for TaskKey {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for TaskKey {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl std::ops::Deref for TaskKey {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for TaskKey {
+    fn from(key: String) -> TaskKey {
+        TaskKey(key)
+    }
+}
+
+impl From<&str> for TaskKey {
+    fn from(key: &str) -> TaskKey {
+        TaskKey(key.into())
+    }
+}
+
 impl std::fmt::Display for TaskKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.pad(&self.0)
     }
 }
 
@@ -268,7 +311,7 @@ pub struct Task {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub project_id: Uuid,
-    pub key: String,
+    pub key: TaskKey,
     pub title: String,
     pub description: String,
     pub status: Status,
@@ -370,18 +413,18 @@ pub struct TaskDetail {
     pub task: Task,
     pub claim: Option<Claim>,
     /// Keys of unfinished tasks blocking this one.
-    pub blocked_by: Vec<String>,
+    pub blocked_by: Vec<TaskKey>,
     /// The id of the `request_changes` review comment that makes this an `in_review` task with changes requested,
     /// computed like `blocked_by` and never stored (see [`changes_requested`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_requested: Option<Uuid>,
     /// Keys of tasks this one blocks.
-    pub blocks: Vec<String>,
+    pub blocks: Vec<TaskKey>,
     pub comments: Vec<Comment>,
     /// Key of the task this one was cancelled as a duplicate of.
-    pub duplicate_of: Option<String>,
+    pub duplicate_of: Option<TaskKey>,
     /// Keys of tasks cancelled as duplicates of this one.
-    pub duplicates: Vec<String>,
+    pub duplicates: Vec<TaskKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -414,7 +457,7 @@ pub struct Event {
     pub at: Timestamp,
 }
 
-string_enum!(Entity {
+string_enum!(Entity "entity" {
     Project => "project",
     Task => "task",
     Claim => "claim",
@@ -432,7 +475,22 @@ mod tests {
             assert_eq!(status.as_str().parse::<Status>().unwrap(), status);
             assert_eq!(serde_json::to_value(status).unwrap(), status.as_str());
         }
-        assert_eq!("shipped".parse::<Status>().unwrap_err().to_string(), "unknown status: shipped");
+        assert_eq!(
+            "shipped".parse::<Status>().unwrap_err().to_string(),
+            "unknown status: shipped (expected one of: open, in_progress, needs_input, in_review, approved, done, cancelled)"
+        );
+    }
+
+    #[test]
+    fn parse_errors_name_the_type_and_list_the_values() {
+        assert_eq!(
+            "bogus".parse::<CommentKind>().unwrap_err().to_string(),
+            "unknown comment kind: bogus (expected one of: handoff, progress, question, decision, note, review)"
+        );
+        assert_eq!(
+            "x".parse::<ProjectStatus>().unwrap_err().to_string(),
+            "unknown project status: x (expected one of: active, archived)"
+        );
     }
 
     #[test]
@@ -457,6 +515,13 @@ mod tests {
         assert_eq!(TaskKey("MY-APP-7".into()).project(), "MY-APP");
         assert_eq!(TaskKey("nodash".into()).project(), "nodash");
         assert_eq!(serde_json::to_value(TaskKey("TRAIL-1".into())).unwrap(), "TRAIL-1");
+    }
+
+    #[test]
+    fn a_task_key_round_trips_as_a_string_and_pads_like_one() {
+        let key: TaskKey = serde_json::from_value("TRAIL-1".into()).unwrap();
+        assert_eq!(key, "TRAIL-1");
+        assert_eq!(format!("{key:<8}|"), "TRAIL-1 |");
     }
 
     #[test]

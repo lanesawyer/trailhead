@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use trailhead_control::Outcome;
 use trailhead_factory::{
-    CodeHost, Commit, FileChange, MergeOutcome, Role, RunOutcome, Status, TaskKey, Tracker, Usd, VerdictKind, label,
+    CodeHost, Commit, Compute, FileChange, MergeOutcome, Role, RunOutcome, Status, TaskKey, Tracker, Usd, VerdictKind,
+    label,
 };
 use trailhead_testkit::{FAKE_BASE, Script};
 
@@ -860,6 +861,8 @@ async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a
     r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
     r.factory.run_task(&r.tracker.task(&third)).await.unwrap();
     let fresh = r.compute.get("trailhead-w1").expect("a new sandbox took the freed name");
+    // Release restores the warm checkpoint of the sandbox it returns to the pool; a restore at acquire would be a second.
+    assert_eq!(r.compute.restores("trailhead-w1").len(), 1, "only release restored it, acquire did not: {fresh:?}");
     assert_eq!(r.compute.checkpoints("trailhead-w1").len(), 1, "built from scratch, not restored: {fresh:?}");
 }
 
@@ -972,6 +975,51 @@ async fn a_breach_park_cut_short_is_finished_by_reconcile_without_a_rerun_or_a_s
 }
 
 #[tokio::test]
+async fn a_breach_park_finished_after_the_sandbox_was_destroyed_says_it_isnt_suspended() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.tracker.fail_next("factory/trail-1-a1", "ask", 1);
+    assert!(r.factory.run_task(&r.tracker.task(&key)).await.is_err());
+    // The sandbox is gone by the time the control plane is back.
+    r.compute.destroy(&r.compute.get("trailhead-w1").unwrap().id).await.unwrap();
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.spend, Some(Usd::dollars(6.0)), "counted once");
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.starts_with("Budget breached"), "{}", questions[0].body);
+    assert!(!questions[0].body.contains("is suspended"), "{}", questions[0].body);
+    assert!(questions[0].body.contains("was destroyed"), "{}", questions[0].body);
+}
+
+#[tokio::test]
+async fn a_breach_park_finished_when_the_sandbox_cant_be_cut_off_destroys_it_and_still_parks() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.tracker.fail_next("factory/trail-1-a1", "ask", 1);
+    assert!(r.factory.run_task(&r.tracker.task(&key)).await.is_err());
+    // The cut-off that reconcile repeats fails this time.
+    r.compute.fail("trailhead-w1", "set_labels");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.spend, Some(Usd::dollars(6.0)), "counted once");
+    assert!(task.run.worker_breach.as_ref().is_some_and(|b| b.parked));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(!questions[0].body.contains("is suspended"), "{}", questions[0].body);
+    assert!(questions[0].body.contains("was destroyed"), "{}", questions[0].body);
+    assert!(r.compute.get("trailhead-w1").is_none(), "a sandbox that can't be cut off is destroyed");
+}
+
+#[tokio::test]
 async fn an_answer_to_a_breach_within_the_lease_requeues_the_task_without_asking_again() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Expensive", "");
@@ -1006,6 +1054,7 @@ async fn a_failed_revoke_doesnt_undo_a_park_or_a_failure() {
             assert!(matches!(ran, Ok(Outcome::Failed { .. })), "{ran:?}");
             assert_eq!(r.tracker.task(&key).status, Status::Open);
         }
+        assert!(!r.tracker.is_revoked("factory/trail-1-a1"), "the injected revoke failure fired on the worker");
     }
 }
 
@@ -1035,8 +1084,12 @@ async fn the_status_board_follows_a_run_from_a_cold_sandbox_through_review() {
         Some(&RunPhase::Preparing { cold: false }),
         "a run starts when its sandbox is being got: {phases:?}"
     );
-    assert!(phases.contains(&RunPhase::Preparing { cold: true }), "no warm checkpoint the first time: {phases:?}");
     let agent = phases.iter().position(|p| *p == RunPhase::Agent).expect("the agent phase");
+    // The reviewer's `begin` also emits a cold Preparing, so only one before the agent phase is the worker's.
+    assert!(
+        phases[..agent].contains(&RunPhase::Preparing { cold: true }),
+        "no warm checkpoint the first time, so the worker's sandbox is cold: {phases:?}"
+    );
     let reviewing = phases.iter().position(|p| *p == RunPhase::Reviewing).expect("the reviewing phase");
     assert!(agent < reviewing, "{phases:?}");
     let steps = events.iter().filter(|e| matches!(e, FactoryEvent::Step { .. })).count();
@@ -1211,5 +1264,23 @@ async fn a_permanent_rejection_parks_the_task_at_once() {
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("400 Bad Request: bad size"), "{}", questions[0].body);
+    assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
+}
+
+#[tokio::test]
+async fn a_rejected_sandbox_create_parks_the_task_at_once() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Refused at create", "");
+    r.compute.reject_creates("sprites api 400 Bad Request: bad size");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(matches!(err, trailhead_factory::Error::Rejected(_)), "{err:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked on the first rejection, not requeued");
+    assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+    assert_eq!(task.run.infra_failures, Some(0));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("400 Bad Request: bad size"), "{}", questions[0].body);
+    assert!(r.compute.sandboxes().is_empty(), "no sandbox was made");
     assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
 }
