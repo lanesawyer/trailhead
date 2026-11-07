@@ -189,12 +189,12 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.lagging_head = head.map(str::to_string)).unwrap();
     }
 
-    /// Sets whether the PR's branch is behind its base.
     /// A person deletes the PR's comment with this id.
     pub fn delete_comment(&self, pr: &PrRef, id: u64) {
         self.find(pr, |p, _| p.deleted.push(id)).unwrap();
     }
 
+    /// Sets whether the PR's branch is behind its base.
     pub fn set_behind(&self, pr: &PrRef, behind: bool) {
         self.find(pr, |p, _| p.behind = behind).unwrap();
     }
