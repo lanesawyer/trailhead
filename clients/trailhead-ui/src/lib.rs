@@ -94,6 +94,7 @@ pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
 pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
+    inline_text_sized,
 };
 pub use input::text_input;
 pub use keyed::Keyed;
