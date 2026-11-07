@@ -42,3 +42,21 @@ fn factory_not_installed_says_how_to_install_it() {
         "{err}"
     );
 }
+
+#[test]
+fn factory_rejects_global_flags_given_before_it() {
+    let th = Instance::new();
+    let bin = fake_factory(&th);
+    let out = common::output(th.command().env("PATH", format!("{}:/usr/bin:/bin", bin.display())).args([
+        "--as",
+        "x",
+        "--url",
+        "http://127.0.0.1:1",
+        "factory",
+        "run",
+    ]));
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--as") && err.contains("--url") && err.contains("after `factory`"), "{err}");
+}
