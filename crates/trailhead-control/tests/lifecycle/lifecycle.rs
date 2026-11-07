@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use trailhead_control::Outcome;
 use trailhead_factory::{
-    CodeHost, Commit, FileChange, MergeOutcome, Role, RunOutcome, Status, TaskKey, Tracker, Usd, VerdictKind, label,
+    CodeHost, Commit, Compute, FileChange, MergeOutcome, Role, RunOutcome, Status, TaskKey, Tracker, Usd, VerdictKind,
+    label,
 };
 use trailhead_testkit::{FAKE_BASE, Script};
 
@@ -971,6 +972,51 @@ async fn a_breach_park_cut_short_is_finished_by_reconcile_without_a_rerun_or_a_s
     let done = r.factory.reconcile().await.unwrap();
     assert!(done.breached.is_empty() && done.released.is_empty(), "{done:?}");
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test]
+async fn a_breach_park_finished_after_the_sandbox_was_destroyed_says_it_isnt_suspended() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.tracker.fail_next("factory/trail-1-a1", "ask", 1);
+    assert!(r.factory.run_task(&r.tracker.task(&key)).await.is_err());
+    // The sandbox is gone by the time the control plane is back.
+    r.compute.destroy(&r.compute.get("trailhead-w1").unwrap().id).await.unwrap();
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.spend, Some(Usd::dollars(6.0)), "counted once");
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.starts_with("Budget breached"), "{}", questions[0].body);
+    assert!(!questions[0].body.contains("is suspended"), "{}", questions[0].body);
+    assert!(questions[0].body.contains("was destroyed"), "{}", questions[0].body);
+}
+
+#[tokio::test]
+async fn a_breach_park_finished_when_the_sandbox_cant_be_cut_off_destroys_it_and_still_parks() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.tracker.fail_next("factory/trail-1-a1", "ask", 1);
+    assert!(r.factory.run_task(&r.tracker.task(&key)).await.is_err());
+    // The cut-off that reconcile repeats fails this time.
+    r.compute.fail("trailhead-w1", "set_labels");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.spend, Some(Usd::dollars(6.0)), "counted once");
+    assert!(task.run.worker_breach.as_ref().is_some_and(|b| b.parked));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(!questions[0].body.contains("is suspended"), "{}", questions[0].body);
+    assert!(questions[0].body.contains("was destroyed"), "{}", questions[0].body);
+    assert!(r.compute.get("trailhead-w1").is_none(), "a sandbox that can't be cut off is destroyed");
 }
 
 #[tokio::test]
