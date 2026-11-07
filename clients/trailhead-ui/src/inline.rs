@@ -11,9 +11,12 @@
 //! beside it. The caller decides what saving means, and may refuse.
 //!
 //! The kit's modal rules hold: an Esc that cancels an edit is not passed on, so it doesn't also close the modal the
-//! text sits in. The hint shows while the value is empty.
+//! text sits in. The hint shows while the value is empty, and in the input while it is empty during an edit (feathers'
+//! input has no placeholder of its own; the hint is laid over it, as the kit's search box does).
 
 use bevy::ecs::system::SystemParam;
+use bevy::feathers::theme::ThemeTextColor;
+use bevy::feathers::tokens;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::tab_navigation::NavAction;
 use bevy::input_focus::{FocusCause, FocusLost, FocusedInput, InputFocus};
@@ -176,6 +179,8 @@ impl InlineField {
     }
 }
 
+/// How far the hint over an empty input sits from its left edge, where the input's text starts (as in the search box).
+const HINT_LEFT: f32 = 6.0;
 /// What a field with nothing chosen reads.
 const NO_CHOICE: &str = "None";
 /// How many options a field's select shows before it scrolls.
@@ -191,6 +196,8 @@ enum Part {
     Hint,
     /// The box holding the input or the select.
     Editor,
+    /// The hint laid over an empty input while editing.
+    EditHint,
     Saving,
     Error,
 }
@@ -207,11 +214,18 @@ pub fn inline_text(value: impl Into<String>, hint: impl Into<String>, lines: f32
         Node { flex_direction: FlexDirection::Column, row_gap: { px(space::STACKED) } }
         InlineText { value: { value.clone() }, hint: { hint.clone() }, multiline: { lines > 1.0 } }
         Children [
-            @shown(value, hint)
+            @shown(value, hint.clone())
             --
             Node { display: { Display::None }, width: percent(100) }
             Part::Editor
-            Children [ @text_input(lines, bsn! { InlineInput }) ]
+            Children [
+                @text_input(lines, bsn! { InlineInput })
+                --
+                @text_dim(hint, size::BODY)
+                Part::EditHint
+                Node { display: { Display::None }, position_type: { PositionType::Absolute }, left: { px(HINT_LEFT) } }
+                Pickable::IGNORE
+            ]
             --
             @status()
         ]
@@ -418,34 +432,53 @@ fn on_picked(
 }
 
 /// Draws each inline widget from its state, in place: shows the value or the editor, the hint, "Saving…" and the
-/// error, and ends a field's edit when its popup closed without a pick.
-#[allow(clippy::type_complexity)]
+/// error, and ends a field's edit when its popup closed without a pick. A widget is drawn when its state changed; one
+/// being edited is looked at every frame too, since its input's text and its select's popup change without it.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn sync_inline(
-    mut texts: Query<(Entity, Ref<InlineText>)>,
+    texts: Query<(Entity, Ref<InlineText>)>,
     mut fields: Query<(Entity, &mut InlineField)>,
     children: Query<&Children>,
-    mut parts: Query<(&Part, &mut Node, Option<&mut Text>)>,
+    inputs: Query<Ref<EditableText>, With<InlineInput>>,
+    mut parts: Query<(&Part, &mut Node, Option<&mut Text>, Option<&ThemeTextColor>)>,
     mut notices: Query<(&Part, &mut Notice)>,
     selects: Query<(), With<crate::select::SelectOptions>>,
     mut select_edit: SelectEdit,
+    mut retry: Local<Vec<Entity>>,
+    mut commands: Commands,
 ) {
-    for (root, text) in &mut texts {
+    let again = std::mem::take(&mut *retry);
+    for (root, text) in &texts {
+        let editing = text.mode == InlineMode::Editing;
+        if !(text.is_changed() || editing) {
+            continue;
+        }
+        let input = children.iter_descendants(root).find_map(|e| inputs.get(e).ok());
+        if !text.is_changed() && !input.as_ref().is_some_and(|i| i.is_changed()) {
+            continue;
+        }
         let empty = text.value.is_empty();
+        let typed_empty = input.as_ref().is_some_and(|i| i.value().to_string().is_empty());
         let view = View {
             mode: text.mode,
             value: &text.value,
             hint: &text.hint,
             show_value: !empty,
             show_hint: empty,
+            show_edit_hint: editing && typed_empty,
             error: &text.error,
         };
-        draw(root, &view, &children, &mut parts, &mut notices);
+        draw(root, &view, &children, &mut parts, &mut notices, &mut commands);
     }
     for (root, mut field) in &mut fields {
+        let editing = field.mode == InlineMode::Editing;
+        if !(field.is_changed() || editing || again.contains(&root)) {
+            continue;
+        }
         let select = children.iter_descendants(root).find(|e| selects.contains(*e));
         if let Some(select) = select {
             let open = select_edit.is_open(select);
-            if field.mode == InlineMode::Editing {
+            if editing {
                 if open && !field.opened {
                     field.opened = true;
                 } else if !open && field.opened {
@@ -455,7 +488,10 @@ fn sync_inline(
             }
             if field.mode != InlineMode::Editing {
                 let (options, selected) = (field.options.clone(), field.selected);
-                select_edit.set(select, &options, selected);
+                // A select that isn't ready yet takes the options on a later frame.
+                if !select_edit.set(select, &options, selected) {
+                    retry.push(root);
+                }
             }
         }
         let view = View {
@@ -464,9 +500,10 @@ fn sync_inline(
             hint: "",
             show_value: true,
             show_hint: false,
+            show_edit_hint: false,
             error: &field.error,
         };
-        draw(root, &view, &children, &mut parts, &mut notices);
+        draw(root, &view, &children, &mut parts, &mut notices, &mut commands);
     }
 }
 
@@ -477,6 +514,7 @@ struct View<'a> {
     hint: &'a str,
     show_value: bool,
     show_hint: bool,
+    show_edit_hint: bool,
     error: &'a str,
 }
 
@@ -485,17 +523,19 @@ fn draw(
     root: Entity,
     view: &View,
     children: &Query<&Children>,
-    parts: &mut Query<(&Part, &mut Node, Option<&mut Text>)>,
+    parts: &mut Query<(&Part, &mut Node, Option<&mut Text>, Option<&ThemeTextColor>)>,
     notices: &mut Query<(&Part, &mut Notice)>,
+    commands: &mut Commands,
 ) {
     let editing = view.mode == InlineMode::Editing;
     for part in children.iter_descendants(root) {
-        if let Ok((kind, node, text)) = parts.get_mut(part) {
+        if let Ok((kind, node, text, color)) = parts.get_mut(part) {
             let shown = match kind {
                 Part::Shown => Some(!editing),
                 Part::Value => Some(view.show_value),
                 Part::Hint => Some(view.show_hint),
                 Part::Editor => Some(editing),
+                Part::EditHint => Some(view.show_edit_hint),
                 Part::Saving => Some(view.mode == InlineMode::Saving),
                 Part::Error => None,
             };
@@ -506,8 +546,15 @@ fn draw(
             if let Some(text) = text {
                 match kind {
                     Part::Value => set_text(text, view.value),
-                    Part::Hint => set_text(text, view.hint),
+                    Part::Hint | Part::EditHint => set_text(text, view.hint),
                     _ => {}
+                }
+            }
+            // A value being saved is dimmed until the caller answers.
+            if *kind == Part::Value {
+                let wanted = if view.mode == InlineMode::Saving { tokens::TEXT_DIM } else { tokens::TEXT_MAIN };
+                if color.is_none_or(|c| c.0 != wanted) {
+                    commands.entity(part).insert(ThemeTextColor(wanted));
                 }
             }
         }
@@ -792,5 +839,93 @@ mod tests {
         pick(&mut app, root, 0);
         assert!(app.world().resource::<Choices>().0.is_empty());
         assert_eq!(app.world().get::<InlineField>(root).unwrap().mode(), InlineMode::Reading);
+    }
+
+    fn value_color(app: &mut App) -> Option<bevy::feathers::theme::ThemeToken> {
+        let world = app.world_mut();
+        let mut q = world.query::<(&Part, Option<&ThemeTextColor>)>();
+        q.iter(world).find(|(p, _)| **p == Part::Value).and_then(|(_, c)| c.map(|c| c.0.clone()))
+    }
+
+    #[test]
+    fn a_value_being_saved_is_dimmed_until_the_caller_answers() {
+        let mut app = app();
+        let (root, input) = text(&mut app, "Fix the board", 1.0);
+        assert_eq!(value_color(&mut app), Some(tokens::TEXT_MAIN));
+        click(&mut app, root);
+        type_in(&mut app, input, "Fix the card");
+        enter(&mut app, input);
+        assert_eq!(mode(&app, root), InlineMode::Saving);
+        assert_eq!(value_color(&mut app), Some(tokens::TEXT_DIM));
+        app.world_mut().get_mut::<InlineText>(root).unwrap().confirm();
+        settle(&mut app);
+        assert_eq!(value_color(&mut app), Some(tokens::TEXT_MAIN));
+    }
+
+    #[test]
+    fn the_hint_shows_in_the_input_while_it_is_empty_during_an_edit() {
+        let mut app = app();
+        let (root, input) = text(&mut app, "", 3.0);
+        assert_eq!(display_of(&mut app, Part::EditHint), Display::None, "not while reading");
+        click(&mut app, root);
+        assert_eq!(display_of(&mut app, Part::EditHint), Display::Flex);
+        type_in(&mut app, input, "Some words");
+        settle(&mut app);
+        assert_eq!(display_of(&mut app, Part::EditHint), Display::None);
+        type_in(&mut app, input, "");
+        settle(&mut app);
+        assert_eq!(display_of(&mut app, Part::EditHint), Display::Flex);
+    }
+
+    #[test]
+    fn an_idle_widget_writes_nothing_from_frame_to_frame() {
+        #[derive(Resource, Default)]
+        struct Redraws(usize);
+        let mut app = app();
+        app.init_resource::<Redraws>().add_systems(
+            PostUpdate,
+            |changed: Query<(), (With<Part>, Changed<Node>)>,
+             notices: Query<(), Changed<Notice>>,
+             mut n: ResMut<Redraws>| {
+                n.0 += changed.iter().count() + notices.iter().count();
+            },
+        );
+        text(&mut app, "Fix the board", 1.0);
+        app.world_mut().commands().spawn_scene(inline_field("Priority", vec!["P1".into(), "P2".into()], Some(1)));
+        settle(&mut app);
+        settle(&mut app);
+        app.world_mut().resource_mut::<Redraws>().0 = 0;
+        settle(&mut app);
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Redraws>().0, 0);
+    }
+
+    #[derive(Component)]
+    struct Holder;
+
+    impl crate::Modal for Holder {
+        fn title(&self) -> String {
+            "Edit".into()
+        }
+    }
+
+    #[test]
+    fn esc_in_an_edit_inside_a_modal_cancels_the_edit_and_leaves_the_modal_open() {
+        let mut app = app();
+        app.add_plugins(crate::ModalPlugin);
+        let modal = crate::open_modal(&mut app.world_mut().commands(), Holder);
+        settle(&mut app);
+        let body = app.world().get::<crate::ModalSlots>(modal).unwrap().body;
+        let root =
+            app.world_mut().commands().spawn_scene(inline_text("Fix the board", "", 1.0)).insert(ChildOf(body)).id();
+        settle(&mut app);
+        let input = app.world_mut().query_filtered::<Entity, With<InlineInput>>().single(app.world()).unwrap();
+        click(&mut app, root);
+        type_in(&mut app, input, "Something else");
+        escape(&mut app, input);
+        assert_eq!(mode(&app, root), InlineMode::Reading);
+        assert_eq!(app.world().get::<InlineText>(root).unwrap().value(), "Fix the board");
+        assert!(app.world().get_entity(modal).is_ok(), "the modal is still open");
+        assert!(edits(&app).is_empty());
     }
 }
