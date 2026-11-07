@@ -787,7 +787,7 @@ async fn a_breach_whose_reopen_failed_is_settled_by_the_next_review() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_answered_breach_question_is_not_asked_again_when_the_final_report_failed() {
+async fn an_answered_breach_question_is_not_asked_again_after_a_failed_ask() {
     let (r, key, _) = breaching_rig().await;
     // The mark is written before the ask, so no later report is left to fail; the ask is what fails here.
     r.tracker.fail_next("factory", "ask", 1);
