@@ -423,6 +423,31 @@ async fn a_node_only_stack_opens_node_hosts_and_no_others_for_install() {
     assert!(labels.contains_key(label::STACK), "the warm checkpoint is keyed on the stack");
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_sandbox_opens_no_stack_install_egress() {
+    let r = rig_with(&with_stack(r#"node = "26""#));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    // Keep the reviewer's sandbox so its egress log outlives the review.
+    let reviewer = trailhead_factory::review_name(&key, 1, 1);
+    r.compute.fail(&reviewer, "destroy");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    tokio::time::advance(Duration::from_secs(61)).await; // out of the no-verdict backoff
+    r.factory.reconcile().await.unwrap();
+
+    let prepared = r.daemon.prepared();
+    let (_, worker) = prepared.iter().find(|(id, _)| id.0 == "trailhead-w1").expect("the worker was prepared");
+    assert!(!worker.tools.is_empty(), "the worker installs the stack");
+    let (_, review) = prepared.iter().find(|(id, _)| id.0 == reviewer).expect("the reviewer was prepared");
+    assert!(review.tools.is_empty(), "{:?}", review.tools);
+
+    let log = r.compute.egress_log(&reviewer);
+    assert!(!log.is_empty(), "the reviewer's sandbox was kept");
+    let opened: Vec<String> = log.into_iter().flat_map(|e| e.domains).collect();
+    assert!(!opened.iter().any(|d| d == "nodejs.org" || d.contains("mise")), "{opened:?}");
+}
+
 #[tokio::test]
 async fn an_unknown_stack_tool_fails_the_prepare() {
     let r = rig_with(&with_stack(r#"zig = "0.13""#));
