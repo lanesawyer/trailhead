@@ -33,6 +33,8 @@
 //! - A number picked on a track: [`spawn_slider`]. Its value is written back for you.
 //! - A search box with a hint while empty and a clear button: [`spawn_search_field`]; match items with
 //!   [`matches_search`]. A text field straight on a pane or menu goes in a [`field_well`] to be seen.
+//! - A detail modal's body, a main column beside a sidebar of facts: [`spawn_detail_panes`], in a modal
+//!   [`extent::DETAIL_WIDTH`] wide.
 //! - A button that opens a URL in the browser: [`link_button`].
 //! - A line saying how something went, with an icon for its [`Tone`]: [`notice`], then write a [`Notice`] onto it;
 //!   an empty message hides it.
@@ -49,6 +51,7 @@ mod badge;
 mod buttons;
 mod chip;
 mod containers;
+mod detail;
 mod field_well;
 mod hint;
 mod icons;
@@ -81,6 +84,7 @@ pub use badge::badge;
 pub use buttons::{button, button_text, danger_button, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{field, panel, row, section, section_frame};
+pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};

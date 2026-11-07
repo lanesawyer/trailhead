@@ -7,6 +7,7 @@ pub mod board;
 pub mod commands;
 pub mod connect;
 pub mod connection;
+pub mod detail;
 pub mod factory;
 #[doc(hidden)]
 pub mod fixture;
