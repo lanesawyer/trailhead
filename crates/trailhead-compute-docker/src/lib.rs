@@ -146,6 +146,8 @@ pub struct DockerCompute {
     /// The SHA-256 of `config.daemon`, hex.
     daemon_digest: Arc<str>,
     watching: Arc<AtomicBool>,
+    /// Set once the first `list` has pruned the checkpoints earlier runs left behind.
+    swept: Arc<AtomicBool>,
     /// Set by [`DockerCompute::read_only`]: calls that change a sandbox are refused.
     read_only: bool,
 }
@@ -172,6 +174,7 @@ impl DockerCompute {
             link: Default::default(),
             daemon_digest,
             watching: Default::default(),
+            swept: Default::default(),
             read_only: false,
         }
     }
@@ -451,6 +454,15 @@ impl Compute for DockerCompute {
             }
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
+        // Once per process, for images an earlier run left behind. Not on every list: a checkpoint just taken is
+        // unlabelled and unused until its restore, and would be pruned.
+        if !self.read_only && !self.swept.swap(true, Ordering::SeqCst) {
+            for sandbox in &out {
+                if let Err(e) = self.prune_checkpoints(&sandbox.id, None).await {
+                    tracing::warn!(sandbox = %sandbox.id.0, error = %e, "couldn't remove old checkpoints at startup");
+                }
+            }
+        }
         Ok(out)
     }
 
@@ -506,7 +518,12 @@ impl Compute for DockerCompute {
             _ => {}
         }
         self.attach(&id.0, &state).await?;
-        self.run_container(&id.0, &cp.0, false).await
+        self.run_container(&id.0, &cp.0, false).await?;
+        // The container no longer runs from the previous checkpoint, which checkpoint() couldn't remove while it did.
+        if let Err(e) = self.prune_checkpoints(id, Some(cp)).await {
+            tracing::warn!(sandbox = %id.0, error = %e, "couldn't remove old checkpoints after the restore");
+        }
+        Ok(())
     }
 
     /// Writes the files as the container's user (each beside its target, then renamed over it, so a running binary
