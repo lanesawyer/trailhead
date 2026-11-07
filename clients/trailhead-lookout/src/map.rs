@@ -193,8 +193,9 @@ pub fn build(input: Input) -> MapModel {
         let run = run_of.get(key);
         let mut markers = Vec::new();
         if let Some(holder) = holder_of.get(&t.id) {
-            let short = || holder.to_string().chars().take(8).collect();
-            markers.push(Marker::Claim(holder_name(*holder, key).unwrap_or_else(short)));
+            // The snapshot carries no users, so a holder that isn't an agent is a person: say so, not just part of an id.
+            let person = || format!("a person ({})", holder.to_string().chars().take(8).collect::<String>());
+            markers.push(Marker::Claim(holder_name(*holder, key).unwrap_or_else(person)));
         }
         if let Some(n) = questions.get(&t.id) {
             markers.push(Marker::Questions(*n));
@@ -605,6 +606,16 @@ mod tests {
         assert_eq!(model.camps[0].phase.as_deref(), Some("agent"));
         // Nothing overlaps the waypoints.
         assert!(model.camps.iter().all(|c| c.pos.x + CAMP_SIZE.x < way_origin().x));
+    }
+
+    #[test]
+    fn a_holder_that_is_no_agent_and_has_no_run_is_labelled_a_person() {
+        let mut w = world();
+        w.tasks[2] = task("t44", "TRAIL-44", "in_progress");
+        let model = w.model();
+        let markers = &model.waypoints.iter().find(|w| w.key == "TRAIL-44").unwrap().markers;
+        let id = sid("u1");
+        assert_eq!(markers[0], Marker::Claim(format!("a person ({})", &id[..8])));
     }
 
     #[test]
