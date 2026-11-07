@@ -64,7 +64,6 @@ fn gate_message(grade: &PrGrade, d: &MergeDecision, said: &Wording) -> String {
         let mut waiting = Vec::new();
         for gate in &d.waiting {
             match gate {
-                GateKind::Ci if !d.failing.is_empty() => parts.push(format!("CI failed ({})", d.failing.join(", "))),
                 GateKind::Ci => waiting.push("CI".to_string()),
                 GateKind::AgentReview => waiting.push("review".into()),
                 GateKind::Human => waiting.push("a person".into()),
@@ -621,7 +620,6 @@ mod tests {
             head: "abc".into(),
             passed: vec![GateKind::Checks, GateKind::Ci, GateKind::AgentReview],
             waiting: vec![],
-            failing: vec![],
             would_merge: true,
             approved_head: None,
             human_head: None,
@@ -660,13 +658,8 @@ mod tests {
             decision_message(&grade(1), &d, Wording { changes: Some(Rework::Parked), ..said() })
                 .ends_with("the task is parked for Lane.")
         );
-        let waiting = MergeDecision {
-            passed: vec![],
-            waiting: vec![GateKind::Ci, GateKind::Human],
-            failing: vec!["build".into()],
-            ..d.clone()
-        };
-        assert_eq!(decision_message(&grade(3), &waiting, said()), "Grade 3: CI failed (build); waiting for a person.");
+        let waiting = MergeDecision { passed: vec![], waiting: vec![GateKind::Ci, GateKind::Human], ..d.clone() };
+        assert_eq!(decision_message(&grade(3), &waiting, said()), "Grade 3: waiting for CI and a person.");
         let rework = Wording { changes: Some(Rework::Running), ..said() };
         assert!(
             decision_message(&grade(1), &d, rework)
