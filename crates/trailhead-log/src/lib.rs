@@ -7,7 +7,7 @@ use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 /// RFC 3339 with milliseconds and the UTC offset, e.g. `2026-11-03T10:56:19.184-08:00`.
 pub const LOG_TIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f%:z";
@@ -19,19 +19,25 @@ pub fn local_timer() -> ChronoLocal {
 }
 
 /// Installs the global subscriber: lines go to stdout (colored only on a terminal), and to `file`
-/// as well, uncolored, when there is one. Panics if a global subscriber is already set.
-pub fn init<W>(filter: EnvFilter, file: Option<W>)
+/// as well, uncolored, when there is one. `extra` is one more layer (the host's log buffer), fed
+/// what the filter lets through. Panics if a global subscriber is already set.
+pub fn init<W, L>(filter: EnvFilter, file: Option<W>, extra: L)
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+    L: Layer<Registry> + Send + Sync + 'static,
 {
     let stdout = tracing_subscriber::fmt::layer().with_timer(local_timer()).with_ansi(std::io::stdout().is_terminal());
     let file = file.map(|w| tracing_subscriber::fmt::layer().with_timer(local_timer()).with_ansi(false).with_writer(w));
-    tracing_subscriber::registry().with(file.with_filter(filter.clone())).with(stdout.with_filter(filter)).init();
+    tracing_subscriber::registry()
+        .with(extra.with_filter(filter.clone()))
+        .with(file.with_filter(filter.clone()))
+        .with(stdout.with_filter(filter))
+        .init();
 }
 
 /// [`init`] with stdout only.
 pub fn init_stdout(filter: EnvFilter) {
-    init(filter, None::<fn() -> std::io::Sink>);
+    init(filter, None::<fn() -> std::io::Sink>, tracing_subscriber::layer::Identity::new());
 }
 
 /// The filter from `RUST_LOG`, or `default` when it is unset or invalid.

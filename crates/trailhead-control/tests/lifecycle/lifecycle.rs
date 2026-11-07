@@ -1084,8 +1084,12 @@ async fn the_status_board_follows_a_run_from_a_cold_sandbox_through_review() {
         Some(&RunPhase::Preparing { cold: false }),
         "a run starts when its sandbox is being got: {phases:?}"
     );
-    assert!(phases.contains(&RunPhase::Preparing { cold: true }), "no warm checkpoint the first time: {phases:?}");
     let agent = phases.iter().position(|p| *p == RunPhase::Agent).expect("the agent phase");
+    // The reviewer's `begin` also emits a cold Preparing, so only one before the agent phase is the worker's.
+    assert!(
+        phases[..agent].contains(&RunPhase::Preparing { cold: true }),
+        "no warm checkpoint the first time, so the worker's sandbox is cold: {phases:?}"
+    );
     let reviewing = phases.iter().position(|p| *p == RunPhase::Reviewing).expect("the reviewing phase");
     assert!(agent < reviewing, "{phases:?}");
     let steps = events.iter().filter(|e| matches!(e, FactoryEvent::Step { .. })).count();
@@ -1260,5 +1264,23 @@ async fn a_permanent_rejection_parks_the_task_at_once() {
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("400 Bad Request: bad size"), "{}", questions[0].body);
+    assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
+}
+
+#[tokio::test]
+async fn a_rejected_sandbox_create_parks_the_task_at_once() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Refused at create", "");
+    r.compute.reject_creates("sprites api 400 Bad Request: bad size");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(matches!(err, trailhead_factory::Error::Rejected(_)), "{err:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked on the first rejection, not requeued");
+    assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+    assert_eq!(task.run.infra_failures, Some(0));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("400 Bad Request: bad size"), "{}", questions[0].body);
+    assert!(r.compute.sandboxes().is_empty(), "no sandbox was made");
     assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
 }

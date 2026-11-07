@@ -452,7 +452,8 @@ pub trait Tracker: Send + Sync {
     async fn approve(&self, task: &TaskKey) -> Result<()>;
     /// Sends an approved task back to review, as a push after its approval needs a new one.
     async fn unapprove(&self, task: &TaskKey) -> Result<()>;
-    /// Sends a task in review back to open, unheld. Reworks don't use it: they stay in review (changes requested).
+    /// Moves any task core lets reach `open` (in review, approved or parked on a question) back to the queue, unheld.
+    /// Reworks don't use it: they stay in review (changes requested).
     async fn reopen(&self, task: &TaskKey) -> Result<()>;
     /// Raises the task's grade. Trailhead lets an agent raise a grade but never set the first or lower it.
     async fn raise_grade(&self, task: &TaskKey, grade: Grade) -> Result<()>;
