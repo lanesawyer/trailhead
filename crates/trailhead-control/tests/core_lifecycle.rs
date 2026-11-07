@@ -107,7 +107,7 @@ async fn rig_paged(config: &str, page_size: Option<usize>) -> Rig {
 impl Rig {
     async fn task(&self, title: &str) -> TaskKey {
         let new = NewTask { project: "TRAIL".into(), title: title.into(), ..Default::default() };
-        TaskKey(self.store.create_task(&self.human, new).await.unwrap().key)
+        self.store.create_task(&self.human, new).await.unwrap().key
     }
 
     async fn show(&self, key: &TaskKey) -> trailhead_factory::Task {
@@ -167,6 +167,14 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
     assert!(filed.description.starts_with("No test for empty input."), "{}", filed.description);
     assert!(filed.description.contains(&key.0), "{}", filed.description);
 
+    // The real engine lists only unfinished follow-ups (TaskFilter::default()).
+    let listed = r.tracker.follow_ups(&key).await.unwrap();
+    assert_eq!(listed.iter().map(|f| &f.key).collect::<Vec<_>>(), [&filed_key]);
+    assert_eq!(listed[0].title, "Cover the edge");
+    let finish = TaskPatch { status: Some(trailhead_core::Status::Done), ..Default::default() };
+    r.store.update_task(&r.human, &filed_key.0, finish, None).await.unwrap();
+    assert!(r.tracker.follow_ups(&key).await.unwrap().is_empty(), "a finished follow-up is no longer listed");
+
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
     assert_eq!(task.holder, None, "moving to review releases the claim");
@@ -220,13 +228,12 @@ async fn sandbox_tokens_are_scoped_and_die_with_the_sub_agent() {
         .create_project(&r.human, NewProject { key: "OTHER".into(), name: "Other".into(), ..Default::default() })
         .await
         .unwrap();
-    let other = TaskKey(
-        r.store
-            .create_task(&r.human, NewTask { project: "OTHER".into(), title: "x".into(), ..Default::default() })
-            .await
-            .unwrap()
-            .key,
-    );
+    let other = r
+        .store
+        .create_task(&r.human, NewTask { project: "OTHER".into(), title: "x".into(), ..Default::default() })
+        .await
+        .unwrap()
+        .key;
     let cred = r.tracker.create_sub_agent("trail-1-a1", "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
     let sandbox = CoreTracker::authenticate(r.store.clone(), &cred).await.unwrap();
     assert!(sandbox.show(&other).await.is_err(), "scoped to TRAIL");
@@ -337,7 +344,7 @@ async fn with_a_queue_only_its_subtasks_run() {
         priority: Some(pr(1)),
         ..Default::default()
     };
-    let epic = TaskKey(r.store.create_task(&r.human, urgent).await.unwrap().key);
+    let epic = r.store.create_task(&r.human, urgent).await.unwrap().key;
     let queue = r.task("Factory queue").await;
     let sub = NewTask {
         project: "TRAIL".into(),
@@ -346,7 +353,7 @@ async fn with_a_queue_only_its_subtasks_run() {
         grade: Some(gr(1)),
         ..Default::default()
     };
-    let handed = TaskKey(r.store.create_task(&r.human, sub).await.unwrap().key);
+    let handed = r.store.create_task(&r.human, sub).await.unwrap().key;
     r.factory.config.repo.queue = vec![queue.0.clone()];
 
     let ready = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 10).await.unwrap();
@@ -373,10 +380,10 @@ async fn a_queue_list_reads_each_parents_direct_children_ordered_by_priority_and
         grade: grade.map(gr),
         ..Default::default()
     };
-    let low = TaskKey(r.store.create_task(&r.human, mk("low", &q1, 4, Some(1))).await.unwrap().key);
-    let high = TaskKey(r.store.create_task(&r.human, mk("high", &q2, 1, Some(1))).await.unwrap().key);
-    let ungraded = TaskKey(r.store.create_task(&r.human, mk("ungraded", &q2, 1, None)).await.unwrap().key);
-    let deep = TaskKey(r.store.create_task(&r.human, mk("deep", &nested, 1, Some(1))).await.unwrap().key);
+    let low = r.store.create_task(&r.human, mk("low", &q1, 4, Some(1))).await.unwrap().key;
+    let high = r.store.create_task(&r.human, mk("high", &q2, 1, Some(1))).await.unwrap().key;
+    let ungraded = r.store.create_task(&r.human, mk("ungraded", &q2, 1, None)).await.unwrap().key;
+    let deep = r.store.create_task(&r.human, mk("deep", &nested, 1, Some(1))).await.unwrap().key;
     let _grandchild = r.store.create_task(&r.human, mk("grandchild", &deep, 1, Some(1))).await.unwrap();
     r.factory.config.repo.queue = vec![q1.0.clone(), q2.0.clone(), q2.0.clone()];
 
@@ -396,7 +403,7 @@ async fn a_queue_list_reads_each_parents_direct_children_ordered_by_priority_and
 async fn the_factory_can_raise_a_grade_a_human_set_but_not_lower_it() {
     let r = rig().await;
     let new = NewTask { project: "TRAIL".into(), title: "Graded".into(), grade: Some(gr(2)), ..Default::default() };
-    let key = TaskKey(r.store.create_task(&r.human, new).await.unwrap().key);
+    let key = r.store.create_task(&r.human, new).await.unwrap().key;
     assert_eq!(r.show(&key).await.grade, Some(gr(2)));
     r.tracker.raise_grade(&key, gr(3)).await.unwrap();
     assert_eq!(r.show(&key).await.grade, Some(gr(3)));
@@ -986,7 +993,7 @@ async fn the_factory_approves_again_after_it_sent_the_task_back_for_a_new_head()
     r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
     let new =
         NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(gr(1)), ..Default::default() };
-    let key = TaskKey(r.store.create_task(&r.human, new).await.unwrap().key);
+    let key = r.store.create_task(&r.human, new).await.unwrap().key;
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
@@ -1022,7 +1029,7 @@ async fn the_factory_cant_approve_work_it_did_and_says_so_without_asking_for_a_r
     r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
     let new =
         NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(gr(1)), ..Default::default() };
-    let key = TaskKey(r.store.create_task(&r.human, new).await.unwrap().key);
+    let key = r.store.create_task(&r.human, new).await.unwrap().key;
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
@@ -1053,7 +1060,7 @@ async fn an_approved_pr_that_starts_conflicting_is_unapproved_and_reworked() {
     r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
     let new =
         NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(gr(1)), ..Default::default() };
-    let key = TaskKey(r.store.create_task(&r.human, new).await.unwrap().key);
+    let key = r.store.create_task(&r.human, new).await.unwrap().key;
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
@@ -1187,10 +1194,10 @@ async fn a_task_that_blocks_urgent_work_is_listed_as_urgent_too() {
         grade: Some(gr(1)),
         ..Default::default()
     };
-    let older = TaskKey(r.store.create_task(&r.human, mk("older", 3)).await.unwrap().key);
-    let blocker = TaskKey(r.store.create_task(&r.human, mk("blocker", 3)).await.unwrap().key);
-    let middle = TaskKey(r.store.create_task(&r.human, mk("middle", 3)).await.unwrap().key);
-    let urgent = TaskKey(r.store.create_task(&r.human, mk("urgent", 2)).await.unwrap().key);
+    let older = r.store.create_task(&r.human, mk("older", 3)).await.unwrap().key;
+    let blocker = r.store.create_task(&r.human, mk("blocker", 3)).await.unwrap().key;
+    let middle = r.store.create_task(&r.human, mk("middle", 3)).await.unwrap().key;
+    let urgent = r.store.create_task(&r.human, mk("urgent", 2)).await.unwrap().key;
     r.store.add_dependency(&r.human, &blocker.0, &middle.0).await.unwrap();
     r.store.add_dependency(&r.human, &middle.0, &urgent.0).await.unwrap();
 
@@ -1214,7 +1221,7 @@ async fn with_run(r: &Rig, key: &TaskKey) {
 async fn subtask(r: &Rig, queue: &TaskKey, title: &str) -> TaskKey {
     let new =
         NewTask { project: "TRAIL".into(), title: title.into(), parent: Some(queue.0.clone()), ..Default::default() };
-    TaskKey(r.store.create_task(&r.human, new).await.unwrap().key)
+    r.store.create_task(&r.human, new).await.unwrap().key
 }
 
 /// A factory for another repo on the rig's store, working `queue` on the given host.
@@ -1322,7 +1329,7 @@ async fn ready_lists_reworks_ahead_of_new_work_only_within_a_priority() {
 
     let urgent =
         NewTask { project: "TRAIL".into(), title: "Urgent".into(), priority: Some(pr(1)), ..Default::default() };
-    let urgent = TaskKey(r.store.create_task(&r.human, urgent).await.unwrap().key);
+    let urgent = r.store.create_task(&r.human, urgent).await.unwrap().key;
     let same = r.task("Same priority as the rework").await;
 
     // The cut to `limit` comes after the merge: the urgent task isn't pushed out by the rework.

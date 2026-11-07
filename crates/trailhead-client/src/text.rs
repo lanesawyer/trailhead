@@ -195,14 +195,14 @@ impl Text {
         }
         for (label, keys) in [("blocked by", &d.blocked_by), ("blocks", &d.blocks)] {
             if !keys.is_empty() {
-                out.push(format!("{label} {}", keys.join(", ")));
+                out.push(format!("{label} {}", keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
             }
         }
         if let Some(k) = &d.duplicate_of {
             out.push(format!("duplicate of {k}"));
         }
         if !d.duplicates.is_empty() {
-            out.push(format!("duplicates {}", d.duplicates.join(", ")));
+            out.push(format!("duplicates {}", d.duplicates.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
         }
         if t.metadata.as_object().is_some_and(|m| !m.is_empty()) {
             out.push(format!("metadata {}", t.metadata));

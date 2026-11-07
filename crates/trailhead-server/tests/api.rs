@@ -94,6 +94,16 @@ async fn health_is_open_and_everything_else_needs_a_token() {
 }
 
 #[tokio::test]
+async fn users_lists_the_workspaces_people() {
+    let api = Api::new().await;
+    let r = api.as_human("GET", "/v1/users", None).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let users = r.body.as_array().unwrap();
+    assert_eq!(users.len(), 1);
+    assert!(users[0]["name"].is_string() && users[0]["id"].is_string());
+}
+
+#[tokio::test]
 async fn agent_lifecycle_over_http() {
     let api = Api::new().await;
     api.seed().await;

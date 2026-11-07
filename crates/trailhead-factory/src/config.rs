@@ -320,6 +320,7 @@ pub const GATEWAY_ANTHROPIC_ID: &str = "anthropic";
 /// The GitHub connection's id in the Docker gateway's list.
 pub const GATEWAY_GITHUB_ID: &str = "github";
 /// The git connection's id in the Docker gateway's list: smart-HTTP to `https://github.com`, read only.
+/// Deliberately equal to [`GATEWAY_GITHUB_ID`]: connections are keyed by (provider, id), so the two don't collide.
 pub const GATEWAY_GIT_ID: &str = "github";
 
 /// Subscription usage windows (`docs/factory/budgets.md`): at or past `pause_at[window]` percent, no new runs
