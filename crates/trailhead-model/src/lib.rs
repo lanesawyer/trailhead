@@ -28,6 +28,9 @@ macro_rules! string_enum {
         pub enum $name { $($variant),+ }
 
         impl $name {
+            /// Every variant, in declaration order (lifecycle order for `Status`).
+            pub const ALL: [$name; [$(stringify!($variant)),+].len()] = [$($name::$variant),+];
+
             pub fn as_str(self) -> &'static str {
                 match self { $($name::$variant => $s),+ }
             }
@@ -62,17 +65,6 @@ string_enum!(Status {
 });
 
 impl Status {
-    /// Every status, in lifecycle order.
-    pub const ALL: [Status; 7] = [
-        Status::Open,
-        Status::InProgress,
-        Status::NeedsInput,
-        Status::InReview,
-        Status::Approved,
-        Status::Done,
-        Status::Cancelled,
-    ];
-
     pub fn is_closed(self) -> bool {
         matches!(self, Status::Done | Status::Cancelled)
     }
@@ -444,24 +436,11 @@ mod tests {
     }
 
     #[test]
-    fn status_all_lists_every_variant_in_order() {
-        // The match has no wildcard, so a new variant fails to compile here until
-        // it is given an index, and the loop then fails unless ALL has it there.
-        fn index(status: Status) -> usize {
-            match status {
-                Status::Open => 0,
-                Status::InProgress => 1,
-                Status::NeedsInput => 2,
-                Status::InReview => 3,
-                Status::Approved => 4,
-                Status::Done => 5,
-                Status::Cancelled => 6,
-            }
-        }
-        for (i, status) in Status::ALL.into_iter().enumerate() {
-            assert_eq!(index(status), i, "{status:?} is out of place in Status::ALL");
-        }
-        assert_eq!(Status::ALL.len(), index(Status::Cancelled) + 1);
+    fn status_all_is_in_lifecycle_order() {
+        assert_eq!(
+            Status::ALL.map(Status::as_str),
+            ["open", "in_progress", "needs_input", "in_review", "approved", "done", "cancelled"]
+        );
     }
 
     #[test]
