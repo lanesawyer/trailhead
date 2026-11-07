@@ -1662,7 +1662,13 @@ fn spawn_block(
                 Action::Cancel => {
                     commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} })
                 }
-                _ => commands.spawn_scene(bsn! { @danger_button("revert since", Some(Icon::History)) @{press} }),
+                Action::Revert(_) => {
+                    commands.spawn_scene(bsn! { @danger_button("revert since", Some(Icon::History)) @{press} })
+                }
+                // Not drawn as an action block: they have their own controls, or none.
+                Action::Status(_) | Action::Resolve(_) | Action::Grade(_) | Action::Comment | Action::Menu => {
+                    commands.spawn_empty()
+                }
             }
             .insert(ChildOf(line));
             let mut parts = Parts::default();
