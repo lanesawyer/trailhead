@@ -20,6 +20,7 @@ use trailhead_daemon::ui::{CLOSE_NOT_ALLOWED, StatusFrame, StatusStream, UI_ALPN
 
 use crate::commands::{self, CommandId, Reply, Request};
 use crate::factory::FactoryUpdate;
+use crate::search::{self, SearchReply};
 use crate::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 
 /// How the app is connected to its factory. The Bevy `States` type is in [`crate::connection`]; this is the same
@@ -101,8 +102,12 @@ pub enum NetCommand {
     Connect(String),
     /// Sign in with a pasted user token; confirmed with `/v1/me`, and saved for this server if it holds.
     Login(String),
+    /// Let go of the control plane and forget it, so the next start doesn't dial it either.
+    Disconnect,
     /// Make this request (`crate::commands`); `attempt` comes back with the answer.
     Request { id: CommandId, attempt: u32, request: Request },
+    /// Search tasks and comments for `query` (`GET /v1/search`); `seq` comes back with the answer.
+    Search { seq: u64, query: String },
 }
 
 /// What the net thread tells the app.
@@ -119,6 +124,8 @@ pub enum NetEvent {
     Reply(Reply),
     /// The control plane's status snapshot and stream, or that it can't be reached.
     Factory(FactoryUpdate),
+    /// What came of a [`NetCommand::Search`].
+    Search(SearchReply),
 }
 
 /// Everything the HTTP client needs to talk to the Trailhead API through the control plane.
@@ -414,12 +421,14 @@ async fn run(
         tokio::select! {
             command = commands.recv() => match command {
                 Some(NetCommand::Connect(t)) => net.connect(&t).await,
+                Some(NetCommand::Disconnect) => net.disconnect(),
                 Some(NetCommand::Login(token)) => {
                     net.release_probe();
                     net.pasted = Some(token.trim().to_string());
                     net.check().await;
                 }
                 Some(NetCommand::Request { id, attempt, request }) => net.request(id, attempt, request),
+                Some(NetCommand::Search { seq, query }) => net.search(seq, query),
                 None => break,
             },
             Some((run, report)) = report_rx.recv() => net.on_report(run, report),
@@ -572,6 +581,19 @@ impl Net {
         }
         self.release_probe();
         self.check().await;
+    }
+
+    /// Drops the control plane and the saved choice of it, back to waiting for an endpoint id.
+    fn disconnect(&mut self) {
+        self.drop_target();
+        self.release_probe();
+        if let Err(e) = std::fs::remove_file(self.config.target_file())
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(error = %e, "can't forget the saved control plane");
+        }
+        self.state = None;
+        self.set(Link::Offline, Some(Reason::NoTarget));
     }
 
     /// Whether the probe may run: not while it waits out a refusal.
@@ -813,6 +835,20 @@ impl Net {
         };
         let (http, token) = (self.http.clone(), token.clone());
         tokio::spawn(async move { reply(commands::execute(&http, &base, &token, &request).await) });
+    }
+
+    /// Searches on its own task, like [`Self::request`], and says so if it can't.
+    fn search(&self, seq: u64, query: String) {
+        let events = self.events.clone();
+        let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
+            let _ = events.send(NetEvent::Search(SearchReply { seq, result: Err("not connected".into()) }));
+            return;
+        };
+        let (http, token) = (self.http.clone(), token.clone());
+        tokio::spawn(async move {
+            let result = search::fetch(&http, &base, &token, &query).await;
+            let _ = events.send(NetEvent::Search(SearchReply { seq, result }));
+        });
     }
 
     /// Starts the sync from the top, replacing any that runs. It brings the link to `Live` once the feed is open.

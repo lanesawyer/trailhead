@@ -614,7 +614,6 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     let wanted = task.run.changes_requested.expect("the rework is told why");
     assert!(wanted.conflict && wanted.body.contains(&pr.url), "{wanted:?}");
 
-    r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let ran = r.factory.tick().await.unwrap();
@@ -635,6 +634,30 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
 }
 
+#[tokio::test]
+async fn a_conflict_the_host_no_longer_reports_goes_back_to_review_without_a_worker() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::Open);
+
+    // The base moved back, or the conflict was fixed, before the rework started.
+    r.codehost.set_mergeable(&pr, Some(true));
+    let sandboxes = r.daemon.prepared().len();
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.daemon.prepared().len(), sandboxes, "no sandbox for a rework with nothing to resolve");
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.attempt, Some(1), "no attempt used up");
+
+    // Reconcile doesn't take the dropped request up again.
+    r.factory.reconcile().await.unwrap();
+    assert_ne!(r.show(&key).await.status, Status::Open);
+}
+
 fn reviewers_started(r: &Rig) -> usize {
     r.daemon.requests().iter().filter(|req| req.role == Role::Reviewer).count()
 }
@@ -648,6 +671,7 @@ async fn a_rework_that_conflicts_with_a_base_that_moved_during_it_is_reworked_ag
     let reviewed = reviewers_started(&r);
 
     // The base moves again while the rework runs, so its push conflicts too.
+    r.codehost.keep_conflict_on_push(&pr);
     r.harness.push(Role::Worker, Script::new(changes()));
     let ran = r.factory.tick().await.unwrap();
     assert_eq!(ran[0].1, Outcome::Conflicted { pr: pr.clone() });
@@ -702,7 +726,6 @@ async fn conflict_and_rework(r: &Rig, key: &TaskKey, pr: &trailhead_factory::PrR
         r.codehost.set_mergeable(pr, Some(false));
         assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
         assert_eq!(r.show(key).await.status, Status::Open);
-        r.codehost.set_mergeable(pr, Some(true));
         r.harness.push(Role::Worker, Script::new(changes()));
         r.harness.push(Role::Reviewer, Script::new(approve()));
         r.factory.tick().await.unwrap();
@@ -743,7 +766,6 @@ async fn a_request_for_changes_after_conflicts_counts_as_one_round() {
     let (key, pr) = in_review(&r, "Add a greeting").await;
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
-    r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(
         Role::Reviewer,
@@ -770,7 +792,6 @@ async fn a_merge_the_agent_started_itself_is_published_as_a_merge_commit() {
 
     // The checkout had no merge under way when prepared; the agent runs `git merge --no-commit` itself.
     r.daemon.agent_merges();
-    r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
@@ -789,7 +810,6 @@ async fn a_merge_the_agent_committed_itself_is_still_published_as_a_merge_commit
 
     // Prepare left the merge uncommitted; the agent's `git commit` removes MERGE_HEAD, but HEAD now has the base.
     r.daemon.agent_commits_merge();
-    r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
@@ -808,7 +828,6 @@ async fn a_merge_the_agent_started_and_committed_itself_is_published_as_a_merge_
 
     // Prepare started no merge, and the agent's `git merge` and `git commit` leave no MERGE_HEAD behind.
     r.daemon.agent_merges_and_commits();
-    r.codehost.set_mergeable(&pr, Some(true));
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
@@ -825,7 +844,6 @@ async fn a_merge_the_agent_aborted_is_not_published() {
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
 
-    r.codehost.set_mergeable(&pr, Some(true));
     r.daemon.agent_aborts_merge();
     let before = r.codehost.commits(&pr.repo, "factory/trail-1").len();
     r.harness.push(Role::Worker, Script::new(changes()));
@@ -843,7 +861,6 @@ async fn a_branch_the_agent_rebased_is_not_published() {
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
 
-    r.codehost.set_mergeable(&pr, Some(true));
     r.daemon.agent_rebases();
     let before = r.codehost.commits(&pr.repo, "factory/trail-1").len();
     r.harness.push(Role::Worker, Script::new(changes()));
@@ -861,7 +878,6 @@ async fn a_merge_with_conflict_markers_left_in_it_is_not_published() {
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
 
-    r.codehost.set_mergeable(&pr, Some(true));
     r.daemon.leave_conflict_markers(&["docs/guide.md"]);
     let before = r.codehost.commits(&pr.repo, "factory/trail-1").len();
     r.harness.push(Role::Worker, Script::new(changes()));
@@ -1155,4 +1171,111 @@ async fn a_task_that_blocks_urgent_work_is_listed_as_urgent_too() {
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
     let ran = r.factory.tick().await.unwrap();
     assert_eq!(ran.iter().map(|(t, _)| &t.key).collect::<Vec<_>>(), [&blocker], "before the older p3 task");
+}
+
+/// Gives `key` factory run metadata, as a run leaves on its task.
+async fn with_run(r: &Rig, key: &TaskKey) {
+    let run = RunUpdate { attempt: Some(1), sandbox: Some("run".into()), ..Default::default() };
+    r.tracker.report(key, run).await.unwrap();
+}
+
+async fn subtask(r: &Rig, queue: &TaskKey, title: &str) -> TaskKey {
+    let new =
+        NewTask { project: "TRAIL".into(), title: title.into(), parent: Some(queue.0.clone()), ..Default::default() };
+    TaskKey(r.store.create_task(&r.human, new).await.unwrap().key)
+}
+
+/// A factory for another repo on the rig's store, working `queue` on the given host.
+fn factory_for(r: &Rig, name: &str, queue: &TaskKey, host: Arc<Host>) -> Factory {
+    let config = CONFIG.replace("name = \"trailhead\"", &format!("name = \"{name}\"\nqueue = \"{}\"", queue.0));
+    Factory::new(
+        FactoryConfig::parse_table(&config, "TRAIL", None).unwrap(),
+        Arc::new(r.compute.clone()),
+        Arc::new(r.tracker.clone()),
+        Arc::new(FakeProvider::new(1)),
+        r.daemon.clone(),
+        host,
+    )
+}
+
+#[derive(Clone, Default)]
+struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+    type Writer = Logs;
+    fn make_writer(&'a self) -> Logs {
+        self.clone()
+    }
+}
+
+impl Logs {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+#[tokio::test]
+async fn strays_are_open_factory_tasks_outside_every_queue() {
+    let r = rig().await;
+    let queue = r.task("Queue").await;
+    let other = r.task("Other queue").await;
+    let queues = [queue.clone(), other.clone()];
+
+    let inside = subtask(&r, &queue, "Inside").await;
+    let inside_other = subtask(&r, &other, "Inside the other").await;
+    let outside = r.task("Moved out").await;
+    let closed = r.task("Moved out, then closed").await;
+    let plain = r.task("No factory metadata").await;
+    for key in [&inside, &inside_other, &outside, &closed] {
+        with_run(&r, key).await;
+    }
+    let done = TaskPatch { status: Some(trailhead_core::Status::Done), ..Default::default() };
+    r.store.update_task(&r.human, &closed.0, done, None).await.unwrap();
+
+    let strays = r.tracker.strays("TRAIL", &queues).await.unwrap();
+    assert_eq!(strays.iter().map(|t| &t.key).collect::<Vec<_>>(), [&outside]);
+    assert!(!strays.iter().any(|t| t.key == plain));
+    // Without a queue named, the task that sat outside it is outside nothing: only the queues' own tasks count.
+    let strays = r.tracker.strays("TRAIL", std::slice::from_ref(&queue)).await.unwrap();
+    let mut keys: Vec<_> = strays.iter().map(|t| t.key.clone()).collect();
+    keys.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(keys, [inside_other, outside]);
+}
+
+#[tokio::test]
+async fn a_stray_is_warned_about_once_across_reconciles_and_not_for_a_sibling_repos_queue() {
+    let r = rig().await;
+    let q1 = r.task("Alpha's queue").await;
+    let q2 = r.task("Beta's queue").await;
+    let host = Host::new(None);
+    let alpha = factory_for(&r, "alpha", &q1, host.clone());
+    let _beta = factory_for(&r, "beta", &q2, host);
+
+    // Beta's run is live under beta's queue; alpha sees the shared queues, so it isn't a stray.
+    let beta_task = subtask(&r, &q2, "Beta's task").await;
+    with_run(&r, &beta_task).await;
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    alpha.reconcile().await.unwrap();
+    assert!(!logs.text().contains(&beta_task.0), "{}", logs.text());
+
+    let stray = r.task("Moved out of every queue").await;
+    with_run(&r, &stray).await;
+    alpha.reconcile().await.unwrap();
+    alpha.reconcile().await.unwrap();
+    let text = logs.text();
+    assert_eq!(text.matches(&stray.0).count(), 1, "{text}");
+    assert!(!text.contains(&beta_task.0), "{text}");
 }

@@ -79,6 +79,8 @@ pub enum FactoryLink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoState {
     pub control: ControlState,
+    /// The repo's queue task keys, when the control plane reports them.
+    pub queue: Vec<String>,
     /// Unix seconds and the message.
     pub last_error: Option<(i64, String)>,
     /// The grades whose gate wants a person.
@@ -216,6 +218,7 @@ impl FactoryMirror {
                 control: snapshot.control,
                 last_error: snapshot.last_error,
                 human_grades: snapshot.human_grades,
+                queue: snapshot.queue.into_iter().map(|k| k.0).collect(),
                 seq: snapshot.seq,
             },
         );
@@ -367,6 +370,7 @@ mod tests {
             holding: None,
             targets: Vec::new(),
             human_grades: Vec::new(),
+            queue: Vec::new(),
             seq,
         };
         FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])

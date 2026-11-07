@@ -485,6 +485,7 @@ mod tests {
                 capped: true,
             }],
             human_grades: Vec::new(),
+            queue: Vec::new(),
             seq: 12,
         };
         let out = render_live(&snapshot);

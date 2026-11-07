@@ -2,6 +2,7 @@
 //!
 //! `SPRITES_TOKEN=... cargo test -p trailhead-compute-sprites --test live -- --ignored`
 
+use bytes::Bytes;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_factory::{Compute, Egress, IROH_DOMAINS, Labels, Program, SandboxFile, SandboxSpec};
 
@@ -29,7 +30,7 @@ async fn lifecycle_against_sprites() {
 
         let script = SandboxFile {
             path: "/home/sprite/.trailhead/sleeper.sh".into(),
-            contents: b"#!/bin/sh\necho up\nexec sleep 600\n".to_vec(),
+            contents: Bytes::from_static(b"#!/bin/sh\necho up\nexec sleep 600\n"),
             mode: 0o755,
         };
         let sleeper = Program {

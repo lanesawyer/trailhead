@@ -10,10 +10,13 @@ pub mod connection;
 pub mod factory;
 #[doc(hidden)]
 pub mod fixture;
+pub mod icon;
 pub mod inspector;
 pub mod map;
 pub mod mirror;
 pub mod net;
+pub mod search;
+pub mod settings;
 pub mod sync;
 pub mod widgets;
 

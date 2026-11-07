@@ -22,6 +22,8 @@ pub struct FakePr {
     pub mergeable: Option<bool>,
     /// The head `pr_state` reports instead of the real one, as a slow host does right after a push.
     pub lagging_head: Option<String>,
+    /// The base moves on while a run works, so a conflict outlives the push that was meant to fix it.
+    pub conflict_survives_push: bool,
     /// The base branch has commits the PR's branch lacks.
     pub behind: bool,
     /// What the host lists as changed, when a test sets it; otherwise it follows the published commits.
@@ -176,6 +178,11 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.mergeable = mergeable).unwrap();
     }
 
+    /// Makes a conflict outlast the next push, as when the base moves again during a rework.
+    pub fn keep_conflict_on_push(&self, pr: &PrRef) {
+        self.find(pr, |p, _| p.conflict_survives_push = true).unwrap();
+    }
+
     /// Makes `pr_state` report `head` as the PR's head (`None`: the real one), as a host that hasn't caught up with a
     /// push yet does.
     pub fn set_lagging_head(&self, pr: &PrRef, head: Option<&str>) {
@@ -274,6 +281,12 @@ impl CodeHost for FakeCodeHost {
         s.starts.entry(key.clone()).or_insert_with(|| start.to_string());
         let n = s.branches.get(&key).map_or(0, Vec::len) + commits.len();
         s.heads.insert(key.clone(), format!("{branch}@{n}"));
+        // A push is a new head: the host works out afresh whether it merges, and the conflict a rework fixed is gone.
+        for p in s.prs.iter_mut().filter(|p| {
+            p.pr.repo == *repo && p.spec.branch == branch && p.mergeable == Some(false) && !p.conflict_survives_push
+        }) {
+            p.mergeable = Some(true);
+        }
         s.branches.entry(key).or_default().extend_from_slice(commits);
         Ok(())
     }
@@ -296,6 +309,7 @@ impl CodeHost for FakeCodeHost {
             closed: false,
             mergeable: Some(true),
             lagging_head: None,
+            conflict_survives_push: false,
             behind: false,
             files: None,
             ci: CiState::Pending,
@@ -487,8 +501,14 @@ impl CodeHost for FakeCodeHost {
                         Some(body) => (FileStatus::Added, body.iter().filter(|b| **b == b'\n').count().max(1) as u32),
                         None => (FileStatus::Removed, 0),
                     };
-                    let file =
-                        ChangedFile { path: change.path.clone(), status, additions, deletions: 0, previous_path: None };
+                    let file = ChangedFile {
+                        path: change.path.clone(),
+                        status,
+                        additions,
+                        deletions: 0,
+                        previous_path: None,
+                        patch: None,
+                    };
                     by_path.insert(change.path.clone(), file);
                 }
             }

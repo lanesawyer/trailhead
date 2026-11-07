@@ -39,7 +39,7 @@ Views are Bevy `States`; the inspector is a panel that both views spawn.
 
 Decided 2026-11-05 (TRAIL-796), after Lane's first real use: Lookout worked but read as a debug overlay of raw text rows. The look is built from one small component kit, and every view uses it.
 
-**One component, used everywhere.** Each kind of control or surface is built once in the `trailhead-ui` crate (`clients/trailhead-ui/src`), one widget to a file, and every view calls it; only widgets about tasks and the board (the card, the column, the status tokens) live in `clients/trailhead-lookout/src/widgets/`, which re-exports the kit so views import from `crate::widgets`. An app adds its own colors by painting tokens onto the kit's theme (`trailhead_ui::paint`). A second, slightly different button, card or dropdown is a bug, even when it's quicker to write. If a widget doesn't do what a view needs, the widget grows the option. The rules agents follow are in the `lookout-ui` skill (`.claude/skills/lookout-ui/SKILL.md`).
+**One component, used everywhere.** Each kind of control or surface is built once in the `trailhead-ui` crate (`clients/trailhead-ui/src`), one widget to a file, and every view calls it; only widgets about tasks and the board (the card, the column, the status tokens) live in `clients/trailhead-lookout/src/widgets/`, which re-exports the kit so views import from `crate::widgets`. An app adds its own colors by painting tokens onto the kit's theme (`trailhead_ui::paint`). A second, slightly different button, card or dropdown is a bug, even when it's quicker to write. If a widget doesn't do what a view needs, the widget grows the option. The rules agents follow for the kit are in the `trailhead-ui` skill (`.claude/skills/trailhead-ui/SKILL.md`), which any app built on the kit uses; Lookout's own part (its tokens, card, column and views) is the short `lookout-ui` skill (`.claude/skills/lookout-ui/SKILL.md`), which points at it.
 
 **Built on feathers.** Buttons, menus, dropdowns (`FeathersSelect`), text inputs, scrollbars, list views and panes come from `bevy_feathers` 0.20, wrapped by the kit so their props are set in one place. The kit doesn't draw its own controls where feathers has one. Much of it is ported from Lane's `bevy-data-explorer` (`src/widgets/`, `src/app/theme.rs`), whose rules have already paid for themselves:
 
@@ -50,13 +50,22 @@ Decided 2026-11-05 (TRAIL-796), after Lane's first real use: Lookout worked but 
 
 **The board.** A kanban board: one fixed-width column per status in the lifecycle order, each with its own background (a theme token per status) and a header with the status and count. The columns scroll on their own, and the board scrolls sideways when they don't fit. Each task is a card: key and title (title clamped to two lines), small badges for priority, grade, holder and open questions, and actions as icon buttons. Clicking the card opens the inspector. A card never shows a handoff or a question body in full: that belongs to the inspector. A column with hundreds of cards (`open` held 366 on 2026-11-05) builds only what's on screen.
 
-**The header bar.** The app name, filters as dropdowns (project, parent, holder), a "closed: hidden/shown" toggle for the done and cancelled columns in place of buttons that cycle through values, a primary "New task" button, and the connection state as a small status chip (dot and words) instead of a banner of text.
+**The header bar.** The app name, filters as dropdowns (project, parent, holder), a "closed: hidden/shown" toggle for the done and cancelled columns in place of buttons that cycle through values, a primary "New task" button, and the connection state as a small status chip (dot and words) instead of a banner of text. A search field (the kit's) narrows the board as you type by task key (`801`, `trail-801`) and title, case-insensitive (`board::build` takes the query in `Filter`); after a 300 ms pause the query also goes to `GET /v1/search` (`search.rs`), and tasks matching only in a description or comment join the board with a "in description: …" line on the card. Answers for a query that has since changed are dropped. Escape or the clear button empties it.
 
 **Panels.** The inspector, the forms and the connect panel use the same pane, section, field (label above input) and button widgets. Choices with a fixed set of values, such as a task's priority or status in the form, are dropdowns too.
 
 **Modals.** Every form and dialog is one kit widget, `clients/trailhead-ui/src/modal.rs` (TRAIL-840): feathers' `FeathersDialog` on a backdrop over the window, centered, with a title and a close X. It closes on the X, Escape or a click outside, by default for every modal; a save in flight locks it (`ModalLocked`). The dialog is never taller than `MAX_HEIGHT_VH` of the window: the body scrolls with the kit's scrollbar and the footer (Save, Cancel) stays in view. A kind of modal is a marker type implementing `Modal` (title, width).
 
 **Checking the look.** A sandbox can't open a window, so the look gets a human review (the `clients/**` grade rule). TRAIL-796's follow-ups include rendering screenshots headlessly, with a software Vulkan driver, so a worker and its reviewer can see what they built.
+
+## Settings
+
+A gear at the right of the board header opens a `Settings` modal (the kit's modal, centered), with pages picked from tabs across the top (`settings.rs`, TRAIL-843). A page is a `Page` variant plus its fields.
+
+- **Connection.** The factory endpoint dialed, this app's endpoint id with a copy button, who the token acts as, and Disconnect, which drops the control plane and the saved choice of it (`NetCommand::Disconnect`) and closes the modal, leaving the connect panel.
+- **Factory.** Read-only, from what Lookout already has: running or stopped, the repos the factory serves with their control state, and the queue task with how many tasks are under it. The status doesn't carry the factory's configured queue list, so the queue shown is the one new tasks go under.
+
+Factory controls (budgets, queues, pausing) land on the Factory page as they become settable at runtime; today none is, so nothing there writes. No new server API. The look needs a human check.
 
 ## Architecture
 

@@ -246,6 +246,7 @@ impl Factory {
         let merge_mode = Mutex::new(config.merge.mode);
         let status = StatusBoard::new();
         status.human_grades(human_grades(&config));
+        status.queue(config.repo.queue.iter().cloned().map(TaskKey).collect());
         Factory {
             config,
             targets,

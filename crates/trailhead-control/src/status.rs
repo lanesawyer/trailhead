@@ -24,6 +24,7 @@ struct Inner {
     holding: Option<String>,
     targets: Vec<TargetSpend>,
     human_grades: Vec<Grade>,
+    queue: Vec<TaskKey>,
     seq: u64,
 }
 
@@ -43,6 +44,7 @@ impl Default for StatusBoard {
                 holding: None,
                 targets: Vec::new(),
                 human_grades: Vec::new(),
+                queue: Vec::new(),
                 seq: 0,
             }),
             tx: broadcast::channel(BACKLOG).0,
@@ -83,6 +85,7 @@ fn snapshot_locked(inner: &Inner) -> FactorySnapshot {
         holding: inner.holding.clone(),
         targets: inner.targets.clone(),
         human_grades: inner.human_grades.clone(),
+        queue: inner.queue.clone(),
         seq: inner.seq,
     }
 }
@@ -138,6 +141,12 @@ impl StatusBoard {
     /// changes it.
     pub fn human_grades(&self, grades: Vec<Grade>) {
         self.inner.lock().unwrap().human_grades = grades;
+    }
+
+    /// Sets the repo's queue tasks, which the snapshot carries. They come from the settings and don't change while
+    /// the control plane runs, so they are in the snapshot and not the stream.
+    pub fn queue(&self, queue: Vec<TaskKey>) {
+        self.inner.lock().unwrap().queue = queue;
     }
 
     pub fn control(&self, control: ControlState) {
