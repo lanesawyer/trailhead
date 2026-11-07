@@ -598,7 +598,8 @@ pub struct BoardColumn {
     pub count: usize,
 }
 
-/// The scrolling body of the column for this status, a child of its [`BoardColumn`].
+/// The scrolling body of the column for this status. It is a grandchild of its [`BoardColumn`]: the body and its
+/// scrollbar share a frame, which sits under the shell after the header.
 #[derive(Component)]
 pub struct ColumnBody(pub Status);
 
@@ -1853,6 +1854,44 @@ mod in_place_tests {
     fn count_cards(app: &mut App) -> usize {
         let mut q = app.world_mut().query::<&BoardCard>();
         q.iter(app.world()).count()
+    }
+
+    #[test]
+    fn a_dressed_column_is_a_header_and_a_frame_holding_the_body_and_scrollbar() {
+        let mut app = app();
+        // The plain test app never dresses columns. Run that system alone, on bodies it sees as new.
+        app.add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>()
+            .init_resource::<BoardScroll>()
+            .add_systems(Update, dress_columns);
+        let bodies: Vec<(Entity, Status)> =
+            app.world_mut().query::<(Entity, &ColumnBody)>().iter(app.world()).map(|(e, b)| (e, b.0)).collect();
+        for (id, status) in bodies {
+            app.world_mut().entity_mut(id).remove::<ColumnBody>().insert(ColumnBody(status));
+        }
+        settle(&mut app);
+        let mut q = app.world_mut().query::<(Entity, &BoardColumn)>();
+        let shells: Vec<Entity> = q.iter(app.world()).map(|(e, _)| e).collect();
+        assert!(!shells.is_empty());
+        for shell in shells {
+            let world = app.world();
+            let kids: Vec<Entity> = world.get::<Children>(shell).expect("a dressed shell has children").to_vec();
+            assert_eq!(
+                kids.len(),
+                2,
+                "shell holds the header and the frame: {:?}",
+                kids.iter().map(|k| world.get::<Name>(*k).map(Name::to_string)).collect::<Vec<_>>()
+            );
+            let (header, frame) = (kids[0], kids[1]);
+            assert!(world.get::<ColumnBody>(header).is_none());
+            assert_eq!(world.get::<Name>(frame).map(Name::as_str), Some("column frame"));
+            let inner: Vec<Entity> = world.get::<Children>(frame).expect("the frame has children").to_vec();
+            assert_eq!(inner.len(), 2, "frame holds the body and the scrollbar");
+            assert!(world.get::<ColumnBody>(inner[0]).is_some(), "the body comes first");
+            assert!(world.get::<ColumnBody>(inner[1]).is_none(), "the scrollbar comes second");
+            assert_eq!(world.get::<ChildOf>(inner[0]).map(ChildOf::parent), Some(frame));
+        }
     }
 
     #[test]
