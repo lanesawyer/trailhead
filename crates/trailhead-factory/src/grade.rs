@@ -1,5 +1,7 @@
 //! Risk grades for a PR (`docs/factory/review.md#grades`): the task's grade, raised by what the diff touches.
 
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 use trailhead_model::Grade;
 
@@ -120,8 +122,22 @@ const CHECK_DEFINITIONS: &[&str] = &[
     ".github/workflows/**",
 ];
 
+/// Compiles globs into one set, skipping any that don't compile (as [`glob_match`] matches nothing for those).
+fn compile_glob_set<'g>(patterns: impl IntoIterator<Item = &'g str>) -> globset::GlobSet {
+    let mut set = globset::GlobSet::builder();
+    for p in patterns {
+        if let Ok(g) = globset::GlobBuilder::new(p).literal_separator(true).build() {
+            set.add(g);
+        }
+    }
+    set.build().unwrap_or_else(|_| globset::GlobSet::empty())
+}
+
+static CHECK_DEFINITION_SET: LazyLock<globset::GlobSet> =
+    LazyLock::new(|| compile_glob_set(CHECK_DEFINITIONS.iter().copied()));
+
 pub fn is_check_definition(path: &str) -> bool {
-    CHECK_DEFINITIONS.iter().any(|p| glob_match(p, path))
+    CHECK_DEFINITION_SET.is_match(path)
 }
 
 /// Whether a `Cargo.lock` patch only edits dependency lists: no package added or removed, no version, source or
@@ -164,13 +180,14 @@ impl Grader<'_> {
     pub fn grade(&self, task: Option<Grade>, files: &[ChangedFile]) -> PrGrade {
         // (grade, reason) per finding.
         let mut found: Vec<(Grade, String)> = Vec::new();
+        // Compiled once for all files, not per file and glob.
+        let rules: Vec<(Grade, globset::GlobSet)> = self
+            .rules
+            .iter()
+            .map(|(grade, globs)| (*grade, compile_glob_set(globs.iter().map(String::as_str))))
+            .collect();
         for f in files {
-            let rule = self
-                .rules
-                .iter()
-                .filter(|(_, globs)| globs.iter().any(|g| glob_match(g, &f.path)))
-                .map(|(grade, _)| *grade)
-                .max();
+            let rule = rules.iter().filter(|(_, set)| set.is_match(&f.path)).map(|(grade, _)| *grade).max();
             let lock_edit = f.path.rsplit('/').next() == Some("Cargo.lock")
                 && f.patch.as_deref().is_some_and(is_dependency_list_only);
             if let Some(grade) = rule.filter(|_| !lock_edit) {
@@ -265,6 +282,19 @@ mod tests {
         assert!(glob_match("src/[ab].rs", "src/b.rs"));
         assert!(!glob_match("src/[ab].rs", "src/c.rs"));
         assert!(!glob_match("src/[ab", "src/[ab"));
+    }
+
+    #[test]
+    fn glob_sets_match_like_glob_match() {
+        let set = compile_glob_set(["docs/*.md", "src/[ab", "crates/{core,server}/**"]);
+        assert!(set.is_match("docs/a.md"));
+        assert!(!set.is_match("docs/a/b.md"));
+        assert!(set.is_match("crates/server/src/a.rs"));
+        assert!(!set.is_match("crates/cli/src/a.rs"));
+        assert!(!set.is_match("src/[ab"));
+        assert!(is_check_definition(".github/workflows/ci.yml"));
+        assert!(is_check_definition("mise.toml"));
+        assert!(!is_check_definition("crates/mise.toml"));
     }
 
     #[test]
