@@ -94,7 +94,8 @@ mod tests {
 
     #[test]
     fn the_scrollbar_lies_in_the_shell_padding_so_the_body_has_none_of_its_own() {
-        const { assert!(SCROLLBAR_WIDTH + SCROLLBAR_EDGE <= space::CONTROL_INSET) };
+        // The bar fills the padding exactly: `SCROLLBAR_EDGE` of gap from the cards, then the bar, flush with the shell.
+        const { assert!(SCROLLBAR_WIDTH + SCROLLBAR_EDGE == space::CONTROL_INSET) };
         assert_eq!(node_of(column_body()).padding, UiRect::ZERO);
     }
 

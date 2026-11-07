@@ -9,8 +9,10 @@ use bevy::feathers::controls::FeathersScrollbar;
 use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, Scrollbar};
 
-/// How thick a scrollbar is, and how far in from the edge it lies.
+/// How thick a scrollbar is.
 pub const SCROLLBAR_WIDTH: f32 = 6.0;
+/// The gap between a vertical bar and the area it scrolls, which is also how far a horizontal bar sits in from the
+/// bottom edge. A vertical bar takes this plus `SCROLLBAR_WIDTH` of room.
 pub const SCROLLBAR_EDGE: f32 = 2.0;
 
 /// The scrollbar of the scrolling node `target`, for scrolling along `orientation`. Spawn it into the target's
