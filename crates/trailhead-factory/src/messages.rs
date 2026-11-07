@@ -156,6 +156,18 @@ pub fn cannot_approve(why: &str) -> String {
     format!("the factory can't move the task to approved ({why})")
 }
 
+/// Why an agent that isn't a delegated reviewer can't approve a task; it ends up in the merger's PR comment.
+pub fn not_a_reviewer(agent: &str, task: &str, project: &str) -> String {
+    format!(
+        "{agent} can't approve {task}: it isn't a delegated reviewer, so a person has to list it as a reviewer of project {project}"
+    )
+}
+
+/// What the run reports when the daemon couldn't finish it after the agent's work was over; it can reach a park question.
+pub fn finishing_failed(error: &dyn std::fmt::Display) -> String {
+    format!("finishing the run failed: {error}")
+}
+
 // ---- On the task ----
 
 /// The reason a PR's grade carries when a person raised the task above what its files matched.
@@ -559,6 +571,16 @@ pub fn ci_failure_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_the_agent_task_and_project_when_it_cannot_approve() {
+        let m = not_a_reviewer("factory/merger", "TRAIL-7", "TRAIL");
+        assert_eq!(
+            m,
+            "factory/merger can't approve TRAIL-7: it isn't a delegated reviewer, so a person has to list it as a reviewer of project TRAIL"
+        );
+        assert_eq!(finishing_failed(&"boom"), "finishing the run failed: boom");
+    }
 
     #[test]
     fn ci_failure_feedback_does_not_claim_ci_passed_before_an_update() {
