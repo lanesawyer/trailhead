@@ -316,7 +316,7 @@ pub fn build(
             let holder = input.claims.iter().find(|c| c.task_id == task.id).map(|c| c.holder_id);
             let holder_agent = holder.and_then(agent_name);
 
-            let mut lines = vec![format!("status: {}", status_label(status))];
+            let mut lines = Vec::new();
             match (&holder_agent, holder) {
                 (Some(name), _) => lines.push(format!("held by {name}")),
                 (None, Some(h)) => lines.push(format!("held by {}", h.to_string().chars().take(8).collect::<String>())),
@@ -1085,9 +1085,14 @@ fn layout(
         plan.push((key.to_string(), items));
     };
 
-    let (run, status): (Vec<&String>, Vec<&String>) = view.lines.iter().partition(|l| is_run_line(l));
+    let (run, mut status): (Vec<String>, Vec<String>) = view.lines.iter().cloned().partition(|l| is_run_line(l));
+    // The "Move to" dropdown shows the status when it is drawn; otherwise the section says it in words.
+    let has_move = live && view.actions.iter().any(|a| matches!(a, Action::Status(_)));
+    if let (Some(s), false) = (view.status, has_move) {
+        status.insert(0, format!("status: {}", status_label(s)));
+    }
     for (key, heading, lines) in [("status", "Status", status), ("run", "Run", run)] {
-        if lines.is_empty() {
+        if lines.is_empty() && !(key == "status" && (view.priority.is_some() || view.status.is_some())) {
             continue;
         }
         let mut items = Vec::new();
@@ -2651,6 +2656,23 @@ mod tests {
         assert_eq!(activity[1].author, "lane");
         assert_eq!(activity[2].tags, ["request changes", "m-1"]);
         assert!(!activity[2].open_question);
+    }
+
+    #[test]
+    fn the_status_line_shows_only_when_the_move_dropdown_does_not() {
+        let f = fixture();
+        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
+        let view = v;
+        let texts = |live: bool| -> Vec<String> {
+            let plan = layout(&view, live, "offline", 0, &|_| None);
+            plan.iter()
+                .flat_map(|(_, items)| items)
+                .filter_map(|(_, b)| if let Block::Text { text, .. } = b { Some(text.clone()) } else { None })
+                .collect()
+        };
+        assert!(!view.lines.iter().any(|l| l.starts_with("status:")));
+        let moves = view.actions.iter().any(|a| matches!(a, Action::Status(_)));
+        assert_eq!(texts(true).iter().any(|t| t.starts_with("status:")), !moves);
     }
 
     #[test]
