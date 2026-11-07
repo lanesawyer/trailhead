@@ -181,8 +181,9 @@ impl Factory {
             Run::Lost(..) => unreachable!("a lost run returns before the verdict is recorded"),
             Run::Breach(reason, _) => {
                 // A breach is the task's doing, like a worker's: the round counts, and the task parks for a human
-                // rather than being reviewed again on the next reconcile (TRAIL-319). The reviewer's sandbox is
-                // already destroyed, so there's nothing to suspend.
+                // rather than being reviewed again on the next reconcile (TRAIL-319). The reviewer's sandbox has
+                // already had its destroy attempted (a failed destroy is left for reconcile), so there's nothing
+                // to suspend.
                 self.setbacks.lock().unwrap().remove(&task.key);
                 tracing::warn!(task = %task.key.0, %reason, "reviewer breached its budget; parking");
                 // Recorded before the task is reopened, so a park cut short is finished by reconcile.
