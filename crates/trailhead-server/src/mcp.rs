@@ -421,10 +421,10 @@ impl TrailheadMcp {
         let store = &self.state.store;
         let task = attempt!(store.create_task(ctx, new).await);
         for blocker in &a.blocked_by {
-            attempt!(store.add_dependency(ctx, blocker, &task.key.0).await);
+            attempt!(store.add_dependency(ctx, blocker, &task.key).await);
         }
         for blocked in &a.blocks {
-            attempt!(store.add_dependency(ctx, &task.key.0, blocked).await);
+            attempt!(store.add_dependency(ctx, &task.key, blocked).await);
         }
         let mut out = task_line(&task);
         let similar = store.similar_tasks(ctx, &task.project_id.to_string(), &task.title, Some(task.id)).await;
@@ -611,7 +611,7 @@ impl TrailheadMcp {
         let task = attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await);
         if let Some(body) = a.handoff.filter(|b| !b.trim().is_empty()) {
             let new = NewComment::new(CommentKind::Handoff, body);
-            attempt!(self.state.store.add_comment(&ctx, &task.key.0, new).await);
+            attempt!(self.state.store.add_comment(&ctx, &task.key, new).await);
         }
         text(task_line(&task))
     }

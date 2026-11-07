@@ -14,7 +14,7 @@ pub struct ParseError(pub String);
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.pad(&self.0)
+        f.write_str(&self.0)
     }
 }
 
@@ -119,11 +119,12 @@ string_enum!(ProjectStatus {
 pub struct TaskKey(pub String);
 
 impl TaskKey {
-    /// The project's key: everything before the last dash, or the whole key if it has none.
+    /// The key as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// The project's key: everything before the last dash, or the whole key if it has none.
     pub fn project(&self) -> &str {
         self.0.rsplit_once('-').map_or(self.0.as_str(), |(p, _)| p)
     }
