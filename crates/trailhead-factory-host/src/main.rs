@@ -392,7 +392,12 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     let feed = surface::BoardFeed::default();
     let build =
         std::env::current_exe().and_then(std::fs::read).map(|b| build_id(&b)).unwrap_or_else(|_| "unknown".into());
-    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths)).with_status(Arc::new(feed.clone())).build(build);
+    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths)).with_status(Arc::new(feed.clone()));
+    let ui = match LOGS.get() {
+        Some(buffer) => ui.with_logs(Arc::new(LogsFeed(buffer.clone()))),
+        None => ui,
+    };
+    let ui = ui.build(build);
     let tunnel = Router::builder(endpoint.clone())
         .accept(API_ALPN, ApiTunnel::new(opts.server, peers))
         .accept(UI_ALPN, ui)
@@ -805,7 +810,22 @@ fn open_log_file() -> Option<logfile::Rotating> {
     }
 }
 
-/// Logs to the terminal, and to `file` when there is one.
+/// The control plane's recent log, for Lookout's Logs page; filled by the layer `init_logging` adds.
+static LOGS: std::sync::OnceLock<trailhead_control::logs::LogBuffer> = std::sync::OnceLock::new();
+
+/// [`LOGS`] as the feed `trailhead/ui/0` serves.
+struct LogsFeed(trailhead_control::logs::LogBuffer);
+
+impl trailhead_daemon::ui::LogFeed for LogsFeed {
+    fn subscribe(
+        &self,
+    ) -> (Vec<trailhead_factory::logs::LogLine>, tokio::sync::broadcast::Receiver<trailhead_factory::logs::LogLine>)
+    {
+        self.0.subscribe()
+    }
+}
+
+/// Logs to the terminal, to `file` when there is one, and to the in-memory buffer Lookout reads.
 fn init_logging(file: Option<logfile::Rotating>) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -814,8 +834,10 @@ fn init_logging(file: Option<logfile::Rotating>) {
     let file = file.map(|f| {
         tracing_subscriber::fmt::layer().with_timer(timer()).with_ansi(false).with_writer(std::sync::Mutex::new(f))
     });
+    let buffer = LOGS.get_or_init(trailhead_control::logs::LogBuffer::default);
     tracing_subscriber::registry()
         .with(filter)
+        .with(buffer.layer())
         .with(tracing_subscriber::fmt::layer().with_timer(timer()))
         .with(file)
         .init();

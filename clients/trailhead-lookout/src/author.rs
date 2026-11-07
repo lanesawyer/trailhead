@@ -126,7 +126,7 @@ impl Open {
 
     /// An edit of `task`, a task as the mirror holds it.
     pub fn edit(task: &Task) -> Open {
-        let target = Target::Edit { key: task.key.clone(), version: task.version };
+        let target = Target::Edit { key: task.key.0.clone(), version: task.version };
         let draft = Draft {
             title: task.title.clone(),
             description: task.description.clone(),
@@ -351,7 +351,7 @@ fn on_act(
         Act::NewSubtask(key) => form.open(Open::create(key)),
         // An existing task is edited in place, in the task modal.
         Act::Edit(key) => {
-            if let Some(task) = tasks.iter().find(|t| t.0.key == *key) {
+            if let Some(task) = tasks.iter().find(|t| t.0.key == key.as_str()) {
                 selection.0 = Some(Subject::Task(task.0.id.to_string()));
             }
         }
