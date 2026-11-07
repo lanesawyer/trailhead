@@ -3468,19 +3468,27 @@ mod in_place_tests {
         assert!(app.world().get::<InlineText>(title).unwrap().error().is_empty());
     }
 
+    #[derive(Resource, Default)]
+    struct Refetched(usize);
+
+    fn count_refetches(mut asked: MessageReader<Refetch>, mut n: ResMut<Refetched>) {
+        n.0 += asked.read().count();
+    }
+
     #[test]
     fn a_conflict_fetches_again_says_so_and_keeps_what_was_typed() {
         let mut app = app();
         let description = editor(&mut app, Field::Description);
         app.world_mut().trigger(InlineEdited { entity: description, old: String::new(), new: "mine".into() });
         sent(&mut app);
-        app.world_mut().resource_mut::<Messages<Refetch>>().clear();
+        // Counted by a reader rather than drained afterwards: MinimalPlugins drops messages after fixed-timestep
+        // ticks, which follow wall-clock time, so on a slow runner settle() could outlive the message.
+        app.init_resource::<Refetched>().add_systems(Update, count_refetches);
         answer(&mut app, description, Outcome::Conflict { current_version: Some(5), message: "stale".into() });
         let t = app.world().get::<InlineText>(description).unwrap();
         assert_eq!(t.draft(), Some("mine"));
         assert!(t.error().contains("changed since you looked"), "{}", t.error());
-        let asked = app.world_mut().resource_mut::<Messages<Refetch>>().drain().count();
-        assert_eq!(asked, 1, "the task is fetched again");
+        assert_eq!(app.world().resource::<Refetched>().0, 1, "the task is fetched again");
     }
 
     #[test]
