@@ -22,7 +22,6 @@ pub(crate) struct Facts<'a> {
 pub(crate) struct Decision {
     pub passed: Vec<GateKind>,
     pub waiting: Vec<GateKind>,
-    pub failing: Vec<String>,
     pub gates_pass: bool,
     /// Every gate passed and the grade auto-merges, so a merger that was on would merge now.
     pub would_merge: bool,
@@ -35,16 +34,13 @@ pub(crate) struct Decision {
 }
 
 pub(crate) fn decide(f: &Facts) -> Decision {
-    let (mut passed, mut waiting, mut failing) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut passed, mut waiting) = (Vec::new(), Vec::new());
     for required in f.require {
         let (name, ok) = match required {
             GateKind::Ci => match f.ci {
                 CiState::Passed => (GateKind::Ci, true),
-                CiState::Pending => (GateKind::Ci, false),
-                CiState::Failed { checks } => {
-                    failing = checks.clone();
-                    (GateKind::Ci, false)
-                }
+                // A failure reworks the task before the merger decides, so here it only counts as not passed.
+                CiState::Pending | CiState::Failed { .. } => (GateKind::Ci, false),
             },
             GateKind::AgentReview => (GateKind::AgentReview, f.verdict_approves),
             GateKind::Human => (GateKind::Human, f.status == Status::Approved && f.human_head == Some(f.head)),
@@ -76,7 +72,6 @@ pub(crate) fn decide(f: &Facts) -> Decision {
         would_merge: gates_pass && f.auto_merge && f.merge_mode == MergeMode::Shadow,
         passed,
         waiting,
-        failing,
         gates_pass,
         withdraw,
         approve,
@@ -120,13 +115,6 @@ mod tests {
         let d = decide(&facts(&[Checks, Ci], &CiState::Pending));
         assert_eq!((d.passed, d.waiting), (vec![Checks], vec![Ci]));
         assert!(!d.approve && !d.merge && !d.would_merge);
-    }
-
-    #[test]
-    fn failed_ci_names_the_failing_checks() {
-        let ci = CiState::Failed { checks: vec!["test".into()] };
-        let d = decide(&facts(&[Ci], &ci));
-        assert_eq!((d.waiting, d.failing), (vec![Ci], vec!["test".to_string()]));
     }
 
     #[test]

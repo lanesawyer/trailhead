@@ -58,7 +58,7 @@ The CLI prints one terse line per task; add `--json` for full detail. MCP answer
    - `progress`: short status on long work.
    - `question`: only for what a human (or another agent) must answer. It parks the task in `needs_input` and takes it out of the ready queue until resolved. Don't ask what you can find out yourself.
    - `note`: anything else.
-5. **Finish with a handoff**: what changed, what's left, anything surprising. `done -m` / `update_task` with `handoff` posts it and closes the task in one step. If the project requires review, or you are unsure the work is accepted, use `review`/`in_review`; only a human or a delegated reviewer (never one who did the work) can move a task from `in_review` to `approved` or `done`.
+5. **Finish with a handoff**: what changed, what's left, anything surprising. `done -m` / `update_task` with `handoff` posts it and closes the task in one step. If the project requires review, or you are unsure the work is accepted, use `review`/`in_review`; only a human or a delegated reviewer (never one who did the work: that is refused with `forbidden`, not `review_required`) can move a task from `in_review` to `approved` or `done`.
 6. **Stopping partway**: leave a handoff saying exactly what's left, then release. Never just walk away holding a claim.
 
 ## Etiquette
@@ -77,4 +77,4 @@ The CLI prints one terse line per task; add `--json` for full detail. MCP answer
 
 ## Errors
 
-Errors carry a stable code: CLI `error[code]: message`, MCP tool errors `error[code]: message`, REST `{"error": {"code", "message"}}`. Common ones: `claim_held`, `claim_lost`, `not_claim_holder`, `blocked_by`, `invalid_transition`, `review_required`, `version_conflict`, `not_found`, `rate_limited`. The full list and the REST API are at `GET /llms.txt` on the server.
+Errors carry a stable code: CLI `error[code]: message`, MCP tool errors `error[code]: message`, REST `{"error": {"code", "message"}}`. Common ones: `claim_held`, `claim_lost`, `not_claim_holder`, `blocked_by`, `invalid_transition`, `review_required`, `forbidden` (a delegated reviewer approving work it claimed or sent to review itself gets this rather than `review_required`; don't retry, hand it to another reviewer or a human), `version_conflict`, `not_found`, `rate_limited`. The full list and the REST API are at `GET /llms.txt` on the server.

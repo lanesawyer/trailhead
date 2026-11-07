@@ -167,7 +167,7 @@ fn ask(
         return;
     }
     let Some(id) = detail.id.clone() else { return };
-    let key = tasks.iter().find(|t| t.0.id.to_string() == id).map_or_else(|| id.clone(), |t| t.0.key.clone());
+    let key = tasks.iter().find(|t| t.0.id.to_string() == id).map_or_else(|| id.clone(), |t| t.0.key.0.clone());
     fetching.next += 1;
     let seq = fetching.next;
     fetching.asked = Some((seq, id));

@@ -28,6 +28,9 @@ macro_rules! string_enum {
         pub enum $name { $($variant),+ }
 
         impl $name {
+            /// Every variant, in declaration order (lifecycle order for `Status`).
+            pub const ALL: [$name; [$(stringify!($variant)),+].len()] = [$($name::$variant),+];
+
             pub fn as_str(self) -> &'static str {
                 match self { $($name::$variant => $s),+ }
             }
@@ -66,17 +69,6 @@ string_enum!(Status "status" {
 });
 
 impl Status {
-    /// Every status, in lifecycle order.
-    pub const ALL: [Status; 7] = [
-        Status::Open,
-        Status::InProgress,
-        Status::NeedsInput,
-        Status::InReview,
-        Status::Approved,
-        Status::Done,
-        Status::Cancelled,
-    ];
-
     pub fn is_closed(self) -> bool {
         matches!(self, Status::Done | Status::Cancelled)
     }
@@ -118,18 +110,57 @@ string_enum!(ProjectStatus "project status" {
 
 /// A task's key, `TRAIL-42`: its project's key, a dash and its number.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = String, example = "TRAIL-42"))]
 pub struct TaskKey(pub String);
 
 impl TaskKey {
+    /// The key as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// The project's key: everything before the last dash, or the whole key if it has none.
     pub fn project(&self) -> &str {
         self.0.rsplit_once('-').map_or(self.0.as_str(), |(p, _)| p)
     }
 }
 
+impl PartialEq<str> for TaskKey {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for TaskKey {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl std::ops::Deref for TaskKey {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for TaskKey {
+    fn from(key: String) -> TaskKey {
+        TaskKey(key)
+    }
+}
+
+impl From<&str> for TaskKey {
+    fn from(key: &str) -> TaskKey {
+        TaskKey(key.into())
+    }
+}
+
 impl std::fmt::Display for TaskKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.pad(&self.0)
     }
 }
 
@@ -280,7 +311,7 @@ pub struct Task {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub project_id: Uuid,
-    pub key: String,
+    pub key: TaskKey,
     pub title: String,
     pub description: String,
     pub status: Status,
@@ -382,18 +413,18 @@ pub struct TaskDetail {
     pub task: Task,
     pub claim: Option<Claim>,
     /// Keys of unfinished tasks blocking this one.
-    pub blocked_by: Vec<String>,
+    pub blocked_by: Vec<TaskKey>,
     /// The id of the `request_changes` review comment that makes this an `in_review` task with changes requested,
     /// computed like `blocked_by` and never stored (see [`changes_requested`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_requested: Option<Uuid>,
     /// Keys of tasks this one blocks.
-    pub blocks: Vec<String>,
+    pub blocks: Vec<TaskKey>,
     pub comments: Vec<Comment>,
     /// Key of the task this one was cancelled as a duplicate of.
-    pub duplicate_of: Option<String>,
+    pub duplicate_of: Option<TaskKey>,
     /// Keys of tasks cancelled as duplicates of this one.
-    pub duplicates: Vec<String>,
+    pub duplicates: Vec<TaskKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -463,6 +494,14 @@ mod tests {
     }
 
     #[test]
+    fn status_all_is_in_lifecycle_order() {
+        assert_eq!(
+            Status::ALL.map(Status::as_str),
+            ["open", "in_progress", "needs_input", "in_review", "approved", "done", "cancelled"]
+        );
+    }
+
+    #[test]
     fn closed_tasks_can_only_reopen() {
         for to in Status::ALL {
             assert_eq!(Status::Done.can_transition_to(to), matches!(to, Status::Open | Status::Done));
@@ -476,6 +515,13 @@ mod tests {
         assert_eq!(TaskKey("MY-APP-7".into()).project(), "MY-APP");
         assert_eq!(TaskKey("nodash".into()).project(), "nodash");
         assert_eq!(serde_json::to_value(TaskKey("TRAIL-1".into())).unwrap(), "TRAIL-1");
+    }
+
+    #[test]
+    fn a_task_key_round_trips_as_a_string_and_pads_like_one() {
+        let key: TaskKey = serde_json::from_value("TRAIL-1".into()).unwrap();
+        assert_eq!(key, "TRAIL-1");
+        assert_eq!(format!("{key:<8}|"), "TRAIL-1 |");
     }
 
     #[test]
