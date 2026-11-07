@@ -1777,6 +1777,85 @@ mod in_place_tests {
         assert_eq!((held[&Status::Open], held[&Status::InProgress]), (1, 3));
     }
 
+    /// Every card sits in a column's body, and there is one card per task shown.
+    fn assert_placed(app: &mut App, step: &str) {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &BoardCard, Option<&ChildOf>)>();
+        let cards: Vec<(Entity, String, Option<Entity>)> =
+            q.iter(world).map(|(e, c, p)| (e, c.0.key.clone(), p.map(ChildOf::parent))).collect();
+        for (e, key, parent) in &cards {
+            let in_body = parent.is_some_and(|p| world.get::<ColumnBody>(p).is_some());
+            assert!(in_body, "{step}: card {key} ({e}) is not in a column (parent {parent:?})");
+        }
+        let mut keys: Vec<&String> = cards.iter().map(|(_, k, _)| k).collect();
+        keys.sort();
+        let n = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), n, "{step}: two cards for one task: {cards:?}");
+    }
+
+    #[test]
+    fn cards_stay_in_their_columns_whichever_way_they_move() {
+        // A card moving back to an earlier column was left without a parent, drawn at the window's top left
+        // (TRAIL-1009).
+        let mut app = app();
+        let mut n = 100;
+        let mut version = 10;
+        let mut move_to = |app: &mut App, id: &str, status: &str, title: &str, settle_after: bool| {
+            n += 1;
+            version += 1;
+            app.world_mut().write_message(SyncItem::Event(json!({
+                "id": n, "entity": "task", "entity_id": sid(id), "kind": "task.updated",
+                "after": task_json(json!({"id": id, "key": id.to_uppercase(), "title": title, "project_id": "p1",
+                          "status": status, "priority": 2, "version": version})),
+            })));
+            if settle_after {
+                settle(app);
+            }
+        };
+        let steps: &[(&str, &str)] = &[
+            ("t3", "in_review"),
+            ("t3", "in_progress"),
+            ("t3", "open"),
+            ("t1", "needs_input"),
+            ("t1", "open"),
+            ("t4", "in_review"),
+            ("t2", "in_review"),
+            ("t4", "open"),
+            ("t2", "in_progress"),
+            ("t2", "done"),
+            ("t2", "open"),
+            ("t1", "in_review"),
+            ("t1", "in_progress"),
+        ];
+        for (i, (id, status)) in steps.iter().enumerate() {
+            move_to(&mut app, id, status, &format!("{id} v{i}"), true);
+            assert_placed(&mut app, &format!("step {i} {id}->{status}"));
+        }
+        // Several in one frame, back and forth.
+        move_to(&mut app, "t3", "in_review", "a", false);
+        move_to(&mut app, "t4", "needs_input", "b", false);
+        move_to(&mut app, "t3", "open", "c", false);
+        settle(&mut app);
+        assert_placed(&mut app, "burst");
+        // Closed columns shown, a card moved into one, hidden again.
+        app.world_mut().resource_mut::<Filter>().closed = true;
+        settle(&mut app);
+        move_to(&mut app, "t1", "cancelled", "d", true);
+        assert_placed(&mut app, "into cancelled");
+        app.world_mut().resource_mut::<Filter>().closed = false;
+        settle(&mut app);
+        assert_placed(&mut app, "closed hidden");
+        move_to(&mut app, "t1", "in_progress", "e", true);
+        assert_placed(&mut app, "out of cancelled");
+        // One frame at a time, with a move every frame.
+        for (i, status) in ["in_review", "open", "needs_input", "in_progress", "in_review"].iter().enumerate() {
+            move_to(&mut app, "t2", status, &format!("f{i}"), false);
+            app.update();
+            assert_placed(&mut app, &format!("frame {i} t2->{status}"));
+        }
+    }
+
     #[test]
     fn a_filter_change_despawns_only_the_cards_it_hides() {
         let mut app = app();
