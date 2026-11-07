@@ -807,18 +807,7 @@ fn open_log_file() -> Option<logfile::Rotating> {
 
 /// Logs to the terminal, and to `file` when there is one.
 fn init_logging(file: Option<logfile::Rotating>) {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    let timer = trailhead_factory::logging::local_timer;
-    let file = file.map(|f| {
-        tracing_subscriber::fmt::layer().with_timer(timer()).with_ansi(false).with_writer(std::sync::Mutex::new(f))
-    });
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().with_timer(timer()))
-        .with(file)
-        .init();
+    trailhead_log::init(trailhead_log::env_filter_or("info"), file.map(std::sync::Mutex::new));
 }
 
 #[tokio::main]
