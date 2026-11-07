@@ -440,9 +440,10 @@ mod tests {
             .unwrap()
             .0;
         app.world_mut().trigger(Activate { entity: button });
+        // Drain before settling: messages live two updates, and settle runs more than that.
+        let sent: Vec<_> = app.world_mut().resource_mut::<Messages<SendNet>>().drain().collect();
         settle(&mut app);
         assert_eq!(modals(&mut app), 0);
-        let sent: Vec<_> = app.world_mut().resource_mut::<Messages<SendNet>>().drain().collect();
         assert!(matches!(sent.as_slice(), [SendNet(NetCommand::Disconnect)]));
     }
 
