@@ -12,11 +12,13 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tokio::sync::broadcast;
 use trailhead_core::{Ctx, NewProject, Principal, Store};
 use trailhead_daemon::net::{read_frame, write_frame};
-use trailhead_daemon::ui::{RepoFeed, StatusFeed, StatusFrame, UI_ALPN, UiAllowlist, UiProtocol, Unsupported};
+use trailhead_daemon::ui::{LogFeed, RepoFeed, StatusFeed, StatusFrame, UI_ALPN, UiAllowlist, UiProtocol, Unsupported};
+use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, SandboxState, SandboxStatus, Sequenced};
 use trailhead_lookout::board;
 use trailhead_lookout::connection::{Api, Connection, ConnectionPlugin, ConnectionStatus, LocalEndpoint, SendNet};
 use trailhead_lookout::factory::{Campsite, FactoryLink, FactoryStatus};
+use trailhead_lookout::logs::LogState;
 use trailhead_lookout::net::{NetCommand, NetConfig, Network, Reason};
 
 /// One repo, "o/r", with an idle sandbox, whose later events the test sends.
@@ -42,6 +44,26 @@ impl StatusFeed for TestFeed {
     }
 }
 
+/// Two lines kept, and whatever the test sends after.
+struct TestLogs(broadcast::Sender<LogLine>);
+
+fn log_line(message: &str) -> LogLine {
+    LogLine {
+        ts_ms: 1,
+        level: LogLevel::Info,
+        target: "t".into(),
+        repo: None,
+        task: Some("TRAIL-1".into()),
+        message: message.into(),
+    }
+}
+
+impl LogFeed for TestLogs {
+    fn subscribe(&self) -> (Vec<LogLine>, broadcast::Receiver<LogLine>) {
+        (vec![log_line("one"), log_line("two")], self.0.subscribe())
+    }
+}
+
 async fn control_plane(key: SecretKey, lookup: &Arc<MemoryLookup>, rig: &Rig) -> (Router, EndpointAddr) {
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(key)
@@ -52,12 +74,11 @@ async fn control_plane(key: SecretKey, lookup: &Arc<MemoryLookup>, rig: &Rig) ->
         .unwrap();
     let addr = endpoint.addr();
     lookup.add_endpoint_info(addr.clone());
-    let router = Router::builder(endpoint)
-        .accept(
-            UI_ALPN,
-            UiProtocol::new(rig.server, rig.allowed.clone()).with_status(Arc::new(TestFeed(rig.events.clone()))),
-        )
-        .spawn();
+    let mut ui = UiProtocol::new(rig.server, rig.allowed.clone()).with_status(Arc::new(TestFeed(rig.events.clone())));
+    if let Some(logs) = &rig.logs {
+        ui = ui.with_logs(Arc::new(TestLogs(logs.clone())));
+    }
+    let router = Router::builder(endpoint).accept(UI_ALPN, ui).spawn();
     (router, addr)
 }
 
@@ -72,6 +93,8 @@ struct Rig {
     human: Ctx,
     token_id: uuid::Uuid,
     events: broadcast::Sender<Sequenced>,
+    /// The log the control plane serves; `None` for a control plane that doesn't know the request.
+    logs: Option<broadcast::Sender<LogLine>>,
 }
 
 impl Rig {
@@ -102,6 +125,7 @@ impl Rig {
             human,
             token_id: token_row.id,
             events: broadcast::channel(16).0,
+            logs: Some(broadcast::channel(16).0),
         }
     }
 
@@ -307,6 +331,55 @@ async fn the_factory_status_arrives_over_the_ui_protocol() {
     rig.events.send(Sequenced { seq: 2, event: busy }).unwrap();
     until(&mut app, "event", |a| a.world().resource::<FactoryStatus>().repos["o/r"].seq == 2).await;
     assert_eq!(campsites(&mut app).len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_log_is_followed_only_while_asked_for() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+    let messages =
+        |a: &App| a.world().resource::<LogState>().entries().map(|e| e.line.message.clone()).collect::<Vec<_>>();
+
+    // Nothing is followed until the Logs page asks.
+    for _ in 0..10 {
+        app.update();
+    }
+    assert!(messages(&app).is_empty());
+
+    send(&mut app, NetCommand::Logs(true));
+    until(&mut app, "the backlog", |a| messages(a) == ["one", "two"]).await;
+    rig.logs.as_ref().unwrap().send(log_line("three")).unwrap();
+    until(&mut app, "a new line", |a| messages(a) == ["one", "two", "three"]).await;
+
+    // Closed, nobody is following: a line sent now never arrives.
+    send(&mut app, NetCommand::Logs(false));
+    for _ in 0..20 {
+        app.update();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // No receiver left on the control plane's side: it stopped serving the stream.
+    assert!(rig.logs.as_ref().unwrap().send(log_line("four")).is_err());
+    for _ in 0..20 {
+        app.update();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!messages(&app).contains(&"four".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_factory_without_logs_is_too_old_to_send_them() {
+    let mut rig = Rig::new().await;
+    rig.logs = None;
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+    send(&mut app, NetCommand::Logs(true));
+    until(&mut app, "the note", |a| a.world().resource::<LogState>().note().is_some()).await;
+    assert_eq!(app.world().resource::<LogState>().note(), Some("this factory is too old to send logs"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -69,6 +69,8 @@ pub mod extent {
     /// A search box's width. Its hint is laid over the field rather than in it, so without one the box shrinks to
     /// nearly nothing in a row of controls.
     pub const SEARCH_WIDTH: f32 = 220.0;
+    /// A list that scrolls on its own inside a modal, such as the log: tall enough to read a screenful of lines.
+    pub const LIST_HEIGHT: f32 = 360.0;
 }
 
 /// The check that keeps spacings named, for an app to run over its own sources (see [`check::typed_spacings`]).
