@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::author::{Act, Authoring};
 use crate::connection::{Connection, ConnectionStatus};
 use crate::factory::{FactoryLink, FactoryStatus, Run};
-use crate::inspector::{Selection, Subject};
+use crate::inspector::{Neighbours, Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::search::{Deep, DeepHit};
 use crate::settings::SettingsButton;
@@ -509,6 +509,34 @@ fn rebuild_view(
     }
 }
 
+/// The cards before and after the task `id` in its column, in the board's order (a subtask under its parent counts
+/// where it sits). A task is in one column at most, since its status picks it.
+pub fn neighbours(view: &BoardView, id: &str) -> Neighbours {
+    for column in &view.columns {
+        if let Some(i) = column.cards.iter().position(|c| c.id == id) {
+            return Neighbours {
+                previous: i.checked_sub(1).map(|p| column.cards[p].id.clone()),
+                next: column.cards.get(i + 1).map(|c| c.id.clone()),
+            };
+        }
+    }
+    Neighbours::default()
+}
+
+/// Keeps [`Neighbours`] for the selected task as the selection and the board change.
+fn follow_neighbours(selection: Res<Selection>, view: Res<BoardView>, mut neighbours: ResMut<Neighbours>) {
+    if !(selection.is_changed() || view.is_changed()) {
+        return;
+    }
+    let next = match &selection.0 {
+        Some(Subject::Task(id)) => self::neighbours(&view, id),
+        _ => Neighbours::default(),
+    };
+    if *neighbours != next {
+        *neighbours = next;
+    }
+}
+
 /// The factory's queue task keys: what the control plane reports for its repos, or else the one parent Lookout knows.
 fn queue_keys(authoring: &Authoring, factory: Option<&FactoryStatus>) -> Vec<String> {
     let mut keys: Vec<String> =
@@ -706,7 +734,9 @@ impl Plugin for BoardPlugin {
             .init_resource::<BoardView>()
             .init_resource::<Shown>()
             .init_resource::<Tree>()
-            .add_systems(Update, (rebuild_view, sync_tree).chain())
+            .init_resource::<Selection>()
+            .init_resource::<Neighbours>()
+            .add_systems(Update, (rebuild_view, sync_tree, follow_neighbours).chain())
             .add_observer(on_pick)
             .add_observer(on_toggle_closed)
             .add_observer(on_toggle_factory);
@@ -1297,6 +1327,26 @@ mod tests {
         let col = view.columns.iter().find(|c| c.status == Status::InProgress).unwrap();
         let parents: Vec<_> = col.cards.iter().map(|c| c.parent.as_deref()).collect();
         assert_eq!(parents, [None, Some("TRAIL-102"), None]);
+    }
+
+    #[test]
+    fn neighbours_are_the_cards_either_side_in_the_column_and_none_past_its_ends() {
+        let view = run(&Filter::default());
+        let id = |key: &str| card(&view, key).id.clone();
+        let around = |key: &str| {
+            let n = neighbours(&view, &id(key));
+            let key_of = |id: Option<String>| {
+                id.map(|id| view.columns.iter().flat_map(|c| &c.cards).find(|c| c.id == id).unwrap().key.clone())
+            };
+            (key_of(n.previous), key_of(n.next))
+        };
+        // In progress is OPS-1, TRAIL-103, then TRAIL-104 nested under it.
+        assert_eq!(around("OPS-1"), (None, Some("TRAIL-103".into())));
+        assert_eq!(around("TRAIL-103"), (Some("OPS-1".into()), Some("TRAIL-104".into())));
+        assert_eq!(around("TRAIL-104"), (Some("TRAIL-103".into()), None));
+        // Never across into another column.
+        assert_eq!(around("TRAIL-102"), (None, Some("TRAIL-105".into())));
+        assert_eq!(neighbours(&view, "not on the board"), Neighbours::default());
     }
 
     fn card<'a>(view: &'a BoardView, key: &str) -> &'a Card {

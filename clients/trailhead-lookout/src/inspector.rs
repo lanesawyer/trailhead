@@ -4,8 +4,10 @@
 //!
 //! A task shows in the [`TaskModal`], in the middle of the window: its title, description, subtasks, open questions
 //! and PR in a main column, and its facts (project, status, priority, grade, claim, dates, dependencies, run) in a
-//! sidebar. The whole task is fetched when it is selected ([`crate::detail`]), for what the mirror doesn't hold. An
-//! agent still shows in the side panel, which stays for anything that suits a panel better than a modal.
+//! sidebar. The whole task is fetched when it is selected ([`crate::detail`]), for what the mirror doesn't hold. Its
+//! header has up and down arrows (and the keys up, down, K and J) to the previous and next task in its board column,
+//! and a ⋯ menu of what else can be done to it: release, cancel, undo, revert. An agent still shows in the side
+//! panel, which stays for anything that suits a panel better than a modal.
 //!
 //! There is no approve or done button. A factory task is approved by the merger once its gates pass and finished when
 //! its PR merges (`docs/factory/lifecycle.md`), so the panel links the PR and shows its merge state and gates from the
@@ -43,9 +45,9 @@ use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::sync::SyncItem;
 use crate::widgets::{
     DetailPanes, Icon, Keyed, Modal, ModalClosed, ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, badge, button,
-    danger_button, display, extent, layer, open_modal, panel, panel_header, priority_tone, row, scroll_body,
-    scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text, text_dim,
-    text_input, text_toned, token, tool_button,
+    danger_button, display, extent, icon_menu, layer, menu_item, open_modal, panel, panel_header, priority_tone, row,
+    scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text,
+    text_dim, text_input, text_toned, token, tool_button,
 };
 use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 
@@ -58,6 +60,14 @@ pub enum Subject {
 
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct Selection(pub Option<Subject>);
+
+/// The tasks before and after the selected one in its board column (ids), which the task modal's arrows go to. The
+/// board keeps it ([`crate::board`]); none at a column's end or for a task the board doesn't show.
+#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct Neighbours {
+    pub previous: Option<String>,
+    pub next: Option<String>,
+}
 
 /// How far back "revert" goes, in hours; one of [`WINDOWS`], picked from a dropdown.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +98,8 @@ pub enum Action {
     Grade(Option<Grade>),
     /// What the task modal's comment box sends: only the key of its control, since the box builds its own request.
     Comment,
+    /// The key of the one control the task modal's ⋯ menu shares, so the last item's answer shows beside the menu.
+    Menu,
 }
 
 impl Action {
@@ -102,6 +114,7 @@ impl Action {
             Action::Grade(Some(g)) => format!("grade {g}"),
             Action::Grade(None) => "clear grade".into(),
             Action::Comment => "comment".into(),
+            Action::Menu => "more".into(),
         }
     }
 }
@@ -527,7 +540,7 @@ pub fn plan(
         Action::Status(st) => Request::new(Method::PATCH, path(""), Some(json!({"status": st})), version),
         Action::Grade(g) => Request::new(Method::PATCH, path(""), Some(json!({"grade": g})), version),
         Action::Resolve(comment) => Request::new(Method::POST, format!("/v1/comments/{comment}/resolve"), None, None),
-        Action::Comment => return None,
+        Action::Comment | Action::Menu => return None,
         Action::Undo => {
             let Subject::Task(id) = subject else { return None };
             Request::new(Method::POST, "/v1/undo", Some(json!({"event_id": latest.get(id)?})), None)
@@ -671,6 +684,7 @@ pub struct InspectorPlugin;
 impl Plugin for InspectorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Selection>()
+            .init_resource::<Neighbours>()
             .init_resource::<RevertWindow>()
             .init_resource::<Latest>()
             .init_resource::<InspectorState>()
@@ -700,11 +714,16 @@ impl Plugin for InspectorUiPlugin {
             .add_observer(on_open_task)
             .add_observer(on_open_composer)
             .add_observer(on_compose_press)
+            .add_observer(on_step)
+            .add_observer(on_step_key)
+            .add_observer(on_menu_item)
             .add_systems(Startup, spawn_panel)
             // After the view is rebuilt: a modal closed from inside must not be reopened from the view it just left.
             .add_systems(
                 Update,
-                (follow_compose, sync_modal, sync_panel, dress, focus_composer, clear_sent).chain().after(rebuild),
+                (follow_compose, sync_modal, sync_panel, sync_tools, dress, focus_composer, clear_sent)
+                    .chain()
+                    .after(rebuild),
             );
     }
 }
@@ -852,9 +871,10 @@ fn send(world: &mut World, source: Entity, subject: &Subject, action: &Action) {
         agents: &agents,
         ..Input::default()
     };
-    // A revert's control is one however far back it goes; the window is read as the button is pressed.
+    // The side panel's revert is one control however far back it goes (`Revert(0)`); its window is read as the button
+    // is pressed. The modal's menu names its hours.
     let action = &match action {
-        Action::Revert(_) => Action::Revert(world.resource::<RevertWindow>().0),
+        Action::Revert(0) => Action::Revert(world.resource::<RevertWindow>().0),
         other => other.clone(),
     };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
@@ -1083,13 +1103,11 @@ fn layout(
 
 /// The task modal's two columns, each a list of sections: the main column (title, description, subtasks, open
 /// questions, the PR) and the sidebar (one fact per section, then the actions). Section keys are unique across both.
-#[allow(clippy::too_many_arguments)]
 fn layout_task(
     view: &InspectorView,
     facts: &TaskFacts,
     live: bool,
     offline: &str,
-    window: i64,
     human: &[Grade],
     answering: Option<&str>,
     note: &dyn Fn(&Action) -> Option<Control>,
@@ -1203,16 +1221,10 @@ fn layout_task(
         grade.push(("s/grade/treeline".to_string(), text_block(words, size::SECONDARY, Tone::Dim)));
     }
     add(&mut side, "s/grade", "Grade", grade);
-    let mut claim = match &facts.claim {
+    let claim = match &facts.claim {
         Some(line) => vec![("s/claim/text".to_string(), text_block(line, size::BODY, Tone::Body))],
         None => vec![("s/claim/none".to_string(), text_block("Nobody holds it", size::BODY, Tone::Dim))],
     };
-    if live && view.actions.contains(&Action::Release) {
-        claim.push((
-            "s/claim/release".to_string(),
-            Block::Act { action: Action::Release, window: None, note: note(&Action::Release) },
-        ));
-    }
     add(&mut side, "s/claim", "Claim", claim);
     for (key, heading, rows) in [
         ("s/dates", "Dates", &facts.dates),
@@ -1222,23 +1234,6 @@ fn layout_task(
     ] {
         if !rows.is_empty() {
             add(&mut side, key, heading, lines(key, rows));
-        }
-    }
-    if live {
-        let mut items = Vec::new();
-        for action in &view.actions {
-            let action = match action {
-                Action::Status(_) | Action::Resolve(_) | Action::Release => continue,
-                // One control however far back, so the answer finds it when the window changes.
-                Action::Revert(_) => Action::Revert(0),
-                other => other.clone(),
-            };
-            let window = matches!(action, Action::Revert(_)).then_some(window);
-            let block = Block::Act { note: note(&action), window, action: action.clone() };
-            items.push((format!("act/{action:?}"), block));
-        }
-        if !items.is_empty() {
-            add(&mut side, "s/actions", "Actions", items);
         }
     }
     (main, side)
@@ -1731,6 +1726,193 @@ impl Modal for TaskModal {
 struct ModalUi {
     root: Option<Entity>,
     panes: Option<DetailPanes>,
+    tools: Option<Tools>,
+}
+
+/// The task modal's own header controls, before its X.
+#[derive(Debug, Clone)]
+struct Tools {
+    previous: Entity,
+    next: Entity,
+    /// The ⋯ menu's root, hidden while there is nothing it can do.
+    menu: Entity,
+    /// Where the menu's last command stands.
+    note: Entity,
+    items: Vec<(Action, Entity)>,
+}
+
+/// On an arrow in the task modal's header.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Previous,
+    Next,
+}
+
+/// On an item of the task modal's ⋯ menu: what it does.
+#[derive(Component, Debug, Clone)]
+struct MenuAct(Action);
+
+/// What the ⋯ menu can hold, in order; each shows while the task offers it.
+const MENU_ACTIONS: [Action; 7] = [
+    Action::Release,
+    Action::Cancel,
+    Action::Undo,
+    Action::Revert(1),
+    Action::Revert(6),
+    Action::Revert(24),
+    Action::Revert(72),
+];
+
+/// A menu item's caption and icon, and whether it is destructive.
+fn menu_look(action: &Action) -> (String, Icon, bool) {
+    match action {
+        Action::Release => ("Release the claim".into(), Icon::Release, false),
+        Action::Cancel => ("Cancel the task".into(), Icon::CircleX, true),
+        Action::Undo => ("Undo the last change".into(), Icon::Undo, false),
+        Action::Revert(h) => (format!("Revert the holder's last {h}h"), Icon::History, true),
+        other => (other.label(), Icon::Circle, false),
+    }
+}
+
+/// Whether the task offers what a menu item does (a revert of any window).
+fn offers(view: &InspectorView, action: &Action) -> bool {
+    match action {
+        Action::Revert(_) => view.actions.iter().any(|a| matches!(a, Action::Revert(_))),
+        other => view.actions.contains(other),
+    }
+}
+
+/// Puts the arrows, the menu and its note at the start of the modal header's tools, before the X.
+fn spawn_tools(commands: &mut Commands, tools: Entity) -> Tools {
+    let row =
+        commands.spawn(Node { align_items: AlignItems::Center, column_gap: px(space::CONTROLS), ..default() }).id();
+    let note = spawn_note(commands, row, &None);
+    let arrow = |commands: &mut Commands, icon, hint: &str, step| {
+        commands.spawn_scene(tool_button(icon, hint, ButtonVariant::Plain)).insert((step, ChildOf(row))).id()
+    };
+    let previous = arrow(commands, Icon::ChevronUp, "Previous task in the column (K)", Step::Previous);
+    let next = arrow(commands, Icon::ChevronDown, "Next task in the column (J)", Step::Next);
+    let menu = icon_menu(commands, row, Icon::Ellipsis, "More actions");
+    let items = MENU_ACTIONS
+        .iter()
+        .map(|action| {
+            let (caption, icon, danger) = menu_look(action);
+            let item = commands
+                .spawn_scene(menu_item(caption, Some(icon), danger))
+                .insert((MenuAct(action.clone()), ChildOf(menu.popup)))
+                .id();
+            (action.clone(), item)
+        })
+        .collect();
+    commands.entity(tools).insert_children(0, &[row]);
+    Tools { previous, next, menu: menu.root, note, items }
+}
+
+/// Keeps the header's controls in line with the task: an arrow is off at its column's end, the menu shows only what
+/// the task offers (and nothing while offline), and the note says where its last command stands.
+#[allow(clippy::too_many_arguments)]
+fn sync_tools(
+    state: Res<InspectorState>,
+    connection: Res<State<Connection>>,
+    neighbours: Res<Neighbours>,
+    ui: Res<ModalUi>,
+    controls: Res<Controls>,
+    states: Query<&Control>,
+    changed_controls: Query<(), Changed<Control>>,
+    mut texts: Query<&mut Text>,
+    mut nodes: Query<&mut Node>,
+    mut commands: Commands,
+) {
+    if !(state.is_changed()
+        || connection.is_changed()
+        || neighbours.is_changed()
+        || ui.is_changed()
+        || !changed_controls.is_empty())
+    {
+        return;
+    }
+    let (Some(tools), Some(view)) = (&ui.tools, state.0.as_ref().filter(|v| v.task.is_some())) else { return };
+    let live = *connection.get() == Connection::Live;
+    gate_button(&mut commands, tools.previous, neighbours.previous.is_some());
+    gate_button(&mut commands, tools.next, neighbours.next.is_some());
+    let mut any = false;
+    for (action, item) in &tools.items {
+        let shown = live && offers(view, action);
+        any |= shown;
+        set_display(&mut nodes, *item, shown);
+    }
+    set_display(&mut nodes, tools.menu, any);
+    let note = controls.0.get(&(view.subject.clone(), Action::Menu)).and_then(|e| states.get(*e).ok()).cloned();
+    dress_note(&mut commands, &mut texts, &mut nodes, tools.note, &note);
+}
+
+fn set_display(nodes: &mut Query<&mut Node>, entity: Entity, shown: bool) {
+    let display = if shown { Display::Flex } else { Display::None };
+    if let Ok(mut node) = nodes.get_mut(entity)
+        && node.display != display
+    {
+        node.display = display;
+    }
+}
+
+/// An arrow in the header was pressed: show the task before or after this one.
+fn on_step(activate: On<Activate>, steps: Query<&Step>, neighbours: Res<Neighbours>, selection: ResMut<Selection>) {
+    if let Ok(step) = steps.get(activate.entity) {
+        step_to(*step, &neighbours, selection);
+    }
+}
+
+/// Up and K, down and J, step through the column while the task modal is open, unless a field has the keyboard or a
+/// control in the modal took the key (a menu or a dropdown's list, which stop the arrows they use).
+fn on_step_key(
+    key: On<FocusedInput<KeyboardInput>>,
+    ui: Res<ModalUi>,
+    windows: Query<(), With<Window>>,
+    inputs: Query<(), With<EditableText>>,
+    neighbours: Res<Neighbours>,
+    selection: ResMut<Selection>,
+) {
+    let Some(root) = ui.root else { return };
+    let (at, from) = (key.event_target(), key.original_event_target());
+    // Once: at the modal's root, where what nothing in it took arrives, or at the window when nothing has the keyboard.
+    if !(at == root || (at == from && windows.contains(at))) || inputs.contains(from) {
+        return;
+    }
+    let pressed = &key.input;
+    if !pressed.state.is_pressed() {
+        return;
+    }
+    let step = match pressed.key_code {
+        KeyCode::ArrowUp | KeyCode::KeyK => Step::Previous,
+        KeyCode::ArrowDown | KeyCode::KeyJ => Step::Next,
+        _ => return,
+    };
+    step_to(step, &neighbours, selection);
+}
+
+fn step_to(step: Step, neighbours: &Neighbours, mut selection: ResMut<Selection>) {
+    let to = match step {
+        Step::Previous => &neighbours.previous,
+        Step::Next => &neighbours.next,
+    };
+    if let Some(id) = to {
+        selection.0 = Some(Subject::Task(id.clone()));
+    }
+}
+
+/// An item of the ⋯ menu was pressed: send it for the task shown, with its answer beside the menu.
+fn on_menu_item(
+    activate: On<Activate>,
+    items: Query<&MenuAct>,
+    state: Res<InspectorState>,
+    mut controls: ResMut<Controls>,
+    mut commands: Commands,
+) {
+    let Ok(MenuAct(action)) = items.get(activate.entity) else { return };
+    let Some(subject) = state.0.as_ref().map(|v| v.subject.clone()) else { return };
+    let source = control(&mut controls, &mut commands, &subject, &Action::Menu);
+    let action = action.clone();
+    commands.queue(move |world: &mut World| send(world, source, &subject, &action));
 }
 
 /// On a subtask's row: opens that task in the modal.
@@ -1766,6 +1948,7 @@ fn sync_modal(
         && let Ok(Some(slots)) = modals.get(root)
     {
         ui.panes = Some(spawn_detail_panes(&mut commands, slots.body));
+        ui.tools = Some(spawn_tools(&mut commands, slots.tools));
     }
 }
 
@@ -2001,7 +2184,7 @@ fn sync_panel(
             // The modal's columns come a frame or two after it opens; this runs again when they do.
             let (Some(root), Some(panes)) = (ui.root, ui.panes) else { return };
             let answering = compose.answering.as_ref().map(|(_, q)| q.as_str());
-            let (main, side) = layout_task(view, facts, live, &offline, window.0, &human, answering, &note);
+            let (main, side) = layout_task(view, facts, live, &offline, &human, answering, &note);
             let keys = |plan: &Plan| plan.iter().map(|(k, _)| (k.clone(), ())).collect::<Vec<_>>();
             let parents = vec![(panes.main, keys(&main)), (panes.side, keys(&side))];
             (facts.breadcrumb.clone(), root, (parents, main.into_iter().chain(side).collect::<Plan>()))
@@ -2544,7 +2727,7 @@ mod in_place_tests {
     use bevy::state::app::StatesPlugin;
 
     use super::*;
-    use crate::fixture::{at, comment_json, sid, task_json};
+    use crate::fixture::{agent_json, at, claim_json, comment_json, sid, task_json};
     use crate::sync::Snapshot;
 
     fn question(id: &str, body: &str) -> SyncItem {
@@ -2828,5 +3011,133 @@ mod in_place_tests {
         let stop = compose_button(&mut app, ComposePart::StopAnswering);
         app.world_mut().trigger(Activate { entity: stop });
         assert_eq!(app.world().resource::<Compose>().answering, None);
+    }
+
+    /// The test app with TRAIL-7 held by agent a1, and its open question, whose event makes it undoable.
+    fn claimed_app() -> App {
+        let mut app = app();
+        let mut t7 = task_json(
+            json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_progress", "priority": 1, "version": 4}),
+        );
+        t7["claim"] = claim_json(json!({"task_id": "t7", "holder_id": "a1"}));
+        let snapshot =
+            Snapshot { at: 6, projects: vec![], tasks: vec![t7], agents: vec![agent_json(json!({"id": "a1"}))] };
+        app.world_mut().write_message(SyncItem::Snapshot(snapshot));
+        app.world_mut().write_message(question("c1", "which db?"));
+        settle(&mut app);
+        app
+    }
+
+    fn menu_item(app: &mut App, action: Action) -> Entity {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &MenuAct)>();
+        q.iter(world).find(|(_, m)| m.0 == action).map(|(e, _)| e).expect("the menu item")
+    }
+
+    fn shows(app: &App, entity: Entity) -> bool {
+        app.world().get::<Node>(entity).is_some_and(|n| n.display != Display::None)
+    }
+
+    #[test]
+    fn the_menu_sends_what_the_task_offers_and_its_answer_shows_beside_it() {
+        let mut app = claimed_app();
+        for action in MENU_ACTIONS {
+            let item = menu_item(&mut app, action.clone());
+            assert!(shows(&app, item), "{action:?} is offered");
+        }
+        let press = |app: &mut App, action: Action| {
+            let item = menu_item(app, action);
+            app.world_mut().trigger(Activate { entity: item });
+            app.update();
+            sent(app).remove(0)
+        };
+        let release = press(&mut app, Action::Release);
+        assert_eq!(release.request.path, "/v1/tasks/TRAIL-7/release");
+        assert_eq!(app.world().get::<Control>(release.source), Some(&Control::Busy));
+        let cancel = press(&mut app, Action::Cancel);
+        assert_eq!(cancel.request.body, Some(json!({"status": "cancelled"})));
+        assert_eq!(press(&mut app, Action::Undo).request.path, "/v1/undo");
+        let revert = press(&mut app, Action::Revert(6));
+        assert_eq!(revert.request.path, "/v1/revert");
+        assert_eq!(revert.request.body.as_ref().unwrap()["actor_id"], json!(sid("a1")));
+        assert_eq!(revert.source, release.source, "the menu's items share the one note beside it");
+        *app.world_mut().get_mut::<Control>(revert.source).unwrap() = Control::Refused("not yours".into());
+        settle(&mut app);
+        let note = app.world().resource::<ModalUi>().tools.as_ref().unwrap().note;
+        assert_eq!(app.world().get::<Text>(note).map(|t| t.0.as_str()), Some("not yours"));
+        assert!(shows(&app, note));
+    }
+
+    #[test]
+    fn the_menu_leaves_out_what_an_unheld_task_cant_do_and_goes_offline() {
+        let mut app = app();
+        let item = menu_item(&mut app, Action::Release);
+        assert!(!shows(&app, item));
+        let item = menu_item(&mut app, Action::Revert(1));
+        assert!(!shows(&app, item));
+        let item = menu_item(&mut app, Action::Cancel);
+        assert!(shows(&app, item));
+        let menu = app.world().resource::<ModalUi>().tools.as_ref().unwrap().menu;
+        assert!(shows(&app, menu));
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Offline);
+        settle(&mut app);
+        assert!(!shows(&app, menu), "nothing to do offline");
+    }
+
+    #[test]
+    fn the_sidebar_has_no_actions_now_the_menu_holds_them() {
+        let mut app = claimed_app();
+        let acts =
+            app.world_mut().query::<&Shown>().iter(app.world()).filter(|s| matches!(s.0, Block::Act { .. })).count();
+        assert_eq!(acts, 0);
+    }
+
+    fn arrow(app: &mut App, step: Step) -> Entity {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &Step)>();
+        q.iter(world).find(|(_, s)| **s == step).map(|(e, _)| e).unwrap()
+    }
+
+    fn next_is_t8(app: &mut App) {
+        *app.world_mut().resource_mut::<Neighbours>() = Neighbours { previous: None, next: Some(sid("t8")) };
+        settle(app);
+    }
+
+    #[test]
+    fn the_arrows_step_through_the_column_and_are_off_at_its_ends() {
+        let mut app = app();
+        next_is_t8(&mut app);
+        let (previous, next) = (arrow(&mut app, Step::Previous), arrow(&mut app, Step::Next));
+        assert!(app.world().get::<InteractionDisabled>(previous).is_some(), "nothing before the first");
+        assert!(app.world().get::<InteractionDisabled>(next).is_none());
+        app.world_mut().trigger(Activate { entity: next });
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t8"))));
+        assert_eq!(modal_count(&mut app), 1, "the same modal shows the next task");
+    }
+
+    fn key(app: &mut App, from: Entity, code: KeyCode) {
+        let input = KeyboardInput {
+            key_code: code,
+            logical_key: bevy::input::keyboard::Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+            state: bevy::input::ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: from,
+        };
+        let window = app.world_mut().spawn_empty().id();
+        app.world_mut().trigger(FocusedInput::new(from, input, window));
+        settle(app);
+    }
+
+    #[test]
+    fn j_and_k_step_through_the_column_from_inside_the_modal() {
+        let mut app = app();
+        next_is_t8(&mut app);
+        let from = arrow(&mut app, Step::Previous);
+        key(&mut app, from, KeyCode::KeyK);
+        assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))), "nothing before it");
+        key(&mut app, from, KeyCode::KeyJ);
+        assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t8"))));
     }
 }
