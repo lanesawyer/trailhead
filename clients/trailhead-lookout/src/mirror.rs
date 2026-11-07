@@ -1,4 +1,5 @@
-//! The ECS mirror of Trailhead (`docs/factory/ui.md#architecture`): tasks, projects, comments, claims and agents
+//! The ECS mirror of Trailhead (`docs/factory/ui.md#architecture`): tasks, projects, comments, claims, agents and
+//! users
 //! as entities keyed by their Trailhead id. The sync ([`crate::sync`]) is the only thing that changes them: a
 //! [`SyncItem::Snapshot`] replaces the lot, and a [`SyncItem::Event`] replaces one entity only if it is newer, so
 //! replays and duplicates are harmless.
@@ -11,7 +12,7 @@
 //! - a deleted entity is despawned, as a snapshot leaves it out, so the stream and a snapshot agree; an undo of the
 //!   delete brings it back. A deleted task takes its claim and comments with it, which the stream sends no events
 //!   for; an undo restores the task, and its claim and comments come back with the next snapshot or event for them;
-//! - agents have no events yet, so they change only with a snapshot.
+//! - agents and users have no events yet, so they change only with a snapshot.
 //!
 //! Each entity holds its data as its `trailhead-model` type in a [`Mirrored`] component, read once as it arrives.
 //! Data that doesn't read (a status a newer server added, say) is left out with a warning rather than shown half-read.
@@ -21,7 +22,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use trailhead_model::{Agent, Claim, Comment, Project, Task};
+use trailhead_model::{Agent, Claim, Comment, Project, Task, User};
 
 use crate::sync::{Snapshot, SyncItem};
 
@@ -32,6 +33,7 @@ pub enum Kind {
     Comment,
     Claim,
     Agent,
+    User,
 }
 
 /// The Trailhead id: a UUID, except for a claim, which is keyed by its task's.
@@ -59,6 +61,7 @@ enum Record {
     Comment(Comment),
     Claim(Claim),
     Agent(Agent),
+    User(User),
 }
 
 impl Record {
@@ -72,6 +75,7 @@ impl Record {
             Kind::Comment => Record::Comment(of(data)?),
             Kind::Claim => Record::Claim(of(data)?),
             Kind::Agent => Record::Agent(of(data)?),
+            Kind::User => Record::User(of(data)?),
         })
     }
 
@@ -82,6 +86,7 @@ impl Record {
             Record::Comment(c) => entity.insert(Mirrored(c)),
             Record::Claim(c) => entity.insert(Mirrored(c)),
             Record::Agent(a) => entity.insert(Mirrored(a)),
+            Record::User(u) => entity.insert(Mirrored(u)),
         };
     }
 }
@@ -174,6 +179,9 @@ impl Mirror {
         }
         for agent in snapshot.agents {
             self.put(commands, Kind::Agent, &str_of(&agent, "id"), Rev(0), agent, true);
+        }
+        for user in snapshot.users {
+            self.put(commands, Kind::User, &str_of(&user, "id"), Rev(0), user, true);
         }
         for mut task in snapshot.tasks {
             let id = str_of(&task, "id");

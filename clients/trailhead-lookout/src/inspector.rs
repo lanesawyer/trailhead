@@ -32,7 +32,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use trailhead_client::text::Text as Wording;
 use trailhead_factory::{GateKind, METADATA_KEY, MergeDecision, MergedBy, RunUpdate};
-use trailhead_model::{Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail};
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, User};
 use uuid::Uuid;
 
 use crate::author::{Act, grade_choices, grade_index, grade_options};
@@ -278,7 +278,14 @@ pub fn build(
     fetched: Fetched,
 ) -> Option<InspectorView> {
     let Fetched { detail, error: fetch_error, me } = fetched;
-    let agent_name = |id: Uuid| input.agents.iter().find(|a| a.id == id).map(|a| a.name.clone());
+    let agent_name = |id: Uuid| {
+        input
+            .agents
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.name.clone())
+            .or_else(|| input.users.iter().find(|u| u.id == id).map(|u| u.name.clone()))
+    };
     let task_key = |id: Uuid| input.tasks.iter().find(|t| t.id == id).map(|t| t.key.0.clone());
     match subject {
         Subject::Agent(id) => {
@@ -637,7 +644,7 @@ fn rebuild(
     tasks: Query<&Mirrored<Task>>,
     claims: Query<&Mirrored<Claim>>,
     comments: Query<&Mirrored<Comment>>,
-    agents: Query<&Mirrored<Agent>>,
+    (agents, users): (Query<&Mirrored<Agent>>, Query<&Mirrored<User>>),
     detail: Option<Res<Detail>>,
     api: Option<Res<Api>>,
     mut state: ResMut<InspectorState>,
@@ -649,14 +656,15 @@ fn rebuild(
         return;
     }
     let next = selection.0.as_ref().and_then(|subject| {
-        let (projects, tasks, claims, comments, agents) =
-            (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
+        let (projects, tasks, claims, comments, agents, users) =
+            (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents), rows(&users));
         let input = Input {
             projects: &projects,
             tasks: &tasks,
             claims: &claims,
             comments: &comments,
             agents: &agents,
+            users: &users,
             now: jiff::Timestamp::now(),
             ..Input::default()
         };
@@ -2787,6 +2795,7 @@ mod tests {
             projects: vec![],
             tasks: as_json(&f.tasks),
             agents: vec![],
+            ..Default::default()
         }));
         app.update();
         let source = app.world_mut().spawn(Control::Idle).id();
@@ -2834,6 +2843,7 @@ mod tests {
             projects: vec![],
             tasks: as_json(&f.tasks),
             agents: as_json(&f.agents),
+            ..Default::default()
         }));
         app.world_mut().write_message(SyncItem::Event(json!({
             "id": 6, "entity": "comment", "entity_id": sid("c1"), "kind": "comment.created",
@@ -2957,6 +2967,7 @@ mod tests {
             projects: vec![],
             tasks: as_json(&f.tasks),
             agents: as_json(&f.agents),
+            ..Default::default()
         }));
         app.update();
         let subject = Subject::Task(sid("t8"));
@@ -3038,7 +3049,13 @@ mod in_place_tests {
             task_json(json!({"id": "t8", "key": "TRAIL-8", "title": "other", "status": "open", "version": 1})),
             task_json(json!({"id": "t9", "key": "TRAIL-9", "title": "a part", "status": "open", "parent_id": "t7"})),
         ];
-        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 5, projects: vec![], tasks, agents: vec![] }));
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 5,
+            projects: vec![],
+            tasks,
+            agents: vec![],
+            ..Default::default()
+        }));
         app.world_mut().write_message(question("c1", "which db?"));
         app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
         app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t7")));
@@ -3213,6 +3230,7 @@ mod in_place_tests {
             projects: vec![],
             tasks: vec![],
             agents: vec![crate::fixture::agent_json(json!({"id": "a1", "name": "factory/trail-7-a1"}))],
+            ..Default::default()
         }));
         app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Agent(sid("a1")));
         settle(&mut app);
@@ -3298,8 +3316,13 @@ mod in_place_tests {
             json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_progress", "priority": 1, "version": 4}),
         );
         t7["claim"] = claim_json(json!({"task_id": "t7", "holder_id": "a1"}));
-        let snapshot =
-            Snapshot { at: 6, projects: vec![], tasks: vec![t7], agents: vec![agent_json(json!({"id": "a1"}))] };
+        let snapshot = Snapshot {
+            at: 6,
+            projects: vec![],
+            tasks: vec![t7],
+            agents: vec![agent_json(json!({"id": "a1"}))],
+            ..Default::default()
+        };
         app.world_mut().write_message(SyncItem::Snapshot(snapshot));
         app.world_mut().write_message(question("c1", "which db?"));
         settle(&mut app);

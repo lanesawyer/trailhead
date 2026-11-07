@@ -16,7 +16,7 @@ use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
-use trailhead_model::{Agent, Claim, Comment, CommentKind, Project, Status, Task};
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Project, Status, Task, User};
 use uuid::Uuid;
 
 use crate::author::{Act, Authoring};
@@ -227,6 +227,7 @@ pub struct Input<'a> {
     pub claims: &'a [Claim],
     pub comments: &'a [Comment],
     pub agents: &'a [Agent],
+    pub users: &'a [User],
     /// The runs in flight, which name a holder the agent list hasn't caught up with.
     pub runs: &'a [Run],
     /// The keys of the factory's queue tasks, whose subtasks the factory works.
@@ -249,14 +250,20 @@ fn next_expiry(claims: &[Claim], now: Timestamp) -> Option<Timestamp> {
 pub fn build(input: Input, filter: &Filter) -> BoardView {
     let project_key: HashMap<Uuid, &str> = input.projects.iter().map(|p| (p.id, p.key.as_str())).collect();
     let task_key: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.key.as_str())).collect();
-    let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
+    // Holders are agents or, for a claim a person made, users.
+    let holder_name: HashMap<Uuid, &str> = input
+        .agents
+        .iter()
+        .map(|a| (a.id, a.name.as_str()))
+        .chain(input.users.iter().map(|u| (u.id, u.name.as_str())))
+        .collect();
     // The claim is keyed by its task.
     let holder_of: HashMap<Uuid, Uuid> =
         input.claims.iter().filter(|c| c.is_live(input.now)).map(|c| (c.task_id, c.holder_id)).collect();
     let running: HashSet<&str> = input.runs.iter().map(|r| r.status.task.0.as_str()).collect();
     // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
     // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
-    let holder_label = |task: Uuid, id: Uuid| match agent_name.get(&id) {
+    let holder_label = |task: Uuid, id: Uuid| match holder_name.get(&id) {
         Some(n) => n.to_string(),
         None => match task_key.get(&task) {
             Some(k) if running.contains(k) => format!("factory/{}", k.to_lowercase()),
@@ -463,7 +470,7 @@ fn rebuild_view(
     tasks: Query<&Mirrored<Task>>,
     claims: Query<&Mirrored<Claim>>,
     comments: Query<&Mirrored<Comment>>,
-    agents: Query<&Mirrored<Agent>>,
+    (agents, users): (Query<&Mirrored<Agent>>, Query<&Mirrored<User>>),
     runs: Query<&Run>,
     runs_changed: Query<(), Changed<Run>>,
     authoring: Res<Authoring>,
@@ -487,8 +494,8 @@ fn rebuild_view(
     {
         return;
     }
-    let (projects, tasks, claims, comments, agents) =
-        (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
+    let (projects, tasks, claims, comments, agents, users) =
+        (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents), rows(&users));
     let runs: Vec<Run> = runs.iter().cloned().collect();
     let queues = queue_keys(&authoring, factory.as_deref());
     let input = Input {
@@ -497,6 +504,7 @@ fn rebuild_view(
         claims: &claims,
         comments: &comments,
         agents: &agents,
+        users: &users,
         runs: &runs,
         queues: &queues,
         deep: deep.as_ref().map_or(&[], |d| d.for_query(filter.query.trim())),
@@ -1262,6 +1270,7 @@ mod tests {
                 claims,
                 comments: &comments,
                 agents: &agents,
+                users: &[],
                 runs: &[],
                 queues: &[],
                 deep: &[],
@@ -1299,6 +1308,7 @@ mod tests {
                 claims: &claims,
                 comments: &comments,
                 agents: &agents,
+                users: &[],
                 runs,
                 queues: &["TRAIL-102".to_string()],
                 deep: &[],
@@ -1649,6 +1659,38 @@ mod tests {
     }
 
     #[test]
+    fn a_person_holding_a_claim_is_named_by_the_users_list() {
+        let (projects, tasks, claims, comments, agents) = input_json();
+        let (projects, tasks, claims, comments, agents) = (
+            typed::<Project>(projects),
+            typed::<Task>(tasks),
+            typed::<Claim>(claims),
+            typed::<Comment>(comments),
+            typed::<Agent>(agents),
+        );
+        let users = typed::<User>(vec![json!({
+            "id": sid("u1"), "workspace_id": sid("w1"), "name": "Lane", "email": null,
+            "created_at": "2026-10-01T00:00:00Z"
+        })]);
+        let view = build(
+            Input {
+                projects: &projects,
+                tasks: &tasks,
+                claims: &claims,
+                comments: &comments,
+                agents: &agents,
+                users: &users,
+                now: at_now(),
+                ..Default::default()
+            },
+            &Filter::default(),
+        );
+        assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, "Lane")]);
+        let labels: Vec<_> = view.options.holders.iter().map(|c| c.label.clone()).collect();
+        assert_eq!(labels, ["Lane", "factory/trail-103-a1"]);
+    }
+
+    #[test]
     fn a_long_parent_title_is_cut_with_an_ellipsis() {
         let label = parent_label("TRAIL-685", &"x".repeat(60));
         assert_eq!(label.chars().count(), "TRAIL-685 ".len() + PARENT_TITLE_CHARS);
@@ -1705,7 +1747,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(BoardPlugin);
         let (projects, tasks, claims, comments, agents) = input_json();
-        let snapshot = Snapshot { at: 5, projects, tasks, agents };
+        let snapshot = Snapshot { at: 5, projects, tasks, agents, ..Default::default() };
         let _ = (claims, comments);
         app.world_mut().write_message(SyncItem::Snapshot(snapshot));
         app.update();
@@ -1752,7 +1794,13 @@ mod in_place_tests {
         let tasks = vec![task("t1", "open"), task("t2", "open"), task("t3", "in_progress"), task("t4", "in_progress")];
         let projects =
             vec![project_json(json!({"id": "p1", "key": "TRAIL"})), project_json(json!({"id": "p2", "key": "OPS"}))];
-        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, agents: vec![] }));
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 1,
+            projects,
+            tasks,
+            agents: vec![],
+            ..Default::default()
+        }));
         settle(&mut app);
         app
     }
@@ -1967,7 +2015,13 @@ mod in_place_tests {
             })
             .collect();
         let projects = vec![project_json(json!({"id": "p1", "key": "TRAIL"}))];
-        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, agents: vec![] }));
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 1,
+            projects,
+            tasks,
+            agents: vec![],
+            ..Default::default()
+        }));
         settle(&mut app);
         let before = cards(&mut app);
         assert_eq!(before.len(), PAGE);
