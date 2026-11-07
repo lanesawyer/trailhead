@@ -1084,8 +1084,12 @@ async fn the_status_board_follows_a_run_from_a_cold_sandbox_through_review() {
         Some(&RunPhase::Preparing { cold: false }),
         "a run starts when its sandbox is being got: {phases:?}"
     );
-    assert!(phases.contains(&RunPhase::Preparing { cold: true }), "no warm checkpoint the first time: {phases:?}");
     let agent = phases.iter().position(|p| *p == RunPhase::Agent).expect("the agent phase");
+    // The reviewer's `begin` also emits a cold Preparing, so only one before the agent phase is the worker's.
+    assert!(
+        phases[..agent].contains(&RunPhase::Preparing { cold: true }),
+        "no warm checkpoint the first time, so the worker's sandbox is cold: {phases:?}"
+    );
     let reviewing = phases.iter().position(|p| *p == RunPhase::Reviewing).expect("the reviewing phase");
     assert!(agent < reviewing, "{phases:?}");
     let steps = events.iter().filter(|e| matches!(e, FactoryEvent::Step { .. })).count();
