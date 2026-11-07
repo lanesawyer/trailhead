@@ -78,7 +78,7 @@ fn read_local(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 enum Fetch {
-    /// The release or its asset doesn't exist (HTTP 404).
+    /// The release's checksum doesn't exist (HTTP 404).
     NoRelease,
     Failed(String),
 }
@@ -103,7 +103,13 @@ async fn fetch(release: &Release, cache_dir: &Path) -> Result<Vec<u8>, Fetch> {
     let sum = get(&http, &release.url(&format!("{name}.sha256"))).await?;
     let sum_text = String::from_utf8(sum).map_err(|_| format!("{name}.sha256 isn't text"))?;
     let want = parse_checksum(&sum_text)?;
-    let binary = get(&http, &release.url(&name)).await?;
+    // The checksum exists, so the release does: a 404 on the binary is a missing or partly uploaded asset.
+    let binary = match get(&http, &release.url(&name)).await {
+        Err(Fetch::NoRelease) => {
+            return Err(Fetch::Failed(format!("{name} is missing from the release, though {name}.sha256 is there")));
+        }
+        other => other?,
+    };
     let got = digest(&binary);
     if got != want {
         return Err(Fetch::Failed(format!(
@@ -245,6 +251,22 @@ mod tests {
 
         let err = resolve(None, None, &release(url, "0.3.0-dev"), dir.path()).await.unwrap_err();
         assert!(err.contains("no release asset") && err.contains("--daemon"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_binary_behind_a_found_checksum_is_an_error() {
+        let base = "/o/r/releases/download/v0.2.0/trailhead-daemon-v0.2.0-x86_64-unknown-linux-musl";
+        let sum = sha256sum(BINARY);
+        let app = Router::new()
+            .route(&format!("{base}.sha256"), get(move || async move { sum }))
+            .fallback(|| async { StatusCode::NOT_FOUND });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = resolve(None, None, &release(url, "0.2.0"), dir.path()).await.unwrap_err();
+        assert!(err.contains("missing from the release") && !err.contains("no release asset"), "{err}");
     }
 
     #[tokio::test]
