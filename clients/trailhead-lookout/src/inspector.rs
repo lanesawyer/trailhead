@@ -1082,6 +1082,7 @@ fn layout(
 
 /// The task modal's two columns, each a list of sections: the main column (title, description, subtasks, open
 /// questions, the PR) and the sidebar (one fact per section, then the actions). Section keys are unique across both.
+#[allow(clippy::too_many_arguments)]
 fn layout_task(
     view: &InspectorView,
     facts: &TaskFacts,
