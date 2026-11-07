@@ -45,7 +45,14 @@ async fn shadow_mode_waits_for_ci_then_approves_and_says_each_change_once() {
     assert_eq!(task.status, Status::Approved);
     let decision = task.run.merge.expect("recorded");
     assert_eq!((decision.grade, decision.would_merge), (gr(1), true));
-    assert_eq!(decision.passed, ["checks", "ci", "agent_review"]);
+    assert_eq!(
+        decision.passed,
+        [
+            trailhead_factory::GateKind::Checks,
+            trailhead_factory::GateKind::Ci,
+            trailhead_factory::GateKind::AgentReview
+        ]
+    );
     assert!(decision.waiting.is_empty());
     assert!(!r.codehost.prs()[0].merged, "shadow mode never merges");
 
