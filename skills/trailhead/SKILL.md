@@ -64,6 +64,7 @@ The CLI prints one terse line per task; add `--json` for full detail. MCP answer
 ## Etiquette
 
 - **Scope.** Follow-ups, bugs and ideas you notice become new tasks, not part of the current one. To get help on your own task, create a subtask that blocks it (`add --blocks KEY-3`, or `create_task` with `blocks`); your task becomes ready again when the subtask is done.
+- **Changes requested** is computed, not a status: an `in_review` task whose newest review verdict is `request_changes` with no handoff after it (`trailhead show` says `in_review (changes requested)`). Claim it like any `in_review` task, fix what the review asked, and finish with a handoff, which answers the review.
 - **Blocked tasks** can't be claimed (`blocked_by` lists what's unfinished). Pick something else or work on a blocker.
 - **Someone else's claim** (`claim_held`, with the holder and expiry) means hands off. Pick another task or ask its holder with a comment.
 - **Edits are versioned.** Pass the `version` you last saw when changing a task; `version_conflict` means it changed under you: re-read, then retry.

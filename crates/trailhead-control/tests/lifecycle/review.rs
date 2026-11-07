@@ -201,7 +201,11 @@ async fn requested_changes_start_a_rework_on_the_pr_branch_with_the_review() {
     let Outcome::Reviewed { pr, verdict } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
     assert_eq!(verdict.kind, VerdictKind::RequestChanges);
     let task = r.tracker.task(&key);
-    assert_eq!(task.status, Status::Open, "back in the queue, not stranded in review");
+    assert_eq!(
+        (task.status, task.changes_requested),
+        (Status::InReview, true),
+        "waiting in review for a rework, not in the backlog"
+    );
     assert_eq!(task.holder, None);
     let wanted = task.run.changes_requested.expect("the review is kept for the next run");
     assert_eq!(wanted.body, "Add a test for `hi()`.");
@@ -240,7 +244,7 @@ async fn requested_changes_start_a_rework_on_the_pr_branch_with_the_review() {
 
 #[tokio::test]
 async fn a_request_for_changes_is_stale_once_the_pr_head_has_moved() {
-    // The counts say a rework is wanted, as when the reset after a park was lost.
+    // The request waits for a worker unless the PR has been pushed to since, which a person did.
     async fn left_in_review(push: bool) -> (Rig, TaskKey) {
         let mut r = rig();
         r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
@@ -253,14 +257,16 @@ async fn a_request_for_changes_is_stale_once_the_pr_head_has_moved() {
         if push {
             r.codehost.push_to(pr);
         }
-        r.tracker.set_status(&key, Status::InReview);
         (r, key)
     }
 
     let (r, key) = left_in_review(false).await;
-    assert_eq!(r.factory.reconcile().await.unwrap().reworked, vec![key.0.clone()], "the head is where it was");
+    assert!(r.factory.reconcile().await.unwrap().reworked.is_empty(), "the request is already recorded");
+    assert!(r.tracker.task(&key).changes_requested, "the head is where it was, so it waits for a worker");
 
     let (r, key) = left_in_review(true).await;
+    assert!(r.factory.reconcile().await.unwrap().reworked.is_empty(), "someone pushed since the request");
+    assert!(!r.tracker.task(&key).changes_requested, "the request was answered, not left waiting");
     assert!(r.factory.reconcile().await.unwrap().reworked.is_empty(), "someone pushed since the request");
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
 }
@@ -304,7 +310,7 @@ async fn requested_changes_past_the_cap_park_the_task_with_the_last_review() {
         r.harness.push(Role::Reviewer, Script::new(request_changes(body)));
     }
     r.factory.tick().await.unwrap();
-    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
     r.factory.tick().await.unwrap();
 
     let task = r.tracker.task(&key);
@@ -331,7 +337,7 @@ async fn a_rework_that_fails_its_check_is_retried_not_parked() {
     r.harness.push(Role::Worker, Script::new(changes()));
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
-    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
 
     r.daemon.pass_check("lint");
     r.harness.push(Role::Worker, Script::new(changes()));
@@ -587,7 +593,7 @@ async fn a_reviewer_that_never_starts_doesnt_use_up_a_review_round() {
     r.factory.reconcile().await.unwrap();
     let task = r.tracker.task(&key);
     assert_eq!(task.run.review_rounds, Some(1));
-    assert_eq!(task.status, Status::Open, "reworks instead of parking at max_review_rounds");
+    assert_eq!(task.status, Status::InReview, "reworks instead of parking at max_review_rounds");
 }
 
 #[tokio::test(start_paused = true)]
@@ -770,11 +776,11 @@ async fn a_breach_whose_reopen_failed_is_settled_by_the_next_review() {
     r.harness.push(Role::Reviewer, Script::new(request_changes("tidy")));
     r.factory.reconcile().await.unwrap();
     assert!(r.tracker.task(&key).run.review_breach.unwrap().parked, "the review settled the breach");
-    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
 
     let done = r.factory.reconcile().await.unwrap();
     assert!(done.breached.is_empty(), "{done:?}");
-    assert_eq!(r.tracker.task(&key).status, Status::Open, "left for the rework, not parked for the old breach");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview, "left for the rework, not parked for the old breach");
 }
 
 #[tokio::test(start_paused = true)]

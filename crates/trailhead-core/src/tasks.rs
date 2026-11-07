@@ -318,6 +318,9 @@ pub struct TaskFilter {
     pub grade: GradeFilter,
     /// Tasks scheduled on or before this day, so overdue plans still show up "today".
     pub scheduled_through: Option<Date>,
+    /// `Some(true)` keeps only `in_review` tasks waiting on a rework (see [`trailhead_model::changes_requested`]),
+    /// `Some(false)` drops them.
+    pub changes_requested: Option<bool>,
     /// `(path, value)` pairs matched against `metadata` as text, e.g. `("team", "web")`.
     pub metadata: Vec<(String, String)>,
     pub sort: TaskSort,
@@ -725,6 +728,7 @@ impl Store {
             .await?;
         let blocks = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
         let comments = list_comments_for(&conn, task.id).await?;
+        let changes_requested = trailhead_model::changes_requested(task.status, &comments);
         let duplicate_of = match task.duplicate_of {
             Some(id) => {
                 let original = load_task(&conn, ctx.workspace_id, &id.to_string(), true).await?;
@@ -742,7 +746,7 @@ impl Store {
             )
             .await?;
         let duplicates = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
-        Ok(TaskDetail { task, claim, blocked_by, blocks, comments, duplicate_of, duplicates })
+        Ok(TaskDetail { task, claim, blocked_by, changes_requested, blocks, comments, duplicate_of, duplicates })
     }
 
     pub async fn list_tasks(&self, ctx: &Ctx, filter: TaskFilter) -> Result<Vec<Task>> {
@@ -772,6 +776,9 @@ impl Store {
         }
         if let Some(c) = filter.grade.sql("grade") {
             sql.push_str(&c);
+        }
+        if let Some(want) = filter.changes_requested {
+            sql.push_str(&format!(" AND {}{}", if want { "" } else { "NOT " }, changes_requested_sql("tasks")));
         }
         for (path, value) in &filter.metadata {
             validate_path(path)?;
@@ -1014,6 +1021,50 @@ fn fts_query(input: &str) -> String {
         }
         None => String::new(),
     }
+}
+
+/// SQL true for an `in_review` task with changes requested, `task` being the tasks table's name or alias: the SQL
+/// twin of [`trailhead_model::changes_requested`].
+pub(crate) fn changes_requested_sql(task: &str) -> String {
+    format!("({task}.status = 'in_review' AND {})", review_asks_changes_sql(&format!("{task}.id")))
+}
+
+/// SQL true when the task with this id expression has a newest verdict that requests changes and no handoff after
+/// it, whatever its status. Comment ids are UUIDv7 text, which sorts in creation order.
+fn review_asks_changes_sql(id: &str) -> String {
+    format!(
+        "EXISTS (
+             SELECT 1 FROM comments r
+             WHERE r.task_id = {id} AND r.deleted_at IS NULL AND r.kind = 'review' AND r.verdict = 'request_changes'
+               AND r.id = (SELECT MAX(l.id) FROM comments l
+                           WHERE l.task_id = {id} AND l.deleted_at IS NULL AND l.kind = 'review' AND l.verdict IS NOT NULL)
+               AND NOT EXISTS (SELECT 1 FROM comments h
+                               WHERE h.task_id = {id} AND h.deleted_at IS NULL AND h.kind = 'handoff' AND h.id > r.id))"
+    )
+}
+
+/// Where a task whose claim ends while `in_progress` goes back to: `in_review` when it was claimed from there and
+/// its review still asks for changes, so a rework that failed or lapsed stays in the review loop instead of sinking
+/// into the backlog; otherwise `open`.
+pub(crate) async fn unclaimed_status(conn: &libsql::Connection, task: &Task) -> Result<Status> {
+    let mut rows = conn
+        .query(
+            &format!(
+                "SELECT COALESCE((SELECT json_extract(before, '$.status') FROM events
+                                  WHERE task_id = ?1 AND undoes IS NULL AND entity = 'task'
+                                    AND json_extract(after, '$.status') = 'in_progress'
+                                    AND COALESCE(json_extract(before, '$.status'), '') != 'in_progress'
+                                  ORDER BY id DESC LIMIT 1) = 'in_review', 0) AND {}",
+                review_asks_changes_sql("?1")
+            ),
+            [task.id.to_string()],
+        )
+        .await?;
+    let back = match rows.next().await? {
+        Some(row) => row.get::<i64>(0)? != 0,
+        None => false,
+    };
+    Ok(if back { Status::InReview } else { Status::Open })
 }
 
 #[cfg(test)]

@@ -690,7 +690,7 @@ async fn a_rework_of_an_open_pr_starts_before_older_fresh_tasks_of_its_priority(
     r.tracker.set_grade(&fresh, 1);
     r.codehost.set_ci(&pr, trailhead_factory::CiState::Failed { checks: vec!["test".into()] });
     r.factory.reconcile().await.unwrap();
-    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
 
     r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
     r.harness.push(Role::Reviewer, Script::new(approve()));

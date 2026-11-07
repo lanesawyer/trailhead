@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -50,6 +50,18 @@ pub fn lease(claim: &Value) -> String {
 
 pub fn task_line(t: &Value) -> String {
     typed(t, |t: &Task| text().task_line(t))
+}
+
+/// [`task_list`], marking the tasks whose key is in `changes_requested`.
+pub fn task_list_flagged(tasks: &Value, empty: &str, changes_requested: &HashSet<String>) {
+    let line = |t: &Value| {
+        let flagged = t["key"].as_str().is_some_and(|k| changes_requested.contains(k));
+        typed(t, |t: &Task| text().task_line_flagged(t, flagged))
+    };
+    match tasks.as_array() {
+        Some(items) if !items.is_empty() => items.iter().for_each(|t| println!("{}", line(t))),
+        _ => println!("{empty}"),
+    }
 }
 
 pub fn task_list(tasks: &Value, empty: &str) {
