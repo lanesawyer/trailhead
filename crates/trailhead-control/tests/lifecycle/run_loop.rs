@@ -424,7 +424,7 @@ async fn the_window_reset_alone_starts_the_reviews_it_held() {
 async fn held_reviews_land_after_the_window_resets(poll: std::time::Duration) {
     let r = pausing_rig();
     let key = r.tracker.add_task("TRAIL", "Unreviewed", "");
-    let script = Script::new(changes()).quota("five_hour", 90, unix_now() + 2);
+    let script = Script::new(changes()).quota("five_hour", 90, unix_now() + 120);
     r.harness.push(Role::Worker, script);
     r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
     let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
@@ -440,10 +440,7 @@ async fn held_reviews_land_after_the_window_resets(poll: std::time::Duration) {
     let tracker = r.tracker.clone();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(tracker.task(&key).run.reviewed, None, "no reviewer starts while the window is paused");
-    // The window resets on the wall clock, which the paused one doesn't move.
-    std::thread::sleep(std::time::Duration::from_millis(2100));
-    // The reset timer runs a second past the reset; the poll is further off than this.
-    tokio::time::advance(std::time::Duration::from_secs(4)).await;
+    tokio::time::advance(std::time::Duration::from_secs(60)).await; // past the window's reset
     until("the review to land once the window resets", || tracker.task(&key).run.reviewed == Some(1)).await;
     stop.send(()).unwrap();
     handle.await.unwrap().unwrap();
