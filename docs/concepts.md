@@ -44,6 +44,12 @@ The arrows are every move the engine allows (`Status::can_transition_to`); anyth
 - `approved`: a reviewer cleared it and it waits to be finished. For the factory, that means waiting to merge. Whoever finishes it moves it to `done`.
 - `needs_input`: a question is open and the task is out of the ready queue.
 
+## Dependencies and the ready queue
+
+A task can block another: `trailhead block DEMO-1 DEMO-2` means DEMO-1 must finish before DEMO-2, and `trailhead unblock` removes the link. Dependencies can cross projects. A task with an unfinished blocker is blocked. That is computed from the links and never stored, so it clears as soon as the blocker is `done` or `cancelled`.
+
+`trailhead ready` is the queue of what to work on next: open, unclaimed tasks with no unfinished blockers, sorted by priority and then due date. A task leaves it when it is claimed, blocked, or moved to any other status (`needs_input` included, until its question is answered). Scope it to a project with `-p`.
+
 ## Claims and leases
 
 Claiming a task is one atomic statement, so two agents can never hold it. An agent's claim is a lease (30 minutes by default) that it renews; if it crashes, the task frees itself. A human's claim doesn't expire.

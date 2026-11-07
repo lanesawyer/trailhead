@@ -242,6 +242,21 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
     assert!(!ws.contains(&base).await.unwrap());
     assert!(ws.contains(&ws.head().await.unwrap()).await.unwrap());
 
+    // Redo the merge and let the agent finish it: once committed, no merge is under way and the base is in HEAD.
+    let merge = Command::new("git")
+        .args(["-c", "user.name=agent", "-c", "user.email=a@example.com", "merge", "--no-commit", base.as_str()])
+        .current_dir(ws.dir())
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the README conflicts");
+    assert_eq!(ws.merge_head().await.unwrap().unwrap(), base);
+    std::fs::write(ws.dir().join("README.md"), "resolved\n").unwrap();
+    git(&ws.dir(), &["add", "README.md"]);
+    git(&ws.dir(), &["-c", "user.name=agent", "-c", "user.email=a@example.com", "commit", "--quiet", "--no-edit"]);
+    assert_eq!(ws.merge_head().await.unwrap(), None);
+    assert!(ws.contains(&base).await.unwrap());
+    assert!(ws.contains(&ws.head().await.unwrap()).await.unwrap());
+
     // A later prepare, as from a warm checkpoint taken mid-merge, drops the merge.
     ws.prepare(&PrepareRequest { branch: None, merge_base: false, ..req }).await.unwrap();
     assert_eq!(ws.merge_head().await.unwrap(), None);
