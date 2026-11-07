@@ -28,7 +28,7 @@ async fn a_reviewer_gets_the_base_branch_and_pr_title_and_a_worker_gets_neither(
             &repo,
             NewPr {
                 branch: "factory/r1".into(),
-                base: "develop".into(),
+                base: "main".into(),
                 title: "feat: add a greeting".into(),
                 body: String::new(),
             },
