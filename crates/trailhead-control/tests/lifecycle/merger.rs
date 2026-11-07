@@ -746,6 +746,8 @@ async fn a_push_after_lanes_approval_of_a_grade_three_task_unapproves_it() {
     // CI is still running, so the first pass only marks the approval as Lane's, given on this head.
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::Approved);
+    let old = r.tracker.task(&key).run.merge.unwrap();
+    assert_eq!(old.human_head.as_deref(), Some(old.head.as_str()), "Lane's approval is marked on the old head");
     r.codehost.push_to(&pr);
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
