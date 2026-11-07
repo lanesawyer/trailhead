@@ -25,6 +25,9 @@ pub struct ChangedFile {
     /// Where a renamed file was before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_path: Option<String>,
+    /// The file's unified diff, when the host gave one and the grader reads it (a `Cargo.lock`); none otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
 }
 
 impl ChangedFile {
@@ -121,6 +124,23 @@ pub fn is_check_definition(path: &str) -> bool {
     CHECK_DEFINITIONS.iter().any(|p| glob_match(p, path))
 }
 
+/// Whether a `Cargo.lock` patch only edits dependency lists: no package added or removed, no version, source or
+/// checksum changed. That is a workspace member gaining or losing a dependency that is already locked, which brings in
+/// nothing new to fetch. Anything else (including a line it can't read) is not safe.
+pub fn is_dependency_list_only(patch: &str) -> bool {
+    let mut changed = 0;
+    for line in patch.lines() {
+        let Some(rest) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) else { continue };
+        changed += 1;
+        let rest = rest.trim();
+        let entry = rest.starts_with('"') && rest.ends_with("\",");
+        if !(entry || rest == "dependencies = [" || rest == "]") {
+            return false;
+        }
+    }
+    changed > 0
+}
+
 /// Floor of a deleted or renamed test, or an edited check's definition: never grade 1.
 const TEST_OR_CHECK_GRADE: Grade = Grade::new(2).unwrap();
 
@@ -151,7 +171,9 @@ impl Grader<'_> {
                 .filter(|(_, globs)| globs.iter().any(|g| glob_match(g, &f.path)))
                 .map(|(grade, _)| *grade)
                 .max();
-            if let Some(grade) = rule {
+            let lock_edit = f.path.rsplit('/').next() == Some("Cargo.lock")
+                && f.patch.as_deref().is_some_and(is_dependency_list_only);
+            if let Some(grade) = rule.filter(|_| !lock_edit) {
                 found.push((grade, format!("{} changed", f.path)));
             }
             let lost_test = |p: &str| is_test_path(p);
@@ -201,7 +223,7 @@ mod tests {
     }
 
     fn file(path: &str, status: FileStatus, lines: u32) -> ChangedFile {
-        ChangedFile { path: path.into(), status, additions: lines, deletions: 0, previous_path: None }
+        ChangedFile { path: path.into(), status, additions: lines, deletions: 0, previous_path: None, patch: None }
     }
 
     fn modified(path: &str) -> ChangedFile {
@@ -293,6 +315,30 @@ mod tests {
         // Adding or editing a test is grade 1.
         let edit = [modified("crates/a/tests/it.rs"), file("tests/new.rs", FileStatus::Added, 5)];
         assert_eq!(grader(&r).grade(Some(gr(1)), &edit).grade, gr(1));
+    }
+
+    fn lock(patch: &str) -> ChangedFile {
+        ChangedFile { patch: Some(patch.into()), ..modified("Cargo.lock") }
+    }
+
+    #[test]
+    fn a_lock_that_only_edits_dependency_lists_is_not_raised() {
+        let r = rules();
+        let dev = "@@ -100,6 +100,7 @@ dependencies = [\n  \"serde\",\n+ \"tracing-subscriber\",\n  \"tokio\",\n ]";
+        assert_eq!(grader(&r).grade(Some(gr(1)), &[lock(dev)]).grade, gr(1));
+        let first = "@@ -1,3 +1,6 @@\n name = \"a\"\n+dependencies = [\n+ \"x 1.0.0\",\n+]";
+        assert_eq!(grader(&r).grade(Some(gr(1)), &[lock(first)]).grade, gr(1));
+        for bad in [
+            "@@ -1,2 +1,8 @@\n+[[package]]\n+name = \"evil\"\n+version = \"1.0.0\"",
+            "@@ -1,3 +1,3 @@\n name = \"x\"\n-version = \"1.0.0\"\n+version = \"1.0.1\"",
+            "@@ -1,3 +1,3 @@\n-checksum = \"aa\"\n+checksum = \"bb\"",
+            "@@ -1,3 +1,3 @@\n+source = \"git+https://x\"",
+            "",
+        ] {
+            assert_eq!(grader(&r).grade(Some(gr(1)), &[lock(bad)]).grade, gr(3), "{bad}");
+        }
+        // No patch (too large for the host to show): treated as risky.
+        assert_eq!(grader(&r).grade(Some(gr(1)), &[modified("Cargo.lock")]).grade, gr(3));
     }
 
     #[test]

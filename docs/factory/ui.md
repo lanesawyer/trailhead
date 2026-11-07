@@ -58,6 +58,15 @@ Decided 2026-11-05 (TRAIL-796), after Lane's first real use: Lookout worked but 
 
 **Checking the look.** A sandbox can't open a window, so the look gets a human review (the `clients/**` grade rule). TRAIL-796's follow-ups include rendering screenshots headlessly, with a software Vulkan driver, so a worker and its reviewer can see what they built.
 
+## Settings
+
+A gear at the right of the board header opens a `Settings` modal (the kit's modal, centered), with pages picked from tabs across the top (`settings.rs`, TRAIL-843). A page is a `Page` variant plus its fields.
+
+- **Connection.** The factory endpoint dialed, this app's endpoint id with a copy button, who the token acts as, and Disconnect, which drops the control plane and the saved choice of it (`NetCommand::Disconnect`) and closes the modal, leaving the connect panel.
+- **Factory.** Read-only, from what Lookout already has: running or stopped, the repos the factory serves with their control state, and the queue task with how many tasks are under it. The status doesn't carry the factory's configured queue list, so the queue shown is the one new tasks go under.
+
+Factory controls (budgets, queues, pausing) land on the Factory page as they become settable at runtime; today none is, so nothing there writes. No new server API. The look needs a human check.
+
 ## Architecture
 
 ```

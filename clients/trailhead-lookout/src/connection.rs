@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 
 use crate::commands::{CommandsPlugin, Reply};
-use crate::factory::{FactoryItem, FactoryPlugin, apply_factory};
+use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate, apply_factory};
 use crate::mirror::{MirrorPlugin, apply_sync};
 use crate::net::{ApiAccess, Link, NetCommand, NetConfig, NetEvent, NetHandle, Reason};
 use crate::search::{SearchPlugin, SearchReply};
@@ -43,6 +43,11 @@ pub struct ConnectionStatus {
 #[derive(Resource, Default, Debug)]
 pub struct LocalEndpoint(pub Option<String>);
 
+/// The control plane's endpoint id as last given to dial (typed, or saved from last time); `None` once disconnected.
+/// It is what was asked for, not proof of a link: [`Connection`] says whether there is one.
+#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct Dialed(pub Option<String>);
+
 /// The forwarded API and the user's token, present once signed in. It stays after a drop, so the last known
 /// address is still there when the link comes back; check [`Connection`] before using it.
 #[derive(Resource, Debug)]
@@ -74,6 +79,7 @@ impl Plugin for ConnectionPlugin {
         app.init_state::<Connection>()
             .init_resource::<ConnectionStatus>()
             .init_resource::<LocalEndpoint>()
+            .insert_resource(Dialed(self.target.clone()))
             .add_plugins((MirrorPlugin, FactoryPlugin, CommandsPlugin, SearchPlugin))
             .add_message::<SendNet>()
             .insert_resource(Net(NetHandle::spawn(self.config.clone(), self.target.clone())))
@@ -81,8 +87,22 @@ impl Plugin for ConnectionPlugin {
     }
 }
 
-fn forward_commands(net: Res<Net>, mut commands: MessageReader<SendNet>) {
+fn forward_commands(
+    net: Res<Net>,
+    mut commands: MessageReader<SendNet>,
+    mut dialed: ResMut<Dialed>,
+    mut factory: MessageWriter<FactoryItem>,
+) {
     for SendNet(command) in commands.read() {
+        match command {
+            NetCommand::Connect(target) => dialed.0 = Some(target.trim().to_string()),
+            NetCommand::Disconnect => {
+                dialed.0 = None;
+                // The status stream goes with the control plane; the mirror keeps its last state, marked stopped.
+                factory.write(FactoryItem(FactoryUpdate::Stopped));
+            }
+            _ => {}
+        }
         net.0.send(command.clone());
     }
 }
