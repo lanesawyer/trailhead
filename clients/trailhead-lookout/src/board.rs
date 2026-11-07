@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::author::{Act, Authoring};
 use crate::connection::{Connection, ConnectionStatus};
 use crate::factory::{FactoryLink, FactoryStatus, Run};
-use crate::inspector::{Selection, Subject};
+use crate::inspector::{Neighbours, Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::search::{Deep, DeepHit};
 use crate::settings::SettingsButton;
@@ -509,6 +509,34 @@ fn rebuild_view(
     }
 }
 
+/// The cards before and after the task `id` in its column, in the board's order (a subtask under its parent counts
+/// where it sits). A task is in one column at most, since its status picks it.
+pub fn neighbours(view: &BoardView, id: &str) -> Neighbours {
+    for column in &view.columns {
+        if let Some(i) = column.cards.iter().position(|c| c.id == id) {
+            return Neighbours {
+                previous: i.checked_sub(1).map(|p| column.cards[p].id.clone()),
+                next: column.cards.get(i + 1).map(|c| c.id.clone()),
+            };
+        }
+    }
+    Neighbours::default()
+}
+
+/// Keeps [`Neighbours`] for the selected task as the selection and the board change.
+fn follow_neighbours(selection: Res<Selection>, view: Res<BoardView>, mut neighbours: ResMut<Neighbours>) {
+    if !(selection.is_changed() || view.is_changed()) {
+        return;
+    }
+    let next = match &selection.0 {
+        Some(Subject::Task(id)) => self::neighbours(&view, id),
+        _ => Neighbours::default(),
+    };
+    if *neighbours != next {
+        *neighbours = next;
+    }
+}
+
 /// The factory's queue task keys: what the control plane reports for its repos, or else the one parent Lookout knows.
 fn queue_keys(authoring: &Authoring, factory: Option<&FactoryStatus>) -> Vec<String> {
     let mut keys: Vec<String> =
@@ -706,7 +734,9 @@ impl Plugin for BoardPlugin {
             .init_resource::<BoardView>()
             .init_resource::<Shown>()
             .init_resource::<Tree>()
-            .add_systems(Update, (rebuild_view, sync_tree).chain())
+            .init_resource::<Selection>()
+            .init_resource::<Neighbours>()
+            .add_systems(Update, (rebuild_view, sync_tree, follow_neighbours).chain())
             .add_observer(on_pick)
             .add_observer(on_toggle_closed)
             .add_observer(on_toggle_factory);
@@ -1299,6 +1329,26 @@ mod tests {
         assert_eq!(parents, [None, Some("TRAIL-102"), None]);
     }
 
+    #[test]
+    fn neighbours_are_the_cards_either_side_in_the_column_and_none_past_its_ends() {
+        let view = run(&Filter::default());
+        let id = |key: &str| card(&view, key).id.clone();
+        let around = |key: &str| {
+            let n = neighbours(&view, &id(key));
+            let key_of = |id: Option<String>| {
+                id.map(|id| view.columns.iter().flat_map(|c| &c.cards).find(|c| c.id == id).unwrap().key.clone())
+            };
+            (key_of(n.previous), key_of(n.next))
+        };
+        // In progress is OPS-1, TRAIL-103, then TRAIL-104 nested under it.
+        assert_eq!(around("OPS-1"), (None, Some("TRAIL-103".into())));
+        assert_eq!(around("TRAIL-103"), (Some("OPS-1".into()), Some("TRAIL-104".into())));
+        assert_eq!(around("TRAIL-104"), (Some("TRAIL-103".into()), None));
+        // Never across into another column.
+        assert_eq!(around("TRAIL-102"), (None, Some("TRAIL-105".into())));
+        assert_eq!(neighbours(&view, "not on the board"), Neighbours::default());
+    }
+
     fn card<'a>(view: &'a BoardView, key: &str) -> &'a Card {
         view.columns.iter().flat_map(|c| &c.cards).find(|c| c.key == key).unwrap()
     }
@@ -1775,6 +1825,85 @@ mod in_place_tests {
         let mut q = app.world_mut().query::<(&ColumnBody, &Children)>();
         let held: HashMap<Status, usize> = q.iter(app.world()).map(|(b, c)| (b.0, c.len())).collect();
         assert_eq!((held[&Status::Open], held[&Status::InProgress]), (1, 3));
+    }
+
+    /// Every card sits in a column's body, and there is one card per task shown.
+    fn assert_placed(app: &mut App, step: &str) {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &BoardCard, Option<&ChildOf>)>();
+        let cards: Vec<(Entity, String, Option<Entity>)> =
+            q.iter(world).map(|(e, c, p)| (e, c.0.key.clone(), p.map(ChildOf::parent))).collect();
+        for (e, key, parent) in &cards {
+            let in_body = parent.is_some_and(|p| world.get::<ColumnBody>(p).is_some());
+            assert!(in_body, "{step}: card {key} ({e}) is not in a column (parent {parent:?})");
+        }
+        let mut keys: Vec<&String> = cards.iter().map(|(_, k, _)| k).collect();
+        keys.sort();
+        let n = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), n, "{step}: two cards for one task: {cards:?}");
+    }
+
+    #[test]
+    fn cards_stay_in_their_columns_whichever_way_they_move() {
+        // A card moving back to an earlier column was left without a parent, drawn at the window's top left
+        // (TRAIL-1009).
+        let mut app = app();
+        let mut n = 100;
+        let mut version = 10;
+        let mut move_to = |app: &mut App, id: &str, status: &str, title: &str, settle_after: bool| {
+            n += 1;
+            version += 1;
+            app.world_mut().write_message(SyncItem::Event(json!({
+                "id": n, "entity": "task", "entity_id": sid(id), "kind": "task.updated",
+                "after": task_json(json!({"id": id, "key": id.to_uppercase(), "title": title, "project_id": "p1",
+                          "status": status, "priority": 2, "version": version})),
+            })));
+            if settle_after {
+                settle(app);
+            }
+        };
+        let steps: &[(&str, &str)] = &[
+            ("t3", "in_review"),
+            ("t3", "in_progress"),
+            ("t3", "open"),
+            ("t1", "needs_input"),
+            ("t1", "open"),
+            ("t4", "in_review"),
+            ("t2", "in_review"),
+            ("t4", "open"),
+            ("t2", "in_progress"),
+            ("t2", "done"),
+            ("t2", "open"),
+            ("t1", "in_review"),
+            ("t1", "in_progress"),
+        ];
+        for (i, (id, status)) in steps.iter().enumerate() {
+            move_to(&mut app, id, status, &format!("{id} v{i}"), true);
+            assert_placed(&mut app, &format!("step {i} {id}->{status}"));
+        }
+        // Several in one frame, back and forth.
+        move_to(&mut app, "t3", "in_review", "a", false);
+        move_to(&mut app, "t4", "needs_input", "b", false);
+        move_to(&mut app, "t3", "open", "c", false);
+        settle(&mut app);
+        assert_placed(&mut app, "burst");
+        // Closed columns shown, a card moved into one, hidden again.
+        app.world_mut().resource_mut::<Filter>().closed = true;
+        settle(&mut app);
+        move_to(&mut app, "t1", "cancelled", "d", true);
+        assert_placed(&mut app, "into cancelled");
+        app.world_mut().resource_mut::<Filter>().closed = false;
+        settle(&mut app);
+        assert_placed(&mut app, "closed hidden");
+        move_to(&mut app, "t1", "in_progress", "e", true);
+        assert_placed(&mut app, "out of cancelled");
+        // One frame at a time, with a move every frame.
+        for (i, status) in ["in_review", "open", "needs_input", "in_progress", "in_review"].iter().enumerate() {
+            move_to(&mut app, "t2", status, &format!("f{i}"), false);
+            app.update();
+            assert_placed(&mut app, &format!("frame {i} t2->{status}"));
+        }
     }
 
     #[test]

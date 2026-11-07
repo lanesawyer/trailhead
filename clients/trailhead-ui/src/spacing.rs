@@ -69,6 +69,14 @@ pub mod extent {
     /// A search box's width. Its hint is laid over the field rather than in it, so without one the box shrinks to
     /// nearly nothing in a row of controls.
     pub const SEARCH_WIDTH: f32 = 220.0;
+    /// A list that scrolls on its own inside a modal, such as the log: tall enough to read a screenful of lines.
+    pub const LIST_HEIGHT: f32 = 360.0;
+    /// The label's column in a sidebar field, so the values line up down the sidebar.
+    pub const FIELD_LABEL_WIDTH: f32 = 90.0;
+    /// A detail modal's width: room for a main column and its sidebar (`spawn_detail_panes`).
+    pub const DETAIL_WIDTH: f32 = 960.0;
+    /// The sidebar of facts in a detail modal.
+    pub const DETAIL_SIDEBAR_WIDTH: f32 = 280.0;
 }
 
 /// The check that keeps spacings named, for an app to run over its own sources (see [`check::typed_spacings`]).

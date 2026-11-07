@@ -461,11 +461,10 @@ impl Tracker for CoreTracker {
             // Core's `ReviewRequired` here means the caller is neither a human nor a delegated reviewer. A reviewer
             // that did the work in review is refused with its own `Forbidden`, which passes through.
             Err(Error::Conflict(why)) if why == trailhead_core::Error::ReviewRequired.to_string() => {
-                Err(Error::Forbidden(format!(
-                    "{} can't approve {}: it isn't a delegated reviewer, so a person has to list it as a reviewer of project {}",
-                    self.agent,
-                    task.0,
-                    task.0.rsplit_once('-').map_or(task.0.as_str(), |(project, _)| project)
+                Err(Error::Forbidden(trailhead_factory::messages::not_a_reviewer(
+                    &self.agent.to_string(),
+                    &task.0,
+                    task.0.rsplit_once('-').map_or(task.0.as_str(), |(project, _)| project),
                 )))
             }
             result => result,
