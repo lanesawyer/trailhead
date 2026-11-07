@@ -3,11 +3,17 @@ use std::time::Duration;
 use trailhead_factory::messages;
 use trailhead_factory::{
     ChangesRequested, CheckResult, Error, PrRef, Result, ReviewBreach, Role, RunPhase, RunReport, RunRequest,
-    RunResult, RunUpdate, Status, Task, TaskKey, Verdict, VerdictKind, review_name,
+    RunResult, RunUpdate, Status, Task, TaskKey, Usd, Verdict, VerdictKind, review_name,
 };
 
 use crate::lifecycle::{Begin, Run, spec, token_ttl};
 use crate::{Factory, Outcome};
+
+/// A review run that ended on the reviewer's own account; a lost one is handled before this exists.
+enum Finished {
+    Report(RunReport, Usd),
+    Breach(String, Usd),
+}
 
 impl Factory {
     /// Runs the reviewer on an open PR in its own fresh sandbox.
@@ -99,21 +105,22 @@ impl Factory {
                 }
                 return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await);
             }
-            Ok(run) => run,
+            Ok(Run::Report(report, spend)) => Finished::Report(report, spend),
+            Ok(Run::Breach(reason, spend)) => Finished::Breach(reason, spend),
             Err(e) => return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await),
         };
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
         let reviewed_head_at_request = head.clone();
         let (spend, reviewed, reviewed_head) = match &run {
-            Run::Report(RunReport { result: RunResult::Reviewed(v), .. }, s) => {
+            Finished::Report(RunReport { result: RunResult::Reviewed(v), .. }, s) => {
                 (*s, (v.kind != VerdictKind::RequestChanges).then_some(attempt), head)
             }
-            Run::Report(_, s) | Run::Breach(_, s) | Run::Lost(_, s) => (*s, None, None),
+            Finished::Report(_, s) | Finished::Breach(_, s) => (*s, None, None),
         };
         // A reviewer that finished (a verdict, or a breach that is the task's doing) ends the run of infrastructure failures.
         let finished =
-            matches!(run, Run::Breach(..) | Run::Report(RunReport { result: RunResult::Reviewed(_), .. }, _));
+            matches!(run, Finished::Breach(..) | Finished::Report(RunReport { result: RunResult::Reviewed(_), .. }, _));
         let infra_failures = if finished { infra_prior.filter(|n| *n > 0).map(|_| 0) } else { None };
         // A review that ran again after a breach park was cut short settles that breach in the same write, so a later
         // rework reopening the task isn't parked for it.
@@ -121,7 +128,7 @@ impl Factory {
             .run
             .review_breach
             .as_ref()
-            .filter(|b| !b.parked && !matches!(run, Run::Breach(..)))
+            .filter(|b| !b.parked && !matches!(run, Finished::Breach(..)))
             .map(|b| ReviewBreach { parked: true, ..b.clone() });
         sub.report(
             &task.key,
@@ -139,7 +146,7 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the reviewer's sub-agent; its token will expire");
         }
         match run {
-            Run::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
+            Finished::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
                 self.setbacks.lock().unwrap().remove(&task.key);
                 if let (Some(raise), Some(mut grade)) = (&verdict.raise_grade, grade)
                     && grade.raise(raise.grade, &raise.reason)
@@ -170,7 +177,7 @@ impl Factory {
                 }
                 Ok(Outcome::Reviewed { pr: pr.clone(), verdict })
             }
-            Run::Report(report, _) => {
+            Finished::Report(report, _) => {
                 tracing::warn!(task = %task.key.0, result = ?report.result, "review didn't produce a verdict");
                 // No verdict, no round: handled like an infrastructure failure, so it backs off and is capped
                 // rather than being reviewed again on every pass (TRAIL-267).
@@ -178,11 +185,11 @@ impl Factory {
                 self.review_infra_failed(task, &name, error, true, before, retries, infra_prior).await;
                 Ok(Outcome::AwaitingReview { pr: pr.clone() })
             }
-            Run::Lost(..) => unreachable!("a lost run returns before the verdict is recorded"),
-            Run::Breach(reason, _) => {
+            Finished::Breach(reason, _) => {
                 // A breach is the task's doing, like a worker's: the round counts, and the task parks for a human
-                // rather than being reviewed again on the next reconcile (TRAIL-319). The reviewer's sandbox is
-                // already destroyed, so there's nothing to suspend.
+                // rather than being reviewed again on the next reconcile (TRAIL-319). The reviewer's sandbox has
+                // already had its destroy attempted (a failed destroy is left for reconcile), so there's nothing
+                // to suspend.
                 self.setbacks.lock().unwrap().remove(&task.key);
                 tracing::warn!(task = %task.key.0, %reason, "reviewer breached its budget; parking");
                 // Recorded before the task is reopened, so a park cut short is finished by reconcile.

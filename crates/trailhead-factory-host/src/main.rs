@@ -392,7 +392,12 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     let feed = surface::BoardFeed::default();
     let build =
         std::env::current_exe().and_then(std::fs::read).map(|b| build_id(&b)).unwrap_or_else(|_| "unknown".into());
-    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths)).with_status(Arc::new(feed.clone())).build(build);
+    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths)).with_status(Arc::new(feed.clone()));
+    let ui = match LOGS.get() {
+        Some(buffer) => ui.with_logs(Arc::new(LogsFeed(buffer.clone()))),
+        None => ui,
+    };
+    let ui = ui.build(build);
     let tunnel = Router::builder(endpoint.clone())
         .accept(API_ALPN, ApiTunnel::new(opts.server, peers))
         .accept(UI_ALPN, ui)
@@ -475,12 +480,35 @@ async fn run_repo(
     }
 }
 
-/// Whether something accepts connections at the server's address, which the daemons' API tunnel forwards to.
+/// Whether a Trailhead server answers at the server's address, which the daemons' API tunnel forwards to: `GET /v1/health`
+/// must come back as JSON with `ok: true`, so another process on the port, or a wedged server, doesn't pass.
 async fn server_reachable(server: SocketAddr) -> Result<(), String> {
-    match tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(server)).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(e)) => Err(format!("can't connect to {server}: {e}")),
-        Err(_) => Err(format!("connecting to {server} timed out")),
+    let probe = async {
+        let client = reqwest::Client::builder().no_proxy().build().map_err(|e| format!("can't probe {server}: {e}"))?;
+        let resp = client
+            .get(format!("http://{server}/v1/health"))
+            .send()
+            .await
+            .map_err(|e| format!("can't connect to {server}: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "{server} answered /v1/health with {}; it isn't a healthy Trailhead server",
+                resp.status()
+            ));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("{server} answered /v1/health with something that isn't Trailhead's: {e}"))?;
+        if body.get("ok") == Some(&serde_json::Value::Bool(true)) {
+            Ok(())
+        } else {
+            Err(format!("{server} answered /v1/health without `ok: true`; it isn't a healthy Trailhead server"))
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(3), probe).await {
+        Ok(r) => r,
+        Err(_) => Err(format!("probing {server} timed out")),
     }
 }
 
@@ -782,7 +810,22 @@ fn open_log_file() -> Option<logfile::Rotating> {
     }
 }
 
-/// Logs to the terminal, and to `file` when there is one.
+/// The control plane's recent log, for Lookout's Logs page; filled by the layer `init_logging` adds.
+static LOGS: std::sync::OnceLock<trailhead_control::logs::LogBuffer> = std::sync::OnceLock::new();
+
+/// [`LOGS`] as the feed `trailhead/ui/0` serves.
+struct LogsFeed(trailhead_control::logs::LogBuffer);
+
+impl trailhead_daemon::ui::LogFeed for LogsFeed {
+    fn subscribe(
+        &self,
+    ) -> (Vec<trailhead_factory::logs::LogLine>, tokio::sync::broadcast::Receiver<trailhead_factory::logs::LogLine>)
+    {
+        self.0.subscribe()
+    }
+}
+
+/// Logs to the terminal, to `file` when there is one, and to the in-memory buffer Lookout reads.
 fn init_logging(file: Option<logfile::Rotating>) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -791,8 +834,10 @@ fn init_logging(file: Option<logfile::Rotating>) {
     let file = file.map(|f| {
         tracing_subscriber::fmt::layer().with_timer(timer()).with_ansi(false).with_writer(std::sync::Mutex::new(f))
     });
+    let buffer = LOGS.get_or_init(trailhead_control::logs::LogBuffer::default);
     tracing_subscriber::registry()
         .with(filter)
+        .with(buffer.layer())
         .with(tracing_subscriber::fmt::layer().with_timer(timer()))
         .with(file)
         .init();
@@ -822,10 +867,31 @@ mod tests {
     use super::{check_result, lock_control_plane, server_check_with};
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
-    #[tokio::test]
-    async fn server_check_sees_whether_something_listens() {
+    /// Serves `app` on a free local port.
+    async fn serve(app: axum::Router) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        assert_eq!(server_check_with(listener.local_addr().unwrap(), |_| Box::pin(async { Ok(()) }))().await, Ok(()));
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        addr
+    }
+
+    #[tokio::test]
+    async fn server_check_sees_whether_trailhead_answers() {
+        use axum::{Json, Router, http::StatusCode, routing::get};
+        let healthy =
+            serve(Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({"ok": true})) }))).await;
+        assert_eq!(server_check_with(healthy, |_| Box::pin(async { Ok(()) }))().await, Ok(()));
+        // Something else on the port, a wedged server and a server that says it isn't ok all fail.
+        let other = serve(Router::new()).await;
+        let wedged =
+            serve(Router::new().route("/v1/health", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))).await;
+        let not_ok =
+            serve(Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({"ok": false})) }))).await;
+        let not_json = serve(Router::new().route("/v1/health", get(|| async { "hello" }))).await;
+        for addr in [other, wedged, not_ok, not_json] {
+            let r = server_check_with(addr, |_| Box::pin(async { Err("no".into()) }))().await;
+            assert!(r.as_ref().is_err_and(|e| e.contains("starting it failed")), "{addr}: {r:?}");
+        }
         // Bound but not listening: it refuses connections, and holding the port keeps another test from listening on
         // it, as one could on a port this test had just let go of.
         let quiet = tokio::net::TcpSocket::new_v4().unwrap();

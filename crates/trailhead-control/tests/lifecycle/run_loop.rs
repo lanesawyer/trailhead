@@ -412,9 +412,19 @@ async fn the_run_loop_wakes_itself_when_the_window_resets() {
 
 #[tokio::test(start_paused = true)]
 async fn the_run_loop_holds_due_reviews_while_the_window_is_paused() {
+    held_reviews_land_after_the_window_resets(std::time::Duration::from_millis(5)).await;
+}
+
+/// With a poll far longer than the test and nothing waking the loop, only the reset timer can start the review.
+#[tokio::test(start_paused = true)]
+async fn the_window_reset_alone_starts_the_reviews_it_held() {
+    held_reviews_land_after_the_window_resets(std::time::Duration::from_secs(60)).await;
+}
+
+async fn held_reviews_land_after_the_window_resets(poll: std::time::Duration) {
     let r = pausing_rig();
     let key = r.tracker.add_task("TRAIL", "Unreviewed", "");
-    let script = Script::new(changes()).quota("five_hour", 90, unix_now() + 2);
+    let script = Script::new(changes()).quota("five_hour", 90, unix_now() + 120);
     r.harness.push(Role::Worker, script);
     r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
     let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
@@ -424,15 +434,13 @@ async fn the_run_loop_holds_due_reviews_while_the_window_is_paused() {
 
     let factory = Arc::new(r.factory);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let handle =
-        tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), std::time::Duration::from_millis(5), async {
-            let _ = stopped.await;
-        }));
+    let handle = tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), poll, async {
+        let _ = stopped.await;
+    }));
     let tracker = r.tracker.clone();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(tracker.task(&key).run.reviewed, None, "no reviewer starts while the window is paused");
-    // The window resets on the wall clock, which the paused one doesn't move.
-    std::thread::sleep(std::time::Duration::from_millis(2100));
+    tokio::time::advance(std::time::Duration::from_secs(60)).await; // past the window's reset
     until("the review to land once the window resets", || tracker.task(&key).run.reviewed == Some(1)).await;
     stop.send(()).unwrap();
     handle.await.unwrap().unwrap();

@@ -6,7 +6,9 @@
 use bevy::prelude::*;
 
 use crate::commands::{CommandsPlugin, Reply};
+use crate::detail::{DetailPlugin, DetailReply};
 use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate, apply_factory};
+use crate::logs::{LogItem, LogsPlugin};
 use crate::mirror::{MirrorPlugin, apply_sync};
 use crate::net::{ApiAccess, Link, NetCommand, NetConfig, NetEvent, NetHandle, Reason};
 use crate::search::{SearchPlugin, SearchReply};
@@ -80,7 +82,7 @@ impl Plugin for ConnectionPlugin {
             .init_resource::<ConnectionStatus>()
             .init_resource::<LocalEndpoint>()
             .insert_resource(Dialed(self.target.clone()))
-            .add_plugins((MirrorPlugin, FactoryPlugin, CommandsPlugin, SearchPlugin))
+            .add_plugins((MirrorPlugin, FactoryPlugin, CommandsPlugin, SearchPlugin, DetailPlugin, LogsPlugin))
             .add_message::<SendNet>()
             .insert_resource(Net(NetHandle::spawn(self.config.clone(), self.target.clone())))
             .add_systems(PreUpdate, (forward_commands, apply_events.before(apply_sync).before(apply_factory)).chain());
@@ -119,6 +121,8 @@ fn apply_events(
     mut factory: MessageWriter<FactoryItem>,
     mut replies: MessageWriter<Reply>,
     mut searches: MessageWriter<SearchReply>,
+    mut logs: MessageWriter<LogItem>,
+    mut details: MessageWriter<DetailReply>,
 ) {
     for event in net.0.drain() {
         match event {
@@ -133,6 +137,12 @@ fn apply_events(
             }
             NetEvent::Search(reply) => {
                 searches.write(reply);
+            }
+            NetEvent::Logs(update) => {
+                logs.write(LogItem(update));
+            }
+            NetEvent::Detail(reply) => {
+                details.write(reply);
             }
             NetEvent::Sync(item) => {
                 sync.write(item);
