@@ -60,11 +60,17 @@ pub(crate) fn proxy_env() -> Vec<String> {
 }
 
 impl DockerCompute {
-    /// Takes the gateway lock, with the gateway up and holding the full state.
-    pub(crate) async fn gateway(&self) -> Result<MutexGuard<'_, Link>> {
+    /// Fails on a [`DockerCompute::read_only`] compute, for every call that changes a sandbox.
+    pub(crate) fn writable(&self) -> Result<()> {
         if self.read_only {
             return Err(Error::Other("this compute is read-only: it can't change sandboxes or the gateway".into()));
         }
+        Ok(())
+    }
+
+    /// Takes the gateway lock, with the gateway up and holding the full state.
+    pub(crate) async fn gateway(&self) -> Result<MutexGuard<'_, Link>> {
+        self.writable()?;
         self.watch();
         self.sync().await
     }

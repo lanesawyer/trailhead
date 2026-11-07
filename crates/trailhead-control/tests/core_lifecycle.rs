@@ -313,6 +313,30 @@ async fn a_task_with_malformed_factory_metadata_is_skipped_not_fatal() {
 }
 
 #[tokio::test]
+async fn a_task_with_non_object_factory_metadata_is_skipped_without_naming_a_field() {
+    let r = rig().await;
+    let good = r.task("Good").await;
+    let mut bad = Vec::new();
+    for (title, value) in [("String", serde_json::json!("fast")), ("Array", serde_json::json!(["attempt_base"]))] {
+        let task = r.task(title).await;
+        let patch = TaskPatch { metadata: Some(serde_json::json!({ "factory": value })), ..TaskPatch::default() };
+        r.store.update_task(&r.human, &task.0, patch, None).await.unwrap();
+        bad.push(task);
+    }
+
+    let ready = r.tracker.ready("TRAIL", &[], 10).await.unwrap();
+    assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&good]);
+
+    for task in &bad {
+        let notes = r.store.list_comments(&r.human, &task.0).await.unwrap();
+        assert_eq!(notes.len(), 1, "{task:?}");
+        assert!(notes[0].body.contains("fix or remove the `factory` metadata"), "{}", notes[0].body);
+        assert!(!notes[0].body.contains("fix or remove that field"), "{}", notes[0].body);
+        assert!(!notes[0].body.contains(" in "), "{}", notes[0].body);
+    }
+}
+
+#[tokio::test]
 async fn with_a_queue_only_its_subtasks_run() {
     let mut r = rig().await;
     let urgent = NewTask {

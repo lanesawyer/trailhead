@@ -34,8 +34,8 @@ struct State {
     context_fails: bool,
     /// Agents refused when they approve, as ones a human hasn't listed as the project's reviewers would be.
     undelegated: HashSet<String>,
-    /// Agent and operation (`note`, `report`, `release`) to how many more of that agent's calls fail.
-    failing: HashMap<(String, &'static str), usize>,
+    /// Agent and operation (one of `INJECTABLE_OPS`) to how many of that agent's calls to let through, then how many more fail.
+    failing: HashMap<(String, &'static str), (usize, usize)>,
     /// Whether every `report`, by any agent, fails.
     reports_fail: bool,
     finish_unapproved_forbidden: bool,
@@ -47,6 +47,10 @@ struct State {
     /// still asks for changes.
     claimed_from_review: HashSet<TaskKey>,
 }
+
+/// The operations `inject` is called with, so `fail_next` refuses a typo that would never fire.
+const INJECTABLE_OPS: [&str; 9] =
+    ["claim", "release", "report", "request_review", "reopen", "ask", "note", "finish", "revoke_sub_agent"];
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
 /// agent; sub-agents are `<parent>/<name>` and revoking one revokes everything under it.
@@ -110,9 +114,18 @@ impl FakeTracker {
         self.state.lock().unwrap().context_fails = fails;
     }
 
-    /// Makes the next `times` calls `agent` makes to `op` (`note`, `report`, `release`, `ask`, `request_review`, `finish` or `revoke_sub_agent`) fail, as a tracker outage would.
+    /// Makes the next `times` calls `agent` makes to `op` (one of `INJECTABLE_OPS`) fail, as a tracker outage would.
     pub fn fail_next(&self, agent: &str, op: &'static str, times: usize) {
-        self.state.lock().unwrap().failing.insert((agent.to_string(), op), times);
+        self.fail_after(agent, op, 0, times);
+    }
+
+    /// Like `fail_next`, but lets the first `skip` calls through, for a failure that should hit a later caller of `op` acting as the same agent.
+    pub fn fail_after(&self, agent: &str, op: &'static str, skip: usize, times: usize) {
+        debug_assert!(
+            INJECTABLE_OPS.contains(&op),
+            "no tracker call checks for failures of {op:?}; use one of {INJECTABLE_OPS:?}"
+        );
+        self.state.lock().unwrap().failing.insert((agent.to_string(), op), (skip, times));
     }
 
     /// Makes every `report`, whichever agent makes it, fail (or heal), as the tracker write outage of 2026-10-28 did.
@@ -137,7 +150,11 @@ impl FakeTracker {
             return Err(Error::Other("injected report failure".into()));
         }
         match s.failing.get_mut(&(self.agent.clone(), op)) {
-            Some(left) if *left > 0 => {
+            Some((skip, _)) if *skip > 0 => {
+                *skip -= 1;
+                Ok(())
+            }
+            Some((_, left)) if *left > 0 => {
                 *left -= 1;
                 Err(Error::Other(format!("injected {op} failure")))
             }
@@ -762,5 +779,18 @@ mod tests {
         let s = tracker.state.lock().unwrap();
         assert_eq!(s.tasks[&key].status, Status::Open);
         assert_eq!(s.tasks[&key].holder, None);
+    }
+
+    #[test]
+    fn injectable_ops_match_the_inject_call_sites() {
+        let mut called: Vec<&str> = include_str!("tracker.rs")
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("self.inject(\""))
+            .filter_map(|l| l.split('"').next())
+            .collect();
+        called.sort_unstable();
+        let mut listed = INJECTABLE_OPS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(called, listed);
     }
 }

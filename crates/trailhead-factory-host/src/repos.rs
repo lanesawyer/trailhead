@@ -65,7 +65,8 @@ pub fn load_all(dirs: &[PathBuf], file: Option<&Path>) -> Result<Vec<RepoSpec>, 
 }
 
 /// Refuses repos that can't share a process: the same slug, the same lowercase name (pool Sprites are `<name>-w<n>`),
-/// or the same (project, queue), which would have both claim the same tasks. Names both repos.
+/// or, in one project, queue lists that share any entry or a repo with no queue alongside any other repo (it takes
+/// every ready task in the project), which would have both claim the same tasks. Names both repos.
 pub fn validate(specs: &[RepoSpec]) -> Result<(), String> {
     let mut slugs: HashMap<String, &RepoSpec> = HashMap::new();
     let mut names: HashMap<String, &RepoSpec> = HashMap::new();
