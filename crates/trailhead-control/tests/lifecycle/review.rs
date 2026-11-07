@@ -15,6 +15,7 @@ async fn a_reviewer_that_breaches_parks_the_task_and_isnt_run_again() {
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
 
+    let reviewed_before = r.harness.contexts().iter().filter(|c| c.role == Role::Reviewer).count();
     // Every reviewer would breach on steps; only the first should ever run.
     for _ in 0..3 {
         r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
@@ -28,6 +29,8 @@ async fn a_reviewer_that_breaches_parks_the_task_and_isnt_run_again() {
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("steps"), "{}", questions[0].body);
     assert_eq!(task.run.review_rounds, Some(0), "a fresh count once a human reopens it");
+    let reviewers = r.harness.contexts().iter().filter(|c| c.role == Role::Reviewer).count();
+    assert_eq!(reviewers - reviewed_before, 1, "the other two reviewer scripts were never used");
 }
 
 #[tokio::test]
