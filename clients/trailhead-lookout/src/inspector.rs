@@ -677,6 +677,7 @@ impl Plugin for InspectorPlugin {
             // Registering a message twice is a no-op, so these are safe beside the mirror's and commands' own.
             .add_message::<SyncItem>()
             .add_message::<CommandDone>()
+            .add_message::<Submit>()
             .add_observer(on_pick)
             .add_observer(on_close_request)
             .add_observer(on_escape)
@@ -2166,6 +2167,35 @@ mod tests {
     }
 
     #[test]
+    fn the_activity_lists_every_comment_oldest_first_naming_who_wrote_it() {
+        let f = fixture();
+        let me = sid("u1");
+        let detail: TaskDetail = serde_json::from_value(json!({
+            "task": serde_json::to_value(&f.tasks[0]).unwrap(),
+            "claim": null, "blocked_by": [], "blocks": [], "duplicate_of": null, "duplicates": [],
+            "comments": [
+                crate::fixture::comment_json(json!({"id": "c3", "task_id": "t7", "kind": "review", "author_id": "a1",
+                    "body": "looks right", "verdict": "request_changes", "model": "m-1", "created_at": at(3)})),
+                crate::fixture::comment_json(json!({"id": "c1", "task_id": "t7", "kind": "question", "author_id": "a1",
+                    "addressed_to": "u1", "body": "which db?", "created_at": at(1)})),
+                crate::fixture::comment_json(json!({"id": "c2", "task_id": "t7", "kind": "note", "author_id": "u1",
+                    "body": "sqlite", "created_at": at(2)})),
+            ],
+        }))
+        .unwrap();
+        let fetched = Fetched { detail: Some(&detail), me: Some((me.as_str(), "lane")), ..Fetched::default() };
+        let activity = build(f.input(), &latest(), &Subject::Task(sid("t7")), fetched).unwrap().task.unwrap().activity;
+        let bodies: Vec<&str> = activity.iter().map(|e| e.body.as_str()).collect();
+        assert_eq!(bodies, ["which db?", "sqlite", "looks right"]);
+        assert_eq!(activity[0].author, "factory/trail-7-a1");
+        assert_eq!(activity[0].tags, ["to lane", "open"]);
+        assert!(activity[0].open_question);
+        assert_eq!(activity[1].author, "lane");
+        assert_eq!(activity[2].tags, ["request changes", "m-1"]);
+        assert!(!activity[2].open_question);
+    }
+
+    #[test]
     fn a_task_view_carries_its_priority_and_an_agent_has_none() {
         let f = fixture();
         let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
@@ -2580,25 +2610,29 @@ mod in_place_tests {
     fn a_new_comment_adds_its_row_and_leaves_every_other_entity_as_it_was() {
         let mut app = app();
         let before = body(&mut app);
-        assert!(texts(&mut app).iter().any(|t| t == "? which db?"));
+        assert!(texts(&mut app).iter().any(|t| t == "which db?"));
 
         app.world_mut().write_message(question("c2", "and the cache?"));
         settle(&mut app);
         let after = body(&mut app);
-        assert!(texts(&mut app).iter().any(|t| t == "? and the cache?"));
+        assert!(texts(&mut app).iter().any(|t| t == "and the cache?"));
         let added: Vec<_> = after.iter().filter(|e| !before.contains(e)).collect();
         assert!(!added.is_empty(), "the new question has entities");
-        // Everything that was there still is, in the same place.
+        // Everything that was there still is, in the same place: the first question, the comment box and the rest.
         let kept: Vec<_> = after.iter().filter(|e| before.contains(e)).copied().collect();
         assert_eq!(kept.len(), before.len());
-        // Each entity added hangs off the new question's row or the Questions section it joined.
         let world = app.world();
-        let old_questions =
-            before.iter().filter(|e| world.get::<Shown>(**e).is_some_and(|s| matches!(s.0, Block::Question { .. })));
-        assert_eq!(old_questions.count(), 1);
-        let new_questions =
-            after.iter().filter(|e| world.get::<Shown>(**e).is_some_and(|s| matches!(s.0, Block::Question { .. })));
-        assert_eq!(new_questions.count(), 2);
+        let questions = |entities: &[Entity]| {
+            entities
+                .iter()
+                .filter(|e| {
+                    world
+                        .get::<Shown>(**e)
+                        .is_some_and(|s| matches!(&s.0, Block::Entry { entry, .. } if entry.open_question))
+                })
+                .count()
+        };
+        assert_eq!((questions(&before), questions(&after)), (1, 2));
     }
 
     #[test]
@@ -2725,5 +2759,74 @@ mod in_place_tests {
         let world = app.world_mut();
         let panel = world.query_filtered::<&Node, With<InspectorPanel>>().single(world).unwrap();
         assert_eq!(panel.display, Display::Flex);
+    }
+
+    fn composer_input(app: &mut App) -> Entity {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &ComposePart)>();
+        q.iter(world).find(|(_, p)| **p == ComposePart::Input).map(|(e, _)| e).expect("the comment box's input")
+    }
+
+    fn compose_button(app: &mut App, part: ComposePart) -> Entity {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &ComposePart)>();
+        q.iter(world).find(|(_, p)| **p == part).map(|(e, _)| e).unwrap()
+    }
+
+    fn sent(app: &mut App) -> Vec<Submit> {
+        app.world_mut().resource_mut::<Messages<Submit>>().drain().collect()
+    }
+
+    #[test]
+    fn the_comment_box_sends_a_comment_and_empties_once_it_went_through() {
+        let mut app = app();
+        let input = composer_input(&mut app);
+        app.world_mut().get_mut::<EditableText>(input).unwrap().editor_mut().set_text("looks good");
+        app.world_mut().resource_mut::<Compose>().kind = CommentKind::Decision;
+        let send = compose_button(&mut app, ComposePart::Send);
+        app.world_mut().trigger(Activate { entity: send });
+        let sent = sent(&mut app);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].request.path, "/v1/tasks/TRAIL-7/comments");
+        assert_eq!(sent[0].request.body, Some(json!({"kind": "decision", "body": "looks good"})));
+        assert_eq!(app.world().get::<Control>(sent[0].source), Some(&Control::Busy));
+        // The server took it.
+        *app.world_mut().get_mut::<Control>(sent[0].source).unwrap() = Control::Done;
+        settle(&mut app);
+        assert_eq!(app.world().get::<EditableText>(input).unwrap().value().to_string(), "");
+    }
+
+    #[test]
+    fn an_empty_comment_box_says_so_and_sends_nothing() {
+        let mut app = app();
+        let send = compose_button(&mut app, ComposePart::Send);
+        app.world_mut().trigger(Activate { entity: send });
+        settle(&mut app);
+        assert!(sent(&mut app).is_empty());
+        assert!(texts(&mut app).iter().any(|t| t == "write the comment first"));
+    }
+
+    #[test]
+    fn answering_opens_the_task_with_the_box_answering_and_sends_the_answer() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Selection>().0 = None;
+        settle(&mut app);
+        let c1 = sid("c1");
+        app.world_mut().trigger(OpenComposer { key: "TRAIL-7".into(), answer: Some((c1.clone(), "which db?".into())) });
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))));
+        assert!(texts(&mut app).iter().any(|t| t == "Answering: which db?"));
+        let input = composer_input(&mut app);
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(input), "the keyboard is in the box");
+        app.world_mut().get_mut::<EditableText>(input).unwrap().editor_mut().set_text("sqlite");
+        let send = compose_button(&mut app, ComposePart::Send);
+        app.world_mut().trigger(Activate { entity: send });
+        let sent = sent(&mut app);
+        assert_eq!(sent[0].request.path, format!("/v1/comments/{c1}/resolve"));
+        assert_eq!(sent[0].request.body, Some(json!({"answer": "sqlite"})));
+        // Stopping answering goes back to a comment.
+        let stop = compose_button(&mut app, ComposePart::StopAnswering);
+        app.world_mut().trigger(Activate { entity: stop });
+        assert_eq!(app.world().resource::<Compose>().answering, None);
     }
 }
