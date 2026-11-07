@@ -24,8 +24,10 @@ pub const API_URL: &str = "https://api.sprites.dev";
 /// Where connectors are reached from inside a Sprite (`/v1/gateway/...`).
 pub const GATEWAY_DOMAIN: &str = "api.sprites.dev";
 
-/// Where a Sprite lists its connectors.
-pub const GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
+/// Where a Sprite lists its connectors, built from `GATEWAY_DOMAIN` so the two can't drift apart.
+pub fn gateway_list() -> String {
+    format!("https://{GATEWAY_DOMAIN}/v1/gateway/list")
+}
 
 /// Where the daemon lives in a Sprite, whose user is `sprite`.
 pub const HOME: &str = "/home/sprite";
@@ -38,7 +40,7 @@ pub fn target() -> Target {
     Target {
         dir: format!("{HOME}/.trailhead"),
         workdir: format!("{HOME}/work"),
-        gateway_list: GATEWAY_LIST.into(),
+        gateway_list: gateway_list(),
         model_endpoint: None,
         hold_socket: Some(API_SOCKET.into()),
         ..Target::default()
@@ -489,6 +491,13 @@ async fn json_body<T: serde::de::DeserializeOwned>(res: Response) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_list_is_built_from_the_gateway_domain() {
+        assert_eq!(gateway_list(), "https://api.sprites.dev/v1/gateway/list");
+        assert!(gateway_list().starts_with(&format!("https://{GATEWAY_DOMAIN}/")));
+        assert_eq!(target().gateway_list, gateway_list());
+    }
 
     #[tokio::test]
     async fn status_maps_to_error_variants() {
