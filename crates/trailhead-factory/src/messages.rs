@@ -37,7 +37,7 @@ pub struct Wording {
 }
 
 /// What the merger says on the PR about its decision, e.g. `Grade 1: checks, CI and review passed; would merge
-/// (shadow).` or `Grade 3 (Cargo.lock changed): waiting for a person.` `merging` is whether the merger is on and will
+/// (shadow).` or `Grade 3 (Cargo.toml changed): waiting for a person.` `merging` is whether the merger is on and will
 /// try to merge now; the message then says the merge happened, so it is only posted once it has.
 pub fn decision_message(grade: &PrGrade, d: &MergeDecision, said: Wording) -> String {
     let message = gate_message(grade, d, &said);
