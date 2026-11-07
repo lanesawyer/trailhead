@@ -230,9 +230,7 @@ async fn gateway_command(command: Command) -> std::process::ExitCode {
     let result: std::result::Result<(), String> = async {
         match command {
             Command::Gateway { listen, socket, log } => {
-                let filter =
-                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| log.as_str().into());
-                trailhead_log::init_stdout(filter);
+                trailhead_log::init_stdout(trailhead_log::env_filter_or(&log));
                 gateway::run(listen, &socket).await.map_err(|e| e.to_string())
             }
             Command::TrimCargo { .. } => unreachable!("handled in main"),

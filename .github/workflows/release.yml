@@ -55,8 +55,8 @@ jobs:
             -e "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" \
             -e "s/^(trailhead-(model|core|client|log|server) = \{ path = \"[^\"]+\", version = \")[^\"]+/\1$VERSION/" \
             Cargo.toml
-          if [ "$(grep -c "version = \"$VERSION\"" Cargo.toml)" != 5 ]; then
-            echo "::error::expected the workspace and all four path dependencies at $VERSION"; exit 1
+          if [ "$(grep -c "version = \"$VERSION\"" Cargo.toml)" != 6 ]; then
+            echo "::error::expected the workspace and all five path dependencies at $VERSION"; exit 1
           fi
           cargo update --workspace
 
