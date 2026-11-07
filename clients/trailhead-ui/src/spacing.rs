@@ -69,6 +69,8 @@ pub mod extent {
     /// A search box's width. Its hint is laid over the field rather than in it, so without one the box shrinks to
     /// nearly nothing in a row of controls.
     pub const SEARCH_WIDTH: f32 = 220.0;
+    /// The label's column in a sidebar field, so the values line up down the sidebar.
+    pub const FIELD_LABEL_WIDTH: f32 = 90.0;
 }
 
 /// The check that keeps spacings named, for an app to run over its own sources (see [`check::typed_spacings`]).
