@@ -475,12 +475,35 @@ async fn run_repo(
     }
 }
 
-/// Whether something accepts connections at the server's address, which the daemons' API tunnel forwards to.
+/// Whether a Trailhead server answers at the server's address, which the daemons' API tunnel forwards to: `GET /v1/health`
+/// must come back as JSON with `ok: true`, so another process on the port, or a wedged server, doesn't pass.
 async fn server_reachable(server: SocketAddr) -> Result<(), String> {
-    match tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(server)).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(e)) => Err(format!("can't connect to {server}: {e}")),
-        Err(_) => Err(format!("connecting to {server} timed out")),
+    let probe = async {
+        let client = reqwest::Client::builder().no_proxy().build().map_err(|e| format!("can't probe {server}: {e}"))?;
+        let resp = client
+            .get(format!("http://{server}/v1/health"))
+            .send()
+            .await
+            .map_err(|e| format!("can't connect to {server}: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "{server} answered /v1/health with {}; it isn't a healthy Trailhead server",
+                resp.status()
+            ));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("{server} answered /v1/health with something that isn't Trailhead's: {e}"))?;
+        if body.get("ok") == Some(&serde_json::Value::Bool(true)) {
+            Ok(())
+        } else {
+            Err(format!("{server} answered /v1/health without `ok: true`; it isn't a healthy Trailhead server"))
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(3), probe).await {
+        Ok(r) => r,
+        Err(_) => Err(format!("probing {server} timed out")),
     }
 }
 
@@ -822,10 +845,31 @@ mod tests {
     use super::{check_result, lock_control_plane, server_check_with};
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
-    #[tokio::test]
-    async fn server_check_sees_whether_something_listens() {
+    /// Serves `app` on a free local port.
+    async fn serve(app: axum::Router) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        assert_eq!(server_check_with(listener.local_addr().unwrap(), |_| Box::pin(async { Ok(()) }))().await, Ok(()));
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        addr
+    }
+
+    #[tokio::test]
+    async fn server_check_sees_whether_trailhead_answers() {
+        use axum::{Json, Router, http::StatusCode, routing::get};
+        let healthy =
+            serve(Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({"ok": true})) }))).await;
+        assert_eq!(server_check_with(healthy, |_| Box::pin(async { Ok(()) }))().await, Ok(()));
+        // Something else on the port, a wedged server and a server that says it isn't ok all fail.
+        let other = serve(Router::new()).await;
+        let wedged =
+            serve(Router::new().route("/v1/health", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))).await;
+        let not_ok =
+            serve(Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({"ok": false})) }))).await;
+        let not_json = serve(Router::new().route("/v1/health", get(|| async { "hello" }))).await;
+        for addr in [other, wedged, not_ok, not_json] {
+            let r = server_check_with(addr, |_| Box::pin(async { Err("no".into()) }))().await;
+            assert!(r.as_ref().is_err_and(|e| e.contains("starting it failed")), "{addr}: {r:?}");
+        }
         // Bound but not listening: it refuses connections, and holding the port keeps another test from listening on
         // it, as one could on a port this test had just let go of.
         let quiet = tokio::net::TcpSocket::new_v4().unwrap();
