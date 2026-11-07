@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use bevy::feathers::controls::ButtonVariant;
 use bevy::feathers::tokens;
 use bevy::input::keyboard::KeyboardInput;
-use bevy::input_focus::FocusedInput;
+use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
@@ -36,16 +36,16 @@ use uuid::Uuid;
 use crate::author::{Act, grade_choices, grade_index, grade_options};
 use crate::board::Input;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
-use crate::connection::{Connection, ConnectionStatus};
+use crate::connection::{Api, Connection, ConnectionStatus};
 use crate::detail::Detail;
 use crate::factory::FactoryStatus;
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::sync::SyncItem;
 use crate::widgets::{
     DetailPanes, Icon, Keyed, Modal, ModalClosed, ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, badge, button,
-    danger_button, extent, layer, open_modal, panel, panel_header, priority_tone, row, scroll_body, scroll_frame,
-    scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text, text_dim, text_toned, token,
-    tool_button,
+    danger_button, display, extent, layer, open_modal, panel, panel_header, priority_tone, row, scroll_body,
+    scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text, text_dim,
+    text_input, text_toned, token, tool_button,
 };
 use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 
@@ -86,6 +86,8 @@ pub enum Action {
     Revert(i64),
     /// Set the task's grade; none clears it.
     Grade(Option<Grade>),
+    /// What the task modal's comment box sends: only the key of its control, since the box builds its own request.
+    Comment,
 }
 
 impl Action {
@@ -99,6 +101,7 @@ impl Action {
             Action::Revert(h) => format!("revert last {h}h"),
             Action::Grade(Some(g)) => format!("grade {g}"),
             Action::Grade(None) => "clear grade".into(),
+            Action::Comment => "comment".into(),
         }
     }
 }
@@ -170,6 +173,33 @@ pub struct TaskFacts {
     pub details: Vec<String>,
     /// Why the task couldn't be fetched in full.
     pub fetch_error: Option<String>,
+    /// Every comment, oldest first: all of them once the task is fetched, until then what the mirror holds (open
+    /// questions and the last handoff).
+    pub activity: Vec<Entry>,
+}
+
+/// One comment in the task modal's activity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub id: String,
+    pub kind: CommentKind,
+    pub author: String,
+    /// When it was written, in the reader's zone.
+    pub when: String,
+    /// To whom, open or resolved for a question, a review's verdict and model.
+    pub tags: Vec<String>,
+    pub body: String,
+    /// A question nobody has resolved yet, which can be answered or resolved from here.
+    pub open_question: bool,
+}
+
+/// What the modal knows beyond the mirror: the task fetched in full, why it couldn't be, and who is reading (their
+/// id and name), to name what they wrote.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Fetched<'a> {
+    pub detail: Option<&'a TaskDetail>,
+    pub error: Option<&'a str>,
+    pub me: Option<(&'a str, &'a str)>,
 }
 
 /// One of a task's subtasks, a row the modal can open.
@@ -231,9 +261,9 @@ pub fn build(
     input: Input,
     latest: &HashMap<String, i64>,
     subject: &Subject,
-    detail: Option<&TaskDetail>,
-    fetch_error: Option<&str>,
+    fetched: Fetched,
 ) -> Option<InspectorView> {
+    let Fetched { detail, error: fetch_error, me } = fetched;
     let agent_name = |id: Uuid| input.agents.iter().find(|a| a.id == id).map(|a| a.name.clone());
     let task_key = |id: Uuid| input.tasks.iter().find(|t| t.id == id).map(|t| t.key.clone());
     match subject {
@@ -329,7 +359,7 @@ pub fn build(
                 priority: Some(task.priority),
                 grade: task.grade,
                 actions,
-                task: Some(facts(&input, task, detail, fetch_error, run.as_ref(), agent_name)),
+                task: Some(facts(&input, task, Fetched { detail, error: fetch_error, me }, run.as_ref(), agent_name)),
             })
         }
     }
@@ -346,13 +376,17 @@ fn clock() -> &'static Wording {
 fn facts(
     input: &Input,
     task: &Task,
-    detail: Option<&TaskDetail>,
-    fetch_error: Option<&str>,
+    fetched: Fetched,
     run: Option<&RunUpdate>,
     agent_name: impl Fn(Uuid) -> Option<String>,
 ) -> TaskFacts {
     let text = clock();
+    let Fetched { detail, error: fetch_error, me } = fetched;
     let detail = detail.filter(|d| d.task.id == task.id);
+    let name_of = |id: Uuid| match me {
+        Some((my_id, my_name)) if my_id == id.to_string() => my_name.to_string(),
+        _ => agent_name(id).unwrap_or_else(|| id.to_string().chars().take(8).collect()),
+    };
     let project_key = input.projects.iter().find(|p| p.id == task.project_id).map(|p| p.key.clone());
     let parent = task.parent_id.and_then(|p| input.tasks.iter().find(|t| t.id == p));
     let mut crumbs: Vec<String> = project_key.iter().cloned().collect();
@@ -377,10 +411,7 @@ fn facts(
         None => input.claims.iter().find(|c| c.task_id == task.id).cloned(),
     }
     .filter(|c| c.is_live(input.now))
-    .map(|c| {
-        let who = agent_name(c.holder_id).unwrap_or_else(|| c.holder_id.to_string().chars().take(8).collect());
-        format!("{who}, {}", text.lease(&c, input.now))
-    });
+    .map(|c| format!("{}, {}", name_of(c.holder_id), text.lease(&c, input.now)));
 
     let dates = [("scheduled", text.scheduled(task)), ("due", text.due(task))]
         .into_iter()
@@ -415,6 +446,41 @@ fn facts(
         }
     }
 
+    let mut comments: Vec<&Comment> = match detail {
+        Some(d) => d.comments.iter().collect(),
+        None => input.comments.iter().filter(|c| c.task_id == task.id).collect(),
+    };
+    comments.retain(|c| c.deleted_at.is_none());
+    comments.sort_by_key(|c| (c.created_at, c.id));
+    let activity = comments
+        .into_iter()
+        .map(|c| {
+            let mut tags = Vec::new();
+            if let Some(to) = c.addressed_to {
+                tags.push(format!("to {}", name_of(to)));
+            }
+            let open_question = c.kind == CommentKind::Question && c.resolved_at.is_none();
+            if c.kind == CommentKind::Question {
+                tags.push(if open_question { "open".into() } else { "resolved".into() });
+            }
+            if let Some(v) = c.verdict {
+                tags.push(v.as_str().replace('_', " "));
+            }
+            if let Some(m) = &c.model {
+                tags.push(m.clone());
+            }
+            Entry {
+                id: c.id.to_string(),
+                kind: c.kind,
+                author: name_of(c.author_id),
+                when: text.time(c.created_at, None),
+                tags,
+                body: c.body.clone(),
+                open_question,
+            }
+        })
+        .collect();
+
     TaskFacts {
         breadcrumb: crumbs.join(" › "),
         title: task.title.clone(),
@@ -431,6 +497,7 @@ fn facts(
             format!("version {}", task.version),
         ],
         fetch_error: fetch_error.map(str::to_string),
+        activity,
     }
 }
 
@@ -460,6 +527,7 @@ pub fn plan(
         Action::Status(st) => Request::new(Method::PATCH, path(""), Some(json!({"status": st})), version),
         Action::Grade(g) => Request::new(Method::PATCH, path(""), Some(json!({"grade": g})), version),
         Action::Resolve(comment) => Request::new(Method::POST, format!("/v1/comments/{comment}/resolve"), None, None),
+        Action::Comment => return None,
         Action::Undo => {
             let Subject::Task(id) = subject else { return None };
             Request::new(Method::POST, "/v1/undo", Some(json!({"event_id": latest.get(id)?})), None)
@@ -556,6 +624,7 @@ fn rebuild(
     comments: Query<&Mirrored<Comment>>,
     agents: Query<&Mirrored<Agent>>,
     detail: Option<Res<Detail>>,
+    api: Option<Res<Api>>,
     mut state: ResMut<InspectorState>,
 ) {
     let gone = removed.read().count() > 0;
@@ -576,11 +645,12 @@ fn rebuild(
             now: jiff::Timestamp::now(),
             ..Input::default()
         };
-        let (data, error) = match &detail {
-            Some(d) => (d.data.as_ref(), d.error.as_deref()),
-            None => (None, None),
+        let me = api.as_ref().map(|a| (a.0.user_id.as_str(), a.0.user.as_str()));
+        let fetched = match &detail {
+            Some(d) => Fetched { detail: d.data.as_ref(), error: d.error.as_deref(), me },
+            None => Fetched { me, ..Fetched::default() },
         };
-        build(input, &latest.0, subject, data, error)
+        build(input, &latest.0, subject, fetched)
     });
     if state.0 != next {
         state.0 = next;
@@ -607,6 +677,7 @@ impl Plugin for InspectorPlugin {
             // Registering a message twice is a no-op, so these are safe beside the mirror's and commands' own.
             .add_message::<SyncItem>()
             .add_message::<CommandDone>()
+            .add_message::<Submit>()
             .add_observer(on_pick)
             .add_observer(on_close_request)
             .add_observer(on_escape)
@@ -623,11 +694,18 @@ impl Plugin for InspectorUiPlugin {
             .init_resource::<Controls>()
             .init_resource::<FactoryStatus>()
             .init_resource::<ModalUi>()
+            .init_resource::<Compose>()
+            .init_resource::<InputFocus>()
             .add_observer(on_modal_closed)
             .add_observer(on_open_task)
+            .add_observer(on_open_composer)
+            .add_observer(on_compose_press)
             .add_systems(Startup, spawn_panel)
             // After the view is rebuilt: a modal closed from inside must not be reopened from the view it just left.
-            .add_systems(Update, (sync_modal, sync_panel, dress).chain().after(rebuild));
+            .add_systems(
+                Update,
+                (follow_compose, sync_modal, sync_panel, dress, focus_composer, clear_sent).chain().after(rebuild),
+            );
     }
 }
 
@@ -725,16 +803,23 @@ fn on_escape(
     }
 }
 
-/// What a dropdown of the panel picked: a status to move to, or how far back "revert" goes.
+/// What a dropdown of the panel picked: a status to move to, how far back "revert" goes, or the comment box's kind.
+#[allow(clippy::too_many_arguments)]
 fn on_pick(
     picked: On<Picked>,
     moves: Query<&StatusMove>,
     grades: Query<&GradeChoice>,
     windows: Query<(), With<WindowChoice>>,
+    kinds: Query<&ComposePart>,
     mut window: ResMut<RevertWindow>,
+    compose: Option<ResMut<Compose>>,
     mut commands: Commands,
 ) {
-    if windows.contains(picked.entity) {
+    if kinds.get(picked.entity) == Ok(&ComposePart::Kind) {
+        if let (Some(mut compose), Some(kind)) = (compose, COMPOSE_KINDS.get(picked.index)) {
+            compose.kind = *kind;
+        }
+    } else if windows.contains(picked.entity) {
         if let Some(hours) = WINDOWS.get(picked.index) {
             window.0 = *hours;
         }
@@ -842,6 +927,10 @@ enum Block {
     Act { action: Action, window: Option<i64>, note: Option<Control> },
     /// A subtask's row, which opens it. Its key holds what it shows, so a change is a new row.
     Subtask(Subtask),
+    /// A comment in the activity. An open question has answer and resolve buttons; its key holds whether it is open.
+    Entry { key: String, entry: Entry, live: bool, note: Option<Control> },
+    /// The comment box at the foot of the activity, spawned once per task so what is typed survives redraws.
+    Composer { answering: Option<String>, live: bool, note: Option<Control> },
 }
 
 /// One of a PR's gates: its key holds the state, so a gate that changes state is a new badge.
@@ -994,6 +1083,7 @@ fn layout(
 
 /// The task modal's two columns, each a list of sections: the main column (title, description, subtasks, open
 /// questions, the PR) and the sidebar (one fact per section, then the actions). Section keys are unique across both.
+#[allow(clippy::too_many_arguments)]
 fn layout_task(
     view: &InspectorView,
     facts: &TaskFacts,
@@ -1001,6 +1091,7 @@ fn layout_task(
     offline: &str,
     window: i64,
     human: &[Grade],
+    answering: Option<&str>,
     note: &dyn Fn(&Action) -> Option<Control>,
 ) -> (Plan, Plan) {
     fn add(plan: &mut Plan, key: &str, heading: &str, mut items: Vec<(String, Block)>) {
@@ -1034,23 +1125,6 @@ fn layout_task(
             .collect();
         add(&mut main, "m/subtasks", "Sub-tasks", rows);
     }
-    if !view.questions.is_empty() {
-        let items = view
-            .questions
-            .iter()
-            .map(|q| {
-                let block = Block::Question {
-                    key: q.key.clone(),
-                    id: q.id.clone(),
-                    body: q.body.clone(),
-                    live,
-                    note: note(&Action::Resolve(q.id.clone())),
-                };
-                (format!("q/{}", q.id), block)
-            })
-            .collect();
-        add(&mut main, "m/questions", "Open questions", items);
-    }
     if view.pr.is_some() || view.merge_note.is_some() {
         let mut items = Vec::new();
         if let Some(pr) = &view.pr {
@@ -1071,6 +1145,24 @@ fn layout_task(
         }
         add(&mut main, "m/pr", "Pull request", items);
     }
+    let key = key_of(view);
+    let mut activity: Vec<(String, Block)> = facts
+        .activity
+        .iter()
+        .map(|e| {
+            let note = if e.open_question { note(&Action::Resolve(e.id.clone())) } else { None };
+            let block = Block::Entry { key: key.clone(), entry: e.clone(), live, note };
+            (format!("a/{}/{}", e.id, e.open_question), block)
+        })
+        .collect();
+    if activity.is_empty() {
+        activity.push(("a/none".into(), text_block("No comments yet", size::BODY, Tone::Dim)));
+    }
+    activity.push((
+        "a/compose".into(),
+        Block::Composer { answering: answering.map(str::to_string), live, note: note(&Action::Comment) },
+    ));
+    add(&mut main, "m/activity", "Activity", activity);
     if let Some(why) = &facts.fetch_error {
         let words = format!("Couldn't load the whole task: {why}");
         add(&mut main, "m/fetch", "", vec![("m/fetch/text".into(), text_block(words, size::SECONDARY, Tone::Warn))]);
@@ -1150,6 +1242,68 @@ fn layout_task(
         }
     }
     (main, side)
+}
+
+/// The task's key, the last part of the view's breadcrumb.
+fn key_of(view: &InspectorView) -> String {
+    view.task.as_ref().and_then(|f| f.breadcrumb.rsplit(" › ").next()).unwrap_or_default().to_string()
+}
+
+/// How many lines the comment box's input shows.
+const COMPOSE_LINES: f32 = 4.0;
+
+/// The kinds the comment box can send, in the order of its dropdown.
+const COMPOSE_KINDS: [CommentKind; 4] =
+    [CommentKind::Note, CommentKind::Handoff, CommentKind::Decision, CommentKind::Question];
+
+/// A comment kind in words, as the activity and the comment box show it.
+fn kind_label(kind: CommentKind) -> &'static str {
+    match kind {
+        CommentKind::Note => "Note",
+        CommentKind::Handoff => "Handoff",
+        CommentKind::Decision => "Decision",
+        CommentKind::Question => "Question",
+        CommentKind::Progress => "Progress",
+        CommentKind::Review => "Review",
+    }
+}
+
+/// The comment box's state: what it sends next, and whether it answers a question.
+#[derive(Resource, Debug)]
+pub struct Compose {
+    /// The task the box belongs to; another task starts over.
+    pub subject: Option<Subject>,
+    pub kind: CommentKind,
+    /// The question (its id and body) the box answers, if it does.
+    pub answering: Option<(String, String)>,
+    /// The box's input should take the keyboard once it exists.
+    pub focus: bool,
+}
+
+impl Default for Compose {
+    fn default() -> Self {
+        Compose { subject: None, kind: CommentKind::Note, answering: None, focus: false }
+    }
+}
+
+/// Opens a task in the modal with the keyboard in its comment box, answering a question if there is one. The board's
+/// comment and answer buttons send it, and so does a question's answer button in the modal.
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct OpenComposer {
+    pub key: String,
+    /// The question's id and body.
+    pub answer: Option<(String, String)>,
+}
+
+/// On the comment box's parts.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum ComposePart {
+    #[default]
+    Input,
+    Kind,
+    Send,
+    Answering,
+    StopAnswering,
 }
 
 /// A PR's gates, in the order the panel shows them.
@@ -1282,6 +1436,86 @@ fn spawn_block(
             let note = spawn_note(commands, line, note);
             commands.entity(line).insert(Parts { select: Some(picker), note: Some(note), ..default() });
             line
+        }
+        Block::Entry { key, entry, live, note } => {
+            let item = commands
+                .spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::STACKED), ..default() })
+                .id();
+            let mut head = vec![kind_label(entry.kind).to_string(), entry.author.clone(), entry.when.clone()];
+            head.extend(entry.tags.iter().cloned());
+            commands.spawn_scene(text_dim(head.join(" · "), size::SECONDARY)).insert(ChildOf(item));
+            let tone = if entry.open_question { token::WARN } else { tokens::TEXT_MAIN };
+            commands.spawn_scene(text_toned(entry.body.clone(), size::BODY, tone)).insert(ChildOf(item));
+            if entry.open_question {
+                let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
+                let act = Act::Answer { key: key.clone(), comment_id: entry.id.clone(), question: entry.body.clone() };
+                let answer = commands
+                    .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonVariant::Normal) })
+                    .insert((act, ChildOf(line)))
+                    .id();
+                let resolve_action = Action::Resolve(entry.id.clone());
+                let source = control(controls, commands, subject, &resolve_action);
+                let resolve = commands
+                    .spawn_scene(bsn! {
+                        @tool_button(Icon::Check, "Resolve without an answer", ButtonVariant::Normal)
+                        @sends(source, subject.clone(), resolve_action.clone())
+                    })
+                    .insert(ChildOf(line))
+                    .id();
+                gate_button(commands, answer, *live);
+                gate_button(commands, resolve, *live);
+                let note = spawn_note(commands, item, note);
+                commands.entity(item).insert(Parts {
+                    answer: Some(answer),
+                    resolve: Some(resolve),
+                    note: Some(note),
+                    ..default()
+                });
+            }
+            item
+        }
+        Block::Composer { answering, live, note } => {
+            let item = commands
+                .spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::ROWS), ..default() })
+                .id();
+            let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
+            let words = answering.as_ref().map_or_else(String::new, |q| format!("Answering: {q}"));
+            let shown = display(answering.is_some());
+            let answering_text = commands
+                .spawn_scene(bsn! {
+                    @text_dim(words, size::SECONDARY)
+                    Node { display: { shown }, flex_shrink: 1.0, min_width: px(0) }
+                })
+                .insert((ComposePart::Answering, ChildOf(line)))
+                .id();
+            let stop = commands
+                .spawn_scene(bsn! { @tool_button(Icon::X, "Comment instead", ButtonVariant::Plain) })
+                .insert((ComposePart::StopAnswering, ChildOf(line)))
+                .id();
+            let labels: Vec<String> = COMPOSE_KINDS.iter().map(|k| kind_label(*k).to_string()).collect();
+            let kind = commands
+                .spawn_scene(select(labels, Some(0), COMPOSE_KINDS.len()))
+                .insert((ComposePart::Kind, ChildOf(line)))
+                .id();
+            commands.spawn_scene(text_input(COMPOSE_LINES, bsn! { ComposePart::Input })).insert(ChildOf(item));
+            let foot = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
+            let send = commands
+                .spawn_scene(bsn! { @button("Send", Some(Icon::Send), ButtonVariant::Primary) })
+                .insert((ComposePart::Send, ChildOf(foot)))
+                .id();
+            gate_button(commands, send, *live);
+            // The box's answer goes to its own control, which outlives redraws like every other.
+            control(controls, commands, subject, &Action::Comment);
+            let note = spawn_note(commands, foot, note);
+            commands.entity(item).insert(Parts {
+                text: Some(answering_text),
+                answer: Some(stop),
+                resolve: Some(send),
+                select: Some(kind),
+                note: Some(note),
+            });
+            // The answering line and the kind's dropdown take turns; `dress` sets which once the parts exist.
+            item
         }
         Block::Subtask(sub) => {
             let line = commands.spawn_scene(bsn! { @row() }).id();
@@ -1434,6 +1668,40 @@ fn dress(
                     dress_note(&mut commands, &mut texts, &mut nodes, n, note);
                 }
             }
+            Block::Entry { live, note, .. } => {
+                for button in [parts.answer, parts.resolve].into_iter().flatten() {
+                    gate_button(&mut commands, button, *live);
+                }
+                if let Some(n) = parts.note {
+                    dress_note(&mut commands, &mut texts, &mut nodes, n, note);
+                }
+            }
+            Block::Composer { answering, live, note } => {
+                let words = answering.as_ref().map_or_else(String::new, |q| format!("Answering: {q}"));
+                if let Some(Ok(mut t)) = parts.text.map(|e| texts.get_mut(e))
+                    && t.0 != words
+                {
+                    t.0 = words;
+                }
+                let turns = [
+                    (parts.text, answering.is_some()),
+                    (parts.answer, answering.is_some()),
+                    (parts.select, answering.is_none()),
+                ];
+                for (part, shown) in turns {
+                    if let Some(Ok(mut node)) = part.map(|e| nodes.get_mut(e))
+                        && node.display != display(shown)
+                    {
+                        node.display = display(shown);
+                    }
+                }
+                if let Some(send) = parts.resolve {
+                    gate_button(&mut commands, send, *live);
+                }
+                if let Some(n) = parts.note {
+                    dress_note(&mut commands, &mut texts, &mut nodes, n, note);
+                }
+            }
             Block::Text { .. } | Block::Priority(_) | Block::Gates | Block::Subtask(_) => {}
         }
     }
@@ -1515,6 +1783,137 @@ fn on_open_task(activate: On<Activate>, rows: Query<&OpensTask>, mut selection: 
     }
 }
 
+/// A different task starts the comment box over.
+fn follow_compose(state: Res<InspectorState>, mut compose: ResMut<Compose>) {
+    if !state.is_changed() {
+        return;
+    }
+    let subject = state.0.as_ref().filter(|v| v.task.is_some()).map(|v| v.subject.clone());
+    if compose.subject != subject {
+        let focus = compose.focus && subject.is_some();
+        let answering = if focus { compose.answering.take() } else { None };
+        *compose = Compose { subject, answering, focus, ..Compose::default() };
+    }
+}
+
+/// Opens the task in the modal with its comment box ready, answering the question if there is one.
+fn on_open_composer(
+    open: On<OpenComposer>,
+    tasks: Query<&Mirrored<Task>>,
+    mut selection: ResMut<Selection>,
+    mut compose: ResMut<Compose>,
+) {
+    let Some(task) = tasks.iter().find(|t| t.0.key == open.key) else { return };
+    let subject = Subject::Task(task.0.id.to_string());
+    if compose.subject.as_ref() != Some(&subject) {
+        *compose = Compose::default();
+    }
+    compose.answering = open.answer.clone();
+    compose.focus = true;
+    selection.0 = Some(subject);
+}
+
+/// Gives the comment box's input the keyboard once it exists, when it was asked for.
+fn focus_composer(
+    mut compose: ResMut<Compose>,
+    inputs: Query<Entity, (With<ComposePart>, With<EditableText>)>,
+    parts: Query<&ComposePart>,
+    mut focus: ResMut<InputFocus>,
+) {
+    if !compose.focus {
+        return;
+    }
+    if let Some(input) = inputs.iter().find(|e| parts.get(*e) == Ok(&ComposePart::Input)) {
+        focus.set(input, FocusCause::Navigated);
+        compose.focus = false;
+    }
+}
+
+/// The comment box's buttons: send, and stop answering.
+#[allow(clippy::too_many_arguments)]
+fn on_compose_press(
+    activate: On<Activate>,
+    parts: Query<&ComposePart>,
+    inputs: Query<(&ComposePart, &EditableText)>,
+    state: Res<InspectorState>,
+    mut compose: ResMut<Compose>,
+    controls: Res<Controls>,
+    mut sources: Query<&mut Control>,
+    mut submit: MessageWriter<Submit>,
+) {
+    let Ok(part) = parts.get(activate.entity) else { return };
+    match part {
+        ComposePart::StopAnswering => compose.answering = None,
+        ComposePart::Send => {
+            let Some(view) = &state.0 else { return };
+            let Some(source) = controls.0.get(&(view.subject.clone(), Action::Comment)).copied() else { return };
+            let body = inputs
+                .iter()
+                .find(|(p, _)| **p == ComposePart::Input)
+                .map(|(_, t)| t.value().to_string())
+                .unwrap_or_default();
+            let outcome = match compose_request(&key_of(view), compose.kind, compose.answering.as_ref(), &body) {
+                Ok(request) => {
+                    submit.write(Submit { source, request });
+                    Control::Busy
+                }
+                Err(why) => Control::Refused(why),
+            };
+            if let Ok(mut c) = sources.get_mut(source) {
+                *c = outcome;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The request the comment box sends: a comment of `kind` on the task, or the answer to a question.
+pub fn compose_request(
+    key: &str,
+    kind: CommentKind,
+    answering: Option<&(String, String)>,
+    body: &str,
+) -> Result<Request, String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(if answering.is_some() { "write the answer first" } else { "write the comment first" }.into());
+    }
+    Ok(match answering {
+        Some((id, _)) => {
+            Request::new(Method::POST, format!("/v1/comments/{id}/resolve"), Some(json!({"answer": body})), None)
+        }
+        None => Request::new(
+            Method::POST,
+            format!("/v1/tasks/{key}/comments"),
+            Some(json!({"kind": kind, "body": body})),
+            None,
+        ),
+    })
+}
+
+/// A comment the box sent went through: empty the box and stop answering.
+fn clear_sent(
+    controls: Res<Controls>,
+    state: Res<InspectorState>,
+    changed: Query<&Control, Changed<Control>>,
+    mut inputs: Query<(&ComposePart, &mut EditableText)>,
+    mut compose: ResMut<Compose>,
+) {
+    let Some(view) = &state.0 else { return };
+    let Some(source) = controls.0.get(&(view.subject.clone(), Action::Comment)) else { return };
+    if changed.get(*source) != Ok(&Control::Done) {
+        return;
+    }
+    for (part, mut text) in &mut inputs {
+        if *part == ComposePart::Input {
+            text.editor_mut().set_text("");
+        }
+    }
+    if compose.answering.is_some() {
+        compose.answering = None;
+    }
+}
+
 /// What the panel has on its entities: the sections of the body, the items in them and a PR's gates.
 #[derive(Default)]
 struct Drawn {
@@ -1538,7 +1937,7 @@ fn sync_panel(
     factory: Res<FactoryStatus>,
     status: Res<ConnectionStatus>,
     window: Res<RevertWindow>,
-    ui: Res<ModalUi>,
+    (ui, compose): (Res<ModalUi>, Res<Compose>),
     mut controls: ResMut<Controls>,
     states: Query<&Control>,
     changed_controls: Query<(), Changed<Control>>,
@@ -1555,6 +1954,7 @@ fn sync_panel(
         || status.is_changed()
         || window.is_changed()
         || ui.is_changed()
+        || compose.is_changed()
         || factory.is_changed()
         || !changed_controls.is_empty())
     {
@@ -1600,7 +2000,8 @@ fn sync_panel(
             panel_node.display = Display::None;
             // The modal's columns come a frame or two after it opens; this runs again when they do.
             let (Some(root), Some(panes)) = (ui.root, ui.panes) else { return };
-            let (main, side) = layout_task(view, facts, live, &offline, window.0, &human, &note);
+            let answering = compose.answering.as_ref().map(|(_, q)| q.as_str());
+            let (main, side) = layout_task(view, facts, live, &offline, window.0, &human, answering, &note);
             let keys = |plan: &Plan| plan.iter().map(|(k, _)| (k.clone(), ())).collect::<Vec<_>>();
             let parents = vec![(panes.main, keys(&main)), (panes.side, keys(&side))];
             (facts.breadcrumb.clone(), root, (parents, main.into_iter().chain(side).collect::<Plan>()))
@@ -1732,7 +2133,13 @@ mod tests {
             "duplicate_of": null, "duplicates": [],
         }))
         .unwrap();
-        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Some(&detail), None).unwrap();
+        let v = build(
+            f.input(),
+            &latest(),
+            &Subject::Task(sid("t7")),
+            Fetched { detail: Some(&detail), ..Fetched::default() },
+        )
+        .unwrap();
         let facts = v.task.unwrap();
         assert_eq!((facts.breadcrumb.as_str(), facts.title.as_str()), ("TRAIL-7", "do it"));
         assert_eq!(facts.links, ["blocked by TRAIL-3", "blocks TRAIL-9, TRAIL-10"]);
@@ -1741,12 +2148,18 @@ mod tests {
         assert_eq!(facts.details.last().unwrap(), "version 4");
 
         // Without the fetch there are no dependencies yet, and a failed fetch says why.
-        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), None, Some("the server answered 500")).unwrap();
+        let v = build(
+            f.input(),
+            &latest(),
+            &Subject::Task(sid("t7")),
+            Fetched { error: Some("the server answered 500"), ..Fetched::default() },
+        )
+        .unwrap();
         let facts = v.task.unwrap();
         assert!(facts.links.is_empty());
         assert_eq!(facts.fetch_error.as_deref(), Some("the server answered 500"));
         // An agent has no facts: it stays in the side panel.
-        assert!(build(f.input(), &latest(), &Subject::Agent(sid("a1")), None, None).unwrap().task.is_none());
+        assert!(build(f.input(), &latest(), &Subject::Agent(sid("a1")), Fetched::default()).unwrap().task.is_none());
     }
 
     fn latest() -> HashMap<String, i64> {
@@ -1754,18 +2167,47 @@ mod tests {
     }
 
     #[test]
+    fn the_activity_lists_every_comment_oldest_first_naming_who_wrote_it() {
+        let f = fixture();
+        let me = sid("u1");
+        let detail: TaskDetail = serde_json::from_value(json!({
+            "task": serde_json::to_value(&f.tasks[0]).unwrap(),
+            "claim": null, "blocked_by": [], "blocks": [], "duplicate_of": null, "duplicates": [],
+            "comments": [
+                crate::fixture::comment_json(json!({"id": "c3", "task_id": "t7", "kind": "review", "author_id": "a1",
+                    "body": "looks right", "verdict": "request_changes", "model": "m-1", "created_at": at(3)})),
+                crate::fixture::comment_json(json!({"id": "c1", "task_id": "t7", "kind": "question", "author_id": "a1",
+                    "addressed_to": "u1", "body": "which db?", "created_at": at(1)})),
+                crate::fixture::comment_json(json!({"id": "c2", "task_id": "t7", "kind": "note", "author_id": "u1",
+                    "body": "sqlite", "created_at": at(2)})),
+            ],
+        }))
+        .unwrap();
+        let fetched = Fetched { detail: Some(&detail), me: Some((me.as_str(), "lane")), ..Fetched::default() };
+        let activity = build(f.input(), &latest(), &Subject::Task(sid("t7")), fetched).unwrap().task.unwrap().activity;
+        let bodies: Vec<&str> = activity.iter().map(|e| e.body.as_str()).collect();
+        assert_eq!(bodies, ["which db?", "sqlite", "looks right"]);
+        assert_eq!(activity[0].author, "factory/trail-7-a1");
+        assert_eq!(activity[0].tags, ["to lane", "open"]);
+        assert!(activity[0].open_question);
+        assert_eq!(activity[1].author, "lane");
+        assert_eq!(activity[2].tags, ["request changes", "m-1"]);
+        assert!(!activity[2].open_question);
+    }
+
+    #[test]
     fn a_task_view_carries_its_priority_and_an_agent_has_none() {
         let f = fixture();
-        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), None, None).unwrap();
+        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
         assert_eq!(v.priority, Priority::new(1));
-        let a = build(f.input(), &latest(), &Subject::Agent(sid("a1")), None, None).unwrap();
+        let a = build(f.input(), &latest(), &Subject::Agent(sid("a1")), Fetched::default()).unwrap();
         assert_eq!(a.priority, None);
     }
 
     #[test]
     fn a_factory_task_shows_its_pr_and_gates_and_has_no_path_to_done() {
         let f = fixture();
-        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), None, None).unwrap();
+        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
         assert_eq!(v.title, "TRAIL-7 do it");
         assert!(v.lines.contains(&"held by factory/trail-7-a1".to_string()));
         assert!(v.lines.contains(&"run: trail-7-a1, attempt 2".to_string()));
@@ -1789,7 +2231,7 @@ mod tests {
     #[test]
     fn a_plain_task_has_no_claim_controls_and_no_merge_note() {
         let f = fixture();
-        let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t8")), None, None).unwrap();
+        let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t8")), Fetched::default()).unwrap();
         assert!(v.pr.is_none() && v.merge_note.is_none());
         assert!(!v.actions.contains(&Action::Release) && !v.actions.contains(&Action::Undo));
         assert!(v.actions.contains(&Action::Status(Status::Done)));
@@ -1799,7 +2241,7 @@ mod tests {
     fn a_done_task_offers_no_cancel() {
         let mut f = fixture();
         f.tasks.push(task(json!({"id": "t9", "key": "TRAIL-9", "title": "finished", "status": "done", "version": 1})));
-        let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t9")), None, None).unwrap();
+        let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t9")), Fetched::default()).unwrap();
         assert!(!v.actions.contains(&Action::Cancel));
     }
 
@@ -1809,7 +2251,7 @@ mod tests {
         f.tasks.push(task(
             json!({"id": "t10", "key": "TRAIL-10", "title": "dropped", "status": "cancelled", "version": 1}),
         ));
-        let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t10")), None, None).unwrap();
+        let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t10")), Fetched::default()).unwrap();
         assert!(!v.actions.contains(&Action::Cancel));
     }
 
@@ -1825,10 +2267,10 @@ mod tests {
     #[test]
     fn an_agent_offers_revert() {
         let f = fixture();
-        let v = build(f.input(), &latest(), &Subject::Agent(sid("a1")), None, None).unwrap();
+        let v = build(f.input(), &latest(), &Subject::Agent(sid("a1")), Fetched::default()).unwrap();
         assert_eq!((v.title.as_str(), v.lines[0].as_str()), ("factory/trail-7-a1", "holds TRAIL-7"));
         assert_eq!(v.actions, [Action::Revert(1)]);
-        assert!(build(f.input(), &latest(), &Subject::Agent(sid("nope")), None, None).is_none());
+        assert!(build(f.input(), &latest(), &Subject::Agent(sid("nope")), Fetched::default()).is_none());
     }
 
     #[test]
@@ -2092,7 +2534,7 @@ mod tests {
             Some(&Control::Refused("not allowed: only a human can set the first grade".into()))
         );
         let f = fixture();
-        let v = build(f.input(), &latest(), &Subject::Task(sid("t8")), None, None).unwrap();
+        let v = build(f.input(), &latest(), &Subject::Task(sid("t8")), Fetched::default()).unwrap();
         assert_eq!(v.grade, None);
     }
 }
@@ -2168,25 +2610,29 @@ mod in_place_tests {
     fn a_new_comment_adds_its_row_and_leaves_every_other_entity_as_it_was() {
         let mut app = app();
         let before = body(&mut app);
-        assert!(texts(&mut app).iter().any(|t| t == "? which db?"));
+        assert!(texts(&mut app).iter().any(|t| t == "which db?"));
 
         app.world_mut().write_message(question("c2", "and the cache?"));
         settle(&mut app);
         let after = body(&mut app);
-        assert!(texts(&mut app).iter().any(|t| t == "? and the cache?"));
+        assert!(texts(&mut app).iter().any(|t| t == "and the cache?"));
         let added: Vec<_> = after.iter().filter(|e| !before.contains(e)).collect();
         assert!(!added.is_empty(), "the new question has entities");
-        // Everything that was there still is, in the same place.
+        // Everything that was there still is, in the same place: the first question, the comment box and the rest.
         let kept: Vec<_> = after.iter().filter(|e| before.contains(e)).copied().collect();
         assert_eq!(kept.len(), before.len());
-        // Each entity added hangs off the new question's row or the Questions section it joined.
         let world = app.world();
-        let old_questions =
-            before.iter().filter(|e| world.get::<Shown>(**e).is_some_and(|s| matches!(s.0, Block::Question { .. })));
-        assert_eq!(old_questions.count(), 1);
-        let new_questions =
-            after.iter().filter(|e| world.get::<Shown>(**e).is_some_and(|s| matches!(s.0, Block::Question { .. })));
-        assert_eq!(new_questions.count(), 2);
+        let questions = |entities: &[Entity]| {
+            entities
+                .iter()
+                .filter(|e| {
+                    world
+                        .get::<Shown>(**e)
+                        .is_some_and(|s| matches!(&s.0, Block::Entry { entry, .. } if entry.open_question))
+                })
+                .count()
+        };
+        assert_eq!((questions(&before), questions(&after)), (1, 2));
     }
 
     #[test]
@@ -2313,5 +2759,74 @@ mod in_place_tests {
         let world = app.world_mut();
         let panel = world.query_filtered::<&Node, With<InspectorPanel>>().single(world).unwrap();
         assert_eq!(panel.display, Display::Flex);
+    }
+
+    fn composer_input(app: &mut App) -> Entity {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &ComposePart)>();
+        q.iter(world).find(|(_, p)| **p == ComposePart::Input).map(|(e, _)| e).expect("the comment box's input")
+    }
+
+    fn compose_button(app: &mut App, part: ComposePart) -> Entity {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &ComposePart)>();
+        q.iter(world).find(|(_, p)| **p == part).map(|(e, _)| e).unwrap()
+    }
+
+    fn sent(app: &mut App) -> Vec<Submit> {
+        app.world_mut().resource_mut::<Messages<Submit>>().drain().collect()
+    }
+
+    #[test]
+    fn the_comment_box_sends_a_comment_and_empties_once_it_went_through() {
+        let mut app = app();
+        let input = composer_input(&mut app);
+        app.world_mut().get_mut::<EditableText>(input).unwrap().editor_mut().set_text("looks good");
+        app.world_mut().resource_mut::<Compose>().kind = CommentKind::Decision;
+        let send = compose_button(&mut app, ComposePart::Send);
+        app.world_mut().trigger(Activate { entity: send });
+        let sent = sent(&mut app);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].request.path, "/v1/tasks/TRAIL-7/comments");
+        assert_eq!(sent[0].request.body, Some(json!({"kind": "decision", "body": "looks good"})));
+        assert_eq!(app.world().get::<Control>(sent[0].source), Some(&Control::Busy));
+        // The server took it.
+        *app.world_mut().get_mut::<Control>(sent[0].source).unwrap() = Control::Done;
+        settle(&mut app);
+        assert_eq!(app.world().get::<EditableText>(input).unwrap().value().to_string(), "");
+    }
+
+    #[test]
+    fn an_empty_comment_box_says_so_and_sends_nothing() {
+        let mut app = app();
+        let send = compose_button(&mut app, ComposePart::Send);
+        app.world_mut().trigger(Activate { entity: send });
+        settle(&mut app);
+        assert!(sent(&mut app).is_empty());
+        assert!(texts(&mut app).iter().any(|t| t == "write the comment first"));
+    }
+
+    #[test]
+    fn answering_opens_the_task_with_the_box_answering_and_sends_the_answer() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Selection>().0 = None;
+        settle(&mut app);
+        let c1 = sid("c1");
+        app.world_mut().trigger(OpenComposer { key: "TRAIL-7".into(), answer: Some((c1.clone(), "which db?".into())) });
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))));
+        assert!(texts(&mut app).iter().any(|t| t == "Answering: which db?"));
+        let input = composer_input(&mut app);
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(input), "the keyboard is in the box");
+        app.world_mut().get_mut::<EditableText>(input).unwrap().editor_mut().set_text("sqlite");
+        let send = compose_button(&mut app, ComposePart::Send);
+        app.world_mut().trigger(Activate { entity: send });
+        let sent = sent(&mut app);
+        assert_eq!(sent[0].request.path, format!("/v1/comments/{c1}/resolve"));
+        assert_eq!(sent[0].request.body, Some(json!({"answer": "sqlite"})));
+        // Stopping answering goes back to a comment.
+        let stop = compose_button(&mut app, ComposePart::StopAnswering);
+        app.world_mut().trigger(Activate { entity: stop });
+        assert_eq!(app.world().resource::<Compose>().answering, None);
     }
 }
