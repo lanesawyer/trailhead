@@ -7,7 +7,7 @@ mod output;
 mod repo;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use trailhead_core::{CommentKind, Status};
 
 use cli::{Cli, Cmd};
@@ -36,9 +36,10 @@ fn exit_quietly_on_broken_pipe() {
 
 fn main() {
     exit_quietly_on_broken_pipe();
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    if let Err(e) = rt.block_on(run(cli)) {
+    if let Err(e) = rt.block_on(run(cli, &matches)) {
         match e.downcast_ref::<ApiError>() {
             Some(api) => eprintln!("{api}"),
             None => eprintln!("error: {e:#}"),
@@ -47,11 +48,12 @@ fn main() {
     }
 }
 
-async fn run(cli: Cli) -> Result<()> {
+async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
     if let Cmd::Serve { bind } = &cli.cmd {
         return server::serve(bind).await;
     }
     if let Cmd::Factory { args } = &cli.cmd {
+        reject_global_flags(matches)?;
         return cmd::factory::run(args);
     }
     let paths = trailhead_server::Paths::from_env().context("no home directory")?;
@@ -113,4 +115,23 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Webhook(w) => webhooks::webhook(&cx, w).await,
         Cmd::Whoami => access::whoami(&cx).await,
     }
+}
+
+/// `trailhead factory` hands everything after `factory` to the factory binary, so a global flag given
+/// before it would be dropped silently. Flags from the environment are fine: the factory reads those itself.
+fn reject_global_flags(matches: &clap::ArgMatches) -> Result<()> {
+    use clap::parser::ValueSource;
+    let given: Vec<String> =
+        [("json", "--json"), ("url", "--url"), ("token", "--token"), ("agent", "--as"), ("as_me", "--as-me")]
+            .into_iter()
+            .filter(|(id, _)| matches.value_source(id) == Some(ValueSource::CommandLine))
+            .map(|(_, flag)| flag.to_string())
+            .collect();
+    if given.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "`trailhead factory` doesn't use {}; the factory takes its own flags, so put them after `factory` (see `trailhead factory --help`)",
+        given.join(", ")
+    )
 }
