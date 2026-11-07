@@ -290,7 +290,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
     };
     let query = filter.query.trim();
     let deep_hit = |t: &Task| input.deep.iter().find(|h| h.id == t.id.to_string());
-    let local = |t: &Task| matches_key_or_title(query, &t.key, &t.title);
+    let local = |t: &Task| matches_key_or_title(query, t.key.as_str(), &t.title);
     // A task only the server found is shown with where it matched.
     let found = |t: &Task| if query.is_empty() || local(t) { None } else { deep_hit(t).map(found_hint) };
     let searched = |t: &Task| query.is_empty() || local(t) || deep_hit(t).is_some();
@@ -336,7 +336,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         }
         Card {
             id: t.id.to_string(),
-            key: t.key.clone(),
+            key: t.key.0.clone(),
             title: t.title.clone(),
             parent: parent_key(t).filter(|_| with_parent).map(str::to_string),
             depth,
@@ -354,7 +354,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         }
         let mut here: Vec<&Task> = shown.iter().copied().filter(|t| t.status == status).collect();
         // Urgent first, then by key number, so the order doesn't shuffle with every update.
-        here.sort_by_key(|t| (t.priority, key_number(&t.key), t.key.clone()));
+        here.sort_by_key(|t| (t.priority, key_number(t.key.as_str()), t.key.clone()));
         let ids: HashSet<Uuid> = here.iter().map(|t| t.id).collect();
         let nested = |t: &Task| t.parent_id.is_some_and(|p| ids.contains(&p));
         let mut cards = Vec::new();
