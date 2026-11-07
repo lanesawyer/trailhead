@@ -13,6 +13,8 @@ pub struct FakeComment {
     pub author: String,
     pub kind: String,
     pub body: String,
+    /// A review's verdict; `None` on every other kind.
+    pub verdict: Option<VerdictKind>,
 }
 
 #[derive(Default)]
@@ -41,6 +43,9 @@ struct State {
     sub_agents_fail: bool,
     /// How many times each task has been read with `show`.
     shows: HashMap<TaskKey, usize>,
+    /// Tasks whose current claim was taken from review, which a release or lapse returns there while the review
+    /// still asks for changes.
+    claimed_from_review: HashSet<TaskKey>,
 }
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
@@ -93,6 +98,7 @@ impl FakeTracker {
                 grade: None,
                 priority: Priority::default(),
                 holder: None,
+                changes_requested: false,
                 run: RunUpdate::default(),
             },
         );
@@ -184,7 +190,8 @@ impl FakeTracker {
     }
 
     pub fn task(&self, key: &TaskKey) -> Task {
-        self.state.lock().unwrap().tasks[key].clone()
+        let s = self.state.lock().unwrap();
+        flagged(&s, &s.tasks[key])
     }
 
     /// Every task in `project`, oldest first.
@@ -270,6 +277,18 @@ impl FakeTracker {
     }
 }
 
+/// Whether the newest review on the task asks for changes and no handoff has come since, whatever its status.
+fn review_asks_changes(s: &State, key: &TaskKey) -> bool {
+    let comments = s.comments.get(key).map(Vec::as_slice).unwrap_or_default();
+    let Some(i) = comments.iter().rposition(|c| c.kind == "review" && c.verdict.is_some()) else { return false };
+    comments[i].verdict == Some(VerdictKind::RequestChanges) && !comments[i + 1..].iter().any(|c| c.kind == "handoff")
+}
+
+/// The task as the tracker shows it: in review with changes requested, or not.
+fn flagged(s: &State, t: &Task) -> Task {
+    Task { changes_requested: t.status == Status::InReview && review_asks_changes(s, &t.key), ..t.clone() }
+}
+
 fn revoked(s: &State, agent: &str) -> bool {
     let mut name = agent;
     loop {
@@ -288,6 +307,7 @@ fn push_comment(s: &mut State, key: &TaskKey, author: &str, kind: &str, body: &s
         author: author.to_string(),
         kind: kind.to_string(),
         body: body.to_string(),
+        verdict: None,
     });
 }
 
@@ -330,10 +350,10 @@ impl Tracker for FakeTracker {
         let s = self.state.lock().unwrap();
         Ok(s.tasks
             .values()
-            .filter(|t| t.project == project && t.status == Status::Open && t.holder.is_none())
+            .map(|t| flagged(&s, t))
+            .filter(|t| t.project == project && t.holder.is_none() && (t.status == Status::Open || t.changes_requested))
             .filter(|t| queue.is_empty() || s.parents.get(&t.key).is_some_and(|p| queue.contains(p)))
             .take(limit)
-            .cloned()
             .collect())
     }
 
@@ -341,7 +361,7 @@ impl Tracker for FakeTracker {
         self.check_live()?;
         let mut s = self.state.lock().unwrap();
         *s.shows.entry(task.clone()).or_default() += 1;
-        s.tasks.get(task).cloned().ok_or_else(|| Error::NotFound(task.0.clone()))
+        s.tasks.get(task).map(|t| flagged(&s, t)).ok_or_else(|| Error::NotFound(task.0.clone()))
     }
 
     async fn human_context(&self, task: &TaskKey) -> Result<HumanContext> {
@@ -401,7 +421,7 @@ impl Tracker for FakeTracker {
                 t.project == project && !t.run.is_empty() && !matches!(t.status, Status::Done | Status::Cancelled)
             })
             .filter(|t| queue.is_empty() || s.parents.get(&t.key).is_some_and(|p| queue.contains(p)))
-            .cloned()
+            .map(|t| flagged(&s, t))
             .collect())
     }
 
@@ -414,13 +434,20 @@ impl Tracker for FakeTracker {
                 t.project == project && !t.run.is_empty() && !matches!(t.status, Status::Done | Status::Cancelled)
             })
             .filter(|t| !s.parents.get(&t.key).is_some_and(|p| queues.contains(p)))
-            .cloned()
+            .map(|t| flagged(&s, t))
             .collect())
     }
 
     async fn claim(&self, task: &TaskKey) -> Result<()> {
         self.inject("claim")?;
-        self.write(task, |t, me| match (&t.holder, t.status) {
+        let from_review = self
+            .state
+            .lock()
+            .unwrap()
+            .tasks
+            .get(task)
+            .is_some_and(|t| t.status == Status::InReview && t.holder.is_none());
+        let claimed = self.write(task, |t, me| match (&t.holder, t.status) {
             (Some(h), _) if h == me => Ok(()),
             // As in core, parked and in-review work is claimable without passing through `open`.
             (None, Status::Open | Status::NeedsInput | Status::InReview) => {
@@ -429,7 +456,11 @@ impl Tracker for FakeTracker {
                 Ok(())
             }
             _ => Err(Error::Conflict(format!("{} isn't claimable", t.key.0))),
-        })
+        });
+        if claimed.is_ok() && from_review {
+            self.state.lock().unwrap().claimed_from_review.insert(task.clone());
+        }
+        claimed
     }
 
     async fn renew(&self, task: &TaskKey) -> Result<()> {
@@ -438,12 +469,21 @@ impl Tracker for FakeTracker {
 
     async fn release(&self, task: &TaskKey) -> Result<()> {
         self.inject("release")?;
-        self.write(task, |t, me| {
+        // As in core, a rework that is given back returns to review while the review still asks for changes.
+        let back = {
+            let s = self.state.lock().unwrap();
+            s.claimed_from_review.contains(task) && review_asks_changes(&s, task)
+        };
+        let released = self.write(task, |t, me| {
             held_by_me(t, me)?;
             t.holder = None;
-            t.status = Status::Open;
+            t.status = if back { Status::InReview } else { Status::Open };
             Ok(())
-        })
+        });
+        if released.is_ok() {
+            self.state.lock().unwrap().claimed_from_review.remove(task);
+        }
+        released
     }
 
     async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()> {
@@ -457,14 +497,22 @@ impl Tracker for FakeTracker {
         })
     }
 
-    async fn request_review(&self, task: &TaskKey) -> Result<()> {
+    async fn request_review(&self, task: &TaskKey, handoff: &str) -> Result<()> {
         self.inject("request_review")?;
         self.write(task, |t, me| {
             held_by_me(t, me)?;
             t.holder = None;
             t.status = Status::InReview;
             Ok(())
-        })
+        })?;
+        self.comment(task, "handoff", handoff);
+        Ok(())
+    }
+
+    async fn handoff(&self, task: &TaskKey, body: &str) -> Result<()> {
+        self.check_live()?;
+        self.comment(task, "handoff", body);
+        Ok(())
     }
 
     async fn approve(&self, task: &TaskKey) -> Result<()> {
@@ -529,6 +577,9 @@ impl Tracker for FakeTracker {
             VerdictKind::RequestChanges => "request_changes",
         };
         self.comment(task, "review", &format!("{kind}: {}", verdict.body));
+        if let Some(c) = self.state.lock().unwrap().comments.get_mut(task).and_then(|c| c.last_mut()) {
+            c.verdict = Some(verdict.kind);
+        }
         Ok(())
     }
 
@@ -645,5 +696,34 @@ impl Tracker for FakeTracker {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn claim_takes_unheld_open_needs_input_and_in_review_tasks_like_core() {
+        for status in [Status::Open, Status::NeedsInput, Status::InReview] {
+            let tracker = FakeTracker::new("factory");
+            let key = tracker.add_task("TRAIL", "t", "d");
+            tracker.state.lock().unwrap().tasks.get_mut(&key).unwrap().status = status;
+            tracker.claim(&key).await.unwrap();
+            let s = tracker.state.lock().unwrap();
+            let t = &s.tasks[&key];
+            assert_eq!(t.status, Status::InProgress, "claiming from {status:?}");
+            assert_eq!(t.holder.as_deref(), Some("factory"));
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_refuses_approved_and_closed_tasks() {
+        for status in [Status::Approved, Status::Done, Status::Cancelled] {
+            let tracker = FakeTracker::new("factory");
+            let key = tracker.add_task("TRAIL", "t", "d");
+            tracker.state.lock().unwrap().tasks.get_mut(&key).unwrap().status = status;
+            assert!(matches!(tracker.claim(&key).await, Err(Error::Conflict(_))), "claiming from {status:?}");
+        }
     }
 }

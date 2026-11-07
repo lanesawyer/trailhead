@@ -166,8 +166,13 @@ impl Tracker for RestTracker {
         self.patch(key, json!({ "metadata": { METADATA_KEY: update } })).await
     }
 
-    async fn request_review(&self, key: &TaskKey) -> Result<()> {
+    async fn request_review(&self, key: &TaskKey, handoff: &str) -> Result<()> {
+        self.handoff(key, handoff).await?;
         self.patch(key, json!({ "status": Status::InReview })).await
+    }
+
+    async fn handoff(&self, key: &TaskKey, body: &str) -> Result<()> {
+        self.comment(key, json!({ "kind": CommentKind::Handoff, "body": body })).await
     }
 
     async fn approve(&self, key: &TaskKey) -> Result<()> {

@@ -161,6 +161,9 @@ pub struct ListArgs {
     scheduled_through: Option<String>,
     /// Only tasks with this grade: 1 to 4, `graded` or `ungraded`.
     grade: Option<String>,
+    /// `true`: only `in_review` tasks with changes requested (the newest review asks for changes and no handoff
+    /// came after); `false`: leave those out.
+    changes_requested: Option<bool>,
     limit: Option<i64>,
     /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
     as_agent: Option<String>,
@@ -525,6 +528,7 @@ impl TrailheadMcp {
             sort: if scheduled_through.is_some() { TaskSort::Scheduled } else { TaskSort::Priority },
             scheduled_through,
             grade: attempt!(parse_grade_filter(a.grade.as_deref())),
+            changes_requested: a.changes_requested,
             limit: a.limit,
             ..Default::default()
         };

@@ -30,6 +30,8 @@ impl Factory {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let task = self.tracker.show(key).await?;
         let Some(pr) = &task.run.pr else { return Ok(()) };
+        // A task waiting on a rework is neither approved nor merged, whatever the gates say.
+        let act = act && !task.changes_requested;
         if !matches!(task.status, Status::InReview | Status::Approved) {
             return Ok(());
         }

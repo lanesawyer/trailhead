@@ -43,7 +43,7 @@ pub struct TrailheadId(pub String);
 pub struct Rev(pub i64);
 
 /// The entity as the API sent it, read into its model type: a [`Task`], [`Project`], [`Comment`], [`Claim`] or
-/// [`Agent`]. A task's `claim`, `open_questions` and `last_handoff` are entities of their own.
+/// [`Agent`]. A task's `claim`, `open_questions`, `last_handoff` and `last_review` are entities of their own.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct Mirrored<T: Send + Sync + 'static>(pub T);
 
@@ -177,16 +177,21 @@ impl Mirror {
         }
         for mut task in snapshot.tasks {
             let id = str_of(&task, "id");
-            let extras = task
-                .as_object_mut()
-                .map(|o| ["claim", "open_questions", "last_handoff"].map(|k| o.remove(k).unwrap_or(Value::Null)));
+            let extras = task.as_object_mut().map(|o| {
+                ["claim", "open_questions", "last_handoff", "last_review"].map(|k| o.remove(k).unwrap_or(Value::Null))
+            });
             let rev = version(&task);
             self.put(commands, Kind::Task, &id, rev, task, true);
-            let Some([claim, questions, handoff]) = extras else { continue };
+            let Some([claim, questions, handoff, review]) = extras else { continue };
             if !claim.is_null() {
                 self.put(commands, Kind::Claim, &id, Rev(0), claim, true);
             }
-            let comments = questions.as_array().into_iter().flatten().chain(handoff.is_object().then_some(&handoff));
+            let comments = questions
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(handoff.is_object().then_some(&handoff))
+                .chain(review.is_object().then_some(&review));
             for comment in comments {
                 self.put(commands, Kind::Comment, &str_of(comment, "id"), Rev(0), comment.clone(), true);
             }
@@ -320,6 +325,21 @@ mod tests {
     fn data_of<T: Clone + Send + Sync + 'static>(app: &mut App) -> Vec<T> {
         let world = app.world_mut();
         world.query::<&Mirrored<T>>().iter(world).map(|m| m.0.clone()).collect()
+    }
+
+    #[test]
+    fn a_snapshot_carries_the_review_that_asks_for_changes() {
+        let mut app = app();
+        let mut task = task_json(json!({"id": "t1", "status": "in_review", "version": 1}));
+        task["claim"] = Value::Null;
+        task["open_questions"] = json!([]);
+        task["last_handoff"] = Value::Null;
+        task["last_review"] =
+            comment_json(json!({"id": "c1", "task_id": "t1", "kind": "review", "verdict": "request_changes"}));
+        send(&mut app, [SyncItem::Snapshot(Snapshot { at: 10, tasks: vec![task], ..Default::default() })]);
+        let comments = data_of::<Comment>(&mut app);
+        let asked = trailhead_model::changes_requested(trailhead_model::Status::InReview, &comments);
+        assert_eq!(asked, Some(comments[0].id));
     }
 
     #[test]

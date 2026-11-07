@@ -5,7 +5,7 @@ use trailhead_core::{CommentKind, Status};
 use super::{Ctx, names, params, print_json};
 use crate::cli::{AddArgs, EditArgs};
 use crate::dates::{Field, local_today, parse_day_time};
-use crate::output::{self, s, task_line, task_list};
+use crate::output::{self, s, task_line, task_list, task_list_flagged};
 
 pub(crate) async fn ready(cx: &Ctx, project: Option<String>, grade: Option<String>, limit: Option<i64>) -> Result<()> {
     let q = params([
@@ -52,7 +52,17 @@ pub(crate) async fn ls(
     if cx.json {
         print_json(&v)
     } else {
-        task_list(&v, "no tasks")
+        let waiting = if v.as_array().into_iter().flatten().any(|t| t["status"] == "in_review") {
+            let mut q = q;
+            q.retain(|(k, _)| ["project", "parent"].contains(k));
+            q.push(("status", "in_review".into()));
+            q.push(("changes_requested", "true".into()));
+            let asked = cx.c.get("tasks", &q).await?;
+            asked.as_array().into_iter().flatten().map(|t| s(t, "key").to_string()).collect()
+        } else {
+            Default::default()
+        };
+        task_list_flagged(&v, "no tasks", &waiting)
     }
     Ok(())
 }
