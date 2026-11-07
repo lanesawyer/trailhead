@@ -281,7 +281,7 @@ pub fn build(
 ) -> Option<InspectorView> {
     let Fetched { detail, error: fetch_error, me } = fetched;
     let agent_name = |id: Uuid| input.agents.iter().find(|a| a.id == id).map(|a| a.name.clone());
-    let task_key = |id: Uuid| input.tasks.iter().find(|t| t.id == id).map(|t| t.key.clone());
+    let task_key = |id: Uuid| input.tasks.iter().find(|t| t.id == id).map(|t| t.key.0.clone());
     match subject {
         Subject::Agent(id) => {
             let id = Uuid::parse_str(id).ok()?;
@@ -337,7 +337,7 @@ pub fn build(
             questions.sort_by_key(|c| c.created_at);
             let questions: Vec<Question> = questions
                 .into_iter()
-                .map(|q| Question { key: task.key.clone(), id: q.id.to_string(), body: q.body.clone() })
+                .map(|q| Question { key: task.key.0.clone(), id: q.id.to_string(), body: q.body.clone() })
                 .collect();
 
             let pr = run.as_ref().and_then(pr_panel);
@@ -406,8 +406,8 @@ fn facts(
     let project_key = input.projects.iter().find(|p| p.id == task.project_id).map(|p| p.key.clone());
     let parent = task.parent_id.and_then(|p| input.tasks.iter().find(|t| t.id == p));
     let mut crumbs: Vec<String> = project_key.iter().cloned().collect();
-    crumbs.extend(parent.map(|p| p.key.clone()));
-    crumbs.push(task.key.clone());
+    crumbs.extend(parent.map(|p| p.key.0.clone()));
+    crumbs.push(task.key.0.clone());
     let project = match (&project_key, parent) {
         (Some(k), Some(p)) => format!("{k} › {} {}", p.key, p.title),
         (Some(k), None) => k.clone(),
@@ -416,10 +416,10 @@ fn facts(
     };
 
     let mut subtasks: Vec<&Task> = input.tasks.iter().filter(|t| t.parent_id == Some(task.id)).collect();
-    subtasks.sort_by_key(|t| (key_number(&t.key), t.key.clone()));
+    subtasks.sort_by_key(|t| (key_number(t.key.as_str()), t.key.0.clone()));
     let subtasks = subtasks
         .into_iter()
-        .map(|t| Subtask { id: t.id.to_string(), key: t.key.clone(), title: t.title.clone(), status: t.status })
+        .map(|t| Subtask { id: t.id.to_string(), key: t.key.0.clone(), title: t.title.clone(), status: t.status })
         .collect();
 
     let claim = match detail {
@@ -438,7 +438,7 @@ fn facts(
     if let Some(d) = detail {
         for (what, keys) in [("blocked by", &d.blocked_by), ("blocks", &d.blocks), ("duplicates", &d.duplicates)] {
             if !keys.is_empty() {
-                links.push(format!("{what} {}", keys.join(", ")));
+                links.push(format!("{what} {}", keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
             }
         }
         if let Some(k) = &d.duplicate_of {
@@ -2261,7 +2261,7 @@ fn on_open_composer(
     mut selection: ResMut<Selection>,
     mut compose: ResMut<Compose>,
 ) {
-    let Some(task) = tasks.iter().find(|t| t.0.key == open.key) else { return };
+    let Some(task) = tasks.iter().find(|t| t.0.key == open.key.as_str()) else { return };
     let subject = Subject::Task(task.0.id.to_string());
     if compose.subject.as_ref() != Some(&subject) {
         *compose = Compose::default();

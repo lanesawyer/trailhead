@@ -3,7 +3,7 @@ mod common;
 use common::Env;
 use trailhead_core::{
     CommentKind, Ctx, Error, EventFilter, GradeFilter, NewComment, NewProject, NewTask, Principal, ProjectPatch,
-    TaskFilter, TaskPatch, TokenOptions, TokenPatch,
+    TaskFilter, TaskKey, TaskPatch, TokenOptions, TokenPatch,
 };
 
 struct Scoped {
@@ -11,7 +11,7 @@ struct Scoped {
     /// An agent whose token only covers AUTH.
     bot: Ctx,
     /// A task in WEB, outside the bot's scope.
-    web: String,
+    web: TaskKey,
 }
 
 async fn setup() -> Scoped {
@@ -51,7 +51,7 @@ async fn reads_outside_scope_look_missing() {
     hidden(s.list_comments(&bot, &web).await);
     hidden(s.blockers(&bot, &web).await);
     hidden(s.get_project(&bot, "WEB").await);
-    hidden(s.list_events(&bot, EventFilter { task: Some(web.clone()), ..Default::default() }).await);
+    hidden(s.list_events(&bot, EventFilter { task: Some(web.0.clone()), ..Default::default() }).await);
     hidden(s.list_tasks(&bot, TaskFilter { project: Some("WEB".into()), ..Default::default() }).await);
     hidden(s.ready(&bot, Some("WEB"), None, GradeFilter::Any).await);
 
@@ -65,7 +65,7 @@ async fn reads_outside_scope_look_missing() {
 
     let events = s.list_events(&bot, EventFilter::default()).await.unwrap();
     assert!(!events.is_empty());
-    assert!(events.iter().all(|e| e.task_key.as_deref() != Some(web.as_str()) && e.entity_id != web));
+    assert!(events.iter().all(|e| e.task_key.as_deref() != Some(web.as_str()) && e.entity_id != web.as_str()));
     assert!(events.iter().all(|e| !(e.kind == "project.created" && e.after.as_ref().unwrap()["key"] == "WEB")));
 }
 
@@ -96,7 +96,8 @@ async fn writes_outside_scope_are_rejected() {
     forbidden(s.create_token_with(&bot, trailhead_core::Principal::Agent(kid.id), "k", wider).await);
 
     // Parents and dependencies can't reach out of scope either.
-    let child = NewTask { project: "AUTH".into(), title: "c".into(), parent: Some(web.clone()), ..Default::default() };
+    let child =
+        NewTask { project: "AUTH".into(), title: "c".into(), parent: Some(web.0.clone()), ..Default::default() };
     hidden(s.create_task(&bot, child).await);
     hidden(s.add_dependency(&bot, &web, &auth.key).await);
     hidden(s.add_dependency(&bot, &auth.key, &web).await);

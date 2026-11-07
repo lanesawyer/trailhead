@@ -110,7 +110,7 @@ pub fn repos_text(status: &FactoryStatus) -> String {
 
 /// The queue task new tasks go under, and how much is queued beneath it.
 pub fn queue_text(queue: &str, tasks: &[Task]) -> String {
-    let Some(task) = tasks.iter().find(|t| t.key == queue) else {
+    let Some(task) = tasks.iter().find(|t| t.key == *queue) else {
         return format!("{queue} (not loaded)");
     };
     let queued: Vec<&Task> = tasks.iter().filter(|t| t.parent_id == Some(task.id)).collect();

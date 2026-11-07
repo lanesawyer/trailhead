@@ -28,7 +28,7 @@ pub struct CoreTracker {
     sub: Option<String>,
     agent: String,
     /// The bad factory metadata already noted on each task (key to note), so each is said once.
-    flagged: Arc<Mutex<HashMap<String, String>>>,
+    flagged: Arc<Mutex<HashMap<TaskKey, String>>>,
     /// How many tasks one `list_tasks` call reads; longer lists are read a page at a time.
     page_size: i64,
 }
@@ -176,7 +176,7 @@ impl CoreTracker {
         let mut free = Vec::new();
         for t in waiting.into_iter().filter(|t| !claims.contains_key(&t.id)) {
             // A blocked task can't be claimed, so it isn't ready.
-            let detail = self.store.task_detail(ctx, &t.key).await.map_err(map_err)?;
+            let detail = self.store.task_detail(ctx, &t.key.0).await.map_err(map_err)?;
             if detail.blocked_by.is_empty() {
                 free.push(t);
             }
@@ -191,16 +191,16 @@ impl CoreTracker {
     /// left out of the walk.
     async fn raise_to_blocked_priority(&self, ctx: &Ctx, tasks: &mut [Task]) {
         // Each task's own priority and the keys it blocks, or None for one that is finished or can't be read.
-        let mut seen: HashMap<String, Option<(Priority, Vec<String>)>> = HashMap::new();
+        let mut seen: HashMap<TaskKey, Option<(Priority, Vec<TaskKey>)>> = HashMap::new();
         for task in tasks.iter_mut() {
-            let mut stack = vec![task.key.0.clone()];
+            let mut stack = vec![task.key.clone()];
             let mut visited = std::collections::HashSet::new();
             while let Some(key) = stack.pop() {
                 if !visited.insert(key.clone()) {
                     continue;
                 }
                 if !seen.contains_key(&key) {
-                    let read = match self.store.task_detail(ctx, &key).await {
+                    let read = match self.store.task_detail(ctx, &key.0).await {
                         Ok(d) if !d.task.status.is_closed() => Some((d.task.priority, d.blocks)),
                         _ => None,
                     };
@@ -223,9 +223,9 @@ impl CoreTracker {
         }
         tracing::warn!(task = %t.key, error, "skipping a task with bad factory metadata");
         // A note from before a restart counts, so a restart doesn't repeat it.
-        let posted = match self.store.list_comments(ctx, &t.key).await {
+        let posted = match self.store.list_comments(ctx, &t.key.0).await {
             Ok(cs) if cs.iter().any(|c| c.kind == CommentKind::Note && c.body == body) => true,
-            _ => self.comment(&TaskKey(t.key.clone()), CommentKind::Note, &body).await.is_ok(),
+            _ => self.comment(&t.key, CommentKind::Note, &body).await.is_ok(),
         };
         if posted {
             self.flagged.lock().unwrap().insert(t.key.clone(), body);
@@ -529,7 +529,7 @@ impl Tracker for CoreTracker {
             ..Default::default()
         };
         let task = self.store.create_task(&ctx, new).await.map_err(map_err)?;
-        Ok(TaskKey(task.key))
+        Ok(task.key)
     }
 
     async fn follow_ups(&self, task: &TaskKey) -> Result<Vec<FollowUpTask>> {
@@ -540,7 +540,7 @@ impl Tracker for CoreTracker {
         Ok(tasks
             .into_iter()
             .filter(|t| is_raised_by(&t.description, task))
-            .map(|t| FollowUpTask { key: TaskKey(t.key), title: t.title, description: t.description })
+            .map(|t| FollowUpTask { key: t.key, title: t.title, description: t.description })
             .collect())
     }
 
@@ -552,7 +552,7 @@ impl Tracker for CoreTracker {
             ..TaskFilter::default()
         };
         let tasks = self.list_all(&ctx, filter).await?;
-        Ok(tasks.into_iter().find(|t| same_title(&t.title, title)).map(|t| TaskKey(t.key)))
+        Ok(tasks.into_iter().find(|t| same_title(&t.title, title)).map(|t| t.key))
     }
 
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential> {

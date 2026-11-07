@@ -190,10 +190,10 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
     let task = s.store.create_task(&ctx, new).await?;
     let similar = s.store.similar_tasks(&ctx, &project, &task.title, Some(task.id)).await.unwrap_or_default();
     for blocker in &b.blocked_by {
-        s.store.add_dependency(&ctx, blocker, &task.key).await?;
+        s.store.add_dependency(&ctx, blocker, &task.key.0).await?;
     }
     for blocked in &b.blocks {
-        s.store.add_dependency(&ctx, &task.key, blocked).await?;
+        s.store.add_dependency(&ctx, &task.key.0, blocked).await?;
     }
     let version = task.version;
     let mut body = serde_json::to_value(task).expect("tasks serialize");

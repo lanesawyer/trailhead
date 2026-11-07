@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use jiff::{SignedDuration, Timestamp, Zoned};
 use tempfile::TempDir;
-use trailhead_core::{Ctx, GradeFilter, NewProject, NewTask, Store, Task};
+use trailhead_core::{Ctx, GradeFilter, NewProject, NewTask, Store, Task, TaskKey};
 
 pub struct Env {
     pub store: Arc<Store>,
@@ -62,7 +62,7 @@ impl Env {
         (self.now() + d).to_zoned(jiff::tz::TimeZone::UTC)
     }
 
-    pub async fn ready_keys(&self) -> Vec<String> {
+    pub async fn ready_keys(&self) -> Vec<TaskKey> {
         self.store.ready(&self.human, None, None, GradeFilter::Any).await.unwrap().into_iter().map(|t| t.key).collect()
     }
 }
