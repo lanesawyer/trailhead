@@ -8,7 +8,8 @@
 //! Neither saves anything itself. A change triggers [`InlineEdited`] (or [`InlineChosen`]) on the widget with the old
 //! and the new value, and the widget shows the new value dimmed with "Saving…" until the caller answers on its
 //! component: [`InlineText::confirm`] keeps the value, [`InlineText::fail`] puts the old one back and shows the error
-//! beside it. The caller decides what saving means, and may refuse.
+//! beside it, and [`InlineText::fail_keeping`] does too but keeps what was typed for the next edit (a save that lost
+//! to someone else's change, to try again over theirs). The caller decides what saving means, and may refuse.
 //!
 //! The kit's modal rules hold: an Esc that cancels an edit is not passed on, so it doesn't also close the modal the
 //! text sits in. The hint shows while the value is empty, and in the input while it is empty during an edit (feathers'
@@ -71,6 +72,8 @@ pub struct InlineText {
     multiline: bool,
     mode: InlineMode,
     error: String,
+    /// What was typed in an edit that couldn't be saved, which the next edit starts from.
+    draft: Option<String>,
 }
 
 impl InlineText {
@@ -107,6 +110,18 @@ impl InlineText {
         self.value = old.into();
         self.error = message.into();
         self.mode = InlineMode::Reading;
+    }
+
+    /// The save was refused but what was typed is worth keeping: back to `old` (which a newer value from elsewhere may
+    /// replace), with `message` beside it, and the next edit starts from `draft`.
+    pub fn fail_keeping(&mut self, old: impl Into<String>, draft: impl Into<String>, message: impl Into<String>) {
+        self.fail(old, message);
+        self.draft = Some(draft.into());
+    }
+
+    /// What the next edit starts from, when an edit couldn't be saved.
+    pub fn draft(&self) -> Option<&str> {
+        self.draft.as_deref()
     }
 
     /// Ends an edit: `draft` is what to save, or `None` to put the value back. Returns the change, if there is one.
@@ -209,12 +224,17 @@ struct InlineInput;
 /// A text that becomes an input when clicked, `lines` high while editing (more than one allows newlines). `hint`
 /// shows while it is empty.
 pub fn inline_text(value: impl Into<String>, hint: impl Into<String>, lines: f32) -> impl Scene {
+    inline_text_sized(value, hint, lines, size::BODY)
+}
+
+/// An [`inline_text`] read at `font_size` (one of [`size`]'s), such as a detail view's title.
+pub fn inline_text_sized(value: impl Into<String>, hint: impl Into<String>, lines: f32, font_size: f32) -> impl Scene {
     let (value, hint) = (value.into(), hint.into());
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: { px(space::STACKED) } }
         InlineText { value: { value.clone() }, hint: { hint.clone() }, multiline: { lines > 1.0 } }
         Children [
-            @shown(value, hint.clone())
+            @shown(value, hint.clone(), font_size)
             --
             Node { display: { Display::None }, width: percent(100) }
             Part::Editor
@@ -245,7 +265,7 @@ pub fn inline_field(label: impl Into<String>, options: Vec<String>, selected: Op
                 @text_dim(label, size::SECONDARY)
                 Node { width: { px(extent::FIELD_LABEL_WIDTH) }, flex_shrink: { 0.0_f32 } }
                 --
-                @shown(shown_text, String::new())
+                @shown(shown_text, String::new(), size::BODY)
                 --
                 Node { display: { Display::None } }
                 Part::Editor
@@ -258,16 +278,16 @@ pub fn inline_field(label: impl Into<String>, options: Vec<String>, selected: Op
 }
 
 /// The clickable value, and its hint while the value is empty.
-fn shown(value: String, hint: String) -> impl Scene {
+fn shown(value: String, hint: String, font_size: f32) -> impl Scene {
     bsn! {
         Node { flex_direction: FlexDirection::Column, width: percent(100) }
         Part::Shown
         on(open_edit)
         Children [
-            @text(value, size::BODY)
+            @text(value, font_size)
             Part::Value
             --
-            @text_dim(hint, size::BODY)
+            @text_dim(hint, font_size)
             Part::Hint
         ]
     }
@@ -326,7 +346,7 @@ fn begin_edit(start: Entity, open: &mut Opening) {
         }
         text.mode = InlineMode::Editing;
         text.error.clear();
-        let value = text.value.clone();
+        let value = text.draft.take().unwrap_or_else(|| text.value.clone());
         let input = open.children.iter_descendants(root).find(|e| open.inputs.contains(*e));
         if let Some(input) = input {
             if let Ok(mut editable) = open.inputs.get_mut(input) {
@@ -698,6 +718,25 @@ mod tests {
         // A click while it saves doesn't start another edit.
         click(&mut app, root);
         assert_eq!(mode(&app, root), InlineMode::Saving);
+    }
+
+    #[test]
+    fn a_save_that_lost_to_another_change_shows_theirs_and_the_next_edit_starts_from_what_was_typed() {
+        let mut app = app();
+        let (root, input) = text(&mut app, "a", 1.0);
+        click(&mut app, root);
+        type_in(&mut app, input, "mine");
+        enter(&mut app, input);
+        app.world_mut().get_mut::<InlineText>(root).unwrap().fail_keeping("a", "mine", "changed elsewhere");
+        // The newer value arrives and is shown.
+        app.world_mut().get_mut::<InlineText>(root).unwrap().set_value("theirs");
+        settle(&mut app);
+        let state = app.world().get::<InlineText>(root).unwrap();
+        assert_eq!((state.value(), state.error(), state.draft()), ("theirs", "changed elsewhere", Some("mine")));
+        click(&mut app, root);
+        assert_eq!(app.world().get::<EditableText>(input).unwrap().value().to_string(), "mine");
+        enter(&mut app, input);
+        assert_eq!(edits(&app).last(), Some(&("theirs".to_string(), "mine".to_string())));
     }
 
     #[test]

@@ -4,6 +4,8 @@
 //! The header says nothing about what closing does: the X sends feathers' `RequestClose` from itself, which climbs
 //! to whatever owns the panel (the modal's root, the inspector) and is answered there. A panel that can't be closed
 //! passes `closable: false` and has the same title row without the X.
+//!
+//! [`PanelTools`] holds the X; a panel puts its own header controls (a modal's arrows and menu) in it before the X.
 
 use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
@@ -14,6 +16,10 @@ use super::{Icon, size, space, text, tool_button};
 /// Marks the title's text, so a title that changes is set in place.
 #[derive(Component, Default, Clone)]
 pub struct PanelTitle;
+
+/// The row at the header's right, ending with the X: insert a panel's own controls at its start.
+#[derive(Component, Default, Clone)]
+pub struct PanelTools;
 
 /// A panel's title row; with `closable`, the close X at its right.
 pub fn panel_header(title: impl Into<String>, closable: bool) -> impl Scene {
@@ -39,7 +45,9 @@ pub fn panel_header(title: impl Into<String>, closable: bool) -> impl Scene {
         Children [
             @text(title, size::HEADING) PanelTitle Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0) }
             --
-            {close}
+            Node { align_items: AlignItems::Center, column_gap: { px(space::CONTROLS) }, flex_shrink: 0.0 }
+            PanelTools
+            Children [ {close} ]
         ]
     }
 }

@@ -71,6 +71,47 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
 }
 
 #[tokio::test]
+async fn a_failed_sub_agent_revoke_still_requeues_an_interrupted_task() {
+    let r = rig();
+    let tracker: Arc<dyn Tracker> = Arc::new(r.tracker.clone());
+    let crashed = r.tracker.add_task("TRAIL", "Crashed", "");
+    let name = run_name(&crashed, 1);
+    tracker.create_sub_agent(&name, "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
+    let sub = tracker.sub_agent(&name);
+    sub.claim(&crashed).await.unwrap();
+    sub.report(&crashed, update(1, &name)).await.unwrap();
+    live(&r.compute, &name, &crashed, "worker").await;
+
+    r.tracker.fail_next("factory", "revoke_sub_agent", 1);
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.requeued, std::slice::from_ref(&crashed.0));
+    assert_eq!(r.tracker.task(&crashed).status, Status::Open, "released despite the failed revoke");
+    assert!(!r.tracker.is_revoked(&format!("factory/{name}")), "the revoke did fail");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_sub_agent_revoke_still_resumes_an_interrupted_review() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    // The rework's review dies with the control plane, after a first counted round.
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    assert_eq!(r.tracker.task(&key).run.review_rounds, Some(1));
+
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
+    r.tracker.fail_next("factory", "revoke_sub_agent", 1);
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
+    assert_eq!(r.tracker.task(&key).run.review_rounds, Some(2), "the review ran despite the failed revoke");
+}
+
+#[tokio::test]
 async fn reconcile_reattaches_to_a_run_still_going_and_counts_all_its_spend() {
     let r = rig();
     let key = going(&r, Usd::dollars(0.5), 120).await;
@@ -315,6 +356,25 @@ async fn a_parked_task_whose_pr_is_merged_is_finished() {
     r.codehost.close(&pr);
     r.factory.tick().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.merged, std::slice::from_ref(&key.0));
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
+async fn reconcile_finishes_an_open_task_whose_pr_merged() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    // Review asked for changes and the task went back to the queue, unclaimed.
+    r.tracker.set_status(&key, Status::Open);
 
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();

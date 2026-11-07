@@ -159,6 +159,8 @@ pub struct ApiAccess {
     pub base: String,
     pub token: String,
     pub user: String,
+    /// The user's id, for naming what they wrote.
+    pub user_id: String,
 }
 
 /// Where the net thread keeps things and how it reaches the network.
@@ -815,8 +817,9 @@ impl Net {
             self.resume.clear();
         }
         let user = me["user"]["name"].as_str().unwrap_or("you").to_string();
+        let user_id = me["user"]["id"].as_str().unwrap_or_default().to_string();
         self.token = Some(token.clone());
-        let access = ApiAccess { base: base.clone(), token: token.clone(), user };
+        let access = ApiAccess { base: base.clone(), token: token.clone(), user, user_id };
         let _ = self.events.send(NetEvent::Access(access));
         self.set(Link::Syncing, Some(Reason::Loading));
         self.start_sync(base, token);

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use trailhead_factory::messages;
+use trailhead_factory::messages::{self, BreachedSandbox};
 use trailhead_factory::{
     ChangesRequested, Error, Merged, MergedBy, PrRef, PrState, Result, RunUpdate, Sandbox, Status, Task, TaskKey,
     WorkerBreach, label,
@@ -168,14 +168,17 @@ impl Factory {
     /// was recorded with the breach, so it isn't counted again. A failure is left for the next reconcile.
     async fn finish_worker_breach(&self, task: &Task, breach: &WorkerBreach, live: &[Sandbox], done: &mut Reconciled) {
         let reason = breach.reason.as_str();
-        let (Some(name), Some(host)) = (&task.run.sandbox, task.run.host.as_ref()) else { return };
+        let (Some(name), Some(host)) = (&task.run.sandbox, task.run.host.as_ref()) else {
+            tracing::warn!(task = %task.key.0, %reason, sandbox = ?task.run.sandbox, host = ?task.run.host, "a worker's budget breach has no sandbox or host to finish the park with; leaving the task as it is");
+            return;
+        };
         tracing::warn!(task = %task.key.0, %reason, "finishing the park for a worker's budget breach");
         // A sandbox that's gone was destroyed after the breach, so there's nothing suspended to point at.
-        let suspended = match live.iter().find(|s| s.name == *host) {
+        let state = match live.iter().find(|s| s.name == *host) {
             Some(sandbox) => self.cut_off_breached(task, sandbox).await,
-            None => false,
+            None => BreachedSandbox::Destroyed,
         };
-        let question = messages::budget_breach_question(reason, host, suspended);
+        let question = messages::budget_breach_question(reason, host, state);
         match self.park_worker_breach(&task.key, &self.tracker.sub_agent(name), breach, &question).await {
             Ok(()) => done.breached.push(task.key.0.clone()),
             Err(e) => {

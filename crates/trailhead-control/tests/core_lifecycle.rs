@@ -167,6 +167,14 @@ async fn spec_to_reviewed_pr_on_the_real_engine() {
     assert!(filed.description.starts_with("No test for empty input."), "{}", filed.description);
     assert!(filed.description.contains(&key.0), "{}", filed.description);
 
+    // The real engine lists only unfinished follow-ups (TaskFilter::default()).
+    let listed = r.tracker.follow_ups(&key).await.unwrap();
+    assert_eq!(listed.iter().map(|f| &f.key).collect::<Vec<_>>(), [&filed_key]);
+    assert_eq!(listed[0].title, "Cover the edge");
+    let finish = TaskPatch { status: Some(trailhead_core::Status::Done), ..Default::default() };
+    r.store.update_task(&r.human, &filed_key.0, finish, None).await.unwrap();
+    assert!(r.tracker.follow_ups(&key).await.unwrap().is_empty(), "a finished follow-up is no longer listed");
+
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
     assert_eq!(task.holder, None, "moving to review releases the claim");
@@ -302,6 +310,30 @@ async fn a_task_with_malformed_factory_metadata_is_skipped_not_fatal() {
     assert!(notes[0].body.contains("attempt_base"), "{}", notes[0].body);
     assert!(!notes[0].body.contains("bad factory metadata"), "{}", notes[0].body);
     assert!(!notes[0].body.contains(&bad.0), "{}", notes[0].body);
+}
+
+#[tokio::test]
+async fn a_task_with_non_object_factory_metadata_is_skipped_without_naming_a_field() {
+    let r = rig().await;
+    let good = r.task("Good").await;
+    let mut bad = Vec::new();
+    for (title, value) in [("String", serde_json::json!("fast")), ("Array", serde_json::json!(["attempt_base"]))] {
+        let task = r.task(title).await;
+        let patch = TaskPatch { metadata: Some(serde_json::json!({ "factory": value })), ..TaskPatch::default() };
+        r.store.update_task(&r.human, &task.0, patch, None).await.unwrap();
+        bad.push(task);
+    }
+
+    let ready = r.tracker.ready("TRAIL", &[], 10).await.unwrap();
+    assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&good]);
+
+    for task in &bad {
+        let notes = r.store.list_comments(&r.human, &task.0).await.unwrap();
+        assert_eq!(notes.len(), 1, "{task:?}");
+        assert!(notes[0].body.contains("fix or remove the `factory` metadata"), "{}", notes[0].body);
+        assert!(!notes[0].body.contains("fix or remove that field"), "{}", notes[0].body);
+        assert!(!notes[0].body.contains(" in "), "{}", notes[0].body);
+    }
 }
 
 #[tokio::test]

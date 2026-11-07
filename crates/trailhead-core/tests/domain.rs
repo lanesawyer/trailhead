@@ -1293,12 +1293,24 @@ async fn agents_cannot_undo_or_revert_a_humans_grade_change() {
     let b = env.agent("b").await;
     let other = env.task_with(NewTask { title: "other".into(), grade: Some(gr(2)), ..Default::default() }).await;
     let since = env.now() - jiff::SignedDuration::from_secs(60);
+    // The agent also retitled two other tasks, one before and one after the grade change, so whichever order the
+    // revert walks them in, some of its work is reverted before the refusal.
+    let before = env.task("before").await;
+    let after = env.task("after").await;
+    let retitle = |t: &str| TaskPatch { title: Some(t.into()), ..Default::default() };
+    env.store.update_task(&a.next_batch(), &before.key, retitle("before, retitled"), None).await.unwrap();
     env.store.update_task(&a.next_batch(), &other.key, patch(Some(gr(4))), None).await.unwrap();
+    env.store.update_task(&a.next_batch(), &after.key, retitle("after, retitled"), None).await.unwrap();
     let report = env.store.revert_actor(&b.next_batch(), a.actor_id(), since).await;
     assert!(matches!(report, Err(Error::Forbidden(_))), "lowering a grade aborts the whole revert: {report:?}");
     assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(gr(4)));
+    // All or nothing: the agent's other changes are still in place after the refusal.
+    assert_eq!(env.store.get_task(&env.human, &before.key).await.unwrap().title, "before, retitled");
+    assert_eq!(env.store.get_task(&env.human, &after.key).await.unwrap().title, "after, retitled");
     env.store.revert_actor(&env.human.next_batch(), a.actor_id(), since).await.unwrap();
     assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(gr(2)));
+    assert_eq!(env.store.get_task(&env.human, &before.key).await.unwrap().title, "before");
+    assert_eq!(env.store.get_task(&env.human, &after.key).await.unwrap().title, "after");
 }
 
 #[tokio::test]

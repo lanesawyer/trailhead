@@ -49,17 +49,22 @@ pub fn trim_target(target: &Path, cap: u64) -> io::Result<Trimmed> {
                 break;
             }
             for path in &unit.paths {
-                if path.is_dir() {
-                    fs::remove_dir_all(path)?;
-                } else {
-                    fs::remove_file(path)?;
-                }
+                remove_path(path)?;
             }
             size = size.saturating_sub(unit.size);
         }
         size = dir_size(target)?;
     }
     Ok(Trimmed { before, after: size })
+}
+
+/// Removes a file or directory tree. A path that is already gone (listed twice, or deleted concurrently) is fine.
+fn remove_path(path: &Path) -> io::Result<()> {
+    let removed = if path.is_dir() { fs::remove_dir_all(path) } else { fs::remove_file(path) };
+    match removed {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// One compilation unit's paths in a profile directory.
@@ -236,6 +241,18 @@ mod tests {
             profile.join(format!("deps/lib{key}.rlib")).exists(),
             profile.join("build").join(key).exists(),
         ]
+    }
+
+    #[test]
+    fn a_path_already_gone_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        file(&dir.path().join("d/f"), 10, 1);
+        file(&dir.path().join("g"), 10, 1);
+        for _ in 0..2 {
+            remove_path(&dir.path().join("d")).unwrap();
+            remove_path(&dir.path().join("g")).unwrap();
+        }
+        assert!(!dir.path().join("d").exists() && !dir.path().join("g").exists());
     }
 
     #[test]
