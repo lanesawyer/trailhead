@@ -45,10 +45,10 @@ use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::sync::SyncItem;
 use crate::widgets::{
     DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed, ModalRoot,
-    ModalSlots, PanelTitle, Picked, SelectEdit, badge, button, danger_button, display, extent, icon_menu, inline_field,
-    inline_text_sized, layer, menu_item, open_modal, panel, panel_header, priority_tone, row, scroll_body,
-    scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text, text_dim,
-    text_input, text_toned, token, tool_button,
+    ModalSlots, PanelTitle, Picked, SelectEdit, badge, button, danger_button, display, extent, grade_tone, icon_menu,
+    inline_field, inline_text_sized, layer, menu_item, open_modal, panel, panel_header, priority_tone, row,
+    scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text,
+    text_dim, text_input, text_toned, token, tool_button,
 };
 use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 
@@ -943,6 +943,8 @@ enum Block {
     Text { text: String, size: f32, tone: Tone },
     /// The `P1` badge. Its key holds the priority, so a new priority is a new badge.
     Priority(Priority),
+    /// The `G2` badge, toned by grade. Its key holds the grade, so a new grade is a new badge.
+    GradeBadge(Grade),
     /// The wrapping row of a PR's gates, which are [`Gate`]s keyed under it.
     Gates,
     /// An open question, with its answer and resolve buttons and what became of the last resolve.
@@ -1138,9 +1140,10 @@ fn layout(
         if let Some(pr) = &view.pr {
             items
                 .push(("pr/url".to_string(), text_block(format!("#{} {}", pr.number, pr.url), size::BODY, Tone::Body)));
-            let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
-            items
-                .push(("pr/state".to_string(), text_block(format!("{}{grade}", pr.state), size::SECONDARY, Tone::Dim)));
+            items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
+            if let Some(g) = pr.grade {
+                items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
+            }
             if !gates(pr).is_empty() {
                 items.push(("pr/gates".to_string(), Block::Gates));
             }
@@ -1239,9 +1242,10 @@ fn layout_task(
         if let Some(pr) = &view.pr {
             items
                 .push(("pr/url".to_string(), text_block(format!("#{} {}", pr.number, pr.url), size::BODY, Tone::Body)));
-            let grade = pr.grade.map_or(String::new(), |g| format!(", grade {g}"));
-            items
-                .push(("pr/state".to_string(), text_block(format!("{}{grade}", pr.state), size::SECONDARY, Tone::Dim)));
+            items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
+            if let Some(g) = pr.grade {
+                items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
+            }
             if !gates(pr).is_empty() {
                 items.push(("pr/gates".to_string(), Block::Gates));
             }
@@ -1473,6 +1477,7 @@ fn spawn_block(
             commands.spawn_scene(scene).id()
         }
         Block::Priority(p) => commands.spawn_scene(badge(format!("P{p}"), None, Some(priority_tone(*p)))).id(),
+        Block::GradeBadge(g) => commands.spawn_scene(badge(format!("G{g}"), None, Some(grade_tone(*g)))).id(),
         Block::Gates => commands.spawn_scene(bsn! { @row() Node { flex_wrap: FlexWrap::Wrap } }).id(),
         Block::Question { key, id, body, live, note } => {
             let item = commands
@@ -1856,6 +1861,7 @@ fn dress(
             }
             Block::Text { .. }
             | Block::Priority(_)
+            | Block::GradeBadge(_)
             | Block::Gates
             | Block::Subtask(_)
             | Block::Inline { .. }

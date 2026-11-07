@@ -21,7 +21,7 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 macro_rules! string_enum {
-    ($name:ident { $($variant:ident => $s:literal),+ $(,)? }) => {
+    ($name:ident $label:literal { $($variant:ident => $s:literal),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
         #[serde(rename_all = "snake_case")]
@@ -44,14 +44,18 @@ macro_rules! string_enum {
             fn from_str(s: &str) -> Result<Self, ParseError> {
                 match s {
                     $($s => Ok($name::$variant),)+
-                    _ => Err(ParseError(format!("unknown {}: {s}", stringify!($name).to_lowercase()))),
+                    _ => Err(ParseError(format!(
+                        "unknown {}: {s} (expected one of: {})",
+                        $label,
+                        [$($s),+].join(", ")
+                    ))),
                 }
             }
         }
     };
 }
 
-string_enum!(Status {
+string_enum!(Status "status" {
     Open => "open",
     InProgress => "in_progress",
     NeedsInput => "needs_input",
@@ -93,7 +97,7 @@ impl Status {
     }
 }
 
-string_enum!(CommentKind {
+string_enum!(CommentKind "comment kind" {
     Handoff => "handoff",
     Progress => "progress",
     Question => "question",
@@ -102,12 +106,12 @@ string_enum!(CommentKind {
     Review => "review",
 });
 
-string_enum!(Verdict {
+string_enum!(Verdict "verdict" {
     Approve => "approve",
     RequestChanges => "request_changes",
 });
 
-string_enum!(ProjectStatus {
+string_enum!(ProjectStatus "project status" {
     Active => "active",
     Archived => "archived",
 });
@@ -461,7 +465,7 @@ pub struct Event {
     pub at: Timestamp,
 }
 
-string_enum!(Entity {
+string_enum!(Entity "entity" {
     Project => "project",
     Task => "task",
     Claim => "claim",
@@ -479,7 +483,22 @@ mod tests {
             assert_eq!(status.as_str().parse::<Status>().unwrap(), status);
             assert_eq!(serde_json::to_value(status).unwrap(), status.as_str());
         }
-        assert_eq!("shipped".parse::<Status>().unwrap_err().to_string(), "unknown status: shipped");
+        assert_eq!(
+            "shipped".parse::<Status>().unwrap_err().to_string(),
+            "unknown status: shipped (expected one of: open, in_progress, needs_input, in_review, approved, done, cancelled)"
+        );
+    }
+
+    #[test]
+    fn parse_errors_name_the_type_and_list_the_values() {
+        assert_eq!(
+            "bogus".parse::<CommentKind>().unwrap_err().to_string(),
+            "unknown comment kind: bogus (expected one of: handoff, progress, question, decision, note, review)"
+        );
+        assert_eq!(
+            "x".parse::<ProjectStatus>().unwrap_err().to_string(),
+            "unknown project status: x (expected one of: active, archived)"
+        );
     }
 
     #[test]
