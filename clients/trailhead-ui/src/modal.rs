@@ -11,7 +11,8 @@
 //! - **Never taller than the window.** The frame is capped to [`MAX_HEIGHT_VH`] of the window and only the body
 //!   scrolls, with the kit's scrollbar, so the footer (Save, Cancel) stays in view.
 //! - **Use.** A marker type implements [`Modal`] (title, width); [`open_modal`] spawns it. Once it has spawned,
-//!   [`ModalSlots`] on the root names the [`ModalBody`] to fill and the [`ModalFooter`] for its buttons. Close it by
+//!   [`ModalSlots`] on the root names the [`ModalBody`] to fill, the [`ModalFooter`] for its buttons and the header's
+//!   tools, for controls beside the X. Close it by
 //!   despawning the root. Layering is [`super::layer::MODAL`].
 
 use bevy::feathers::controls::FeathersDialog;
@@ -20,7 +21,7 @@ use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, RequestClose};
 
-use super::{ScrollDown, extent, layer, panel_header, scrollbar, space};
+use super::{PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
 
 /// How much of the window's height the modal may take, with the barrier's margin around it.
 pub const MAX_HEIGHT_VH: f32 = 80.0;
@@ -32,6 +33,11 @@ pub trait Modal: Component {
     fn title(&self) -> String;
     fn width(&self) -> f32 {
         extent::MODAL_WIDTH
+    }
+    /// Whether the modal takes all the height it may ([`MAX_HEIGHT_VH`]) rather than its content's: for a detail view,
+    /// which reads better at a steady size than one that jumps with what is in it.
+    fn tall(&self) -> bool {
+        false
     }
 }
 
@@ -60,6 +66,8 @@ pub struct ModalLocked;
 pub struct ModalSlots {
     pub body: Entity,
     pub footer: Entity,
+    /// The header's [`PanelTools`], ending with the X: a modal's own header controls go in at its start.
+    pub tools: Entity,
 }
 
 /// A modal is about to be despawned because it was asked to close.
@@ -70,11 +78,11 @@ pub struct ModalClosed {
 
 /// Opens `modal` over everything on the board, and returns its root.
 pub fn open_modal<M: Modal>(commands: &mut Commands, modal: M) -> Entity {
-    let (title, width) = (modal.title(), modal.width());
+    let (title, width, tall) = (modal.title(), modal.width(), modal.tall());
     commands
         .spawn_scene(bsn! {
             @FeathersDialog {
-                @contents: { frame(title, width) },
+                @contents: { frame(title, width, tall) },
             }
             GlobalZIndex({ layer::MODAL })
         })
@@ -82,12 +90,14 @@ pub fn open_modal<M: Modal>(commands: &mut Commands, modal: M) -> Entity {
         .id()
 }
 
-fn frame(title: String, width: f32) -> Box<dyn SceneList> {
+fn frame(title: String, width: f32, tall: bool) -> Box<dyn SceneList> {
+    let height = if tall { vh(MAX_HEIGHT_VH) } else { Val::Auto };
     Box::new(bsn_list! {
         Node {
             flex_direction: FlexDirection::Column,
             row_gap: { px(space::ROWS) },
             width: { px(width) },
+            height: { height },
             max_width: { vw(MAX_WIDTH_VW) },
             max_height: { vh(MAX_HEIGHT_VH) },
         }
@@ -95,8 +105,9 @@ fn frame(title: String, width: f32) -> Box<dyn SceneList> {
         Children [
             @panel_header(title, true)
             --
-            // The body's box may shrink below its content, so the body scrolls and the footer keeps its place.
-            Node { flex_direction: FlexDirection::Column, min_height: px(0), flex_shrink: 1.0 }
+            // The body's box may shrink below its content, so the body scrolls and the footer keeps its place, and grows
+            // into a tall modal's height.
+            Node { flex_direction: FlexDirection::Column, min_height: px(0), flex_shrink: 1.0, flex_grow: 1.0 }
             Children [
                 Node {
                     flex_direction: FlexDirection::Column,
@@ -160,15 +171,18 @@ fn link_slots(
     parents: Query<&ChildOf>,
     roots: Query<(), With<ModalRoot>>,
     footers: Query<Entity, With<ModalFooter>>,
+    tools: Query<Entity, With<PanelTools>>,
     mut commands: Commands,
 ) {
     for body in &bodies {
         let Some(root) = parents.iter_ancestors(body).find(|e| roots.contains(*e)) else { continue };
-        let Some(footer) = footers.iter().find(|f| parents.iter_ancestors(*f).any(|e| e == root)) else { continue };
+        let inside = |e: &Entity| parents.iter_ancestors(*e).any(|a| a == root);
+        let Some(footer) = footers.iter().find(inside) else { continue };
+        let Some(tools) = tools.iter().find(inside) else { continue };
         if let Ok(holder) = parents.get(body) {
             commands.queue_spawn_scene(scrollbar(body, ControlOrientation::Vertical)).insert(ChildOf(holder.parent()));
         }
-        commands.entity(root).insert(ModalSlots { body, footer });
+        commands.entity(root).insert(ModalSlots { body, footer, tools });
     }
 }
 
@@ -226,7 +240,10 @@ mod tests {
         let modal = open(&mut app);
         assert_eq!(count(&mut app), 1);
         assert!(app.world().get::<Test>(modal).is_some());
-        assert!(app.world().get::<ModalSlots>(modal).is_some());
+        let slots = *app.world().get::<ModalSlots>(modal).unwrap();
+        assert!(app.world().get::<PanelTools>(slots.tools).is_some());
+        let tools = app.world().get::<Children>(slots.tools).map_or(0, |c| c.len());
+        assert_eq!(tools, 1, "the tools hold the X until the modal adds its own");
         assert_eq!(app.world().get::<GlobalZIndex>(modal).map(|z| z.0), Some(layer::MODAL));
     }
 
@@ -325,5 +342,37 @@ mod tests {
         // And the body got its scrollbar.
         let bars = app.world_mut().query::<&bevy::ui_widgets::Scrollbar>().iter(app.world()).count();
         assert_eq!(bars, 1);
+    }
+
+    #[derive(Component)]
+    struct Tall;
+
+    impl Modal for Tall {
+        fn title(&self) -> String {
+            "Tall".into()
+        }
+        fn tall(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_tall_modal_takes_all_the_height_it_may_and_others_their_contents() {
+        let mut app = app();
+        open(&mut app);
+        let frame = app.world_mut().query_filtered::<&Node, With<ModalFrame>>().single(app.world()).unwrap();
+        assert_eq!(frame.height, Val::Auto);
+        let modal = open_modal(&mut app.world_mut().commands(), Tall);
+        app.world_mut().flush();
+        for _ in 0..3 {
+            app.update();
+        }
+        let frames: Vec<Val> =
+            app.world_mut().query_filtered::<&Node, With<ModalFrame>>().iter(app.world()).map(|n| n.height).collect();
+        assert!(frames.contains(&vh(MAX_HEIGHT_VH)), "{frames:?}");
+        // The body's box grows into the height, so the body fills it.
+        let slots = *app.world().get::<ModalSlots>(modal).unwrap();
+        let wrap = app.world().get::<ChildOf>(slots.body).unwrap().parent();
+        assert_eq!(app.world().get::<Node>(wrap).unwrap().flex_grow, 1.0);
     }
 }

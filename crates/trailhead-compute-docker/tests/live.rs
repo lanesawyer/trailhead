@@ -511,6 +511,9 @@ async fn warm_checkpoints_stay_flat_and_old_ones_go() {
         }
         let cp = warm.unwrap();
         c.restore(&sandbox.id, &cp).await.unwrap();
+        // The container no longer runs from the one before, so only the current checkpoint is left (TRAIL-994).
+        let images = docker(&["images", "--filter", &filter, "--format", "{{.Repository}}:{{.Tag}}"]).await;
+        assert_eq!(images.trim(), cp.0, "{images}");
         assert_eq!(sh(&n, "wc -l < $HOME/log").await.trim(), "6");
         assert_eq!(sh(&n, "id -un").await.trim(), "trailhead");
     };

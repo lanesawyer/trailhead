@@ -193,9 +193,28 @@ pub enum ComputeConfig {
         /// The OCI runtime, such as `runsc` (gVisor).
         runtime: Option<String>,
         /// Each sandbox's memory limit, in MiB, swap included. Without one, sandboxes share the engine's memory and
-        /// concurrent builds can OOM-kill each other. Also sets `CARGO_BUILD_JOBS` to one per GiB of it.
+        /// concurrent builds can OOM-kill each other. Also sets `CARGO_BUILD_JOBS` to one per GiB of it. At least
+        /// [`MIN_MEMORY_MIB`].
+        #[serde(default, deserialize_with = "memory_mib_at_least_min")]
         memory_mib: Option<u64>,
     },
+}
+
+/// The least `memory_mib` that can run a sandbox. Docker reads 0 as unlimited, and a limit much below this
+/// OOM-kills every sandbox, which comes back as endless infrastructure retries.
+pub const MIN_MEMORY_MIB: u64 = 512;
+
+fn check_memory_mib(mib: Option<u64>) -> std::result::Result<Option<u64>, String> {
+    match mib {
+        Some(m) if m < MIN_MEMORY_MIB => Err(format!(
+            "`memory_mib` is {m}, too small to run a sandbox; it must be at least {MIN_MEMORY_MIB} (omit it for no limit)"
+        )),
+        other => Ok(other),
+    }
+}
+
+fn memory_mib_at_least_min<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<u64>, D::Error> {
+    check_memory_mib(Option::<u64>::deserialize(d)?).map_err(serde::de::Error::custom)
 }
 
 /// `[factory.targets.<name>]`: one place sandboxes can run, with its compute's settings and its limits
@@ -251,7 +270,7 @@ impl TryFrom<RawTarget> for TargetConfig {
                 image: raw.image,
                 network: raw.network,
                 runtime: raw.runtime,
-                memory_mib: raw.memory_mib,
+                memory_mib: check_memory_mib(raw.memory_mib)?,
             },
             other => return Err(format!("unknown kind `{other}`; the kinds are sprites and docker")),
         };
@@ -696,12 +715,6 @@ impl std::fmt::Display for GateKind {
     }
 }
 
-impl PartialEq<&str> for GateKind {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
 impl Serialize for GateKind {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         s.serialize_str(self.as_str())
@@ -966,6 +979,7 @@ impl FactoryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use GateKind::{AgentReview, Checks, Ci, Human};
 
     fn gr(n: u8) -> Grade {
         Grade::new(n).unwrap()
@@ -1063,7 +1077,7 @@ mod tests {
         assert!(config.gate(gr(1)).auto_merge);
         assert!(config.gate(gr(2)).auto_merge);
         assert!(!config.gate(gr(3)).auto_merge);
-        assert_eq!(config.gate(gr(3)).require, ["checks", "ci", "agent_review", "human"]);
+        assert_eq!(config.gate(gr(3)).require, [Checks, Ci, AgentReview, Human]);
         let raised = |path: &str| {
             config
                 .grades
@@ -1267,17 +1281,17 @@ require = ["checks", "agent_review", "human"]
         let mut c =
             parse(&SAMPLE.replace("[gates.1]\nrequire = [\"checks\", \"agent_review\", \"human\"]", "")).unwrap();
         assert_eq!(c.merge.mode, MergeMode::Off);
-        assert_eq!(c.gate(gr(1)).require, ["checks", "ci"]);
+        assert_eq!(c.gate(gr(1)).require, [Checks, Ci]);
         assert!(c.gate(gr(2)).auto_merge);
-        assert_eq!(c.gate(gr(3)).require, ["checks", "ci", "agent_review", "human"]);
+        assert_eq!(c.gate(gr(3)).require, [Checks, Ci, AgentReview, Human]);
         assert!(!c.gate(gr(3)).auto_merge);
-        assert_eq!(c.gate(gr(4)).require, ["checks", "ci", "human"]);
+        assert_eq!(c.gate(gr(4)).require, [Checks, Ci, Human]);
 
         let custom =
             format!("{SAMPLE}\n[gates.2]\nrequire = [\"ci\"]\nauto_merge = true\n[merge]\nmode = \"shadow\"\n");
         c = parse(&custom).unwrap();
-        assert_eq!(c.gate(gr(2)).require, ["ci"]);
-        assert_eq!(c.gate(gr(1)).require, ["checks", "agent_review", "human"]);
+        assert_eq!(c.gate(gr(2)).require, [Ci]);
+        assert_eq!(c.gate(gr(1)).require, [Checks, AgentReview, Human]);
         assert_eq!(c.merge.mode, MergeMode::Shadow);
     }
 
@@ -1381,6 +1395,16 @@ require = ["checks", "agent_review", "human"]
             parse(&sized).unwrap().compute,
             ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: Some(1536) }
         );
+        for mib in [0, 511] {
+            let small = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = {mib}\n");
+            let Err(Error::Config(m)) = parse(&small) else { panic!("{mib}: expected a config error") };
+            assert!(m.contains("memory_mib") && m.contains("512"), "{m}");
+            let target = format!("{SAMPLE}\n[targets.t]\nkind = \"docker\"\nmemory_mib = {mib}\n");
+            let Err(Error::Config(m)) = parse(&target) else { panic!("{mib}: expected a config error") };
+            assert!(m.contains("memory_mib") && m.contains("512"), "{m}");
+        }
+        let least = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 512\n");
+        assert!(parse(&least).is_ok());
         let bad = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nimgae = \"x\"\n");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
     }

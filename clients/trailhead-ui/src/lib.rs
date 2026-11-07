@@ -7,9 +7,12 @@
 //!
 //! Which widget for what:
 //! - A button with words (and maybe an icon): [`button`]. Icon only, with a hint: [`tool_button`].
-//! - A button that opens a menu: [`icon_menu`], then fill its popup; [`close_menu_holding`] when an item is done.
+//! - A button that opens a menu: [`icon_menu`], then fill its popup with [`menu_item`]s; [`close_menu_holding`] when
+//!   something else in it is done.
 //! - A small chip with an icon and a word: [`badge`].
 //! - A text input, one line or several: [`text_input`], inside a [`field`].
+//! - A text edited where it is read (a title, a description): [`inline_text`]; a sidebar label and choice:
+//!   [`inline_field`]. Observe [`InlineEdited`] / [`InlineChosen`]; the caller answers `confirm` or `fail`.
 //! - A choice from a fixed set: [`select`], and observe [`Picked`].
 //! - Text: [`text`], [`text_dim`], [`text_toned`] at a [`size`]. A button's caption: [`button_text`].
 //! - An icon in text: [`icon_text`]; as a button's caption: [`button_icon`].
@@ -33,6 +36,8 @@
 //! - A number picked on a track: [`spawn_slider`]. Its value is written back for you.
 //! - A search box with a hint while empty and a clear button: [`spawn_search_field`]; match items with
 //!   [`matches_search`]. A text field straight on a pane or menu goes in a [`field_well`] to be seen.
+//! - A detail modal's body, a main column beside a sidebar of facts: [`spawn_detail_panes`], in a modal
+//!   [`extent::DETAIL_WIDTH`] wide.
 //! - A button that opens a URL in the browser: [`link_button`].
 //! - A line saying how something went, with an icon for its [`Tone`]: [`notice`], then write a [`Notice`] onto it;
 //!   an empty message hides it.
@@ -49,9 +54,11 @@ mod badge;
 mod buttons;
 mod chip;
 mod containers;
+mod detail;
 mod field_well;
 mod hint;
 mod icons;
+mod inline;
 mod input;
 mod keyed;
 pub mod layer;
@@ -81,19 +88,24 @@ pub use badge::badge;
 pub use buttons::{button, button_text, danger_button, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{field, panel, row, section, section_frame};
+pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
 pub use hint::Hint;
 pub use icons::{Icon, button_icon, icon_text};
+pub use inline::{
+    InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
+    inline_text_sized,
+};
 pub use input::text_input;
 pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button};
-pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu};
+pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu, menu_item};
 pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
     open_modal,
 };
 pub use notice::{Notice, Tone, notice};
-pub use panel_header::{PanelTitle, panel_header};
+pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
@@ -103,7 +115,7 @@ pub use skeleton::{SkeletonBar, spawn_skeleton};
 pub use slider::spawn_slider;
 pub use spacing::{check as spacing_check, extent, radius, space};
 pub use tabs::{TabCaption, fit_tabs, style_tabs, tab, tab_strip};
-pub use text::{size, text, text_dim, text_toned};
+pub use text::{size, text, text_dim, text_mono, text_toned};
 pub use theme::{paint, props as theme_props, theme, token};
 pub use truncate::{truncate_to_width, width_of};
 
@@ -118,7 +130,7 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin))
+        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin))
             .add_observer(scroll::on_scroll)
             .add_observer(bevy::ui_widgets::slider_self_update)
             .add_systems(PostUpdate, scrollbar::hide_when_fits.after(bevy::ui::UiSystems::Layout))
