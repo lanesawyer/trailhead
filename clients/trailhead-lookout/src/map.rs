@@ -163,6 +163,7 @@ pub fn build(input: Input) -> MapModel {
 
     let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
     let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
+    let on_behalf_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.on_behalf_of)).collect();
     // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
     // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
     let holder_name = |holder: Uuid, key: &str| -> Option<String> {
@@ -193,9 +194,17 @@ pub fn build(input: Input) -> MapModel {
         let run = run_of.get(key);
         let mut markers = Vec::new();
         if let Some(holder) = holder_of.get(&t.id) {
-            // The snapshot carries no users, so a holder that isn't an agent is a person: say so, not just part of an id.
-            let person = || format!("a person ({})", holder.to_string().chars().take(8).collect::<String>());
-            markers.push(Marker::Claim(holder_name(*holder, key).unwrap_or_else(person)));
+            // The snapshot carries no users, so a holder that isn't a known agent gets a label, not just part of an id.
+            // A person claims for themselves (holder == on_behalf_of); anyone else is an agent the stale list lacks.
+            let label = || {
+                let id = holder.to_string().chars().take(8).collect::<String>();
+                if on_behalf_of.get(&t.id) == Some(holder) {
+                    format!("a person ({id})")
+                } else {
+                    format!("an agent ({id})")
+                }
+            };
+            markers.push(Marker::Claim(holder_name(*holder, key).unwrap_or_else(label)));
         }
         if let Some(n) = questions.get(&t.id) {
             markers.push(Marker::Questions(*n));
@@ -568,7 +577,7 @@ mod tests {
             claims: vec![
                 fixture::claim(json!({"task_id": "t42", "holder_id": "a1"})),
                 fixture::claim(json!({"task_id": "t43", "holder_id": "a2"})),
-                fixture::claim(json!({"task_id": "t44", "holder_id": "u1"})),
+                fixture::claim(json!({"task_id": "t44", "holder_id": "u1", "on_behalf_of": "u1"})),
             ],
             comments: vec![
                 fixture::comment(json!({"id": "c1", "task_id": "t43", "kind": "question", "created_at": at(1)})),
@@ -616,6 +625,16 @@ mod tests {
         let markers = &model.waypoints.iter().find(|w| w.key == "TRAIL-44").unwrap().markers;
         let id = sid("u1");
         assert_eq!(markers[0], Marker::Claim(format!("a person ({})", &id[..8])));
+    }
+
+    #[test]
+    fn an_unknown_holder_acting_for_someone_else_is_not_called_a_person() {
+        let mut w = world();
+        w.tasks[2] = task("t44", "TRAIL-44", "in_progress");
+        w.claims[2] = fixture::claim(json!({"task_id": "t44", "holder_id": "u1", "on_behalf_of": "u2"}));
+        let model = w.model();
+        let markers = &model.waypoints.iter().find(|w| w.key == "TRAIL-44").unwrap().markers;
+        assert_eq!(markers[0], Marker::Claim(format!("an agent ({})", &sid("u1")[..8])));
     }
 
     #[test]
