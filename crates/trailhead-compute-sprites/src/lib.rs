@@ -242,8 +242,17 @@ impl Compute for SpritesCompute {
                 let body = res.text().await;
                 if !status.is_success() && status != StatusCode::NOT_FOUND {
                     tracing::warn!(sandbox = %id.0, program = %program.name, %status, "stopping the old service failed");
-                } else if let Err(e) = body {
-                    tracing::warn!(sandbox = %id.0, program = %program.name, error = %e, "stopping the old service: reading the answer failed");
+                } else {
+                    match body {
+                        Ok(body) => {
+                            if let Some(error) = service_stop_error(&body) {
+                                tracing::warn!(sandbox = %id.0, program = %program.name, %error, "stopping the old service reported an error");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(sandbox = %id.0, program = %program.name, error = %e, "stopping the old service: reading the answer failed");
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -340,6 +349,14 @@ fn service_started(name: &str, ndjson: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Reads a service stop's NDJSON log for the message of its first `error` event, which the API can report inside a 200.
+/// Lines that aren't JSON are skipped: the stop is best effort, so only a clear error event is worth a warning.
+fn service_stop_error(ndjson: &str) -> Option<String> {
+    ndjson.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|event| {
+        (event["type"].as_str() == Some("error")).then(|| event["data"].as_str().unwrap_or("unknown error").to_string())
+    })
 }
 
 pub fn encode_labels(labels: &Labels) -> Vec<String> {
@@ -497,6 +514,15 @@ mod tests {
             assert!(err.to_string().contains("nope"), "{code}: {err}");
             assert!(expected(&err), "{code} mapped to {err:?}");
         }
+    }
+
+    #[test]
+    fn a_stop_reports_its_first_error_event() {
+        let clean = "{\"type\":\"stopping\"}\n\n{\"type\":\"complete\"}\n";
+        assert_eq!(service_stop_error(clean), None);
+        let failed = "{\"type\":\"stopping\"}\nnot json\n{\"type\":\"error\",\"data\":\"no such process\"}\n{\"type\":\"error\",\"data\":\"later\"}\n";
+        assert_eq!(service_stop_error(failed).as_deref(), Some("no such process"));
+        assert_eq!(service_stop_error("{\"type\":\"error\"}").as_deref(), Some("unknown error"));
     }
 
     #[test]
