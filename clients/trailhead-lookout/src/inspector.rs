@@ -111,7 +111,8 @@ impl Action {
             Action::Status(s) => format!("move to {}", status_label(*s)),
             Action::Resolve(_) => "resolve".into(),
             Action::Undo => "undo last change".into(),
-            Action::Revert(h) => format!("revert last {h}h"),
+            // The window is a dropdown beside the button, so the caption does not name it.
+            Action::Revert(_) => "revert since".into(),
             Action::Grade(Some(g)) => format!("grade {g}"),
             Action::Grade(None) => "clear grade".into(),
             Action::Comment => "comment".into(),
@@ -1669,7 +1670,7 @@ fn spawn_block(
                     commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} })
                 }
                 Action::Revert(_) => {
-                    commands.spawn_scene(bsn! { @danger_button("revert since", Some(Icon::History)) @{press} })
+                    commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::History)) @{press} })
                 }
                 // Not drawn as an action block: they have their own controls, or none.
                 Action::Status(_) | Action::Resolve(_) | Action::Grade(_) | Action::Comment | Action::Menu => {
@@ -2757,6 +2758,8 @@ mod tests {
         let r = p(&Action::Resolve(sid("c1")));
         assert_eq!((r.path, r.body), (format!("/v1/comments/{}/resolve", sid("c1")), None));
         assert_eq!(p(&Action::Undo).body, Some(json!({"event_id": 41})));
+        // The window lives in the dropdown, so every revert captions the same.
+        assert_eq!(Action::Revert(1).label(), Action::Revert(72).label());
         let r = p(&Action::Revert(1));
         assert_eq!(
             (r.path.as_str(), r.body),
