@@ -5,7 +5,7 @@ use crate::db::{collect, fmt_ts};
 use crate::error::{Error, Result};
 use crate::store::{Ctx, Store, Tx};
 use crate::tasks::{TASK_COLS, find_task, task_from_row};
-use trailhead_model::{Dependency, Entity, Task};
+use trailhead_model::{Dependency, Entity, Task, TaskKey};
 
 pub(crate) fn dep_entity_id(blocker: Uuid, blocked: Uuid) -> String {
     format!("{blocker}:{blocked}")
@@ -30,8 +30,8 @@ pub(crate) async fn unfinished_blockers(conn: &Connection, task_id: Uuid) -> Res
 /// still learns that something blocks it without learning what.
 pub(crate) const HIDDEN_KEY: &str = "(out of scope)";
 
-pub(crate) fn visible_key(ctx: &Ctx, task: &Task) -> String {
-    if ctx.in_scope(task.project_id) { task.key.clone() } else { HIDDEN_KEY.into() }
+pub(crate) fn visible_key(ctx: &Ctx, task: &Task) -> TaskKey {
+    if ctx.in_scope(task.project_id) { task.key.clone() } else { TaskKey(HIDDEN_KEY.into()) }
 }
 
 pub(crate) async fn insert_dependency(tx: &Tx, d: &Dependency) -> Result<bool> {

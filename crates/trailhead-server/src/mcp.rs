@@ -428,7 +428,7 @@ impl TrailheadMcp {
         }
         let mut out = task_line(&task);
         let similar = store.similar_tasks(ctx, &task.project_id.to_string(), &task.title, Some(task.id)).await;
-        let keys: Vec<_> = similar.unwrap_or_default().into_iter().map(|t| t.key).collect();
+        let keys: Vec<_> = similar.unwrap_or_default().into_iter().map(|t| t.key.0).collect();
         if !keys.is_empty() {
             out.push_str(&format!("\npossible duplicates: {}", keys.join(", ")));
         }
