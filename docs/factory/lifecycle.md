@@ -52,7 +52,7 @@ A rework (a review's changes, a failed CI, a conflict) whose `setup` check fails
 | Spec | Parent task; `description` is the editable spec, comments are history | Fits |
 | Approved | Human moves the spec task to `done` (project with `require_review`) | Fits, by convention |
 | Planned | Planner creates subtasks with `parent_id`, `blocked_by` the spec task | Fits |
-| Queued | `open`, graded, under the queue task; ready queue; repo cap enforced by the control plane | Fits once tasks have grades |
+| Queued | `open`, graded, under the queue task; ready queue; repo cap enforced by the control plane; ordered by priority (raised to the highest open task it blocks), then reworks of open PRs before fresh tasks, then due date and age, as [Handing it work](operating.md#handing-it-work) says | Fits once tasks have grades |
 | Running | Claim + `in_progress`; the daemon renews the lease | Fits |
 | PR open / Review | `in_review`; PR URL, grade, profile in `metadata` | Fits, but the claim is released |
 | Agent review verdict | One delegated reviewer approves straight to `done` | Gap: no verdict record, no quorum |

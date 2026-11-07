@@ -270,9 +270,6 @@ const FOLLOW_UPS_CAP: usize = 40;
 /// The most the answers may take of the human-context section, so notes keep the rest.
 const ANSWERS_CAP: usize = 4000;
 
-/// The answers and the task's decisions and notes, for after the description. Empty when there are none. Past
-/// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
-/// is always kept.
 /// The follow-ups earlier reviews of the task filed, so a reviewer doesn't file a reworded copy of one, or leave one
 /// open that the change has since fixed.
 fn follow_ups_section(task: &trailhead_factory::TaskSpec) -> String {
@@ -295,6 +292,9 @@ fn follow_ups_section(task: &trailhead_factory::TaskSpec) -> String {
     out
 }
 
+/// The answers and the task's decisions and notes, for after the description. Empty when there are none. Past
+/// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
+/// is always kept.
 fn human_section(task: &trailhead_factory::TaskSpec) -> String {
     let ctx = &task.context;
     let mut budget = HUMAN_CONTEXT_CAP;

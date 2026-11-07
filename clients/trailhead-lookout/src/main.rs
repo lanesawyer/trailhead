@@ -15,8 +15,8 @@ use trailhead_lookout::net::{NetCommand, NetConfig};
 use trailhead_lookout::settings::SettingsUiPlugin;
 
 /// `lookout [<control plane endpoint id>]`, with `LOOKOUT_TOKEN` to sign in with a pasted user token and
-/// `LOOKOUT_QUEUE` for the task new tasks go under (default `TRAIL-102`). Without an
-/// id it dials the one used last time.
+/// `LOOKOUT_QUEUE` for the task new tasks go under (default: the factory's own
+/// queue, else `TRAIL-102`). Without an id it dials the one used last time.
 fn main() {
     let Some(config) = NetConfig::from_env() else {
         eprintln!("lookout: no home directory to keep its endpoint key in");
@@ -49,6 +49,7 @@ fn main() {
         .add_systems(Startup, |mut authoring: ResMut<Authoring>| {
             if let Some(queue) = std::env::var("LOOKOUT_QUEUE").ok().filter(|q| !q.is_empty()) {
                 authoring.queue = queue;
+                authoring.pinned = true;
             }
         })
         .add_systems(Startup, move |mut send: MessageWriter<SendNet>| {
