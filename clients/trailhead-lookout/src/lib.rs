@@ -13,6 +13,7 @@ pub mod factory;
 pub mod fixture;
 pub mod icon;
 pub mod inspector;
+pub mod logs;
 pub mod map;
 pub mod mirror;
 pub mod net;
