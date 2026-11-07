@@ -695,12 +695,6 @@ impl std::fmt::Display for GateKind {
     }
 }
 
-impl PartialEq<&str> for GateKind {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
 impl Serialize for GateKind {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         s.serialize_str(self.as_str())
@@ -965,6 +959,7 @@ impl FactoryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use GateKind::{AgentReview, Checks, Ci, Human};
 
     fn gr(n: u8) -> Grade {
         Grade::new(n).unwrap()
@@ -1062,7 +1057,7 @@ mod tests {
         assert!(config.gate(gr(1)).auto_merge);
         assert!(config.gate(gr(2)).auto_merge);
         assert!(!config.gate(gr(3)).auto_merge);
-        assert_eq!(config.gate(gr(3)).require, ["checks", "ci", "agent_review", "human"]);
+        assert_eq!(config.gate(gr(3)).require, [Checks, Ci, AgentReview, Human]);
         let raised = |path: &str| {
             config
                 .grades
@@ -1266,17 +1261,17 @@ require = ["checks", "agent_review", "human"]
         let mut c =
             parse(&SAMPLE.replace("[gates.1]\nrequire = [\"checks\", \"agent_review\", \"human\"]", "")).unwrap();
         assert_eq!(c.merge.mode, MergeMode::Off);
-        assert_eq!(c.gate(gr(1)).require, ["checks", "ci"]);
+        assert_eq!(c.gate(gr(1)).require, [Checks, Ci]);
         assert!(c.gate(gr(2)).auto_merge);
-        assert_eq!(c.gate(gr(3)).require, ["checks", "ci", "agent_review", "human"]);
+        assert_eq!(c.gate(gr(3)).require, [Checks, Ci, AgentReview, Human]);
         assert!(!c.gate(gr(3)).auto_merge);
-        assert_eq!(c.gate(gr(4)).require, ["checks", "ci", "human"]);
+        assert_eq!(c.gate(gr(4)).require, [Checks, Ci, Human]);
 
         let custom =
             format!("{SAMPLE}\n[gates.2]\nrequire = [\"ci\"]\nauto_merge = true\n[merge]\nmode = \"shadow\"\n");
         c = parse(&custom).unwrap();
-        assert_eq!(c.gate(gr(2)).require, ["ci"]);
-        assert_eq!(c.gate(gr(1)).require, ["checks", "agent_review", "human"]);
+        assert_eq!(c.gate(gr(2)).require, [Ci]);
+        assert_eq!(c.gate(gr(1)).require, [Checks, AgentReview, Human]);
         assert_eq!(c.merge.mode, MergeMode::Shadow);
     }
 
