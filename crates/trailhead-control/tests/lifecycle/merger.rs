@@ -75,7 +75,7 @@ async fn a_merge_the_merger_started_but_didnt_close_is_still_the_mergers() {
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Done);
     assert_eq!(task.run.merged.expect("recorded").by, MergedBy::Merger);
-    let handoff = r.tracker.comments(&key).into_iter().find(|c| c.kind == "handoff").expect("a handoff").body;
+    let handoff = r.tracker.comments(&key).into_iter().rev().find(|c| c.kind == "handoff").expect("a handoff").body;
     assert!(handoff.contains(" Grade 1; gates passed: "), "{handoff}");
 }
 
@@ -111,6 +111,7 @@ async fn the_pr_says_the_rework_has_pushed_before_the_new_head_is_reviewed() {
         .unwrap();
     r.codehost.push_to(pr);
     r.tracker.set_status(&key, Status::InReview);
+    Tracker::handoff(&r.tracker, &key, "Pushed the rework.").await.unwrap();
     r.factory.reconcile().await.unwrap();
     let said = said(&r);
     assert!(said.last().unwrap().ends_with("The latest review asked for changes; the rework has pushed."), "{said:?}");
@@ -131,6 +132,7 @@ async fn a_push_by_a_person_is_not_credited_to_the_rework() {
     // A person pushes before any rework ran: the attempt is still the one that was reviewed.
     r.codehost.push_to(pr);
     r.tracker.set_status(&key, Status::InReview);
+    Tracker::handoff(&r.tracker, &key, "Pushed the rework.").await.unwrap();
     r.factory.reconcile().await.unwrap();
     let said = said(&r);
     assert!(said.iter().all(|m| !m.contains("the rework has pushed")), "{said:?}");
@@ -222,7 +224,7 @@ async fn failed_ci_sends_the_task_back_for_a_rework_told_what_failed() {
     r.codehost.set_ci_logs(&pr, vec![("test".into(), "assertion failed: left == right".into())]);
     r.factory.reconcile().await.unwrap();
     let task = r.tracker.task(&key);
-    assert_eq!(task.status, Status::Open);
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true));
     let wanted = task.run.changes_requested.expect("the rework is told why");
     assert!(wanted.conflict, "counted as a conflict rework, not a review round");
     assert!(
@@ -241,7 +243,7 @@ async fn a_ci_failure_rework_merges_the_base_though_the_pr_merges_cleanly() {
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
     r.factory.reconcile().await.unwrap();
-    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
 
     // The host says the PR merges cleanly (TRAIL-243), but the feedback promises the merge, so the checkout has it.
     r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
@@ -273,7 +275,7 @@ async fn red_ci_after_a_branch_update_unapproves_and_reworks_saying_the_merge_br
     r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
     r.factory.reconcile().await.unwrap();
     let task = r.tracker.task(&key);
-    assert_eq!(task.status, Status::Open);
+    assert_eq!(task.status, Status::InReview);
     let wanted = task.run.changes_requested.expect("the rework is told why");
     assert!(wanted.body.contains("test") && wanted.body.contains("base branch was merged"), "{wanted:?}");
 }
@@ -371,7 +373,7 @@ async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
     assert_eq!(task.status, Status::Done);
     let merged = task.run.merged.expect("recorded");
     assert_eq!((merged.by, merged.pr), (MergedBy::Merger, pr.clone()));
-    let handoff = r.tracker.comments(&key).into_iter().find(|c| c.kind == "handoff").expect("a handoff").body;
+    let handoff = r.tracker.comments(&key).into_iter().rev().find(|c| c.kind == "handoff").expect("a handoff").body;
     assert!(handoff.contains(&pr.url) && handoff.contains("gates passed: checks, ci, agent_review"), "{handoff}");
 }
 
@@ -423,7 +425,7 @@ async fn a_conflict_at_merge_reworks_the_pr_instead_of_forcing_it() {
     r.factory.reconcile().await.unwrap();
     assert!(!r.codehost.prs()[0].merged);
     let task = r.tracker.task(&key);
-    assert_eq!(task.status, Status::Open, "back to running for a rework");
+    assert_eq!(task.status, Status::InReview, "waiting in review for a rework");
     assert!(task.run.pending_changes().is_some_and(|c| c.conflict));
 }
 
@@ -641,7 +643,7 @@ async fn a_conflict_resolving_rework_doesnt_inherit_the_verdict() {
     r.codehost.set_conflicts(true);
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
-    assert_eq!(r.tracker.task(&key).status, Status::Open, "back to running for a rework");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview, "waiting in review for a rework");
 
     // The rework pushes a single commit that merges the base: a merge the host didn't make, holding the resolution.
     let resolution = Commit { message: "fix: resolve".into(), changes: vec![], merges: vec!["base".into()] };
@@ -829,7 +831,7 @@ async fn a_stale_merge_intent_does_not_make_a_persons_merge_the_mergers() {
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Done);
     assert_eq!(task.run.merged.expect("recorded").by, MergedBy::Human);
-    let handoff = r.tracker.comments(&key).into_iter().find(|c| c.kind == "handoff").expect("a handoff").body;
+    let handoff = r.tracker.comments(&key).into_iter().rev().find(|c| c.kind == "handoff").expect("a handoff").body;
     assert!(!handoff.contains("gates passed"), "{handoff}");
 }
 

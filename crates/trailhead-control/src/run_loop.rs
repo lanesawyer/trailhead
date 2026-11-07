@@ -608,7 +608,8 @@ fn parked_fill_repo_cap(others: usize, max_sandboxes: usize) -> bool {
 /// open (changes requested for a conflict, CI or a review) before fresh tasks, since it is nearly done and goes stale
 /// while it waits (TRAIL-868). The sort is stable, so the tracker's order (due date, age) holds among equals.
 fn in_start_order(mut ready: Vec<Task>) -> Vec<Task> {
-    ready.sort_by_key(|t| (t.priority, !(t.run.pr.is_some() && t.run.changes_requested.is_some())));
+    let rework = |t: &Task| t.changes_requested || (t.run.pr.is_some() && t.run.changes_requested.is_some());
+    ready.sort_by_key(|t| (t.priority, !rework(t)));
     ready
 }
 

@@ -336,8 +336,8 @@ impl Factory {
                         tracing::warn!(task = %task.key.0, error = %e, "couldn't record the head from before the push");
                     }
                 }
-                // MVP: no suspend during review; requested changes reopen the task (`request_rework`) and a new run
-                // starts from the PR branch.
+                // MVP: no suspend during review; requested changes leave the task in review as changes requested
+                // (`request_rework`) and a new run starts from the PR branch.
                 if let Err(e) = self.release_worker(sandbox).await {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile will");
                 }
@@ -351,7 +351,7 @@ impl Factory {
                         Ok(()) => Ok(Outcome::Conflicted { pr }),
                         // Still in review and conflicting, so reconcile reworks it.
                         Err(e) => {
-                            tracing::warn!(task = %task.key.0, error = %e, "couldn't reopen the conflicting PR for a rework; reconcile will");
+                            tracing::warn!(task = %task.key.0, error = %e, "couldn't request a rework of the conflicting PR; reconcile will");
                             Ok(Outcome::AwaitingReview { pr })
                         }
                     };
@@ -700,11 +700,9 @@ impl Factory {
         let settled = RunUpdate { conflict_reworks: Some(0), ..RunUpdate::default() };
         self.tracker.report(&task.key, settled).await?;
         self.tracker.claim(&task.key).await?;
-        self.tracker.request_review(&task.key).await?;
-        let note = messages::conflict_gone_note(&pr.url, &self.config.repo.base_branch);
-        if let Err(e) = self.tracker.note(&task.key, &note).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't note the conflict that went away");
-        }
+        // The handoff answers the conflict request, so the task is no longer waiting on a rework.
+        let handoff = messages::conflict_gone_note(&pr.url, &self.config.repo.base_branch);
+        self.tracker.request_review(&task.key, &handoff).await?;
         Ok(())
     }
 
@@ -811,8 +809,8 @@ impl Factory {
                 tracing::warn!(task = %task.key.0, error = %e, "couldn't record the opened PR");
             }
         }
-        if shown.status != Status::InReview
-            && let Err(e) = sub.request_review(&task.key).await
+        if (shown.status != Status::InReview || shown.changes_requested)
+            && let Err(e) = sub.request_review(&task.key, &messages::pushed_for_review_handoff(&pr.url)).await
         {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't move the task to review");
         }

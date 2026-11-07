@@ -492,7 +492,7 @@ impl Runner {
                     }
                     let result =
                         match tracker.report(key, RunUpdate { pr: Some(pr.clone()), ..Default::default() }).await {
-                            Ok(()) => tracker.request_review(key).await,
+                            Ok(()) => tracker.request_review(key, &messages::pushed_for_review_handoff(&pr.url)).await,
                             Err(e) => Err(e),
                         };
                     match result {
