@@ -223,9 +223,11 @@ async fn work_flows_from_trailhead_over_the_tunnel() {
     assert_eq!(filed.status, trailhead_core::Status::Open);
     assert!(filed.description.starts_with("No test for empty input."), "{}", filed.description);
     assert!(filed.description.contains(&key.0), "{}", filed.description);
+    let agents = r.store.list_agents(&r.human).await.unwrap();
+    let creator = agents.iter().find(|a| a.id == filed.created_by).expect("created by an agent");
+    assert_eq!(creator.name, "factory/trail-1-a1-r1", "the reviewer's sub-agent filed it");
 
     // Both sandboxes' sub-agents are revoked, so their tokens no longer work, even through the tunnel.
-    let agents = r.store.list_agents(&r.human).await.unwrap();
     assert!(agents.iter().filter(|a| a.name.starts_with("factory/trail-1")).all(|a| a.revoked_at.is_some()));
 }
 
