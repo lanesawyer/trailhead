@@ -827,20 +827,8 @@ impl trailhead_daemon::ui::LogFeed for LogsFeed {
 
 /// Logs to the terminal, to `file` when there is one, and to the in-memory buffer Lookout reads.
 fn init_logging(file: Option<logfile::Rotating>) {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    let timer = trailhead_factory::logging::local_timer;
-    let file = file.map(|f| {
-        tracing_subscriber::fmt::layer().with_timer(timer()).with_ansi(false).with_writer(std::sync::Mutex::new(f))
-    });
     let buffer = LOGS.get_or_init(trailhead_control::logs::LogBuffer::default);
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(buffer.layer())
-        .with(tracing_subscriber::fmt::layer().with_timer(timer()))
-        .with(file)
-        .init();
+    trailhead_log::init(trailhead_log::env_filter_or("info"), file.map(std::sync::Mutex::new), buffer.layer());
 }
 
 #[tokio::main]
