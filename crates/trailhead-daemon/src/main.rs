@@ -208,7 +208,7 @@ async fn main() -> std::process::ExitCode {
             .exit(),
     };
     let filter = log_filter(args.log.as_deref(), std::env::var("RUST_LOG").ok().as_deref());
-    tracing_subscriber::fmt().with_timer(trailhead_factory::logging::local_timer()).with_env_filter(filter).init();
+    trailhead_log::init_stdout(filter);
     match serve(args).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
@@ -235,12 +235,7 @@ async fn gateway_command(command: Command) -> std::process::ExitCode {
     let result: std::result::Result<(), String> = async {
         match command {
             Command::Gateway { listen, socket, log } => {
-                let filter =
-                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| log.as_str().into());
-                tracing_subscriber::fmt()
-                    .with_timer(trailhead_factory::logging::local_timer())
-                    .with_env_filter(filter)
-                    .init();
+                trailhead_log::init_stdout(trailhead_log::env_filter_or(&log));
                 gateway::run(listen, &socket).await.map_err(|e| e.to_string())
             }
             Command::TrimCargo { .. } => unreachable!("handled in main"),

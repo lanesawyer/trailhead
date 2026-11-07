@@ -138,7 +138,6 @@ pub struct PrPanel {
     pub grade: Option<Grade>,
     pub passed: Vec<String>,
     pub waiting: Vec<String>,
-    pub failing: Vec<String>,
     pub would_merge: bool,
     /// Why the merger couldn't act or the host refused to merge.
     pub problem: Option<String>,
@@ -254,7 +253,6 @@ pub fn pr_panel(run: &RunUpdate) -> Option<PrPanel> {
         grade: run.grade.as_ref().map(|g| g.grade).or(decision.map(|d| d.grade)),
         passed: gates(|d| &d.passed),
         waiting: gates(|d| &d.waiting),
-        failing: decision.map(|d| d.failing.clone()).unwrap_or_default(),
         would_merge: decision.is_some_and(|d| d.would_merge),
         problem: decision.and_then(|d| d.problem.clone().or_else(|| d.refused.clone())),
     })
@@ -1056,7 +1054,6 @@ struct Gate {
 enum GateState {
     Passed,
     Waiting,
-    Failing,
 }
 
 /// A block on its entity, which [`dress`] brings in line with it when it changes.
@@ -1422,16 +1419,12 @@ enum ComposePart {
 
 /// A PR's gates, in the order the panel shows them.
 fn gates(pr: &PrPanel) -> Vec<(String, Gate)> {
-    [
-        (&pr.passed, GateState::Passed, "passed"),
-        (&pr.waiting, GateState::Waiting, "waiting"),
-        (&pr.failing, GateState::Failing, "failing"),
-    ]
-    .into_iter()
-    .flat_map(|(names, state, word)| {
-        names.iter().map(move |name| (format!("{word}/{name}"), Gate { name: name.clone(), state }))
-    })
-    .collect()
+    [(&pr.passed, GateState::Passed, "passed"), (&pr.waiting, GateState::Waiting, "waiting")]
+        .into_iter()
+        .flat_map(|(names, state, word)| {
+            names.iter().map(move |name| (format!("{word}/{name}"), Gate { name: name.clone(), state }))
+        })
+        .collect()
 }
 
 fn window_labels() -> Vec<String> {
@@ -2523,7 +2516,6 @@ fn sync_panel(
             let (icon, tone) = match gate.state {
                 GateState::Passed => (Icon::CircleCheck, token::OK),
                 GateState::Waiting => (Icon::Circle, tokens::TEXT_DIM),
-                GateState::Failing => (Icon::CircleX, token::DANGER),
             };
             commands.spawn_scene(badge(gate.name.clone(), Some(icon), Some(tone))).id()
         },
@@ -2570,7 +2562,7 @@ mod tests {
             "sandbox": "trail-7-a1", "attempt": 2,
             "pr": {"repo": {"owner": "o", "name": "r"}, "number": 12, "url": "https://github.com/o/r/pull/12"},
             "grade": {"grade": 2},
-            "merge": {"grade": 2, "head": "abc", "passed": ["checks", "ci"], "waiting": ["agent_review"], "failing": [],
+            "merge": {"grade": 2, "head": "abc", "passed": ["checks", "ci"], "waiting": ["agent_review"],
                       "would_merge": false, "problem": null, "message": "Grade 2: waiting for agent review."},
         });
         Fixture {
@@ -3499,19 +3491,27 @@ mod in_place_tests {
         assert!(app.world().get::<InlineText>(title).unwrap().error().is_empty());
     }
 
+    #[derive(Resource, Default)]
+    struct Refetched(usize);
+
+    fn count_refetches(mut asked: MessageReader<Refetch>, mut n: ResMut<Refetched>) {
+        n.0 += asked.read().count();
+    }
+
     #[test]
     fn a_conflict_fetches_again_says_so_and_keeps_what_was_typed() {
         let mut app = app();
         let description = editor(&mut app, Field::Description);
         app.world_mut().trigger(InlineEdited { entity: description, old: String::new(), new: "mine".into() });
         sent(&mut app);
-        app.world_mut().resource_mut::<Messages<Refetch>>().clear();
+        // Counted by a reader rather than drained afterwards: MinimalPlugins drops messages after fixed-timestep
+        // ticks, which follow wall-clock time, so on a slow runner settle() could outlive the message.
+        app.init_resource::<Refetched>().add_systems(Update, count_refetches);
         answer(&mut app, description, Outcome::Conflict { current_version: Some(5), message: "stale".into() });
         let t = app.world().get::<InlineText>(description).unwrap();
         assert_eq!(t.draft(), Some("mine"));
         assert!(t.error().contains("changed since you looked"), "{}", t.error());
-        let asked = app.world_mut().resource_mut::<Messages<Refetch>>().drain().count();
-        assert_eq!(asked, 1, "the task is fetched again");
+        assert_eq!(app.world().resource::<Refetched>().0, 1, "the task is fetched again");
     }
 
     #[test]

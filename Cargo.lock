@@ -8018,10 +8018,10 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
- "tracing-subscriber",
  "trailhead-client",
  "trailhead-core",
  "trailhead-factory",
+ "trailhead-log",
  "trailhead-server",
  "uuid",
 ]
@@ -8161,6 +8161,7 @@ dependencies = [
  "trailhead-core",
  "trailhead-factory",
  "trailhead-harness-claude-code",
+ "trailhead-log",
  "trailhead-model",
  "trailhead-server",
  "trailhead-testkit",
@@ -8172,7 +8173,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
- "chrono",
  "globset",
  "serde",
  "serde_json",
@@ -8180,7 +8180,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
  "trailhead-model",
 ]
 
@@ -8209,6 +8208,7 @@ dependencies = [
  "trailhead-core",
  "trailhead-daemon",
  "trailhead-factory",
+ "trailhead-log",
  "trailhead-provider-anthropic",
  "trailhead-server",
 ]
@@ -8224,6 +8224,14 @@ dependencies = [
  "tokio",
  "tracing",
  "trailhead-factory",
+]
+
+[[package]]
+name = "trailhead-log"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "tracing-subscriber",
 ]
 
 [[package]]

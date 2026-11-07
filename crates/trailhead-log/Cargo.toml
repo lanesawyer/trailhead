@@ -1,0 +1,18 @@
+[package]
+name = "trailhead-log"
+description = "The log setup Trailhead's binaries share: local-time stamps with the UTC offset, an env filter, an optional log file"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
