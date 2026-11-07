@@ -34,6 +34,8 @@ pub struct FakeCompute {
     wake_failures: Arc<Mutex<BTreeMap<String, usize>>>,
     hung_wakes: Arc<Mutex<BTreeSet<String>>>,
     rejected_wakes: Arc<Mutex<BTreeSet<String>>>,
+    /// The reason every `create` fails with a permanent 4xx, while set.
+    create_rejection: Arc<Mutex<Option<String>>>,
     wake_attempts: Arc<Mutex<BTreeMap<String, usize>>>,
     /// Whether the compute's API is down: listing fails, while its sandboxes carry on.
     unreachable: Arc<std::sync::atomic::AtomicBool>,
@@ -114,6 +116,11 @@ impl FakeCompute {
         self.rejected_wakes.lock().unwrap().insert(name.to_string());
     }
 
+    /// Makes every `create` fail with a permanent 4xx, as an API that refuses the sandbox's size or name.
+    pub fn reject_creates(&self, error: &str) {
+        *self.create_rejection.lock().unwrap() = Some(error.to_string());
+    }
+
     /// Wakes tried on a sandbox, failed ones included.
     pub fn wake_attempts(&self, name: &str) -> usize {
         self.wake_attempts.lock().unwrap().get(name).copied().unwrap_or(0)
@@ -190,6 +197,9 @@ impl FakeCompute {
 #[async_trait]
 impl Compute for FakeCompute {
     async fn create(&self, spec: &SandboxSpec) -> Result<Sandbox> {
+        if let Some(error) = self.create_rejection.lock().unwrap().clone() {
+            return Err(Error::Rejected(error));
+        }
         let id = SandboxId(spec.name.clone());
         let mut live = self.live.lock().unwrap();
         let entry = live.entry(id.clone()).or_insert_with(|| Live {
