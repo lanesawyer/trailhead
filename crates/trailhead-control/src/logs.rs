@@ -166,7 +166,8 @@ pub fn redact_value(value: &str) -> String {
         if at_word_start {
             let lower = rest.to_ascii_lowercase();
             if let Some(after) = lower.strip_prefix("bearer ") {
-                let secret = after.chars().take_while(|c| !c.is_whitespace() && *c != '"').count();
+                let secret =
+                    after.chars().take_while(|c| !c.is_whitespace() && *c != '"').map(char::len_utf8).sum::<usize>();
                 if secret > 0 {
                     out.push_str("Bearer ");
                     out.push_str(REDACTED);
@@ -302,6 +303,13 @@ mod tests {
         let (lines, _) = buffer.subscribe();
         let text = &lines[0].message;
         assert_eq!(text, "key [redacted] used api_token=[redacted] error=401 with Bearer [redacted] sent");
+    }
+
+    #[test]
+    fn redaction_survives_non_ascii_after_bearer() {
+        assert_eq!(redact_value("Bearer é"), "Bearer [redacted]");
+        assert_eq!(redact_value("bearer —x ok"), "Bearer [redacted] ok");
+        assert_eq!(redact_value("bearer “x” end"), "Bearer [redacted] end");
     }
 
     #[test]
