@@ -647,3 +647,32 @@ impl Tracker for FakeTracker {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn claim_takes_unheld_open_needs_input_and_in_review_tasks_like_core() {
+        for status in [Status::Open, Status::NeedsInput, Status::InReview] {
+            let tracker = FakeTracker::new("factory");
+            let key = tracker.add_task("TRAIL", "t", "d");
+            tracker.state.lock().unwrap().tasks.get_mut(&key).unwrap().status = status;
+            tracker.claim(&key).await.unwrap();
+            let s = tracker.state.lock().unwrap();
+            let t = &s.tasks[&key];
+            assert_eq!(t.status, Status::InProgress, "claiming from {status:?}");
+            assert_eq!(t.holder.as_deref(), Some("factory"));
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_refuses_approved_and_closed_tasks() {
+        for status in [Status::Approved, Status::Done, Status::Cancelled] {
+            let tracker = FakeTracker::new("factory");
+            let key = tracker.add_task("TRAIL", "t", "d");
+            tracker.state.lock().unwrap().tasks.get_mut(&key).unwrap().status = status;
+            assert!(matches!(tracker.claim(&key).await, Err(Error::Conflict(_))), "claiming from {status:?}");
+        }
+    }
+}
