@@ -118,6 +118,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn from_status_rejects_only_client_errors_worth_not_repeating() {
+        for status in [400, 404, 409, 422, 499] {
+            assert!(matches!(Error::from_status(status, "x".into()), Error::Rejected(m) if m == "x"), "{status}");
+        }
+        for status in [200, 302, 399, 408, 429, 500, 503] {
+            assert!(matches!(Error::from_status(status, "x".into()), Error::Other(m) if m == "x"), "{status}");
+        }
+    }
+
+    #[test]
     fn run_names_are_deterministic() {
         let key = TaskKey("TRAIL-42".into());
         assert_eq!(run_name(&key, 1), "trail-42-a1");

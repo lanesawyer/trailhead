@@ -478,11 +478,7 @@ async fn ok(res: Response) -> Result<Response> {
         StatusCode::NOT_FOUND => Error::NotFound(msg),
         StatusCode::CONFLICT => Error::Conflict(msg),
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Forbidden(msg),
-        // Timeouts and rate limits pass; every other client error will repeat itself.
-        s if s.is_client_error() && !matches!(s, StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS) => {
-            Error::Rejected(msg)
-        }
-        _ => Error::Other(msg),
+        s => Error::from_status(s.as_u16(), msg),
     })
 }
 
