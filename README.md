@@ -68,7 +68,7 @@ cargo fmt --all
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` on every pull request and push to `main`, and checks that the published crates package (`cargo package -p trailhead-core -p trailhead-server -p trailhead`). The factory's crates aren't published yet.
 
-The docs in `docs/` are also a book, built with mdBook and published to the [docs site](https://lanesawyer.github.io/trailhead/) by `.github/workflows/docs.yml`, which builds them on pull requests that touch them and deploys from `main`. `mise run docs` builds them locally and `mdbook serve` previews them. A new page has to be listed in `docs/SUMMARY.md`; the build fails on a listed page that doesn't exist.
+The docs in `docs/` are also a book, built with mdBook and published to the [docs site](https://lanesawyer.github.io/trailhead/) by `.github/workflows/docs.yml`, which builds them on pull requests that touch them and deploys from `main`. `mise run docs` builds them locally and `mise run docs-serve` previews them (a plain `mdbook serve` fails or draws no diagrams on a fresh clone, because the git-ignored `mermaid.min.js` is unpacked by the docs tasks). A new page has to be listed in `docs/SUMMARY.md`; the build fails on a listed page that doesn't exist.
 
 ## Releasing
 
