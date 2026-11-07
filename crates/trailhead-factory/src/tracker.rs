@@ -37,7 +37,7 @@ impl Task {
     /// The factory's view of a Trailhead task. `holder` is the name of the agent holding its claim, if any.
     pub fn from_model(task: trailhead_model::Task, holder: Option<String>) -> Result<Task> {
         let run = RunUpdate::of(&task).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", task.key)))?;
-        let key = TaskKey(task.key);
+        let key = task.key;
         Ok(Task {
             project: key.project().to_string(),
             key,
@@ -171,10 +171,8 @@ pub struct MergeDecision {
     pub head: String,
     /// The gates that passed: `checks`, `ci`, `agent_review`, `human`.
     pub passed: Vec<GateKind>,
-    /// The gates still to pass, and for CI that failed, the names of the failing checks.
+    /// The gates still to pass.
     pub waiting: Vec<GateKind>,
-    #[serde(default)]
-    pub failing: Vec<String>,
     /// Every gate passed and the grade auto-merges, so a merger that was on would merge now.
     pub would_merge: bool,
     /// The head the control plane moved the task to `approved` on, which tells its approval from Lane's.

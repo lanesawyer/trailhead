@@ -1,7 +1,7 @@
 //! The three-step sync (`docs/factory/ui.md#sync`) and the event stream, run on the net thread.
 //!
 //! 1. Note the newest event id.
-//! 2. Load the snapshot: projects, agents, and tasks with their claims, open questions and last handoff, paged.
+//! 2. Load the snapshot: projects, agents, users, and tasks with their claims, open questions and last handoff, paged.
 //! 3. Open `/v1/events/stream` with `Last-Event-ID` set to the id from step 1. Whatever was written during step 2
 //!    arrives again, and the mirror ignores it by version.
 //!
@@ -31,6 +31,7 @@ pub struct Snapshot {
     pub at: i64,
     pub projects: Vec<Value>,
     pub agents: Vec<Value>,
+    pub users: Vec<Value>,
     /// Tasks with `claim`, `open_questions`, `last_handoff` and `last_review` on each.
     pub tasks: Vec<Value>,
 }
@@ -119,6 +120,7 @@ impl Remote {
     pub async fn load_snapshot(&self, at: i64) -> Result<Snapshot, String> {
         let projects = self.list("/v1/projects").await?;
         let agents = self.list("/v1/agents").await?;
+        let users = self.list("/v1/users").await?;
         // Pages are by offset, and a task deleted from an earlier page moves the rest up one, so the one at the
         // boundary is skipped. Nothing after `at` need bring it back, so page again if anything was deleted meanwhile.
         let tasks = loop {
@@ -129,7 +131,7 @@ impl Remote {
                 break tasks;
             }
         };
-        Ok(Snapshot { at, projects, agents, tasks })
+        Ok(Snapshot { at, projects, agents, users, tasks })
     }
 
     async fn load_tasks(&self) -> Result<Vec<Value>, String> {

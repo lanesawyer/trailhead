@@ -5,6 +5,8 @@
 //! byte pipe to the Trailhead server's loopback port, so the UI's HTTP client (and the `/v1/events/stream` event
 //! stream) talks to a local port. [`UiRequest::Status`] answers with the factory status snapshot and then its stream
 //! (TRAIL-692, TRAIL-701) as framed [`StatusFrame`]s, from whatever [`StatusFeed`] the control plane gave the protocol.
+//! [`UiRequest::Logs`] answers with the control plane's last log lines and then each new one as framed [`LogFrame`]s, from
+//! a [`LogFeed`] (TRAIL-885).
 //!
 //! Admission is a persisted [`UiAllowlist`] of endpoint ids a person added; it decides who can connect. What they can
 //! do is decided by the user's bearer token, which the server checks on every forwarded request.
@@ -19,6 +21,7 @@ use iroh::{Endpoint, EndpointId};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
+use trailhead_factory::logs::LogLine;
 use trailhead_factory::{Error, FactorySnapshot, Result, Sequenced};
 
 use crate::net::{io_err, parse_endpoint_id, pipe, read_frame, write_frame};
@@ -40,6 +43,8 @@ pub enum UiRequest {
     /// The stream carries [`StatusFrame`]s: a snapshot of every repo, then each event after it, until either side
     /// closes it.
     Status,
+    /// The stream carries [`LogFrame`]s: the control plane's last log lines, then each new one.
+    Logs,
 }
 
 /// One repo's snapshot in a [`StatusFrame::Snapshot`].
@@ -91,7 +96,7 @@ impl std::fmt::Display for Unsupported {
 }
 
 /// The `op` of every [`UiRequest`], for [`Unsupported::known`].
-const KNOWN_OPS: [&str; 2] = ["api", "status"];
+const KNOWN_OPS: [&str; 3] = ["api", "status", "logs"];
 
 /// One repo's status as the control plane keeps it: a snapshot and the events after it.
 pub struct RepoFeed {
@@ -109,6 +114,30 @@ pub trait StatusFeed: Send + Sync + 'static {
 impl std::fmt::Debug for dyn StatusFeed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("StatusFeed")
+    }
+}
+
+/// A frame the control plane sends on a [`UiRequest::Logs`] stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "frame", rename_all = "snake_case")]
+pub enum LogFrame {
+    /// Always first: the lines the control plane has kept, oldest first.
+    Backlog { lines: Vec<LogLine> },
+    /// One new line.
+    Line(LogLine),
+    /// What a control plane that doesn't know the request answers with (see [`StatusFrame::Unsupported`]).
+    Unsupported(Unsupported),
+}
+
+/// Where the control plane's log comes from, so this crate needn't know the control plane's types.
+pub trait LogFeed: Send + Sync + 'static {
+    /// The lines kept so far, oldest first, and a receiver for each one after them.
+    fn subscribe(&self) -> (Vec<LogLine>, broadcast::Receiver<LogLine>);
+}
+
+impl std::fmt::Debug for dyn LogFeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LogFeed")
     }
 }
 
@@ -197,6 +226,7 @@ pub struct UiProtocol {
     server: SocketAddr,
     allowed: Arc<UiAllowlist>,
     status: Option<Arc<dyn StatusFeed>>,
+    logs: Option<Arc<dyn LogFeed>>,
     /// The build reported to a UI that sent a request this control plane doesn't know.
     build: String,
     /// The (peer, request kind) pairs already logged as unknown, so a UI retrying doesn't fill the log.
@@ -209,6 +239,7 @@ impl UiProtocol {
             server,
             allowed: Arc::new(allowed),
             status: None,
+            logs: None,
             build: "unknown".into(),
             unknown: Arc::default(),
         }
@@ -223,6 +254,12 @@ impl UiProtocol {
     /// Serves [`UiRequest::Status`] from `feed`; without one that request is refused.
     pub fn with_status(mut self, feed: Arc<dyn StatusFeed>) -> UiProtocol {
         self.status = Some(feed);
+        self
+    }
+
+    /// Serves [`UiRequest::Logs`] from `feed`; without one that request is refused.
+    pub fn with_logs(mut self, feed: Arc<dyn LogFeed>) -> UiProtocol {
+        self.logs = Some(feed);
         self
     }
 }
@@ -271,6 +308,30 @@ async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStrea
     let _ = send.finish();
 }
 
+/// Sends the kept lines, then every new one, until the UI goes away.
+async fn serve_logs(feed: &dyn LogFeed, mut send: iroh::endpoint::SendStream) {
+    let (lines, mut live) = feed.subscribe();
+    if write_frame(&mut send, &LogFrame::Backlog { lines }).await.is_err() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            line = live.recv() => match line {
+                Ok(line) => {
+                    if write_frame(&mut send, &LogFrame::Line(line)).await.is_err() {
+                        return;
+                    }
+                }
+                // Too slow to keep up: it misses some lines.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            _ = send.stopped() => return,
+        }
+    }
+    let _ = send.finish();
+}
+
 impl ProtocolHandler for UiProtocol {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
         if !self.allowed.contains(&conn.remote_id()) {
@@ -299,7 +360,7 @@ impl ProtocolHandler for UiProtocol {
                 conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
                 return Ok(());
             }
-            let (server, status) = (self.server, self.status.clone());
+            let (server, status, logs) = (self.server, self.status.clone(), self.logs.clone());
             let (peer, build, unknown) = (conn.remote_id(), self.build.clone(), self.unknown.clone());
             tokio::spawn(async move {
                 let request = match read_frame::<serde_json::Value>(&mut recv).await {
@@ -324,6 +385,12 @@ impl ProtocolHandler for UiProtocol {
                     },
                     Ok(Some(UiRequest::Status)) => match status {
                         Some(feed) => serve_status(feed.as_ref(), send).await,
+                        None => {
+                            let _ = send.reset(BAD_REQUEST.into());
+                        }
+                    },
+                    Ok(Some(UiRequest::Logs)) => match logs {
+                        Some(feed) => serve_logs(feed.as_ref(), send).await,
                         None => {
                             let _ = send.reset(BAD_REQUEST.into());
                         }
@@ -382,6 +449,28 @@ impl StatusStream {
 
     /// The next frame, or `None` when the control plane ended the stream cleanly.
     pub async fn next(&mut self) -> Result<Option<StatusFrame>> {
+        read_frame(&mut self.recv).await
+    }
+}
+
+/// A UI's end of a [`UiRequest::Logs`] stream.
+pub struct LogStream {
+    recv: iroh::endpoint::RecvStream,
+    // Held so the connection lives as long as the stream is read.
+    _conn: Connection,
+}
+
+impl LogStream {
+    /// Asks for the log on a new stream. A control plane without the op resets it, which shows up as an error from
+    /// [`next`](Self::next), or answers [`LogFrame::Unsupported`].
+    pub async fn open(conn: Connection) -> Result<LogStream> {
+        let (mut send, recv) = conn.open_bi().await.map_err(io_err)?;
+        write_frame(&mut send, &UiRequest::Logs).await?;
+        Ok(LogStream { recv, _conn: conn })
+    }
+
+    /// The next frame, or `None` when the control plane ended the stream cleanly.
+    pub async fn next(&mut self) -> Result<Option<LogFrame>> {
         read_frame(&mut self.recv).await
     }
 }
@@ -456,15 +545,16 @@ mod tests {
     fn requests_are_tagged_so_status_can_join_them() {
         assert_eq!(serde_json::to_string(&UiRequest::Api).unwrap(), r#"{"op":"api"}"#);
         assert_eq!(serde_json::to_string(&UiRequest::Status).unwrap(), r#"{"op":"status"}"#);
+        assert_eq!(serde_json::to_string(&UiRequest::Logs).unwrap(), r#"{"op":"logs"}"#);
     }
 
     #[test]
     fn known_ops_are_the_requests_variants() {
-        for request in [UiRequest::Api, UiRequest::Status] {
+        for request in [UiRequest::Api, UiRequest::Status, UiRequest::Logs] {
             let op = serde_json::to_value(&request).unwrap()["op"].as_str().unwrap().to_string();
             assert!(KNOWN_OPS.contains(&op.as_str()), "{op}");
         }
-        assert_eq!(KNOWN_OPS.len(), 2);
+        assert_eq!(KNOWN_OPS.len(), 3);
     }
 
     #[test]

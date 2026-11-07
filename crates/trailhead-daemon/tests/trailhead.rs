@@ -160,7 +160,7 @@ impl Rig {
 
     async fn task(&self, title: &str) -> TaskKey {
         let new = NewTask { project: "TRAIL".into(), title: title.into(), ..Default::default() };
-        TaskKey(self.store.create_task(&self.human, new).await.unwrap().key)
+        self.store.create_task(&self.human, new).await.unwrap().key
     }
 }
 

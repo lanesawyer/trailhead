@@ -30,7 +30,7 @@ async fn trailhead(dir: &std::path::Path) -> (std::net::SocketAddr, CoreTracker,
         .await
         .unwrap();
     let task = NewTask { project: "LIVE".into(), title: "Live run".into(), ..Default::default() };
-    let key = TaskKey(server_store.create_task(&human, task).await.unwrap().key);
+    let key = server_store.create_task(&human, task).await.unwrap().key;
     let agent = server_store.create_agent(&human, "factory").await.unwrap();
     let ctx = server_store.agent_ctx(ws.id, agent.id).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
