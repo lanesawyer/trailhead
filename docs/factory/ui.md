@@ -83,7 +83,7 @@ Bevy app ── channels ── net thread (tokio)
 ## Sync
 
 1. Note the newest event id (`GET /v1/events` newest first, limit 1).
-2. Load the snapshot: projects, then `GET /v1/tasks` with `include=claim,open_questions,last_handoff`, paged.
+2. Load the snapshot: projects, then `GET /v1/tasks` with `include=claim,open_questions,last_handoff,last_review`, paged.
 3. Open the stream with `Last-Event-ID` set to the id from step 1. Anything written during step 2 arrives again and is ignored by version.
 
 On a dropped stream, reconnect with the last applied id; the server resumes with nothing missed. The stream reads only `events`, not `events_archive`, so after a long disconnect (or on any doubt) the client redoes all three steps rather than resuming. App start always does the full sync.

@@ -96,8 +96,15 @@ impl CoreTracker {
     async fn task(&self, ctx: &Ctx, t: trailhead_core::Task) -> Result<Task> {
         let claims = self.store.live_claims(ctx, &[t.id]).await.map_err(map_err)?;
         let holder = claims.get(&t.id).map(|c| c.holder.clone());
-        let flag = t.status == trailhead_core::Status::InReview
-            && self.store.task_detail(ctx, &t.key).await.map_err(map_err)?.changes_requested.is_some();
+        let flag = if t.status == trailhead_core::Status::InReview {
+            // Only the newest verdict and the newest handoff decide it, so there is no need to load every comment.
+            let reviews = self.store.last_reviews(ctx, &[t.id]).await.map_err(map_err)?;
+            let handoffs = self.store.last_handoffs(ctx, &[t.id]).await.map_err(map_err)?;
+            let newest = reviews.get(&t.id).into_iter().chain(handoffs.get(&t.id));
+            trailhead_core::changes_requested(t.status, newest).is_some()
+        } else {
+            false
+        };
         Task::from_model(t, holder).map(|task| Task { changes_requested: flag, ..task })
     }
 

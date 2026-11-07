@@ -13,6 +13,8 @@ pub struct FakeComment {
     pub author: String,
     pub kind: String,
     pub body: String,
+    /// A review's verdict; `None` on every other kind.
+    pub verdict: Option<VerdictKind>,
 }
 
 #[derive(Default)]
@@ -278,8 +280,8 @@ impl FakeTracker {
 /// Whether the newest review on the task asks for changes and no handoff has come since, whatever its status.
 fn review_asks_changes(s: &State, key: &TaskKey) -> bool {
     let comments = s.comments.get(key).map(Vec::as_slice).unwrap_or_default();
-    let Some(i) = comments.iter().rposition(|c| c.kind == "review") else { return false };
-    comments[i].body.starts_with("request_changes: ") && !comments[i + 1..].iter().any(|c| c.kind == "handoff")
+    let Some(i) = comments.iter().rposition(|c| c.kind == "review" && c.verdict.is_some()) else { return false };
+    comments[i].verdict == Some(VerdictKind::RequestChanges) && !comments[i + 1..].iter().any(|c| c.kind == "handoff")
 }
 
 /// The task as the tracker shows it: in review with changes requested, or not.
@@ -305,6 +307,7 @@ fn push_comment(s: &mut State, key: &TaskKey, author: &str, kind: &str, body: &s
         author: author.to_string(),
         kind: kind.to_string(),
         body: body.to_string(),
+        verdict: None,
     });
 }
 
@@ -574,6 +577,9 @@ impl Tracker for FakeTracker {
             VerdictKind::RequestChanges => "request_changes",
         };
         self.comment(task, "review", &format!("{kind}: {}", verdict.body));
+        if let Some(c) = self.state.lock().unwrap().comments.get_mut(task).and_then(|c| c.last_mut()) {
+            c.verdict = Some(verdict.kind);
+        }
         Ok(())
     }
 

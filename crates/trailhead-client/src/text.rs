@@ -66,6 +66,11 @@ impl Text {
 
     /// One line per task: key, status, priority, (version,) title, then its grade and dates.
     pub fn task_line(&self, t: &Task) -> String {
+        self.task_line_flagged(t, false)
+    }
+
+    /// [`Self::task_line`], saying so when the task is in review with changes requested.
+    pub fn task_line_flagged(&self, t: &Task, changes_requested: bool) -> String {
         let mut line = if self.columns {
             format!("{:<10} {:<11} p{}", t.key, t.status.as_str(), t.priority)
         } else {
@@ -84,6 +89,9 @@ impl Text {
         }
         if let Some(w) = self.due(t) {
             line.push_str(&format!("{gap}(due {w})"));
+        }
+        if changes_requested {
+            line.push_str(&format!("{gap}(changes requested)"));
         }
         line
     }
