@@ -21,7 +21,7 @@ Named after the climbing classes of the Yosemite Decimal System: the higher the 
 
 How grades are set:
 
-- **On the task, by a human, when it's triaged.** The grade is a field on the task ([PLAN.md](../PLAN.md), engine change #6). Grading a task is what makes it the factory's work: the factory only picks up graded tasks under its queue task, and skips an ungraded one, saying so. A task that should never be worked by the factory, like an item on a shopping list, simply has no grade.
+- **On the task, by a human, when it's triaged.** The grade is a field on the task ([PLAN.md](../PLAN.md), engine change #6). Grading a task is what makes it the factory's work: the factory only picks up graded tasks that are direct subtasks of a task in its `queue` list (or any task in the project when the repo has no queue, where the grade filter is skipped), and skips an ungraded one, saying so. A task that should never be worked by the factory, like an item on a shopping list, simply has no grade.
 - **Only raised after that.** Agents can raise a task's grade but never set the first one, lower it or clear it. The PR is graded the task's grade or higher:
   - **By the diff.** The control plane matches each changed file against the repo's path rules, and a diff over the repo's line limit is at least grade 3. If that comes out higher than the task's grade, the PR and the task are raised, with the file or rule that did it. Deleting a test or a check is never grade 1.
   - **By the reviewer.** Its verdict can name a higher grade with a reason.
@@ -69,6 +69,10 @@ Decided: quorum reviewers must be independent. Quorums are built after the merge
 - **Different models or providers** (`distinct_models`).
 - **Fresh sandboxes and contexts**, no access to the author's transcript.
 - **Blind first pass.** Each reviewer records a verdict before seeing the others; disagreement escalates.
+
+## Changes requested
+
+A review that asks for changes doesn't send the task back to `open`: the task has a PR in flight, and `open` means nobody has started it (TRAIL-963). It stays `in_review`, and "changes requested" is computed from the review history ([PLAN.md](../PLAN.md#statuses)): the newest `review` comment with a verdict is `request_changes` and no `handoff` comment came after it. A reviewer's verdict is that comment already; for a conflict or a CI failure the factory writes a `request_changes` verdict itself, from what the code host reports, so the rule needs no special case. `Tracker::ready` lists these tasks ahead of new work, the worker's claim makes the task `in_progress`, and the handoff the worker leaves when it pushes answers the review and puts the task back in the ordinary review state. A merger never approves or merges a task that has changes requested. Lookout keeps the card in the In Review column with a "changes requested" badge.
 
 ## What counts as a review round
 

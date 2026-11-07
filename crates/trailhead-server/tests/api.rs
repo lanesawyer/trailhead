@@ -656,7 +656,9 @@ async fn an_agent_cant_set_a_first_grade_or_lower_one() {
     assert_eq!(r.status, StatusCode::OK, "an agent may raise a grade: {}", r.body);
     assert_eq!(r.body["grade"], 4);
     let r = api.as_human("GET", "/v1/tasks/AUTH-1", None).await;
-    assert!(r.body["task"]["grade"].is_null(), "{}", r.body);
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["task"]["key"], "AUTH-1", "{}", r.body);
+    assert!(r.body["task"].as_object().is_some_and(|t| t.get("grade").is_some_and(Value::is_null)), "{}", r.body);
 }
 
 #[tokio::test]
@@ -685,4 +687,28 @@ async fn creating_a_task_lists_possible_duplicates_among_open_tasks() {
     let again = create("Rotate signing keys").await;
     assert_eq!(again.status, StatusCode::CREATED, "{}", again.body);
     assert!(again.body.get("possible_duplicates").is_none(), "{}", again.body);
+}
+
+#[tokio::test]
+async fn task_list_can_include_the_last_review() {
+    let api = Api::new().await;
+    api.seed().await;
+    for title in ["reviewed", "unreviewed"] {
+        api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": title}))).await;
+    }
+    for (verdict, body) in [("approve", "fine"), ("request_changes", "rebase")] {
+        let r = api
+            .as_human(
+                "POST",
+                "/v1/tasks/AUTH-1/comments",
+                Some(json!({"kind": "review", "verdict": verdict, "body": body})),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    }
+    let r = api.as_human("GET", "/v1/tasks?sort=created_at&fields=key&include=last_review", None).await;
+    let items = r.body.as_array().unwrap();
+    assert_eq!(items[0]["last_review"]["body"], "rebase");
+    assert_eq!(items[0]["last_review"]["verdict"], "request_changes");
+    assert!(items[1]["last_review"].is_null());
 }

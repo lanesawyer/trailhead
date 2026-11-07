@@ -17,7 +17,7 @@ pub struct TaskSpec {
     /// Why the previous attempt at the task failed, when there was one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_failure: Option<String>,
-    /// Lane's answers to the agent's earlier questions, and the task's decisions and notes.
+    /// A person's answers to the agent's earlier questions, and the task's decisions and notes.
     #[serde(default, skip_serializing_if = "HumanContext::is_empty")]
     pub context: HumanContext,
 }
@@ -258,8 +258,10 @@ pub fn is_conventional(title: &str) -> bool {
 /// The commit subject and PR title for a task: the agent's conventional `title` with the task key appended, or, when
 /// it's missing or not conventional, `chore: {task title} [{key}]`. The flag is false for the fallback.
 pub fn conventional_title(agent_title: Option<&str>, key: &TaskKey, task_title: &str) -> (String, bool) {
-    match agent_title.map(str::trim).filter(|t| is_conventional(t)) {
-        Some(t) => (format!("{} [{}]", strip_trailing_key(t, key), key.0), true),
+    // Check after stripping the key, so a title whose subject was only the key has no subject left.
+    let stripped = agent_title.map(|t| strip_trailing_key(t.trim(), key)).filter(|t| is_conventional(t));
+    match stripped {
+        Some(t) => (format!("{} [{}]", t, key.0), true),
         None => (format!("chore: {} [{}]", strip_trailing_key(task_title.trim(), key), key.0), false),
     }
 }
@@ -303,6 +305,7 @@ mod tests {
             ("fix(core): a [TRAIL-9]".into(), true)
         );
         assert_eq!(conventional_title(Some("fix(core): a [TRAIL-8]"), &key, "T").0, "fix(core): a [TRAIL-8] [TRAIL-9]");
+        assert_eq!(conventional_title(Some("fix(core): [TRAIL-9]"), &key, "T"), ("chore: T [TRAIL-9]".into(), false));
         assert_eq!(conventional_title(None, &key, "T [TRAIL-9]").0, "chore: T [TRAIL-9]");
         assert_eq!(conventional_title(Some("nope"), &key, "T"), ("chore: T [TRAIL-9]".into(), false));
         assert_eq!(conventional_title(None, &key, "T"), ("chore: T [TRAIL-9]".into(), false));

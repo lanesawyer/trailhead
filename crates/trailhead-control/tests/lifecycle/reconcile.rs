@@ -122,13 +122,48 @@ async fn reconcile_does_not_reattach_to_a_run_whose_report_was_already_counted()
 }
 
 #[tokio::test]
+async fn a_run_that_concluded_but_couldnt_release_its_sandbox_is_not_reattached_to() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Opens a PR", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    // The sandbox goes bad once the worker has it, so releasing it after the PR opens fails.
+    r.compute.fail_after("trailhead-w1", "set_egress", 2);
+
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.concluded.as_deref(), Some("trail-1-a1"), "`conclude` itself marked the run");
+    assert_eq!(busy(&r.compute), ["trailhead-w1"], "the sandbox was left to reconcile");
+
+    // The daemon would still replay the run, whose spend `conclude` has already counted.
+    let spend = task.run.spend;
+    let report = trailhead_factory::RunReport {
+        result: trailhead_factory::RunResult::NeedsInput("Which greeting?".into()),
+        checks: vec![],
+        usage: Default::default(),
+    };
+    r.daemon.ongoing("trail-1-a1", vec![spent(400_000)], report);
+    r.compute.heal("trailhead-w1");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reattached.is_empty(), "{done:?}");
+    assert!(r.daemon.attached().is_empty());
+    assert_eq!(r.tracker.task(&key).run.spend, spend, "not counted a second time");
+}
+
+#[tokio::test]
 async fn a_reattached_run_counts_its_wall_clock_from_when_it_started() {
     let r = rig();
     // Started 61 minutes back against a 60 minute worker budget: nothing is left of it.
     let key = going(&r, Usd::ZERO, 61 * 60).await;
     r.daemon.ongoing_hung("trail-1-a1", vec![spent(1_000)]);
 
-    let done = r.factory.reconcile().await.unwrap();
+    // On real time, so a regression would wait out the whole budget: fail fast instead.
+    let done = tokio::time::timeout(std::time::Duration::from_secs(10), r.factory.reconcile())
+        .await
+        .expect("reattach gave the run a fresh budget")
+        .unwrap();
     assert_eq!(done.reattached, std::slice::from_ref(&key.0));
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::NeedsInput, "parked, not given another full budget");
@@ -169,7 +204,7 @@ async fn no_worker_starts_on_a_task_whose_pr_merged_meanwhile() {
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
     let task = r.tracker.task(&key);
-    assert_eq!(task.status, Status::Open);
+    assert_eq!(task.status, Status::InReview);
     let pr = task.run.pr.clone().expect("a PR");
 
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
@@ -242,15 +277,29 @@ async fn a_rework_request_cut_short_is_finished_by_reconcile() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
     r.harness.push(Role::Worker, Script::new(changes()));
-    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.tick().await.unwrap();
-    // The review was recorded, but the control plane stopped before the task left review.
-    r.tracker.set_status(&key, Status::InReview);
+    // A conflict rework was requested in the task's metadata, but the control plane stopped before the factory's
+    // request_changes review was recorded, so the task isn't yet waiting on a rework.
+    let cut_short = trailhead_factory::RunUpdate {
+        conflict_reworks: Some(1),
+        changes_requested: Some(trailhead_factory::ChangesRequested {
+            reviewer: "factory".into(),
+            body: "Merge main.".into(),
+            attempt: 1,
+            conflict: true,
+            head: None,
+        }),
+        ..Default::default()
+    };
+    Tracker::report(&r.tracker, &key, cut_short).await.unwrap();
+    assert!(!r.tracker.task(&key).changes_requested);
 
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.reworked, std::slice::from_ref(&key.0));
     assert!(done.reviewed.is_empty(), "the review isn't run again: {done:?}");
-    assert_eq!(r.tracker.task(&key).status, Status::Open);
+    let task = r.tracker.task(&key);
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true), "waiting in review for the rework");
     assert!(r.factory.reconcile().await.unwrap().reworked.is_empty());
 }
 

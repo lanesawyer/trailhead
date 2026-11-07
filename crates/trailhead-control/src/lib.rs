@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use trailhead_factory::{
-    ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, IROH_DOMAINS, Labels, MergeMode, ModelProvider,
-    PrRef, Sandbox, SandboxId, Target, Task, TaskKey, Tracker, Verdict, label,
+    ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, GateKind, Grade, IROH_DOMAINS, Labels, MergeMode,
+    ModelProvider, PrRef, Sandbox, SandboxId, Target, Task, TaskKey, Tracker, Verdict, label,
 };
 
 use crate::pool::Trouble;
@@ -106,6 +106,11 @@ impl Placed {
         }
         Ok(found)
     }
+}
+
+/// The grades whose gate in `config` requires a person.
+fn human_grades(config: &FactoryConfig) -> Vec<Grade> {
+    Grade::ALL.into_iter().filter(|g| config.gate(*g).require.contains(&GateKind::Human)).collect()
 }
 
 pub struct Factory {
@@ -191,11 +196,12 @@ pub struct Reconciled {
     pub reattached: Vec<String>,
     pub requeued: Vec<String>,
     pub reviewed: Vec<String>,
-    /// Tasks whose review asked for changes but stayed in review, now reopened for a rework or parked.
+    /// Tasks whose request for changes was cut short before it was recorded, now recorded for a rework or parked.
     pub reworked: Vec<String>,
     /// Tasks whose reviewer breached its budget and whose park was cut short, now parked for a human.
     pub breached: Vec<String>,
-    /// In-review tasks whose PR no longer merges cleanly, now reopened to merge the base branch in or parked.
+    /// In-review tasks whose PR no longer merges cleanly, now marked as having changes requested to merge the base
+    /// branch in, or parked.
     pub conflicted: Vec<String>,
     /// In-review tasks whose PR was merged, now done.
     pub merged: Vec<String>,
@@ -241,6 +247,7 @@ impl Factory {
         host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
         let merge_mode = Mutex::new(config.merge.mode);
         let status = StatusBoard::new();
+        status.human_grades(human_grades(&config));
         status.queue(config.repo.queue.iter().cloned().map(TaskKey).collect());
         Factory {
             config,
@@ -285,6 +292,7 @@ impl Factory {
 
     /// Publishes to `board` instead of a board of its own, to share one between repos or with a server.
     pub fn with_status(mut self, board: Arc<StatusBoard>) -> Factory {
+        board.human_grades(human_grades(&self.config));
         self.status = board;
         self
     }

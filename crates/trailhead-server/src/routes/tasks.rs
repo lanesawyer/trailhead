@@ -34,6 +34,9 @@ pub(crate) struct TaskListQuery {
     scheduled_through: Option<String>,
     /// `1` to `4`, `graded` or `ungraded`.
     grade: Option<String>,
+    /// `true`: only `in_review` tasks waiting on a rework (the newest review asks for changes, no handoff since);
+    /// `false`: leave those out.
+    changes_requested: Option<bool>,
     /// `key:value` pairs, comma-separated.
     metadata: Option<String>,
     /// `priority` (the default: priority, then due date, then oldest), `updated_at` or
@@ -47,7 +50,8 @@ pub(crate) struct TaskListQuery {
     fields: Option<String>,
     /// Comma-separated extras per task: `claim` (the live claim or `null`, with the holder's
     /// name as `holder`), `open_questions` (unresolved `question` comments, oldest first) and
-    /// `last_handoff` (the newest `handoff` comment or `null`).
+    /// `last_handoff` (the newest `handoff` comment or `null`) and `last_review` (the newest `review` comment
+    /// with a verdict or `null`; with `last_handoff` it is what `changes_requested` is computed from).
     include: Option<String>,
 }
 
@@ -78,13 +82,16 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
         due_before: parse_opt_time(q.due_before.as_deref())?,
         scheduled_through: parse_opt_date(q.scheduled_through.as_deref())?,
         grade: parse_grade_filter(q.grade.as_deref())?,
+        changes_requested: q.changes_requested,
         metadata,
         sort: q.sort.as_deref().map(str::parse).transpose()?.unwrap_or_default(),
         limit: q.limit,
         offset: q.offset,
     };
     let includes = split_list(q.include.as_deref());
-    if let Some(other) = includes.iter().find(|i| !["claim", "open_questions", "last_handoff"].contains(&i.as_str())) {
+    if let Some(other) =
+        includes.iter().find(|i| !["claim", "open_questions", "last_handoff", "last_review"].contains(&i.as_str()))
+    {
         return Err(invalid(format!("unknown include: {other}")));
     }
     let wants = |name: &str| includes.iter().any(|i| i == name);
@@ -94,6 +101,7 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
     let mut claims = if wants("claim") { Some(s.store.live_claims(&ctx, &ids).await?) } else { None };
     let mut questions = if wants("open_questions") { Some(s.store.open_questions(&ctx, &ids).await?) } else { None };
     let mut handoffs = if wants("last_handoff") { Some(s.store.last_handoffs(&ctx, &ids).await?) } else { None };
+    let mut reviews = if wants("last_review") { Some(s.store.last_reviews(&ctx, &ids).await?) } else { None };
     if let Value::Array(items) = &mut out {
         for (item, task) in items.iter_mut().zip(&tasks) {
             if let Some(c) = &mut claims {
@@ -104,6 +112,9 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
             }
             if let Some(h) = &mut handoffs {
                 item["last_handoff"] = json!(h.remove(&task.id));
+            }
+            if let Some(r) = &mut reviews {
+                item["last_review"] = json!(r.remove(&task.id));
             }
         }
     }
@@ -152,7 +163,7 @@ pub(crate) struct CreateTask {
 #[utoipa::path(
     post, path = "/v1/tasks", tag = "tasks", request_body = CreateTask,
     responses(
-        (status = 201, description = "Created. `possible_duplicates` lists keys of open tasks with a close title, when there are any; it's a warning, not an error.", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 201, description = "Created. `possible_duplicates` lists keys of open tasks with a close title, when there are any; it's a warning, not an error.", body = crate::openapi::CreatedTask, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
         (status = 404, description = "`not_found`: project, parent or dependency", body = ErrorBody),
         (status = 409, description = "`dependency_cycle` from `blocked_by`/`blocks`. Repeating a `source` + `external_id` returns the existing task instead of an error.", body = ErrorBody),
     )

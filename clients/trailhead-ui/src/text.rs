@@ -23,6 +23,8 @@ pub mod size {
     pub const HEADING: f32 = 15.0;
     /// The app's name in the header bar.
     pub const APP_TITLE: f32 = 18.0;
+    /// The title of the one thing a detail modal shows.
+    pub const DETAIL_TITLE: f32 = 18.0;
 }
 
 /// A label at `size`.

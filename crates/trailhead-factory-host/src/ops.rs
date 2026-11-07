@@ -362,6 +362,7 @@ mod tests {
             grade: Grade::new(2),
             priority: Priority::default(),
             holder: None,
+            changes_requested: false,
             run,
         }
     }
@@ -484,6 +485,7 @@ mod tests {
                 cap: Usd::dollars(5.0),
                 capped: true,
             }],
+            human_grades: Vec::new(),
             queue: Vec::new(),
             seq: 12,
         };

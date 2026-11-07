@@ -39,7 +39,7 @@ pub const ERROR_CODES: &[&str] = &[
     "internal",
 ];
 
-/// A task in `GET /v1/tasks`. `claim`, `open_questions` and `last_handoff` are present only when named in `include`.
+/// A task in `GET /v1/tasks`. `claim`, `open_questions`, `last_handoff` and `last_review` are present only when named in `include`.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code, reason = "schema only; the handler adds claim to the JSON")]
 pub struct ListedTask {
@@ -51,6 +51,18 @@ pub struct ListedTask {
     open_questions: Option<Vec<trailhead_core::Comment>>,
     /// With `include=last_handoff`: the newest `handoff` comment, or `null`.
     last_handoff: Option<trailhead_core::Comment>,
+    /// With `include=last_review`: the newest `review` comment with a verdict, or `null`.
+    last_review: Option<trailhead_core::Comment>,
+}
+
+/// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.
+#[derive(Serialize, ToSchema)]
+#[allow(dead_code, reason = "schema only; the handler adds possible_duplicates to the JSON")]
+pub struct CreatedTask {
+    #[serde(flatten)]
+    task: trailhead_core::Task,
+    /// Keys of open tasks with a close title; absent when there are none. A warning, not an error.
+    possible_duplicates: Option<Vec<String>>,
 }
 
 /// Path and header parameters many routes share, declared once for the docs.

@@ -31,7 +31,7 @@ pub struct Snapshot {
     pub at: i64,
     pub projects: Vec<Value>,
     pub agents: Vec<Value>,
-    /// Tasks with `claim`, `open_questions` and `last_handoff` on each.
+    /// Tasks with `claim`, `open_questions`, `last_handoff` and `last_review` on each.
     pub tasks: Vec<Value>,
 }
 
@@ -139,7 +139,7 @@ impl Remote {
         loop {
             let page = self
                 .list(&format!(
-                    "/v1/tasks?include=claim,open_questions,last_handoff&status={all_statuses}\
+                    "/v1/tasks?include=claim,open_questions,last_handoff,last_review&status={all_statuses}\
                      &sort=created_at&limit={PAGE}&offset={}",
                     tasks.len()
                 ))

@@ -145,3 +145,12 @@ async fn update_task_documents_a_nullable_grade() {
     let params = doc["paths"]["/v1/ready"]["get"]["parameters"].as_array().unwrap();
     assert!(params.iter().any(|p| p["name"] == "grade"));
 }
+
+#[tokio::test]
+async fn task_creation_schema_documents_possible_duplicates() {
+    let doc = fetch_doc().await;
+    let created = &doc["paths"]["/v1/tasks"]["post"]["responses"]["201"]["content"]["application/json"]["schema"];
+    assert_eq!(created["$ref"], "#/components/schemas/CreatedTask");
+    let schema = serde_json::to_string(&doc["components"]["schemas"]["CreatedTask"]).unwrap();
+    assert!(schema.contains("#/components/schemas/Task") && schema.contains("possible_duplicates"), "{schema}");
+}

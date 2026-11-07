@@ -56,10 +56,6 @@ impl Factory {
                 self.status.control(ControlState::Reconciling);
                 match self.reconcile_deferring(&keys.values().cloned().collect()).await {
                     Ok((done, due)) => {
-                        if done != Reconciled::default() || !due.reviews.is_empty() {
-                            let reviewing: Vec<&str> = due.reviews.iter().map(|t| t.key.0.as_str()).collect();
-                            tracing::info!(?done, ?reviewing, "reconciled");
-                        }
                         // Due reviews are new work, picked up again by the next start. Due runs are runs the daemon is
                         // still working on, so a drain keeps following them and waits for them too.
                         let due = if draining { Due { reviews: Vec::new(), ..due } } else { due };
@@ -76,6 +72,11 @@ impl Factory {
                         // held: the daemon already has them, and runs in flight carry on through an outage.
                         let hold = !due.reviews.is_empty() && (self.usage_paused() || !self.server_up().await);
                         let reviews_due = if hold { Vec::new() } else { due.reviews };
+                        // Logged after the hold, so a pause doesn't list reviews that never start on every poll.
+                        if done != Reconciled::default() || !reviews_due.is_empty() {
+                            let reviewing: Vec<&str> = reviews_due.iter().map(|t| t.key.0.as_str()).collect();
+                            tracing::info!(?done, ?reviewing, "reconciled");
+                        }
                         for task in reviews_due {
                             let key = task.key.clone();
                             let factory = self.clone();
@@ -608,7 +609,8 @@ fn parked_fill_repo_cap(others: usize, max_sandboxes: usize) -> bool {
 /// open (changes requested for a conflict, CI or a review) before fresh tasks, since it is nearly done and goes stale
 /// while it waits (TRAIL-868). The sort is stable, so the tracker's order (due date, age) holds among equals.
 fn in_start_order(mut ready: Vec<Task>) -> Vec<Task> {
-    ready.sort_by_key(|t| (t.priority, !(t.run.pr.is_some() && t.run.changes_requested.is_some())));
+    let rework = |t: &Task| t.changes_requested || (t.run.pr.is_some() && t.run.changes_requested.is_some());
+    ready.sort_by_key(|t| (t.priority, !rework(t)));
     ready
 }
 

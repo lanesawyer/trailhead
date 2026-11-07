@@ -30,6 +30,8 @@ impl Factory {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let task = self.tracker.show(key).await?;
         let Some(pr) = &task.run.pr else { return Ok(()) };
+        // A task waiting on a rework is neither approved nor merged, whatever the gates say.
+        let act = act && !task.changes_requested;
         if !matches!(task.status, Status::InReview | Status::Approved) {
             return Ok(());
         }
@@ -289,7 +291,6 @@ impl Factory {
                 }
                 tracing::warn!(task = %task.key.0, pr = %pr.url, %why, "the code host refused the merge; trying again each pass");
                 let note = messages::merge_refused(&why);
-                let codehost = self.codehost.as_ref().expect("checked above");
                 codehost.comment(pr, &note).await?;
                 self.tracker.note(&task.key, &note).await?;
                 let decision = MergeDecision { refused: Some(why), ..decision.clone() };

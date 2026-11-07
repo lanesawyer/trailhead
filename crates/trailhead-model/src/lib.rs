@@ -356,6 +356,21 @@ pub struct Comment {
     pub deleted_at: Option<Timestamp>,
 }
 
+/// The `request_changes` review comment a task is waiting on a rework for, if it is: the task is `in_review`, its
+/// newest `review` comment with a verdict (newest by id, which is a UUIDv7 and so follows creation order) asks for
+/// changes, and no `handoff` comment has a larger id. Computed from stored columns only, never from text. `in_review`
+/// then means the work is in the review loop, and this says whose move it is.
+pub fn changes_requested<'a>(status: Status, comments: impl IntoIterator<Item = &'a Comment>) -> Option<Uuid> {
+    if status != Status::InReview {
+        return None;
+    }
+    let comments: Vec<&Comment> = comments.into_iter().filter(|c| c.deleted_at.is_none()).collect();
+    let live = || comments.iter().copied();
+    let review = live().filter(|c| c.kind == CommentKind::Review && c.verdict.is_some()).max_by_key(|c| c.id)?;
+    let answered = live().any(|c| c.kind == CommentKind::Handoff && c.id > review.id);
+    (review.verdict == Some(Verdict::RequestChanges) && !answered).then_some(review.id)
+}
+
 /// A task with its claim, comments and links, as `GET /v1/tasks/{key}` returns it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -364,6 +379,10 @@ pub struct TaskDetail {
     pub claim: Option<Claim>,
     /// Keys of unfinished tasks blocking this one.
     pub blocked_by: Vec<String>,
+    /// The id of the `request_changes` review comment that makes this an `in_review` task with changes requested,
+    /// computed like `blocked_by` and never stored (see [`changes_requested`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_requested: Option<Uuid>,
     /// Keys of tasks this one blocks.
     pub blocks: Vec<String>,
     pub comments: Vec<Comment>,

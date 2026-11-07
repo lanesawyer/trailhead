@@ -35,6 +35,8 @@ Approving needs care. In Trailhead, approving and merging are one step ([lifecyc
 
 Views are Bevy `States`; the inspector is a panel that both views spawn.
 
+**The task modal (2026-11-06, TRAIL-997).** Selecting a task opens it in a large modal in the middle of the window, laid out like Todoist's task view, in place of the side inspector: a header with the breadcrumb (project › parent › key), a main column (title, description, subtasks that open in the same modal, open questions, the PR with its gates) and a sidebar of facts (project, status, priority, grade and whether it is above Treeline, claim, dates, dependencies, the factory run, created/updated/version), then the inspector's actions. The whole task is fetched when it is selected (`GET /v1/tasks/{key}`, `detail.rs`), since the mirror holds only open questions and the last handoff, and fetched again when the stream brings an event about it. The side panel stays, for agents now and anything later that suits a panel. Still to come: the full activity list with a comment box (TRAIL-999), editing in place (TRAIL-1000, on the kit's inline-editable widgets, TRAIL-998), and moving up and down the column with a ⋯ menu for the actions (TRAIL-1001).
+
 ## Look and components
 
 Decided 2026-11-05 (TRAIL-796), after Lane's first real use: Lookout worked but read as a debug overlay of raw text rows. The look is built from one small component kit, and every view uses it.
@@ -84,7 +86,7 @@ Bevy app ── channels ── net thread (tokio)
 ## Sync
 
 1. Note the newest event id (`GET /v1/events` newest first, limit 1).
-2. Load the snapshot: projects, then `GET /v1/tasks` with `include=claim,open_questions,last_handoff`, paged.
+2. Load the snapshot: projects, then `GET /v1/tasks` with `include=claim,open_questions,last_handoff,last_review`, paged.
 3. Open the stream with `Last-Event-ID` set to the id from step 1. Anything written during step 2 arrives again and is ignored by version.
 
 On a dropped stream, reconnect with the last applied id; the server resumes with nothing missed. The stream reads only `events`, not `events_archive`, so after a long disconnect (or on any doubt) the client redoes all three steps rather than resuming. App start always does the full sync.

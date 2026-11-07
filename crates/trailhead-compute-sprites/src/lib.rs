@@ -24,8 +24,10 @@ pub const API_URL: &str = "https://api.sprites.dev";
 /// Where connectors are reached from inside a Sprite (`/v1/gateway/...`).
 pub const GATEWAY_DOMAIN: &str = "api.sprites.dev";
 
-/// Where a Sprite lists its connectors.
-pub const GATEWAY_LIST: &str = "https://api.sprites.dev/v1/gateway/list";
+/// Where a Sprite lists its connectors, built from `GATEWAY_DOMAIN` so the two can't drift apart.
+pub fn gateway_list() -> String {
+    format!("https://{GATEWAY_DOMAIN}/v1/gateway/list")
+}
 
 /// Where the daemon lives in a Sprite, whose user is `sprite`.
 pub const HOME: &str = "/home/sprite";
@@ -38,7 +40,7 @@ pub fn target() -> Target {
     Target {
         dir: format!("{HOME}/.trailhead"),
         workdir: format!("{HOME}/work"),
-        gateway_list: GATEWAY_LIST.into(),
+        gateway_list: gateway_list(),
         model_endpoint: None,
         hold_socket: Some(API_SOCKET.into()),
         ..Target::default()
@@ -242,8 +244,17 @@ impl Compute for SpritesCompute {
                 let body = res.text().await;
                 if !status.is_success() && status != StatusCode::NOT_FOUND {
                     tracing::warn!(sandbox = %id.0, program = %program.name, %status, "stopping the old service failed");
-                } else if let Err(e) = body {
-                    tracing::warn!(sandbox = %id.0, program = %program.name, error = %e, "stopping the old service: reading the answer failed");
+                } else {
+                    match body {
+                        Ok(body) => {
+                            if let Some(error) = service_stop_error(&body) {
+                                tracing::warn!(sandbox = %id.0, program = %program.name, %error, "stopping the old service reported an error");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(sandbox = %id.0, program = %program.name, error = %e, "stopping the old service: reading the answer failed");
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -340,6 +351,14 @@ fn service_started(name: &str, ndjson: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Reads a service stop's NDJSON log for the message of its first `error` event, which the API can report inside a 200.
+/// Lines that aren't JSON are skipped: the stop is best effort, so only a clear error event is worth a warning.
+fn service_stop_error(ndjson: &str) -> Option<String> {
+    ndjson.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|event| {
+        (event["type"].as_str() == Some("error")).then(|| event["data"].as_str().unwrap_or("unknown error").to_string())
+    })
 }
 
 pub fn encode_labels(labels: &Labels) -> Vec<String> {
@@ -461,11 +480,7 @@ async fn ok(res: Response) -> Result<Response> {
         StatusCode::NOT_FOUND => Error::NotFound(msg),
         StatusCode::CONFLICT => Error::Conflict(msg),
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Forbidden(msg),
-        // Timeouts and rate limits pass; every other client error will repeat itself.
-        s if s.is_client_error() && !matches!(s, StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS) => {
-            Error::Rejected(msg)
-        }
-        _ => Error::Other(msg),
+        s => Error::from_status(s.as_u16(), msg),
     })
 }
 
@@ -476,6 +491,13 @@ async fn json_body<T: serde::de::DeserializeOwned>(res: Response) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_list_is_built_from_the_gateway_domain() {
+        assert_eq!(gateway_list(), "https://api.sprites.dev/v1/gateway/list");
+        assert!(gateway_list().starts_with(&format!("https://{GATEWAY_DOMAIN}/")));
+        assert_eq!(target().gateway_list, gateway_list());
+    }
 
     #[tokio::test]
     async fn status_maps_to_error_variants() {
@@ -497,6 +519,15 @@ mod tests {
             assert!(err.to_string().contains("nope"), "{code}: {err}");
             assert!(expected(&err), "{code} mapped to {err:?}");
         }
+    }
+
+    #[test]
+    fn a_stop_reports_its_first_error_event() {
+        let clean = "{\"type\":\"stopping\"}\n\n{\"type\":\"complete\"}\n";
+        assert_eq!(service_stop_error(clean), None);
+        let failed = "{\"type\":\"stopping\"}\nnot json\n{\"type\":\"error\",\"data\":\"no such process\"}\n{\"type\":\"error\",\"data\":\"later\"}\n";
+        assert_eq!(service_stop_error(failed).as_deref(), Some("no such process"));
+        assert_eq!(service_stop_error("{\"type\":\"error\"}").as_deref(), Some("unknown error"));
     }
 
     #[test]

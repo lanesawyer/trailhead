@@ -480,17 +480,86 @@ async fn run_repo(
     }
 }
 
-/// Whether something accepts connections at the server's address, which the daemons' API tunnel forwards to.
+/// Whether a Trailhead server answers at the server's address, which the daemons' API tunnel forwards to: `GET /v1/health`
+/// must come back as JSON with `ok: true`, so another process on the port, or a wedged server, doesn't pass.
+async fn server_reachable(server: SocketAddr) -> Result<(), String> {
+    let probe = async {
+        let client = reqwest::Client::builder().no_proxy().build().map_err(|e| format!("can't probe {server}: {e}"))?;
+        let resp = client
+            .get(format!("http://{server}/v1/health"))
+            .send()
+            .await
+            .map_err(|e| format!("can't connect to {server}: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "{server} answered /v1/health with {}; it isn't a healthy Trailhead server",
+                resp.status()
+            ));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("{server} answered /v1/health with something that isn't Trailhead's: {e}"))?;
+        if body.get("ok") == Some(&serde_json::Value::Bool(true)) {
+            Ok(())
+        } else {
+            Err(format!("{server} answered /v1/health without `ok: true`; it isn't a healthy Trailhead server"))
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(3), probe).await {
+        Ok(r) => r,
+        Err(_) => Err(format!("probing {server} timed out")),
+    }
+}
+
+/// Checks the server is reachable. When it isn't, tries once per outage to start it the way the CLI does
+/// (a CLI command, which starts it in its own scope from the installed binary, and refuses to when the address is a tunnel to another machine), so runs aren't held until a CLI command
+/// happens to do it. A failed start is reported along with the reason the server is down.
 fn server_check(server: SocketAddr) -> trailhead_control::ServerCheck {
+    server_check_with(server, |server| Box::pin(start_server(server)))
+}
+
+fn server_check_with<F>(server: SocketAddr, start: F) -> trailhead_control::ServerCheck
+where
+    F: Fn(SocketAddr) -> futures_util::future::BoxFuture<'static, Result<(), String>> + Send + Sync + 'static,
+{
+    let start = Arc::new(start);
+    let tried = Arc::new(std::sync::atomic::AtomicBool::new(false));
     Box::new(move || {
+        let (start, tried) = (start.clone(), tried.clone());
         Box::pin(async move {
-            match tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(server)).await {
-                Ok(Ok(_)) => Ok(()),
-                Ok(Err(e)) => Err(format!("can't connect to {server}: {e}")),
-                Err(_) => Err(format!("connecting to {server} timed out")),
+            use std::sync::atomic::Ordering::SeqCst;
+            let Err(down) = server_reachable(server).await else {
+                tried.store(false, SeqCst);
+                return Ok(());
+            };
+            if tried.swap(true, SeqCst) {
+                return Err(down);
             }
+            tracing::warn!(why = %down, "the Trailhead server is down; starting it");
+            if let Err(e) = start(server).await {
+                return Err(format!("{down}; starting it failed: {e}"));
+            }
+            server_reachable(server).await
         })
     })
+}
+
+/// Runs `trailhead whoami` (any command connects, and so starts the server) against `server`: the `trailhead` beside this binary, else the one on PATH.
+async fn start_server(server: SocketAddr) -> Result<(), String> {
+    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.join("trailhead")));
+    let program = beside.filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("trailhead"));
+    let mut cmd = tokio::process::Command::new(&program);
+    cmd.args(["--url", &format!("http://{server}"), "whoami"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(60), cmd.output())
+        .await
+        .map_err(|_| format!("`{} whoami` timed out", program.display()))?
+        .map_err(|e| format!("can't run `{}`: {e}", program.display()))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Err(format!("`{} whoami` failed ({}): {}", program.display(), out.status, stderr.trim()))
 }
 
 /// A target's `Compute` and launch facts.
@@ -795,19 +864,59 @@ fn providers() -> Registry<ProviderKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_result, lock_control_plane, server_check};
+    use super::{check_result, lock_control_plane, server_check_with};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    /// Serves `app` on a free local port.
+    async fn serve(app: axum::Router) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        addr
+    }
 
     #[tokio::test]
-    async fn server_check_sees_whether_something_listens() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        assert_eq!(server_check(listener.local_addr().unwrap())().await, Ok(()));
+    async fn server_check_sees_whether_trailhead_answers() {
+        use axum::{Json, Router, http::StatusCode, routing::get};
+        let healthy =
+            serve(Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({"ok": true})) }))).await;
+        assert_eq!(server_check_with(healthy, |_| Box::pin(async { Ok(()) }))().await, Ok(()));
+        // Something else on the port, a wedged server and a server that says it isn't ok all fail.
+        let other = serve(Router::new()).await;
+        let wedged =
+            serve(Router::new().route("/v1/health", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))).await;
+        let not_ok =
+            serve(Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({"ok": false})) }))).await;
+        let not_json = serve(Router::new().route("/v1/health", get(|| async { "hello" }))).await;
+        for addr in [other, wedged, not_ok, not_json] {
+            let r = server_check_with(addr, |_| Box::pin(async { Err("no".into()) }))().await;
+            assert!(r.as_ref().is_err_and(|e| e.contains("starting it failed")), "{addr}: {r:?}");
+        }
         // Bound but not listening: it refuses connections, and holding the port keeps another test from listening on
         // it, as one could on a port this test had just let go of.
         let quiet = tokio::net::TcpSocket::new_v4().unwrap();
         quiet.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = quiet.local_addr().unwrap();
-        let refused = server_check(addr)().await;
+        let refused = server_check_with(addr, |_| Box::pin(async { Err("no".into()) }))().await;
         assert!(refused.as_ref().is_err_and(|e| e.contains("can't connect")), "{addr}: {refused:?}");
+    }
+
+    #[tokio::test]
+    async fn a_down_server_is_started_once_per_outage() {
+        let quiet = tokio::net::TcpSocket::new_v4().unwrap();
+        quiet.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = quiet.local_addr().unwrap();
+        let starts = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = starts.clone();
+        let check = server_check_with(addr, move |_| {
+            counted.fetch_add(1, SeqCst);
+            Box::pin(async { Err("boom".into()) })
+        });
+        let first = check().await.unwrap_err();
+        assert!(first.contains("starting it failed: boom"), "{first}");
+        let second = check().await.unwrap_err();
+        assert!(!second.contains("boom"), "{second}");
+        assert_eq!(starts.load(SeqCst), 1);
     }
 
     #[test]

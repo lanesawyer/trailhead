@@ -151,6 +151,9 @@ pub enum BadgeKind {
     Factory,
     /// Open questions, with their count.
     Questions,
+    /// An in-review task whose newest review asks for changes, with no handoff since: the rework is the factory's
+    /// move (or a person's), not the reviewer's.
+    ChangesRequested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +272,13 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         }
     }
 
+    // The comments of each in-review task, which decide whether it is waiting on a rework.
+    let in_review: HashSet<Uuid> = input.tasks.iter().filter(|t| t.status == Status::InReview).map(|t| t.id).collect();
+    let mut reviews: HashMap<Uuid, Vec<&Comment>> = HashMap::new();
+    for c in input.comments.iter().filter(|c| in_review.contains(&c.task_id)) {
+        reviews.entry(c.task_id).or_default().push(c);
+    }
+
     let in_queue = |t: &Task| parent_key(t).is_some_and(|k| input.queues.iter().any(|q| q == k));
     let is_factory = |t: &Task| in_queue(t) || has_run(t);
 
@@ -304,6 +314,13 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
                 kind: BadgeKind::Holder,
                 label: holder_badge(&holder_label(t.id, *holder)),
                 tone: None,
+            });
+        }
+        if trailhead_model::changes_requested(t.status, reviews.get(&t.id).into_iter().flatten().copied()).is_some() {
+            badges.push(Badge {
+                kind: BadgeKind::ChangesRequested,
+                label: "changes requested".into(),
+                tone: Some(token::WARN),
             });
         }
         if !open.is_empty() {
@@ -1291,6 +1308,33 @@ mod tests {
     }
 
     #[test]
+    fn an_in_review_task_with_changes_requested_says_so_and_stays_in_review() {
+        use crate::fixture::{comment, task};
+        let first = "01900000-0000-7000-8000-000000000001";
+        let second = "01900000-0000-7000-8000-000000000002";
+        let tasks = [
+            task(json!({"id": "t1", "key": "TRAIL-1", "status": "in_review"})),
+            task(json!({"id": "t2", "key": "TRAIL-2", "status": "in_review"})),
+            task(json!({"id": "t3", "key": "TRAIL-3", "status": "open"})),
+        ];
+        let comments = [
+            comment(json!({"id": first, "task_id": "t1", "kind": "review", "verdict": "request_changes"})),
+            // TRAIL-2's request was answered by a handoff after it.
+            comment(json!({"id": first, "task_id": "t2", "kind": "review", "verdict": "request_changes"})),
+            comment(json!({"id": second, "task_id": "t2", "kind": "handoff"})),
+            // Not in review, so nothing to wait on.
+            comment(json!({"id": first, "task_id": "t3", "kind": "review", "verdict": "request_changes"})),
+        ];
+        let projects = [crate::fixture::project(json!({"id": "p1", "key": "TRAIL"}))];
+        let view = build(
+            Input { projects: &projects, tasks: &tasks, comments: &comments, now: at_now(), ..Default::default() },
+            &Filter::default(),
+        );
+        let flagged = |key: &str| card(&view, key).badges.iter().any(|b| b.kind == BadgeKind::ChangesRequested);
+        assert_eq!(keys(&view, Status::InReview), [("TRAIL-1".into(), 0), ("TRAIL-2".into(), 0)]);
+        assert!(flagged("TRAIL-1") && !flagged("TRAIL-2") && !flagged("TRAIL-3"));
+    }
+    #[test]
     fn a_holder_the_agent_list_lacks_is_named_for_its_run() {
         use trailhead_factory::{RunPhase, RunStatus, TaskKey, Usd};
         let runs = [Run {
@@ -1731,6 +1775,85 @@ mod in_place_tests {
         let mut q = app.world_mut().query::<(&ColumnBody, &Children)>();
         let held: HashMap<Status, usize> = q.iter(app.world()).map(|(b, c)| (b.0, c.len())).collect();
         assert_eq!((held[&Status::Open], held[&Status::InProgress]), (1, 3));
+    }
+
+    /// Every card sits in a column's body, and there is one card per task shown.
+    fn assert_placed(app: &mut App, step: &str) {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &BoardCard, Option<&ChildOf>)>();
+        let cards: Vec<(Entity, String, Option<Entity>)> =
+            q.iter(world).map(|(e, c, p)| (e, c.0.key.clone(), p.map(ChildOf::parent))).collect();
+        for (e, key, parent) in &cards {
+            let in_body = parent.is_some_and(|p| world.get::<ColumnBody>(p).is_some());
+            assert!(in_body, "{step}: card {key} ({e}) is not in a column (parent {parent:?})");
+        }
+        let mut keys: Vec<&String> = cards.iter().map(|(_, k, _)| k).collect();
+        keys.sort();
+        let n = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), n, "{step}: two cards for one task: {cards:?}");
+    }
+
+    #[test]
+    fn cards_stay_in_their_columns_whichever_way_they_move() {
+        // A card moving back to an earlier column was left without a parent, drawn at the window's top left
+        // (TRAIL-1009).
+        let mut app = app();
+        let mut n = 100;
+        let mut version = 10;
+        let mut move_to = |app: &mut App, id: &str, status: &str, title: &str, settle_after: bool| {
+            n += 1;
+            version += 1;
+            app.world_mut().write_message(SyncItem::Event(json!({
+                "id": n, "entity": "task", "entity_id": sid(id), "kind": "task.updated",
+                "after": task_json(json!({"id": id, "key": id.to_uppercase(), "title": title, "project_id": "p1",
+                          "status": status, "priority": 2, "version": version})),
+            })));
+            if settle_after {
+                settle(app);
+            }
+        };
+        let steps: &[(&str, &str)] = &[
+            ("t3", "in_review"),
+            ("t3", "in_progress"),
+            ("t3", "open"),
+            ("t1", "needs_input"),
+            ("t1", "open"),
+            ("t4", "in_review"),
+            ("t2", "in_review"),
+            ("t4", "open"),
+            ("t2", "in_progress"),
+            ("t2", "done"),
+            ("t2", "open"),
+            ("t1", "in_review"),
+            ("t1", "in_progress"),
+        ];
+        for (i, (id, status)) in steps.iter().enumerate() {
+            move_to(&mut app, id, status, &format!("{id} v{i}"), true);
+            assert_placed(&mut app, &format!("step {i} {id}->{status}"));
+        }
+        // Several in one frame, back and forth.
+        move_to(&mut app, "t3", "in_review", "a", false);
+        move_to(&mut app, "t4", "needs_input", "b", false);
+        move_to(&mut app, "t3", "open", "c", false);
+        settle(&mut app);
+        assert_placed(&mut app, "burst");
+        // Closed columns shown, a card moved into one, hidden again.
+        app.world_mut().resource_mut::<Filter>().closed = true;
+        settle(&mut app);
+        move_to(&mut app, "t1", "cancelled", "d", true);
+        assert_placed(&mut app, "into cancelled");
+        app.world_mut().resource_mut::<Filter>().closed = false;
+        settle(&mut app);
+        assert_placed(&mut app, "closed hidden");
+        move_to(&mut app, "t1", "in_progress", "e", true);
+        assert_placed(&mut app, "out of cancelled");
+        // One frame at a time, with a move every frame.
+        for (i, status) in ["in_review", "open", "needs_input", "in_progress", "in_review"].iter().enumerate() {
+            move_to(&mut app, "t2", status, &format!("f{i}"), false);
+            app.update();
+            assert_placed(&mut app, &format!("frame {i} t2->{status}"));
+        }
     }
 
     #[test]
