@@ -117,6 +117,26 @@ async fn reconcile_returns_a_busy_pooled_sandbox_to_idle() {
 }
 
 #[tokio::test]
+async fn a_parked_tasks_pooled_sandbox_shows_paused_after_a_restart() {
+    use trailhead_factory::SandboxState;
+
+    let mut r = rig();
+    r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+
+    // A boot rebuilds the board from the compute and the tracker alone.
+    restart(&mut r, CONFIG);
+    assert!(r.factory.status().snapshot().sandboxes.is_empty());
+    r.factory.reconcile().await.unwrap();
+
+    let snap = r.factory.status().snapshot();
+    assert_eq!(snap.sandboxes.len(), 1, "{snap:?}");
+    assert_eq!(snap.sandboxes[0].name, "trailhead-w1");
+    assert_eq!(snap.sandboxes[0].state, SandboxState::Paused);
+}
+
+#[tokio::test]
 async fn a_pooled_sandbox_that_cant_be_restored_is_destroyed_without_stopping_reconcile() {
     let r = rig();
     r.tracker.add_task("TRAIL", "First", "");
@@ -421,6 +441,31 @@ async fn a_node_only_stack_opens_node_hosts_and_no_others_for_install() {
     assert!(blocked.iter().any(|d| d == "nodejs.org"), "confirmed blocked before the agent starts: {blocked:?}");
     let labels = r.compute.get("trailhead-w1").unwrap().labels;
     assert!(labels.contains_key(label::STACK), "the warm checkpoint is keyed on the stack");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_sandbox_opens_no_stack_install_egress() {
+    let r = rig_with(&with_stack(r#"node = "26""#));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    // Keep the reviewer's sandbox so its egress log outlives the review.
+    let reviewer = trailhead_factory::review_name(&key, 1, 1);
+    r.compute.fail(&reviewer, "destroy");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    tokio::time::advance(Duration::from_secs(61)).await; // out of the no-verdict backoff
+    r.factory.reconcile().await.unwrap();
+
+    let prepared = r.daemon.prepared();
+    let (_, worker) = prepared.iter().find(|(id, _)| id.0 == "trailhead-w1").expect("the worker was prepared");
+    assert!(!worker.tools.is_empty(), "the worker installs the stack");
+    let (_, review) = prepared.iter().find(|(id, _)| id.0 == reviewer).expect("the reviewer was prepared");
+    assert!(review.tools.is_empty(), "{:?}", review.tools);
+
+    let log = r.compute.egress_log(&reviewer);
+    assert!(!log.is_empty(), "the reviewer's sandbox was kept");
+    let opened: Vec<String> = log.into_iter().flat_map(|e| e.domains).collect();
+    assert!(!opened.iter().any(|d| d == "nodejs.org" || d.contains("mise")), "{opened:?}");
 }
 
 #[tokio::test]

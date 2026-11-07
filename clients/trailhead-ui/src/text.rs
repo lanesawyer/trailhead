@@ -3,9 +3,11 @@
 //! Sizes are named for where the text sits, not how big it is, so the scale is one edit. Sizing goes on the text
 //! itself: feathers' `label` carries `PropagateOver<TextFont>`, so a font set on a container above it is dropped.
 
+use bevy::app::PropagateOver;
 use bevy::feathers::display::{label, label_dim};
 use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 use bevy::prelude::*;
+use bevy::text::FontSource;
 
 /// The scale text is sized from.
 pub mod size {
@@ -21,6 +23,8 @@ pub mod size {
     pub const HEADING: f32 = 15.0;
     /// The app's name in the header bar.
     pub const APP_TITLE: f32 = 18.0;
+    /// The title of the one thing a detail modal shows.
+    pub const DETAIL_TITLE: f32 = 18.0;
 }
 
 /// A label at `size`.
@@ -49,4 +53,16 @@ pub fn text_toned(content: impl Into<String>, size: f32, tone: ThemeToken) -> im
         TextFont { font_size: { FontSize::Px(size) } }
         ThemeTextColor({ tone })
     }
+}
+
+/// A label in the monospace face at `size`, in a theme color (`tokens::TEXT_MAIN` for the default one), for text where
+/// columns should line up and every character counts: log lines, ids, code. The face is the system's monospace; the
+/// font is set on the text itself, as the others are.
+pub fn text_mono(content: impl Into<String>, size: f32, tone: ThemeToken) -> impl Bundle {
+    (
+        Text::new(content),
+        TextFont { font: FontSource::monospace(), font_size: FontSize::Px(size), ..default() },
+        ThemeTextColor(tone),
+        PropagateOver::<TextFont>::default(),
+    )
 }

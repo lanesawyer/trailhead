@@ -28,7 +28,7 @@ pub fn button_text(text: impl Into<String>) -> impl Scene {
 }
 
 /// A caption in `tone`, which a button's own color would otherwise replace.
-fn toned_text(text: impl Into<String>, tone: ThemeToken) -> impl Scene {
+pub(crate) fn toned_text(text: impl Into<String>, tone: ThemeToken) -> impl Scene {
     let text = text.into();
     bsn! {
         @label(text)

@@ -623,7 +623,11 @@ async fn reviews_that_end_without_a_verdict_back_off_and_park_at_the_cap() {
     assert_eq!(task.run.review_rounds, rounds, "the failed rounds are given back");
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
-    assert!(questions[0].body.contains("ended without a verdict"), "{}", questions[0].body);
+    let body = &questions[0].body;
+    assert!(body.contains("ended without a verdict"), "{body}");
+    // Only the no-verdict question points at the review prompt; the infrastructure one says the infrastructure failed.
+    assert!(body.contains("review prompt"), "{body}");
+    assert!(!body.contains("infrastructure failed"), "{body}");
 }
 
 const NO_REVIEW_GATE: &str = r#"
@@ -787,7 +791,7 @@ async fn a_breach_whose_reopen_failed_is_settled_by_the_next_review() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_answered_breach_question_is_not_asked_again_when_the_final_report_failed() {
+async fn an_answered_breach_question_is_not_asked_again_after_a_failed_ask() {
     let (r, key, _) = breaching_rig().await;
     // The mark is written before the ask, so no later report is left to fail; the ask is what fails here.
     r.tracker.fail_next("factory", "ask", 1);

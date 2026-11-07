@@ -291,7 +291,6 @@ impl Factory {
                 }
                 tracing::warn!(task = %task.key.0, pr = %pr.url, %why, "the code host refused the merge; trying again each pass");
                 let note = messages::merge_refused(&why);
-                let codehost = self.codehost.as_ref().expect("checked above");
                 codehost.comment(pr, &note).await?;
                 self.tracker.note(&task.key, &note).await?;
                 let decision = MergeDecision { refused: Some(why), ..decision.clone() };
