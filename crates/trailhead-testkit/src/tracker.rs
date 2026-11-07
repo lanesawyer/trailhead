@@ -545,7 +545,11 @@ impl Tracker for FakeTracker {
 
     async fn reopen(&self, task: &TaskKey) -> Result<()> {
         self.inject("reopen")?;
-        self.write(task, |t, _| {
+        self.write(task, |t, me| {
+            // Like core's `check_claim_access`: not a task another agent holds.
+            if t.holder.as_deref().is_some_and(|h| h != me) {
+                return Err(Error::Forbidden(format!("{} is held by another agent", t.key.0)));
+            }
             if !can_transition(t.status, Status::Open) {
                 return Err(Error::Conflict(format!("{} can't be reopened from {:?}", t.key.0, t.status)));
             }
@@ -726,5 +730,37 @@ mod tests {
             tracker.state.lock().unwrap().tasks.get_mut(&key).unwrap().status = status;
             assert!(matches!(tracker.claim(&key).await, Err(Error::Conflict(_))), "claiming from {status:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn reopen_refuses_a_task_another_agent_holds_like_core() {
+        let tracker = FakeTracker::new("factory");
+        let key = tracker.add_task("TRAIL", "t", "d");
+        {
+            let mut s = tracker.state.lock().unwrap();
+            let t = s.tasks.get_mut(&key).unwrap();
+            t.status = Status::NeedsInput;
+            t.holder = Some("someone-else".into());
+        }
+        assert!(matches!(tracker.reopen(&key).await, Err(Error::Forbidden(_))));
+        let s = tracker.state.lock().unwrap();
+        assert_eq!(s.tasks[&key].status, Status::NeedsInput);
+        assert_eq!(s.tasks[&key].holder.as_deref(), Some("someone-else"));
+    }
+
+    #[tokio::test]
+    async fn reopen_clears_the_callers_own_claim() {
+        let tracker = FakeTracker::new("factory");
+        let key = tracker.add_task("TRAIL", "t", "d");
+        {
+            let mut s = tracker.state.lock().unwrap();
+            let t = s.tasks.get_mut(&key).unwrap();
+            t.status = Status::NeedsInput;
+            t.holder = Some("factory".into());
+        }
+        tracker.reopen(&key).await.unwrap();
+        let s = tracker.state.lock().unwrap();
+        assert_eq!(s.tasks[&key].status, Status::Open);
+        assert_eq!(s.tasks[&key].holder, None);
     }
 }
