@@ -122,6 +122,37 @@ async fn reconcile_does_not_reattach_to_a_run_whose_report_was_already_counted()
 }
 
 #[tokio::test]
+async fn a_run_that_concluded_but_couldnt_release_its_sandbox_is_not_reattached_to() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Opens a PR", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    // The sandbox goes bad once the worker has it, so releasing it after the PR opens fails.
+    r.compute.fail_after("trailhead-w1", "set_egress", 2);
+
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.concluded.as_deref(), Some("trail-1-a1"), "`conclude` itself marked the run");
+    assert_eq!(busy(&r.compute), ["trailhead-w1"], "the sandbox was left to reconcile");
+
+    // The daemon would still replay the run, whose spend `conclude` has already counted.
+    let spend = task.run.spend;
+    let report = trailhead_factory::RunReport {
+        result: trailhead_factory::RunResult::NeedsInput("Which greeting?".into()),
+        checks: vec![],
+        usage: Default::default(),
+    };
+    r.daemon.ongoing("trail-1-a1", vec![spent(400_000)], report);
+    r.compute.heal("trailhead-w1");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reattached.is_empty(), "{done:?}");
+    assert!(r.daemon.attached().is_empty());
+    assert_eq!(r.tracker.task(&key).run.spend, spend, "not counted a second time");
+}
+
+#[tokio::test]
 async fn a_reattached_run_counts_its_wall_clock_from_when_it_started() {
     let r = rig();
     // Started 61 minutes back against a 60 minute worker budget: nothing is left of it.
