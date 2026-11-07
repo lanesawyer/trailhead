@@ -112,7 +112,7 @@ Every error is `{"error": {"code", "message", ...}}`. Branch on `code`, which is
 - `invalid` 400: bad input; `message` says what.
 - `unauthorized` 401: missing, invalid or revoked token.
 - `forbidden` 403: not allowed for this caller or token scope.
-- `review_required` 403: an agent that is neither a human nor a delegated reviewer tried to set `approved` or `done`. A delegated reviewer approving or finishing work it did itself gets `forbidden` instead.
+- `review_required` 403: an agent tried to set `approved` or `done` on work that has to go through review first, or isn't a delegated reviewer. A delegated reviewer approving or finishing work it did itself gets `forbidden` instead.
 - `not_found` 404: no such thing, or outside your token's scope.
 - `claim_held` 409: someone else holds the claim; `holder`, `holder_id`, `expires_at` (`null` if it never expires).
 - `not_claim_holder` 409: you don't hold a claim on this task.

@@ -262,7 +262,7 @@ pub(crate) struct UpdateTask {
     request_body = UpdateTask,
     responses(
         (status = 200, description = "Updated", body = Task, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
-        (status = 403, description = "`review_required` (not a reviewer) or `forbidden` (a reviewer's own work)", body = ErrorBody),
+        (status = 403, description = "`review_required`, or `forbidden` (e.g. a reviewer's own work)", body = ErrorBody),
         (status = 404, description = "`not_found`", body = ErrorBody),
         (status = 409, description = "`invalid_transition`, `claim_held` or `not_claim_holder`", body = ErrorBody),
         (status = 412, description = "`version_conflict`", body = ErrorBody),
