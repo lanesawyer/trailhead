@@ -649,9 +649,10 @@ impl Net {
             matches!(self.state, Some((Link::Live, _) | (Link::Syncing, Some(Reason::Loading | Reason::Reconnecting))))
                 && self.pasted.is_none();
         // A token turned down stays on show until a new login, even through the probe's "connecting".
+        // Bare cause: with no token left to try, nothing is retried, so no "trying again in n s".
         let refusal = match &self.state {
             Some((_, Some(reason))) if matches!(reason.cause(), Reason::TokenRejected | Reason::AgentToken) => {
-                Some(reason.clone())
+                Some(reason.cause().clone())
             }
             _ => None,
         };
@@ -935,5 +936,12 @@ mod tests {
         assert_eq!(backoff.dropped(), Duration::from_secs(2), "a drop is retried quickly even after refusals");
         backoff.reset();
         assert_eq!(backoff.refused(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_waiting_refusal_shows_its_wait_but_its_cause_does_not() {
+        let waiting = Reason::Waiting(Box::new(Reason::TokenRejected), 8);
+        assert!(waiting.to_string().ends_with("trying again in 8 s"));
+        assert_eq!(waiting.cause().to_string(), "the server rejected the token: log in again");
     }
 }
