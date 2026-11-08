@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use trailhead_control::{Factory, Host};
+use trailhead_factory::HostConfig;
 use trailhead_factory::{
     Commit, Compute, FactoryConfig, FileChange, Role, RunOutcome, SandboxSpec, TaskKey, Tracker, Usd, VerdictKind,
     conventional_title, label, run_name,
@@ -54,6 +55,11 @@ pub fn rig() -> Rig {
 
 /// One micro-dollar per token, so 1,000,000 tokens is $1.
 pub fn rig_with(config: &str) -> Rig {
+    rig_on(config, Host::new(&HostConfig::default()))
+}
+
+/// [`rig_with`] on `host`, for the host-wide settings in the user config.
+pub fn rig_on(config: &str, host: Arc<Host>) -> Rig {
     let tracker = FakeTracker::new("factory");
     let compute = FakeCompute::new();
     let codehost = FakeCodeHost::new();
@@ -69,7 +75,7 @@ pub fn rig_with(config: &str) -> Rig {
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
         daemon.clone(),
-        Host::new(None),
+        host,
     );
     Rig { factory, tracker, compute, codehost, harness, daemon }
 }
@@ -82,7 +88,7 @@ pub fn restart(r: &mut Rig, config: &str) {
         Arc::new(r.tracker.clone()),
         Arc::new(FakeProvider::new(1)),
         r.daemon.clone(),
-        Host::new(None),
+        Host::new(&HostConfig::default()),
     );
 }
 
