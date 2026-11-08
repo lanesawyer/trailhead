@@ -46,6 +46,9 @@ pub mod space {
     pub const BADGE_INSET: f32 = step::XXS;
     /// Inside a map label, tight against its border.
     pub const LABEL_INSET: f32 = step::XS;
+    /// Inside an inline text's input, before and after the text: the input reaches out by as much, so its text lines
+    /// up with the text it stands in for.
+    pub const INPUT_INSET: f32 = step::XS;
     /// Inside a card, a field, the hint over a button.
     pub const CONTROL_INSET: f32 = step::S;
     /// Inside a panel, a column, the header bar.
@@ -158,6 +161,7 @@ mod tests {
             space::GROUPS,
             space::INDENT,
             space::BADGE_INSET,
+            space::INPUT_INSET,
             space::CONTROL_INSET,
             space::PANEL_INSET,
             space::DOT,
