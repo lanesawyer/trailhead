@@ -1,12 +1,13 @@
 //! The factory's control plane, as a library (`docs/factory/server-control-plane.md`): the Trailhead server runs it
-//! behind its `factory` feature ([`start`]), and `trailhead factory <cmd>` ([`Command`]) checks, inspects and runs it.
+//! behind its `factory` feature ([`start`]), and `trailhead factory <cmd>` ([`Command`]) checks and inspects it.
 //!
 //! The factory's settings are the `[factory]` table of each repo's `.trailhead.toml`. The server runs the `repos` in
-//! `[factory]` of the user config; `trailhead factory run` and `check` take every `--repo <dir>`, else those, else the
-//! nearest one at or above the working directory, or `--config <path>`. Repos share one process, so their `[factory.compute]` and `[factory.daemon]` must match.
+//! `[factory]` of the user config; `check` takes every `--repo <dir>`, else those, else the nearest one at or above
+//! the working directory, or `--config <path>`. Repos share one process, so their `[factory.compute]` and
+//! `[factory.daemon]` must match.
 //!
-//! The daemon uploaded to sandboxes is `--daemon <path>`, else a `trailhead-daemon` next to this binary or on PATH,
-//! else the release asset matching this binary's version.
+//! The daemon uploaded to sandboxes is `--daemon <path>` (`TRAILHEAD_DAEMON`), else a `trailhead-daemon` next to
+//! this binary or on PATH, else the release asset matching this binary's version.
 //!
 //! Sandboxes run on Sprites unless the factory file sets `[factory.compute] kind = "docker"`, which needs the `docker`
 //! feature.
@@ -15,8 +16,6 @@
 //! credential store (so a restart can still reach the sandboxes it started), serves the API tunnel to the server
 //! and runs the factory loop. [`check`] does everything up to the loop and prints what it found.
 
-use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{Read, Seek, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -67,7 +66,7 @@ pub struct Opts {
     config: Option<PathBuf>,
     /// A daemon binary to start in each sandbox, built for Linux x86_64. Default: a `trailhead-daemon` next to this
     /// binary or on PATH, else the release asset for this version.
-    #[arg(long)]
+    #[arg(long, env = "TRAILHEAD_DAEMON")]
     daemon: Option<PathBuf>,
     /// The local Trailhead server the API tunnel forwards to.
     #[arg(long, default_value = DEFAULT_BIND)]
@@ -82,8 +81,8 @@ pub struct Opts {
     /// the repo's pull requests is enough. Without it, merges are not noticed and `trailhead done` stays manual.
     #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
     github_token: Option<String>,
-    /// How often to look for ready work.
-    #[arg(long, default_value_t = 30)]
+    /// How often the run loops look for ready work and reconcile, besides waking on each commit.
+    #[arg(long, env = "TRAILHEAD_FACTORY_POLL_SECS", default_value_t = 30)]
     poll_secs: u64,
     /// Subscription mode: run Claude Code in sandboxes on this OAuth token (`claude setup-token`) instead of a model
     /// connector. Each sandbox holds the token, and egress opens to api.anthropic.com. For Lane's own use.
@@ -133,43 +132,6 @@ fn load_or_create_keys(creds: &CredStore) -> Result<(SecretKey, [u8; 32]), Strin
     Ok((endpoint, master))
 }
 
-/// Takes the machine's control-plane lock, held until the returned file drops (or the process dies). Every control
-/// plane on a machine shares one iroh identity (`load_or_create_keys`), so two at once, for any repos, flap each
-/// other's daemon connections and reconcile each other's busy sandboxes as interrupted.
-fn lock_control_plane(data_dir: &Path, repo: &str) -> Result<File, String> {
-    let dir = data_dir.join("factory");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join("control.lock");
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            let mut holder = String::new();
-            let _ = file.read_to_string(&mut holder);
-            let who = match holder.trim().split_once(' ') {
-                Some((pid, repo)) => format!("pid {pid}, running {repo}"),
-                None if !holder.trim().is_empty() => format!("pid {}", holder.trim()),
-                None => "another process".to_string(),
-            };
-            return Err(format!(
-                "a control plane is already running on this machine ({who}, lock {}); stop it first",
-                path.display()
-            ));
-        }
-        Err(TryLockError::Error(e)) => return Err(format!("{}: {e}", path.display())),
-    }
-    file.set_len(0).and_then(|()| file.rewind()).map_err(|e| format!("{}: {e}", path.display()))?;
-    write!(file, "{} {repo}", std::process::id()).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(file)
-}
-
-/// The UI endpoints allowed on `trailhead/ui/0`, kept beside the control plane's other state.
 fn ui_allowlist(paths: &Paths) -> UiAllowlist {
     UiAllowlist::new(paths.data_dir.join("factory").join("ui-allowed"))
 }
@@ -264,12 +226,8 @@ struct Entry {
 struct Setup {
     repos: Vec<Entry>,
     tunnel: Router,
-    _lock: File,
     store: Arc<Store>,
     ctx: Ctx,
-    /// Whether this runs inside the server, sharing its store.
-    in_server: bool,
-    feed: surface::Feed,
 }
 
 /// The user config's `[factory]` table; a missing file is the default.
@@ -329,9 +287,9 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     wire(plan, &paths, &cwd, None, surface::Feed::new(FactoryState::Starting { reason: None })).await
 }
 
-/// Reaches out from a [`Plan`]: secrets, the daemon binary, the lock, the store, the iroh endpoint and the
-/// computes. Fnox runs in `fnox_dir`. `store` is the server's own when it runs the control plane, which then needs no
-/// check that the server is up; without one this opens the database itself.
+/// Reaches out from a [`Plan`]: secrets, the daemon binary, the store, the iroh endpoint and the
+/// computes. Fnox runs in `fnox_dir`. `store` is the server's own when it runs the control plane; `check` has none
+/// and opens the database itself.
 async fn wire(
     plan: Plan,
     paths: &Paths,
@@ -374,9 +332,6 @@ async fn wire(
     )
     .await?;
     let slugs: Vec<String> = specs.iter().map(|s| s.slug()).collect();
-    // Before the store opens or the endpoint binds, so a refused start changes nothing.
-    let lock = lock_control_plane(&paths.data_dir, &slugs.join(", "))?;
-    let in_server = store.is_some();
     let store = match store {
         Some(store) => store,
         None => {
@@ -448,9 +403,6 @@ async fn wire(
             .collect();
         let mut factory = Factory::with_targets(config, placed, tracker.clone(), host.clone())
             .with_spend_file(paths.data_dir.join("factory").join(format!("spend-{}.json", slug.replace('/', "-"))));
-        if !in_server {
-            factory = factory.with_server_check(server_check(opts.server));
-        }
         factory = factory.with_merge_mode_source(Box::new(move || {
             let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
             FactoryConfig::from_repo_file(&src, remote.clone())
@@ -471,7 +423,7 @@ async fn wire(
     }
     feed.set_boards(repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect());
     feed.set_state(FactoryState::Running);
-    Ok(Setup { repos, tunnel, _lock: lock, store, ctx, in_server, feed })
+    Ok(Setup { repos, tunnel, store, ctx })
 }
 
 /// Resolves once the watch channel it came from is set.
@@ -484,19 +436,14 @@ async fn run_repo(
     entry: Entry,
     store: Arc<Store>,
     ctx: Ctx,
-    in_server: bool,
     poll: Duration,
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> bool {
     let wake = Arc::new(Notify::new());
     let project = entry.factory.config.repo.project.clone();
-    // In the server every write commits in this process, so the commit signal is enough; standalone needs a timer.
-    let trigger =
-        if in_server { wake::Trigger::Commits(store.changes()) } else { wake::Trigger::Every(wake::INTERVAL) };
-    let watcher = tokio::spawn(
-        wake::wake_on_changes(store, ctx, project, wake.clone(), trigger).instrument(tracing::Span::current()),
-    );
+    let watcher =
+        tokio::spawn(wake::wake_on_changes(store, ctx, project, wake.clone()).instrument(tracing::Span::current()));
     let ran = entry.factory.clone().run_draining(wake, poll, fired(drain), fired(cancel)).await;
     watcher.abort();
     match ran {
@@ -506,88 +453,6 @@ async fn run_repo(
             true
         }
     }
-}
-
-/// Whether a Trailhead server answers at the server's address, which the daemons' API tunnel forwards to: `GET /v1/health`
-/// must come back as JSON with `ok: true`, so another process on the port, or a wedged server, doesn't pass.
-async fn server_reachable(server: SocketAddr) -> Result<(), String> {
-    let probe = async {
-        let client = reqwest::Client::builder().no_proxy().build().map_err(|e| format!("can't probe {server}: {e}"))?;
-        let resp = client
-            .get(format!("http://{server}/v1/health"))
-            .send()
-            .await
-            .map_err(|e| format!("can't connect to {server}: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "{server} answered /v1/health with {}; it isn't a healthy Trailhead server",
-                resp.status()
-            ));
-        }
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("{server} answered /v1/health with something that isn't Trailhead's: {e}"))?;
-        if body.get("ok") == Some(&serde_json::Value::Bool(true)) {
-            Ok(())
-        } else {
-            Err(format!("{server} answered /v1/health without `ok: true`; it isn't a healthy Trailhead server"))
-        }
-    };
-    match tokio::time::timeout(Duration::from_secs(3), probe).await {
-        Ok(r) => r,
-        Err(_) => Err(format!("probing {server} timed out")),
-    }
-}
-
-/// Checks the server is reachable. When it isn't, tries once per outage to start it the way the CLI does
-/// (a CLI command, which starts it in its own scope from the installed binary, and refuses to when the address is a tunnel to another machine), so runs aren't held until a CLI command
-/// happens to do it. A failed start is reported along with the reason the server is down.
-fn server_check(server: SocketAddr) -> trailhead_control::ServerCheck {
-    server_check_with(server, |server| Box::pin(start_server(server)))
-}
-
-fn server_check_with<F>(server: SocketAddr, start: F) -> trailhead_control::ServerCheck
-where
-    F: Fn(SocketAddr) -> futures_util::future::BoxFuture<'static, Result<(), String>> + Send + Sync + 'static,
-{
-    let start = Arc::new(start);
-    let tried = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    Box::new(move || {
-        let (start, tried) = (start.clone(), tried.clone());
-        Box::pin(async move {
-            use std::sync::atomic::Ordering::SeqCst;
-            let Err(down) = server_reachable(server).await else {
-                tried.store(false, SeqCst);
-                return Ok(());
-            };
-            if tried.swap(true, SeqCst) {
-                return Err(down);
-            }
-            tracing::warn!(why = %down, "the Trailhead server is down; starting it");
-            if let Err(e) = start(server).await {
-                return Err(format!("{down}; starting it failed: {e}"));
-            }
-            server_reachable(server).await
-        })
-    })
-}
-
-/// Runs `trailhead whoami` (any command connects, and so starts the server) against `server`: the `trailhead` beside this binary, else the one on PATH.
-async fn start_server(server: SocketAddr) -> Result<(), String> {
-    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.join("trailhead")));
-    let program = beside.filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("trailhead"));
-    let mut cmd = tokio::process::Command::new(&program);
-    cmd.args(["--url", &format!("http://{server}"), "whoami"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
-    let out = tokio::time::timeout(Duration::from_secs(60), cmd.output())
-        .await
-        .map_err(|_| format!("`{} whoami` timed out", program.display()))?
-        .map_err(|e| format!("can't run `{}`: {e}", program.display()))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Err(format!("`{} whoami` failed ({}): {}", program.display(), out.status, stderr.trim()))
 }
 
 /// A target's `Compute` and launch facts.
@@ -713,6 +578,17 @@ fn check_result(failed: usize) -> Result<(), String> {
 
 /// Sets everything up for `run`'s repos and reports what it found, without running anything.
 pub async fn check(run: &RunOpts) -> Result<(), String> {
+    let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+    // The control plane's iroh identity is one per machine: binding it here too would flap the server's daemons.
+    if let Some((token, _)) = paths.creds().read(Cred::User)
+        && let Some((_, reply)) = surface::find(surface::Remote::server(run.opts.server, token)).await
+        && let Some(state) = reply.control
+    {
+        return Err(format!(
+            "the server's control plane is {}; `trailhead factory status` shows it, and `check` runs with the server stopped or the factory disabled",
+            state.label()
+        ));
+    }
     let setup = setup(run).await?;
     let mut failed = 0;
     for entry in &setup.repos {
@@ -760,47 +636,19 @@ pub async fn check(run: &RunOpts) -> Result<(), String> {
     check_result(failed)
 }
 
-/// Runs the control plane for every repo until Ctrl-C: the first drains, the second cancels what is left.
-pub async fn run(run: &RunOpts) -> Result<(), String> {
-    let setup = setup(run).await?;
-    let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    // The first Ctrl-C drains; the second cancels what is left.
-    let (drain_tx, drain) = tokio::sync::watch::channel(false);
-    let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = drain_tx.send(true);
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("stopping; runs in flight are requeued on the next start");
-        let _ = cancel_tx.send(true);
-    });
-    run_loops(setup, &paths, Duration::from_secs(run.opts.poll_secs), drain, cancel).await
-}
-
-/// Serves the status surface and runs every repo's loop until `drain` lets the runs finish or `cancel` stops them.
+/// Runs every repo's loop until `drain` lets the runs finish or `cancel` stops them.
 async fn run_loops(
     setup: Setup,
-    paths: &Paths,
     poll: Duration,
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let Setup { repos, tunnel, _lock, store, ctx, in_server, feed } = setup;
-    // The server serves the status itself, under /v1/factory. A standalone one serves it on a port, recorded beside
-    // the lock, so it exists and says the same thing: this machine has one control plane.
-    let serving = match in_server {
-        true => None,
-        false => {
-            let serving = surface::serve(&paths.data_dir.join("factory"), feed.clone()).await?;
-            tracing::info!(addr = %serving.addr, "serving factory status for `trailhead factory status` and `logs --follow`");
-            Some(serving)
-        }
-    };
+    let Setup { repos, tunnel, store, ctx } = setup;
     let mut loops = tokio::task::JoinSet::new();
     for entry in repos {
         let span = tracing::info_span!("repo", repo = %entry.slug);
         let (store, ctx, drain, cancel) = (store.clone(), ctx.clone(), drain.clone(), cancel.clone());
-        loops.spawn(run_repo(entry, store, ctx, in_server, poll, drain, cancel).instrument(span));
+        loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel).instrument(span));
     }
     let mut failed = 0;
     while let Some(joined) = loops.join_next().await {
@@ -813,7 +661,6 @@ async fn run_loops(
             }
         }
     }
-    drop(serving);
     tunnel.shutdown().await.map_err(|e| e.to_string())?;
     match failed {
         0 => Ok(()),
@@ -870,7 +717,7 @@ const RETRY_MAX: Duration = Duration::from_secs(300);
 /// (`docs/factory/server-control-plane.md`). Only the user config's `[factory] repos` turns it on: with none listed,
 /// or with `disabled` set, this returns `None` and runs nothing. A configuration error (a repo file that won't parse, repos that collide, an
 /// unknown harness or provider, a missing repo) is returned, and the server refuses to start. Outside failures
-/// (Sprites or GitHub unreachable, a locked keyring, a daemon download, another control plane holding the lock)
+/// (Sprites or GitHub unreachable, a locked keyring, a daemon download)
 /// are logged and retried with backoff while the server keeps serving.
 pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InServer, String> {
     let host_config = read_host_config(&paths)?;
@@ -923,7 +770,7 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
             }
             wait = (wait * 2).min(RETRY_MAX);
         };
-        if let Err(e) = run_loops(setup, &paths, poll, drain, cancel).await {
+        if let Err(e) = run_loops(setup, poll, drain, cancel).await {
             tracing::error!(error = %e, "the control plane stopped; the server keeps serving");
         }
         shared.set_state(FactoryState::Stopped);
@@ -956,8 +803,9 @@ pub fn configured(paths: &Paths) -> bool {
 
 /// The server's logging when it may run the control plane: the factory's events (its crates, iroh and anything in a
 /// `repo` span) go to `factory.log` (when `configured`) and the buffer Lookout reads, everything else to stdout,
-/// which the CLI points at `server.log`.
-pub fn init_server_logging(paths: &Paths, default: &str) {
+/// which the CLI points at `server.log`. `factory_on_stdout` sends the factory's events to stdout as well, for
+/// `trailhead factory run` at a terminal.
+pub fn init_server_logging(paths: &Paths, default: &str, factory_on_stdout: bool) {
     use tracing_subscriber::fmt::writer::BoxMakeWriter;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -965,8 +813,8 @@ pub fn init_server_logging(paths: &Paths, default: &str) {
     let file = if configured(paths) { open_log_file() } else { None };
     let file = file.map(|w| BoxMakeWriter::new(std::sync::Mutex::new(w)));
     let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    server_subscriber(trailhead_log::env_filter_or(default), buffer, BoxMakeWriter::new(std::io::stdout), ansi, file)
-        .init();
+    let stdout = BoxMakeWriter::new(std::io::stdout);
+    server_subscriber(trailhead_log::env_filter_or(default), buffer, stdout, ansi, file, factory_on_stdout).init();
 }
 
 /// [`init_server_logging`]'s subscriber, with its writers given. Spans pass every layer, so each one sees whether an
@@ -977,6 +825,7 @@ fn server_subscriber(
     stdout: tracing_subscriber::fmt::writer::BoxMakeWriter,
     ansi: bool,
     file: Option<tracing_subscriber::fmt::writer::BoxMakeWriter>,
+    factory_on_stdout: bool,
 ) -> impl tracing::Subscriber + Send + Sync {
     use tracing_subscriber::filter::{FilterExt, dynamic_filter_fn};
     use tracing_subscriber::layer::SubscriberExt;
@@ -1004,12 +853,6 @@ fn server_subscriber(
     ) -> bool {
         !meta.is_event() || is_factory(meta, cx)
     }
-    fn server<S: tracing::Subscriber + for<'a> LookupSpan<'a>>(
-        meta: &tracing::Metadata<'_>,
-        cx: &tracing_subscriber::layer::Context<'_, S>,
-    ) -> bool {
-        !meta.is_event() || !is_factory(meta, cx)
-    }
 
     let stdout =
         tracing_subscriber::fmt::layer().with_timer(trailhead_log::local_timer()).with_ansi(ansi).with_writer(stdout);
@@ -1019,7 +862,11 @@ fn server_subscriber(
     tracing_subscriber::registry()
         .with(buffer.layer().with_filter(filter.clone().and(dynamic_filter_fn(factory))))
         .with(file.with_filter(filter.clone().and(dynamic_filter_fn(factory))))
-        .with(stdout.with_filter(filter.and(dynamic_filter_fn(server))))
+        .with(
+            stdout.with_filter(filter.and(dynamic_filter_fn(move |meta, cx| {
+                !meta.is_event() || factory_on_stdout || !is_factory(meta, cx)
+            }))),
+        )
 }
 
 /// The factory's commands, as `trailhead factory <cmd>` takes them.
@@ -1027,9 +874,7 @@ fn server_subscriber(
 pub enum Command {
     /// Set everything up and report, without running anything.
     Check(RunOpts),
-    /// Run the control plane in this process, for every repo until Ctrl-C, instead of in the server.
-    Run(RunOpts),
-    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; runs beside `run`.
+    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; runs beside the server.
     Status(Opts),
     /// Print the daemon's service log from a task's sandbox.
     Logs(ops::LogsOpts),
@@ -1039,18 +884,16 @@ pub enum Command {
     Disallow { endpoint_id: String },
     /// List the UI endpoint ids allowed to connect.
     Allowed,
-    /// Save a secret in the OS keyring (read from stdin), so `run` needs no environment variables.
+    /// Save a secret in the OS keyring (read from stdin), so the server's control plane needs no environment variables.
     #[command(subcommand)]
     Login(login::Login),
 }
 
-/// Sets up logging for `cmd` (`run` also writes `factory.log`) and runs it.
+/// Sets up logging to the terminal and runs `cmd`.
 pub async fn command(cmd: Command) -> Result<(), String> {
-    let file = if matches!(cmd, Command::Run(_)) { open_log_file() } else { None };
-    init_logging(file);
+    trailhead_log::init_stdout(trailhead_log::env_filter_or("info"));
     match cmd {
         Command::Check(opts) => check(&opts).await,
-        Command::Run(opts) => run(&opts).await,
         Command::Status(opts) => ops::status(&opts).await,
         Command::Logs(logs) => ops::logs(&logs).await,
         Command::Allow { endpoint_id } => allow(&endpoint_id, true),
@@ -1060,14 +903,14 @@ pub async fn command(cmd: Command) -> Result<(), String> {
     }
 }
 
-/// Saves a secret for `run` in the OS keyring (`trailhead factory login ...`).
+/// Saves a secret for the control plane in the OS keyring (`trailhead factory login ...`).
 pub async fn login(cmd: login::Login) -> Result<(), String> {
     let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     login::run(cmd, &paths.creds()).await
 }
 
-/// `run`'s log file, if it can be opened; without one the log still goes to the terminal.
-pub fn open_log_file() -> Option<logfile::Rotating> {
+/// The control plane's log file, if it can be opened.
+fn open_log_file() -> Option<logfile::Rotating> {
     let paths = Paths::from_env()?;
     let path = logfile::path(&paths.data_dir);
     match logfile::Rotating::open(&path) {
@@ -1082,7 +925,7 @@ pub fn open_log_file() -> Option<logfile::Rotating> {
     }
 }
 
-/// The control plane's recent log, for Lookout's Logs page; filled by the layer `init_logging` adds.
+/// The control plane's recent log, for Lookout's Logs page; filled by the layer `init_server_logging` adds.
 static LOGS: std::sync::OnceLock<trailhead_control::logs::LogBuffer> = std::sync::OnceLock::new();
 
 /// [`LOGS`] as the feed `trailhead/ui/0` serves.
@@ -1097,79 +940,9 @@ impl trailhead_wire::ui::LogFeed for LogsFeed {
     }
 }
 
-/// Logs to the terminal, to `file` when there is one, and to the in-memory buffer Lookout reads.
-pub fn init_logging(file: Option<logfile::Rotating>) {
-    let buffer = LOGS.get_or_init(trailhead_control::logs::LogBuffer::default);
-    trailhead_log::init(trailhead_log::env_filter_or("info"), file.map(std::sync::Mutex::new), buffer.layer());
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{check_result, lock_control_plane, server_check_with};
-    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-
-    /// Serves `app` on a free local port.
-    async fn serve(app: axum::Router) -> std::net::SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await });
-        addr
-    }
-
-    #[tokio::test]
-    async fn server_check_sees_whether_trailhead_answers() {
-        use axum::{Json, Router, http::StatusCode, routing::get};
-        let healthy =
-            serve(Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({"ok": true})) }))).await;
-        assert_eq!(server_check_with(healthy, |_| Box::pin(async { Ok(()) }))().await, Ok(()));
-        // Something else on the port, a wedged server and a server that says it isn't ok all fail.
-        let other = serve(Router::new()).await;
-        let wedged =
-            serve(Router::new().route("/v1/health", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))).await;
-        let not_ok =
-            serve(Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({"ok": false})) }))).await;
-        let not_json = serve(Router::new().route("/v1/health", get(|| async { "hello" }))).await;
-        for addr in [other, wedged, not_ok, not_json] {
-            let r = server_check_with(addr, |_| Box::pin(async { Err("no".into()) }))().await;
-            assert!(r.as_ref().is_err_and(|e| e.contains("starting it failed")), "{addr}: {r:?}");
-        }
-        // Bound but not listening: it refuses connections, and holding the port keeps another test from listening on
-        // it, as one could on a port this test had just let go of.
-        let quiet = tokio::net::TcpSocket::new_v4().unwrap();
-        quiet.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let addr = quiet.local_addr().unwrap();
-        let refused = server_check_with(addr, |_| Box::pin(async { Err("no".into()) }))().await;
-        assert!(refused.as_ref().is_err_and(|e| e.contains("can't connect")), "{addr}: {refused:?}");
-    }
-
-    #[tokio::test]
-    async fn a_down_server_is_started_once_per_outage() {
-        let quiet = tokio::net::TcpSocket::new_v4().unwrap();
-        quiet.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let addr = quiet.local_addr().unwrap();
-        let starts = std::sync::Arc::new(AtomicUsize::new(0));
-        let counted = starts.clone();
-        let check = server_check_with(addr, move |_| {
-            counted.fetch_add(1, SeqCst);
-            Box::pin(async { Err("boom".into()) })
-        });
-        let first = check().await.unwrap_err();
-        assert!(first.contains("starting it failed: boom"), "{first}");
-        let second = check().await.unwrap_err();
-        assert!(!second.contains("boom"), "{second}");
-        assert_eq!(starts.load(SeqCst), 1);
-    }
-
-    #[test]
-    fn second_control_plane_is_refused_naming_the_holder() {
-        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let held = lock_control_plane(dir.path(), "acme/app").unwrap();
-        let err = lock_control_plane(dir.path(), "acme/other").unwrap_err();
-        assert!(err.contains(&format!("pid {}, running acme/app", std::process::id())), "{err}");
-        drop(held);
-        assert!(lock_control_plane(dir.path(), "acme/other").is_ok());
-    }
+    use super::check_result;
 
     /// Paths under `dir`, and a store in it.
     async fn instance(
@@ -1271,6 +1044,7 @@ mod tests {
             BoxMakeWriter::new(move || s.clone()),
             false,
             Some(BoxMakeWriter::new(move || f.clone())),
+            false,
         );
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!(target: "trailhead_core", "outside any repo");

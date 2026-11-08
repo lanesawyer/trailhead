@@ -51,7 +51,7 @@ fn main() {
 #[cfg_attr(not(feature = "factory"), allow(unused_variables))]
 async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
     if let Cmd::Serve { bind } = &cli.cmd {
-        return server::serve(bind).await;
+        return server::serve(bind, false).await;
     }
     #[cfg(feature = "factory")]
     if let Cmd::Factory(_) = &cli.cmd {

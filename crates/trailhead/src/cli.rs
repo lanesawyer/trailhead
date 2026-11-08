@@ -358,6 +358,12 @@ pub(crate) enum ProjectCmd {
 #[cfg(feature = "factory")]
 #[derive(Subcommand)]
 pub(crate) enum FactoryCmd {
+    /// Run the server in the foreground with the factory's log on the terminal too, to watch it; Ctrl-C drains the
+    /// factory's runs and stops, a second Ctrl-C cancels them. The background server runs the factory by itself.
+    Run {
+        #[arg(long, env = "TRAILHEAD_BIND", default_value = trailhead_server::DEFAULT_BIND)]
+        bind: String,
+    },
     #[command(flatten)]
     Control(Box<trailhead_factory_server::Command>),
     /// Turn the server's control plane back on. Needs no server; takes effect when the server restarts.

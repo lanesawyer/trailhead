@@ -23,11 +23,11 @@ run = [
 ]
 
 [tasks.factory]
-description = "Run the factory's control plane for this repo in the foreground, instead of in the server (needs a `factory` agent and SPRITES_TOKEN from the environment, fnox or `factory login`)"
+description = "Run the server from this checkout in the foreground, with the factory's log on the terminal (stop the background server first; the user config's `[factory] repos` says what it runs; SPRITES_TOKEN from the environment, fnox or `factory login`)"
 run = [
   "cargo build --release -p trailhead-daemon --bin trailhead-daemon",
   "cargo build --release -p trailhead --features docker",
-  "{{config_root}}/target/release/trailhead factory run --config {{config_root}}/.trailhead.toml --daemon {{config_root}}/target/release/trailhead-daemon",
+  "TRAILHEAD_DAEMON={{config_root}}/target/release/trailhead-daemon {{config_root}}/target/release/trailhead factory run",
 ]
 
 [tasks.docker-up]

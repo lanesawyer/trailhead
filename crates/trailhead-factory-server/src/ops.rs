@@ -1,5 +1,5 @@
-//! `status` and `logs`: read-only views of a running factory, for operating it without curl. They read the same
-//! factory file as `run`, take no control-plane lock and open no iroh endpoint, so they work beside a running one.
+//! `status` and `logs`: read-only views of a running factory, for operating it without curl. They read the repo's
+//! factory file and open no iroh endpoint, so they work beside the server's control plane.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +44,10 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     // A running control plane knows its sandboxes and runs itself, so it is asked first; the compute is only read when
     // there isn't one (or it isn't running this repo).
     let slug = config.repo.repo().slug();
-    let found = surface::find(&paths.data_dir.join("factory"), server(&opts, &paths)).await;
+    let found = match server(&opts, &paths) {
+        Some(server) => surface::find(server).await,
+        None => None,
+    };
     if let Some((_, reply)) = &found
         && let Some(control) = &reply.control
     {
@@ -78,7 +81,7 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
         print!("{}", render_live(&live.snapshot));
     }
     print!("{}", render_status(&rows, &tasks, &waiting, config.repo.max_sandboxes));
-    println!("\nlog file: {} (written by `run`)", crate::logfile::path(&paths.data_dir).display());
+    println!("\nlog file: {} (written by the server's control plane)", crate::logfile::path(&paths.data_dir).display());
     match saved_endpoint_id(&paths.creds()) {
         Some(id) => println!("\nUI endpoint id: {id}  (allow a UI with `trailhead factory allow <its endpoint id>`)"),
         None => println!("\nUI endpoint id: none yet (the control plane makes it on its first run)"),
@@ -99,10 +102,9 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     let task = tracker.show(&key).await.map_err(|e| format!("{}: {e}", key.0))?;
 
     // With a control plane to ask, `--follow` follows its stream of the task's events rather than polling the log.
-    let dir = paths.data_dir.join("factory");
-    let streaming = match logs.follow {
-        true => surface::find(&dir, server(&opts, &paths)).await.map(|(remote, _)| remote),
-        false => None,
+    let streaming = match (logs.follow, server(&opts, &paths)) {
+        (true, Some(server)) => surface::find(server).await.map(|(remote, _)| remote),
+        _ => None,
     };
     let source = log_source(&config, &opts, &fnox, &paths, &task).await;
     let (compute, sandbox) = match source {

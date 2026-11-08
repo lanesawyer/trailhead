@@ -1,6 +1,6 @@
 # This repo's defaults. `agent` and `project` are for the CLI (who interactive tools act as, and the default -p); the
-# factory reads `project` too, and everything under [factory] (docs/factory/). `trailhead factory run` finds this file
-# the way the CLI does, upwards from the working directory; the server runs the repos listed in the user config.
+# factory reads `project` too, and everything under [factory] (docs/factory/). The server runs the repos listed in the
+# user config; `trailhead factory check` finds this file the way the CLI does, upwards from the working directory.
 agent = "claude"
 project = "TRAIL"
 

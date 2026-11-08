@@ -41,3 +41,12 @@ fn factory_rejects_global_flags_given_before_it() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--as") && err.contains("--url") && err.contains("after its command"), "{err}");
 }
+
+#[test]
+fn run_is_the_server_and_needs_repos_to_run() {
+    let th = Instance::new();
+    let out = common::output(th.command().args(["factory", "run", "--bind", "127.0.0.1:1"]));
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("[factory] repos"), "{err}");
+}
