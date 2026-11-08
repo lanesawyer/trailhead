@@ -517,7 +517,7 @@ pub(super) fn spawn_block(
             let item = commands.spawn_scene(bubble(side)).id();
             let mut head = vec![kind_label(entry.kind).to_string(), entry.author.clone(), entry.when.clone()];
             head.extend(entry.tags.iter().cloned());
-            commands.spawn_scene(text_dim(head.join(" · "), size::SECONDARY)).insert(ChildOf(item));
+            commands.spawn_scene(bubble_head(comment_icon(entry.kind), head.join(" · "))).insert(ChildOf(item));
             let tone = if entry.open_question { token::WARN } else { token::TEXT };
             commands.spawn_scene(text_toned(entry.body.clone(), size::BODY, tone)).insert(ChildOf(item));
             if entry.open_question {
@@ -568,7 +568,12 @@ pub(super) fn spawn_block(
                 .id();
             let labels: Vec<String> = COMPOSE_KINDS.iter().map(|k| kind_label(*k).to_string()).collect();
             let kind = commands
-                .spawn_scene(select(labels, Some(0), COMPOSE_KINDS.len()))
+                .spawn_scene(select_iconed(
+                    labels,
+                    COMPOSE_KINDS.map(comment_icon).to_vec(),
+                    Some(0),
+                    COMPOSE_KINDS.len(),
+                ))
                 .insert((ComposePart::Kind, ChildOf(line)))
                 .id();
             commands.spawn_scene(text_input(COMPOSE_LINES, bsn! { ComposePart::Input })).insert(ChildOf(item));

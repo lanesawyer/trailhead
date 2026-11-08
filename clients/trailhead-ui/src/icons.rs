@@ -42,10 +42,13 @@ pub enum Icon {
     Comment,
     Copy,
     Ellipsis,
+    Eye,
     ExternalLink,
     Filter,
     Flag,
+    Footprints,
     Help,
+    Handshake,
     History,
     Info,
     /// Open the inspector on something.
@@ -63,6 +66,7 @@ pub enum Icon {
     Send,
     Settings,
     Shield,
+    Signpost,
     Stop,
     Sun,
     TriangleAlert,
@@ -75,7 +79,7 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    const ALL: [Icon; 41] = [
+    const ALL: [Icon; 45] = [
         Icon::Board,
         Icon::Bot,
         Icon::Check,
@@ -89,10 +93,13 @@ impl Icon {
         Icon::Comment,
         Icon::Copy,
         Icon::Ellipsis,
+        Icon::Eye,
         Icon::ExternalLink,
         Icon::Filter,
         Icon::Flag,
+        Icon::Footprints,
         Icon::Help,
+        Icon::Handshake,
         Icon::History,
         Icon::Info,
         Icon::Inspect,
@@ -109,6 +116,7 @@ impl Icon {
         Icon::Send,
         Icon::Settings,
         Icon::Shield,
+        Icon::Signpost,
         Icon::Stop,
         Icon::Sun,
         Icon::TriangleAlert,
@@ -135,10 +143,13 @@ impl Icon {
             Icon::Comment => "\u{e117}",       // message-square
             Icon::Copy => "\u{e09e}",          // copy
             Icon::Ellipsis => "\u{e0b6}",      // ellipsis
+            Icon::Eye => "\u{e0ba}",           // eye
             Icon::ExternalLink => "\u{e0b9}",  // external-link
             Icon::Filter => "\u{e0dc}",        // filter
             Icon::Flag => "\u{e0d1}",          // flag
+            Icon::Footprints => "\u{e3b9}",    // footprints
             Icon::Help => "\u{e082}",          // circle-help
+            Icon::Handshake => "\u{e5c0}",     // handshake
             Icon::History => "\u{e1f5}",       // history
             Icon::Info => "\u{e0f9}",          // info
             Icon::Inspect => "\u{e434}",       // panel-right-open
@@ -155,6 +166,7 @@ impl Icon {
             Icon::Send => "\u{e152}",          // send
             Icon::Settings => "\u{e154}",      // settings
             Icon::Shield => "\u{e158}",        // shield
+            Icon::Signpost => "\u{e540}",      // signpost
             Icon::Stop => "\u{e051}",          // ban
             Icon::Sun => "\u{e178}",           // sun
             Icon::TriangleAlert => "\u{e193}", // triangle-alert
