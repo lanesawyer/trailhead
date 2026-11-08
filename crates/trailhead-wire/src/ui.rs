@@ -41,7 +41,8 @@ pub enum UiRequest {
     /// The rest of the stream is raw bytes to and from the Trailhead server.
     Api,
     /// The stream carries [`StatusFrame`]s: a snapshot of every repo, then each event after it, until either side
-    /// closes it.
+    /// closes it. The control plane ends it when the UI falls behind and misses events, so a UI that sees it end
+    /// redials for a fresh snapshot.
     Status,
     /// The stream carries [`LogFrame`]s: the control plane's last log lines, then each new one.
     Logs,
