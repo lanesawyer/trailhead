@@ -58,7 +58,15 @@ pub struct SearchField {
 /// A field sitting straight in a pane or a menu needs setting in a [`field_well`](crate::field_well) to be seen; one
 /// in a group doesn't.
 pub fn spawn_search_field(commands: &mut Commands, hint: impl Into<String>) -> SearchField {
-    let hint = hint.into();
+    spawn_search(commands, hint.into(), px(extent::SEARCH_WIDTH))
+}
+
+/// [`spawn_search_field`], as wide as what it sits in rather than [`extent::SEARCH_WIDTH`]: for a sidebar or a column.
+pub fn spawn_search_field_filling(commands: &mut Commands, hint: impl Into<String>) -> SearchField {
+    spawn_search(commands, hint.into(), percent(100))
+}
+
+fn spawn_search(commands: &mut Commands, hint: String, width: Val) -> SearchField {
     // Spawned apart and parented by hand: feathers' container is a scene of its own, and the hint has to know the
     // field.
     let field = commands.spawn_scene(bsn! { @FeathersTextInput }).id();
@@ -95,7 +103,7 @@ pub fn spawn_search_field(commands: &mut Commands, hint: impl Into<String>) -> S
     let entry = commands
         .spawn_scene(bsn! {
             @FeathersTextInputContainer
-            Node { flex_grow: { 0.0_f32 }, flex_shrink: { 0.0_f32 }, width: { px(extent::SEARCH_WIDTH) } }
+            Node { flex_grow: { 0.0_f32 }, flex_shrink: { 0.0_f32 }, width: { width }, min_width: px(0) }
         })
         .id();
     commands.entity(entry).add_children(&[field, hint, clear]);

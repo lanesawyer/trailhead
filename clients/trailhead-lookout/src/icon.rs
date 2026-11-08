@@ -4,11 +4,12 @@
 //! fails if the committed ones drift from it. [`IconUiPlugin`] sets the 256 px one as the window's icon, and the
 //! window's [`APP_ID`] is what the desktop matches to `lookout.desktop` for the dock's icon.
 
-use bevy::feathers::palette;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy::winit::WINIT_WINDOWS;
 use winit::window::Icon;
+
+use crate::widgets::palette;
 
 /// The window's `Window.name`: the Wayland app id and X11 `WM_CLASS`, and `StartupWMClass` in `lookout.desktop`.
 pub const APP_ID: &str = "lookout";

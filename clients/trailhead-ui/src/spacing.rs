@@ -36,6 +36,8 @@ pub mod space {
     pub const GROUPS: f32 = step::M;
     /// How far a subtask's card sits in from its parent's.
     pub const INDENT: f32 = step::M;
+    /// The least room a hint keeps from the edge of the window, or of the surface it stays inside.
+    pub const HINT_MARGIN: f32 = step::XS;
 
     /// The colored dot of a status chip, across.
     pub const DOT: f32 = step::S;
@@ -62,6 +64,8 @@ pub mod radius {
 
 /// How big a panel is and where it sits.
 pub mod extent {
+    /// An app's sidebar, down the left of the window.
+    pub const SIDEBAR_WIDTH: f32 = 220.0;
     /// The inspector's width, down the right of the window.
     pub const INSPECTOR_WIDTH: f32 = 360.0;
     /// A modal's width, unless its kind says otherwise.

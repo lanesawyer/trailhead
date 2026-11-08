@@ -33,6 +33,51 @@ pub struct Identity {
     pub email: String,
 }
 
+/// How many conditional-GET answers a `GitHub` keeps.
+const ETAG_CACHE_CAP: usize = 256;
+
+/// A small least-recently-used cache of conditional-GET answers, by URL: the ETag and the body.
+struct EtagCache {
+    cap: usize,
+    clock: u64,
+    entries: HashMap<String, (u64, String, Value)>,
+}
+
+impl Default for EtagCache {
+    fn default() -> Self {
+        EtagCache::new(ETAG_CACHE_CAP)
+    }
+}
+
+impl EtagCache {
+    fn new(cap: usize) -> EtagCache {
+        EtagCache { cap, clock: 0, entries: HashMap::new() }
+    }
+
+    fn get(&mut self, key: &str) -> Option<(String, Value)> {
+        self.clock += 1;
+        let entry = self.entries.get_mut(key)?;
+        entry.0 = self.clock;
+        Some((entry.1.clone(), entry.2.clone()))
+    }
+
+    fn insert(&mut self, key: String, etag: String, body: Value) {
+        self.clock += 1;
+        self.entries.insert(key, (self.clock, etag, body));
+        while self.entries.len() > self.cap {
+            let oldest = self.entries.iter().min_by_key(|(_, v)| v.0).map(|(k, _)| k.clone());
+            match oldest {
+                Some(k) => self.entries.remove(&k),
+                None => break,
+            };
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+}
+
 #[derive(Clone)]
 pub struct GitHub {
     http: reqwest::Client,
@@ -40,8 +85,9 @@ pub struct GitHub {
     token: Option<String>,
     author: Option<Identity>,
     /// The last answer to each conditional GET, by URL: its ETag and body. A `304 Not Modified` isn't counted
-    /// against GitHub's rate limit, so asking again about an unchanged PR is almost free.
-    etags: Arc<Mutex<HashMap<String, (String, Value)>>>,
+    /// against GitHub's rate limit, so asking again about an unchanged PR is almost free. Bounded: the least
+    /// recently used answers are dropped, since the host keeps one `GitHub` for the life of the process.
+    etags: Arc<Mutex<EtagCache>>,
     /// What the last response said of GitHub's rate limit (`x-ratelimit-*`), if it said.
     rate: Arc<Mutex<Option<RateLimit>>>,
 }
@@ -181,7 +227,7 @@ impl GitHub {
     async fn call_cached(&self, req: RequestBuilder) -> Result<Value> {
         let mut req = req.build().map_err(|e| Error::Other(format!("github: {e}")))?;
         let key = req.url().to_string();
-        let known = self.etags.lock().unwrap().get(&key).cloned();
+        let known = self.etags.lock().unwrap().get(&key);
         if let Some((etag, _)) = &known
             && let Ok(value) = etag.parse()
         {
@@ -196,9 +242,9 @@ impl GitHub {
         let body = Self::checked(status, body, call)?;
         let mut etags = self.etags.lock().unwrap();
         match etag {
-            Some(etag) => etags.insert(key, (etag, body.clone())),
+            Some(etag) => etags.insert(key, etag, body.clone()),
             None => etags.remove(&key),
-        };
+        }
         Ok(body)
     }
 
@@ -661,6 +707,21 @@ fn complete_commits(compare: &Value) -> Option<&Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn etag_cache_evicts_the_least_recently_used() {
+        let mut c = EtagCache::new(2);
+        c.insert("a".into(), "1".into(), json!("a"));
+        c.insert("b".into(), "2".into(), json!("b"));
+        assert!(c.get("a").is_some());
+        c.insert("c".into(), "3".into(), json!("c"));
+        assert!(c.get("b").is_none());
+        assert_eq!(c.get("a"), Some(("1".into(), json!("a"))));
+        assert!(c.get("c").is_some());
+        c.remove("c");
+        assert!(c.get("c").is_none());
+        assert_eq!(c.entries.len(), 1);
+    }
 
     fn run(name: &str, status: &str, conclusion: Option<&str>) -> Value {
         json!({ "name": name, "status": status, "conclusion": conclusion })
