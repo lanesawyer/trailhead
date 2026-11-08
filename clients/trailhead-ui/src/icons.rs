@@ -52,6 +52,8 @@ pub enum Icon {
     Inspect,
     LogIn,
     Map,
+    Monitor,
+    Moon,
     Pencil,
     Plus,
     PullRequest,
@@ -62,6 +64,7 @@ pub enum Icon {
     Settings,
     Shield,
     Stop,
+    Sun,
     TriangleAlert,
     Undo,
     User,
@@ -72,7 +75,7 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    const ALL: [Icon; 38] = [
+    const ALL: [Icon; 41] = [
         Icon::Board,
         Icon::Bot,
         Icon::Check,
@@ -95,6 +98,8 @@ impl Icon {
         Icon::Inspect,
         Icon::LogIn,
         Icon::Map,
+        Icon::Monitor,
+        Icon::Moon,
         Icon::Pencil,
         Icon::Plus,
         Icon::PullRequest,
@@ -105,6 +110,7 @@ impl Icon {
         Icon::Settings,
         Icon::Shield,
         Icon::Stop,
+        Icon::Sun,
         Icon::TriangleAlert,
         Icon::Undo,
         Icon::User,
@@ -138,6 +144,8 @@ impl Icon {
             Icon::Inspect => "\u{e434}",       // panel-right-open
             Icon::LogIn => "\u{e10d}",         // log-in
             Icon::Map => "\u{e110}",           // map
+            Icon::Monitor => "\u{e11d}",       // monitor
+            Icon::Moon => "\u{e11e}",          // moon
             Icon::Pencil => "\u{e1f9}",        // pencil
             Icon::Plus => "\u{e13d}",          // plus
             Icon::PullRequest => "\u{e0e5}",   // git-pull-request
@@ -148,6 +156,7 @@ impl Icon {
             Icon::Settings => "\u{e154}",      // settings
             Icon::Shield => "\u{e158}",        // shield
             Icon::Stop => "\u{e051}",          // ban
+            Icon::Sun => "\u{e178}",           // sun
             Icon::TriangleAlert => "\u{e193}", // triangle-alert
             Icon::Undo => "\u{e2a1}",          // undo-2
             Icon::User => "\u{e19f}",          // user
