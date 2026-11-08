@@ -1,50 +1,48 @@
 //! The colors Lookout adds on top of the kit's theme.
 //!
-//! The kit's ([`trailhead_ui::theme_props`]) is the base; Lookout paints its own tokens onto it with
-//! [`trailhead_ui::paint`]: one background per status column, the board and card surfaces, and a tone per priority.
+//! The kit's ([`trailhead_ui::Theme::new`]) is the base; Lookout paints its own tokens onto it with
+//! [`trailhead_ui::Theme::paint`]: one background per status column, the board and card surfaces, and a tone per priority.
 //! A view names a token, never a color.
 
-use bevy::feathers::palette;
-use bevy::feathers::theme::{ThemeProps, ThemeToken, UiTheme};
 use bevy::prelude::*;
 use trailhead_model::{Grade, Priority, Status};
-use trailhead_ui::paint;
+use trailhead_ui::{Theme, Token, palette};
 
-/// The kit's tokens and Lookout's own. Feathers' (`bevy::feathers::tokens`) cover the controls.
+/// The kit's tokens and Lookout's own.
 pub mod token {
     pub use trailhead_ui::token::*;
 
-    use bevy::feathers::theme::ThemeToken;
+    use trailhead_ui::Token;
 
     /// What the board's columns and the panels sit on.
-    pub const BOARD_BG: ThemeToken = ThemeToken::new_static("lookout.board.bg");
+    pub const BOARD_BG: Token = Token::new("lookout.board.bg");
     /// A task card.
-    pub const CARD_BG: ThemeToken = ThemeToken::new_static("lookout.card.bg");
+    pub const CARD_BG: Token = Token::new("lookout.card.bg");
 
     /// One tone per priority, the same wherever a priority shows: P1 red, P2 orange, P3 blue, P4 gray.
-    pub const PRIORITY_1: ThemeToken = ThemeToken::new_static("lookout.priority.1");
-    pub const PRIORITY_2: ThemeToken = ThemeToken::new_static("lookout.priority.2");
-    pub const PRIORITY_3: ThemeToken = ThemeToken::new_static("lookout.priority.3");
-    pub const PRIORITY_4: ThemeToken = ThemeToken::new_static("lookout.priority.4");
+    pub const PRIORITY_1: Token = Token::new("lookout.priority.1");
+    pub const PRIORITY_2: Token = Token::new("lookout.priority.2");
+    pub const PRIORITY_3: Token = Token::new("lookout.priority.3");
+    pub const PRIORITY_4: Token = Token::new("lookout.priority.4");
 
     /// One tone per grade, apart from the priorities' warm-to-cool run: G1 green, G2 teal, G3 purple, G4 magenta.
-    pub const GRADE_1: ThemeToken = ThemeToken::new_static("lookout.grade.1");
-    pub const GRADE_2: ThemeToken = ThemeToken::new_static("lookout.grade.2");
-    pub const GRADE_3: ThemeToken = ThemeToken::new_static("lookout.grade.3");
-    pub const GRADE_4: ThemeToken = ThemeToken::new_static("lookout.grade.4");
+    pub const GRADE_1: Token = Token::new("lookout.grade.1");
+    pub const GRADE_2: Token = Token::new("lookout.grade.2");
+    pub const GRADE_3: Token = Token::new("lookout.grade.3");
+    pub const GRADE_4: Token = Token::new("lookout.grade.4");
 
     /// One background per status column, in lifecycle order.
-    pub const STATUS_OPEN: ThemeToken = ThemeToken::new_static("lookout.status.open");
-    pub const STATUS_IN_PROGRESS: ThemeToken = ThemeToken::new_static("lookout.status.in_progress");
-    pub const STATUS_NEEDS_INPUT: ThemeToken = ThemeToken::new_static("lookout.status.needs_input");
-    pub const STATUS_IN_REVIEW: ThemeToken = ThemeToken::new_static("lookout.status.in_review");
-    pub const STATUS_APPROVED: ThemeToken = ThemeToken::new_static("lookout.status.approved");
-    pub const STATUS_DONE: ThemeToken = ThemeToken::new_static("lookout.status.done");
-    pub const STATUS_CANCELLED: ThemeToken = ThemeToken::new_static("lookout.status.cancelled");
+    pub const STATUS_OPEN: Token = Token::new("lookout.status.open");
+    pub const STATUS_IN_PROGRESS: Token = Token::new("lookout.status.in_progress");
+    pub const STATUS_NEEDS_INPUT: Token = Token::new("lookout.status.needs_input");
+    pub const STATUS_IN_REVIEW: Token = Token::new("lookout.status.in_review");
+    pub const STATUS_APPROVED: Token = Token::new("lookout.status.approved");
+    pub const STATUS_DONE: Token = Token::new("lookout.status.done");
+    pub const STATUS_CANCELLED: Token = Token::new("lookout.status.cancelled");
 }
 
 /// The background token of a status column.
-pub fn status_token(status: Status) -> ThemeToken {
+pub fn status_token(status: Status) -> Token {
     match status {
         Status::Open => token::STATUS_OPEN,
         Status::InProgress => token::STATUS_IN_PROGRESS,
@@ -71,7 +69,7 @@ pub fn status_label(status: Status) -> &'static str {
 }
 
 /// The tone of a priority, the same wherever a priority is shown.
-pub fn priority_tone(p: Priority) -> ThemeToken {
+pub fn priority_tone(p: Priority) -> Token {
     match p.get() {
         1 => token::PRIORITY_1,
         2 => token::PRIORITY_2,
@@ -81,7 +79,7 @@ pub fn priority_tone(p: Priority) -> ThemeToken {
 }
 
 /// The tone of a grade, the same wherever a grade is shown.
-pub fn grade_tone(g: Grade) -> ThemeToken {
+pub fn grade_tone(g: Grade) -> Token {
     match g.get() {
         1 => token::GRADE_1,
         2 => token::GRADE_2,
@@ -90,50 +88,43 @@ pub fn grade_tone(g: Grade) -> ThemeToken {
     }
 }
 
-/// The theme `main.rs` inserts.
-pub fn theme() -> UiTheme {
-    UiTheme(props())
-}
-
-/// The kit's theme with Lookout's tokens added. Public so a test can check every token resolves.
-pub fn props() -> ThemeProps {
-    let mut theme = trailhead_ui::theme_props();
-    paint(&mut theme, &token::BOARD_BG, palette::GRAY_0);
-    paint(&mut theme, &token::CARD_BG, palette::GRAY_2);
+/// The kit's theme with Lookout's tokens added, which `main.rs` hands to the kit's `ThemePlugin`.
+pub fn theme() -> Theme {
+    let mut theme = Theme::new();
+    theme.paint(&token::BOARD_BG, palette::GRAY_0);
+    theme.paint(&token::CARD_BG, palette::GRAY_2);
 
     // The most urgent priority is the kit's danger red, read from the theme so the two can't drift apart.
     let danger = theme.color(&token::DANGER);
-    paint(&mut theme, &token::PRIORITY_1, danger);
-    paint(&mut theme, &token::PRIORITY_2, Color::oklch(0.76, 0.15, 60.0));
-    paint(&mut theme, &token::PRIORITY_3, Color::oklch(0.70, 0.13, 250.0));
-    paint(&mut theme, &token::PRIORITY_4, Color::oklch(0.65, 0.0, 0.0));
+    theme.paint(&token::PRIORITY_1, danger);
+    theme.paint(&token::PRIORITY_2, Color::oklch(0.76, 0.15, 60.0));
+    theme.paint(&token::PRIORITY_3, Color::oklch(0.70, 0.13, 250.0));
+    theme.paint(&token::PRIORITY_4, Color::oklch(0.65, 0.0, 0.0));
 
-    paint(&mut theme, &token::GRADE_1, Color::oklch(0.74, 0.15, 145.0));
-    paint(&mut theme, &token::GRADE_2, Color::oklch(0.74, 0.11, 190.0));
-    paint(&mut theme, &token::GRADE_3, Color::oklch(0.68, 0.15, 295.0));
-    paint(&mut theme, &token::GRADE_4, Color::oklch(0.68, 0.19, 340.0));
+    theme.paint(&token::GRADE_1, Color::oklch(0.74, 0.15, 145.0));
+    theme.paint(&token::GRADE_2, Color::oklch(0.74, 0.11, 190.0));
+    theme.paint(&token::GRADE_3, Color::oklch(0.68, 0.15, 295.0));
+    theme.paint(&token::GRADE_4, Color::oklch(0.68, 0.19, 340.0));
 
     // Columns tinted just enough to tell apart, each toward the hue of what the status means.
     let column = |hue: f32| Color::oklch(0.24, 0.025, hue);
-    paint(&mut theme, &token::STATUS_OPEN, column(250.0));
-    paint(&mut theme, &token::STATUS_IN_PROGRESS, column(210.0));
-    paint(&mut theme, &token::STATUS_NEEDS_INPUT, column(75.0));
-    paint(&mut theme, &token::STATUS_IN_REVIEW, column(300.0));
-    paint(&mut theme, &token::STATUS_APPROVED, column(150.0));
-    paint(&mut theme, &token::STATUS_DONE, Color::oklch(0.22, 0.0, 0.0));
-    paint(&mut theme, &token::STATUS_CANCELLED, Color::oklch(0.20, 0.0, 0.0));
+    theme.paint(&token::STATUS_OPEN, column(250.0));
+    theme.paint(&token::STATUS_IN_PROGRESS, column(210.0));
+    theme.paint(&token::STATUS_NEEDS_INPUT, column(75.0));
+    theme.paint(&token::STATUS_IN_REVIEW, column(300.0));
+    theme.paint(&token::STATUS_APPROVED, column(150.0));
+    theme.paint(&token::STATUS_DONE, Color::oklch(0.22, 0.0, 0.0));
+    theme.paint(&token::STATUS_CANCELLED, Color::oklch(0.20, 0.0, 0.0));
     theme
 }
 
 #[cfg(test)]
 mod tests {
-    use bevy::feathers::tokens;
-
     use super::*;
 
     #[test]
     fn every_lookout_token_resolves_rather_than_falling_back_to_fuchsia() {
-        let theme = props();
+        let theme = theme();
         let all = [
             token::BOARD_BG,
             token::PANEL_BG,
@@ -161,17 +152,16 @@ mod tests {
             token::STATUS_CANCELLED,
         ];
         for t in all {
-            assert!(theme.token_assignments.contains_key(&t), "{t} isn't in the theme");
+            assert!(theme.has(&t), "{t} isn't in the theme");
         }
         // Feathers' own controls still resolve.
-        assert!(theme.token_assignments.contains_key(&tokens::BUTTON_BG));
+        assert!(theme.has(&token::BUTTON_BG));
     }
 
     #[test]
     fn each_priority_has_its_own_token_and_color() {
-        let theme = props();
-        let colors: Vec<Color> =
-            Priority::ALL.map(|p| theme.semantic_base[&theme.token_assignments[&priority_tone(p)]]).to_vec();
+        let theme = theme();
+        let colors: Vec<Color> = Priority::ALL.map(|p| theme.color(&priority_tone(p))).to_vec();
         for (i, a) in colors.iter().enumerate() {
             for b in &colors[i + 1..] {
                 assert_ne!(a, b);
@@ -181,14 +171,14 @@ mod tests {
 
     #[test]
     fn the_top_priority_is_the_danger_color() {
-        let theme = props();
+        let theme = theme();
         assert_eq!(theme.color(&token::PRIORITY_1), theme.color(&token::DANGER));
     }
 
     #[test]
     fn each_grade_has_its_own_color_apart_from_the_priorities() {
-        let theme = props();
-        let color = |t: ThemeToken| format!("{:?}", theme.color(&t));
+        let theme = theme();
+        let color = |t: Token| format!("{:?}", theme.color(&t));
         let grades: Vec<String> = Grade::ALL.map(|g| color(grade_tone(g))).to_vec();
         let priorities: Vec<String> = Priority::ALL.map(|p| color(priority_tone(p))).to_vec();
         let all: std::collections::HashSet<_> = grades.iter().chain(&priorities).collect();
@@ -197,7 +187,7 @@ mod tests {
 
     #[test]
     fn each_status_has_its_own_column_color() {
-        let theme = props();
+        let theme = theme();
         let colors: Vec<_> = Status::ALL.iter().map(|s| format!("{:?}", theme.color(&status_token(*s)))).collect();
         let distinct: std::collections::HashSet<_> = colors.iter().collect();
         assert_eq!(distinct.len(), Status::ALL.len(), "{colors:?}");

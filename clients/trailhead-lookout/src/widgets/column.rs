@@ -6,13 +6,12 @@
 //! column entity across redraws: [`column_shell`], [`column_frame`] and [`column_body`] are bundles, and
 //! [`column_header`] and [`column_scrollbar`] add the rest.
 
-use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::prelude::*;
 use bevy::ui_widgets::ControlOrientation;
 
 use trailhead_model::Status;
 
-use super::{ScrollDown, radius, scrollbar, size, space, status_label, status_token, text, text_dim};
+use super::{BackgroundTone, ScrollDown, radius, scrollbar, size, space, status_label, status_token, text, text_dim};
 
 /// How wide every column is.
 pub const COLUMN_WIDTH: f32 = 260.0;
@@ -33,7 +32,7 @@ pub fn column_shell(status: Status) -> impl Bundle {
             border_radius: BorderRadius::all(px(radius::PANEL)),
             ..default()
         },
-        ThemeBackgroundColor(status_token(status)),
+        BackgroundTone(status_token(status)),
     )
 }
 

@@ -58,6 +58,16 @@ impl SelectEdit<'_, '_> {
         self.children.iter_descendants(select).any(|e| self.popups.get(e).is_ok_and(|v| *v != Visibility::Hidden))
     }
 
+    /// The rows shown as selected, by their index in the options: one, or none before anything is picked.
+    pub fn selected_rows(&self, select: Entity) -> Vec<usize> {
+        self.children
+            .iter_descendants(select)
+            .filter_map(|e| self.rows.get(e).ok())
+            .filter(|(_, selected)| *selected)
+            .map(|(index, _)| index.0)
+            .collect()
+    }
+
     /// Shows `selected` of `options`. The rows are rebuilt only if `options` differ from the last ones, and nothing
     /// is touched while the popup is open (returns `false` then, so the caller can try again).
     pub fn set(&mut self, select: Entity, options: &[String], selected: Option<usize>) -> bool {

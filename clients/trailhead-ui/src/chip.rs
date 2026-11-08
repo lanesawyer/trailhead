@@ -3,26 +3,25 @@
 //! For state that is always there and rarely needs reading, such as the connection in the header bar.
 
 use bevy::ecs::system::SystemParam;
-use bevy::feathers::theme::{ThemeBackgroundColor, ThemeToken};
 use bevy::prelude::*;
 
-use super::{Hint, radius, size, space, text};
+use super::{BackgroundTone, Hint, Token, radius, size, space, text};
 
 /// A small round dot in `tone`.
-pub fn dot(tone: ThemeToken) -> impl Scene {
+pub fn dot(tone: Token) -> impl Scene {
     bsn! {
         Node {
             width: { px(space::DOT) },
             height: { px(space::DOT) },
             border_radius: { BorderRadius::all(px(radius::PANEL)) },
         }
-        ThemeBackgroundColor({ tone })
+        BackgroundTone({ tone })
         ChipDot
     }
 }
 
 /// A chip with a dot in `tone` and `words` beside it; hovering shows `hint`.
-pub fn chip(tone: ThemeToken, words: impl Into<String>, hint: impl Into<String>) -> impl Scene {
+pub fn chip(tone: Token, words: impl Into<String>, hint: impl Into<String>) -> impl Scene {
     let words = words.into();
     let hint = hint.into();
     bsn! {
@@ -51,14 +50,14 @@ pub struct ChipWords;
 #[derive(SystemParam)]
 pub struct ChipEdit<'w, 's> {
     children: Query<'w, 's, &'static Children>,
-    dots: Query<'w, 's, &'static ThemeBackgroundColor, With<ChipDot>>,
+    dots: Query<'w, 's, &'static BackgroundTone, With<ChipDot>>,
     words: Query<'w, 's, &'static mut Text, With<ChipWords>>,
     hints: Query<'w, 's, &'static mut Hint>,
     commands: Commands<'w, 's>,
 }
 
 impl ChipEdit<'_, '_> {
-    pub fn set(&mut self, chip: Entity, tone: ThemeToken, words: &str, hint: &str) {
+    pub fn set(&mut self, chip: Entity, tone: Token, words: &str, hint: &str) {
         if let Ok(mut h) = self.hints.get_mut(chip)
             && h.0 != hint
         {
@@ -68,7 +67,7 @@ impl ChipEdit<'_, '_> {
             if let Ok(dot) = self.dots.get(e)
                 && dot.0 != tone
             {
-                self.commands.entity(e).insert(ThemeBackgroundColor(tone.clone()));
+                self.commands.entity(e).insert(BackgroundTone(tone.clone()));
             }
             if let Ok(mut text) = self.words.get_mut(e)
                 && text.0 != words

@@ -6,7 +6,7 @@
 //!
 //! Ported from bevy-data-explorer's `widgets/notice.rs`, with its palette swapped for the kit's tokens.
 
-use bevy::feathers::theme::{ThemeToken, UiTheme};
+use bevy::feathers::theme::UiTheme;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
 
@@ -14,7 +14,7 @@ use crate::icons::{Icon, icon_text};
 use crate::patch::{display, patch_node, set_text};
 use crate::spacing::{radius, space};
 use crate::text::{size, text};
-use crate::theme::token;
+use crate::theme::{Token, token};
 
 /// What kind of news a message is, which picks its icon and color.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -39,7 +39,7 @@ impl Tone {
     }
 
     /// The token a notice of this tone is drawn in.
-    pub fn token(self) -> ThemeToken {
+    pub fn token(self) -> Token {
         match self {
             Tone::Info => token::INFO,
             Tone::Success => token::OK,
@@ -127,7 +127,7 @@ pub(crate) fn sync_notices(
             continue;
         }
         patch_node(node, |node| node.display = display(!notice.message.is_empty()));
-        let color = theme.color(&notice.tone.token());
+        let color = theme.color(&notice.tone.token().0);
         background.set_if_neq(BackgroundColor(color.with_alpha(FILL_ALPHA)));
         border.set_if_neq(BorderColor::all(color.with_alpha(BORDER_ALPHA)));
         for &child in children {
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn every_tone_has_its_own_icon_and_color() {
-        let theme = UiTheme(crate::theme::props());
+        let theme = crate::theme::Theme::new();
         let tones = [Tone::Info, Tone::Success, Tone::Warning, Tone::Error];
         for (i, a) in tones.iter().enumerate() {
             for b in &tones[i + 1..] {
@@ -165,7 +165,7 @@ mod tests {
             .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>()
-            .insert_resource(crate::theme::theme())
+            .insert_resource(crate::theme::Theme::new().resource())
             .add_systems(Update, sync_notices);
         let notice = app.world_mut().commands().spawn_scene(notice()).id();
         app.world_mut().flush();

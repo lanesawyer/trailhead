@@ -25,7 +25,7 @@ use bevy::window::SystemCursorIcon;
 use crate::patch::set_text;
 use crate::spacing::space;
 use crate::text::size;
-use crate::theme::token;
+use crate::theme::{BorderTone, token};
 use crate::truncate::{truncate_to_width, width_of};
 
 /// How thick the strip's rule is.
@@ -54,7 +54,7 @@ pub fn tab_strip(orientation: ControlOrientation) -> impl Scene {
             orientation: { orientation },
             activation: { TabActivation::Automatic },
         }
-        ThemeBorderColor({ token::DIVIDER })
+        BorderTone({ token::DIVIDER })
     }
 }
 

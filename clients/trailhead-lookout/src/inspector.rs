@@ -20,8 +20,6 @@
 
 use std::collections::HashMap;
 
-use bevy::feathers::controls::ButtonVariant;
-use bevy::feathers::tokens;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::prelude::*;
@@ -45,13 +43,12 @@ use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::project::OpenProject;
 use crate::sync::SyncItem;
 use crate::widgets::{
-    DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed, ModalRoot,
-    ModalSlots, PanelTitle, Picked, SelectEdit, badge, button, danger_button, display, extent, grade_tone, icon_menu,
-    inline_field, inline_text_sized, layer, menu_item, open_modal, panel, panel_header, priority_tone, row,
-    scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text,
-    text_dim, text_input, text_toned, token, tool_button,
+    ButtonKind, DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed,
+    ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, TextTone, Token, badge, button, danger_button, display,
+    extent, grade_tone, icon_menu, inline_field, inline_text_sized, layer, menu_item, open_modal, panel, panel_header,
+    priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes,
+    status_label, text, text_dim, text_input, text_toned, token, tool_button,
 };
-use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1452,13 +1449,13 @@ fn window_labels() -> Vec<String> {
 }
 
 /// The words beside a control for where its command stands, and their color; no words for none.
-fn note_look(note: &Option<Control>) -> (String, ThemeToken) {
+fn note_look(note: &Option<Control>) -> (String, Token) {
     match note {
-        Some(Control::Busy) => ("sending…".into(), tokens::TEXT_DIM),
+        Some(Control::Busy) => ("sending…".into(), token::TEXT_DIM),
         // The command went through: not the task's status, so not `status_label`'s.
-        Some(Control::Done) => (String::from("done"), tokens::TEXT_DIM),
+        Some(Control::Done) => (String::from("done"), token::TEXT_DIM),
         Some(Control::Refused(why)) => (why.clone(), token::DANGER),
-        _ => (String::new(), tokens::TEXT_DIM),
+        _ => (String::new(), token::TEXT_DIM),
     }
 }
 
@@ -1514,14 +1511,14 @@ fn spawn_block(
             // The same form the board opens; it saves even after the inspector moves on.
             let act = Act::Answer { key: key.clone(), comment_id: id.clone(), question: body.clone() };
             let answer = commands
-                .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonVariant::Normal) })
+                .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonKind::Normal) })
                 .insert((act, ChildOf(line)))
                 .id();
             let resolve_action = Action::Resolve(id.clone());
             let source = control(controls, commands, subject, &resolve_action);
             let resolve = commands
                 .spawn_scene(bsn! {
-                    @tool_button(Icon::Check, "Resolve without an answer", ButtonVariant::Normal)
+                    @tool_button(Icon::Check, "Resolve without an answer", ButtonKind::Normal)
                     @sends(source, subject.clone(), resolve_action.clone())
                 })
                 .insert(ChildOf(line))
@@ -1572,20 +1569,20 @@ fn spawn_block(
             let mut head = vec![kind_label(entry.kind).to_string(), entry.author.clone(), entry.when.clone()];
             head.extend(entry.tags.iter().cloned());
             commands.spawn_scene(text_dim(head.join(" · "), size::SECONDARY)).insert(ChildOf(item));
-            let tone = if entry.open_question { token::WARN } else { tokens::TEXT_MAIN };
+            let tone = if entry.open_question { token::WARN } else { token::TEXT };
             commands.spawn_scene(text_toned(entry.body.clone(), size::BODY, tone)).insert(ChildOf(item));
             if entry.open_question {
                 let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
                 let act = Act::Answer { key: key.clone(), comment_id: entry.id.clone(), question: entry.body.clone() };
                 let answer = commands
-                    .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonVariant::Normal) })
+                    .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonKind::Normal) })
                     .insert((act, ChildOf(line)))
                     .id();
                 let resolve_action = Action::Resolve(entry.id.clone());
                 let source = control(controls, commands, subject, &resolve_action);
                 let resolve = commands
                     .spawn_scene(bsn! {
-                        @tool_button(Icon::Check, "Resolve without an answer", ButtonVariant::Normal)
+                        @tool_button(Icon::Check, "Resolve without an answer", ButtonKind::Normal)
                         @sends(source, subject.clone(), resolve_action.clone())
                     })
                     .insert(ChildOf(line))
@@ -1617,7 +1614,7 @@ fn spawn_block(
                 .insert((ComposePart::Answering, ChildOf(line)))
                 .id();
             let stop = commands
-                .spawn_scene(bsn! { @tool_button(Icon::X, "Comment instead", ButtonVariant::Plain) })
+                .spawn_scene(bsn! { @tool_button(Icon::X, "Comment instead", ButtonKind::Plain) })
                 .insert((ComposePart::StopAnswering, ChildOf(line)))
                 .id();
             let labels: Vec<String> = COMPOSE_KINDS.iter().map(|k| kind_label(*k).to_string()).collect();
@@ -1628,7 +1625,7 @@ fn spawn_block(
             commands.spawn_scene(text_input(COMPOSE_LINES, bsn! { ComposePart::Input })).insert(ChildOf(item));
             let foot = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
             let send = commands
-                .spawn_scene(bsn! { @button("Send", Some(Icon::Send), ButtonVariant::Primary) })
+                .spawn_scene(bsn! { @button("Send", Some(Icon::Send), ButtonKind::Primary) })
                 .insert((ComposePart::Send, ChildOf(foot)))
                 .id();
             gate_button(commands, send, *live);
@@ -1661,7 +1658,7 @@ fn spawn_block(
             .id(),
         Block::AddSubtask { key, live } => {
             let button = commands
-                .spawn_scene(bsn! { @button("Add sub-task", Some(Icon::Plus), ButtonVariant::Normal) })
+                .spawn_scene(bsn! { @button("Add sub-task", Some(Icon::Plus), ButtonKind::Normal) })
                 .insert(Act::NewSubtask(key.clone()))
                 .id();
             gate_button(commands, button, *live);
@@ -1670,19 +1667,19 @@ fn spawn_block(
         Block::Parent(parent) => {
             let caption = format!("{}  {}", parent.key, parent.title);
             commands
-                .spawn_scene(bsn! { @button(caption, None, ButtonVariant::Plain) })
+                .spawn_scene(bsn! { @button(caption, None, ButtonKind::Plain) })
                 .insert(OpensTask(parent.id.clone()))
                 .id()
         }
         Block::Project(key) => commands
-            .spawn_scene(bsn! { @button(key.clone(), None, ButtonVariant::Plain) })
+            .spawn_scene(bsn! { @button(key.clone(), None, ButtonKind::Plain) })
             .insert(OpensProject(key.clone()))
             .id(),
         Block::Subtask(sub) => {
             let line = commands.spawn_scene(bsn! { @row() }).id();
             let caption = format!("{}  {}", sub.key, sub.title);
             commands
-                .spawn_scene(bsn! { @button(caption, None, ButtonVariant::Plain) })
+                .spawn_scene(bsn! { @button(caption, None, ButtonKind::Plain) })
                 .insert((OpensTask(sub.id.clone()), ChildOf(line)));
             commands.spawn_scene(text_dim(status_label(sub.status), size::SECONDARY)).insert(ChildOf(line));
             line
@@ -1693,9 +1690,9 @@ fn spawn_block(
             let press = sends(source, subject.clone(), action.clone());
             match action {
                 Action::Release => commands
-                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonVariant::Normal) @{press} }),
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonKind::Normal) @{press} }),
                 Action::Undo => commands
-                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonVariant::Normal) @{press} }),
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonKind::Normal) @{press} }),
                 Action::Cancel => {
                     commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} })
                 }
@@ -1747,7 +1744,7 @@ fn dress_note(
     {
         node.display = display;
     }
-    commands.entity(note).insert(ThemeTextColor(tone));
+    commands.entity(note).insert(TextTone(tone));
 }
 
 /// Brings the parts of changed blocks in line with them: words, notes, disabled buttons, dropdown rows.
@@ -2109,7 +2106,7 @@ fn spawn_tools(commands: &mut Commands, tools: Entity) -> Tools {
         commands.spawn(Node { align_items: AlignItems::Center, column_gap: px(space::CONTROLS), ..default() }).id();
     let note = spawn_note(commands, row, &None);
     let arrow = |commands: &mut Commands, icon, hint: &str, step| {
-        commands.spawn_scene(tool_button(icon, hint, ButtonVariant::Plain)).insert((step, ChildOf(row))).id()
+        commands.spawn_scene(tool_button(icon, hint, ButtonKind::Plain)).insert((step, ChildOf(row))).id()
     };
     let previous = arrow(commands, Icon::ChevronUp, "Previous task in the column (K)", Step::Previous);
     let next = arrow(commands, Icon::ChevronDown, "Next task in the column (J)", Step::Next);
@@ -2571,7 +2568,7 @@ fn sync_panel(
         |commands, _, gate| {
             let (icon, tone) = match gate.state {
                 GateState::Passed => (Icon::CircleCheck, token::OK),
-                GateState::Waiting => (Icon::Circle, tokens::TEXT_DIM),
+                GateState::Waiting => (Icon::Circle, token::TEXT_DIM),
             };
             commands.spawn_scene(badge(gate.name.clone(), Some(icon), Some(tone))).id()
         },

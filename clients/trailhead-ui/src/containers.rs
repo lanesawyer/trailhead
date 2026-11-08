@@ -1,6 +1,6 @@
 //! The surfaces controls sit in: a panel over the board, a section within it, and a field (a label over an input).
 
-use bevy::feathers::theme::ThemeBackgroundColor;
+use crate::theme::BackgroundTone;
 use bevy::prelude::*;
 
 use super::{radius, size, space, text_dim, token};
@@ -15,7 +15,7 @@ pub fn panel() -> impl Scene {
             padding: { UiRect::all(px(space::PANEL_INSET)) },
             border_radius: { BorderRadius::all(px(radius::PANEL)) },
         }
-        ThemeBackgroundColor({ token::PANEL_BG })
+        BackgroundTone({ token::PANEL_BG })
     }
 }
 
