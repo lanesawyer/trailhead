@@ -194,6 +194,38 @@ mod tests {
     }
 
     #[test]
+    fn in_the_light_theme_priorities_and_grades_still_read_on_a_card() {
+        let light = theme().light();
+        let lightness = |t: &Token| Oklcha::from(light.color(t)).lightness;
+        let card = lightness(&token::CARD_BG);
+        assert!(card > 0.5, "the card turns light");
+        let tones = Priority::ALL.map(priority_tone).into_iter().chain(Grade::ALL.map(grade_tone));
+        for tone in tones {
+            assert!(card - lightness(&tone) > 0.1, "{tone} is too faint on a light card");
+        }
+    }
+
+    /// The least lightness between a hover and the surface under it that reads as a response.
+    const HOVER_CONTRAST: f32 = 0.05;
+
+    #[test]
+    fn a_plain_buttons_hover_shows_on_the_card_and_the_panel_in_either_theme() {
+        // The card's Edit, Comment and Answer buttons are plain, as are the inspector's and settings' (TRAIL-1091).
+        // Feathers' own plain hover is a shade of the surface, a gap too small to see.
+        for theme in [theme(), theme().light()] {
+            let lightness = |t: &Token| Oklcha::from(theme.color(t)).lightness;
+            let hover = lightness(&token::BUTTON_PLAIN_BG_HOVER);
+            for surface in [token::CARD_BG, token::PANEL_BG] {
+                let gap = (hover - lightness(&surface)).abs();
+                assert!(
+                    gap >= HOVER_CONTRAST,
+                    "a plain button's hover on {surface} is {gap:.3} away, too close to see"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn statuses_read_as_words() {
         let words = Status::ALL.map(status_label);
         assert_eq!(words, ["Open", "In Progress", "Needs Input", "In Review", "Approved", "Done", "Cancelled"]);

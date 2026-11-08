@@ -11,6 +11,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = ["factory"]
 # Runs the factory's control plane in the server when the user config's `[factory] repos` lists a repo
@@ -39,6 +42,7 @@ http.workspace = true
 
 
 [dev-dependencies]
+trailhead-client = { workspace = true, features = ["http"] }
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }

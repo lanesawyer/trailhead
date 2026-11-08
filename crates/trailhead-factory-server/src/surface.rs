@@ -5,6 +5,7 @@
 //! The stream carries tool calls, which can name commands and paths, so the server mounts the routes
 //! behind the user's token (agent tokens, a sandbox's included, are refused).
 
+use crate::error::{Error, Result};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -215,21 +216,21 @@ pub async fn follow(
     task: Option<&str>,
     mut on_event: impl FnMut(RepoEvent),
     stop: impl std::future::Future<Output = ()>,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut req = client(None).get(format!("{}/events", remote.base)).bearer_auth(&remote.token);
     if let Some(task) = task {
         req = req.query(&[("task", task)]);
     }
-    let mut reply = req.send().await.map_err(|e| format!("the control plane doesn't answer: {e}"))?;
+    let mut reply = req.send().await.map_err(Error::Unreachable)?;
     if !reply.status().is_success() {
-        return Err(format!("the control plane refused the stream: {}", reply.status()));
+        return Err(Error::StreamRefused(reply.status()));
     }
     tokio::pin!(stop);
     let mut buf: Vec<u8> = Vec::new();
     loop {
         tokio::select! {
             _ = &mut stop => return Ok(()),
-            chunk = reply.chunk() => match chunk.map_err(|e| e.to_string())? {
+            chunk = reply.chunk() => match chunk.map_err(Error::backend)? {
                 Some(chunk) => {
                     buf.extend_from_slice(&chunk);
                     while let Some(at) = buf.iter().position(|b| *b == b'\n') {
@@ -239,7 +240,7 @@ pub async fn follow(
                         }
                     }
                 }
-                None => return Err("the control plane stopped".into()),
+                None => return Err(Error::StreamEnded),
             },
         }
     }

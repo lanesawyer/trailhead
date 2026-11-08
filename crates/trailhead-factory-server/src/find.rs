@@ -1,6 +1,7 @@
 //! Finding the factory's settings: the `[factory]` table of the nearest `.trailhead.toml`, found by walking up from the
 //! working directory the way the CLI does.
 
+use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
 
 use trailhead_factory::Repo;
@@ -9,22 +10,23 @@ use trailhead_factory::Repo;
 const CONFIG: &str = ".trailhead.toml";
 
 /// The nearest `.trailhead.toml` at or above `dir`.
-pub fn config(dir: &Path) -> Result<PathBuf, String> {
-    dir.ancestors().map(|d| d.join(CONFIG)).find(|p| p.is_file()).ok_or_else(|| {
-        format!("no {CONFIG} at or above {}; run from inside the repo or pass --config <path>", dir.display())
-    })
+pub fn config(dir: &Path) -> Result<PathBuf> {
+    dir.ancestors()
+        .map(|d| d.join(CONFIG))
+        .find(|p| p.is_file())
+        .ok_or_else(|| Error::NoConfig { file: CONFIG, dir: dir.to_path_buf() })
 }
 
 /// The repo the factory works on: the `[factory]` table of `config`, else of the nearest `.trailhead.toml`.
-pub fn repo(config_path: Option<&Path>) -> Result<Repo, String> {
+pub fn repo(config_path: Option<&Path>) -> Result<Repo> {
     let path = match config_path {
         Some(path) => path.to_path_buf(),
-        None => config(&std::env::current_dir().map_err(|e| e.to_string())?)?,
+        None => config(&std::env::current_dir().map_err(Error::backend)?)?,
     };
-    let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let src = std::fs::read_to_string(&path).map_err(|e| Error::at(&path, e))?;
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let config = trailhead_factory::FactoryConfig::from_repo_file(&src, remote(dir))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let config =
+        trailhead_factory::FactoryConfig::from_repo_file(&src, remote(dir)).map_err(|e| Error::at(&path, e))?;
     Ok(config.repo.repo())
 }
 
@@ -86,7 +88,7 @@ mod tests {
     fn a_missing_config_names_the_flag() {
         let dir = tempfile::tempdir().unwrap();
         // A tempdir sits under /tmp, which has no .trailhead.toml above it.
-        let err = config(dir.path()).unwrap_err();
+        let err = config(dir.path()).unwrap_err().to_string();
         assert!(err.contains("--config"), "{err}");
     }
 }
