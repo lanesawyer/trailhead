@@ -221,7 +221,7 @@ struct Entry {
     slug: String,
 }
 
-/// Everything `check` and `run` share: one store, agent, key set, iroh endpoint with its API tunnel, compute and
+/// Everything the server's control plane runs on: one store, agent, key set, iroh endpoint with its API tunnel, compute and
 /// host, and a factory for each repo.
 struct Setup {
     repos: Vec<Entry>,
@@ -271,23 +271,9 @@ fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan> {
     Ok(Plan { opts: run.opts.clone(), host_config, specs, adapter })
 }
 
-async fn setup(run: &RunOpts) -> Result<Setup> {
-    let paths = Paths::from_env().ok_or(Error::NoDirs)?;
-    let plan = plan(run, read_host_config(&paths)?)?;
-    let cwd = std::env::current_dir().map_err(Error::backend)?;
-    wire(plan, &paths, &cwd, None, surface::Feed::new(FactoryState::Starting { reason: None })).await
-}
-
 /// Reaches out from a [`Plan`]: secrets, the daemon binary, the store, the iroh endpoint and the
-/// computes. Fnox runs in `fnox_dir`. `store` is the server's own when it runs the control plane; `check` has none
-/// and opens the database itself.
-async fn wire(
-    plan: Plan,
-    paths: &Paths,
-    fnox_dir: &Path,
-    store: Option<Arc<Store>>,
-    feed: surface::Feed,
-) -> Result<Setup> {
+/// computes. Fnox runs in `fnox_dir`. `store` is the server's own: the only process that opens the database.
+async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, feed: surface::Feed) -> Result<Setup> {
     let Plan { opts, host_config, mut specs, adapter } = plan;
     let (opts, fnox) = resolve_opts(&opts, paths, fnox_dir)?;
     let opts = &opts;
@@ -324,16 +310,6 @@ async fn wire(
     .await
     .map_err(Error::backend)?;
     let slugs: Vec<String> = specs.iter().map(|s| s.slug()).collect();
-    let store = match store {
-        Some(store) => store,
-        None => {
-            let db = paths.db();
-            if let Some(dir) = db.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| Error::at(dir, e))?;
-            }
-            Arc::new(Store::open_local(&db).await.map_err(Error::backend)?)
-        }
-    };
     let ctx = factory_ctx(&store, opts.create_agent).await?;
     let tracker = Arc::new(CoreTracker::new(store.clone(), ctx.clone(), AGENT));
     let (key, master) = load_or_create_keys(&paths.creds())?;
@@ -568,20 +544,21 @@ fn check_result(failed: usize) -> Result<()> {
     }
 }
 
-/// Sets everything up for `run`'s repos and reports what it found, without running anything.
+/// Reports what the setup for `run`'s repos can see, without running anything. It asks the server's API for tasks
+/// (only the server opens the database) and lists the computes itself; it binds no iroh endpoint, so it runs beside
+/// the server.
 pub async fn check(run: &RunOpts) -> Result<()> {
     let paths = Paths::from_env().ok_or(Error::NoDirs)?;
-    // The control plane's iroh identity is one per machine: binding it beside the server's would flap its daemons,
-    // and a server started meanwhile would bind it too. The server's lock keeps them apart.
-    let _lock = trailhead_client::paths::lock(&paths.lock_file(), "trailhead factory check")
-        .map_err(|e| Error::context("stop the server to run `check`", e))?;
-    let setup = setup(run).await?;
+    let plan = plan(run, read_host_config(&paths)?)?;
+    let cwd = std::env::current_dir().map_err(Error::backend)?;
+    let (opts, fnox) = resolve_opts(&plan.opts, &paths, &cwd)?;
+    let tracker = ops::api_tracker(&opts, &paths)?;
     let mut failed = 0;
-    for entry in &setup.repos {
-        let factory = &entry.factory;
-        let project = &factory.config.repo.project;
-        let queue: Vec<_> = factory.config.repo.queue.iter().cloned().map(trailhead_factory::TaskKey).collect();
-        match factory.tracker.ready(project, &queue, 10).await {
+    for spec in &plan.specs {
+        let slug = spec.slug();
+        let project = &spec.config.repo.project;
+        let queue: Vec<_> = spec.config.repo.queue.iter().cloned().map(trailhead_factory::TaskKey).collect();
+        match trailhead_factory::Tracker::ready(&tracker, project, &queue, 10).await {
             Ok(ready) => {
                 let scope = if queue.is_empty() {
                     project.clone()
@@ -589,36 +566,46 @@ pub async fn check(run: &RunOpts) -> Result<()> {
                     let keys: Vec<_> = queue.iter().map(|q| q.0.as_str()).collect();
                     format!("{project}, under {}", keys.join(", "))
                 };
-                println!("{}: tracker: acting as {AGENT}; {} ready task(s) in {scope}", entry.slug, ready.len());
+                println!("{slug}: tracker: the server's API; {} ready task(s) in {scope}", ready.len());
                 for t in &ready {
                     println!("  {} {}", t.key.0, t.title);
                 }
             }
             Err(e) => {
                 failed += 1;
-                println!("{}: tracker: acting as {AGENT}; {e}", entry.slug);
+                println!("{slug}: tracker: {}", ops::reach(e));
             }
         }
     }
-    let first = &setup.repos[0].factory;
-    let specs = first.config.target_specs();
-    for (p, spec) in first.targets().iter().zip(specs.iter().map(|s| compute_name(&s.compute))) {
-        match p.compute.list(&Default::default()).await {
-            Ok(live) => println!(
-                "compute: {} ({spec}, priority {}) reachable; {} sandbox(es) visible",
-                p.target.name,
-                p.target.priority,
-                live.len()
-            ),
-            Err(e) => {
-                failed += 1;
-                println!("compute: {} ({spec}): {e}", p.target.name);
+    let first = &plan.specs[0].config;
+    let specs = first.target_specs();
+    match computes(first, &opts, &fnox, &paths, Default::default(), true) {
+        Ok(built) => {
+            for ((compute, target), spec) in built.iter().zip(specs.iter().map(|s| compute_name(&s.compute))) {
+                match compute.list(&Default::default()).await {
+                    Ok(live) => println!(
+                        "compute: {} ({spec}, priority {}) reachable; {} sandbox(es) visible",
+                        target.name,
+                        target.priority,
+                        live.len()
+                    ),
+                    Err(e) => {
+                        failed += 1;
+                        println!("compute: {} ({spec}): {e}", target.name);
+                    }
+                }
             }
         }
+        Err(e) => {
+            failed += 1;
+            println!("compute: {e}");
+        }
     }
-    println!("endpoint: {}", setup.tunnel.endpoint().id());
-    println!("tunnel: forwarding to {}", run.opts.server);
-    setup.tunnel.shutdown().await.map_err(Error::backend)?;
+    match saved_endpoint_id(&paths.creds()) {
+        Some(id) => println!("endpoint: {id}"),
+        None => println!("endpoint: none yet (the server's control plane makes it on its first run)"),
+    }
+    println!("tunnel: the server's control plane forwards to {}", opts.server);
     check_result(failed)
 }
 
@@ -736,7 +723,7 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
     let control = async move {
         let mut wait = RETRY_FIRST;
         let setup = loop {
-            match wire(plan.clone(), &paths, &fnox_dir, Some(store.clone()), shared.clone()).await {
+            match wire(plan.clone(), &paths, &fnox_dir, store.clone(), shared.clone()).await {
                 Ok(setup) => break setup,
                 Err(e) => {
                     tracing::warn!(
@@ -858,9 +845,9 @@ fn server_subscriber(
 /// The factory's commands, as `trailhead factory <cmd>` takes them.
 #[derive(clap::Subcommand)]
 pub enum Command {
-    /// Set everything up and report, without running anything.
+    /// Report what the factory can see (queued tasks via the server, the compute, its endpoint), without running anything.
     Check(RunOpts),
-    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; runs beside the server.
+    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; asks the server.
     Status(Opts),
     /// Print the daemon's service log from a task's sandbox.
     Logs(ops::LogsOpts),

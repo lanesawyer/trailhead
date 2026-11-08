@@ -55,6 +55,11 @@ pub enum Error {
     ChecksFailed(usize),
     #[error("{0} repo loop(s) stopped on an error")]
     LoopsFailed(usize),
+    #[error("no user token yet; start the server with `trailhead server start`")]
+    NoUserToken,
+    /// The server didn't answer a request for tasks.
+    #[error("{0}; is the server running? (`trailhead server start`)")]
+    ServerDown(Source),
     #[error("the control plane doesn't answer: {0}")]
     Unreachable(reqwest::Error),
     #[error("the control plane refused the stream: {0}")]

@@ -59,11 +59,14 @@ use bevy::feathers::theme::UiTheme;
 use bevy::prelude::*;
 
 mod accordion;
+mod appearance;
 mod badge;
 mod bubble;
+mod button_group;
 mod buttons;
 mod chip;
 mod containers;
+mod desktop;
 mod detail;
 mod field_well;
 mod hint;
@@ -95,8 +98,10 @@ pub use accordion::{
     ACCORDION_INDENT, Accordion, AccordionCaret, AccordionParts, AccordionTitle, SectionLevel, spawn_accordion,
     spawn_header_button,
 };
+pub use appearance::{Appearance, ThemeChoice, ThemePlugin};
 pub use badge::badge;
 pub use bubble::{Side, bubble};
+pub use button_group::{ButtonGroup, button_group};
 pub use buttons::{ButtonKind, button, button_text, danger_button, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{field, panel, row, section, section_frame};
@@ -108,7 +113,7 @@ pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
     inline_text_sized,
 };
-pub use input::text_input;
+pub use input::{text_input, text_input_sized};
 pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu, menu_item};
@@ -125,13 +130,13 @@ pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
 pub use search::{
     ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
 };
-pub use select::{Picked, SelectEdit, SelectOptions, select};
+pub use select::{Picked, SelectEdit, SelectOptions, SelectTones, select, select_toned};
 pub use skeleton::{SkeletonBar, spawn_skeleton};
 pub use slider::spawn_slider;
 pub use spacing::{check as spacing_check, extent, radius, space};
 pub use tabs::{TabCaption, fit_tabs, style_tabs, tab, tab_strip};
 pub use text::{size, text, text_dim, text_mono, text_toned};
-pub use theme::{BackgroundTone, BorderTone, TextTone, Theme, ThemePlugin, Token, palette, token};
+pub use theme::{BackgroundTone, BorderTone, TextTone, Theme, Token, palette, token};
 pub use truncate::{truncate_to_width, width_of};
 
 /// Where the kit's per-frame systems run in `Update`: opening and closing accordions, cutting titles and captions to
@@ -147,6 +152,7 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin))
             .add_observer(scroll::on_scroll)
+            .add_observer(button_group::on_option)
             .add_observer(bevy::ui_widgets::slider_self_update)
             .add_systems(PostUpdate, scrollbar::hide_when_fits.after(bevy::ui::UiSystems::Layout))
             .add_systems(
@@ -162,6 +168,8 @@ impl Plugin for UiPlugin {
                     tabs::fit_tabs,
                     tabs::style_tabs,
                     nav::paint_nav_items,
+                    button_group::paint_groups,
+                    select::style_select_captions,
                 )
                     .chain()
                     .in_set(UiPlace),

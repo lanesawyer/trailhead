@@ -194,6 +194,18 @@ mod tests {
     }
 
     #[test]
+    fn in_the_light_theme_priorities_and_grades_still_read_on_a_card() {
+        let light = theme().light();
+        let lightness = |t: &Token| Oklcha::from(light.color(t)).lightness;
+        let card = lightness(&token::CARD_BG);
+        assert!(card > 0.5, "the card turns light");
+        let tones = Priority::ALL.map(priority_tone).into_iter().chain(Grade::ALL.map(grade_tone));
+        for tone in tones {
+            assert!(card - lightness(&tone) > 0.1, "{tone} is too faint on a light card");
+        }
+    }
+
+    #[test]
     fn statuses_read_as_words() {
         let words = Status::ALL.map(status_label);
         assert_eq!(words, ["Open", "In Progress", "Needs Input", "In Review", "Approved", "Done", "Cancelled"]);

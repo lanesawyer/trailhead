@@ -339,6 +339,19 @@ async fn a_transient_publish_failure_is_retried_without_redoing_the_work() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_transient_failure_opening_the_pr_is_retried() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Fix CI", "");
+    r.codehost.flaky_open_pr(2);
+    r.harness.push(Role::Worker, Script::new(changes()));
+
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. } | Outcome::AwaitingReview { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.codehost.calls("open_pr"), 3);
+    assert_ne!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_publish_that_keeps_failing_transiently_parks_the_task_after_the_retries() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Fix CI", "");
@@ -1283,4 +1296,18 @@ async fn a_rejected_sandbox_create_parks_the_task_at_once() {
     assert!(questions[0].body.contains("400 Bad Request: bad size"), "{}", questions[0].body);
     assert!(r.compute.sandboxes().is_empty(), "no sandbox was made");
     assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
+}
+
+#[tokio::test]
+async fn a_park_that_fails_still_keeps_the_backoff() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 1"));
+    let key = r.tracker.add_task("TRAIL", "Lost daemon", "");
+    r.daemon.fail_runs(1, "not found: run trail-1 on this daemon");
+    r.tracker.fail_next("factory/trail-1-a1", "ask", 1);
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InProgress, "the park failed, so the claim is left to reconcile");
+    assert_eq!(task.run.infra_failures, Some(1), "the count is kept so the next failure parks");
+    r.tracker.set_status(&key, Status::Open); // what reconcile does with it
+    assert!(r.factory.tick().await.unwrap().is_empty(), "nothing is started during the backoff");
 }

@@ -20,6 +20,9 @@ pub mod step {
 pub mod space {
     use super::step;
 
+    /// The join between controls drawn as one, such as a button group's options. A seam rather than a space, so it
+    /// sits off the scale.
+    pub const SEAM: f32 = 1.0;
     /// Lines within one item: a card's key over its title, a field's label over its input.
     pub const STACKED: f32 = step::XXS;
     /// An icon and the text beside it, inside one control.
@@ -46,6 +49,9 @@ pub mod space {
     pub const BADGE_INSET: f32 = step::XXS;
     /// Inside a map label, tight against its border.
     pub const LABEL_INSET: f32 = step::XS;
+    /// Inside an inline text's input, before and after the text: the input reaches out by as much, so its text lines
+    /// up with the text it stands in for.
+    pub const INPUT_INSET: f32 = step::XS;
     /// Inside a card, a field, the hint over a button.
     pub const CONTROL_INSET: f32 = step::S;
     /// Inside a panel, a column, the header bar.
@@ -158,6 +164,7 @@ mod tests {
             space::GROUPS,
             space::INDENT,
             space::BADGE_INSET,
+            space::INPUT_INSET,
             space::CONTROL_INSET,
             space::PANEL_INSET,
             space::DOT,
