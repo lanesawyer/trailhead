@@ -45,9 +45,19 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                 if let Some(db) = &info.db {
                     println!("db {}", db.display());
                 }
+                if let Some(runs) = info.runs_in_flight {
+                    println!("factory runs in flight: {runs}");
+                }
+                if info.upgrade_pending {
+                    println!(
+                        "restarting onto the new binary once those finish (`trailhead server restart --now` cancels them)"
+                    );
+                } else if info.draining {
+                    println!("draining: stops once those finish (`trailhead server stop --now` cancels them)");
+                }
                 if local && !client::is_ours(&paths, &info) {
                     println!("served from another data directory or machine (a tunnel?), not this CLI's");
-                } else if local && client::is_stale(&info) {
+                } else if local && client::is_stale(&info) && !info.upgrade_pending {
                     println!("the binary has been rebuilt since; the next command restarts the server");
                 }
             }
@@ -87,6 +97,15 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
     Ok(())
 }
 
+/// Replaces this process with the newly installed binary, same arguments, so the pid (and the scope the server runs
+/// in) stays.
+fn restart_onto_new_binary() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let exe = client::current_exe()?;
+    let err = std::process::Command::new(&exe).args(std::env::args_os().skip(1)).exec();
+    bail!("restarting onto {}: {err}", exe.display())
+}
+
 pub(crate) async fn serve(bind: &str) -> Result<()> {
     let paths = trailhead_server::Paths::from_env().context("no home directory")?;
     #[cfg(feature = "factory")]
@@ -102,5 +121,8 @@ pub(crate) async fn serve(bind: &str) -> Result<()> {
         instance: Some(paths.instance_or_create()?),
         factory: Some(paths.clone()),
     };
-    trailhead_server::serve_local(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
+    match trailhead_server::serve_local(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))? {
+        trailhead_server::Exit::Stopped => Ok(()),
+        trailhead_server::Exit::Restart => restart_onto_new_binary(),
+    }
 }

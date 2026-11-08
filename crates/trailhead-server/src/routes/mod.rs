@@ -125,6 +125,9 @@ async fn health(State(s): S, headers: HeaderMap) -> Json<Value> {
     if s.draining.load(std::sync::atomic::Ordering::SeqCst) {
         v["draining"] = json!(true);
     }
+    if s.upgrade_pending.load(std::sync::atomic::Ordering::SeqCst) {
+        v["upgrade_pending"] = json!(true);
+    }
     // Paths name the local user, so over a tunnel only token holders see them.
     let authed = headers.contains_key(header::AUTHORIZATION) && crate::auth::authenticate(&s, &headers).await.is_ok();
     if !authed && let Some(o) = v.as_object_mut() {

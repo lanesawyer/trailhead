@@ -61,10 +61,18 @@ impl Client {
             && !would_start_unscoped_under_systemd()
         {
             match info.runs_in_flight.unwrap_or(0) {
-                // A restart would cancel the factory's runs; the old server keeps working meanwhile.
-                runs @ 1.. => eprintln!(
-                    "note: a newer trailhead is installed, but the server has {runs} factory run(s) in flight; restart it with `trailhead server restart` when they finish"
-                ),
+                // A restart now would cancel the factory's runs: the server drains them and restarts itself, and keeps
+                // working meanwhile.
+                runs @ 1.. => {
+                    if !info.upgrade_pending
+                        && let Some(pid) = info.pid
+                    {
+                        signal(pid, "-USR1")?;
+                    }
+                    eprintln!(
+                        "note: a newer trailhead is installed; the server restarts onto it once its {runs} factory run(s) finish (`trailhead server restart --now` cancels them)"
+                    );
+                }
                 0 => {
                     eprintln!("note: restarting the local server on the updated trailhead binary");
                     stop_local(&http, &base, true).await?;
@@ -479,12 +487,17 @@ pub async fn stop_local(http: &reqwest::Client, base: &Url, now: bool) -> Result
 
 /// Asks the process to shut down gracefully. Returns false if it wasn't running.
 fn signal_stop(pid: u32) -> Result<bool> {
-    Ok(std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status()?.success())
+    signal(pid, "-TERM")
+}
+
+/// Sends `sig` (`-TERM`, say) to `pid`. Returns false if it wasn't running.
+fn signal(pid: u32, sig: &str) -> Result<bool> {
+    Ok(std::process::Command::new("kill").args([sig, &pid.to_string()]).status()?.success())
 }
 
 /// This binary's path. On Linux a process whose file was replaced by a reinstall
 /// sees `<path> (deleted)`; the new binary at the original path is the one to run.
-fn current_exe() -> Result<std::path::PathBuf> {
+pub(crate) fn current_exe() -> Result<std::path::PathBuf> {
     let exe = std::env::current_exe()?;
     if !exe.exists()
         && let Some(path) = exe.to_str().and_then(|s| s.strip_suffix(" (deleted)"))
