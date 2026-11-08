@@ -209,6 +209,10 @@ pub enum FactoryEvent {
     Holding {
         holding: Option<String>,
     },
+    /// An event a newer control plane sent that this build doesn't know. Clients ignore it, so a variant can be added
+    /// without breaking older clients.
+    #[serde(other)]
+    Unknown,
 }
 
 impl FactoryEvent {
@@ -230,6 +234,7 @@ impl FactoryEvent {
         match self {
             FactoryEvent::Control { control } => format!("control plane: {}", control_label(control)),
             FactoryEvent::Error { message } => format!("error: {message}"),
+            FactoryEvent::Unknown => "unknown event".to_string(),
             FactoryEvent::Holding { holding: Some(why) } => format!("holding merges: {why}"),
             FactoryEvent::Holding { holding: None } => "no longer holding merges".to_string(),
             FactoryEvent::SandboxChanged { sandbox } => format!("sandbox {} {}", sandbox.name, sandbox.state.as_str()),
@@ -259,4 +264,17 @@ pub struct Sequenced {
     pub seq: u64,
     #[serde(flatten)]
     pub event: FactoryEvent,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_event_from_a_newer_control_plane_reads_as_unknown() {
+        let e: FactoryEvent = serde_json::from_str(r#"{"event":"from_the_future","x":1}"#).unwrap();
+        assert_eq!(e, FactoryEvent::Unknown);
+        let s: Sequenced = serde_json::from_str(r#"{"seq":7,"event":"from_the_future","x":1}"#).unwrap();
+        assert_eq!((s.seq, s.event), (7, FactoryEvent::Unknown));
+    }
 }
