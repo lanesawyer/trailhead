@@ -23,7 +23,7 @@ Read this index first, then open only the file the work in front of you needs.
 | [mvp.md](mvp.md) | The first slice, its milestones, and what "done" means |
 | [operating.md](operating.md) | Running the factory day to day: starting it, handing it work, watching runs, outcomes |
 | [ui.md](ui.md) | The Bevy app for watching, steering and authoring: views, sync, transport, repo layout |
-| [server-control-plane.md](server-control-plane.md) | Proposal: moving the control plane into the Trailhead server (TRAIL-164): what moves, lifecycle, config, migration steps, open questions |
+| [server-control-plane.md](server-control-plane.md) | Decided plan for moving the control plane into the Trailhead server (TRAIL-164): what moves, lifecycle, config, migration steps, Lane's decisions |
 | [ordering.md](ordering.md) | Proposal: an order within a priority, set by dragging cards in Lookout, that the factory picks up in (TRAIL-883): rank, API, where it applies |
 | [open-questions.md](open-questions.md) | Undecided questions and hands-on tests still to run |
 | [naming.md](naming.md) | Name ideas for the factory and its parts |
