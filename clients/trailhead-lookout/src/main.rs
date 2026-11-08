@@ -12,6 +12,7 @@ use trailhead_lookout::icon::{IconUiPlugin, primary_window};
 use trailhead_lookout::inspector::InspectorUiPlugin;
 use trailhead_lookout::map::MapUiPlugin;
 use trailhead_lookout::net::{NetCommand, NetConfig};
+use trailhead_lookout::project::ProjectUiPlugin;
 use trailhead_lookout::settings::SettingsUiPlugin;
 
 /// `lookout [<control plane endpoint id>]`, with `LOOKOUT_TOKEN` to sign in with a pasted user token and
@@ -40,6 +41,7 @@ fn main() {
             LookoutPlugin,
             BoardUiPlugin,
             MapUiPlugin,
+            ProjectUiPlugin,
             AuthorUiPlugin,
             InspectorUiPlugin,
             ConnectUiPlugin,
