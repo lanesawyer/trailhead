@@ -252,6 +252,42 @@ mod tests {
     }
 
     #[test]
+    fn lookout_never_reaches_past_the_kit_to_feathers() {
+        // Feathers stays inside trailhead-ui: what Lookout needs from it, the kit wraps and exports (TRAIL-1102). The
+        // needles are split so this file doesn't find itself.
+        let needles = [concat!("feathers", "::"), concat!("bevy_", "feathers")];
+        let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut bad = Vec::new();
+        let mut folders = vec![crate_root.join("src"), crate_root.join("examples"), crate_root.join("tests")];
+        let mut files = vec![crate_root.join("Cargo.toml")];
+        while let Some(folder) = folders.pop() {
+            let Ok(entries) = std::fs::read_dir(&folder) else { continue };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        assert!(files.len() >= 10, "found only {files:?}");
+        for path in files {
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (n, line) in source.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") || (code.starts_with('#') && path.ends_with("Cargo.toml")) {
+                    continue;
+                }
+                if needles.iter().any(|needle| line.contains(needle)) {
+                    bad.push(format!("{}:{}: {}", path.strip_prefix(crate_root).unwrap().display(), n + 1, code));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "use (or grow) the trailhead-ui kit instead of feathers:\n{}", bad.join("\n"));
+    }
+
+    #[test]
     fn a_spacing_is_named_rather_than_typed() {
         // `board.rs` predates the kit; each view moves onto it in its own task (TRAIL-798 to TRAIL-801). Take it off
         // this list when it's moved; nothing new goes on it.
