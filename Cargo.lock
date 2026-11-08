@@ -8030,6 +8030,7 @@ dependencies = [
 name = "trailhead-client"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "jiff",
  "keyring",
  "libc",
@@ -8185,6 +8186,20 @@ dependencies = [
 name = "trailhead-factory-host"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "trailhead-compute-docker",
+ "trailhead-factory",
+ "trailhead-factory-server",
+]
+
+[[package]]
+name = "trailhead-factory-server"
+version = "0.1.0"
+dependencies = [
  "axum",
  "clap",
  "futures-util",
@@ -8197,7 +8212,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "trailhead-client",
  "trailhead-codehost-github",
  "trailhead-compute-docker",
@@ -8208,7 +8222,6 @@ dependencies = [
  "trailhead-log",
  "trailhead-plugins",
  "trailhead-provider-anthropic",
- "trailhead-server",
  "trailhead-wire",
 ]
 
@@ -8294,7 +8307,6 @@ name = "trailhead-server"
 version = "0.1.0"
 dependencies = [
  "axum",
- "directories",
  "futures-util",
  "http 1.5.0",
  "http-body-util",

@@ -26,11 +26,11 @@ use trailhead_core::{Ctx, DEFAULT_REMINDER_WINDOW, Principal, Store};
 pub use auth::BATCH_HEADER;
 pub use idempotency::{IDEMPOTENCY_KEY, REPLAYED_HEADER};
 
-/// Port 7241 spells T-R-A-I on a phone keypad.
-pub const DEFAULT_BIND: &str = "127.0.0.1:7241";
+pub use trailhead_client::paths::{DEFAULT_BIND, Paths};
 
 pub struct AppState {
-    pub store: Store,
+    /// Shared, so the factory's control plane can run on the same store in the same process.
+    pub store: Arc<Store>,
     pub info: ServerInfo,
     /// Flips to true when the server starts shutting down, so long-lived
     /// streams end instead of holding graceful shutdown open forever.
@@ -42,9 +42,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: impl Into<Arc<Store>>) -> Self {
         AppState {
-            store,
+            store: store.into(),
             info: ServerInfo::current(None),
             shutdown: tokio::sync::watch::Sender::new(false),
             limits: Default::default(),
@@ -107,64 +107,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(state.clone(), idempotency::layer))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-/// OS-standard locations for Trailhead's data and config.
-pub struct Paths {
-    pub data_dir: PathBuf,
-    pub config_dir: PathBuf,
-}
-
-impl Paths {
-    /// `TRAILHEAD_DATA_DIR` and `TRAILHEAD_CONFIG_DIR` override the OS defaults,
-    /// which is how tests and side-by-side instances stay isolated.
-    pub fn from_env() -> Option<Paths> {
-        let dirs = directories::ProjectDirs::from("", "", "trailhead");
-        let pick = |var: &str, default: Option<&Path>| {
-            std::env::var_os(var).map(PathBuf::from).or_else(|| default.map(Path::to_path_buf))
-        };
-        Some(Paths {
-            data_dir: pick("TRAILHEAD_DATA_DIR", dirs.as_ref().map(|d| d.data_dir()))?,
-            config_dir: pick("TRAILHEAD_CONFIG_DIR", dirs.as_ref().map(|d| d.config_dir()))?,
-        })
-    }
-
-    pub fn db(&self) -> PathBuf {
-        self.data_dir.join("trailhead.db")
-    }
-
-    pub fn creds(&self) -> creds::CredStore {
-        creds::CredStore::new(self.config_dir.clone())
-    }
-
-    pub fn pid_file(&self) -> PathBuf {
-        self.data_dir.join("server.pid")
-    }
-
-    pub fn instance_file(&self) -> PathBuf {
-        self.data_dir.join("instance")
-    }
-
-    /// This data directory's instance id, if a server has ever run from it.
-    pub fn instance(&self) -> Option<String> {
-        let id = std::fs::read_to_string(self.instance_file()).ok()?;
-        Some(id.trim().to_string()).filter(|id| !id.is_empty())
-    }
-
-    /// Like [`Paths::instance`], creating the id on first use.
-    pub fn instance_or_create(&self) -> std::io::Result<String> {
-        if let Some(id) = self.instance() {
-            return Ok(id);
-        }
-        std::fs::create_dir_all(&self.data_dir)?;
-        let id = uuid::Uuid::now_v7().simple().to_string();
-        std::fs::write(self.instance_file(), format!("{id}\n"))?;
-        Ok(id)
-    }
-
-    pub fn server_log(&self) -> PathBuf {
-        self.data_dir.join("server.log")
-    }
 }
 
 pub struct LocalConfig {

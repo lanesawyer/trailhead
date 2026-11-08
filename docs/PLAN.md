@@ -68,7 +68,8 @@ Remote machines reach the server through a tunnel (iroh via `dumbpipe`, Tailscal
 | `trailhead` (CLI) | REST client for people and shell-capable agents; auto-starts a local server | `clap`, `reqwest` |
 | `trailhead-factory` | Factory domain types, the five plugin traits, the daemon contract, the per-repo factory file | `async-trait`, `toml` |
 | `trailhead-control` | Control plane: run loop, sandbox pool, budget metering, review dispatch, reconcile; in-process `Tracker` over `trailhead-core` | `tokio` |
-| `trailhead-factory-host` | The `trailhead-factory` binary that assembles and runs the control plane | `iroh`, `clap` |
+| `trailhead-factory-server` | The control plane's setup as a library: credentials, keys, iroh endpoint, status surface, run loops | `iroh` |
+| `trailhead-factory-host` | The `trailhead-factory` binary, a thin command line over `trailhead-factory-server` | `clap` |
 | `trailhead-daemon` | The in-sandbox daemon and its side of the iroh transport | `iroh` |
 | `trailhead-wire` | The iroh protocols the control plane, the daemon and Lookout share: framing, keys, `RemoteDaemon`, the API tunnel, `trailhead/ui/0` | `iroh` |
 | `trailhead-plugins` | The harnesses and model providers a build carries, by the names config gives them | |
