@@ -218,7 +218,7 @@ async fn status_is_a_snapshot_then_the_events_after_it() {
     let client = r.client(key).await;
     let mut stream = StatusStream::open(dial_ui(&client, r.control.id).await.unwrap()).await.unwrap();
 
-    let Some(StatusFrame::Snapshot { repos }) = next(&mut stream).await else {
+    let Some(StatusFrame::Snapshot { repos, .. }) = next(&mut stream).await else {
         panic!("the first frame is the snapshot");
     };
     assert_eq!((repos[0].repo.as_str(), repos[0].snapshot.seq), ("o/r", 7));

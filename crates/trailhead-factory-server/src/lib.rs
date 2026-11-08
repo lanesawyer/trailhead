@@ -34,7 +34,9 @@ use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
-use trailhead_factory::{Compute, ComputeConfig, Daemon, FactoryConfig, HarnessSecrets, HostConfig, Target};
+use trailhead_factory::{
+    Compute, ComputeConfig, Daemon, FactoryConfig, FactoryState, HarnessSecrets, HostConfig, Target,
+};
 use trailhead_plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN, harnesses, providers};
 use trailhead_wire::api::ApiTunnel;
 use trailhead_wire::daemon::{Launch, RemoteDaemon};
@@ -48,6 +50,8 @@ pub mod login;
 pub mod ops;
 mod repos;
 mod surface;
+
+pub use surface::Feed;
 mod wake;
 
 /// The agent the control plane acts as; sandboxes get its sub-agents.
@@ -265,6 +269,7 @@ struct Setup {
     ctx: Ctx,
     /// Whether this runs inside the server, sharing its store.
     in_server: bool,
+    feed: surface::Feed,
 }
 
 /// The user config's `[factory]` table; a missing file is the default.
@@ -321,13 +326,19 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let plan = plan(run, read_host_config(&paths)?)?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    wire(plan, &paths, &cwd, None).await
+    wire(plan, &paths, &cwd, None, surface::Feed::new(FactoryState::Starting { reason: None })).await
 }
 
 /// Reaches out from a [`Plan`]: secrets, the daemon binary, the lock, the store, the iroh endpoint and the
 /// computes. Fnox runs in `fnox_dir`. `store` is the server's own when it runs the control plane, which then needs no
 /// check that the server is up; without one this opens the database itself.
-async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Option<Arc<Store>>) -> Result<Setup, String> {
+async fn wire(
+    plan: Plan,
+    paths: &Paths,
+    fnox_dir: &Path,
+    store: Option<Arc<Store>>,
+    feed: surface::Feed,
+) -> Result<Setup, String> {
     let Plan { opts, host_config, mut specs, adapter } = plan;
     let (opts, fnox) = resolve_opts(&opts, paths, fnox_dir)?;
     let opts = &opts;
@@ -401,7 +412,6 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Option<Arc<Stor
         let daemon = RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch).with_peers(peers.clone());
         targets.push((target, compute, Arc::new(daemon)));
     }
-    let feed = surface::BoardFeed::default();
     let build =
         std::env::current_exe().and_then(std::fs::read).map(|b| build_id(&b)).unwrap_or_else(|_| "unknown".into());
     let ui = UiProtocol::new(opts.server, ui_allowlist(paths)).with_status(Arc::new(feed.clone()));
@@ -459,8 +469,9 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Option<Arc<Stor
         }
         repos.push(Entry { factory: Arc::new(factory), slug });
     }
-    feed.set(repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect());
-    Ok(Setup { repos, tunnel, _lock: lock, store, ctx, in_server })
+    feed.set_boards(repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect());
+    feed.set_state(FactoryState::Running);
+    Ok(Setup { repos, tunnel, _lock: lock, store, ctx, in_server, feed })
 }
 
 /// Resolves once the watch channel it came from is set.
@@ -774,11 +785,17 @@ async fn run_loops(
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let Setup { repos, tunnel, _lock, store, ctx, in_server } = setup;
-    // Beside the lock, so it exists and says the same thing: this machine has one control plane.
-    let boards = repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect();
-    let serving = surface::serve(&paths.data_dir.join("factory"), boards).await?;
-    tracing::info!(addr = %serving.addr, "serving factory status for `trailhead-factory status` and `logs --follow`");
+    let Setup { repos, tunnel, _lock, store, ctx, in_server, feed } = setup;
+    // The server serves the status itself, under /v1/factory. A standalone one serves it on a port, recorded beside
+    // the lock, so it exists and says the same thing: this machine has one control plane.
+    let serving = match in_server {
+        true => None,
+        false => {
+            let serving = surface::serve(&paths.data_dir.join("factory"), feed.clone()).await?;
+            tracing::info!(addr = %serving.addr, "serving factory status for `trailhead-factory status` and `logs --follow`");
+            Some(serving)
+        }
+    };
     let mut loops = tokio::task::JoinSet::new();
     for entry in repos {
         let span = tracing::info_span!("repo", repo = %entry.slug);
@@ -810,14 +827,13 @@ pub struct Running {
     cancel: tokio::sync::watch::Sender<bool>,
     /// Set when the control plane has stopped, drained or not.
     done: tokio::sync::watch::Receiver<bool>,
-    /// Each repo's board, once the control plane is up.
-    boards: Arc<std::sync::Mutex<Vec<Arc<trailhead_control::StatusBoard>>>>,
+    feed: surface::Feed,
 }
 
 impl Running {
     /// The runs and reviews in flight across every repo.
     pub fn runs_in_flight(&self) -> usize {
-        self.boards.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|b| b.snapshot().runs.len()).sum()
+        self.feed.boards().iter().map(|(_, b)| b.snapshot().runs.len()).sum()
     }
 
     /// Starts no new runs or reviews; the ones in flight finish, then the control plane stops. A control plane
@@ -856,14 +872,15 @@ const RETRY_MAX: Duration = Duration::from_secs(300);
 /// unknown harness or provider, a missing repo) is returned, and the server refuses to start. Outside failures
 /// (Sprites or GitHub unreachable, a locked keyring, a daemon download, another control plane holding the lock)
 /// are logged and retried with backoff while the server keeps serving.
-pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<Option<Running>, String> {
+pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InServer, String> {
     let host_config = read_host_config(&paths)?;
+    let idle = |state| Ok(InServer { feed: surface::Feed::new(state), running: None });
     if host_config.disabled {
         tracing::info!("control: disabled; `trailhead factory enable` turns it back on");
-        return Ok(None);
+        return idle(FactoryState::Disabled);
     }
     if host_config.repos.is_empty() {
-        return Ok(None);
+        return idle(FactoryState::Off);
     }
     #[derive(clap::Parser)]
     struct Defaults {
@@ -881,36 +898,54 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<Opti
     let (drain_tx, drain) = tokio::sync::watch::channel(false);
     let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
     let (done_tx, done) = tokio::sync::watch::channel(false);
-    let boards = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let filled = boards.clone();
+    let feed = surface::Feed::new(FactoryState::Starting { reason: None });
+    let shared = feed.clone();
     let control = async move {
         let mut wait = RETRY_FIRST;
         let setup = loop {
-            match wire(plan.clone(), &paths, &fnox_dir, Some(store.clone())).await {
+            match wire(plan.clone(), &paths, &fnox_dir, Some(store.clone()), shared.clone()).await {
                 Ok(setup) => break setup,
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    retry_secs = wait.as_secs(),
-                    "control: starting; the server keeps serving and tries the factory again"
-                ),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        retry_secs = wait.as_secs(),
+                        "control: starting; the server keeps serving and tries the factory again"
+                    );
+                    shared.set_state(FactoryState::Starting { reason: Some(e) });
+                }
             }
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
-                _ = fired(drain.clone()) => return,
+                _ = fired(drain.clone()) => {
+                    shared.set_state(FactoryState::Stopped);
+                    return;
+                }
             }
             wait = (wait * 2).min(RETRY_MAX);
         };
-        *filled.lock().unwrap_or_else(|e| e.into_inner()) =
-            setup.repos.iter().map(|e| e.factory.status().clone()).collect();
         if let Err(e) = run_loops(setup, &paths, poll, drain, cancel).await {
             tracing::error!(error = %e, "the control plane stopped; the server keeps serving");
         }
+        shared.set_state(FactoryState::Stopped);
     };
     tokio::spawn(async move {
         control.await;
         done_tx.send_replace(true);
     });
-    Ok(Some(Running { drain: drain_tx, cancel: cancel_tx, done, boards }))
+    let running = Running { drain: drain_tx, cancel: cancel_tx, done, feed: feed.clone() };
+    Ok(InServer { feed, running: Some(running) })
+}
+
+/// What [`start`] gives the server: the status feed its `/v1/factory` routes serve, whatever the control plane is
+/// doing, and the control plane when the user config turns it on.
+pub struct InServer {
+    pub feed: Feed,
+    pub running: Option<Running>,
+}
+
+/// The server's `/v1/factory/status` and `/v1/factory/events`, for it to mount behind its own bearer token.
+pub fn api(feed: &Feed) -> axum::Router {
+    surface::routes(feed.clone())
 }
 
 /// Whether the user config lists any repos for the factory, for a caller deciding whether to open `factory.log`.
@@ -1115,7 +1150,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (paths, store) = instance(dir.path(), "url = \"http://127.0.0.1:7241\"\n").await;
         let started = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).unwrap();
-        assert!(started.is_none());
+        assert!(started.running.is_none());
+        assert_eq!(started.feed.state(), trailhead_factory::FactoryState::Off);
     }
 
     #[tokio::test]
@@ -1123,7 +1159,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (paths, store) = instance(dir.path(), "[factory]\nrepos = [\"/no/such/repo\"]\ndisabled = true\n").await;
         assert!(!super::configured(&paths));
-        assert!(super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).unwrap().is_none());
+        let started = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).unwrap();
+        assert!(started.running.is_none());
+        assert_eq!(started.feed.state(), trailhead_factory::FactoryState::Disabled);
     }
 
     #[tokio::test]
