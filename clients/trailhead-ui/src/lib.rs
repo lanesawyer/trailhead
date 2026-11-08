@@ -22,6 +22,7 @@
 //! - A dot and a few words of state: [`chip`].
 //! - A form or dialog: a [`Modal`] marker type and [`open_modal`]; fill its [`ModalBody`], buttons in its [`ModalFooter`].
 //! - A hint over anything: put a [`Hint`] on it.
+//! - A message in a conversation, the reader's on the right and others' on the left: [`bubble`] on a [`Side`].
 //! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
 //!   [`sidebar_footer`]; mark the page shown on its [`NavItem`]. Pages fill [`beside_sidebar`].
 //! - Colors: a [`Token`] from [`token`], on a node as a [`BackgroundTone`], [`BorderTone`] or [`TextTone`]. An app
@@ -59,6 +60,7 @@ use bevy::prelude::*;
 
 mod accordion;
 mod badge;
+mod bubble;
 mod buttons;
 mod chip;
 mod containers;
@@ -94,6 +96,7 @@ pub use accordion::{
     spawn_header_button,
 };
 pub use badge::badge;
+pub use bubble::{Side, bubble};
 pub use buttons::{ButtonKind, button, button_text, danger_button, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{field, panel, row, section, section_frame};

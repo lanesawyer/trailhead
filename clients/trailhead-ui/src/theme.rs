@@ -52,6 +52,10 @@ pub mod token {
     pub const BADGE_BG: Token = Token::new("ui.badge.bg");
     /// The hint shown over a hovered tool button.
     pub const HINT_BG: Token = Token::new("ui.hint.bg");
+    /// A message in a conversation from someone else.
+    pub const BUBBLE_BG: Token = Token::new("ui.bubble.bg");
+    /// A message in a conversation from the reader.
+    pub const BUBBLE_MINE_BG: Token = Token::new("ui.bubble.mine.bg");
 
     /// Something that wants a person: an open question, a refusal to look at.
     pub const WARN: Token = Token::new("ui.warn");
@@ -108,6 +112,8 @@ impl Theme {
         theme.paint(&token::DIVIDER, palette::GRAY_3);
         theme.paint(&token::BADGE_BG, palette::GRAY_3);
         theme.paint(&token::HINT_BG, palette::GRAY_3.darker(0.05));
+        theme.paint(&token::BUBBLE_BG, palette::GRAY_2);
+        theme.paint(&token::BUBBLE_MINE_BG, palette::ACCENT);
 
         theme.paint(&token::WARN, Color::oklch(0.80, 0.14, 75.0));
         theme.paint(&token::DANGER, Color::oklch(0.68, 0.17, 25.0));
@@ -197,6 +203,8 @@ mod tests {
             token::DIVIDER,
             token::BADGE_BG,
             token::HINT_BG,
+            token::BUBBLE_BG,
+            token::BUBBLE_MINE_BG,
             token::WARN,
             token::DANGER,
             token::OK,
