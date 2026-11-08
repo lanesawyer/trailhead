@@ -84,6 +84,9 @@ pub mod token {
     pub const TEXT_DIM: Token = Token(tokens::TEXT_DIM);
     /// A button's caption.
     pub const BUTTON_TEXT: Token = Token(tokens::BUTTON_TEXT);
+    /// A plain button's background under the pointer, for an app to check against the surfaces its plain buttons sit
+    /// on: it has to show on each.
+    pub const BUTTON_PLAIN_BG_HOVER: Token = Token(tokens::BUTTON_PLAIN_BG_HOVER);
     /// A normal button's background, the token every control's theme is checked by.
     pub const BUTTON_BG: Token = Token(tokens::BUTTON_BG);
 }
@@ -149,6 +152,10 @@ impl Theme {
         theme.paint(&Token(tokens::BUTTON_BG_HOVER), feathers_palette::GRAY_3.lighter(0.14));
         theme.paint_accent(&Token(tokens::BUTTON_BG_PRESSED), feathers_palette::ACCENT.darker(0.12));
         theme.paint_accent(&Token(tokens::BUTTON_PRIMARY_BG_HOVER), feathers_palette::ACCENT.lighter(0.08));
+        // Plain buttons (icon buttons on cards and lists) hover like normal ones: feathers' plain hover is a shade of
+        // the surface they sit on, so on a card it can't be seen.
+        theme.paint(&token::BUTTON_PLAIN_BG_HOVER, feathers_palette::GRAY_3.lighter(0.14));
+        theme.paint_accent(&Token(tokens::BUTTON_PLAIN_BG_PRESSED), feathers_palette::ACCENT.darker(0.12));
 
         theme.paint(&token::PANEL_BG, palette::GRAY_1);
         theme.paint(&token::DIVIDER, palette::GRAY_3);
@@ -333,6 +340,7 @@ mod tests {
             token::BUTTON_TEXT,
             token::BUTTON_BG,
             token::WINDOW_BG,
+            token::BUTTON_PLAIN_BG_HOVER,
         ];
         for t in all {
             assert!(theme.has(&t), "{t} isn't in the theme");

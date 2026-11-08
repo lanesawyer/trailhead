@@ -46,6 +46,9 @@ private copy.
 - **A fixed set of choices** (a filter, a priority, a status) is a dropdown (`FeathersSelect`), never a button that
   cycles through values.
 - **A button that opens a menu** shows a chevron. One that acts when pressed doesn't.
+- **Every button changes background on hover**, `Plain` ones included (a tool button on a card is `Plain`). The hover
+  colors are theme tokens painted in `theme.rs`; a new variant or hand-built clickable row needs its own hover token,
+  visible against the surface it sits on.
 - **One primary button per surface** ("New task", "Save"). Everything else is normal or an icon-only tool button with a
   tooltip.
 
