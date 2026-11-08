@@ -247,7 +247,7 @@ impl FactoryMirror {
             FactoryEvent::Control { control } => state.control = control,
             FactoryEvent::Error { message } => state.last_error = Some((unix_now(), message)),
             // Shown in the activity log only for now.
-            FactoryEvent::Holding { .. } => {}
+            FactoryEvent::Holding { .. } | FactoryEvent::Unknown => {}
             FactoryEvent::SandboxChanged { sandbox } => self.set_campsite(commands, repo, sandbox),
             FactoryEvent::SandboxGone { name } => {
                 if let Some((entity, _)) = self.campsites.remove(&(repo.to_string(), name)) {
