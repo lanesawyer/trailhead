@@ -1,6 +1,7 @@
 //! Which repos one factory process runs, and the checks that they can share it: `--repo` (repeatable), else the user
 //! config's `[factory] repos`, else the repo found upward from the working directory.
 
+use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -31,7 +32,7 @@ pub fn dirs(
     host: &HostConfig,
     home: Option<&Path>,
     cwd: &Path,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<Vec<PathBuf>> {
     if !flags.is_empty() {
         return Ok(flags.to_vec());
     }
@@ -49,17 +50,16 @@ fn parent(file: &Path) -> PathBuf {
 }
 
 /// Reads one repo. `dir` is the repo's directory, or (as `--config` gives it) the file itself.
-pub fn load(dir: &Path, file: Option<&Path>) -> Result<RepoSpec, String> {
+pub fn load(dir: &Path, file: Option<&Path>) -> Result<RepoSpec> {
     let config_path = file.map_or_else(|| dir.join(".trailhead.toml"), Path::to_path_buf);
-    let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
     let remote = find::remote(dir);
-    let config =
-        FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let config = FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
     Ok(RepoSpec { dir: dir.to_path_buf(), config_path, remote, config })
 }
 
 /// Loads every repo; one that fails fails the lot, so the rest don't run silently without it.
-pub fn load_all(dirs: &[PathBuf], file: Option<&Path>) -> Result<Vec<RepoSpec>, String> {
+pub fn load_all(dirs: &[PathBuf], file: Option<&Path>) -> Result<Vec<RepoSpec>> {
     let specs = dirs.iter().map(|d| load(d, file.filter(|_| dirs.len() == 1))).collect::<Result<Vec<_>, _>>()?;
     validate(&specs)?;
     Ok(specs)
@@ -68,7 +68,7 @@ pub fn load_all(dirs: &[PathBuf], file: Option<&Path>) -> Result<Vec<RepoSpec>, 
 /// Refuses repos that can't share a process: the same slug, the same lowercase name (pool Sprites are `<name>-w<n>`),
 /// or, in one project, queue lists that share any entry or a repo with no queue alongside any other repo (it takes
 /// every ready task in the project), which would have both claim the same tasks. Names both repos.
-pub fn validate(specs: &[RepoSpec]) -> Result<(), String> {
+pub fn validate(specs: &[RepoSpec]) -> Result<()> {
     let mut slugs: HashMap<String, &RepoSpec> = HashMap::new();
     let mut names: HashMap<String, &RepoSpec> = HashMap::new();
     for (i, spec) in specs.iter().enumerate() {
@@ -76,24 +76,24 @@ pub fn validate(specs: &[RepoSpec]) -> Result<(), String> {
             .first()
             .filter(|f| f.config.target_specs() != spec.config.target_specs() || f.config.daemon != spec.config.daemon)
         {
-            return Err(format!(
+            return Err(Error::Conflict(format!(
                 "{} ({}) and {} ({}) differ in [factory.compute], [factory.targets] or [factory.daemon]; repos in one process share the sandbox providers and daemon launch",
                 first.dir.display(),
                 first.slug(),
                 spec.dir.display(),
                 spec.slug(),
-            ));
+            )));
         }
         if let Some(first) =
             specs.first().filter(|f| f.config.plugins().map(|p| p.0) != spec.config.plugins().map(|p| p.0))
         {
-            return Err(format!(
+            return Err(Error::Conflict(format!(
                 "{} ({}) and {} ({}) use different profile adapters; repos in one process share the daemon launch, which builds one harness",
                 first.dir.display(),
                 first.slug(),
                 spec.dir.display(),
                 spec.slug(),
-            ));
+            )));
         }
         let repo = &spec.config.repo;
         let slug = spec.slug();
@@ -105,13 +105,13 @@ pub fn validate(specs: &[RepoSpec]) -> Result<(), String> {
             ),
         ];
         if let Some((other, what)) = keys.into_iter().find_map(|(prev, what)| prev.map(|p| (p, what))) {
-            return Err(format!(
+            return Err(Error::Conflict(format!(
                 "{} ({}) and {} ({}) have {what}; they would collide, so run only one of them",
                 other.dir.display(),
                 other.slug(),
                 spec.dir.display(),
                 spec.slug(),
-            ));
+            )));
         }
         // Lists that share any queue task claim the same tasks (the same list is the common case).
         if let Some((other, shared)) = specs[..i].iter().find_map(|o| {
@@ -122,27 +122,27 @@ pub fn validate(specs: &[RepoSpec]) -> Result<(), String> {
             let shared = repo.queue.iter().find(|q| other.queue.contains(q))?;
             Some((o, shared))
         }) {
-            return Err(format!(
+            return Err(Error::Conflict(format!(
                 "{} ({}) and {} ({}) have the same project and queue, {} under {shared}; they would collide, so run only one of them",
                 other.dir.display(),
                 other.slug(),
                 spec.dir.display(),
                 spec.slug(),
                 repo.project,
-            ));
+            )));
         }
         // A repo with no queue takes every ready task in its project, so it overlaps any other repo there.
         if let Some(other) = specs[..i].iter().find(|o| {
             o.config.repo.project == repo.project && (o.config.repo.queue.is_empty() || repo.queue.is_empty())
         }) {
-            return Err(format!(
+            return Err(Error::Conflict(format!(
                 "{} ({}) and {} ({}) share project {} and one has no queue, so it would take the other's tasks; give each a queue",
                 other.dir.display(),
                 other.slug(),
                 spec.dir.display(),
                 spec.slug(),
                 repo.project,
-            ));
+            )));
         }
     }
     Ok(())
@@ -168,14 +168,14 @@ mod tests {
     fn distinct_repos_are_accepted() {
         let a = spec("/a", "o", "alpha", "ALPHA", &[]);
         let b = spec("/b", "o", "beta", "BETA", &[]);
-        assert_eq!(validate(&[a, b]), Ok(()));
+        validate(&[a, b]).unwrap();
     }
 
     #[test]
     fn the_same_slug_is_refused_naming_both() {
         let a = spec("/a", "o", "app", "ALPHA", &[]);
         let b = spec("/b", "o", "app", "BETA", &[]);
-        let err = validate(&[a, b]).unwrap_err();
+        let err = validate(&[a, b]).unwrap_err().to_string();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("the same repo, o/app"), "{err}");
     }
 
@@ -183,7 +183,7 @@ mod tests {
     fn the_same_lowercase_name_is_refused_naming_both() {
         let a = spec("/a", "o", "App", "ALPHA", &[]);
         let b = spec("/b", "p", "app", "BETA", &[]);
-        let err = validate(&[a, b]).unwrap_err();
+        let err = validate(&[a, b]).unwrap_err().to_string();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("same repo name"), "{err}");
     }
 
@@ -191,11 +191,11 @@ mod tests {
     fn the_same_project_and_queue_is_refused_naming_both() {
         let a = spec("/a", "o", "alpha", "TRAIL", &["TRAIL-102"]);
         let b = spec("/b", "o", "beta", "TRAIL", &["TRAIL-102"]);
-        let err = validate(&[a, b]).unwrap_err();
+        let err = validate(&[a, b]).unwrap_err().to_string();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("project and queue"), "{err}");
         let a = spec("/a", "o", "alpha", "TRAIL", &[]);
         let b = spec("/b", "o", "beta", "TRAIL", &[]);
-        assert!(validate(&[a, b]).unwrap_err().contains("no queue"));
+        assert!(validate(&[a, b]).unwrap_err().to_string().contains("no queue"));
     }
 
     #[test]
@@ -204,7 +204,7 @@ mod tests {
         let mut b = spec("/b", "o", "beta", "BETA", &[]);
         b.config.compute =
             trailhead_factory::ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: None };
-        let err = validate(&[a, b]).unwrap_err();
+        let err = validate(&[a, b]).unwrap_err().to_string();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("[factory.compute]"), "{err}");
     }
 
@@ -221,7 +221,7 @@ mod tests {
                 spend: None,
             },
         );
-        let err = validate(&[a, b]).unwrap_err();
+        let err = validate(&[a, b]).unwrap_err().to_string();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("[factory.targets]"), "{err}");
     }
 
@@ -230,7 +230,7 @@ mod tests {
         let a = spec("/a", "o", "alpha", "ALPHA", &[]);
         let mut b = spec("/b", "o", "beta", "BETA", &[]);
         b.config.profiles.get_mut("worker").unwrap().adapter = "other-harness".into();
-        let err = validate(&[a, b]).unwrap_err();
+        let err = validate(&[a, b]).unwrap_err().to_string();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("different profile adapters"), "{err}");
     }
 
@@ -238,30 +238,30 @@ mod tests {
     fn a_queueless_repo_overlaps_another_on_its_project() {
         let a = spec("/a", "o", "alpha", "TRAIL", &[]);
         let b = spec("/b", "o", "beta", "TRAIL", &["TRAIL-2"]);
-        assert!(validate(&[a, b]).unwrap_err().contains("no queue"));
+        assert!(validate(&[a, b]).unwrap_err().to_string().contains("no queue"));
         let (a, b) = (spec("/a", "o", "alpha", "TRAIL", &[]), spec("/b", "o", "beta", "TRAIL", &["TRAIL-2"]));
-        assert!(validate(&[b, a]).unwrap_err().contains("no queue"));
+        assert!(validate(&[b, a]).unwrap_err().to_string().contains("no queue"));
     }
 
     #[test]
     fn one_project_with_different_queues_is_fine() {
         let a = spec("/a", "o", "alpha", "TRAIL", &["TRAIL-1"]);
         let b = spec("/b", "o", "beta", "TRAIL", &["TRAIL-2"]);
-        assert_eq!(validate(&[a, b]), Ok(()));
+        validate(&[a, b]).unwrap();
     }
 
     #[test]
     fn overlapping_queue_lists_are_refused_and_disjoint_ones_are_fine() {
         let a = spec("/a", "o", "alpha", "TRAIL", &["TRAIL-1", "TRAIL-2"]);
         let b = spec("/b", "o", "beta", "TRAIL", &["TRAIL-3", "TRAIL-2"]);
-        let err = validate(&[a, b]).unwrap_err();
+        let err = validate(&[a, b]).unwrap_err().to_string();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("TRAIL-2"), "{err}");
         let a = spec("/a", "o", "alpha", "TRAIL", &["TRAIL-1", "TRAIL-2"]);
         let b = spec("/b", "o", "beta", "TRAIL", &["TRAIL-3"]);
-        assert_eq!(validate(&[a, b]), Ok(()));
+        validate(&[a, b]).unwrap();
         let a = spec("/a", "o", "alpha", "ALPHA", &["TRAIL-1"]);
         let b = spec("/b", "o", "beta", "BETA", &["TRAIL-1"]);
-        assert_eq!(validate(&[a, b]), Ok(()));
+        validate(&[a, b]).unwrap();
     }
 
     #[test]
@@ -288,7 +288,7 @@ mod tests {
             std::fs::create_dir_all(d).unwrap();
         }
         std::fs::write(bad.join(".trailhead.toml"), "project = \"X\"\n").unwrap();
-        let err = load_all(&[bad.clone(), good], None).err().unwrap();
+        let err = load_all(&[bad.clone(), good], None).err().unwrap().to_string();
         assert!(err.contains(&bad.display().to_string()), "{err}");
     }
 }
