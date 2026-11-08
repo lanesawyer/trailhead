@@ -24,8 +24,8 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
 
 [dev-dependencies]
+trailhead-plugins.workspace = true
 trailhead-wire.workspace = true
 tempfile.workspace = true
-trailhead-daemon = { workspace = true, features = ["net"] }
 iroh.workspace = true
 tokio = { workspace = true, features = ["process"] }

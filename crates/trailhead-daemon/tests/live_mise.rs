@@ -9,8 +9,8 @@ use std::sync::Arc;
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use trailhead_compute_sprites::SpritesCompute;
-use trailhead_daemon::plugins::CLAUDE_CODE;
 use trailhead_factory::{Check, Compute, Daemon, Egress, IROH_DOMAINS, Labels, PrepareRequest, Repo, SandboxSpec};
+use trailhead_plugins::CLAUDE_CODE;
 use trailhead_wire::daemon::{Launch, RemoteDaemon};
 
 #[tokio::test]

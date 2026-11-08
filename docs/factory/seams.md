@@ -27,7 +27,7 @@ The code in `crates/trailhead-factory` is authoritative; this is what each trait
 ## Rules
 
 - **Vendor features map onto neutral concepts.** Sprites connectors become a sandbox's `role` label plus an `Egress` list; another compute host might grant the same role with injected env or a proxy. Checkpoints are required of every `Compute`, since the pool and rollback depend on them.
-- **Static plugins.** Implementations are crates compiled into the `trailhead-factory` binary, which wires them up in `trailhead-factory-host`. No dynamic loading or hot swapping. Compute has two implementations (Sprites and Docker), picked by `[factory.compute]`. Harnesses and providers are picked by name: a profile's `adapter` and `provider` look up a `HarnessKind` (`trailhead_daemon::plugins::harnesses`) and a `ProviderKind` (`providers()` in the host) in a `Registry`, and an unknown name fails at config load. Today each registry holds one entry, and a repo's worker and reviewer profiles must agree, as must all repos in one process. A harness takes its credentials from `DaemonSecrets.harness_secrets`, a name-to-value map only that harness reads, and declares the egress it needs for them (Claude Code in subscription mode: `api.anthropic.com`). Cargo features may keep the binary slim.
+- **Static plugins.** Implementations are crates compiled into the `trailhead-factory` binary, which wires them up in `trailhead-factory-host`. No dynamic loading or hot swapping. Compute has two implementations (Sprites and Docker), picked by `[factory.compute]`. Harnesses and providers are picked by name: a profile's `adapter` and `provider` look up a `HarnessKind` and a `ProviderKind` in a `Registry`, and an unknown name fails at config load. Each plugin crate describes itself with a `kind()` function, and `trailhead-plugins` holds the one list of them (`harnesses()`, `providers()`) that the control plane and the daemon both read. Today each registry holds one entry, and a repo's worker and reviewer profiles must agree, as must all repos in one process. A harness takes its credentials from `DaemonSecrets.harness_secrets`, a name-to-value map only that harness reads, and declares the egress it needs for them (Claude Code in subscription mode: `api.anthropic.com`). Cargo features may keep the binary slim.
 - **Fakes for testing.** `trailhead-testkit` has an in-memory `Compute`, a scripted `Harness`, and fake `Tracker`, `CodeHost` and `ModelProvider`, so the whole lifecycle runs in `cargo test` with no network or spend. No external emulator.
 
 ## Crates
@@ -47,6 +47,7 @@ The code in `crates/trailhead-factory` is authoritative; this is what each trait
 | `trailhead-harness-claude-code` | `Harness` wrapping the Claude Code CLI |
 | `trailhead-provider-anthropic` | `ModelProvider` for Anthropic |
 | `trailhead-codehost-github` | `CodeHost` for GitHub through the Sprites connector, with the Git Data API |
+| `trailhead-plugins` | The harnesses and providers a build carries, by name: the `Registry` lists the control plane checks config against and the daemon builds its harness from |
 | `trailhead-testkit` | Fakes for all five seams and an in-process daemon |
 
 The factory crates are `publish = false`. CI and the release workflow package and publish only `trailhead-core`, `trailhead-server` and `trailhead`.

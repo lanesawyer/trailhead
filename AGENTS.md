@@ -13,6 +13,7 @@ Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). 
 - `trailhead-factory-host`: the `trailhead-factory` binary that runs the control plane beside the server (`mise run factory`).
 - `trailhead-daemon`: the daemon in each sandbox, and its side of the iroh transport.
 - `trailhead-wire`: the iroh protocols the control plane, the daemon and Lookout share: framing, the daemon contract's control-plane side (`RemoteDaemon`), the API tunnel and Lookout's `trailhead/ui/0`.
+- `trailhead-plugins`: the one list of harnesses and model providers a build carries, which the control plane and the daemon share.
 - `trailhead-compute-sprites`, `trailhead-compute-docker`, `trailhead-harness-claude-code`, `trailhead-provider-anthropic`, `trailhead-codehost-github`: the real implementations of the traits.
 - `trailhead-testkit`: in-memory fakes of all five, so the whole lifecycle runs in `cargo test`.
 

@@ -12,11 +12,11 @@ use iroh::{Endpoint, SecretKey};
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::CoreTracker;
 use trailhead_core::{Ctx, EventFilter, NewProject, NewTask, Store};
-use trailhead_daemon::plugins::CLAUDE_CODE;
 use trailhead_factory::{
     Check, Compute, Daemon, Egress, Endpoint as ModelEndpoint, IROH_DOMAINS, Labels, ModelId, PrRef, PrepareRequest,
     Repo, Role, RunRequest, RunResult, SandboxSpec, TaskKey, TaskSpec, Tracker,
 };
+use trailhead_plugins::CLAUDE_CODE;
 use trailhead_wire::API_ALPN;
 use trailhead_wire::api::ApiTunnel;
 use trailhead_wire::daemon::{Launch, RemoteDaemon};

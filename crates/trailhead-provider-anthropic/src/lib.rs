@@ -3,6 +3,14 @@
 
 use trailhead_factory::{Endpoint, ModelAlias, ModelId, ModelProvider, Usage, Usd};
 
+/// The name profiles give this provider (`provider = "anthropic"`).
+pub const NAME: &str = "anthropic";
+
+/// How the factory's registry builds this provider from the model endpoint (`trailhead-plugins` lists it).
+pub fn kind() -> trailhead_factory::ProviderKind {
+    |endpoint| std::sync::Arc::new(Anthropic::new(endpoint))
+}
+
 /// Where model calls go without a connector.
 pub const API_URL: &str = "https://api.anthropic.com";
 

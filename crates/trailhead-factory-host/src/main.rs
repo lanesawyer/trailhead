@@ -38,11 +38,8 @@ use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
-use trailhead_daemon::plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN};
-use trailhead_factory::{
-    Compute, ComputeConfig, Daemon, FactoryConfig, HarnessSecrets, ProviderKind, Registry, Target,
-};
-use trailhead_provider_anthropic::Anthropic;
+use trailhead_factory::{Compute, ComputeConfig, Daemon, FactoryConfig, HarnessSecrets, Target};
+use trailhead_plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN, harnesses, providers};
 use trailhead_wire::api::ApiTunnel;
 use trailhead_wire::daemon::{Launch, RemoteDaemon};
 use trailhead_wire::ui::{UI_ALPN, UiAllowlist, UiProtocol};
@@ -314,7 +311,7 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let dirs = repos::dirs(&run.repo, opts.config.as_deref(), &host_config, home.as_deref(), &cwd)?;
     let mut specs = repos::load_all(&dirs, opts.config.as_deref())?;
-    let harnesses = trailhead_daemon::plugins::harnesses();
+    let harnesses = harnesses();
     let providers = providers();
     for spec in &specs {
         spec.config
@@ -847,10 +844,6 @@ async fn main() -> std::process::ExitCode {
 }
 
 /// The model providers this build carries, by the `provider` name profiles give them.
-fn providers() -> Registry<ProviderKind> {
-    Registry::new("provider").with("anthropic", |endpoint| Arc::new(Anthropic::new(endpoint)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{check_result, lock_control_plane, server_check_with};
