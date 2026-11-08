@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use bevy::ecs::system::SystemParam;
 use bevy::feathers::controls::ButtonVariant;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::FocusedInput;
@@ -34,12 +35,13 @@ use crate::widgets::{
 };
 use bevy::feathers::theme::ThemeToken;
 
-/// The views of the app: the task board and the trail map.
+/// The views of the app: the task board, the trail map, and one project's page ([`crate::project`]).
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum View {
     #[default]
     Board,
     Map,
+    Project,
 }
 
 /// How many cards a column builds at first, and how many more each "show more" adds. A column holds hundreds
@@ -239,15 +241,22 @@ pub struct Input<'a> {
     pub now: Timestamp,
 }
 
-/// The first moment a claim still live at `now` runs out, if any does.
-fn next_expiry(claims: &[Claim], now: Timestamp) -> Option<Timestamp> {
-    claims.iter().filter(|c| c.is_live(now)).filter_map(|c| c.expires_at).min()
-}
-
 /// Groups the tasks passing `filter` into one column per status (empty ones included; done and cancelled
 /// only when `closed`), with subtasks under their parent, and works out
 /// what each filter can offer.
 pub fn build(input: Input, filter: &Filter) -> BoardView {
+    build_with(input, filter, true)
+}
+
+/// Every task in the project keyed `project`, closed ones included, as cards in the board's order (by status, then
+/// urgency) without nesting: a subtask is a card of its own that names its parent.
+pub fn grid(input: Input, project: &str) -> Vec<Card> {
+    let filter = Filter { project: Some(project.to_string()), closed: true, ..default() };
+    build_with(input, &filter, false).columns.into_iter().flat_map(|c| c.cards).collect()
+}
+
+/// [`build`], with subtasks under their parent in a column when `nest`, else each a top-level card naming its parent.
+fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView {
     let project_key: HashMap<Uuid, &str> = input.projects.iter().map(|p| (p.id, p.key.as_str())).collect();
     let task_key: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.key.as_str())).collect();
     // Holders are agents or, for a claim a person made, users.
@@ -363,11 +372,13 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         // Urgent first, then by key number, so the order doesn't shuffle with every update.
         here.sort_by_key(|t| (t.priority, key_number(t.key.as_str()), t.key.clone()));
         let ids: HashSet<Uuid> = here.iter().map(|t| t.id).collect();
-        let nested = |t: &Task| t.parent_id.is_some_and(|p| ids.contains(&p));
+        let nested = |t: &Task| nest && t.parent_id.is_some_and(|p| ids.contains(&p));
         let mut cards = Vec::new();
         for t in here.iter().filter(|t| !nested(t)) {
             cards.push(card(t, 0, true));
-            cards.extend(here.iter().filter(|c| c.parent_id == Some(t.id)).map(|c| card(c, 1, false)));
+            if nest {
+                cards.extend(here.iter().filter(|c| c.parent_id == Some(t.id)).map(|c| card(c, 1, false)));
+            }
         }
         columns.push(Column { status, cards });
     }
@@ -459,62 +470,105 @@ fn key_number(key: &str) -> i64 {
     key.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
 }
 
-#[allow(clippy::type_complexity)]
-#[allow(clippy::too_many_arguments)]
+/// What the views of tasks build from: the mirror's rows, the factory's queues, and what says any of them changed.
+#[derive(SystemParam)]
+pub struct Sources<'w, 's> {
+    mirror: Res<'w, Mirror>,
+    changed: Query<'w, 's, (), Changed<Rev>>,
+    removed: RemovedComponents<'w, 's, Rev>,
+    removed_runs: RemovedComponents<'w, 's, Run>,
+    projects: Query<'w, 's, &'static Mirrored<Project>>,
+    tasks: Query<'w, 's, &'static Mirrored<Task>>,
+    claims: Query<'w, 's, &'static Mirrored<Claim>>,
+    comments: Query<'w, 's, &'static Mirrored<Comment>>,
+    agents: Query<'w, 's, &'static Mirrored<Agent>>,
+    users: Query<'w, 's, &'static Mirrored<User>>,
+    runs: Query<'w, 's, &'static Run>,
+    runs_changed: Query<'w, 's, (), Changed<Run>>,
+    authoring: Res<'w, Authoring>,
+    factory: Option<Res<'w, FactoryStatus>>,
+}
+
+impl Sources<'_, '_> {
+    /// Whether anything changed since the system using this last ran. It reads the removals, so call it on every run.
+    pub fn changed(&mut self) -> bool {
+        let gone = self.removed.read().count() + self.removed_runs.read().count() > 0;
+        gone || self.mirror.is_changed()
+            || self.authoring.is_changed()
+            || self.factory.as_ref().is_some_and(|f| f.is_changed())
+            || !self.changed.is_empty()
+            || !self.runs_changed.is_empty()
+    }
+
+    /// The rows, copied out of the mirror for [`Rows::input`].
+    pub fn rows(&self) -> Rows {
+        Rows {
+            projects: rows(&self.projects),
+            tasks: rows(&self.tasks),
+            claims: rows(&self.claims),
+            comments: rows(&self.comments),
+            agents: rows(&self.agents),
+            users: rows(&self.users),
+            runs: self.runs.iter().cloned().collect(),
+            queues: queue_keys(&self.authoring, self.factory.as_deref()),
+        }
+    }
+}
+
+/// The mirror's rows as [`Sources::rows`] copied them.
+pub struct Rows {
+    pub projects: Vec<Project>,
+    pub tasks: Vec<Task>,
+    pub claims: Vec<Claim>,
+    pub comments: Vec<Comment>,
+    pub agents: Vec<Agent>,
+    pub users: Vec<User>,
+    pub runs: Vec<Run>,
+    pub queues: Vec<String>,
+}
+
+impl Rows {
+    pub fn input<'a>(&'a self, deep: &'a [DeepHit], now: Timestamp) -> Input<'a> {
+        Input {
+            projects: &self.projects,
+            tasks: &self.tasks,
+            claims: &self.claims,
+            comments: &self.comments,
+            agents: &self.agents,
+            users: &self.users,
+            runs: &self.runs,
+            queues: &self.queues,
+            deep,
+            now,
+        }
+    }
+}
+
 fn rebuild_view(
     filter: Res<Filter>,
-    mirror: Res<Mirror>,
-    changed: Query<(), Changed<Rev>>,
-    (mut removed, mut removed_runs): (RemovedComponents<Rev>, RemovedComponents<Run>),
-    projects: Query<&Mirrored<Project>>,
-    tasks: Query<&Mirrored<Task>>,
-    claims: Query<&Mirrored<Claim>>,
-    comments: Query<&Mirrored<Comment>>,
-    (agents, users): (Query<&Mirrored<Agent>>, Query<&Mirrored<User>>),
-    runs: Query<&Run>,
-    runs_changed: Query<(), Changed<Run>>,
-    authoring: Res<Authoring>,
-    factory: Option<Res<FactoryStatus>>,
+    mut sources: Sources,
     deep: Option<Res<Deep>>,
     mut view: ResMut<BoardView>,
     mut expiry: Local<Option<Timestamp>>,
 ) {
-    let gone = removed.read().count() + removed_runs.read().count() > 0;
+    let changed = sources.changed();
     let now = Timestamp::now();
     let expired = expiry.is_some_and(|at| at <= now);
-    if !(filter.is_changed()
-        || authoring.is_changed()
-        || factory.as_ref().is_some_and(|f| f.is_changed())
-        || deep.as_ref().is_some_and(|d| d.is_changed())
-        || mirror.is_changed()
-        || gone
-        || !changed.is_empty()
-        || !runs_changed.is_empty()
-        || expired)
-    {
+    if !(changed || filter.is_changed() || deep.as_ref().is_some_and(|d| d.is_changed()) || expired) {
         return;
     }
-    let (projects, tasks, claims, comments, agents, users) =
-        (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents), rows(&users));
-    let runs: Vec<Run> = runs.iter().cloned().collect();
-    let queues = queue_keys(&authoring, factory.as_deref());
-    let input = Input {
-        projects: &projects,
-        tasks: &tasks,
-        claims: &claims,
-        comments: &comments,
-        agents: &agents,
-        users: &users,
-        runs: &runs,
-        queues: &queues,
-        deep: deep.as_ref().map_or(&[], |d| d.for_query(filter.query.trim())),
-        now,
-    };
-    *expiry = next_expiry(&claims, now);
-    let next = build(input, &filter);
+    let rows = sources.rows();
+    *expiry = next_expiry(&rows.claims, now);
+    let deep = deep.as_ref().map_or(&[][..], |d| d.for_query(filter.query.trim()));
+    let next = build(rows.input(deep, now), &filter);
     if *view != next {
         *view = next;
     }
+}
+
+/// The first moment a claim still live at `now` runs out, if any does.
+pub fn next_expiry(claims: &[Claim], now: Timestamp) -> Option<Timestamp> {
+    claims.iter().filter(|c| c.is_live(now)).filter_map(|c| c.expires_at).min()
 }
 
 /// The cards before and after the task `id` in its column, in the board's order (a subtask under its parent counts
@@ -752,7 +806,7 @@ impl Plugin for BoardPlugin {
     }
 }
 
-/// Draws the board while in [`View::Board`].
+/// Draws the board while in [`View::Board`], and every [`BoardCard`] in any view.
 pub struct BoardUiPlugin;
 
 impl Plugin for BoardUiPlugin {
@@ -767,20 +821,13 @@ impl Plugin for BoardUiPlugin {
             .add_observer(clear_search_on_escape)
             .add_systems(
                 Update,
-                (
-                    dress_columns,
-                    dress_cards,
-                    dress_slots,
-                    update_counts,
-                    tools_follow_connection,
-                    read_search_box,
-                    dress_header,
-                    update_header,
-                )
+                (dress_columns, dress_slots, update_counts, read_search_box, dress_header, update_header)
                     .chain()
                     .after(sync_tree)
                     .run_if(in_state(View::Board)),
-            );
+            )
+            // Cards are drawn wherever they are, on the board or on a project's page.
+            .add_systems(Update, (dress_cards, tools_follow_connection));
     }
 }
 
