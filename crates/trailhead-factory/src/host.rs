@@ -21,6 +21,9 @@ pub struct HostConfig {
     /// Directories holding a `.trailhead.toml` with a `[factory]` table. A leading `~` is the home directory.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// Set by `trailhead factory disable`: the server runs no control plane, whatever `repos` lists.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 impl HostConfig {

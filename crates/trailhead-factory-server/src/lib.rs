@@ -822,13 +822,17 @@ const RETRY_FIRST: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(300);
 
 /// Starts the control plane inside the Trailhead server on `store`, with the API tunnel forwarding to `server`
-/// (`docs/factory/server-control-plane.md`). Only the user config's `[factory] repos` turns it on: with none listed
-/// this returns `None` and runs nothing. A configuration error (a repo file that won't parse, repos that collide, an
+/// (`docs/factory/server-control-plane.md`). Only the user config's `[factory] repos` turns it on: with none listed,
+/// or with `disabled` set, this returns `None` and runs nothing. A configuration error (a repo file that won't parse, repos that collide, an
 /// unknown harness or provider, a missing repo) is returned, and the server refuses to start. Outside failures
 /// (Sprites or GitHub unreachable, a locked keyring, a daemon download, another control plane holding the lock)
 /// are logged and retried with backoff while the server keeps serving.
 pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<Option<Running>, String> {
     let host_config = read_host_config(&paths)?;
+    if host_config.disabled {
+        tracing::info!("control: disabled; `trailhead factory enable` turns it back on");
+        return Ok(None);
+    }
     if host_config.repos.is_empty() {
         return Ok(None);
     }
@@ -874,7 +878,7 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<Opti
 /// Whether the user config lists any repos for the factory, for a caller deciding whether to open `factory.log`.
 /// Unreadable config counts as yes, so [`start`]'s error is logged where the factory's lines go.
 pub fn configured(paths: &Paths) -> bool {
-    read_host_config(paths).map_or(true, |c| !c.repos.is_empty())
+    read_host_config(paths).map_or(true, |c| !c.disabled && !c.repos.is_empty())
 }
 
 /// The server's logging when it may run the control plane: the factory's events (its crates, iroh and anything in a
@@ -1074,6 +1078,14 @@ mod tests {
         let (paths, store) = instance(dir.path(), "url = \"http://127.0.0.1:7241\"\n").await;
         let started = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).unwrap();
         assert!(started.is_none());
+    }
+
+    #[tokio::test]
+    async fn disabled_runs_nothing_even_with_a_broken_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, store) = instance(dir.path(), "[factory]\nrepos = [\"/no/such/repo\"]\ndisabled = true\n").await;
+        assert!(!super::configured(&paths));
+        assert!(super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).unwrap().is_none());
     }
 
     #[tokio::test]
