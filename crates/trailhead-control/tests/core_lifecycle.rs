@@ -13,6 +13,7 @@ fn gr(n: u8) -> Grade {
 fn pr(n: u8) -> Priority {
     Priority::new(n).unwrap()
 }
+use trailhead_factory::HostConfig;
 use trailhead_factory::{
     CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Role, RunOutcome, RunUpdate, Status, TaskKey,
     Tracker, Usd, Verdict, VerdictKind, label,
@@ -98,7 +99,7 @@ async fn rig_paged(config: &str, page_size: Option<usize>) -> Rig {
         Arc::new(tracker.clone()),
         Arc::new(FakeProvider::new(1)),
         daemon.clone(),
-        Host::new(None),
+        Host::new(&HostConfig::default()),
     )
     .with_codehost(Arc::new(codehost.clone()));
     Rig { store, human, factory, tracker, compute, codehost, harness, daemon }
@@ -1296,7 +1297,7 @@ async fn a_stray_is_warned_about_once_across_reconciles_and_not_for_a_sibling_re
     let r = rig().await;
     let q1 = r.task("Alpha's queue").await;
     let q2 = r.task("Beta's queue").await;
-    let host = Host::new(None);
+    let host = Host::new(&HostConfig::default());
     let alpha = factory_for(&r, "alpha", &q1, host.clone());
     let _beta = factory_for(&r, "beta", &q2, host);
 

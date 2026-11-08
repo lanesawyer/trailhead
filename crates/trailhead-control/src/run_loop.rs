@@ -537,8 +537,7 @@ impl Factory {
     fn paused_until(&self) -> Option<(String, u32, i64)> {
         let now = unix_now();
         let quota = self.host.quota.lock().unwrap();
-        self.config
-            .usage
+        self.host
             .pause_at
             .iter()
             .filter_map(|(window, limit)| {

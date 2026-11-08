@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use trailhead_control::{Factory, Host};
+use trailhead_factory::HostConfig;
 use trailhead_factory::{Compute, FactoryConfig, Labels, Role, RunOutcome, SandboxSpec, TaskKey, VerdictKind, label};
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
 
@@ -13,9 +14,6 @@ fn config(repo: &str, extra: &str) -> String {
 owner = "lanesawyer"
 name = "{repo}"
 {extra}
-
-[usage]
-pause_at = {{ five_hour = 80 }}
 
 [checks]
 fmt = "cargo fmt --check"
@@ -65,6 +63,11 @@ fn repo(name: &str, extra: &str, compute: &FakeCompute, host: &Arc<Host>) -> Rep
     Repo { factory, tracker, harness }
 }
 
+/// A host pausing every repo at 80% of the five-hour window.
+fn pausing_host() -> Arc<Host> {
+    Host::new(&HostConfig { pause_at: [("five_hour".to_string(), 80)].into(), ..Default::default() })
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
@@ -97,7 +100,7 @@ fn queue(r: &Repo) {
 #[tokio::test]
 async fn a_quota_reading_from_one_repo_pauses_both() {
     let compute = FakeCompute::new();
-    let host = Host::new(None);
+    let host = pausing_host();
     let (a, b) = (repo("alpha", "", &compute, &host), repo("beta", "", &compute, &host));
     a.tracker.add_task("TRAIL", "First", "");
     a.harness.push(Role::Worker, Script::new(changes()).quota("five_hour", 85, unix_now() + 3600));
@@ -113,7 +116,7 @@ async fn a_quota_reading_from_one_repo_pauses_both() {
 #[tokio::test]
 async fn a_host_cap_counts_every_repos_sandboxes() {
     let compute = FakeCompute::new();
-    let host = Host::new(Some(1));
+    let host = Host::new(&HostConfig { max_sandboxes: Some(1), ..Default::default() });
     let (a, b) =
         (repo("alpha", "max_sandboxes = 3", &compute, &host), repo("beta", "max_sandboxes = 3", &compute, &host));
     hold(&compute, "trail-99-a1", "beta").await;
@@ -128,7 +131,7 @@ async fn a_host_cap_counts_every_repos_sandboxes() {
 #[tokio::test]
 async fn a_repos_own_cap_still_applies_under_a_roomy_host() {
     let compute = FakeCompute::new();
-    let host = Host::new(Some(10));
+    let host = Host::new(&HostConfig { max_sandboxes: Some(10), ..Default::default() });
     let a = repo("alpha", "max_sandboxes = 1", &compute, &host);
     hold(&compute, "trail-99-a1", "alpha").await;
     queue(&a);
@@ -148,7 +151,7 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
 #[tokio::test]
 async fn two_repos_loops_run_at_once_each_taking_only_its_own_projects_tasks() {
     let compute = FakeCompute::new();
-    let host = Host::new(None);
+    let host = Host::new(&HostConfig::default());
     let tracker = FakeTracker::new("factory");
     let mut loops = Vec::new();
     let mut harnesses = Vec::new();
@@ -204,7 +207,7 @@ async fn repos_sharing_a_project_through_different_queues_leave_each_others_in_f
     use trailhead_factory::{RunUpdate, Status, Tracker};
 
     let compute = FakeCompute::new();
-    let host = Host::new(None);
+    let host = Host::new(&HostConfig::default());
     let tracker = FakeTracker::new("factory");
     let q1 = tracker.add_task("TRAIL", "Alpha's queue", "");
     let q2 = tracker.add_task("TRAIL", "Beta's queue", "");
