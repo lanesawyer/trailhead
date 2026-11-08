@@ -1,0 +1,42 @@
+[package]
+name = "trailhead-factory-server"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+description = "The Trailhead factory's control plane as a library: setup, credentials, status surface and run loops"
+
+[features]
+# The Docker Compute (`[compute] kind = "docker"`).
+docker = ["dep:trailhead-compute-docker"]
+
+[dependencies]
+trailhead-client.workspace = true
+trailhead-core.workspace = true
+trailhead-factory.workspace = true
+trailhead-log.workspace = true
+trailhead-control.workspace = true
+trailhead-plugins.workspace = true
+trailhead-provider-anthropic.workspace = true
+trailhead-wire.workspace = true
+trailhead-compute-sprites.workspace = true
+trailhead-codehost-github.workspace = true
+trailhead-compute-docker = { workspace = true, optional = true }
+clap.workspace = true
+hex.workspace = true
+iroh.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["signal", "net", "time", "process"] }
+axum.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

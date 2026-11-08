@@ -15,6 +15,7 @@ categories.workspace = true
 trailhead-model.workspace = true
 jiff.workspace = true
 uuid.workspace = true
+directories.workspace = true
 serde.workspace = true
 keyring.workspace = true
 libc.workspace = true

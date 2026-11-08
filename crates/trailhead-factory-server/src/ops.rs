@@ -33,7 +33,8 @@ pub struct LogsOpts {
 }
 
 pub async fn status(opts: &Opts) -> Result<(), String> {
-    let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+    let paths =
+        trailhead_client::paths::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let (opts, fnox) = resolve_opts(opts, &paths)?;
     let (_, _, config) = load_config(&opts)?;
     let store = Arc::new(Store::open_local(&paths.db()).await.map_err(|e| e.to_string())?);
@@ -82,7 +83,8 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
 }
 
 pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
-    let paths = trailhead_server::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+    let paths =
+        trailhead_client::paths::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     let (opts, fnox) = resolve_opts(&logs.opts, &paths)?;
     let (_, _, config) = load_config(&opts)?;
 
@@ -137,7 +139,7 @@ async fn log_source(
     config: &trailhead_factory::FactoryConfig,
     opts: &Opts,
     fnox: &crate::fnox::Fnox,
-    paths: &trailhead_server::Paths,
+    paths: &trailhead_client::paths::Paths,
     task: &Task,
 ) -> Result<(Arc<dyn trailhead_factory::Compute>, Sandbox), String> {
     let computes = computes(config, opts, fnox, paths, Default::default(), true)?;
