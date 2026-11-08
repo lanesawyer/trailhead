@@ -29,6 +29,9 @@ pub struct Health {
     pub runs_in_flight: Option<usize>,
     /// Whether a stop signal has the server draining the factory before it exits.
     pub draining: bool,
+    /// Whether the server restarts onto a newer binary once the factory's runs finish. `None` from a server older
+    /// than that restart, which doesn't handle the SIGUSR1 that asks for it.
+    pub upgrade_pending: Option<bool>,
 }
 
 /// An API error with its stable code, so a client can print `error[claim_held]: ...`.

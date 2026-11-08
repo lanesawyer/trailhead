@@ -139,3 +139,11 @@ fn login_makes_the_other_server_this_machines_default() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("laptop"));
 }
+
+#[test]
+fn health_says_an_upgrade_restart_can_be_asked_for() {
+    let th = Instance::new();
+    th.stdout(&["whoami"]);
+    let v: serde_json::Value = serde_json::from_str(&th.stdout(&["--json", "server", "status"])).unwrap();
+    assert_eq!(v["upgrade_pending"], serde_json::json!(false), "{v}");
+}

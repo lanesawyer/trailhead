@@ -43,6 +43,8 @@ pub struct AppState {
     pub runs_in_flight: std::sync::OnceLock<Box<dyn Fn() -> usize + Send + Sync>>,
     /// Set once a stop signal has started draining the control plane; `/v1/health` reports it.
     pub draining: std::sync::atomic::AtomicBool,
+    /// Set once SIGUSR1 asked for a restart onto a new binary; `/v1/health` reports it.
+    pub upgrade_pending: std::sync::atomic::AtomicBool,
 }
 
 impl AppState {
@@ -55,6 +57,7 @@ impl AppState {
             webhook_targets: webhooks::Targets::PublicOnly,
             runs_in_flight: Default::default(),
             draining: Default::default(),
+            upgrade_pending: Default::default(),
         }
     }
 }
@@ -170,8 +173,9 @@ pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::
     Ok((store, ctx))
 }
 
-/// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first.
-pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Error>> {
+/// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first, or until SIGUSR1 asks it to
+/// restart onto a new binary.
+pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::Error>> {
     let (store, ctx) = open_local(&cfg).await?;
     let state = Arc::new(AppState {
         info: ServerInfo { instance: cfg.instance.clone(), ..ServerInfo::current(Some(cfg.db.clone())) },
@@ -241,8 +245,11 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
     let stopping = state.shutdown.clone();
     let mut stopped = state.shutdown.subscribe();
     let mut signals = Signals::new()?;
+    let signal_state = state.clone();
     #[cfg(feature = "factory")]
-    let (draining, signal_state) = (factory.clone(), state.clone());
+    let draining = factory.clone();
+    let restart = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restarting = restart.clone();
     let app = router(state.clone());
     #[cfg(feature = "factory")]
     let app = match factory_api {
@@ -250,11 +257,17 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
         None => app,
     };
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-        signals.next().await;
+        use std::sync::atomic::Ordering::SeqCst;
+        #[cfg_attr(not(feature = "factory"), allow(unused_mut))]
+        let mut upgrade = signals.first().await;
+        if upgrade {
+            tracing::info!("a newer trailhead is installed; restarting onto it once the factory's runs finish");
+            signal_state.upgrade_pending.store(true, SeqCst);
+        }
         // The API keeps serving while the control plane drains, since its runs reach it through the tunnel.
         #[cfg(feature = "factory")]
         if let Some(factory) = draining {
-            signal_state.draining.store(true, std::sync::atomic::Ordering::SeqCst);
+            signal_state.draining.store(true, SeqCst);
             match factory.runs_in_flight() {
                 0 => tracing::info!("stopping the factory; no runs in flight"),
                 runs => {
@@ -262,14 +275,25 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
                 }
             }
             factory.drain();
-            tokio::select! {
-                _ = factory.finished() => tracing::info!("the factory drained"),
-                _ = signals.next() => {
-                    tracing::info!("cancelling the factory's runs; they're requeued on the next start");
-                    factory.stop(FACTORY_STOP).await;
+            loop {
+                tokio::select! {
+                    _ = factory.finished() => tracing::info!("the factory drained"),
+                    _ = signals.next() => {
+                        // A stop asked for during an upgrade's drain is a stop: it still waits for the runs, and a
+                        // further signal cancels them.
+                        if std::mem::take(&mut upgrade) {
+                            signal_state.upgrade_pending.store(false, SeqCst);
+                            tracing::info!("stopping instead of restarting once the factory's runs finish; a second signal cancels them");
+                            continue;
+                        }
+                        tracing::info!("cancelling the factory's runs; they're requeued on the next start");
+                        factory.stop(FACTORY_STOP).await;
+                    }
                 }
+                break;
             }
         }
+        restarting.store(upgrade, SeqCst);
         stopping.send_replace(true);
     });
     let served = tokio::select! {
@@ -286,13 +310,30 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
     if let Some(factory) = factory {
         factory.stop(FACTORY_STOP).await;
     }
-    if let Some(pid_file) = &cfg.pid_file
+    let restart = restart.load(std::sync::atomic::Ordering::SeqCst);
+    // A restart execs the new binary in this process, which keeps the pid, so the file stays.
+    if !restart
+        && let Some(pid_file) = &cfg.pid_file
         && std::fs::read_to_string(pid_file).is_ok_and(|p| p.trim() == std::process::id().to_string())
     {
         std::fs::remove_file(pid_file).ok();
     }
+    served?;
+    if restart {
+        tracing::info!("trailhead stopped; restarting onto the new binary");
+        return Ok(Exit::Restart);
+    }
     tracing::info!("trailhead stopped");
-    Ok(served?)
+    Ok(Exit::Stopped)
+}
+
+/// Why [`serve_local`] returned.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Exit {
+    Stopped,
+    /// SIGUSR1 asked it to restart onto a newly installed binary, which the caller execs. With the factory, that
+    /// waited for its runs to finish.
+    Restart,
 }
 
 /// Hourly, moves events older than the undo window to `events_archive`.
@@ -323,14 +364,34 @@ fn spawn_archiver(state: Arc<AppState>) {
 struct Signals {
     int: tokio::signal::unix::Signal,
     term: tokio::signal::unix::Signal,
+    usr1: tokio::signal::unix::Signal,
 }
 
 impl Signals {
     fn new() -> std::io::Result<Signals> {
         use tokio::signal::unix::{SignalKind, signal};
-        Ok(Signals { int: signal(SignalKind::interrupt())?, term: signal(SignalKind::terminate())? })
+        Ok(Signals {
+            int: signal(SignalKind::interrupt())?,
+            term: signal(SignalKind::terminate())?,
+            usr1: signal(SignalKind::user_defined1())?,
+        })
     }
 
+    /// The first of a stop signal or SIGUSR1, which the CLI sends when a newer binary is installed but factory runs
+    /// are in flight (not SIGHUP, which a foreground `trailhead serve` gets when its terminal closes). True for SIGUSR1.
+    async fn first(&mut self) -> bool {
+        tokio::select! {
+            _ = self.int.recv() => tracing::info!("received SIGINT; shutting down"),
+            _ = self.term.recv() => tracing::info!("received SIGTERM; shutting down"),
+            _ = self.usr1.recv() => {
+                tracing::info!("received SIGUSR1; restarting onto the new binary");
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg_attr(not(feature = "factory"), allow(dead_code))]
     async fn next(&mut self) {
         tokio::select! {
             _ = self.int.recv() => tracing::info!("received SIGINT; shutting down"),
