@@ -8147,7 +8147,6 @@ dependencies = [
  "clap",
  "iroh",
  "reqwest",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -8191,7 +8190,6 @@ dependencies = [
  "axum",
  "clap",
  "futures-util",
- "getrandom 0.4.3",
  "hex",
  "iroh",
  "reqwest",
@@ -8221,7 +8219,6 @@ name = "trailhead-harness-claude-code"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -8322,7 +8319,6 @@ name = "trailhead-testkit"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "serde_json",
  "tokio",
  "trailhead-daemon",
  "trailhead-factory",

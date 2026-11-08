@@ -10,6 +10,9 @@ readme.workspace = true
 publish = false
 description = "Trailhead factory control plane: orchestrator, reconciler, budget meter"
 
+[lints]
+workspace = true
+
 [dependencies]
 trailhead-core.workspace = true
 trailhead-factory.workspace = true

@@ -10,6 +10,9 @@ readme.workspace = true
 publish = false
 description = "Trailhead factory Compute for Docker (or Podman's Docker API): sandboxed agents on your own machine"
 
+[lints]
+workspace = true
+
 [dependencies]
 trailhead-factory.workspace = true
 async-trait.workspace = true

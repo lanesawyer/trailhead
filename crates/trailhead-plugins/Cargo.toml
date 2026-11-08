@@ -10,6 +10,9 @@ readme.workspace = true
 publish = false
 description = "The harnesses and model providers a Trailhead factory build carries, by the names config gives them"
 
+[lints]
+workspace = true
+
 [dependencies]
 trailhead-factory.workspace = true
 trailhead-harness-claude-code.workspace = true
