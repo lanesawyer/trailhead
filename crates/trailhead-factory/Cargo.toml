@@ -10,6 +10,9 @@ readme.workspace = true
 publish = false
 description = "Trailhead factory: domain types, daemon contract, the five plugin traits, config schema"
 
+[lints]
+workspace = true
+
 [dependencies]
 trailhead-model.workspace = true
 async-trait.workspace = true
