@@ -255,7 +255,7 @@ fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let dirs = repos::dirs(&run.repo, run.opts.config.as_deref(), &host_config, home.as_deref(), &cwd)?;
-    let mut specs = repos::load_all(&dirs, run.opts.config.as_deref())?;
+    let specs = repos::load_all(&dirs, run.opts.config.as_deref())?;
     let (harnesses, providers) = (harnesses(), providers());
     for spec in &specs {
         spec.config
@@ -271,12 +271,6 @@ fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan, String> {
     }
     let (adapter, _) = specs[0].config.plugins().ok_or("the worker profile is missing")?;
     let adapter = adapter.to_string();
-    let (pause_at, warnings) =
-        host_config.effective_pause_at(specs.iter().map(|s| (s.config.repo.project.as_str(), &s.config.usage)));
-    warnings.iter().for_each(|w| tracing::warn!("{w}"));
-    for spec in &mut specs {
-        spec.config.usage.pause_at = pause_at.clone();
-    }
     Ok(Plan { opts: run.opts.clone(), host_config, specs, adapter })
 }
 
@@ -367,7 +361,7 @@ async fn wire(
         endpoint.id()
     );
 
-    let host = Host::new(host_config.max_sandboxes);
+    let host = Host::new(&host_config);
     let mut repos = Vec::new();
     for spec in specs {
         let slug = spec.slug();

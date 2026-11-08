@@ -12,6 +12,7 @@ use trailhead_control::{CoreTracker, Factory, Host, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Priority, Store, TaskFilter};
 use trailhead_daemon::net::DaemonProtocol;
 use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, RestTracker, Runner};
+use trailhead_factory::HostConfig;
 use trailhead_factory::{
     Commit, Credential, DaemonSecrets, Error, FactoryConfig, FileChange, FollowUp, Role, RunOutcome, SandboxId, Status,
     TaskKey, Tracker, VerdictKind,
@@ -155,7 +156,7 @@ impl Rig {
             Arc::new(self.tracker.clone()),
             Arc::new(FakeProvider::new(1)),
             self.remote.clone(),
-            Host::new(None),
+            Host::new(&HostConfig::default()),
         )
     }
 

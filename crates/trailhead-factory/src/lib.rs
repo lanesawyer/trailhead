@@ -29,7 +29,7 @@ pub use compute::{
 pub use config::{
     Budget, CheckSpec, Checks, ComputeConfig, FactoryConfig, GATEWAY_ANTHROPIC_ID, GATEWAY_GIT_ID, GATEWAY_GITHUB_ID,
     GATEWAY_HOST, GATEWAY_PORT, Gate, GateKind, GradesConfig, MergeConfig, MergeMode, Profile, Role, TargetConfig,
-    TargetSpec, UsageConfig,
+    TargetSpec,
 };
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, InstallHost, MISE_INSTALLER_HOSTS,
