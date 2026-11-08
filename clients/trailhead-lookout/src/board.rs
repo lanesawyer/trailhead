@@ -9,7 +9,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bevy::ecs::system::SystemParam;
-use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
@@ -25,10 +24,10 @@ use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::search::{Deep, DeepHit};
 use crate::widgets;
 use crate::widgets::{
-    Hint, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_found, card_row,
-    card_title, card_under, field, grade_tone, priority_tone, select, space, status_label, token, tool_button,
+    ButtonKind, Hint, Icon, Keyed, Picked, ScrollBoth, SelectEdit, Token, badge, button, card as card_shell,
+    card_found, card_row, card_title, card_under, field, grade_tone, priority_tone, select, space, status_label, token,
+    tool_button,
 };
-use bevy::feathers::theme::ThemeToken;
 
 /// The views of the app: the task board, the trail map, and one project's page ([`crate::project`]).
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -160,7 +159,7 @@ pub struct Badge {
     pub kind: BadgeKind,
     pub label: String,
     /// The theme token that tints the badge; none leaves it dim.
-    pub tone: Option<ThemeToken>,
+    pub tone: Option<Token>,
     /// What a hover says, for a badge whose label is short for something longer.
     pub hint: Option<String>,
 }
@@ -1037,7 +1036,7 @@ fn dress_cards(
                 CardAction::Comment => (Icon::Comment, "Comment"),
                 CardAction::Answer { .. } => (Icon::Help, "Answer the open question"),
             };
-            let mut tool = commands.queue_spawn_scene(tool_button(icon, hint, ButtonVariant::Plain));
+            let mut tool = commands.queue_spawn_scene(tool_button(icon, hint, ButtonKind::Plain));
             tool.insert((action.act(&card.key), CardTool, ChildOf(tools)));
             if !live {
                 tool.insert(InteractionDisabled);
@@ -1080,7 +1079,7 @@ fn dress_slots(
             commands.entity(*child).despawn();
         }
         let label = format!("Show {} more", more.next);
-        commands.entity(entity).queue_apply_scene(button(label, None, ButtonVariant::Normal));
+        commands.entity(entity).queue_apply_scene(button(label, None, ButtonKind::Normal));
     }
 }
 
@@ -1131,12 +1130,12 @@ fn dress_header(
             commands.queue_spawn_scene(field(key.name(), control)).insert(ChildOf(bar));
         }
         commands
-            .queue_spawn_scene(button(closed_caption(&filter), None, ButtonVariant::Normal))
+            .queue_spawn_scene(button(closed_caption(&filter), None, ButtonKind::Normal))
             .insert((ClosedToggle, ChildOf(bar)));
         commands
-            .queue_spawn_scene(button(factory_caption(&filter), None, ButtonVariant::Normal))
+            .queue_spawn_scene(button(factory_caption(&filter), None, ButtonKind::Normal))
             .insert((FactoryToggle, ChildOf(bar)));
-        let mut new = commands.queue_spawn_scene(button("New task", Some(Icon::Plus), ButtonVariant::Primary));
+        let mut new = commands.queue_spawn_scene(button("New task", Some(Icon::Plus), ButtonKind::Primary));
         new.insert((Act::New, NewTask, ChildOf(bar)));
         if *connection.get() != Connection::Live {
             new.insert(InteractionDisabled);
@@ -2145,6 +2144,7 @@ mod in_place_tests {
 
 #[cfg(test)]
 mod header_tests {
+    use bevy::ecs::system::RunSystemOnce;
     use bevy::state::app::StatesPlugin;
 
     use super::tests::run;
@@ -2210,13 +2210,10 @@ mod header_tests {
         // The select shows the pick: its row is marked selected.
         let mut q = app.world_mut().query::<(&FilterSelect, Entity)>();
         let project = q.iter(app.world()).find(|(s, _)| s.0 == FilterKey::Project).unwrap().1;
-        let mut rows =
-            app.world_mut().query::<(&bevy::feathers::controls::OptionIndex, Has<bevy::ui::Selected>, Entity)>();
-        let chosen: Vec<usize> = rows
-            .iter(app.world())
-            .filter(|(_, selected, e)| *selected && is_under(app.world(), *e, project))
-            .map(|(i, _, _)| i.0)
-            .collect();
+        let chosen = app
+            .world_mut()
+            .run_system_once(move |edit: crate::widgets::SelectEdit| edit.selected_rows(project))
+            .unwrap();
         assert_eq!(chosen.len(), 1);
         assert_eq!(
             chosen[0],

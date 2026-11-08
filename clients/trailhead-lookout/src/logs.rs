@@ -8,9 +8,6 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use bevy::feathers::controls::ButtonVariant;
-use bevy::feathers::theme::ThemeToken;
-use bevy::feathers::tokens;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::logs::{LogLevel, LogLine};
@@ -18,8 +15,8 @@ use trailhead_factory::logs::{LogLevel, LogLine};
 use crate::connection::SendNet;
 use crate::net::{LogUpdate, NetCommand};
 use crate::widgets::{
-    Icon, Keyed, Picked, SelectEdit, button, extent, field, row, scroll_body, scroll_frame, scrollbar, select,
-    set_display, set_text, size, space, text_mono, text_toned, token,
+    ButtonKind, Icon, Keyed, Picked, SelectEdit, Token, button, extent, field, row, scroll_body, scroll_frame,
+    scrollbar, select, set_display, set_text, size, space, text_mono, text_toned, token,
 };
 
 /// How many lines are kept; past this the oldest are dropped.
@@ -175,12 +172,12 @@ pub fn line_text(line: &LogLine) -> String {
 }
 
 /// The theme color a level is drawn in.
-pub fn level_tone(level: LogLevel) -> ThemeToken {
+pub fn level_tone(level: LogLevel) -> Token {
     match level {
         LogLevel::Error => token::DANGER,
         LogLevel::Warn => token::WARN,
-        LogLevel::Info => tokens::TEXT_MAIN,
-        LogLevel::Debug | LogLevel::Trace => tokens::TEXT_DIM,
+        LogLevel::Info => token::TEXT,
+        LogLevel::Debug | LogLevel::Trace => token::TEXT_DIM,
     }
 }
 
@@ -261,7 +258,7 @@ pub fn logs_page(commands: &mut Commands, page: Entity) {
         .spawn_scene(field("Task", bsn_list! { @select(vec![ALL_TASKS.to_string()], Some(0), 8) TaskSelect }))
         .insert(ChildOf(filters));
     commands
-        .spawn_scene(button("Jump to latest", Some(Icon::ChevronDown), ButtonVariant::Normal))
+        .spawn_scene(button("Jump to latest", Some(Icon::ChevronDown), ButtonKind::Normal))
         .insert((JumpToLatest, ChildOf(filters)));
     commands.spawn_scene(text_toned("", size::BODY, token::WARN)).insert((
         LogNote,
@@ -668,11 +665,11 @@ mod tests {
             app.update();
             let world = app.world_mut();
             let tones: Vec<_> = world
-                .query_filtered::<&bevy::feathers::theme::ThemeTextColor, With<LogRow>>()
+                .query_filtered::<&crate::widgets::TextTone, With<LogRow>>()
                 .iter(world)
                 .map(|t| t.0.clone())
                 .collect();
-            assert_eq!(tones, [token::DANGER, tokens::TEXT_MAIN]);
+            assert_eq!(tones, [token::DANGER, token::TEXT]);
         }
     }
 }

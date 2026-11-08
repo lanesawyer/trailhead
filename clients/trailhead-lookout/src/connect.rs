@@ -2,7 +2,6 @@
 //! the server asks for one, and copy the `trailhead factory allow` command for this Lookout.
 
 use bevy::clipboard::Clipboard;
-use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
 use bevy::scene::bsn;
 use bevy::text::EditableText;
@@ -10,7 +9,9 @@ use bevy::ui_widgets::Activate;
 
 use crate::connection::{Connection, ConnectionStatus, LocalEndpoint, SendNet};
 use crate::net::{NetCommand, Reason};
-use crate::widgets::{Icon, button, extent, field, layer, panel, row, size, text_dim, text_input, tool_button};
+use crate::widgets::{
+    ButtonKind, Icon, button, extent, field, layer, panel, row, size, text_dim, text_input, tool_button,
+};
 
 /// A text field on the connect panel.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,23 +125,17 @@ fn spawn_panel(mut commands: Commands) {
         ConnectField::Target,
         "Connect",
         ConnectAct::Dial,
-        ButtonVariant::Primary,
+        ButtonKind::Primary,
     );
     commands.entity(target).insert(ChildOf(panel));
-    let token = input_row(
-        &mut commands,
-        "User token",
-        ConnectField::Token,
-        "Sign in",
-        ConnectAct::SignIn,
-        ButtonVariant::Normal,
-    );
+    let token =
+        input_row(&mut commands, "User token", ConnectField::Token, "Sign in", ConnectAct::SignIn, ButtonKind::Normal);
     commands.entity(token).insert((TokenRow, ChildOf(panel)));
 
     let allow = commands.spawn_scene(bsn! { @row() }).insert((AllowRow, ChildOf(panel))).id();
     commands.spawn_scene(bsn! { @text_dim("", size::SECONDARY) }).insert((AllowText, ChildOf(allow)));
     commands
-        .spawn_scene(bsn! { @tool_button(Icon::Copy, "Copy the command", ButtonVariant::Plain) })
+        .spawn_scene(bsn! { @tool_button(Icon::Copy, "Copy the command", ButtonKind::Plain) })
         .insert((ConnectAct::CopyAllow, ChildOf(allow)));
 }
 
@@ -151,7 +146,7 @@ fn input_row(
     which: ConnectField,
     caption: &str,
     act: ConnectAct,
-    variant: ButtonVariant,
+    variant: ButtonKind,
 ) -> Entity {
     let control = bsn_list! { @text_input(1.0, bsn! { which }) };
     let line = commands.spawn_scene(bsn! { @row() Node { align_items: AlignItems::FlexEnd } }).id();

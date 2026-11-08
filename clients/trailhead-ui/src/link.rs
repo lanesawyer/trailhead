@@ -3,6 +3,8 @@
 //! Ported from bevy-data-explorer's `widgets/link.rs`.
 
 use bevy::feathers::controls::{ButtonVariant, FeathersButton};
+
+use crate::buttons::ButtonKind;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 
@@ -18,11 +20,11 @@ pub struct ExternalLink {
 
 /// A link, drawn as a button with `icon` beside `text`. `Plain` shows no background until hovered, which is what reads
 /// as a link in running text.
-pub fn link_button(icon: Icon, text: impl Into<String>, url: impl Into<String>, variant: ButtonVariant) -> impl Scene {
+pub fn link_button(icon: Icon, text: impl Into<String>, url: impl Into<String>, kind: ButtonKind) -> impl Scene {
     let (text, url) = (text.into(), url.into());
     bsn! {
         @FeathersButton {
-            @variant: { variant },
+            @variant: { ButtonVariant::from(kind) },
             @caption: { bsn_list! {@button_icon(icon) -- @button_text(text)} }
         }
         Node { column_gap: { px(space::ICON_LABEL) } }

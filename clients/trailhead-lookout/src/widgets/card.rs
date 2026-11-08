@@ -8,11 +8,10 @@
 //! Spawn the pieces in order as children of [`card`]: [`badge`](super::badge) for the key, [`card_title`],
 //! [`card_under`] when there is a parent, then a [`card_row`] each for badges and for actions.
 
-use bevy::feathers::theme::{ThemeBackgroundColor, ThemeBorderColor};
 use bevy::prelude::*;
 use bevy::ui_widgets::Button;
 
-use super::{radius, size, space, text, text_dim, token};
+use super::{BackgroundTone, BorderTone, radius, size, space, text, text_dim, token};
 
 /// How many lines of a title a card shows.
 pub const TITLE_LINES: f32 = 2.0;
@@ -32,8 +31,8 @@ pub fn card(depth: usize) -> impl Scene {
             border: { UiRect::all(px(1)) },
             border_radius: { BorderRadius::all(px(radius::CONTROL)) },
         }
-        ThemeBackgroundColor({ token::CARD_BG })
-        ThemeBorderColor({ token::DIVIDER })
+        BackgroundTone({ token::CARD_BG })
+        BorderTone({ token::DIVIDER })
     }
 }
 
