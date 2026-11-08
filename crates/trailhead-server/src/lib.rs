@@ -200,18 +200,23 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
     // After the listener, so the API tunnel has a server to forward to; before the pid file, so a configuration error
     // stops the server before it says it's up.
     #[cfg(feature = "factory")]
-    let factory: Option<Arc<trailhead_factory_server::Running>> = match cfg.factory.clone() {
+    let started: Option<trailhead_factory_server::InServer> = match cfg.factory.clone() {
         Some(paths) => {
             let user_config = paths.config_dir.join("config.toml");
-            trailhead_factory_server::start(paths, state.store.clone(), cfg.bind).map_err(|e| {
+            let started = trailhead_factory_server::start(paths, state.store.clone(), cfg.bind).map_err(|e| {
                 format!(
                     "the factory's configuration is broken, so the server won't start: {e}\nFix it, or run `trailhead factory disable` to run without the factory (it edits {})",
                     user_config.display()
                 )
-            })?
-            .map(Arc::new)
+            })?;
+            Some(started)
         }
         None => None,
+    };
+    #[cfg(feature = "factory")]
+    let (factory, factory_api) = match started {
+        Some(started) => (started.running.map(Arc::new), Some(trailhead_factory_server::api(&started.feed))),
+        None => (None, None),
     };
     #[cfg(feature = "factory")]
     if let Some(running) = factory.clone() {
@@ -231,7 +236,14 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
     let mut signals = Signals::new()?;
     #[cfg(feature = "factory")]
     let (draining, signal_state) = (factory.clone(), state.clone());
-    let server = axum::serve(listener, router(state)).with_graceful_shutdown(async move {
+    let app = router(state.clone());
+    // The factory's status stream carries tool calls, which can name commands and paths: any valid token, as MCP.
+    #[cfg(feature = "factory")]
+    let app = match factory_api {
+        Some(api) => app.nest("/v1/factory", api.layer(axum::middleware::from_fn_with_state(state.clone(), mcp::auth))),
+        None => app,
+    };
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         signals.next().await;
         // The API keeps serving while the control plane drains, since its runs reach it through the tunnel.
         #[cfg(feature = "factory")]

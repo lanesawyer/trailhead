@@ -20,6 +20,37 @@ pub enum ControlState {
     Stopped,
 }
 
+/// Whether the server is running its control plane at all, the `control` field of the factory status (each repo's
+/// own [`ControlState`] says what its loop is doing).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FactoryState {
+    /// No repos listed in the user config's `[factory] repos`.
+    Off,
+    /// `trailhead factory disable`.
+    Disabled,
+    /// Setting up, or retrying after an outside failure (`reason`).
+    Starting {
+        reason: Option<String>,
+    },
+    Running,
+    /// The control plane stopped (a drain finished, or every repo's loop ended).
+    Stopped,
+}
+
+impl FactoryState {
+    pub fn label(&self) -> String {
+        match self {
+            FactoryState::Off => "off (no [factory] repos)".into(),
+            FactoryState::Disabled => "disabled (`trailhead factory enable` turns it on)".into(),
+            FactoryState::Starting { reason: None } => "starting".into(),
+            FactoryState::Starting { reason: Some(why) } => format!("starting: {why}"),
+            FactoryState::Running => "running".into(),
+            FactoryState::Stopped => "stopped".into(),
+        }
+    }
+}
+
 /// A pooled sandbox's state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

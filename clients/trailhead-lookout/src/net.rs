@@ -533,7 +533,7 @@ async fn stream_status(
     let mut stream = StatusStream::open(conn).await?;
     while let Some(frame) = stream.next().await? {
         let update = match frame {
-            StatusFrame::Snapshot { repos } => FactoryUpdate::Snapshot(repos),
+            StatusFrame::Snapshot { repos, .. } => FactoryUpdate::Snapshot(repos),
             StatusFrame::Event { repo, event } => FactoryUpdate::Event { repo, event },
             StatusFrame::Unsupported(unsupported) => return Ok(Some(Refusal::TooOld(too_old_message(&unsupported)))),
         };

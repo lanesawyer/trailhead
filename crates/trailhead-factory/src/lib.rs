@@ -49,8 +49,8 @@ pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
 pub use status::{
-    ControlState, FactoryEvent, FactorySnapshot, RunPhase, RunStatus, SandboxState, SandboxStatus, Sequenced,
-    TargetSpend,
+    ControlState, FactoryEvent, FactorySnapshot, FactoryState, RunPhase, RunStatus, SandboxState, SandboxStatus,
+    Sequenced, TargetSpend,
 };
 pub use target::{DEFAULT_TARGET, Spend, Target};
 pub use tracker::{

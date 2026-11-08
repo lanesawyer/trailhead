@@ -44,9 +44,13 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     // A running control plane knows its sandboxes and runs itself, so it is asked first; the compute is only read when
     // there isn't one (or it isn't running this repo).
     let slug = config.repo.repo().slug();
-    let live = surface::fetch(&paths.data_dir.join("factory"))
-        .await
-        .and_then(|reply| reply.repos.into_iter().find(|r| r.repo == slug));
+    let found = surface::find(&paths.data_dir.join("factory"), server(&opts, &paths)).await;
+    if let Some((_, reply)) = &found
+        && let Some(control) = &reply.control
+    {
+        println!("control: {}\n", control.label());
+    }
+    let live = found.and_then(|(_, reply)| reply.repos.into_iter().find(|r| r.repo == slug));
     let (rows, runs): (Vec<Row>, _) = match &live {
         Some(live) => (live.snapshot.sandboxes.iter().map(Row::from_status).collect(), Some(live)),
         None => {
@@ -96,13 +100,16 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
 
     // With a control plane to ask, `--follow` follows its stream of the task's events rather than polling the log.
     let dir = paths.data_dir.join("factory");
-    let streaming = logs.follow && surface::fetch(&dir).await.is_some();
+    let streaming = match logs.follow {
+        true => surface::find(&dir, server(&opts, &paths)).await.map(|(remote, _)| remote),
+        false => None,
+    };
     let source = log_source(&config, &opts, &fnox, &paths, &task).await;
     let (compute, sandbox) = match source {
         Ok(source) => source,
-        Err(why) if streaming => {
+        Err(why) if streaming.is_some() => {
             eprintln!("{why}");
-            return stream_events(&dir, &key).await;
+            return stream_events(streaming.as_ref().expect("checked"), &key).await;
         }
         Err(why) => return Err(why),
     };
@@ -115,9 +122,9 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
         if !logs.follow {
             return Ok(());
         }
-        if streaming {
+        if let Some(remote) = &streaming {
             println!("-- following the control plane's events for {} --", key.0);
-            return stream_events(&dir, &key).await;
+            return stream_events(remote, &key).await;
         }
         tokio::select! {
             _ = tokio::time::sleep(FOLLOW_EVERY) => {}
@@ -126,9 +133,15 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
     }
 }
 
+/// The local server's `/v1/factory`, when there is a user token to ask it with.
+fn server(opts: &Opts, paths: &trailhead_client::paths::Paths) -> Option<surface::Remote> {
+    let (token, _) = paths.creds().read(trailhead_client::creds::Cred::User)?;
+    Some(surface::Remote::server(opts.server, token))
+}
+
 /// Prints the control plane's events about `key` as they happen, until Ctrl-C or it stops.
-async fn stream_events(dir: &std::path::Path, key: &TaskKey) -> Result<(), String> {
-    surface::follow(dir, Some(&key.0), |e| println!("{}", e.event.event.line()), async {
+async fn stream_events(remote: &surface::Remote, key: &TaskKey) -> Result<(), String> {
+    surface::follow(remote, Some(&key.0), |e| println!("{}", e.event.event.line()), async {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await

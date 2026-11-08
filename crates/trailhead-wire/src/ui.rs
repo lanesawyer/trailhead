@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use trailhead_factory::logs::LogLine;
-use trailhead_factory::{Error, FactorySnapshot, Result, Sequenced};
+use trailhead_factory::{Error, FactorySnapshot, FactoryState, Result, Sequenced};
 
 use crate::{io_err, parse_endpoint_id, pipe, read_frame, write_frame};
 
@@ -59,8 +59,13 @@ pub struct RepoSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "frame", rename_all = "snake_case")]
 pub enum StatusFrame {
-    /// Always first. Each repo's `seq` is the last event it includes.
-    Snapshot { repos: Vec<RepoSnapshot> },
+    /// Always first. Each repo's `seq` is the last event it includes. `control` says whether the server's control
+    /// plane is running at all; a control plane from before it was added sends none.
+    Snapshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        control: Option<FactoryState>,
+        repos: Vec<RepoSnapshot>,
+    },
     Event {
         repo: String,
         #[serde(flatten)]
@@ -109,6 +114,11 @@ pub struct RepoFeed {
 pub trait StatusFeed: Send + Sync + 'static {
     /// Every repo's snapshot with a receiver for the events after it.
     fn subscribe(&self) -> Vec<RepoFeed>;
+
+    /// Whether the control plane is running at all, sent with the snapshot.
+    fn state(&self) -> Option<FactoryState> {
+        None
+    }
 }
 
 impl std::fmt::Debug for dyn StatusFeed {
@@ -268,7 +278,7 @@ impl UiProtocol {
 async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStream) {
     let feeds = feed.subscribe();
     let repos = feeds.iter().map(|f| RepoSnapshot { repo: f.repo.clone(), snapshot: f.snapshot.clone() }).collect();
-    if write_frame(&mut send, &StatusFrame::Snapshot { repos }).await.is_err() {
+    if write_frame(&mut send, &StatusFrame::Snapshot { control: feed.state(), repos }).await.is_err() {
         return;
     }
     let (tx, mut rx) = mpsc::channel(256);
@@ -572,7 +582,14 @@ mod tests {
             seq: 4,
         };
         let frames = [
-            StatusFrame::Snapshot { repos: vec![RepoSnapshot { repo: "a/b".into(), snapshot }] },
+            StatusFrame::Snapshot {
+                control: None,
+                repos: vec![RepoSnapshot { repo: "a/b".into(), snapshot: snapshot.clone() }],
+            },
+            StatusFrame::Snapshot {
+                control: Some(FactoryState::Starting { reason: Some("keyring locked".into()) }),
+                repos: vec![RepoSnapshot { repo: "a/b".into(), snapshot }],
+            },
             StatusFrame::Event {
                 repo: "a/b".into(),
                 event: Sequenced { seq: 5, event: FactoryEvent::RunEnded { task: TaskKey("TRAIL-1".into()) } },
