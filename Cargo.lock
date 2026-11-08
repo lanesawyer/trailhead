@@ -8249,7 +8249,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "toml",
  "tracing",
  "trailhead-client",
  "trailhead-core",

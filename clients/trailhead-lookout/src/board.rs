@@ -16,6 +16,7 @@ use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
+use trailhead_factory::FactoryState;
 use trailhead_model::{Agent, Claim, Comment, CommentKind, Project, Status, Task, User};
 use uuid::Uuid;
 
@@ -1027,7 +1028,18 @@ pub fn connection_chip(
             FactoryLink::Unknown => {
                 (token::WARN, "Factory connecting", "Server connected; the factory hasn't been heard from yet".into())
             }
-            FactoryLink::Stopped => (
+            FactoryLink::Control(state) => (
+                token::WARN,
+                match state {
+                    FactoryState::Off => "Factory off",
+                    FactoryState::Disabled => "Factory disabled",
+                    FactoryState::Starting { .. } => "Factory starting",
+                    FactoryState::Running => "Factory running",
+                    FactoryState::Stopped => "Factory stopped",
+                },
+                format!("Server connected; the factory is {}", state.label()),
+            ),
+            FactoryLink::Unreachable => (
                 token::WARN,
                 "Factory down",
                 "Server connected; the factory can't be reached, so the map shows its last known state".into(),
@@ -2235,14 +2247,17 @@ mod header_tests {
         let status = ConnectionStatus::default();
         let words = |c, f: FactoryLink| connection_chip(c, &status, &f).1;
         assert_eq!(words(Connection::Live, FactoryLink::Running), "Live");
-        assert_eq!(words(Connection::Live, FactoryLink::Stopped), "Factory down");
+        assert_eq!(words(Connection::Live, FactoryLink::Unreachable), "Factory down");
+        assert_eq!(words(Connection::Live, FactoryLink::Control(FactoryState::Disabled)), "Factory disabled");
+        let starting = FactoryLink::Control(FactoryState::Starting { reason: Some("sprites down".into()) });
+        assert!(connection_chip(Connection::Live, &status, &starting).2.contains("sprites down"));
         assert_eq!(words(Connection::Live, FactoryLink::Unknown), "Factory connecting");
         assert_eq!(words(Connection::Live, FactoryLink::TooOld("x".into())), "Factory too old");
         assert_eq!(words(Connection::Live, FactoryLink::Refused("x".into())), "Factory refused");
-        assert_eq!(words(Connection::Syncing, FactoryLink::Stopped), "Syncing");
+        assert_eq!(words(Connection::Syncing, FactoryLink::Unreachable), "Syncing");
         assert_eq!(words(Connection::Offline, FactoryLink::Running), "Offline");
         let tone = |f| connection_chip(Connection::Live, &status, &f).0;
-        assert_ne!(tone(FactoryLink::Running), tone(FactoryLink::Stopped));
+        assert_ne!(tone(FactoryLink::Running), tone(FactoryLink::Unreachable));
     }
 
     #[test]
@@ -2257,7 +2272,7 @@ mod header_tests {
             world.query::<(&Text, &ChildOf)>().iter(world).map(|(t, _)| t.0.clone()).collect::<Vec<_>>()
         };
         assert!(words(&mut app).contains(&"Live".to_string()));
-        app.world_mut().resource_mut::<FactoryStatus>().link = FactoryLink::Stopped;
+        app.world_mut().resource_mut::<FactoryStatus>().link = FactoryLink::Unreachable;
         settle(&mut app);
         let now = words(&mut app);
         assert!(now.contains(&"Factory down".to_string()) && !now.contains(&"Live".to_string()), "{now:?}");

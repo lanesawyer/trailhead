@@ -12,7 +12,9 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tokio::sync::broadcast;
 use trailhead_core::{Ctx, NewProject, Principal, Store};
 use trailhead_factory::logs::{LogLevel, LogLine};
-use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, SandboxState, SandboxStatus, Sequenced};
+use trailhead_factory::{
+    ControlState, FactoryEvent, FactorySnapshot, FactoryState, SandboxState, SandboxStatus, Sequenced,
+};
 use trailhead_lookout::board;
 use trailhead_lookout::connection::{Api, Connection, ConnectionPlugin, ConnectionStatus, LocalEndpoint, SendNet};
 use trailhead_lookout::factory::{Campsite, FactoryLink, FactoryStatus};
@@ -22,7 +24,7 @@ use trailhead_wire::ui::{LogFeed, RepoFeed, StatusFeed, StatusFrame, UI_ALPN, Ui
 use trailhead_wire::{read_frame, write_frame};
 
 /// One repo, "o/r", with an idle sandbox, whose later events the test sends.
-struct TestFeed(broadcast::Sender<Sequenced>);
+struct TestFeed(broadcast::Sender<Sequenced>, Option<FactoryState>);
 
 fn sandbox(name: &str, state: SandboxState) -> SandboxStatus {
     SandboxStatus { name: name.into(), target: None, state, task: None, role: None, warm: false, own: false }
@@ -42,6 +44,10 @@ impl StatusFeed for TestFeed {
             seq: 1,
         };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
+    }
+
+    fn state(&self) -> Option<FactoryState> {
+        self.1.clone()
     }
 }
 
@@ -75,7 +81,8 @@ async fn control_plane(key: SecretKey, lookup: &Arc<MemoryLookup>, rig: &Rig) ->
         .unwrap();
     let addr = endpoint.addr();
     lookup.add_endpoint_info(addr.clone());
-    let mut ui = UiProtocol::new(rig.server, rig.allowed.clone()).with_status(Arc::new(TestFeed(rig.events.clone())));
+    let mut ui = UiProtocol::new(rig.server, rig.allowed.clone())
+        .with_status(Arc::new(TestFeed(rig.events.clone(), rig.control.clone())));
     if let Some(logs) = &rig.logs {
         ui = ui.with_logs(Arc::new(TestLogs(logs.clone())));
     }
@@ -96,6 +103,8 @@ struct Rig {
     events: broadcast::Sender<Sequenced>,
     /// The log the control plane serves; `None` for a control plane that doesn't know the request.
     logs: Option<broadcast::Sender<LogLine>>,
+    /// The control plane state the status frame carries.
+    control: Option<FactoryState>,
 }
 
 impl Rig {
@@ -127,6 +136,7 @@ impl Rig {
             token_id: token_row.id,
             events: broadcast::channel(16).0,
             logs: Some(broadcast::channel(16).0),
+            control: Some(FactoryState::Running),
         }
     }
 
@@ -137,7 +147,6 @@ impl Rig {
             trailhead_data_dir: self.dir.path().join("data"),
             keyring: false,
             network: Network::Direct(lookup.clone()),
-            server_url: None,
             status_retry: Duration::from_millis(100),
         }
     }
@@ -384,35 +393,24 @@ async fn a_factory_without_logs_is_too_old_to_send_them() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn when_the_factory_stops_the_last_state_stays_and_the_board_uses_the_server_url() {
+async fn when_the_server_goes_away_the_last_state_stays_and_it_is_unreachable() {
     let rig = Rig::new().await;
     let lookup = Arc::new(MemoryLookup::new());
     let key = SecretKey::generate();
     let (router, addr) = control_plane(key.clone(), &lookup, &rig).await;
-    let mut config = rig.config(&lookup);
-    config.server_url = Some(format!("http://{}", rig.server));
-    let mut app = app(config, Some(addr.id.to_string()));
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
     allowed_and_live(&mut app, &rig).await;
     until(&mut app, "snapshot", |a| link(a) == FactoryLink::Running).await;
     let tunnel = app.world().resource::<Api>().0.base.clone();
 
     router.shutdown().await.unwrap();
-    until(&mut app, "factory stopped", |a| link(a) == FactoryLink::Stopped).await;
-    // Trailhead's last known state is kept, marked stopped, and the board is reached without the control plane.
-    assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory stopped");
+    until(&mut app, "unreachable", |a| link(a) == FactoryLink::Unreachable).await;
+    // The last known state is kept, and there is no way around the tunnel: the board goes offline.
+    assert_eq!(app.world().resource::<FactoryStatus>().label(), "unreachable");
     assert_eq!(campsites(&mut app), [("camp-1".to_string(), SandboxState::Idle)]);
-    let direct = format!("http://{}", rig.server);
-    until(&mut app, "live on the server url", |a| {
-        state(a) == Connection::Live && a.world().resource::<Api>().0.base == direct
-    })
-    .await;
-    // The server is up but the factory is not: the chip is not green.
-    assert_eq!(chip_words(&app), "Factory down");
-    let api = &app.world().resource::<Api>().0;
-    let me = reqwest::Client::new().get(format!("{}/v1/me", api.base)).bearer_auth(&api.token).send().await.unwrap();
-    assert!(me.status().is_success());
+    until(&mut app, "offline", |a| state(a) == Connection::Offline).await;
 
-    // The control plane comes back: the tunnel and a fresh snapshot replace the fallback.
+    // The control plane comes back: the tunnel and a fresh snapshot.
     let (_router, _) = control_plane(key, &lookup, &rig).await;
     until(&mut app, "back on the tunnel", |a| {
         link(a) == FactoryLink::Running && state(a) == Connection::Live && a.world().resource::<Api>().0.base == tunnel
@@ -422,25 +420,26 @@ async fn when_the_factory_stops_the_last_state_stays_and_the_board_uses_the_serv
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_refused_lookout_does_not_fall_back_to_the_server_url() {
+async fn a_control_plane_that_is_not_running_is_shown_over_the_board() {
+    let mut rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    rig.control = Some(FactoryState::Starting { reason: Some("sprites down".into()) });
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+    until(&mut app, "control", |a| matches!(link(a), FactoryLink::Control(_))).await;
+    assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory starting: sprites down");
+    assert_eq!(chip_words(&app), "Factory starting");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_lookout_is_offline_not_redirected() {
     let rig = Rig::new().await;
     let lookup = Arc::new(MemoryLookup::new());
     let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
-    let mut config = rig.config(&lookup);
-    config.server_url = Some(format!("http://{}", rig.server));
-    let mut app = app(config, Some(addr.id.to_string()));
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
     until(&mut app, "refused", |a| reason(a) == Some(Reason::NotAllowed)).await;
     assert_eq!(state(&app), Connection::Offline);
-}
-
-#[test]
-fn the_cli_server_url_comes_from_the_environment_then_the_config_then_the_default() {
-    use trailhead_lookout::net::cli_server_url;
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(cli_server_url(dir.path(), None), "http://127.0.0.1:7241");
-    std::fs::write(dir.path().join("config.toml"), "url = \"http://10.0.0.5:9000/\"\n").unwrap();
-    assert_eq!(cli_server_url(dir.path(), None), "http://10.0.0.5:9000");
-    assert_eq!(cli_server_url(dir.path(), Some("http://127.0.0.1:1".into())), "http://127.0.0.1:1");
 }
 
 /// A control plane from before the status request: it forwards the API, and answers anything else with the error.
@@ -585,7 +584,7 @@ async fn a_dropped_link_reconnects_quickly() {
     let gaps = gaps_after(&mut app, &asked, 5).await;
     // Refusals would have reached 800 ms by now.
     assert!(gaps.iter().all(|g| *g < Duration::from_millis(500)), "the retry stays quick: {gaps:?}");
-    assert!(matches!(link(&app), FactoryLink::Stopped));
+    assert!(matches!(link(&app), FactoryLink::Unreachable));
 }
 
 /// A control plane whose allowlist doesn't have this Lookout: it closes every connection, and notes when.

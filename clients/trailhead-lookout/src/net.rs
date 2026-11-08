@@ -174,9 +174,6 @@ pub struct NetConfig {
     /// Whether tokens may use the OS keyring (off in tests; `TRAILHEAD_NO_KEYRING` turns it off too).
     pub keyring: bool,
     pub network: Network,
-    /// The server URL the CLI uses. When the control plane can't be reached, the board talks to the server here
-    /// instead of through the tunnel. `None` keeps the tunnel as the only way in.
-    pub server_url: Option<String>,
     /// How often the link is probed, how soon the status stream is retried after a dropped link, and the first gap
     /// after a refusal of either, which then doubles up to [`STATUS_BACKOFF_STEPS`] times.
     pub status_retry: Duration,
@@ -207,7 +204,6 @@ impl NetConfig {
             trailhead_data_dir: pick("TRAILHEAD_DATA_DIR", trailhead.as_ref().map(|d| d.data_dir()))?,
             keyring: CredStore::new(PathBuf::new()).keyring,
             network: Network::Internet,
-            server_url: Some(cli_server_url(&trailhead_config_dir, std::env::var("TRAILHEAD_URL").ok())),
             status_retry: STATUS_RETRY,
         })
     }
@@ -237,22 +233,6 @@ impl NetConfig {
         }
     }
 }
-
-/// The server the CLI would use: `TRAILHEAD_URL`, else `url` in `<config dir>/config.toml` (which `trailhead login`
-/// sets), else the default.
-pub fn cli_server_url(config_dir: &Path, env: Option<String>) -> String {
-    let from_file = || {
-        let text = std::fs::read_to_string(config_dir.join("config.toml")).ok()?;
-        text.parse::<toml::Table>().ok()?.get("url")?.as_str().map(String::from)
-    };
-    env.filter(|u| !u.is_empty())
-        .or_else(from_file)
-        .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
-        .trim_end_matches('/')
-        .to_string()
-}
-
-const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:7241";
 
 /// The app's end of the channels. Dropping it stops the net thread.
 pub struct NetHandle {
@@ -313,15 +293,6 @@ struct Target {
     api: SocketAddr,
 }
 
-/// Which way the Trailhead API is reached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Via {
-    /// Through the control plane's tunnel.
-    Tunnel,
-    /// Straight to the server the CLI uses, because the control plane can't be reached.
-    Direct,
-}
-
 /// The default [`NetConfig::status_retry`].
 pub const STATUS_RETRY: Duration = Duration::from_secs(2);
 /// A refused request is asked again after 1x, 2x, 4x ... the retry, up to 2^5 = 32x (64 s by default). It is refused
@@ -380,7 +351,6 @@ struct Net {
     http: reqwest::Client,
     events: mpsc::Sender<NetEvent>,
     target: Option<Target>,
-    via: Via,
     /// Follows the control plane's status stream, redialing until it is back.
     status: Option<tokio::task::JoinHandle<()>>,
     /// Follows the log while the Logs page is open.
@@ -428,7 +398,6 @@ async fn run(
         http,
         events,
         target: None,
-        via: Via::Tunnel,
         status: None,
         logs: None,
         logs_wanted: false,
@@ -533,7 +502,12 @@ async fn stream_status(
     let mut stream = StatusStream::open(conn).await?;
     while let Some(frame) = stream.next().await? {
         let update = match frame {
-            StatusFrame::Snapshot { repos, .. } => FactoryUpdate::Snapshot(repos),
+            StatusFrame::Snapshot { control, repos } => {
+                if events.send(NetEvent::Factory(FactoryUpdate::Control(control))).is_err() {
+                    return Ok(None);
+                }
+                FactoryUpdate::Snapshot(repos)
+            }
             StatusFrame::Event { repo, event } => FactoryUpdate::Event { repo, event },
             StatusFrame::Unsupported(unsupported) => return Ok(Some(Refusal::TooOld(too_old_message(&unsupported)))),
         };
@@ -633,7 +607,6 @@ impl Net {
                     return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string())));
                 }
             }
-            self.via = Via::Tunnel;
             self.start_status(id);
             self.restart_logs();
             self.token = None;
@@ -704,7 +677,7 @@ impl Net {
         };
         let (id, tunnel) = (target.id, format!("http://{}", target.api));
         // Signed in: live, or still loading the board or reconnecting its feed.
-        let mut live =
+        let live =
             matches!(self.state, Some((Link::Live, _) | (Link::Syncing, Some(Reason::Loading | Reason::Reconnecting))))
                 && self.pasted.is_none();
         // A token turned down stays on show until a new login, even through the probe's "connecting".
@@ -720,24 +693,17 @@ impl Net {
         }
 
         // The control plane forwards to the server, which answers /v1/health to anyone.
-        let (health, via) = match self.http.get(format!("{tunnel}/v1/health")).send().await {
-            Ok(r) if r.status().is_success() => (r.json::<Health>().await.unwrap_or_default(), Via::Tunnel),
+        let health = match self.http.get(format!("{tunnel}/v1/health")).send().await {
+            Ok(r) if r.status().is_success() => r.json::<Health>().await.unwrap_or_default(),
             Ok(r) => {
                 return self
                     .set(Link::Offline, Some(Reason::Unreachable(format!("the server answered {}", r.status()))));
             }
             Err(_) => {
-                // Already on the server's own URL: the control plane stays down, and asking why again is slow.
-                let reason = if self.via == Via::Direct {
-                    Reason::Unreachable("the control plane isn't answering".into())
-                } else {
-                    self.diagnose(id).await
-                };
-                // A control plane that refuses this Lookout is up, so that is told rather than hidden; one that is
-                // gone leaves the board working from the server the CLI uses.
-                match (&reason, self.direct_health().await) {
-                    (Reason::Unreachable(_), Some(health)) => (health, Via::Direct),
-                    (Reason::NotAllowed, _) => return self.refused(reason),
+                let reason = self.diagnose(id).await;
+                // A control plane that refuses this Lookout is up, so that is told rather than hidden.
+                match reason {
+                    Reason::NotAllowed => return self.refused(reason),
                     _ => return self.set(Link::Offline, Some(reason)),
                 }
             }
@@ -746,15 +712,7 @@ impl Net {
         if matches!(&self.probe_hold, Some((_, Reason::NotAllowed))) {
             self.release_probe();
         }
-        if via != self.via {
-            // Moving between the tunnel and the server: sign in and sync again on the new address.
-            self.via = via;
-            live = false;
-        }
-        let base = match via {
-            Via::Tunnel => tunnel,
-            Via::Direct => self.config.server_url.clone().unwrap_or_default(),
-        };
+        let base = tunnel;
         if live {
             self.release_probe();
             // /v1/health is open to anyone, so a token revoked since sign-in shows only on an authenticated call.
@@ -828,17 +786,7 @@ impl Net {
 
     /// Where the Trailhead API is reached right now.
     fn api_base(&self) -> Option<String> {
-        match self.via {
-            Via::Tunnel => self.target.as_ref().map(|t| format!("http://{}", t.api)),
-            Via::Direct => self.config.server_url.clone(),
-        }
-    }
-
-    /// The server's health at the URL the CLI uses, if it answers there.
-    async fn direct_health(&self) -> Option<Health> {
-        let url = self.config.server_url.as_ref()?;
-        let r = self.http.get(format!("{url}/v1/health")).send().await.ok()?.error_for_status().ok()?;
-        Some(r.json::<Health>().await.unwrap_or_default())
+        self.target.as_ref().map(|t| format!("http://{}", t.api))
     }
 
     /// Follows the control plane's status stream on its own connection, and says when it can't be reached.
@@ -877,7 +825,7 @@ impl Net {
                 }
                 if !progress.stopped {
                     progress.stopped = true;
-                    if events.send(NetEvent::Factory(FactoryUpdate::Stopped)).is_err() {
+                    if events.send(NetEvent::Factory(FactoryUpdate::Unreachable)).is_err() {
                         return;
                     }
                 }
