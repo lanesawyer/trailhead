@@ -73,7 +73,6 @@ jobs:
           git tag -a "$TAG" -m "$TAG"
           git push --atomic origin HEAD:main "$TAG"
 
-  # Built before publishing so a broken build stops the release before anything reaches crates.io.
   binaries:
     needs: release
     strategy:
@@ -138,21 +137,8 @@ jobs:
           path: dist/trailhead-daemon-*
           if-no-files-found: error
 
-  crates-io:
-    needs: [release, binaries, daemon]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-      # Publishes trailhead-model, trailhead-core, trailhead-client, trailhead-log, trailhead-server and trailhead in dependency order.
-      - run: cargo publish --locked -p trailhead-model -p trailhead-core -p trailhead-client -p trailhead-log -p trailhead-server -p trailhead
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
   github-release:
-    needs: [release, crates-io, daemon]
+    needs: [release, binaries, daemon]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

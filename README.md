@@ -12,10 +12,10 @@ Agents can learn the API from `GET /llms.txt` on any server, and the workflow fr
 ## Install
 
 ```sh
-cargo install trailhead --locked
+cargo install --git https://github.com/lanesawyer/trailhead trailhead --locked
 ```
 
-Or skip the build with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) (`cargo binstall trailhead`), or download a Linux binary (x86_64 or arm64) from the [releases page](https://github.com/lanesawyer/trailhead/releases). Trailhead runs on Linux.
+Or download a Linux binary (x86_64 or arm64) from the [releases page](https://github.com/lanesawyer/trailhead/releases). Trailhead runs on Linux. Nothing is published to crates.io for now; the 0.1.0 there predates the factory.
 
 This installs the task engine. The CLI starts a local server in the background on first use.
 
@@ -66,7 +66,7 @@ cargo fmt --all
 
 `cargo test` covers the engine and the whole factory lifecycle on in-memory fakes. Tests that touch real services are `#[ignore]`d and run as mise tasks (`mise run test-live-sprites`, `mise run test-live-daemon`), with secrets from Bitwarden through fnox. Work on Trailhead is tracked in Trailhead, in the `TRAIL` project; [AGENTS.md](AGENTS.md) has the conventions for agents working here.
 
-CI (`.github/workflows/ci.yml`) runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` on every pull request and push to `main`, and checks that the published crates package (`cargo package -p trailhead-core -p trailhead-server -p trailhead`). The factory's crates aren't published yet.
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` on every pull request and push to `main`. No crate is published to crates.io for now.
 
 The docs in `docs/` are also a book, built with mdBook and published to the [docs site](https://lanesawyer.github.io/trailhead/) by `.github/workflows/docs.yml`, which builds them on pull requests that touch them and deploys from `main`. `mise run docs` builds them locally and `mise run docs-serve` previews them (a plain `mdbook serve` fails or draws no diagrams on a fresh clone, because the git-ignored `mermaid.min.js` is unpacked by the docs tasks). A new page has to be listed in `docs/SUMMARY.md`; the build fails on a listed page that doesn't exist.
 
@@ -76,9 +76,9 @@ Releases are cut from GitHub Actions; there's nothing to do locally.
 
 1. Run the **Release** workflow on `main` (Actions → Release → Run workflow). Leave the version empty to take the next version [git-cliff](https://git-cliff.org) calculates from the conventional commits since the last tag (`feat` and breaking changes bump the minor version while we're pre-1.0, everything else the patch), or enter one to override it.
 2. It sets every crate to that version, regenerates [CHANGELOG.md](CHANGELOG.md) from `cliff.toml`, commits `chore(release): vX.Y.Z` to `main`, and pushes the tag.
-3. It then builds `trailhead` Linux binaries (x86_64 and arm64) and a static `trailhead-daemon` (`trailhead-daemon-vX.Y.Z-x86_64-unknown-linux-musl`, with a `.sha256` beside it, which the factory's control plane downloads and verifies), publishes `trailhead-core`, `trailhead-server` and `trailhead` to crates.io, and creates a GitHub release with that version's changelog and the binaries.
+3. It then builds `trailhead` Linux binaries (x86_64 and arm64) and a static `trailhead-daemon` (`trailhead-daemon-vX.Y.Z-x86_64-unknown-linux-musl`, with a `.sha256` beside it, which the factory's control plane downloads and verifies), and creates a GitHub release with that version's changelog and the binaries.
 
-Publishing needs a crates.io API token in the `CARGO_REGISTRY_TOKEN` repository secret, and the Release workflow needs to be able to push to `main`.
+The Release workflow needs to be able to push to `main`.
 
 ## License
 

@@ -73,19 +73,3 @@ jobs:
       # No system packages: it builds without alsa, udev or wayland headers (see its README).
       - run: cargo clippy --profile ci -p trailhead-ui -p trailhead-lookout --all-targets --locked -- -D warnings
       - run: cargo test --profile ci -p trailhead-ui -p trailhead-lookout --locked
-
-  package:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # The profiles live in the root Cargo.toml, which rust-cache's own key ignores. Without this a profile change
-          # restored a stale cache that was an exact hit, so every run rebuilt every dependency and nothing was saved.
-          key: ${{ hashFiles('Cargo.toml') }}
-      # Only the published crates; the factory crates are publish = false until they're ready.
-      - run: cargo package --locked -p trailhead-model -p trailhead-core -p trailhead-client -p trailhead-log -p trailhead-server -p trailhead
-      # rust-cache's cleanup trips over the unpacked crates and logs ENOENT errors.
-      - if: always()
-        run: rm -rf target/package

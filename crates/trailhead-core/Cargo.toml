@@ -9,6 +9,7 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish = false
 description = "Domain core for Trailhead: schema, claims, ready queue, event log and undo"
 
 [dependencies]

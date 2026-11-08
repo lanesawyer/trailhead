@@ -19,7 +19,7 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 - **One process for coordination.** With the factory feature on, the Trailhead server is the control plane. The orchestrator follows the events table in-process. Today the control plane is still a separate `trailhead-factory` process beside the server, sharing its database (TRAIL-164).
 - **One tunnel.** Trailhead already reaches other machines through an iroh tunnel to its loopback port (`dumbpipe`). Sandboxes use the same tunnel, and the factory's daemon protocol rides on it as server routes alongside REST and MCP.
 - **Keep the `Tracker` trait.** In-process inside the server, REST from the daemon. It keeps the engine/factory boundary clean, makes test fakes possible, and leaves other trackers open.
-- **Engine still usable alone.** Factory crates sit behind a Cargo feature, so `cargo install trailhead` without it stays a small task engine for existing users (OpenClaw, the maintainer's reader app). Today the factory is a separate binary built from this repo, so `cargo install trailhead` is the engine alone either way (TRAIL-116).
+- **Engine still usable alone.** Factory crates sit behind a Cargo feature, so a `trailhead` build without it stays a small task engine for existing users (OpenClaw, the maintainer's reader app). Today the factory is a separate binary built from this repo, so a `trailhead` install is the engine alone either way (TRAIL-116).
 - **Plan and license.** `docs/PLAN.md` was rewritten to match (TRAIL-87). Trailhead is AGPL-3.0, so the factory is too.
 
 ## Components
