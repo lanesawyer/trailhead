@@ -74,7 +74,7 @@ async fn ready_queue_orders_and_filters() {
     assert_eq!(env.ready_keys().await, [undated.key.clone(), low.key.clone()]);
 
     let err = env.store.claim(&agent, &urgent.key, None).await.unwrap_err();
-    assert!(matches!(err, Error::BlockedBy(ref k) if k == std::slice::from_ref(&low.key)));
+    assert!(matches!(err, Error::BlockedBy(ref k) if k == std::slice::from_ref(&low.key.0)));
     env.store.update_task(&env.human, &low.key, status(Status::Cancelled), None).await.unwrap();
     assert_eq!(env.ready_keys().await, [urgent.key.clone(), undated.key.clone()]);
 }
@@ -105,7 +105,7 @@ async fn expired_claims_free_the_task() {
     assert_eq!(env.ready_keys().await, vec![t.key.clone()]);
     let events = env
         .store
-        .list_events(&env.human, EventFilter { task: Some(t.key.clone()), ..Default::default() })
+        .list_events(&env.human, EventFilter { task: Some(t.key.0.clone()), ..Default::default() })
         .await
         .unwrap();
     let expired = events.iter().find(|e| e.kind == "claim.expired").unwrap();
@@ -322,7 +322,7 @@ async fn subtask_blocking_parent_unblocks_on_done() {
             NewTask {
                 project: "AUTH".into(),
                 title: "sub".into(),
-                parent: Some(parent.key.clone()),
+                parent: Some(parent.key.0.clone()),
                 ..Default::default()
             },
         )
@@ -387,7 +387,7 @@ async fn moving_under_an_existing_parent_cycle_is_rejected_without_hanging() {
         .await
         .unwrap();
     }
-    let under_a = TaskPatch { parent: Some(Some(a.key.clone())), ..Default::default() };
+    let under_a = TaskPatch { parent: Some(Some(a.key.0.clone())), ..Default::default() };
     // Local queries can finish without yielding, so a looping walk would never let a
     // `tokio::time::timeout` fire. Run the update on its own thread and wait with a deadline.
     let env = std::sync::Arc::new(env);
@@ -595,7 +595,7 @@ async fn every_write_is_attributed() {
         .await
         .unwrap();
     let events =
-        env.store.list_events(&env.human, EventFilter { task: Some(t.key), ..Default::default() }).await.unwrap();
+        env.store.list_events(&env.human, EventFilter { task: Some(t.key.0), ..Default::default() }).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].actor_id, a.actor_id());
     assert_eq!(events[0].on_behalf_of, env.human.user_id);
@@ -826,7 +826,7 @@ async fn lost_claims_are_reported_on_renew() {
     env.store.claim(&a, &t.key, Some(60)).await.unwrap();
     let mine = env.store.my_claims(&a).await.unwrap();
     assert_eq!(mine.len(), 1);
-    assert_eq!(mine[0].key, t.key);
+    assert_eq!(mine[0].key, t.key.as_str());
     assert!(env.store.my_claims(&b).await.unwrap().is_empty());
 
     // Expired but not yet reaped.
@@ -1125,7 +1125,7 @@ async fn list_events_filters_by_project_and_pages_back() {
         web_events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
         ["comment.created", "task.created", "project.created"]
     );
-    assert!(web_events.iter().all(|e| e.task_key.as_deref().is_none_or(|k| k == web.key)));
+    assert!(web_events.iter().all(|e| e.task_key.as_deref().is_none_or(|k| k == web.key.as_str())));
     let first = list("WEB", None, Some(1)).await;
     let rest = list("WEB", Some(first[0].id), None).await;
     assert_eq!(rest.len(), 2);
@@ -1196,7 +1196,7 @@ async fn search_by_key_puts_that_task_first() {
     let keys: Vec<_> = hits.iter().map(|t| t.key.clone()).collect();
     assert_eq!(keys, [target.key.clone(), mentions.key.clone()]);
 
-    let filter = SearchFilter { query: target.key.clone(), statuses: vec![Status::Done], ..Default::default() };
+    let filter = SearchFilter { query: target.key.0.clone(), statuses: vec![Status::Done], ..Default::default() };
     assert!(env.store.search_hits(&env.human, filter).await.unwrap().is_empty(), "filters still apply");
 }
 
@@ -1256,7 +1256,7 @@ async fn only_humans_can_set_lower_or_clear_a_grade() {
 
     // The event log records the change.
     let log =
-        env.store.list_events(&env.human, EventFilter { task: Some(task.key.clone()), ..Default::default() }).await;
+        env.store.list_events(&env.human, EventFilter { task: Some(task.key.0.clone()), ..Default::default() }).await;
     assert!(log.unwrap().iter().any(|e| e.kind == "task.updated" && e.after.as_ref().is_some_and(|t| t["grade"] == 3)));
 }
 
@@ -1293,12 +1293,24 @@ async fn agents_cannot_undo_or_revert_a_humans_grade_change() {
     let b = env.agent("b").await;
     let other = env.task_with(NewTask { title: "other".into(), grade: Some(gr(2)), ..Default::default() }).await;
     let since = env.now() - jiff::SignedDuration::from_secs(60);
+    // The agent also retitled two other tasks, one before and one after the grade change, so whichever order the
+    // revert walks them in, some of its work is reverted before the refusal.
+    let before = env.task("before").await;
+    let after = env.task("after").await;
+    let retitle = |t: &str| TaskPatch { title: Some(t.into()), ..Default::default() };
+    env.store.update_task(&a.next_batch(), &before.key, retitle("before, retitled"), None).await.unwrap();
     env.store.update_task(&a.next_batch(), &other.key, patch(Some(gr(4))), None).await.unwrap();
+    env.store.update_task(&a.next_batch(), &after.key, retitle("after, retitled"), None).await.unwrap();
     let report = env.store.revert_actor(&b.next_batch(), a.actor_id(), since).await;
     assert!(matches!(report, Err(Error::Forbidden(_))), "lowering a grade aborts the whole revert: {report:?}");
     assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(gr(4)));
+    // All or nothing: the agent's other changes are still in place after the refusal.
+    assert_eq!(env.store.get_task(&env.human, &before.key).await.unwrap().title, "before, retitled");
+    assert_eq!(env.store.get_task(&env.human, &after.key).await.unwrap().title, "after, retitled");
     env.store.revert_actor(&env.human.next_batch(), a.actor_id(), since).await.unwrap();
     assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(gr(2)));
+    assert_eq!(env.store.get_task(&env.human, &before.key).await.unwrap().title, "before");
+    assert_eq!(env.store.get_task(&env.human, &after.key).await.unwrap().title, "after");
 }
 
 #[tokio::test]
@@ -1360,8 +1372,11 @@ async fn undoing_a_duplicate_cancel_restores_the_task() {
     let env = Env::new().await;
     let orig = env.task("CI is red on main").await;
     let dup = env.task("main CI broken").await;
-    let patch =
-        TaskPatch { status: Some(Status::Cancelled), duplicate_of: Some(Some(orig.key.clone())), ..Default::default() };
+    let patch = TaskPatch {
+        status: Some(Status::Cancelled),
+        duplicate_of: Some(Some(orig.key.0.clone())),
+        ..Default::default()
+    };
     let batch = env.human.next_batch();
     env.store.update_task(&batch, &dup.key, patch, None).await.unwrap();
     env.store.undo_batch(&env.human, batch.batch_id).await.unwrap();

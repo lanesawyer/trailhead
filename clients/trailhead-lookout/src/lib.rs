@@ -7,11 +7,13 @@ pub mod board;
 pub mod commands;
 pub mod connect;
 pub mod connection;
+pub mod detail;
 pub mod factory;
 #[doc(hidden)]
 pub mod fixture;
 pub mod icon;
 pub mod inspector;
+pub mod logs;
 pub mod map;
 pub mod mirror;
 pub mod net;

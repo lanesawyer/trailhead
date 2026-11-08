@@ -22,16 +22,18 @@ use trailhead_model::{Grade, Priority, Status, Task};
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
 use crate::factory::FactoryStatus;
+use crate::inspector::{OpenComposer, Selection, Subject};
 use crate::mirror::Mirrored;
 use crate::widgets::{
-    Modal, ModalClosed, ModalLocked, ModalSlots, Picked, button, dot, field, open_modal, priority_tone, row, section,
-    select, size, space, status_label, text, text_dim, text_input, token,
+    Modal, ModalClosed, ModalLocked, ModalSlots, Picked, button, dot, field, open_modal, priority_tone, row, select,
+    size, space, status_label, text_dim, text_input, token,
 };
 
 /// The priority the form starts a new task at.
 const NEW_PRIORITY: Priority = Priority::new(2).unwrap();
 
-/// The queue task new tasks go under unless the form says otherwise (`queue` in `.trailhead.toml`).
+/// The queue task new tasks go under until the factory has said what its queue is (`queue` in `.trailhead.toml`),
+/// unless `LOOKOUT_QUEUE` pins one.
 pub const DEFAULT_QUEUE: &str = "TRAIL-102";
 
 /// What a task's grade can be set to, in the order of the dropdown: none, then 1 to 4.
@@ -60,11 +62,13 @@ pub fn grade_index(grade: Option<Grade>) -> Option<usize> {
 pub struct Authoring {
     /// The key new tasks are made under.
     pub queue: String,
+    /// `queue` was set by the person (`LOOKOUT_QUEUE`), so the factory's queue doesn't replace it.
+    pub pinned: bool,
 }
 
 impl Default for Authoring {
     fn default() -> Self {
-        Authoring { queue: DEFAULT_QUEUE.to_string() }
+        Authoring { queue: DEFAULT_QUEUE.to_string(), pinned: false }
     }
 }
 
@@ -76,14 +80,6 @@ pub enum Target {
     Edit {
         key: String,
         version: i64,
-    },
-    Comment {
-        key: String,
-    },
-    Answer {
-        key: String,
-        comment_id: String,
-        question: String,
     },
 }
 
@@ -98,8 +94,6 @@ pub struct Draft {
     pub grade: Option<Grade>,
     /// The parent's key when creating; empty for none.
     pub parent: String,
-    /// A comment or an answer.
-    pub body: String,
 }
 
 impl Default for Draft {
@@ -111,7 +105,6 @@ impl Default for Draft {
             status: Status::Open,
             grade: None,
             parent: String::new(),
-            body: String::new(),
         }
     }
 }
@@ -136,7 +129,7 @@ impl Open {
 
     /// An edit of `task`, a task as the mirror holds it.
     pub fn edit(task: &Task) -> Open {
-        let target = Target::Edit { key: task.key.clone(), version: task.version };
+        let target = Target::Edit { key: task.key.0.clone(), version: task.version };
         let draft = Draft {
             title: task.title.clone(),
             description: task.description.clone(),
@@ -153,19 +146,7 @@ impl Open {
         match &self.target {
             Target::Create => "New task".to_string(),
             Target::Edit { key, .. } => format!("Edit {key}"),
-            Target::Comment { key } => format!("Comment on {key}"),
-            Target::Answer { key, .. } => format!("Answer on {key}"),
         }
-    }
-
-    pub fn comment(key: &str) -> Open {
-        Open::new(Target::Comment { key: key.to_string() }, Draft::default())
-    }
-
-    pub fn answer(key: &str, comment_id: &str, question: &str) -> Open {
-        let target =
-            Target::Answer { key: key.to_string(), comment_id: comment_id.to_string(), question: question.to_string() };
-        Open::new(target, Draft::default())
     }
 }
 
@@ -227,30 +208,6 @@ pub fn request(open: &Open) -> Result<Request, String> {
             }
             Ok(Request::new(Method::PATCH, format!("/v1/tasks/{key}"), Some(Value::Object(patch)), Some(*version)))
         }
-        Target::Comment { key } => {
-            let body = d.body.trim();
-            if body.is_empty() {
-                return Err("write the comment first".into());
-            }
-            Ok(Request::new(
-                Method::POST,
-                format!("/v1/tasks/{key}/comments"),
-                Some(json!({"kind": "note", "body": body})),
-                None,
-            ))
-        }
-        Target::Answer { comment_id, .. } => {
-            let body = d.body.trim();
-            if body.is_empty() {
-                return Err("write the answer first".into());
-            }
-            Ok(Request::new(
-                Method::POST,
-                format!("/v1/comments/{comment_id}/resolve"),
-                Some(json!({"answer": body})),
-                None,
-            ))
-        }
     }
 }
 
@@ -305,6 +262,9 @@ impl Form {
 pub enum Act {
     #[default]
     New,
+    /// The new-task form, under the task with this key.
+    NewSubtask(String),
+    /// Opens the task in the modal, where it is edited in place.
     Edit(String),
     Comment(String),
     Answer {
@@ -322,7 +282,6 @@ pub enum FieldKind {
     Title,
     Description,
     Parent,
-    Body,
 }
 
 /// A text input of the form, which draft field it holds, and the form generation it was drawn for
@@ -345,6 +304,20 @@ pub enum FormChoice {
     Priority,
     Status,
     Grade,
+    /// The queue a new task goes under.
+    Parent,
+}
+
+/// Follows the factory's queue: until the person pins one, new tasks go under the first queue it reports.
+fn follow_factory_queue(factory: Res<FactoryStatus>, mut authoring: ResMut<Authoring>) {
+    if authoring.pinned || !factory.is_changed() {
+        return;
+    }
+    if let Some(first) = factory.queues().into_iter().next()
+        && authoring.queue != first
+    {
+        authoring.queue = first;
+    }
 }
 
 /// The text showing the form's last message.
@@ -353,7 +326,6 @@ pub struct FormMessage;
 
 /// Lines tall the spec's box is, and a comment's or answer's.
 const SPEC_LINES: f32 = 12.0;
-const BODY_LINES: f32 = 6.0;
 
 /// The form's modal, and the source of its commands. `title` is what the modal's heading says.
 #[derive(Component, Default)]
@@ -372,7 +344,6 @@ fn field_value(draft: &mut Draft, kind: FieldKind) -> &mut String {
         FieldKind::Title => &mut draft.title,
         FieldKind::Description => &mut draft.description,
         FieldKind::Parent => &mut draft.parent,
-        FieldKind::Body => &mut draft.body,
     }
 }
 
@@ -386,19 +357,26 @@ fn on_act(
     tasks: Query<&Mirrored<Task>>,
     panel: Query<Entity, With<FormPanel>>,
     mut submit: MessageWriter<Submit>,
+    mut selection: ResMut<Selection>,
+    mut commands: Commands,
 ) {
     let Ok(act) = acts.get(activate.entity) else { return };
     // Opening a form is allowed offline (the board is read-only then, so its buttons are greyed out), but nothing
     // is sent until the connection is live again.
     match act {
         Act::New => form.open(Open::create(&authoring.queue)),
+        Act::NewSubtask(key) => form.open(Open::create(key)),
+        // An existing task is edited in place, in the task modal.
         Act::Edit(key) => {
-            if let Some(task) = tasks.iter().find(|t| t.0.key == *key) {
-                form.open(Open::edit(&task.0));
+            if let Some(task) = tasks.iter().find(|t| t.0.key == key.as_str()) {
+                selection.0 = Some(Subject::Task(task.0.id.to_string()));
             }
         }
-        Act::Comment(key) => form.open(Open::comment(key)),
-        Act::Answer { key, comment_id, question } => form.open(Open::answer(key, comment_id, question)),
+        // Comments and answers are written in the task modal's comment box.
+        Act::Comment(key) => commands.trigger(OpenComposer { key: key.clone(), answer: None }),
+        Act::Answer { key, comment_id, question } => {
+            commands.trigger(OpenComposer { key: key.clone(), answer: Some((comment_id.clone(), question.clone())) })
+        }
         // A save in flight can't be withdrawn, so the form stays until it is answered.
         Act::Cancel if !form.saving => form.close(),
         Act::Cancel => {}
@@ -469,10 +447,12 @@ impl Plugin for AuthorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Form>()
             .init_resource::<Authoring>()
+            .init_resource::<FactoryStatus>()
+            .init_resource::<Selection>()
             .add_observer(on_act)
             .add_observer(on_pick)
             .add_observer(on_modal_closed)
-            .add_systems(Update, (init_text, read_fields, finish).chain());
+            .add_systems(Update, (follow_factory_queue, init_text, read_fields, finish).chain());
     }
 }
 
@@ -533,6 +513,7 @@ fn choice_field(
         }
         FormChoice::Status => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Status }),
         FormChoice::Grade => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Grade }),
+        FormChoice::Parent => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Parent }),
     };
     commands.queue_spawn_scene(field(label.to_string(), control)).insert(ChildOf(parent));
 }
@@ -543,9 +524,11 @@ fn on_pick(
     choices: Query<&FormChoice>,
     dots: Query<Entity, With<PriorityDot>>,
     mut form: ResMut<Form>,
+    factory: Res<FactoryStatus>,
     mut commands: Commands,
 ) {
     let Ok(choice) = choices.get(picked.entity) else { return };
+    let queues = factory.queues();
     let Some(open) = &mut form.open else { return };
     match choice {
         FormChoice::Priority => {
@@ -564,6 +547,11 @@ fn on_pick(
         FormChoice::Grade => {
             if let Some(grade) = grade_choices().nth(picked.index) {
                 open.draft.grade = grade;
+            }
+        }
+        FormChoice::Parent => {
+            if let Some(queue) = queues.get(picked.index) {
+                open.draft.parent = queue.clone();
             }
         }
     }
@@ -605,7 +593,14 @@ fn fill_form(
             Target::Create | Target::Edit { .. } => {
                 let creating = open.target == Target::Create;
                 if creating {
-                    text_field(c, body, "Parent", input(FieldKind::Parent, generation, d.parent.clone(), 1.0));
+                    let queues = factory.queues();
+                    // A new task under one of the factory's queues picks among them; any other parent is typed.
+                    match queues.iter().position(|q| *q == d.parent) {
+                        Some(at) => choice_field(c, body, "Queue", FormChoice::Parent, queues, Some(at)),
+                        None => {
+                            text_field(c, body, "Parent", input(FieldKind::Parent, generation, d.parent.clone(), 1.0))
+                        }
+                    }
                 }
                 text_field(c, body, "Title", input(FieldKind::Title, generation, d.title.clone(), 1.0));
                 let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(body)).id();
@@ -627,15 +622,6 @@ fn fill_form(
                 );
                 let spec = input(FieldKind::Description, generation, d.description.clone(), SPEC_LINES);
                 text_field(c, body, "Spec", spec);
-            }
-            Target::Comment { .. } | Target::Answer { .. } => {
-                if let Target::Answer { question, .. } = &open.target {
-                    // The question wraps to the dialog's width and is styled like the rest of the kit's text.
-                    let quoted = c.spawn_scene(bsn! { @section("Question") }).insert(ChildOf(body)).id();
-                    c.spawn_scene(text(question.clone(), size::BODY)).insert(ChildOf(quoted));
-                }
-                let label = if matches!(open.target, Target::Answer { .. }) { "Answer" } else { "Comment" };
-                text_field(c, body, label, input(FieldKind::Body, generation, String::new(), BODY_LINES));
             }
         }
         let footer = slots.footer;
@@ -735,19 +721,53 @@ mod tests {
 
     #[test]
     fn comments_and_answers_need_a_body() {
-        let mut open = Open::comment("TRAIL-7");
-        assert!(request(&open).is_err());
-        open.draft.body = "hello\nthere".into();
-        let r = request(&open).unwrap();
+        use crate::inspector::compose_request;
+        use trailhead_model::CommentKind;
+        assert!(compose_request("TRAIL-7", CommentKind::Note, None, "  ").is_err());
+        let r = compose_request("TRAIL-7", CommentKind::Handoff, None, "hello\nthere").unwrap();
         assert_eq!(r.path, "/v1/tasks/TRAIL-7/comments");
-        assert_eq!(body(&r), &json!({"kind": "note", "body": "hello\nthere"}));
+        assert_eq!(body(&r), &json!({"kind": "handoff", "body": "hello\nthere"}));
 
-        let mut open = Open::answer("TRAIL-7", "c9", "which db?");
-        assert!(request(&open).is_err());
-        open.draft.body = "sqlite".into();
-        let r = request(&open).unwrap();
+        let question = ("c9".to_string(), "which db?".to_string());
+        assert!(compose_request("TRAIL-7", CommentKind::Note, Some(&question), "").is_err());
+        let r = compose_request("TRAIL-7", CommentKind::Note, Some(&question), "sqlite").unwrap();
         assert_eq!((r.method.clone(), r.path.as_str()), (Method::POST, "/v1/comments/c9/resolve"));
         assert_eq!(body(&r), &json!({"answer": "sqlite"}));
+    }
+
+    #[test]
+    fn comment_and_answer_open_the_tasks_comment_box_instead_of_a_form() {
+        let mut app = app();
+        app.init_resource::<crate::inspector::Selection>().init_resource::<crate::inspector::Compose>();
+        #[derive(Resource, Default)]
+        struct Opened(Vec<crate::inspector::OpenComposer>);
+        app.init_resource::<Opened>()
+            .add_observer(|o: On<crate::inspector::OpenComposer>, mut opened: ResMut<Opened>| opened.0.push(o.clone()));
+        press(&mut app, Act::Comment("TRAIL-7".into()));
+        press(&mut app, Act::Answer { key: "TRAIL-7".into(), comment_id: "c1".into(), question: "which db?".into() });
+        assert!(app.world().resource::<Form>().open.is_none(), "no form");
+        let opened = &app.world().resource::<Opened>().0;
+        assert_eq!(opened[0], crate::inspector::OpenComposer { key: "TRAIL-7".into(), answer: None });
+        assert_eq!(opened[1].answer, Some(("c1".to_string(), "which db?".to_string())));
+    }
+
+    /// The edit form, which nothing in Lookout opens any more (existing tasks are edited in the task modal), until it
+    /// is removed.
+    fn open_edit_form(app: &mut App) {
+        app.world_mut().resource_mut::<Form>().open(edit(&task()));
+        app.update();
+    }
+
+    #[test]
+    fn edit_opens_the_task_in_the_modal_and_add_sub_task_opens_a_new_task_under_it() {
+        let mut app = app();
+        press(&mut app, Act::Edit("TRAIL-7".into()));
+        assert!(app.world().resource::<Form>().open.is_none(), "no form");
+        let selected = app.world().resource::<Selection>().0.clone();
+        assert!(matches!(selected, Some(Subject::Task(_))), "{selected:?}");
+        press(&mut app, Act::NewSubtask("TRAIL-7".into()));
+        let open = app.world().resource::<Form>().open.clone().unwrap();
+        assert_eq!((open.target, open.draft.parent.as_str()), (Target::Create, "TRAIL-7"));
     }
 
     /// Picks `index` in the form's dropdown for `choice`, as a click on its row does.
@@ -760,7 +780,7 @@ mod tests {
     #[test]
     fn the_dropdowns_set_the_priority_and_the_status() {
         let mut app = app();
-        press(&mut app, Act::Edit("TRAIL-7".into()));
+        open_edit_form(&mut app);
         pick(&mut app, FormChoice::Priority, 0);
         pick(&mut app, FormChoice::Status, 1);
         let draft = app.world().resource::<Form>().open.as_ref().unwrap().draft.clone();
@@ -793,7 +813,7 @@ mod tests {
     #[test]
     fn the_grade_dropdown_sets_the_draft() {
         let mut app = app();
-        press(&mut app, Act::Edit("TRAIL-7".into()));
+        open_edit_form(&mut app);
         pick(&mut app, FormChoice::Grade, 3);
         assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.grade, Grade::new(3));
         pick(&mut app, FormChoice::Grade, 0);
@@ -812,7 +832,7 @@ mod tests {
     #[test]
     fn the_priority_dot_follows_the_picked_priority() {
         let mut app = app();
-        press(&mut app, Act::Edit("TRAIL-7".into()));
+        open_edit_form(&mut app);
         let dot = app.world_mut().spawn((PriorityDot, ThemeBackgroundColor(token::BADGE_BG))).id();
         pick(&mut app, FormChoice::Priority, 0);
         assert_eq!(app.world().get::<ThemeBackgroundColor>(dot).unwrap().0, token::PRIORITY_1);
@@ -852,7 +872,7 @@ mod tests {
         let panel = app.world_mut().spawn(FormPanel::default()).id();
         go_live(&mut app);
 
-        press(&mut app, Act::Edit("TRAIL-7".into()));
+        open_edit_form(&mut app);
         assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.title, "old");
 
         // Nothing changed: refused on the form, nothing sent.
@@ -890,8 +910,8 @@ mod tests {
     fn saving_while_offline_says_so_and_sends_nothing() {
         let mut app = app();
         app.world_mut().spawn(FormPanel::default());
-        press(&mut app, Act::Comment("TRAIL-7".into()));
-        app.world_mut().resource_mut::<Form>().open.as_mut().unwrap().draft.body = "hi".into();
+        open_edit_form(&mut app);
+        app.world_mut().resource_mut::<Form>().open.as_mut().unwrap().draft.title = "hi".into();
         press(&mut app, Act::Save);
         let form = app.world().resource::<Form>();
         assert!(form.message.contains("Not connected") && !form.saving);
@@ -909,31 +929,59 @@ mod tests {
         assert!(app.world().resource::<Form>().open.is_none());
     }
 
+    fn report_queues(app: &mut App, queues: &[&str]) {
+        let state = crate::factory::RepoState {
+            control: trailhead_factory::status::ControlState::Up,
+            queue: queues.iter().map(|q| q.to_string()).collect(),
+            last_error: None,
+            human_grades: Vec::new(),
+            seq: 1,
+        };
+        app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), state);
+        app.update();
+    }
+
+    #[test]
+    fn new_follows_the_factory_queue_unless_pinned() {
+        let mut app = app();
+        report_queues(&mut app, &["TRAIL-102", "TRAIL-685"]);
+        assert_eq!(app.world().resource::<FactoryStatus>().queues(), ["TRAIL-102", "TRAIL-685"]);
+        report_queues(&mut app, &["TRAIL-685"]);
+        assert_eq!(app.world().resource::<Authoring>().queue, "TRAIL-685");
+        {
+            let mut authoring = app.world_mut().resource_mut::<Authoring>();
+            authoring.queue = "TRAIL-9".into();
+            authoring.pinned = true;
+        }
+        report_queues(&mut app, &["TRAIL-102"]);
+        assert_eq!(app.world().resource::<Authoring>().queue, "TRAIL-9");
+    }
+
     #[test]
     fn typed_text_reaches_the_draft() {
         let mut app = app();
-        press(&mut app, Act::Comment("TRAIL-7".into()));
+        open_edit_form(&mut app);
         let generation = app.world().resource::<Form>().generation;
         let mut text = EditableText::new("one\ntwo");
         text.allow_newlines = true;
-        app.world_mut().spawn((Field(FieldKind::Body, generation), text));
+        app.world_mut().spawn((Field(FieldKind::Description, generation), text));
         app.update();
-        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.body, "one\ntwo");
+        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.description, "one\ntwo");
     }
 
     #[test]
     fn fields_of_a_replaced_form_do_not_feed_the_new_draft() {
         let mut app = app();
-        press(&mut app, Act::Comment("TRAIL-1".into()));
+        open_edit_form(&mut app);
         let old = app.world().resource::<Form>().generation;
         let mut text = EditableText::new("old form text");
         text.allow_newlines = true;
-        app.world_mut().spawn((Field(FieldKind::Body, old), text));
+        app.world_mut().spawn((Field(FieldKind::Description, old), text));
         // Switch forms while the old panel's inputs still exist.
-        press(&mut app, Act::Comment("TRAIL-2".into()));
+        press(&mut app, Act::New);
         let open = app.world().resource::<Form>().open.clone().unwrap();
-        assert_eq!(open.target, Target::Comment { key: "TRAIL-2".into() });
-        assert_eq!(open.draft.body, "");
+        assert_eq!(open.target, Target::Create);
+        assert_eq!(open.draft.description, "");
     }
 
     /// The form with its drawing, headless: scenes need the asset and scene plugins, and the kit's modal its observer.
@@ -960,7 +1008,7 @@ mod tests {
     #[test]
     fn the_forms_status_dropdown_lists_every_status_in_words() {
         let mut app = ui_app();
-        press(&mut app, Act::Edit("TRAIL-7".into()));
+        open_edit_form(&mut app);
         settle(&mut app);
         let world = app.world_mut();
         let shown: Vec<String> = world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect();
@@ -973,21 +1021,19 @@ mod tests {
 
     #[test]
     fn every_form_opens_one_modal_and_closing_it_closes_the_form() {
-        let acts = [
-            Act::New,
-            Act::Edit("TRAIL-7".into()),
-            Act::Comment("TRAIL-7".into()),
-            Act::Answer { key: "TRAIL-7".into(), comment_id: "c1".into(), question: "which db?".into() },
-        ];
-        for act in acts {
+        for edit in [false, true] {
             // Cancel, then the modal's own ways out: Escape and a click outside both send `RequestClose` for the
             // backdrop, and the X sends it from inside.
             for from_backdrop in [None, Some(true), Some(false)] {
                 let mut app = ui_app();
                 settle(&mut app);
-                press(&mut app, act.clone());
+                if edit {
+                    open_edit_form(&mut app);
+                } else {
+                    press(&mut app, Act::New);
+                }
                 settle(&mut app);
-                assert_eq!(modals(&mut app), 1, "{act:?}");
+                assert_eq!(modals(&mut app), 1, "edit: {edit}");
                 let root = app.world_mut().query_filtered::<Entity, With<FormPanel>>().single(app.world()).unwrap();
                 match from_backdrop {
                     None => press(&mut app, Act::Cancel),
@@ -998,7 +1044,7 @@ mod tests {
                     }
                 }
                 settle(&mut app);
-                assert_eq!(modals(&mut app), 0, "{act:?} {from_backdrop:?}");
+                assert_eq!(modals(&mut app), 0, "edit: {edit}, {from_backdrop:?}");
                 assert!(app.world().resource::<Form>().open.is_none());
             }
         }
@@ -1007,7 +1053,7 @@ mod tests {
     #[test]
     fn a_form_with_a_save_in_flight_ignores_a_click_outside() {
         let mut app = ui_app();
-        press(&mut app, Act::Comment("TRAIL-7".into()));
+        open_edit_form(&mut app);
         settle(&mut app);
         app.world_mut().resource_mut::<Form>().saving = true;
         settle(&mut app);
@@ -1021,7 +1067,7 @@ mod tests {
     #[test]
     fn cancel_is_ignored_while_saving() {
         let mut app = app();
-        press(&mut app, Act::Comment("TRAIL-7".into()));
+        open_edit_form(&mut app);
         app.world_mut().resource_mut::<Form>().saving = true;
         press(&mut app, Act::Cancel);
         assert!(app.world().resource::<Form>().open.is_some());

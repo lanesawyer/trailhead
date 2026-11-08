@@ -16,20 +16,20 @@ use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
-use trailhead_model::{Agent, Claim, Comment, CommentKind, Project, Status, Task};
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Project, Status, Task, User};
 use uuid::Uuid;
 
 use crate::author::{Act, Authoring};
 use crate::connection::{Connection, ConnectionStatus};
 use crate::factory::{FactoryLink, FactoryStatus, Run};
-use crate::inspector::{Selection, Subject};
+use crate::inspector::{Neighbours, Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::search::{Deep, DeepHit};
 use crate::settings::SettingsButton;
 use crate::widgets;
 use crate::widgets::{
     ChipEdit, ChipWords, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_found,
-    card_row, card_title, card_under, chip, field, priority_tone, select, size, space, spawn_search_field,
+    card_row, card_title, card_under, chip, field, grade_tone, priority_tone, select, size, space, spawn_search_field,
     status_label, text as label_text, token, tool_button,
 };
 use bevy::feathers::theme::ThemeToken;
@@ -227,6 +227,7 @@ pub struct Input<'a> {
     pub claims: &'a [Claim],
     pub comments: &'a [Comment],
     pub agents: &'a [Agent],
+    pub users: &'a [User],
     /// The runs in flight, which name a holder the agent list hasn't caught up with.
     pub runs: &'a [Run],
     /// The keys of the factory's queue tasks, whose subtasks the factory works.
@@ -249,14 +250,20 @@ fn next_expiry(claims: &[Claim], now: Timestamp) -> Option<Timestamp> {
 pub fn build(input: Input, filter: &Filter) -> BoardView {
     let project_key: HashMap<Uuid, &str> = input.projects.iter().map(|p| (p.id, p.key.as_str())).collect();
     let task_key: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.key.as_str())).collect();
-    let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
+    // Holders are agents or, for a claim a person made, users.
+    let holder_name: HashMap<Uuid, &str> = input
+        .agents
+        .iter()
+        .map(|a| (a.id, a.name.as_str()))
+        .chain(input.users.iter().map(|u| (u.id, u.name.as_str())))
+        .collect();
     // The claim is keyed by its task.
     let holder_of: HashMap<Uuid, Uuid> =
         input.claims.iter().filter(|c| c.is_live(input.now)).map(|c| (c.task_id, c.holder_id)).collect();
     let running: HashSet<&str> = input.runs.iter().map(|r| r.status.task.0.as_str()).collect();
     // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
     // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
-    let holder_label = |task: Uuid, id: Uuid| match agent_name.get(&id) {
+    let holder_label = |task: Uuid, id: Uuid| match holder_name.get(&id) {
         Some(n) => n.to_string(),
         None => match task_key.get(&task) {
             Some(k) if running.contains(k) => format!("factory/{}", k.to_lowercase()),
@@ -290,7 +297,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
     };
     let query = filter.query.trim();
     let deep_hit = |t: &Task| input.deep.iter().find(|h| h.id == t.id.to_string());
-    let local = |t: &Task| matches_key_or_title(query, &t.key, &t.title);
+    let local = |t: &Task| matches_key_or_title(query, t.key.as_str(), &t.title);
     // A task only the server found is shown with where it matched.
     let found = |t: &Task| if query.is_empty() || local(t) { None } else { deep_hit(t).map(found_hint) };
     let searched = |t: &Task| query.is_empty() || local(t) || deep_hit(t).is_some();
@@ -305,7 +312,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
             badges.push(Badge { kind: BadgeKind::Factory, label: "factory".into(), tone: Some(token::INFO) });
         }
         if let Some(grade) = t.grade {
-            badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}"), tone: None });
+            badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}"), tone: Some(grade_tone(grade)) });
         } else if !t.status.is_closed() && in_queue(t) {
             badges.push(Badge { kind: BadgeKind::NeedsGrade, label: "needs grade".into(), tone: Some(token::WARN) });
         }
@@ -336,7 +343,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         }
         Card {
             id: t.id.to_string(),
-            key: t.key.clone(),
+            key: t.key.0.clone(),
             title: t.title.clone(),
             parent: parent_key(t).filter(|_| with_parent).map(str::to_string),
             depth,
@@ -354,7 +361,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         }
         let mut here: Vec<&Task> = shown.iter().copied().filter(|t| t.status == status).collect();
         // Urgent first, then by key number, so the order doesn't shuffle with every update.
-        here.sort_by_key(|t| (t.priority, key_number(&t.key), t.key.clone()));
+        here.sort_by_key(|t| (t.priority, key_number(t.key.as_str()), t.key.clone()));
         let ids: HashSet<Uuid> = here.iter().map(|t| t.id).collect();
         let nested = |t: &Task| t.parent_id.is_some_and(|p| ids.contains(&p));
         let mut cards = Vec::new();
@@ -463,7 +470,7 @@ fn rebuild_view(
     tasks: Query<&Mirrored<Task>>,
     claims: Query<&Mirrored<Claim>>,
     comments: Query<&Mirrored<Comment>>,
-    agents: Query<&Mirrored<Agent>>,
+    (agents, users): (Query<&Mirrored<Agent>>, Query<&Mirrored<User>>),
     runs: Query<&Run>,
     runs_changed: Query<(), Changed<Run>>,
     authoring: Res<Authoring>,
@@ -487,8 +494,8 @@ fn rebuild_view(
     {
         return;
     }
-    let (projects, tasks, claims, comments, agents) =
-        (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
+    let (projects, tasks, claims, comments, agents, users) =
+        (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents), rows(&users));
     let runs: Vec<Run> = runs.iter().cloned().collect();
     let queues = queue_keys(&authoring, factory.as_deref());
     let input = Input {
@@ -497,6 +504,7 @@ fn rebuild_view(
         claims: &claims,
         comments: &comments,
         agents: &agents,
+        users: &users,
         runs: &runs,
         queues: &queues,
         deep: deep.as_ref().map_or(&[], |d| d.for_query(filter.query.trim())),
@@ -506,6 +514,34 @@ fn rebuild_view(
     let next = build(input, &filter);
     if *view != next {
         *view = next;
+    }
+}
+
+/// The cards before and after the task `id` in its column, in the board's order (a subtask under its parent counts
+/// where it sits). A task is in one column at most, since its status picks it.
+pub fn neighbours(view: &BoardView, id: &str) -> Neighbours {
+    for column in &view.columns {
+        if let Some(i) = column.cards.iter().position(|c| c.id == id) {
+            return Neighbours {
+                previous: i.checked_sub(1).map(|p| column.cards[p].id.clone()),
+                next: column.cards.get(i + 1).map(|c| c.id.clone()),
+            };
+        }
+    }
+    Neighbours::default()
+}
+
+/// Keeps [`Neighbours`] for the selected task as the selection and the board change.
+fn follow_neighbours(selection: Res<Selection>, view: Res<BoardView>, mut neighbours: ResMut<Neighbours>) {
+    if !(selection.is_changed() || view.is_changed()) {
+        return;
+    }
+    let next = match &selection.0 {
+        Some(Subject::Task(id)) => self::neighbours(&view, id),
+        _ => Neighbours::default(),
+    };
+    if *neighbours != next {
+        *neighbours = next;
     }
 }
 
@@ -562,7 +598,8 @@ pub struct BoardColumn {
     pub count: usize,
 }
 
-/// The scrolling body of the column for this status, a child of its [`BoardColumn`].
+/// The scrolling body of the column for this status. It is a grandchild of its [`BoardColumn`]: the body and its
+/// scrollbar share a frame, which sits under the shell after the header.
 #[derive(Component)]
 pub struct ColumnBody(pub Status);
 
@@ -706,7 +743,9 @@ impl Plugin for BoardPlugin {
             .init_resource::<BoardView>()
             .init_resource::<Shown>()
             .init_resource::<Tree>()
-            .add_systems(Update, (rebuild_view, sync_tree).chain())
+            .init_resource::<Selection>()
+            .init_resource::<Neighbours>()
+            .add_systems(Update, (rebuild_view, sync_tree, follow_neighbours).chain())
             .add_observer(on_pick)
             .add_observer(on_toggle_closed)
             .add_observer(on_toggle_factory);
@@ -805,9 +844,13 @@ fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<BoardPanel>>)
 #[derive(Component)]
 struct HeaderBar;
 
-/// What the cards of one column build now: the first `limit` of them, and how many are left out.
+/// What the cards of one column build now: the first `limit` of them, and how many are left out. A page that ends
+/// partway through a parent's subtasks runs on to the last of them, so a parent is never split from its children.
 pub fn visible(cards: &[Card], limit: usize) -> (&[Card], usize) {
-    let shown = limit.min(cards.len());
+    let mut shown = limit.min(cards.len());
+    while shown > 0 && shown < cards.len() && cards[shown].depth > 0 {
+        shown += 1;
+    }
     (&cards[..shown], cards.len() - shown)
 }
 
@@ -1232,6 +1275,7 @@ mod tests {
                 claims,
                 comments: &comments,
                 agents: &agents,
+                users: &[],
                 runs: &[],
                 queues: &[],
                 deep: &[],
@@ -1269,6 +1313,7 @@ mod tests {
                 claims: &claims,
                 comments: &comments,
                 agents: &agents,
+                users: &[],
                 runs,
                 queues: &["TRAIL-102".to_string()],
                 deep: &[],
@@ -1297,6 +1342,26 @@ mod tests {
         let col = view.columns.iter().find(|c| c.status == Status::InProgress).unwrap();
         let parents: Vec<_> = col.cards.iter().map(|c| c.parent.as_deref()).collect();
         assert_eq!(parents, [None, Some("TRAIL-102"), None]);
+    }
+
+    #[test]
+    fn neighbours_are_the_cards_either_side_in_the_column_and_none_past_its_ends() {
+        let view = run(&Filter::default());
+        let id = |key: &str| card(&view, key).id.clone();
+        let around = |key: &str| {
+            let n = neighbours(&view, &id(key));
+            let key_of = |id: Option<String>| {
+                id.map(|id| view.columns.iter().flat_map(|c| &c.cards).find(|c| c.id == id).unwrap().key.clone())
+            };
+            (key_of(n.previous), key_of(n.next))
+        };
+        // In progress is OPS-1, TRAIL-103, then TRAIL-104 nested under it.
+        assert_eq!(around("OPS-1"), (None, Some("TRAIL-103".into())));
+        assert_eq!(around("TRAIL-103"), (Some("OPS-1".into()), Some("TRAIL-104".into())));
+        assert_eq!(around("TRAIL-104"), (Some("TRAIL-103".into()), None));
+        // Never across into another column.
+        assert_eq!(around("TRAIL-102"), (None, Some("TRAIL-105".into())));
+        assert_eq!(neighbours(&view, "not on the board"), Neighbours::default());
     }
 
     fn card<'a>(view: &'a BoardView, key: &str) -> &'a Card {
@@ -1394,7 +1459,7 @@ mod tests {
         let badge =
             |key: &str, kind: BadgeKind| card(&view, key).badges.iter().find(|b| b.kind == kind).unwrap().tone.clone();
         assert_eq!(badge("TRAIL-103", BadgeKind::Priority), Some(token::PRIORITY_2));
-        assert_eq!(badge("TRAIL-103", BadgeKind::Grade), None);
+        assert_eq!(badge("TRAIL-103", BadgeKind::Grade), Some(token::GRADE_3));
         assert_eq!(badge("TRAIL-103", BadgeKind::Questions), Some(token::WARN));
         let tones = Priority::ALL.map(priority_tone);
         assert_eq!(tones, [token::PRIORITY_1, token::PRIORITY_2, token::PRIORITY_3, token::PRIORITY_4]);
@@ -1575,6 +1640,21 @@ mod tests {
         assert_eq!(visible(&many(3), PAGE).1, 0);
         assert!(visible(&[], PAGE).0.is_empty());
     }
+
+    #[test]
+    fn a_page_does_not_split_a_parent_from_its_subtasks() {
+        let mut cards = many(PAGE + 5);
+        // The parent is the page's last card; three subtasks follow it.
+        for card in &mut cards[PAGE..PAGE + 3] {
+            card.depth = 1;
+        }
+        let (shown, hidden) = visible(&cards, PAGE);
+        assert_eq!((shown.len(), hidden), (PAGE + 3, 2));
+        assert_eq!(shown[PAGE + 2].depth, 1);
+        // A page that ends on a top-level boundary is cut where it was.
+        let (shown, hidden) = visible(&cards, PAGE - 1);
+        assert_eq!((shown.len(), hidden), (PAGE - 1, 6));
+    }
     #[test]
     fn filters_narrow_the_board() {
         let by = |f: Filter| -> Vec<String> {
@@ -1596,6 +1676,38 @@ mod tests {
         assert_eq!(view.options.parents[0].value, "TRAIL-102", "the filter still takes the key");
         // A holder that isn't an agent is its short id, which sorts first here.
         assert_eq!(labels(&view.options.holders), [&sid("u1")[..8], "factory/trail-103-a1"]);
+    }
+
+    #[test]
+    fn a_person_holding_a_claim_is_named_by_the_users_list() {
+        let (projects, tasks, claims, comments, agents) = input_json();
+        let (projects, tasks, claims, comments, agents) = (
+            typed::<Project>(projects),
+            typed::<Task>(tasks),
+            typed::<Claim>(claims),
+            typed::<Comment>(comments),
+            typed::<Agent>(agents),
+        );
+        let users = typed::<User>(vec![json!({
+            "id": sid("u1"), "workspace_id": sid("w1"), "name": "Lane", "email": null,
+            "created_at": "2026-10-01T00:00:00Z"
+        })]);
+        let view = build(
+            Input {
+                projects: &projects,
+                tasks: &tasks,
+                claims: &claims,
+                comments: &comments,
+                agents: &agents,
+                users: &users,
+                now: at_now(),
+                ..Default::default()
+            },
+            &Filter::default(),
+        );
+        assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, "Lane")]);
+        let labels: Vec<_> = view.options.holders.iter().map(|c| c.label.clone()).collect();
+        assert_eq!(labels, ["Lane", "factory/trail-103-a1"]);
     }
 
     #[test]
@@ -1655,7 +1767,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(BoardPlugin);
         let (projects, tasks, claims, comments, agents) = input_json();
-        let snapshot = Snapshot { at: 5, projects, tasks, agents };
+        let snapshot = Snapshot { at: 5, projects, tasks, agents, ..Default::default() };
         let _ = (claims, comments);
         app.world_mut().write_message(SyncItem::Snapshot(snapshot));
         app.update();
@@ -1702,7 +1814,13 @@ mod in_place_tests {
         let tasks = vec![task("t1", "open"), task("t2", "open"), task("t3", "in_progress"), task("t4", "in_progress")];
         let projects =
             vec![project_json(json!({"id": "p1", "key": "TRAIL"})), project_json(json!({"id": "p2", "key": "OPS"}))];
-        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, agents: vec![] }));
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 1,
+            projects,
+            tasks,
+            agents: vec![],
+            ..Default::default()
+        }));
         settle(&mut app);
         app
     }
@@ -1736,6 +1854,44 @@ mod in_place_tests {
     fn count_cards(app: &mut App) -> usize {
         let mut q = app.world_mut().query::<&BoardCard>();
         q.iter(app.world()).count()
+    }
+
+    #[test]
+    fn a_dressed_column_is_a_header_and_a_frame_holding_the_body_and_scrollbar() {
+        let mut app = app();
+        // The plain test app never dresses columns. Run that system alone, on bodies it sees as new.
+        app.add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>()
+            .init_resource::<BoardScroll>()
+            .add_systems(Update, dress_columns);
+        let bodies: Vec<(Entity, Status)> =
+            app.world_mut().query::<(Entity, &ColumnBody)>().iter(app.world()).map(|(e, b)| (e, b.0)).collect();
+        for (id, status) in bodies {
+            app.world_mut().entity_mut(id).remove::<ColumnBody>().insert(ColumnBody(status));
+        }
+        settle(&mut app);
+        let mut q = app.world_mut().query::<(Entity, &BoardColumn)>();
+        let shells: Vec<Entity> = q.iter(app.world()).map(|(e, _)| e).collect();
+        assert!(!shells.is_empty());
+        for shell in shells {
+            let world = app.world();
+            let kids: Vec<Entity> = world.get::<Children>(shell).expect("a dressed shell has children").to_vec();
+            assert_eq!(
+                kids.len(),
+                2,
+                "shell holds the header and the frame: {:?}",
+                kids.iter().map(|k| world.get::<Name>(*k).map(Name::to_string)).collect::<Vec<_>>()
+            );
+            let (header, frame) = (kids[0], kids[1]);
+            assert!(world.get::<ColumnBody>(header).is_none());
+            assert_eq!(world.get::<Name>(frame).map(Name::as_str), Some("column frame"));
+            let inner: Vec<Entity> = world.get::<Children>(frame).expect("the frame has children").to_vec();
+            assert_eq!(inner.len(), 2, "frame holds the body and the scrollbar");
+            assert!(world.get::<ColumnBody>(inner[0]).is_some(), "the body comes first");
+            assert!(world.get::<ColumnBody>(inner[1]).is_none(), "the scrollbar comes second");
+            assert_eq!(world.get::<ChildOf>(inner[0]).map(ChildOf::parent), Some(frame));
+        }
     }
 
     #[test]
@@ -1775,6 +1931,85 @@ mod in_place_tests {
         let mut q = app.world_mut().query::<(&ColumnBody, &Children)>();
         let held: HashMap<Status, usize> = q.iter(app.world()).map(|(b, c)| (b.0, c.len())).collect();
         assert_eq!((held[&Status::Open], held[&Status::InProgress]), (1, 3));
+    }
+
+    /// Every card sits in a column's body, and there is one card per task shown.
+    fn assert_placed(app: &mut App, step: &str) {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &BoardCard, Option<&ChildOf>)>();
+        let cards: Vec<(Entity, String, Option<Entity>)> =
+            q.iter(world).map(|(e, c, p)| (e, c.0.key.clone(), p.map(ChildOf::parent))).collect();
+        for (e, key, parent) in &cards {
+            let in_body = parent.is_some_and(|p| world.get::<ColumnBody>(p).is_some());
+            assert!(in_body, "{step}: card {key} ({e}) is not in a column (parent {parent:?})");
+        }
+        let mut keys: Vec<&String> = cards.iter().map(|(_, k, _)| k).collect();
+        keys.sort();
+        let n = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), n, "{step}: two cards for one task: {cards:?}");
+    }
+
+    #[test]
+    fn cards_stay_in_their_columns_whichever_way_they_move() {
+        // A card moving back to an earlier column was left without a parent, drawn at the window's top left
+        // (TRAIL-1009).
+        let mut app = app();
+        let mut n = 100;
+        let mut version = 10;
+        let mut move_to = |app: &mut App, id: &str, status: &str, title: &str, settle_after: bool| {
+            n += 1;
+            version += 1;
+            app.world_mut().write_message(SyncItem::Event(json!({
+                "id": n, "entity": "task", "entity_id": sid(id), "kind": "task.updated",
+                "after": task_json(json!({"id": id, "key": id.to_uppercase(), "title": title, "project_id": "p1",
+                          "status": status, "priority": 2, "version": version})),
+            })));
+            if settle_after {
+                settle(app);
+            }
+        };
+        let steps: &[(&str, &str)] = &[
+            ("t3", "in_review"),
+            ("t3", "in_progress"),
+            ("t3", "open"),
+            ("t1", "needs_input"),
+            ("t1", "open"),
+            ("t4", "in_review"),
+            ("t2", "in_review"),
+            ("t4", "open"),
+            ("t2", "in_progress"),
+            ("t2", "done"),
+            ("t2", "open"),
+            ("t1", "in_review"),
+            ("t1", "in_progress"),
+        ];
+        for (i, (id, status)) in steps.iter().enumerate() {
+            move_to(&mut app, id, status, &format!("{id} v{i}"), true);
+            assert_placed(&mut app, &format!("step {i} {id}->{status}"));
+        }
+        // Several in one frame, back and forth.
+        move_to(&mut app, "t3", "in_review", "a", false);
+        move_to(&mut app, "t4", "needs_input", "b", false);
+        move_to(&mut app, "t3", "open", "c", false);
+        settle(&mut app);
+        assert_placed(&mut app, "burst");
+        // Closed columns shown, a card moved into one, hidden again.
+        app.world_mut().resource_mut::<Filter>().closed = true;
+        settle(&mut app);
+        move_to(&mut app, "t1", "cancelled", "d", true);
+        assert_placed(&mut app, "into cancelled");
+        app.world_mut().resource_mut::<Filter>().closed = false;
+        settle(&mut app);
+        assert_placed(&mut app, "closed hidden");
+        move_to(&mut app, "t1", "in_progress", "e", true);
+        assert_placed(&mut app, "out of cancelled");
+        // One frame at a time, with a move every frame.
+        for (i, status) in ["in_review", "open", "needs_input", "in_progress", "in_review"].iter().enumerate() {
+            move_to(&mut app, "t2", status, &format!("f{i}"), false);
+            app.update();
+            assert_placed(&mut app, &format!("frame {i} t2->{status}"));
+        }
     }
 
     #[test]
@@ -1838,7 +2073,13 @@ mod in_place_tests {
             })
             .collect();
         let projects = vec![project_json(json!({"id": "p1", "key": "TRAIL"}))];
-        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, agents: vec![] }));
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 1,
+            projects,
+            tasks,
+            agents: vec![],
+            ..Default::default()
+        }));
         settle(&mut app);
         let before = cards(&mut app);
         assert_eq!(before.len(), PAGE);

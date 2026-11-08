@@ -306,6 +306,12 @@ impl Store {
     /// Reverts everything `actor_id` did since `since`. Anything someone else has
     /// touched since is skipped and reported rather than overwritten. A `since`
     /// before the undo window is clamped to it: older events aren't reverted.
+    ///
+    /// Skipping only covers entities someone else touched. A permission failure
+    /// (`Error::Forbidden`: an event outside the token's scope, an agent lowering
+    /// a grade, or a change to a project's review settings) aborts the whole
+    /// revert and rolls back every entity in it, so callers get an error, not a
+    /// partial report.
     pub async fn revert_actor(&self, ctx: &Ctx, actor_id: Uuid, since: Timestamp) -> Result<UndoReport> {
         self.write(ctx, async |tx| {
             let since = since.max(tx.now - UNDO_WINDOW);

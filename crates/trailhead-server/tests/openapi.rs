@@ -39,6 +39,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("get", "/v1/events/stream"),
     ("post", "/v1/undo"),
     ("post", "/v1/revert"),
+    ("get", "/v1/users"),
     ("get", "/v1/agents"),
     ("post", "/v1/agents"),
     ("get", "/v1/claims"),

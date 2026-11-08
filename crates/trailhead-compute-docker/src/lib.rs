@@ -473,6 +473,7 @@ impl Compute for DockerCompute {
     /// environment are carried over. Warm checkpoints of the sandbox that no label points at any more are removed
     /// afterwards.
     async fn checkpoint(&self, id: &SandboxId, note: &str) -> Result<CheckpointId> {
+        self.writable()?;
         let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
         let cp = CheckpointId(format!("{CHECKPOINT_REPO}:{}-{millis}", id.0));
         let info = self.docker.inspect_container(&id.0, None::<InspectContainerOptions>).await.map_err(docker_err)?;
@@ -532,6 +533,7 @@ impl Compute for DockerCompute {
     /// can be replaced), writes the program's run script and has the supervisor (re)start it. A program that exits
     /// within the first few seconds is an error carrying its output.
     async fn start(&self, id: &SandboxId, program: &Program) -> Result<()> {
+        self.writable()?;
         let name = &id.0;
         let (code, out) = self.exec(name, None, "id -u; id -g; echo \"$HOME\"").await?;
         let [uid, gid, home] = out.lines().collect::<Vec<_>>()[..] else {
@@ -577,6 +579,7 @@ impl Compute for DockerCompute {
     /// Containers don't pause, but one can be stopped (by hand, or by the Docker host restarting without it), so
     /// this starts it if it isn't running.
     async fn wake(&self, id: &SandboxId) -> Result<()> {
+        self.writable()?;
         let info = self.docker.inspect_container(&id.0, None::<InspectContainerOptions>).await.map_err(docker_err)?;
         if info.state.and_then(|s| s.running) == Some(true) {
             return Ok(());
@@ -614,8 +617,8 @@ impl Compute for DockerCompute {
     }
 
     /// Fails with [`Error::Unavailable`], for the control plane to wait out, when the sandbox's disk (the Docker
-    /// engine's) has less free than [`disk_needed`] for its filesystem, so a run doesn't start only to fail partway
-    /// through a build or a checkpoint.
+    /// engine's) has less free than [`disk_needed`] for the larger of its filesystem and the biggest checkpoint image
+    /// on the host, so a run doesn't start only to fail partway through a build or a checkpoint.
     async fn preflight(&self, id: &SandboxId) -> Result<()> {
         let (code, out) = self.exec(&id.0, None, "df -Pk /").await?;
         let Some(free) = (code == 0).then(|| free_bytes(&out)).flatten() else {
@@ -627,24 +630,14 @@ impl Compute for DockerCompute {
         };
         let opts = InspectContainerOptions { size: true };
         let info = self.docker.inspect_container(&id.0, Some(opts)).await.map_err(docker_err)?;
-        let size = info.size_root_fs.unwrap_or(0).max(0) as u64;
+        let fs = info.size_root_fs.unwrap_or(0).max(0) as u64;
         // A new sandbox's filesystem is small, but its checkpoint after prepare is not: size the need by the largest
         // checkpoint image the host holds too.
-        let mut sized_by = String::new();
-        let mut size = size;
-        if let Some((big, name)) = self.largest_checkpoint().await.filter(|(big, _)| *big > size) {
-            size = big;
-            sized_by = format!(", set by the checkpoint image {name}, which `docker rmi` frees if it is stale");
-        }
+        let checkpoint = self.largest_checkpoint().await;
+        let size = checkpoint.as_ref().map_or(fs, |(big, _)| fs.max(*big));
         let need = disk_needed(self.config.min_free_bytes, size);
         if free < need {
-            return Err(Error::Unavailable(format!(
-                "sandbox {}: only {} MiB of disk free, below the {} MiB a task and its checkpoint need (filesystem {} MiB{sized_by}); free up space on the Docker host (docker system df)",
-                id.0,
-                free >> 20,
-                need >> 20,
-                size >> 20
-            )));
+            return Err(Error::Unavailable(disk_short(&id.0, free, need, fs, checkpoint.as_ref())));
         }
         Ok(())
     }
@@ -730,6 +723,21 @@ fn build_jobs(memory_bytes: u64) -> u64 {
 fn full_disk(msg: &str) -> bool {
     let msg = msg.to_ascii_lowercase();
     msg.contains("no space left on device") || msg.contains("disk quota exceeded")
+}
+
+/// The message for a sandbox short of disk, naming both sizes the need could rest on so an operator knows what to
+/// free: the container's filesystem, or the largest checkpoint image (which `docker rmi` frees if it is stale).
+fn disk_short(sandbox: &str, free: u64, need: u64, fs: u64, checkpoint: Option<&(u64, String)>) -> String {
+    let checkpoint = match checkpoint {
+        Some((big, name)) => format!("largest checkpoint {} MiB, image {name}", big >> 20),
+        None => "no checkpoint image".to_string(),
+    };
+    format!(
+        "sandbox {sandbox}: only {} MiB of disk free, below the {} MiB a task and its checkpoint need (filesystem {} MiB, {checkpoint}); free up space on the Docker host (docker system df)",
+        free >> 20,
+        need >> 20,
+        fs >> 20
+    )
 }
 
 /// The free bytes on the filesystem `df -Pk` reports last.
@@ -855,6 +863,15 @@ mod tests {
         assert!(compute.gateway().await.is_err());
         let err = compute.set_labels(&SandboxId("x".into()), &Labels::default()).await.unwrap_err();
         assert!(err.to_string().contains("read-only"), "{err}");
+        let id = SandboxId("x".into());
+        let program = Program { name: "p".into(), cmd: "true".into(), args: vec![], files: vec![] };
+        for err in [
+            compute.checkpoint(&id, "n").await.unwrap_err(),
+            compute.start(&id, &program).await.unwrap_err(),
+            compute.wake(&id).await.unwrap_err(),
+        ] {
+            assert!(err.to_string().contains("read-only"), "{err}");
+        }
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(seen.lock().unwrap().is_empty(), "{:?}", seen.lock().unwrap());
     }
@@ -934,6 +951,15 @@ mod tests {
         let changes = image_changes("t-w1", "parked: first\nsecond\r\nthird", None);
         assert_eq!(changes[1], "LABEL dev.trailhead.checkpoint-note=\"parked: first second  third\"");
         assert!(changes.iter().all(|c| !c.contains(['\n', '\r'])));
+    }
+
+    #[test]
+    fn the_disk_short_message_names_the_filesystem_and_the_largest_checkpoint() {
+        let mib = 1u64 << 20;
+        let both = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, Some(&(800 * mib, "cp:1".into())));
+        assert!(both.contains("filesystem 300 MiB, largest checkpoint 800 MiB, image cp:1"), "{both}");
+        let none = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, None);
+        assert!(none.contains("filesystem 300 MiB, no checkpoint image"), "{none}");
     }
 
     #[test]
