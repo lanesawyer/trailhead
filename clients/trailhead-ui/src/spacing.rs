@@ -36,6 +36,8 @@ pub mod space {
     pub const GROUPS: f32 = step::M;
     /// How far a subtask's card sits in from its parent's.
     pub const INDENT: f32 = step::M;
+    /// The least room a hint keeps from the edge of the window, or of the surface it stays inside.
+    pub const HINT_MARGIN: f32 = step::XS;
 
     /// The colored dot of a status chip, across.
     pub const DOT: f32 = step::S;
