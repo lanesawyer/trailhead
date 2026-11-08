@@ -11,6 +11,9 @@ keywords.workspace = true
 categories.workspace = true
 description = "Domain core for Trailhead: schema, claims, ready queue, event log and undo"
 
+[lints]
+workspace = true
+
 [dependencies]
 trailhead-model.workspace = true
 libsql.workspace = true

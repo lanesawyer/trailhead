@@ -5,8 +5,8 @@
 //! A view names a token, never a color.
 
 use bevy::prelude::*;
-use trailhead_model::{Grade, Priority, Status};
-use trailhead_ui::{Theme, Token, palette};
+use trailhead_model::{CommentKind, Grade, Priority, Status};
+use trailhead_ui::{Icon, Theme, Token, palette};
 
 /// The kit's tokens and Lookout's own.
 pub mod token {
@@ -18,6 +18,8 @@ pub mod token {
     pub const BOARD_BG: Token = Token::new("lookout.board.bg");
     /// A task card.
     pub const CARD_BG: Token = Token::new("lookout.card.bg");
+    /// A task card under the pointer.
+    pub const CARD_BG_HOVER: Token = Token::new("lookout.card.bg.hover");
 
     /// One tone per priority, the same wherever a priority shows: P1 red, P2 orange, P3 blue, P4 gray.
     pub const PRIORITY_1: Token = Token::new("lookout.priority.1");
@@ -39,6 +41,15 @@ pub mod token {
     pub const STATUS_APPROVED: Token = Token::new("lookout.status.approved");
     pub const STATUS_DONE: Token = Token::new("lookout.status.done");
     pub const STATUS_CANCELLED: Token = Token::new("lookout.status.cancelled");
+
+    /// One text tone per status, in its column's hue, for a status written on a panel or card rather than filled in.
+    pub const STATUS_OPEN_TEXT: Token = Token::new("lookout.status.open.text");
+    pub const STATUS_IN_PROGRESS_TEXT: Token = Token::new("lookout.status.in_progress.text");
+    pub const STATUS_NEEDS_INPUT_TEXT: Token = Token::new("lookout.status.needs_input.text");
+    pub const STATUS_IN_REVIEW_TEXT: Token = Token::new("lookout.status.in_review.text");
+    pub const STATUS_APPROVED_TEXT: Token = Token::new("lookout.status.approved.text");
+    pub const STATUS_DONE_TEXT: Token = Token::new("lookout.status.done.text");
+    pub const STATUS_CANCELLED_TEXT: Token = Token::new("lookout.status.cancelled.text");
 }
 
 /// The background token of a status column.
@@ -51,6 +62,20 @@ pub fn status_token(status: Status) -> Token {
         Status::Approved => token::STATUS_APPROVED,
         Status::Done => token::STATUS_DONE,
         Status::Cancelled => token::STATUS_CANCELLED,
+    }
+}
+
+/// The text tone of a status, the same wherever a status is written. [`status_token`] is its column's background, too
+/// dark to read as text.
+pub fn status_tone(status: Status) -> Token {
+    match status {
+        Status::Open => token::STATUS_OPEN_TEXT,
+        Status::InProgress => token::STATUS_IN_PROGRESS_TEXT,
+        Status::NeedsInput => token::STATUS_NEEDS_INPUT_TEXT,
+        Status::InReview => token::STATUS_IN_REVIEW_TEXT,
+        Status::Approved => token::STATUS_APPROVED_TEXT,
+        Status::Done => token::STATUS_DONE_TEXT,
+        Status::Cancelled => token::STATUS_CANCELLED_TEXT,
     }
 }
 
@@ -88,11 +113,24 @@ pub fn grade_tone(g: Grade) -> Token {
     }
 }
 
+/// The icon of a kind of comment, the same wherever a comment shows, so its kind reads before its words.
+pub fn comment_icon(kind: CommentKind) -> Icon {
+    match kind {
+        CommentKind::Note => Icon::Comment,
+        CommentKind::Handoff => Icon::Handshake,
+        CommentKind::Decision => Icon::Signpost,
+        CommentKind::Question => Icon::Help,
+        CommentKind::Progress => Icon::Footprints,
+        CommentKind::Review => Icon::Eye,
+    }
+}
+
 /// The kit's theme with Lookout's tokens added, which `main.rs` hands to the kit's `ThemePlugin`.
 pub fn theme() -> Theme {
     let mut theme = Theme::new();
     theme.paint(&token::BOARD_BG, palette::GRAY_0);
     theme.paint(&token::CARD_BG, palette::GRAY_2);
+    theme.paint(&token::CARD_BG_HOVER, palette::GRAY_3);
 
     // The most urgent priority is the kit's danger red, read from the theme so the two can't drift apart.
     let danger = theme.color(&token::DANGER);
@@ -115,6 +153,16 @@ pub fn theme() -> Theme {
     theme.paint(&token::STATUS_APPROVED, column(150.0));
     theme.paint(&token::STATUS_DONE, Color::oklch(0.22, 0.0, 0.0));
     theme.paint(&token::STATUS_CANCELLED, Color::oklch(0.20, 0.0, 0.0));
+
+    // Written in the same hues, as light as the priorities, so they read on a panel or card.
+    let words = |hue: f32| Color::oklch(0.74, 0.12, hue);
+    theme.paint(&token::STATUS_OPEN_TEXT, words(250.0));
+    theme.paint(&token::STATUS_IN_PROGRESS_TEXT, words(210.0));
+    theme.paint(&token::STATUS_NEEDS_INPUT_TEXT, words(75.0));
+    theme.paint(&token::STATUS_IN_REVIEW_TEXT, words(300.0));
+    theme.paint(&token::STATUS_APPROVED_TEXT, words(150.0));
+    theme.paint(&token::STATUS_DONE_TEXT, Color::oklch(0.76, 0.0, 0.0));
+    theme.paint(&token::STATUS_CANCELLED_TEXT, Color::oklch(0.66, 0.0, 0.0));
     theme
 }
 
@@ -123,12 +171,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn each_kind_of_comment_has_its_own_icon() {
+        let icons: std::collections::HashSet<Icon> = CommentKind::ALL.into_iter().map(comment_icon).collect();
+        assert_eq!(icons.len(), CommentKind::ALL.len());
+    }
+
+    #[test]
     fn every_lookout_token_resolves_rather_than_falling_back_to_fuchsia() {
         let theme = theme();
         let all = [
             token::BOARD_BG,
             token::PANEL_BG,
             token::CARD_BG,
+            token::CARD_BG_HOVER,
             token::DIVIDER,
             token::BADGE_BG,
             token::HINT_BG,
@@ -150,6 +205,13 @@ mod tests {
             token::STATUS_APPROVED,
             token::STATUS_DONE,
             token::STATUS_CANCELLED,
+            token::STATUS_OPEN_TEXT,
+            token::STATUS_IN_PROGRESS_TEXT,
+            token::STATUS_NEEDS_INPUT_TEXT,
+            token::STATUS_IN_REVIEW_TEXT,
+            token::STATUS_APPROVED_TEXT,
+            token::STATUS_DONE_TEXT,
+            token::STATUS_CANCELLED_TEXT,
         ];
         for t in all {
             assert!(theme.has(&t), "{t} isn't in the theme");
@@ -191,6 +253,68 @@ mod tests {
         let colors: Vec<_> = Status::ALL.iter().map(|s| format!("{:?}", theme.color(&status_token(*s)))).collect();
         let distinct: std::collections::HashSet<_> = colors.iter().collect();
         assert_eq!(distinct.len(), Status::ALL.len(), "{colors:?}");
+    }
+
+    #[test]
+    fn in_the_light_theme_priorities_and_grades_still_read_on_a_card() {
+        let light = theme().light();
+        let lightness = |t: &Token| Oklcha::from(light.color(t)).lightness;
+        let card = lightness(&token::CARD_BG);
+        assert!(card > 0.5, "the card turns light");
+        for tone in written_tones() {
+            assert!(card - lightness(&tone) > 0.1, "{tone} is too faint on a light card");
+        }
+    }
+
+    /// Every tone written as text in one of Lookout's own colors: priorities, grades, statuses.
+    fn written_tones() -> Vec<Token> {
+        let priorities = Priority::ALL.map(priority_tone).into_iter();
+        priorities.chain(Grade::ALL.map(grade_tone)).chain(Status::ALL.map(status_tone)).collect()
+    }
+
+    /// The least lightness between text and the surface under it that reads easily.
+    const TEXT_CONTRAST: f32 = 0.3;
+
+    #[test]
+    fn in_the_dark_theme_every_written_tone_reads_on_the_panel_and_a_card() {
+        // The status select once wrote each status in its column's background, near-black on a dark panel.
+        let dark = theme();
+        let lightness = |t: &Token| Oklcha::from(dark.color(t)).lightness;
+        for surface in [token::PANEL_BG, token::CARD_BG] {
+            for tone in written_tones() {
+                let gap = lightness(&tone) - lightness(&surface);
+                assert!(gap >= TEXT_CONTRAST, "{tone} on {surface} is {gap:.2} lighter, too dark to read");
+            }
+        }
+    }
+
+    /// The least lightness between a hover and the surface under it that reads as a response.
+    const HOVER_CONTRAST: f32 = 0.05;
+
+    #[test]
+    fn a_plain_buttons_hover_shows_on_the_card_and_the_panel_in_either_theme() {
+        // The card's Edit, Comment and Answer buttons are plain, as are the inspector's and settings' (TRAIL-1091).
+        // Feathers' own plain hover is a shade of the surface, a gap too small to see.
+        for theme in [theme(), theme().light()] {
+            let lightness = |t: &Token| Oklcha::from(theme.color(t)).lightness;
+            let hover = lightness(&token::BUTTON_PLAIN_BG_HOVER);
+            for surface in [token::CARD_BG, token::PANEL_BG] {
+                let gap = (hover - lightness(&surface)).abs();
+                assert!(
+                    gap >= HOVER_CONTRAST,
+                    "a plain button's hover on {surface} is {gap:.3} away, too close to see"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cards_hover_shows_on_the_card_in_either_theme() {
+        for theme in [theme(), theme().light()] {
+            let lightness = |t: &Token| Oklcha::from(theme.color(t)).lightness;
+            let gap = (lightness(&token::CARD_BG_HOVER) - lightness(&token::CARD_BG)).abs();
+            assert!(gap >= HOVER_CONTRAST, "a card's hover is {gap:.3} away from the card, too close to see");
+        }
     }
 
     #[test]

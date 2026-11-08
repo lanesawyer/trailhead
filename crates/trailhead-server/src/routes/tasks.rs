@@ -51,7 +51,8 @@ pub(crate) struct TaskListQuery {
     /// Comma-separated extras per task: `claim` (the live claim or `null`, with the holder's
     /// name as `holder`), `open_questions` (unresolved `question` comments, oldest first) and
     /// `last_handoff` (the newest `handoff` comment or `null`) and `last_review` (the newest `review` comment
-    /// with a verdict or `null`; with `last_handoff` it is what `changes_requested` is computed from).
+    /// with a verdict or `null`; with `last_handoff` it is what `changes_requested` is computed from) and
+    /// `blocked_by` (the ids of every task blocking it, finished or not, in key order).
     include: Option<String>,
 }
 
@@ -89,8 +90,9 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
         offset: q.offset,
     };
     let includes = split_list(q.include.as_deref());
-    if let Some(other) =
-        includes.iter().find(|i| !["claim", "open_questions", "last_handoff", "last_review"].contains(&i.as_str()))
+    if let Some(other) = includes
+        .iter()
+        .find(|i| !["claim", "open_questions", "last_handoff", "last_review", "blocked_by"].contains(&i.as_str()))
     {
         return Err(invalid(format!("unknown include: {other}")));
     }
@@ -102,8 +104,12 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
     let mut questions = if wants("open_questions") { Some(s.store.open_questions(&ctx, &ids).await?) } else { None };
     let mut handoffs = if wants("last_handoff") { Some(s.store.last_handoffs(&ctx, &ids).await?) } else { None };
     let mut reviews = if wants("last_review") { Some(s.store.last_reviews(&ctx, &ids).await?) } else { None };
+    let mut blockers = if wants("blocked_by") { Some(s.store.blockers_of(&ctx, &ids).await?) } else { None };
     if let Value::Array(items) = &mut out {
         for (item, task) in items.iter_mut().zip(&tasks) {
+            if let Some(b) = &mut blockers {
+                item["blocked_by"] = json!(b.remove(&task.id).unwrap_or_default());
+            }
             if let Some(c) = &mut claims {
                 item["claim"] = json!(c.remove(&task.id));
             }

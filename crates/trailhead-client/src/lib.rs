@@ -4,10 +4,13 @@
 //! - [`creds`]: where saved tokens live (`<config dir>/servers/<instance>/` and the keyring entry).
 //! - [`Health`] and [`ApiError`]: the bodies a client reads from `/v1/health` and from failed requests.
 //! - [`paths`]: where an instance keeps its data and config ([`paths::Paths`]), and the local server's default address.
+//! - `http` (feature `http`): the typed client, `http::Client`.
 //! - [`text`]: how the CLI and MCP show tasks, projects, comments, claims and events.
 
 pub mod creds;
 pub mod echo;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod paths;
 pub mod text;
 

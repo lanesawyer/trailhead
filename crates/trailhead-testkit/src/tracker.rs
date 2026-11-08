@@ -43,6 +43,7 @@ struct State {
     sub_agents_fail: bool,
     /// How many times each task has been read with `show`.
     shows: HashMap<TaskKey, usize>,
+    renews: HashMap<TaskKey, usize>,
     /// Tasks whose current claim was taken from review, which a release or lapse returns there while the review
     /// still asks for changes.
     claimed_from_review: HashSet<TaskKey>,
@@ -204,6 +205,11 @@ impl FakeTracker {
     /// How many times `show` has read the task.
     pub fn shows(&self, key: &TaskKey) -> usize {
         self.state.lock().unwrap().shows.get(key).copied().unwrap_or(0)
+    }
+
+    /// How many times the task's claim has been renewed.
+    pub fn renews(&self, key: &TaskKey) -> usize {
+        self.state.lock().unwrap().renews.get(key).copied().unwrap_or(0)
     }
 
     pub fn task(&self, key: &TaskKey) -> Task {
@@ -481,6 +487,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn renew(&self, task: &TaskKey) -> Result<()> {
+        *self.state.lock().unwrap().renews.entry(task.clone()).or_default() += 1;
         self.write(task, |t, me| held_by_me(t, me))
     }
 

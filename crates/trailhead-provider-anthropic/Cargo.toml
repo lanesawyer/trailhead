@@ -10,6 +10,9 @@ readme.workspace = true
 publish = false
 description = "Trailhead factory ModelProvider for Anthropic: model aliases, endpoint and prices"
 
+[lints]
+workspace = true
+
 [dependencies]
 trailhead-factory.workspace = true
 tracing.workspace = true

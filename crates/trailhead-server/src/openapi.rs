@@ -39,7 +39,7 @@ pub const ERROR_CODES: &[&str] = &[
     "internal",
 ];
 
-/// A task in `GET /v1/tasks`. `claim`, `open_questions`, `last_handoff` and `last_review` are present only when named in `include`.
+/// A task in `GET /v1/tasks`. `claim`, `open_questions`, `last_handoff` and `last_review` and `blocked_by` are present only when named in `include`.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code, reason = "schema only; the handler adds claim to the JSON")]
 pub struct ListedTask {
@@ -53,6 +53,8 @@ pub struct ListedTask {
     last_handoff: Option<trailhead_core::Comment>,
     /// With `include=last_review`: the newest `review` comment with a verdict, or `null`.
     last_review: Option<trailhead_core::Comment>,
+    /// With `include=blocked_by`: the ids of every task blocking this one, finished or not (empty if none).
+    blocked_by: Option<Vec<uuid::Uuid>>,
 }
 
 /// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.
@@ -396,5 +398,23 @@ pub(crate) mod tests {
     fn error_codes_match_core() {
         let codes: Vec<_> = sample_errors().iter().map(Error::code).collect();
         assert_eq!(codes, ERROR_CODES);
+    }
+}
+
+#[cfg(test)]
+mod client_routes {
+    use super::ApiDoc;
+    use trailhead_client::http::routes;
+    use utoipa::OpenApi;
+
+    /// Every endpoint the typed client calls is in the document, with the method it uses, so the two can't drift.
+    #[test]
+    fn the_clients_routes_are_in_the_document() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        for route in routes::all() {
+            let item = &doc["paths"][route.path];
+            let method = route.method.as_str().to_ascii_lowercase();
+            assert!(item.get(&method).is_some(), "{} {} isn't in the OpenAPI document", route.method, route.path);
+        }
     }
 }

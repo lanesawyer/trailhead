@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use libsql::Connection;
 use uuid::Uuid;
 
-use crate::db::{collect, fmt_ts};
+use crate::db::{collect, fmt_ts, get_uuid, json_ids};
 use crate::error::{Error, Result};
 use crate::store::{Ctx, Store, Tx};
 use crate::tasks::{TASK_COLS, find_task, task_from_row};
@@ -146,6 +148,28 @@ impl Store {
         let mut blockers = unfinished_blockers(&conn, task.id).await?;
         blockers.retain(|b| ctx.in_scope(b.project_id));
         Ok(blockers)
+    }
+
+    /// Every blocker of these tasks, finished or not, keyed by the blocked task's id; tasks without one are absent.
+    /// Blockers outside the caller's scope, and deleted ones, are left out.
+    pub async fn blockers_of(&self, ctx: &Ctx, task_ids: &[Uuid]) -> Result<HashMap<Uuid, Vec<Uuid>>> {
+        let conn = self.reader()?;
+        let rows = conn
+            .query(
+                "SELECT d.blocked_id, d.blocker_id, b.project_id FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
+                 WHERE b.deleted_at IS NULL AND d.blocked_id IN (SELECT value FROM json_each(?1))
+                 ORDER BY b.key",
+                [json_ids(task_ids)?],
+            )
+            .await?;
+        let edges = collect(rows, |row| Ok((get_uuid(row, 0)?, get_uuid(row, 1)?, get_uuid(row, 2)?))).await?;
+        let mut out: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        for (blocked, blocker, project) in edges {
+            if ctx.in_scope(project) {
+                out.entry(blocked).or_default().push(blocker);
+            }
+        }
+        Ok(out)
     }
 }
 
