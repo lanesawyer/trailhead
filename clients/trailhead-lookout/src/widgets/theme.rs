@@ -41,6 +41,15 @@ pub mod token {
     pub const STATUS_APPROVED: Token = Token::new("lookout.status.approved");
     pub const STATUS_DONE: Token = Token::new("lookout.status.done");
     pub const STATUS_CANCELLED: Token = Token::new("lookout.status.cancelled");
+
+    /// One text tone per status, in its column's hue, for a status written on a panel or card rather than filled in.
+    pub const STATUS_OPEN_TEXT: Token = Token::new("lookout.status.open.text");
+    pub const STATUS_IN_PROGRESS_TEXT: Token = Token::new("lookout.status.in_progress.text");
+    pub const STATUS_NEEDS_INPUT_TEXT: Token = Token::new("lookout.status.needs_input.text");
+    pub const STATUS_IN_REVIEW_TEXT: Token = Token::new("lookout.status.in_review.text");
+    pub const STATUS_APPROVED_TEXT: Token = Token::new("lookout.status.approved.text");
+    pub const STATUS_DONE_TEXT: Token = Token::new("lookout.status.done.text");
+    pub const STATUS_CANCELLED_TEXT: Token = Token::new("lookout.status.cancelled.text");
 }
 
 /// The background token of a status column.
@@ -53,6 +62,20 @@ pub fn status_token(status: Status) -> Token {
         Status::Approved => token::STATUS_APPROVED,
         Status::Done => token::STATUS_DONE,
         Status::Cancelled => token::STATUS_CANCELLED,
+    }
+}
+
+/// The text tone of a status, the same wherever a status is written. [`status_token`] is its column's background, too
+/// dark to read as text.
+pub fn status_tone(status: Status) -> Token {
+    match status {
+        Status::Open => token::STATUS_OPEN_TEXT,
+        Status::InProgress => token::STATUS_IN_PROGRESS_TEXT,
+        Status::NeedsInput => token::STATUS_NEEDS_INPUT_TEXT,
+        Status::InReview => token::STATUS_IN_REVIEW_TEXT,
+        Status::Approved => token::STATUS_APPROVED_TEXT,
+        Status::Done => token::STATUS_DONE_TEXT,
+        Status::Cancelled => token::STATUS_CANCELLED_TEXT,
     }
 }
 
@@ -130,6 +153,16 @@ pub fn theme() -> Theme {
     theme.paint(&token::STATUS_APPROVED, column(150.0));
     theme.paint(&token::STATUS_DONE, Color::oklch(0.22, 0.0, 0.0));
     theme.paint(&token::STATUS_CANCELLED, Color::oklch(0.20, 0.0, 0.0));
+
+    // Written in the same hues, as light as the priorities, so they read on a panel or card.
+    let words = |hue: f32| Color::oklch(0.74, 0.12, hue);
+    theme.paint(&token::STATUS_OPEN_TEXT, words(250.0));
+    theme.paint(&token::STATUS_IN_PROGRESS_TEXT, words(210.0));
+    theme.paint(&token::STATUS_NEEDS_INPUT_TEXT, words(75.0));
+    theme.paint(&token::STATUS_IN_REVIEW_TEXT, words(300.0));
+    theme.paint(&token::STATUS_APPROVED_TEXT, words(150.0));
+    theme.paint(&token::STATUS_DONE_TEXT, Color::oklch(0.76, 0.0, 0.0));
+    theme.paint(&token::STATUS_CANCELLED_TEXT, Color::oklch(0.66, 0.0, 0.0));
     theme
 }
 
@@ -172,6 +205,13 @@ mod tests {
             token::STATUS_APPROVED,
             token::STATUS_DONE,
             token::STATUS_CANCELLED,
+            token::STATUS_OPEN_TEXT,
+            token::STATUS_IN_PROGRESS_TEXT,
+            token::STATUS_NEEDS_INPUT_TEXT,
+            token::STATUS_IN_REVIEW_TEXT,
+            token::STATUS_APPROVED_TEXT,
+            token::STATUS_DONE_TEXT,
+            token::STATUS_CANCELLED_TEXT,
         ];
         for t in all {
             assert!(theme.has(&t), "{t} isn't in the theme");
@@ -221,9 +261,30 @@ mod tests {
         let lightness = |t: &Token| Oklcha::from(light.color(t)).lightness;
         let card = lightness(&token::CARD_BG);
         assert!(card > 0.5, "the card turns light");
-        let tones = Priority::ALL.map(priority_tone).into_iter().chain(Grade::ALL.map(grade_tone));
-        for tone in tones {
+        for tone in written_tones() {
             assert!(card - lightness(&tone) > 0.1, "{tone} is too faint on a light card");
+        }
+    }
+
+    /// Every tone written as text in one of Lookout's own colors: priorities, grades, statuses.
+    fn written_tones() -> Vec<Token> {
+        let priorities = Priority::ALL.map(priority_tone).into_iter();
+        priorities.chain(Grade::ALL.map(grade_tone)).chain(Status::ALL.map(status_tone)).collect()
+    }
+
+    /// The least lightness between text and the surface under it that reads easily.
+    const TEXT_CONTRAST: f32 = 0.3;
+
+    #[test]
+    fn in_the_dark_theme_every_written_tone_reads_on_the_panel_and_a_card() {
+        // The status select once wrote each status in its column's background, near-black on a dark panel.
+        let dark = theme();
+        let lightness = |t: &Token| Oklcha::from(dark.color(t)).lightness;
+        for surface in [token::PANEL_BG, token::CARD_BG] {
+            for tone in written_tones() {
+                let gap = lightness(&tone) - lightness(&surface);
+                assert!(gap >= TEXT_CONTRAST, "{tone} on {surface} is {gap:.2} lighter, too dark to read");
+            }
         }
     }
 
