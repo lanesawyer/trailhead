@@ -20,7 +20,6 @@ bevy = { version = "0.20", default-features = false, features = [
     "multi_threaded",
     "ui_bevy_render",
     "bevy_ui_widgets",
-    "bevy_feathers",
     "bevy_scene",
     # Paste into text fields, and copy the `allow` command (arboard, over X11; no system libraries).
     "system_clipboard",

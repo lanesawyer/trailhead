@@ -18,7 +18,9 @@ updates, plugins. This file is only what is Lookout's own. The design is in `doc
 - **Lookout's colors** (one per status column, priorities, grades) are tokens painted onto the kit's theme with
   `Theme::paint`, defined once where Lookout's theme is built (`widgets/theme.rs`).
 - **Lookout never imports `bevy::feathers`**, not even in a test. What it needs from feathers it gets from the kit;
-  when the kit lacks it, grow the kit (the `trailhead-ui` skill, section 2).
+  when the kit lacks it, grow the kit (the `trailhead-ui` skill, section 2). A test in `widgets/theme.rs`
+  (`lookout_never_reaches_past_the_kit_to_feathers`) fails on any `feathers::` or `bevy_feathers` in its code or
+  `Cargo.toml`, so CI catches it.
 - **Cards and columns:** a card shows key, title (clamped to two lines), small badges and icon-button actions; never a
   handoff or question body in full, which belongs to the inspector. A column that can hold hundreds of cards builds
   only what's on screen.
