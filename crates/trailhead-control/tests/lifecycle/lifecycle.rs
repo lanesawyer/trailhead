@@ -339,6 +339,19 @@ async fn a_transient_publish_failure_is_retried_without_redoing_the_work() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_transient_failure_opening_the_pr_is_retried() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Fix CI", "");
+    r.codehost.flaky_open_pr(2);
+    r.harness.push(Role::Worker, Script::new(changes()));
+
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. } | Outcome::AwaitingReview { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.codehost.calls("open_pr"), 3);
+    assert_ne!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_publish_that_keeps_failing_transiently_parks_the_task_after_the_retries() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Fix CI", "");
