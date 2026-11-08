@@ -295,12 +295,13 @@ impl Runner {
                 t.strip_suffix(&format!(" [{}]", req.task.key.0)).is_some_and(trailhead_factory::is_conventional)
             })
             .map(str::to_string);
-        self.publish_with_retries(req, start, &commits).await?;
+        self.with_retries(req, "publishing", || self.codehost.publish(&req.repo, start, &req.branch, &commits)).await?;
         match &req.pr {
             Some(pr) => {
                 // The PR is already open, so a note on a flaky or skipped check goes on it as a comment.
                 if !notes.is_empty() {
-                    self.codehost.comment(pr, &format!("{}{}", notes.trim_start(), pr_footer(req, agent))).await?;
+                    let body = format!("{}{}", notes.trim_start(), pr_footer(req, agent));
+                    self.with_retries(req, "commenting on the PR", || self.codehost.comment(pr, &body)).await?;
                 }
                 Ok(pr.clone())
             }
@@ -313,27 +314,27 @@ impl Runner {
                     }),
                     body: format!("{summary}{notes}{}", pr_footer(req, agent)),
                 };
-                self.codehost.open_pr(&req.repo, new).await
+                self.with_retries(req, "opening the PR", || self.codehost.open_pr(&req.repo, new.clone())).await
             }
         }
     }
 
-    /// Publishes, asking again after a transient failure (a 5xx, a timeout) with a growing wait, until the waits add up
-    /// to `PUBLISH_RETRY_FOR`. Anything else the host answers (a 403, a 422, a moved branch) is returned at once.
-    /// Repeating is safe: blobs and trees are content-addressed, an unreferenced commit is harmless, and the branch
-    /// ref moves last, only from `start`.
-    async fn publish_with_retries(
-        &self,
-        req: &RunRequest,
-        start: &str,
-        commits: &[trailhead_factory::Commit],
-    ) -> Result<()> {
+    /// Runs a code host call, asking again after a transient failure (a 5xx, a timeout) with a growing wait, until
+    /// the waits add up to `PUBLISH_RETRY_FOR`. Anything else the host answers (a 403, a 422, a moved branch) is
+    /// returned at once. Repeating is safe for what publishing does: blobs and trees are content-addressed, an
+    /// unreferenced commit is harmless, and the branch ref moves last, only from `start`. `open_pr` resolves a 422
+    /// for an existing PR to that PR, and a repeated comment at worst posts twice.
+    async fn with_retries<T, F, Fut>(&self, req: &RunRequest, what: &str, mut call: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
         let mut wait = Duration::from_secs(5);
         let mut waited = Duration::ZERO;
         loop {
-            match self.codehost.publish(&req.repo, start, &req.branch, commits).await {
+            match call().await {
                 Err(Error::Other(e)) if waited < PUBLISH_RETRY_FOR => {
-                    tracing::warn!(task = %req.task.key.0, error = %e, ?wait, "publishing failed; retrying");
+                    tracing::warn!(task = %req.task.key.0, error = %e, ?wait, "{what} failed; retrying");
                     tokio::time::sleep(wait).await;
                     waited += wait;
                     wait = (wait * 2).min(Duration::from_secs(120));
