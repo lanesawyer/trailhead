@@ -20,6 +20,9 @@ pub mod step {
 pub mod space {
     use super::step;
 
+    /// The join between controls drawn as one, such as a button group's options. A seam rather than a space, so it
+    /// sits off the scale.
+    pub const SEAM: f32 = 1.0;
     /// Lines within one item: a card's key over its title, a field's label over its input.
     pub const STACKED: f32 = step::XXS;
     /// An icon and the text beside it, inside one control.

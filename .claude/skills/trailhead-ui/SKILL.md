@@ -56,6 +56,10 @@ private copy.
   are `Token`s it paints onto `Theme::new()` with `Theme::paint` (from the kit's `palette` or its own colors), defined
   once where the theme is built. The tone components are immutable: insert a new one to change the token. A missing token renders fuchsia
   (TRAIL-777): if you see magenta, a token isn't in the theme.
+- **Paint dark; the kit derives light and the accent.** `Theme::light` turns near-neutrals over and darkens colors
+  that mean something; `Theme::with_accent` moves the accent's shades onto the desktop's. Paint a shade of
+  `palette::ACCENT` with `Theme::paint_accent`, or it stays feathers' blue. A color written as a literal follows
+  neither, so it stays dark in a light theme.
 - **Text sizes** come from the kit's `size` scale and **gaps, padding and margins** from its `space` scale, named for
   what they're for. A test fails on a literal. If no name fits, add one with a doc comment.
 - **Icons** are `Icon` variants (Lucide glyphs from the embedded font). The text font has no icon glyphs, so anything

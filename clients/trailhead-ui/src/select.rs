@@ -17,7 +17,7 @@ use bevy::ui_widgets::{ScrollArea, ValueChange};
 
 use crate::theme::{TextTone, Token, token};
 
-/// Which option of a select was picked, triggered on the select's own entity.
+/// Which option of a select (or a [`super::button_group`]) was picked, triggered on the control's own entity.
 #[derive(EntityEvent, Debug, Clone, Copy)]
 pub struct Picked {
     pub entity: Entity,
