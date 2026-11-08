@@ -83,17 +83,16 @@ run = [
 ]
 
 [tasks.install]
-description = "Reinstall the CLI, the factory and the daemon from this checkout (cargo install takes one --path at a time)"
+description = "Reinstall trailhead (the server runs the factory) and the daemon from this checkout (cargo install takes one --path at a time)"
 run = """
 set -e
 # -j 4: full parallelism has OOM-killed a dev machine.
-cargo install --locked -j 4 --path crates/trailhead
-cargo install --locked -j 4 --features docker --path crates/trailhead-factory-host
+cargo install --locked -j 4 --features docker --path crates/trailhead
 cargo install --locked -j 4 --path crates/trailhead-daemon
 # Anchored so this script's own command line doesn't match.
 if pgrep -f "^${CARGO_HOME:-$HOME/.cargo}/bin/trailhead-factory run" >/dev/null; then
   echo
-  echo "A factory is still running the old trailhead-factory binary. Restart it: Ctrl-C once to drain, then 'trailhead factory run'."
+  echo "The old standalone trailhead-factory is still running. The server runs the factory now: Ctrl-C it once to drain, and the server's control plane takes over."
 fi
 """
 

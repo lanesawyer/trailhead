@@ -48,16 +48,22 @@ fn main() {
     }
 }
 
+#[cfg_attr(not(feature = "factory"), allow(unused_variables))]
 async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
     if let Cmd::Serve { bind } = &cli.cmd {
         return server::serve(bind).await;
     }
-    if let Cmd::Factory { args } = &cli.cmd {
+    #[cfg(feature = "factory")]
+    if let Cmd::Factory(_) = &cli.cmd {
         reject_global_flags(matches)?;
-        if let Some(enable) = cmd::factory::toggle(args) {
-            return cmd::factory::set_enabled(enable).await;
-        }
-        return cmd::factory::run(args);
+        let Cmd::Factory(factory) = cli.cmd else { unreachable!() };
+        return cmd::factory::run(factory).await;
+    }
+    #[cfg(not(feature = "factory"))]
+    if let Cmd::Factory { .. } = &cli.cmd {
+        anyhow::bail!(
+            "this trailhead was built without the factory feature; reinstall it with the default features to get `trailhead factory`"
+        );
     }
     let paths = trailhead_server::Paths::from_env().context("no home directory")?;
     let url = match cli.url.clone() {
@@ -81,7 +87,11 @@ async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
     let cx = Ctx { c, json: cli.json, project: repo.project.clone() };
 
     match cli.cmd {
-        Cmd::Serve { .. } | Cmd::Factory { .. } | Cmd::Server(_) | Cmd::Login => unreachable!(),
+        #[cfg(feature = "factory")]
+        Cmd::Factory(_) => unreachable!(),
+        #[cfg(not(feature = "factory"))]
+        Cmd::Factory { .. } => unreachable!(),
+        Cmd::Serve { .. } | Cmd::Server(_) | Cmd::Login => unreachable!(),
         Cmd::Ready { project, grade, limit } => tasks::ready(&cx, project, grade, limit).await,
         Cmd::Ls { project, status, parent, all, today, grade, limit } => {
             tasks::ls(&cx, project, status, parent, all, today, grade, limit).await
@@ -120,8 +130,9 @@ async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
     }
 }
 
-/// `trailhead factory` hands everything after `factory` to the factory binary, so a global flag given
-/// before it would be dropped silently. Flags from the environment are fine: the factory reads those itself.
+/// `trailhead factory` doesn't talk to the server as this CLI's other commands do, so a global flag given before it
+/// would be dropped silently. Flags from the environment are fine: the factory reads those itself.
+#[cfg(feature = "factory")]
 fn reject_global_flags(matches: &clap::ArgMatches) -> Result<()> {
     use clap::parser::ValueSource;
     let given: Vec<String> =
@@ -134,7 +145,7 @@ fn reject_global_flags(matches: &clap::ArgMatches) -> Result<()> {
         return Ok(());
     }
     anyhow::bail!(
-        "`trailhead factory` doesn't use {}; the factory takes its own flags, so put them after `factory` (see `trailhead factory --help`)",
+        "`trailhead factory` doesn't use {}; the factory takes its own flags, so put them after its command (see `trailhead factory --help`)",
         given.join(", ")
     )
 }

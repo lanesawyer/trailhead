@@ -1,62 +1,43 @@
-#![cfg(unix)]
+#![cfg(feature = "factory")]
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
-
 use common::Instance;
 
-/// Puts a fake `trailhead-factory` that echoes its arguments and exits 3 in a directory, returned for PATH.
-fn fake_factory(th: &Instance) -> std::path::PathBuf {
-    let bin = th.dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let exe = bin.join("trailhead-factory");
-    std::fs::write(&exe, "#!/bin/sh\necho \"fake factory: $@\"\nexit 3\n").unwrap();
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-    bin
+#[test]
+fn factory_commands_are_built_in() {
+    let th = Instance::new();
+    let out = common::output(th.command().args(["factory", "allowed"]));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no UI endpoints are allowed"));
 }
 
 #[test]
-fn factory_runs_trailhead_factory_from_path_with_its_args_and_exit_code() {
+fn disable_and_enable_edit_the_user_config_with_no_server() {
     let th = Instance::new();
-    let bin = fake_factory(&th);
-    let out = common::output(th.command().env("PATH", format!("{}:/usr/bin:/bin", bin.display())).args([
-        "factory",
-        "run",
-        "--poll-secs",
-        "5",
-        "-h",
-    ]));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "fake factory: run --poll-secs 5 -h\n");
-    assert_eq!(out.status.code(), Some(3));
-}
+    let config = th.dir.path().join("config").join("config.toml");
+    std::fs::create_dir_all(th.dir.path().join("config")).unwrap();
+    std::fs::write(&config, "[factory]\nrepos = [\"/no/such/repo\"]\n").unwrap();
 
-#[test]
-fn factory_not_installed_says_how_to_install_it() {
-    let th = Instance::new();
-    let out = common::output(th.command().env("PATH", "/nonexistent").args(["factory", "run"]));
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("trailhead-factory") && err.contains("cargo install --locked --features docker --path"),
-        "{err}"
-    );
+    let out = common::output(th.command().args(["factory", "disable"]));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("disabled = true") && text.contains("/no/such/repo"), "{text}");
+
+    let again = common::output(th.command().args(["factory", "disable"]));
+    assert!(String::from_utf8_lossy(&again.stdout).contains("already disabled"));
+
+    let out = common::output(th.command().args(["factory", "enable"]));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!std::fs::read_to_string(&config).unwrap().contains("disabled"));
 }
 
 #[test]
 fn factory_rejects_global_flags_given_before_it() {
     let th = Instance::new();
-    let bin = fake_factory(&th);
-    let out = common::output(th.command().env("PATH", format!("{}:/usr/bin:/bin", bin.display())).args([
-        "--as",
-        "x",
-        "--url",
-        "http://127.0.0.1:1",
-        "factory",
-        "run",
-    ]));
+    let out = common::output(th.command().args(["--as", "x", "--url", "http://127.0.0.1:1", "factory", "allowed"]));
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("--as") && err.contains("--url") && err.contains("after `factory`"), "{err}");
+    assert!(err.contains("--as") && err.contains("--url") && err.contains("after its command"), "{err}");
 }
