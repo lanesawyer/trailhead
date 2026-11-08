@@ -11,15 +11,16 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, RelayMode, SecretKey};
 use tokio::sync::Notify;
 use trailhead_control::{Factory, Host, Outcome};
-use trailhead_daemon::net::{
-    ALPN, DaemonProtocol, Launch, RemoteDaemon, build_id, read_frame, sandbox_key, write_frame,
-};
+use trailhead_daemon::net::DaemonProtocol;
+use trailhead_daemon::plugins::CLAUDE_CODE;
 use trailhead_factory::{
     Commit, Compute, Credential, Daemon, DaemonSecrets, Error, FactoryConfig, FileChange, FromDaemon, Labels, Role,
     RunEvent, RunOutcome, RunRequest, RunResult, SandboxId, SandboxSpec, Status, TaskKey, ToDaemon, Tracker, Usd,
     VerdictKind,
 };
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
+use trailhead_wire::daemon::{Launch, RemoteDaemon};
+use trailhead_wire::{ALPN, build_id, read_frame, sandbox_key, write_frame};
 
 const CONFIG: &str = r#"
 [repo]
@@ -66,8 +67,8 @@ async fn spawn_daemon(
 ) -> Router {
     let program = remote.program(&SandboxId(sandbox.into()));
     let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
-    let key = trailhead_daemon::net::parse_secret_key(&secrets.secret_key).unwrap();
-    let control_plane = trailhead_daemon::net::parse_endpoint_id(&secrets.control_plane).unwrap();
+    let key = trailhead_wire::parse_secret_key(&secrets.secret_key).unwrap();
+    let control_plane = trailhead_wire::parse_endpoint_id(&secrets.control_plane).unwrap();
     let ep = endpoint(key, None).await;
     lookup.add_endpoint_info(ep.addr());
     let protocol = DaemonProtocol::new(local.runner(), control_plane)
@@ -111,14 +112,14 @@ impl Rig {
             control.clone(),
             MASTER,
             Arc::new(compute.clone()),
-            Launch::new(b"daemon".to_vec(), &target()),
+            Launch::new(b"daemon".to_vec(), &target(), CLAUDE_CODE),
         ));
         Rig { tracker, compute, codehost, harness, lookup, control, remote, local, routers: Vec::new() }
     }
 
     /// Stands up the daemon a sandbox would run, from the secrets the control plane would hand it.
     async fn serve(&mut self, sandbox: &str) {
-        self.serve_with(sandbox, trailhead_daemon::net::ATTACH_PATIENCE).await;
+        self.serve_with(sandbox, trailhead_wire::daemon::ATTACH_PATIENCE).await;
     }
 
     async fn serve_with(&mut self, sandbox: &str, attach_patience: Duration) {
@@ -451,7 +452,7 @@ async fn subscription_token_goes_in_the_secrets_file_only() {
     let control = endpoint(SecretKey::generate(), None).await;
     let launch = Launch {
         harness_secrets: [("oauth_token".to_string(), "sk-ant-oat-test".to_string())].into(),
-        ..Launch::new(b"daemon".to_vec(), &target())
+        ..Launch::new(b"daemon".to_vec(), &target(), CLAUDE_CODE)
     };
     let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
     let program = remote.program(&SandboxId("s".into()));
@@ -470,12 +471,13 @@ async fn daemon_log_filter_goes_on_the_command_line_when_set() {
         control.clone(),
         MASTER,
         Arc::new(FakeCompute::new()),
-        Launch::new(b"daemon".to_vec(), &target()),
+        Launch::new(b"daemon".to_vec(), &target(), CLAUDE_CODE),
     );
     let program = remote.program(&SandboxId("s".into()));
     assert!(!program.args.iter().any(|a| a == "--log"));
 
-    let launch = Launch { log: Some("info,iroh=debug".into()), ..Launch::new(b"daemon".to_vec(), &target()) };
+    let launch =
+        Launch { log: Some("info,iroh=debug".into()), ..Launch::new(b"daemon".to_vec(), &target(), CLAUDE_CODE) };
     let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
     let args = remote.program(&SandboxId("s".into())).args;
     let at = args.iter().position(|a| a == "--log").expect("--log is set");
@@ -517,7 +519,7 @@ async fn a_daemon_of_an_older_build_is_restarted_before_prepare() {
     let sandbox = r.sandbox("restored").await;
     // The checkpoint's process: running the previous build.
     let old = Arc::new(tokio::sync::Mutex::new(Some(
-        r.daemon("restored", trailhead_daemon::net::ATTACH_PATIENCE, build_id(b"old daemon")).await,
+        r.daemon("restored", trailhead_wire::daemon::ATTACH_PATIENCE, build_id(b"old daemon")).await,
     )));
     let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (remote, local, lookup) = (r.remote.clone(), r.local.clone(), r.lookup.clone());
@@ -537,7 +539,7 @@ async fn a_daemon_of_an_older_build_is_restarted_before_prepare() {
                         &local,
                         &lookup,
                         "restored",
-                        trailhead_daemon::net::ATTACH_PATIENCE,
+                        trailhead_wire::daemon::ATTACH_PATIENCE,
                         build_id(b"daemon"),
                     )
                     .await;
@@ -557,7 +559,7 @@ async fn a_restored_sandbox_whose_daemon_is_current_is_not_started_again() {
     let mut r = Rig::new().await;
     let sandbox = r.sandbox("warm").await;
     // The restored container's own supervisor started the current build.
-    let current = r.daemon("warm", trailhead_daemon::net::ATTACH_PATIENCE, build_id(b"daemon")).await;
+    let current = r.daemon("warm", trailhead_wire::daemon::ATTACH_PATIENCE, build_id(b"daemon")).await;
     r.routers.push(current);
     r.remote.restored(&sandbox).await;
     let req = r.factory().config.prepare_request(Role::Worker, None);
@@ -573,9 +575,9 @@ async fn a_restored_sandbox_whose_daemon_has_other_secrets_is_started_again() {
     // The current build, but started with the secrets of an earlier factory run.
     let program = r.remote.program(&sandbox);
     let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
-    let ep = endpoint(trailhead_daemon::net::parse_secret_key(&secrets.secret_key).unwrap(), None).await;
+    let ep = endpoint(trailhead_wire::parse_secret_key(&secrets.secret_key).unwrap(), None).await;
     r.lookup.add_endpoint_info(ep.addr());
-    let control_plane = trailhead_daemon::net::parse_endpoint_id(&secrets.control_plane).unwrap();
+    let control_plane = trailhead_wire::parse_endpoint_id(&secrets.control_plane).unwrap();
     let protocol = DaemonProtocol::new(r.local.runner(), control_plane)
         .build(build_id(b"daemon"))
         .secrets(build_id(b"old secrets"));
@@ -590,7 +592,7 @@ async fn a_restored_sandbox_whose_daemon_has_other_secrets_is_started_again() {
 async fn a_daemon_that_stays_stale_fails_the_prepare_loudly() {
     let mut r = Rig::new().await;
     let sandbox = r.sandbox("stuck-old").await;
-    let old = r.daemon("stuck-old", trailhead_daemon::net::ATTACH_PATIENCE, build_id(b"old daemon")).await;
+    let old = r.daemon("stuck-old", trailhead_wire::daemon::ATTACH_PATIENCE, build_id(b"old daemon")).await;
     r.routers.push(old);
     let req = r.factory().config.prepare_request(Role::Worker, None);
     let err = r.remote.prepare(&sandbox, req).await.unwrap_err();
@@ -616,7 +618,12 @@ async fn the_target_decides_the_launch_dir_gateway_list_and_hold_socket() {
     let control = endpoint(SecretKey::generate(), None).await;
     let mut t = target();
     t.hold_socket = Some("/run/hold.sock".into());
-    let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), Launch::new(b"daemon".to_vec(), &t));
+    let remote = RemoteDaemon::new(
+        control,
+        MASTER,
+        Arc::new(FakeCompute::new()),
+        Launch::new(b"daemon".to_vec(), &t, CLAUDE_CODE),
+    );
     let program = remote.program(&SandboxId("s".into()));
     assert_eq!(program.cmd, "/sandbox/.trailhead/trailhead-daemon");
     let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
@@ -628,7 +635,7 @@ async fn the_target_decides_the_launch_dir_gateway_list_and_hold_socket() {
         endpoint(SecretKey::generate(), None).await,
         MASTER,
         Arc::new(FakeCompute::new()),
-        Launch::new(b"d".to_vec(), &target()),
+        Launch::new(b"d".to_vec(), &target(), CLAUDE_CODE),
     );
     assert!(!remote.program(&SandboxId("s".into())).args.iter().any(|a| a == "--hold-socket"));
 }

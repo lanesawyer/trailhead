@@ -20,8 +20,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use trailhead_control::StatusBoard;
-use trailhead_daemon::ui::{RepoFeed, StatusFeed};
 use trailhead_factory::{FactorySnapshot, Sequenced};
+use trailhead_wire::ui::{RepoFeed, StatusFeed};
 
 /// The boards behind `trailhead/ui/0`'s status request. The protocol is up before the repos are, so the boards are
 /// filled in once they exist; until then a UI sees no repos.

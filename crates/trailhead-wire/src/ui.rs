@@ -1,5 +1,5 @@
 //! The control plane's side of Lookout's transport (`docs/factory/ui.md#transport`): the `trailhead/ui/0` protocol on
-//! the control plane's iroh endpoint, separate from the daemons' [`API_ALPN`](crate::net::API_ALPN) tunnel.
+//! the control plane's iroh endpoint, separate from the daemons' [`API_ALPN`](crate::API_ALPN) tunnel.
 //!
 //! Each stream opens with one framed [`UiRequest`] saying what it wants. [`UiRequest::Api`] turns the stream into a
 //! byte pipe to the Trailhead server's loopback port, so the UI's HTTP client (and the `/v1/events/stream` event
@@ -24,7 +24,7 @@ use tokio::sync::{broadcast, mpsc};
 use trailhead_factory::logs::LogLine;
 use trailhead_factory::{Error, FactorySnapshot, Result, Sequenced};
 
-use crate::net::{io_err, parse_endpoint_id, pipe, read_frame, write_frame};
+use crate::{io_err, parse_endpoint_id, pipe, read_frame, write_frame};
 
 pub const UI_ALPN: &[u8] = b"trailhead/ui/0";
 
@@ -245,7 +245,7 @@ impl UiProtocol {
         }
     }
 
-    /// Sets the build reported with an unknown request: [`build_id`](crate::net::build_id) of the executable.
+    /// Sets the build reported with an unknown request: [`build_id`](crate::build_id) of the executable.
     pub fn build(mut self, build: String) -> UiProtocol {
         self.build = build;
         self

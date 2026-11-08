@@ -11,14 +11,14 @@ use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use trailhead_codehost_github::{GitHub, Identity};
 use trailhead_daemon::awake::SpriteHolds;
-use trailhead_daemon::net::{
-    ALPN, DaemonProtocol, build_id, open_api_tunnel, parse_endpoint_id, parse_secret_key, watch_network,
-};
+use trailhead_daemon::net::{DaemonProtocol, watch_network};
 use trailhead_daemon::{Connect, GitWorkspace, HEARTBEAT_EVERY, RENEW_EVERY, RestTracker, Runner};
 use trailhead_factory::{
     BranchUpdate, ChangedFile, Ci, CodeHost, Commit, DaemonSecrets, Error, HarnessSetup, MergeOutcome, NewPr, PrRef,
     PrState, Repo, Result, Tracker,
 };
+use trailhead_wire::api::open_api_tunnel;
+use trailhead_wire::{ALPN, build_id, parse_endpoint_id, parse_secret_key};
 
 #[derive(Parser)]
 #[command(args_conflicts_with_subcommands = true)]

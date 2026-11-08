@@ -13,10 +13,10 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bevy::prelude::*;
-use trailhead_daemon::ui::RepoSnapshot;
 use trailhead_factory::{
     ControlState, FactoryEvent, Grade, RunPhase, RunStatus, SandboxStatus, Sequenced, TaskKey, Usd,
 };
+use trailhead_wire::ui::RepoSnapshot;
 
 /// How many lines of live activity are kept.
 const ACTIVITY: usize = 200;

@@ -11,8 +11,6 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tokio::sync::broadcast;
 use trailhead_core::{Ctx, NewProject, Principal, Store};
-use trailhead_daemon::net::{read_frame, write_frame};
-use trailhead_daemon::ui::{LogFeed, RepoFeed, StatusFeed, StatusFrame, UI_ALPN, UiAllowlist, UiProtocol, Unsupported};
 use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, SandboxState, SandboxStatus, Sequenced};
 use trailhead_lookout::board;
@@ -20,6 +18,8 @@ use trailhead_lookout::connection::{Api, Connection, ConnectionPlugin, Connectio
 use trailhead_lookout::factory::{Campsite, FactoryLink, FactoryStatus};
 use trailhead_lookout::logs::LogState;
 use trailhead_lookout::net::{NetCommand, NetConfig, Network, Reason};
+use trailhead_wire::ui::{LogFeed, RepoFeed, StatusFeed, StatusFrame, UI_ALPN, UiAllowlist, UiProtocol, Unsupported};
+use trailhead_wire::{read_frame, write_frame};
 
 /// One repo, "o/r", with an idle sandbox, whose later events the test sends.
 struct TestFeed(broadcast::Sender<Sequenced>);
@@ -594,7 +594,7 @@ struct StrictFactory {
 impl iroh::protocol::ProtocolHandler for StrictFactory {
     async fn accept(&self, conn: iroh::endpoint::Connection) -> Result<(), iroh::protocol::AcceptError> {
         self.dialed.lock().unwrap().push(std::time::Instant::now());
-        conn.close(trailhead_daemon::ui::CLOSE_NOT_ALLOWED.into(), b"not allowed");
+        conn.close(trailhead_wire::ui::CLOSE_NOT_ALLOWED.into(), b"not allowed");
         Ok(())
     }
 }

@@ -8072,6 +8072,7 @@ dependencies = [
  "tracing",
  "trailhead-daemon",
  "trailhead-factory",
+ "trailhead-wire",
 ]
 
 [[package]]
@@ -8141,15 +8142,11 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
- "bytes",
  "clap",
- "hex",
- "hmac",
  "iroh",
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "tokio",
  "toml",
@@ -8165,6 +8162,7 @@ dependencies = [
  "trailhead-model",
  "trailhead-server",
  "trailhead-testkit",
+ "trailhead-wire",
 ]
 
 [[package]]
@@ -8211,6 +8209,7 @@ dependencies = [
  "trailhead-log",
  "trailhead-provider-anthropic",
  "trailhead-server",
+ "trailhead-wire",
 ]
 
 [[package]]
@@ -8253,11 +8252,11 @@ dependencies = [
  "tracing",
  "trailhead-client",
  "trailhead-core",
- "trailhead-daemon",
  "trailhead-factory",
  "trailhead-model",
  "trailhead-server",
  "trailhead-ui",
+ "trailhead-wire",
  "uuid",
  "winit",
 ]
@@ -8323,6 +8322,24 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "open",
+]
+
+[[package]]
+name = "trailhead-wire"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "hex",
+ "hmac",
+ "iroh",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "trailhead-factory",
 ]
 
 [[package]]
