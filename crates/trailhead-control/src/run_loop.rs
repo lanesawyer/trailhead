@@ -66,11 +66,10 @@ impl Factory {
                                 .spawn(async move { factory.resume_run(&task, &sandbox).await }.in_current_span());
                             keys.insert(handle.id(), key);
                         }
-                        // A review is a session on the same subscription window, so a pause holds them back too, and
-                        // it acquires a sandbox whose daemon needs the server, so an outage does. The next reconcile
-                        // finds them due again (the resume below triggers one, and so does the poll). Due runs aren't
-                        // held: the daemon already has them, and runs in flight carry on through an outage.
-                        let hold = !due.reviews.is_empty() && (self.usage_paused() || !self.server_up().await);
+                        // A review is a session on the same subscription window, so a pause holds them back too. The
+                        // next reconcile finds them due again (the resume below triggers one, and so does the poll).
+                        // Due runs aren't held: the daemon already has them.
+                        let hold = !due.reviews.is_empty() && self.usage_paused();
                         let reviews_due = if hold { Vec::new() } else { due.reviews };
                         // Logged after the hold, so a pause doesn't list reviews that never start on every poll.
                         if done != Reconciled::default() || !reviews_due.is_empty() {
@@ -177,7 +176,7 @@ impl Factory {
         keys: &mut HashMap<task::Id, TaskKey>,
         reviewing: usize,
     ) -> Result<()> {
-        if self.usage_paused() || !self.server_up().await {
+        if self.usage_paused() {
             return Ok(());
         }
         let busy: HashSet<TaskKey> = keys.values().cloned().collect();
@@ -507,7 +506,7 @@ impl Factory {
 
     /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
     pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
-        if self.usage_paused() || !self.server_up().await {
+        if self.usage_paused() {
             return Ok(Vec::new());
         }
         let none = HashSet::new();

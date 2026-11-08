@@ -60,10 +60,6 @@ const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 /// Reads the current `[merge] mode`, or says why it can't.
 pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String> + Send + Sync>;
 
-/// Checks that the Trailhead server the sandboxes' daemons claim through is reachable, or says why not.
-pub type ServerCheck =
-    Box<dyn Fn() -> futures_util::future::BoxFuture<'static, std::result::Result<(), String>> + Send + Sync>;
-
 /// State shared by every [`Factory`] on one host (one per repo): a usage reading from any repo's run pauses them all,
 /// and the sandbox cap can span repos.
 #[derive(Default)]
@@ -125,11 +121,6 @@ pub struct Factory {
     merge_mode_source: Option<MergeModeSource>,
     /// The merge mode last read from `merge_mode_source`, kept when a later read fails.
     merge_mode: Mutex<MergeMode>,
-    /// Run before starting runs: the control plane reads the database directly, but each sandbox's daemon needs the
-    /// server, so a run started while it is down fails on its first claim.
-    server_check: Option<ServerCheck>,
-    /// Whether the server was last found down, so an outage is reported loudly once and its end once.
-    server_down: Mutex<bool>,
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, u32, Instant)>>,
@@ -256,8 +247,6 @@ impl Factory {
             codehost: None,
             merge_mode_source: None,
             merge_mode,
-            server_check: None,
-            server_down: Mutex::new(false),
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
             listed: Mutex::default(),
@@ -300,34 +289,6 @@ impl Factory {
     /// The live status board: the snapshot and the stream of events.
     pub fn status(&self) -> &Arc<StatusBoard> {
         &self.status
-    }
-
-    /// Checks the server is reachable before starting runs, and starts none while it isn't.
-    pub fn with_server_check(mut self, check: ServerCheck) -> Factory {
-        self.server_check = Some(check);
-        self
-    }
-
-    /// Whether the server the daemons need is up. While it isn't, the outage is logged as an error when it starts
-    /// and again when it ends, and no new runs start (running ones carry on).
-    async fn server_up(&self) -> bool {
-        let Some(check) = &self.server_check else { return true };
-        let result = check().await;
-        let mut down = self.server_down.lock().unwrap();
-        match result {
-            Ok(()) => {
-                if std::mem::take(&mut *down) {
-                    tracing::info!("the Trailhead server is reachable again; starting runs again");
-                }
-                true
-            }
-            Err(why) => {
-                if !std::mem::replace(&mut *down, true) {
-                    tracing::error!(%why, "the Trailhead server is down; starting no new runs until it is back (start it with `trailhead server start`)");
-                }
-                false
-            }
-        }
     }
 
     /// The merge mode now in force.

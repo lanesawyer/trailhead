@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-/// The log file's name, in the factory's state directory beside `control.lock`.
+/// The log file's name, in the factory's state directory.
 pub const FILE_NAME: &str = "factory.log";
 /// Rotate when the file reaches this size.
 const MAX_BYTES: u64 = 10 * 1024 * 1024;

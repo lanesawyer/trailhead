@@ -1,21 +1,18 @@
 //! The factory status surface (`docs/factory/ui.md#factory-status`): the control plane's in-memory snapshot and event
-//! stream, as one [`Feed`] behind `trailhead/ui/0`'s status request, the server's `/v1/factory` routes ([`routes`])
-//! and, for the standalone binary, a loopback port ([`serve`]). `status` and `logs --follow` read the server's routes,
-//! or the standalone's port, whose address is in a small file removed on a clean stop.
+//! stream, as one [`Feed`] behind `trailhead/ui/0`'s status request and the server's `/v1/factory` routes
+//! ([`routes`]), which `status` and `logs --follow` read.
 //!
-//! The stream carries tool calls, which can name commands and paths, so only the user reads it: the server mounts its
-//! routes behind the user's token (agent tokens, a sandbox's included, are refused), and the port takes a token only
-//! the user who runs the control plane can read (the file is `0600`).
+//! The stream carries tool calls, which can name commands and paths, so the server mounts the routes
+//! behind the user's token (agent tokens, a sandbox's included, are refused).
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::StreamExt;
@@ -86,19 +83,8 @@ impl StatusFeed for Feed {
     }
 }
 
-/// Where the control plane says how to reach it, inside `<data dir>/factory`.
-pub const FILE: &str = "status.json";
-
-/// How long a client waits to connect and to hear a snapshot, so a dead control plane's leftover file costs little.
+/// How long a client waits to connect and to hear a snapshot.
 const CONNECT: Duration = Duration::from_secs(2);
-
-/// What `status.json` holds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Endpoint {
-    pub addr: SocketAddr,
-    pub token: String,
-    pub pid: u32,
-}
 
 /// One repo's snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,7 +97,7 @@ pub struct RepoStatus {
 /// The reply to `GET /status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusReply {
-    /// Whether the control plane runs at all; a standalone binary from before this was added sends none.
+    /// Whether the control plane runs at all; a server from before this was added sends none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<FactoryState>,
     pub repos: Vec<RepoStatus>,
@@ -125,76 +111,10 @@ pub struct RepoEvent {
     pub event: Sequenced,
 }
 
-/// A running status server. Dropping it stops serving and removes the file.
-pub struct Serving {
-    task: tokio::task::JoinHandle<()>,
-    file: PathBuf,
-    pub addr: SocketAddr,
-}
-
-impl Drop for Serving {
-    fn drop(&mut self) {
-        self.task.abort();
-        let _ = std::fs::remove_file(&self.file);
-    }
-}
-
 /// `GET /status` and `GET /events` for `feed`, with no authentication of their own: the server mounts them under
-/// `/v1/factory` behind its bearer token, and [`serve`] behind the status file's.
+/// `/v1/factory` behind its bearer token.
 pub fn routes(feed: Feed) -> Router {
     Router::new().route("/status", get(status)).route("/events", get(events)).with_state(feed)
-}
-
-/// Serves `feed` on a loopback port and records where in `dir`: the standalone binary's surface.
-pub async fn serve(dir: &Path, feed: Feed) -> Result<Serving, String> {
-    let mut bytes = [0u8; 24];
-    getrandom::fill(&mut bytes).map_err(|e| format!("no randomness for the status token: {e}"))?;
-    let token = hex::encode(bytes);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| format!("status port: {e}"))?;
-    let addr = listener.local_addr().map_err(|e| e.to_string())?;
-    let file = dir.join(FILE);
-    let endpoint = Endpoint { addr, token: token.clone(), pid: std::process::id() };
-    write_private(&file, &serde_json::to_vec(&endpoint).map_err(|e| e.to_string())?)?;
-    let token: Arc<str> = token.into();
-    let app = routes(feed).layer(axum::middleware::from_fn(
-        move |req: axum::extract::Request, next: axum::middleware::Next| {
-            let token = token.clone();
-            async move {
-                if authorized(&token, req.headers()) {
-                    next.run(req).await
-                } else {
-                    StatusCode::UNAUTHORIZED.into_response()
-                }
-            }
-        },
-    ));
-    let task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            tracing::warn!(error = %e, "the status server stopped");
-        }
-    });
-    Ok(Serving { task, file, addr })
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let _ = std::fs::remove_file(path);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    file.write_all(bytes).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-fn authorized(token: &str, headers: &HeaderMap) -> bool {
-    let given =
-        headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
-    // Compared in full whatever the first mismatch, so the time taken says nothing about the token.
-    given
-        .is_some_and(|g| g.len() == token.len() && g.bytes().zip(token.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0)
 }
 
 async fn status(State(feed): State<Feed>) -> Response {
@@ -246,11 +166,7 @@ async fn events(State(feed): State<Feed>, Query(q): Query<EventsQuery>) -> Respo
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-fn read_endpoint(dir: &Path) -> Option<Endpoint> {
-    serde_json::from_slice(&std::fs::read(dir.join(FILE)).ok()?).ok()
-}
-
-/// Where `status` and `logs --follow` reach a control plane: the server's `/v1/factory`, or a standalone's port.
+/// Where `status` and `logs --follow` reach the control plane: the server's `/v1/factory`.
 #[derive(Debug, Clone)]
 pub struct Remote {
     base: String,
@@ -262,25 +178,12 @@ impl Remote {
     pub fn server(addr: SocketAddr, token: String) -> Remote {
         Remote { base: format!("http://{addr}/v1/factory"), token }
     }
-
-    /// A standalone control plane, from its status file in `dir`.
-    pub fn standalone(dir: &Path) -> Option<Remote> {
-        let endpoint = read_endpoint(dir)?;
-        Some(Remote { base: format!("http://{}", endpoint.addr), token: endpoint.token })
-    }
 }
 
-/// The control plane to ask and its snapshot: the server's, when it runs one, else a standalone's.
-pub async fn find(dir: &Path, server: Option<Remote>) -> Option<(Remote, StatusReply)> {
-    if let Some(server) = server
-        && let Some(reply) = fetch(&server).await
-        && !matches!(reply.control, None | Some(FactoryState::Off | FactoryState::Disabled))
-    {
-        return Some((server, reply));
-    }
-    let standalone = Remote::standalone(dir)?;
-    let reply = fetch(&standalone).await?;
-    Some((standalone, reply))
+/// The server's snapshot, when it runs a control plane (one that is off or disabled doesn't count).
+pub async fn find(server: Remote) -> Option<(Remote, StatusReply)> {
+    let reply = fetch(&server).await?;
+    (!matches!(reply.control, None | Some(FactoryState::Off | FactoryState::Disabled))).then_some((server, reply))
 }
 
 fn client(timeout: Option<Duration>) -> reqwest::Client {
@@ -348,17 +251,23 @@ mod tests {
 
     use super::*;
 
+    async fn server(feed: Feed) -> Remote {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().nest("/v1/factory", routes(feed));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        Remote::server(addr, "t".into())
+    }
+
     #[tokio::test]
     async fn a_client_reads_the_snapshot_and_follows_one_tasks_events() {
-        let dir = tempfile::tempdir().unwrap();
         let board = StatusBoard::new();
         board.control(ControlState::Up);
         let feed = Feed::new(FactoryState::Running);
         feed.set_boards(vec![("a/b".into(), board.clone())]);
-        let serving = serve(dir.path(), feed).await.unwrap();
+        let remote = server(feed).await;
 
-        let remote = Remote::standalone(dir.path()).unwrap();
-        let reply = fetch(&remote).await.expect("a snapshot");
+        let (_, reply) = find(remote.clone()).await.expect("a snapshot");
         assert_eq!(reply.control, Some(FactoryState::Running));
         assert_eq!(reply.repos[0].repo, "a/b");
         assert_eq!(reply.repos[0].snapshot.control, ControlState::Up);
@@ -378,44 +287,17 @@ mod tests {
         let second = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
         assert!(second.event.event.line().contains("tool Bash ls"), "{second:?}");
         drop((other, mine));
-
-        // Without the token the port says no.
-        let endpoint = read_endpoint(dir.path()).unwrap();
-        let bare = client(None).get(format!("http://{}/status", endpoint.addr)).send().await.unwrap();
-        assert_eq!(bare.status(), 401);
-
         follower.abort();
-        drop(serving);
-        assert!(Remote::standalone(dir.path()).is_none(), "the file goes with the server");
-        assert!(fetch(&remote).await.is_none());
     }
 
     #[tokio::test]
-    async fn no_file_means_no_control_plane() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(Remote::standalone(dir.path()).is_none());
-        assert!(find(dir.path(), None).await.is_none());
-    }
+    async fn a_server_without_a_running_control_plane_has_none_to_ask() {
+        let feed = Feed::new(FactoryState::Disabled);
+        let remote = server(feed.clone()).await;
+        assert!(find(remote.clone()).await.is_none());
 
-    #[tokio::test]
-    async fn a_server_without_a_running_control_plane_falls_back_to_the_standalone() {
-        let dir = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let disabled = Feed::new(FactoryState::Disabled);
-        let app = Router::new().nest("/v1/factory", routes(disabled.clone()));
-        tokio::spawn(async move { axum::serve(listener, app).await });
-        let server = || Some(Remote::server(addr, "t".into()));
-        assert!(find(dir.path(), server()).await.is_none());
-
-        let standalone = Feed::new(FactoryState::Running);
-        let _serving = serve(dir.path(), standalone).await.unwrap();
-        let (_, reply) = find(dir.path(), server()).await.unwrap();
-        assert_eq!(reply.control, Some(FactoryState::Running));
-
-        disabled.set_state(FactoryState::Starting { reason: Some("keyring locked".into()) });
-        let (remote, reply) = find(dir.path(), server()).await.unwrap();
-        assert!(remote.base.ends_with("/v1/factory"), "{remote:?}");
+        feed.set_state(FactoryState::Starting { reason: Some("keyring locked".into()) });
+        let (_, reply) = find(remote).await.unwrap();
         assert_eq!(reply.control, Some(FactoryState::Starting { reason: Some("keyring locked".into()) }));
     }
 }

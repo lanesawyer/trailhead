@@ -147,3 +147,62 @@ fn health_says_an_upgrade_restart_can_be_asked_for() {
     let v: serde_json::Value = serde_json::from_str(&th.stdout(&["--json", "server", "status"])).unwrap();
     assert_eq!(v["upgrade_pending"], serde_json::json!(false), "{v}");
 }
+
+/// `trailhead serve` at a terminal, on the instance's port; killed when dropped.
+struct Foreground(std::process::Child);
+
+impl Drop for Foreground {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn serve_in_foreground(th: &Instance) -> Foreground {
+    let bind = th.url.trim_start_matches("http://").to_string();
+    let mut cmd = th.command();
+    cmd.args(["serve", "--bind", &bind]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    // As `common::output` does: another test's fork can briefly hold the fresh binary open for writing.
+    let child = (0..50)
+        .find_map(|_| match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(20));
+                None
+            }
+            r => Some(r.unwrap()),
+        })
+        .expect("the binary stayed busy");
+    let server = Foreground(child);
+    for _ in 0..100 {
+        if th.pid().is_some() {
+            return server;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("the foreground server didn't come up");
+}
+
+#[test]
+fn a_stale_foreground_server_is_left_running() {
+    let th = Instance::new();
+    let _server = serve_in_foreground(&th);
+    let pid = th.pid().unwrap();
+
+    std::thread::sleep(Duration::from_millis(20));
+    th.install();
+    let out = th.run(&["whoami"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("running in the foreground"), "{err}");
+    assert_eq!(th.pid().unwrap(), pid);
+}
+
+#[test]
+fn a_second_server_on_the_same_data_dir_is_refused() {
+    let th = Instance::new();
+    let _server = serve_in_foreground(&th);
+    let out = output(th.command().args(["serve", "--bind", "127.0.0.1:0"]));
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("another Trailhead process is using this data directory"), "{err}");
+}

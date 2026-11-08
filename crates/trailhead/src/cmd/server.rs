@@ -106,10 +106,13 @@ fn restart_onto_new_binary() -> Result<()> {
     bail!("restarting onto {}: {err}", exe.display())
 }
 
-pub(crate) async fn serve(bind: &str) -> Result<()> {
+/// Runs the server in this process until stopped. `factory_on_terminal` also prints the factory's log lines, which
+/// otherwise only go to `factory.log` (`trailhead factory run`).
+#[cfg_attr(not(feature = "factory"), allow(unused_variables))]
+pub(crate) async fn serve(bind: &str, factory_on_terminal: bool, foreground: bool) -> Result<()> {
     let paths = trailhead_server::Paths::from_env().context("no home directory")?;
     #[cfg(feature = "factory")]
-    trailhead_factory_server::init_server_logging(&paths, "info,tower_http=warn");
+    trailhead_factory_server::init_server_logging(&paths, "info,tower_http=warn", factory_on_terminal);
     #[cfg(not(feature = "factory"))]
     trailhead_log::init_stdout(trailhead_log::env_filter_or("info,tower_http=warn"));
     let cfg = trailhead_server::LocalConfig {
@@ -118,6 +121,8 @@ pub(crate) async fn serve(bind: &str) -> Result<()> {
         creds: paths.creds(),
         user_name: std::env::var("USER").unwrap_or_else(|_| "me".into()),
         pid_file: Some(paths.pid_file()),
+        lock_file: Some(paths.lock_file()),
+        foreground,
         instance: Some(paths.instance_or_create()?),
         factory: Some(paths.clone()),
     };

@@ -1,5 +1,5 @@
-//! A Trailhead task end to end on Docker sandboxes through the gateway, with the real `trailhead` server, a real
-//! `trailhead factory run` and a scratch GitHub repo (`docs/factory/sandbox.md#the-gateway-credentials-and-egress-for-docker-sandboxes`).
+//! A Trailhead task end to end on Docker sandboxes through the gateway, with the real `trailhead` server running the
+//! factory (`trailhead factory run`, the server in the foreground) and a scratch GitHub repo (`docs/factory/sandbox.md#the-gateway-credentials-and-egress-for-docker-sandboxes`).
 //!
 //! The factory runs a worker on a small task, which clones the repo, edits it and opens a PR, and then a reviewer
 //! reviews that PR. While each agent works the test checks, from outside and inside its sandbox, that a host off the
@@ -348,17 +348,22 @@ async fn a_task_runs_on_docker_through_the_gateway() {
     let key = cli(&env, dir, &url, &["add", "Add HELLO.md", "-p", PROJECT, "--grade", "1", "-d", description]).await;
     assert!(key.contains(TASK), "{key}");
 
+    // The CLI started a server without the factory; `factory run` is that server in the foreground, with it.
+    cli(&env, dir, &url, &["server", "stop"]).await;
+    let config = dir.join("config").join("config.toml");
+    let mut user = std::fs::read_to_string(&config).unwrap_or_default();
+    user.push_str(&format!("\n[factory]\nrepos = [{:?}]\n", dir.display().to_string()));
+    std::fs::write(&config, user).unwrap();
+
     let log = std::fs::File::create(dir.join("factory.log")).unwrap();
     let mut factory = tokio::process::Command::new(&env.cli)
-        .args(["factory", "run", "--create-agent", "--poll-secs", "5", "--server", &format!("127.0.0.1:{port}")])
-        .arg("--config")
-        .arg(dir.join(".trailhead.toml"))
-        .arg("--daemon")
-        .arg(&env.daemon)
+        .args(["factory", "run", "--bind", &format!("127.0.0.1:{port}")])
         .current_dir(dir)
         .env("TRAILHEAD_NO_KEYRING", "1")
         .env("TRAILHEAD_DATA_DIR", dir.join("data"))
         .env("TRAILHEAD_CONFIG_DIR", dir.join("config"))
+        .env("TRAILHEAD_DAEMON", &env.daemon)
+        .env("TRAILHEAD_FACTORY_POLL_SECS", "5")
         .env("GITHUB_TOKEN", &env.read)
         .env("GITHUB_WRITER_TOKEN", &env.writer)
         .env("CLAUDE_CODE_OAUTH_TOKEN", oauth)

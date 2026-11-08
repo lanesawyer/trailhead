@@ -11,6 +11,8 @@ pub fn local_config(dir: &Path) -> LocalConfig {
         creds: CredStore { config_dir: dir.into(), keyring: false },
         user_name: "lane".into(),
         pid_file: None,
+        lock_file: None,
+        foreground: false,
         instance: None,
         factory: None,
     }
