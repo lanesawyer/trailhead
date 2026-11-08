@@ -514,11 +514,12 @@ fn note_unscoped(mut log: &std::fs::File, why: &str) {
 /// What `log` gained after byte `from`, at most its last 40 lines.
 fn log_since(log: &std::path::Path, from: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     if let Ok(mut file) = std::fs::File::open(log) {
         let _ = file.seek(SeekFrom::Start(from));
-        let _ = file.take(1 << 20).read_to_string(&mut text);
+        let _ = file.take(1 << 20).read_to_end(&mut bytes);
     }
+    let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.lines().collect();
     lines[lines.len().saturating_sub(40)..].join("\n")
 }

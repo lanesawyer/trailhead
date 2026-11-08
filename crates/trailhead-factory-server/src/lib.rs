@@ -296,6 +296,13 @@ fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan, String> {
         spec.config
             .check_plugins(&harnesses.names(), &providers.names())
             .map_err(|e| format!("{}: {e}", spec.config_path.display()))?;
+        #[cfg(not(feature = "docker"))]
+        if spec.config.target_specs().iter().any(|t| matches!(t.compute, ComputeConfig::Docker { .. })) {
+            return Err(format!(
+                "{}: Docker compute needs a build with the `docker` feature (`cargo install --features docker`)",
+                spec.config_path.display()
+            ));
+        }
     }
     let (adapter, _) = specs[0].config.plugins().ok_or("the worker profile is missing")?;
     let adapter = adapter.to_string();
@@ -874,9 +881,28 @@ pub fn configured(paths: &Paths) -> bool {
 /// `repo` span) go to `factory.log` (when `configured`) and the buffer Lookout reads, everything else to stdout,
 /// which the CLI points at `server.log`.
 pub fn init_server_logging(paths: &Paths, default: &str) {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let buffer = LOGS.get_or_init(trailhead_control::logs::LogBuffer::default);
+    let file = if configured(paths) { open_log_file() } else { None };
+    let file = file.map(|w| BoxMakeWriter::new(std::sync::Mutex::new(w)));
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    server_subscriber(trailhead_log::env_filter_or(default), buffer, BoxMakeWriter::new(std::io::stdout), ansi, file)
+        .init();
+}
+
+/// [`init_server_logging`]'s subscriber, with its writers given. Spans pass every layer, so each one sees whether an
+/// event is inside a `repo` span; only events are routed.
+fn server_subscriber(
+    filter: tracing_subscriber::EnvFilter,
+    buffer: &trailhead_control::logs::LogBuffer,
+    stdout: tracing_subscriber::fmt::writer::BoxMakeWriter,
+    ansi: bool,
+    file: Option<tracing_subscriber::fmt::writer::BoxMakeWriter>,
+) -> impl tracing::Subscriber + Send + Sync {
     use tracing_subscriber::filter::{FilterExt, dynamic_filter_fn};
     use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{Layer, registry::LookupSpan};
 
     fn is_factory<S: tracing::Subscriber + for<'a> LookupSpan<'a>>(
@@ -895,24 +921,28 @@ pub fn init_server_logging(paths: &Paths, default: &str) {
         TARGETS.iter().any(|t| meta.target().starts_with(t))
             || cx.lookup_current().is_some_and(|span| span.scope().any(|s| s.name() == "repo"))
     }
+    fn factory<S: tracing::Subscriber + for<'a> LookupSpan<'a>>(
+        meta: &tracing::Metadata<'_>,
+        cx: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        !meta.is_event() || is_factory(meta, cx)
+    }
+    fn server<S: tracing::Subscriber + for<'a> LookupSpan<'a>>(
+        meta: &tracing::Metadata<'_>,
+        cx: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        !meta.is_event() || !is_factory(meta, cx)
+    }
 
-    let buffer = LOGS.get_or_init(trailhead_control::logs::LogBuffer::default);
-    let file = if configured(paths) { open_log_file() } else { None };
-    let filter = trailhead_log::env_filter_or(default);
-    let stdout = tracing_subscriber::fmt::layer()
-        .with_timer(trailhead_log::local_timer())
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()));
+    let stdout =
+        tracing_subscriber::fmt::layer().with_timer(trailhead_log::local_timer()).with_ansi(ansi).with_writer(stdout);
     let file = file.map(|w| {
-        tracing_subscriber::fmt::layer()
-            .with_timer(trailhead_log::local_timer())
-            .with_ansi(false)
-            .with_writer(std::sync::Mutex::new(w))
+        tracing_subscriber::fmt::layer().with_timer(trailhead_log::local_timer()).with_ansi(false).with_writer(w)
     });
     tracing_subscriber::registry()
-        .with(buffer.layer().with_filter(filter.clone().and(dynamic_filter_fn(is_factory))))
-        .with(file.with_filter(filter.clone().and(dynamic_filter_fn(is_factory))))
-        .with(stdout.with_filter(filter.and(dynamic_filter_fn(is_factory).not())))
-        .init();
+        .with(buffer.layer().with_filter(filter.clone().and(dynamic_filter_fn(factory))))
+        .with(file.with_filter(filter.clone().and(dynamic_filter_fn(factory))))
+        .with(stdout.with_filter(filter.and(dynamic_filter_fn(server))))
 }
 
 /// Saves a secret for `run` in the OS keyring (`trailhead-factory login ...`).
@@ -1058,6 +1088,76 @@ mod tests {
         let (paths, store) = instance(dir.path(), "[factory]\nrepos = 3\n").await;
         let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap();
         assert!(err.contains("config.toml"), "{err}");
+    }
+
+    #[cfg(not(feature = "docker"))]
+    #[tokio::test]
+    async fn docker_compute_without_the_feature_is_a_configuration_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let profile = |role: &str| {
+            format!(
+                "[factory.profiles.{role}]\nrole = \"{role}\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\n\
+                 model = \"sonnet\"\nbudget = {{ usd = 1, minutes = 1, steps = 1 }}\n"
+            )
+        };
+        let file = format!(
+            "project = \"P\"\n[factory.repo]\nowner = \"o\"\nname = \"r\"\n[factory.compute]\nkind = \"docker\"\n\
+             [factory.checks]\nfmt = \"f\"\nlint = \"l\"\ntest = \"t\"\n{}{}",
+            profile("worker"),
+            profile("reviewer")
+        );
+        std::fs::write(repo.join(".trailhead.toml"), file).unwrap();
+        let config = format!("[factory]\nrepos = [{:?}]\n", repo.display().to_string());
+        let (paths, store) = instance(dir.path(), &config).await;
+        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap();
+        assert!(err.contains("`docker` feature"), "{err}");
+    }
+
+    #[test]
+    fn a_servers_event_inside_a_repo_span_goes_to_the_factory_log_only() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::writer::BoxMakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Capture {
+            fn text(&self) -> String {
+                String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+            }
+        }
+
+        let (server, factory) = (Capture::default(), Capture::default());
+        let (s, f) = (server.clone(), factory.clone());
+        let subscriber = super::server_subscriber(
+            "info".into(),
+            &trailhead_control::logs::LogBuffer::default(),
+            BoxMakeWriter::new(move || s.clone()),
+            false,
+            Some(BoxMakeWriter::new(move || f.clone())),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "trailhead_core", "outside any repo");
+            let span = tracing::info_span!(target: "trailhead_factory_server", "repo", repo = "a/b");
+            let _in = span.enter();
+            tracing::info!(target: "trailhead_core", "inside a repo");
+            tracing::info!(target: "trailhead_control", "the factory's own");
+        });
+        let (server, factory) = (server.text(), factory.text());
+        assert!(server.contains("outside any repo"), "{server}");
+        assert!(!server.contains("inside a repo") && !server.contains("the factory's own"), "{server}");
+        assert!(factory.contains("inside a repo") && factory.contains("the factory's own"), "{factory}");
+        assert!(!factory.contains("outside any repo"), "{factory}");
     }
 
     #[test]
