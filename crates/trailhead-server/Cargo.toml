@@ -39,6 +39,7 @@ http.workspace = true
 
 
 [dev-dependencies]
+trailhead-client = { workspace = true, features = ["http"] }
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
