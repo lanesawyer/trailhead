@@ -560,3 +560,21 @@ async fn releasing_a_busy_sandbox_keeps_the_stack_tag_its_checkpoint_was_built_f
     assert_eq!(labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
     assert_eq!(labels.get(label::STACK).map(String::as_str), Some("old"), "not recomputed from the current config");
 }
+
+#[tokio::test]
+async fn a_resource_wait_park_that_fails_adds_no_failure_and_keeps_the_backoff() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Waits too long", "");
+    r.compute.fail("trailhead-w1", "preflight");
+    for _ in 1..=11 {
+        r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    }
+    assert_eq!(r.tracker.task(&key).status, Status::Open, "still waiting");
+    r.tracker.fail_next("factory/trail-1-a1-11", "ask", 1);
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InProgress, "the park failed");
+    assert_eq!(task.run.infra_failures.unwrap_or(0), 0, "a wait isn't an infrastructure failure");
+    r.tracker.set_status(&key, Status::Open); // what reconcile does with it
+    assert!(r.factory.tick().await.unwrap().is_empty(), "still backing off");
+}

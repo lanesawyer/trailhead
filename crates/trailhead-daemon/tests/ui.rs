@@ -229,6 +229,30 @@ async fn status_is_a_snapshot_then_the_events_after_it() {
 }
 
 #[tokio::test]
+async fn status_ends_when_a_subscriber_lags_so_the_ui_resyncs() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let client = r.client(key).await;
+    let mut stream = StatusStream::open(dial_ui(&client, r.control.id).await.unwrap()).await.unwrap();
+    assert!(matches!(next(&mut stream).await, Some(StatusFrame::Snapshot { .. })));
+
+    // The channel holds 16 and the runtime is single-threaded, so the forwarder cannot run during
+    // this loop: its first receive finds it has fallen behind.
+    for seq in 8..8 + 17 {
+        let event = Sequenced { seq, event: FactoryEvent::RunEnded { task: TaskKey("TRAIL-1".into()) } };
+        r.events.send(event).unwrap();
+    }
+    loop {
+        match next(&mut stream).await {
+            Some(StatusFrame::Event { .. }) => {}
+            None => break,
+            other => panic!("expected the stream to end after a lag, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn logs_are_the_kept_lines_then_each_new_one() {
     let r = Rig::new().await;
     let key = SecretKey::generate();
