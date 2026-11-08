@@ -66,7 +66,8 @@ impl Default for Shown {
     }
 }
 
-/// Keeps the [`ProjectView`] and the grid's entities from the mirror. Needs the board's [`View`] state.
+/// Keeps the [`ProjectView`] and the grid's entities from the mirror. Needs the board's [`View`] state and
+/// [`BoardPlugin`](crate::board::BoardPlugin), whose resources the page builds from too.
 pub struct ProjectPlugin;
 
 impl Plugin for ProjectPlugin {
@@ -194,25 +195,16 @@ fn spawn_page(mut commands: Commands) {
             Name::new("project"),
             ProjectPanel,
             Node {
-                width: percent(100),
-                height: percent(100),
                 min_width: px(0),
                 min_height: px(0),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(px(space::PANEL_INSET)),
                 row_gap: px(space::GROUPS),
-                ..default()
+                ..widgets::beside_sidebar()
             },
         ))
         .id();
-    let header = commands
-        .spawn((Node { align_items: AlignItems::Center, column_gap: px(space::GROUPS), ..default() }, ChildOf(panel)))
-        .id();
-    commands
-        .queue_spawn_scene(button("Switchbacks", None, ButtonVariant::Normal))
-        .insert(ChildOf(header))
-        .observe(|_: On<Activate>, mut next: ResMut<NextState<View>>| next.set(View::Board));
-    commands.queue_spawn_scene(text("", size::APP_TITLE)).insert((ProjectTitle, ChildOf(header)));
+    commands.queue_spawn_scene(text("", size::APP_TITLE)).insert((ProjectTitle, ChildOf(panel)));
     // The body and its scrollbar share a row, so the bar runs the body's height.
     let frame = commands
         .spawn((

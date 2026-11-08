@@ -64,6 +64,8 @@ pub mod radius {
 
 /// How big a panel is and where it sits.
 pub mod extent {
+    /// An app's sidebar, down the left of the window.
+    pub const SIDEBAR_WIDTH: f32 = 220.0;
     /// The inspector's width, down the right of the window.
     pub const INSPECTOR_WIDTH: f32 = 360.0;
     /// A modal's width, unless its kind says otherwise.
