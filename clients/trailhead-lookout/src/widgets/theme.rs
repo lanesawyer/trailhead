@@ -5,8 +5,8 @@
 //! A view names a token, never a color.
 
 use bevy::prelude::*;
-use trailhead_model::{Grade, Priority, Status};
-use trailhead_ui::{Theme, Token, palette};
+use trailhead_model::{CommentKind, Grade, Priority, Status};
+use trailhead_ui::{Icon, Theme, Token, palette};
 
 /// The kit's tokens and Lookout's own.
 pub mod token {
@@ -88,6 +88,18 @@ pub fn grade_tone(g: Grade) -> Token {
     }
 }
 
+/// The icon of a kind of comment, the same wherever a comment shows, so its kind reads before its words.
+pub fn comment_icon(kind: CommentKind) -> Icon {
+    match kind {
+        CommentKind::Note => Icon::Comment,
+        CommentKind::Handoff => Icon::Handshake,
+        CommentKind::Decision => Icon::Signpost,
+        CommentKind::Question => Icon::Help,
+        CommentKind::Progress => Icon::Footprints,
+        CommentKind::Review => Icon::Eye,
+    }
+}
+
 /// The kit's theme with Lookout's tokens added, which `main.rs` hands to the kit's `ThemePlugin`.
 pub fn theme() -> Theme {
     let mut theme = Theme::new();
@@ -121,6 +133,12 @@ pub fn theme() -> Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_kind_of_comment_has_its_own_icon() {
+        let icons: std::collections::HashSet<Icon> = CommentKind::ALL.into_iter().map(comment_icon).collect();
+        assert_eq!(icons.len(), CommentKind::ALL.len());
+    }
 
     #[test]
     fn every_lookout_token_resolves_rather_than_falling_back_to_fuchsia() {
