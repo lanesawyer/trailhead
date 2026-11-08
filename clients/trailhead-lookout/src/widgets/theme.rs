@@ -206,7 +206,7 @@ mod tests {
     }
 
     /// The least lightness between a hover and the surface under it that reads as a response.
-    const HOVER_GAP: f32 = 0.05;
+    const HOVER_CONTRAST: f32 = 0.05;
 
     #[test]
     fn a_plain_buttons_hover_shows_on_the_card_and_the_panel_in_either_theme() {
@@ -217,7 +217,7 @@ mod tests {
             let hover = lightness(&token::BUTTON_PLAIN_BG_HOVER);
             for surface in [token::CARD_BG, token::PANEL_BG] {
                 let gap = (hover - lightness(&surface)).abs();
-                assert!(gap >= HOVER_GAP, "a plain button's hover on {surface} is {gap:.3} away, too close to see");
+                assert!(gap >= HOVER_CONTRAST, "a plain button's hover on {surface} is {gap:.3} away, too close to see");
             }
         }
     }
