@@ -1,11 +1,12 @@
 //! A message in a conversation, as a messaging app shows one: a rounded box against the end edge for what the reader
 //! wrote and the start edge for everyone else's, each side in its own color, so whose is whose reads at a glance.
 //!
-//! Put it in a column (its parent lays its children out top to bottom) and spawn the message's lines as its children.
+//! Put it in a column (its parent lays its children out top to bottom) and spawn the message's lines as its children,
+//! a [`bubble_head`] first.
 
 use bevy::prelude::*;
 
-use super::{BackgroundTone, radius, space, token};
+use super::{BackgroundTone, Icon, TextTone, icon_text, radius, size, space, text_dim, token};
 
 /// Whose a [`bubble`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,5 +36,18 @@ pub fn bubble(side: Side) -> impl Scene {
             align_self: { align },
         }
         BackgroundTone({ tone })
+    }
+}
+
+/// A bubble's first line, dim and small: `icon` for what kind of message it is, then `words` about it (who wrote it,
+/// when).
+pub fn bubble_head(icon: Icon, words: impl Into<String>) -> impl Scene {
+    let words = words.into();
+    bsn! {
+        Node { align_items: AlignItems::Center, column_gap: { px(space::ICON_LABEL) } }
+        Children [
+                @icon_text(icon) TextTone({ token::TEXT_DIM })
+            -- @text_dim(words, size::SECONDARY)
+        ]
     }
 }

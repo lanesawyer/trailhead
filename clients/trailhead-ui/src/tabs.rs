@@ -9,6 +9,8 @@
 //! A strip narrower than its captions cuts them rather than spilling past its edge: [`fit_tabs`] shares the room out,
 //! leaving whole the captions short enough to fit and cutting the rest to an even share.
 //!
+//! A tab under the pointer takes a plain button's hover background, as every pressable thing does.
+//!
 //! Ported from bevy-data-explorer's `widgets/tabs.rs`.
 
 use bevy::feathers::display::label;
@@ -22,10 +24,11 @@ use bevy::ui::{InteractionDisabled, Selected};
 use bevy::ui_widgets::{ControlOrientation, Tab, TabActivation, TabList};
 use bevy::window::SystemCursorIcon;
 
+use crate::hover::HoverTone;
 use crate::patch::set_text;
 use crate::spacing::space;
 use crate::text::size;
-use crate::theme::{BorderTone, token};
+use crate::theme::{BackgroundTone, BorderTone, token};
 use crate::truncate::{truncate_to_width, width_of};
 
 /// How thick the strip's rule is.
@@ -81,6 +84,8 @@ pub fn tab(caption: impl Into<String>, orientation: ControlOrientation) -> impl 
         }
         Tab
         Hovered
+        BackgroundTone({ token::BUTTON_PLAIN_BG })
+        HoverTone { rest: { token::BUTTON_PLAIN_BG }, hover: { token::BUTTON_PLAIN_BG_HOVER } }
         FocusIndicator
         EntityCursor::System(SystemCursorIcon::Pointer)
         ThemeBorderColor({ tokens::BUTTON_PLAIN_BG })
