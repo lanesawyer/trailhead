@@ -32,6 +32,8 @@ pub struct Health {
     /// Whether the server restarts onto a newer binary once the factory's runs finish. `None` from a server older
     /// than that restart, which doesn't handle the SIGUSR1 that asks for it.
     pub upgrade_pending: Option<bool>,
+    /// Started at a terminal, not by the CLI in the background.
+    pub foreground: bool,
 }
 
 /// An API error with its stable code, so a client can print `error[claim_held]: ...`.

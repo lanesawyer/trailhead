@@ -85,6 +85,10 @@ pub struct ServerInfo {
     pub exe_modified_ms: Option<u64>,
     pub db: Option<PathBuf>,
     pub started_at: jiff::Timestamp,
+    /// Started at a terminal (`trailhead serve`, `trailhead factory run`) rather than by the CLI in the background,
+    /// so the CLI doesn't replace it with a background one after a reinstall.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub foreground: bool,
 }
 
 impl ServerInfo {
@@ -98,6 +102,7 @@ impl ServerInfo {
             exe,
             db,
             started_at: jiff::Timestamp::now(),
+            foreground: false,
         }
     }
 }
@@ -137,6 +142,11 @@ pub struct LocalConfig {
     pub user_name: String,
     /// Holds the running server's pid while it's up.
     pub pid_file: Option<PathBuf>,
+    /// Held while the server runs, so a second server can't serve the same data directory on another port
+    /// ([`trailhead_client::paths::lock`]).
+    pub lock_file: Option<PathBuf>,
+    /// Reported by `/v1/health`; see [`ServerInfo::foreground`].
+    pub foreground: bool,
     /// Reported by `/v1/health`; see [`ServerInfo::instance`].
     pub instance: Option<String>,
     /// Where the factory's control plane finds the user config and keeps its state. With the `factory` feature and
@@ -176,9 +186,17 @@ pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::
 /// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first, or until SIGUSR1 asks it to
 /// restart onto a new binary.
 pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::Error>> {
+    let lock = match &cfg.lock_file {
+        Some(path) => Some(trailhead_client::paths::lock(path, &format!("a server at {}", cfg.bind))?),
+        None => None,
+    };
     let (store, ctx) = open_local(&cfg).await?;
     let state = Arc::new(AppState {
-        info: ServerInfo { instance: cfg.instance.clone(), ..ServerInfo::current(Some(cfg.db.clone())) },
+        info: ServerInfo {
+            instance: cfg.instance.clone(),
+            foreground: cfg.foreground,
+            ..ServerInfo::current(Some(cfg.db.clone()))
+        },
         webhook_targets: webhooks::Targets::Any,
         ..AppState::new(store)
     });
@@ -311,6 +329,8 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
         factory.stop(FACTORY_STOP).await;
     }
     let restart = restart.load(std::sync::atomic::Ordering::SeqCst);
+    // Before the pid file goes, which the CLI waits for: a server it starts next then finds the lock free.
+    drop(lock);
     // A restart execs the new binary in this process, which keeps the pid, so the file stays.
     if !restart
         && let Some(pid_file) = &cfg.pid_file

@@ -79,6 +79,12 @@ impl Client {
                         "note: a newer trailhead is installed; {runs} factory run(s) are in flight, so the server keeps running. Restart it with `trailhead server restart` when they finish"
                     ),
                 },
+                // Someone started it at a terminal and may be watching it: replacing it with a background server would
+                // take it away from them.
+                0 if info.foreground => eprintln!(
+                    "note: a newer trailhead is installed; restart the server running in the foreground (pid {}) to use it",
+                    info.pid.map_or("?".into(), |p| p.to_string())
+                ),
                 0 => {
                     eprintln!("note: restarting the local server on the updated trailhead binary");
                     stop_local(&http, &base, true).await?;
@@ -611,7 +617,10 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
         } else {
             std::process::Command::new(&exe)
         };
-        cmd.args(["serve", "--bind", &bind]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log.try_clone()?);
+        cmd.args(["serve", "--bind", &bind, "--background"])
+            .stdin(Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log.try_clone()?);
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         Ok(cmd.spawn()?)
     };

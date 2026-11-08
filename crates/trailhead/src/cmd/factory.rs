@@ -32,7 +32,7 @@ async fn run_in_foreground(bind: &str) -> Result<()> {
             "a server is already running at {bind}{pid}; `trailhead server stop` it first, or watch the factory it runs with `trailhead factory status`"
         );
     }
-    crate::cmd::server::serve(bind, true).await
+    crate::cmd::server::serve(bind, true, true).await
 }
 
 /// Sets or clears `disabled` in `[factory]` of the user config. Needs no server, and touches no other factory key.

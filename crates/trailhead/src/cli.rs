@@ -250,6 +250,9 @@ pub(crate) enum Cmd {
     Serve {
         #[arg(long, env = "TRAILHEAD_BIND", default_value = trailhead_server::DEFAULT_BIND)]
         bind: String,
+        /// Set by the CLI when it starts the server in the background.
+        #[arg(long, hide = true)]
+        background: bool,
     },
 }
 

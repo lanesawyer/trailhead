@@ -579,16 +579,10 @@ fn check_result(failed: usize) -> Result<(), String> {
 /// Sets everything up for `run`'s repos and reports what it found, without running anything.
 pub async fn check(run: &RunOpts) -> Result<(), String> {
     let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    // The control plane's iroh identity is one per machine: binding it here too would flap the server's daemons.
-    if let Some((token, _)) = paths.creds().read(Cred::User)
-        && let Some((_, reply)) = surface::find(surface::Remote::server(run.opts.server, token)).await
-        && let Some(state) = reply.control
-    {
-        return Err(format!(
-            "the server's control plane is {}; `trailhead factory status` shows it, and `check` runs with the server stopped or the factory disabled",
-            state.label()
-        ));
-    }
+    // The control plane's iroh identity is one per machine: binding it beside the server's would flap its daemons,
+    // and a server started meanwhile would bind it too. The server's lock keeps them apart.
+    let _lock = trailhead_client::paths::lock(&paths.lock_file(), "trailhead factory check")
+        .map_err(|e| format!("{e}; stop the server to run `check`"))?;
     let setup = setup(run).await?;
     let mut failed = 0;
     for entry in &setup.repos {
