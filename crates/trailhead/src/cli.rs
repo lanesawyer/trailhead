@@ -233,6 +233,8 @@ pub(crate) enum Cmd {
     Mcp,
     /// Run the factory: passes its arguments to the `trailhead-factory` binary, found next to this one or on PATH.
     /// Install it with `cargo install --locked --features docker --path crates/trailhead-factory-host`.
+    /// `trailhead factory disable` and `enable` are handled here and need no server: they turn the server's own
+    /// control plane off and on in the user config.toml.
     #[command(disable_help_flag = true)]
     Factory {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

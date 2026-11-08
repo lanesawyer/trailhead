@@ -195,7 +195,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
             let user_config = paths.config_dir.join("config.toml");
             trailhead_factory_server::start(paths, state.store.clone(), cfg.bind).map_err(|e| {
                 format!(
-                    "the factory's configuration is broken, so the server won't start: {e}\nFix it, or take the repos out of `[factory] repos` in {} to run without the factory",
+                    "the factory's configuration is broken, so the server won't start: {e}\nFix it, or run `trailhead factory disable` to run without the factory (it edits {})",
                     user_config.display()
                 )
             })?

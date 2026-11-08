@@ -54,6 +54,9 @@ async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
     }
     if let Cmd::Factory { args } = &cli.cmd {
         reject_global_flags(matches)?;
+        if let Some(enable) = cmd::factory::toggle(args) {
+            return cmd::factory::set_enabled(enable).await;
+        }
         return cmd::factory::run(args);
     }
     let paths = trailhead_server::Paths::from_env().context("no home directory")?;
