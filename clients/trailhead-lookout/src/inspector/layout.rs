@@ -319,7 +319,7 @@ pub(super) fn layout_task(
         let moves = view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(*st) } else { None });
         let statuses: Vec<Status> = std::iter::once(status).chain(moves).collect();
         let options = status_labels(&statuses);
-        let tones = statuses.iter().map(|s| Some(status_token(*s))).collect();
+        let tones = statuses.iter().map(|s| Some(status_tone(*s))).collect();
         fields.push((
             "s/fields/status".to_string(),
             Block::Choice { field: Field::Status, options, tones, selected: Some(0), statuses },

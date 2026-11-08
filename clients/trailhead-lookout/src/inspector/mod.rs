@@ -47,7 +47,7 @@ use crate::widgets::{
     ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, bubble, bubble_head, button,
     comment_icon, danger_button, display, extent, grade_tone, icon_menu, inline_field, inline_text_sized, layer,
     menu_item, open_modal, panel, panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar,
-    section_frame, select, select_iconed, size, space, spawn_detail_panes, status_label, status_token, text, text_dim,
+    section_frame, select, select_iconed, size, space, spawn_detail_panes, status_label, status_tone, text, text_dim,
     text_input, text_toned, token, tool_button,
 };
 
