@@ -1022,6 +1022,44 @@ fn server_subscriber(
         .with(stdout.with_filter(filter.and(dynamic_filter_fn(server))))
 }
 
+/// The factory's commands, as `trailhead factory <cmd>` and the standalone `trailhead-factory <cmd>` take them.
+#[derive(clap::Subcommand)]
+pub enum Command {
+    /// Set everything up and report, without running anything.
+    Check(RunOpts),
+    /// Run the control plane in this process, for every repo until Ctrl-C, instead of in the server.
+    Run(RunOpts),
+    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; runs beside `run`.
+    Status(Opts),
+    /// Print the daemon's service log from a task's sandbox.
+    Logs(ops::LogsOpts),
+    /// Let a UI (Lookout) connect: add its endpoint id to the allowlist. Takes effect on a running control plane at once.
+    Allow { endpoint_id: String },
+    /// Stop allowing a UI endpoint.
+    Disallow { endpoint_id: String },
+    /// List the UI endpoint ids allowed to connect.
+    Allowed,
+    /// Save a secret in the OS keyring (read from stdin), so `run` needs no environment variables.
+    #[command(subcommand)]
+    Login(login::Login),
+}
+
+/// Sets up logging for `cmd` (`run` also writes `factory.log`) and runs it.
+pub async fn command(cmd: Command) -> Result<(), String> {
+    let file = if matches!(cmd, Command::Run(_)) { open_log_file() } else { None };
+    init_logging(file);
+    match cmd {
+        Command::Check(opts) => check(&opts).await,
+        Command::Run(opts) => run(&opts).await,
+        Command::Status(opts) => ops::status(&opts).await,
+        Command::Logs(logs) => ops::logs(&logs).await,
+        Command::Allow { endpoint_id } => allow(&endpoint_id, true),
+        Command::Disallow { endpoint_id } => allow(&endpoint_id, false),
+        Command::Allowed => allowed(),
+        Command::Login(cmd) => login(cmd).await,
+    }
+}
+
 /// Saves a secret for `run` in the OS keyring (`trailhead-factory login ...`).
 pub async fn login(cmd: login::Login) -> Result<(), String> {
     let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;

@@ -231,10 +231,13 @@ pub(crate) enum Cmd {
     /// Speak MCP over stdin/stdout, forwarding to the server's /mcp endpoint.
     /// For MCP clients that launch a command, e.g. `trailhead --as claude mcp`.
     Mcp,
-    /// Run the factory: passes its arguments to the `trailhead-factory` binary, found next to this one or on PATH.
-    /// Install it with `cargo install --locked --features docker --path crates/trailhead-factory-host`.
-    /// `trailhead factory disable` and `enable` are handled here and need no server: they turn the server's own
-    /// control plane off and on in the user config.toml.
+    /// The software factory. The server runs its control plane when the user config.toml lists `[factory] repos`;
+    /// these inspect it, set it up, and turn it off and on.
+    #[cfg(feature = "factory")]
+    #[command(subcommand)]
+    Factory(FactoryCmd),
+    /// The software factory, which this build leaves out.
+    #[cfg(not(feature = "factory"))]
     #[command(disable_help_flag = true)]
     Factory {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -350,6 +353,18 @@ pub(crate) enum ProjectCmd {
         #[arg(long)]
         unarchive: bool,
     },
+}
+
+#[cfg(feature = "factory")]
+#[derive(Subcommand)]
+pub(crate) enum FactoryCmd {
+    #[command(flatten)]
+    Control(Box<trailhead_factory_server::Command>),
+    /// Turn the server's control plane back on. Needs no server; takes effect when the server restarts.
+    Enable,
+    /// Turn the server's control plane off, even when a broken factory configuration keeps the server from starting.
+    /// Needs no server; takes effect when the server restarts.
+    Disable,
 }
 
 #[derive(Subcommand)]

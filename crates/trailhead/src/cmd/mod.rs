@@ -4,6 +4,7 @@ pub(crate) mod access;
 pub(crate) mod claims;
 pub(crate) mod comments;
 pub(crate) mod events;
+#[cfg(feature = "factory")]
 pub(crate) mod factory;
 pub(crate) mod mcp;
 pub(crate) mod projects;

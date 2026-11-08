@@ -10,7 +10,7 @@ From a checkout of the repo:
 cargo install --path crates/trailhead --locked
 ```
 
-To reinstall the CLI, the factory and the daemon together (say, after pulling a merge that touches them), run `mise run install`; it does the three `cargo install --locked --path ...` commands in `docs/factory/operating.md`.
+This builds the factory in (it runs only once the user `config.toml` lists `[factory] repos`); `--no-default-features` leaves it out. To reinstall `trailhead` and the daemon together (say, after pulling a merge that touches them), run `mise run install`; it does the two `cargo install --locked --path ...` commands in `docs/factory/operating.md`.
 
 The README lists other ways to get the CLI as releases are cut.
 

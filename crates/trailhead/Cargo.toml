@@ -17,6 +17,7 @@ bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [features]
+default = ["factory"]
 # The factory's control plane in `trailhead serve` (docs/factory/server-control-plane.md).
 factory = ["trailhead-server/factory", "dep:trailhead-factory-server"]
 docker = ["factory", "trailhead-server/docker"]
