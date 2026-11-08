@@ -10,7 +10,6 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish = false
 
 [features]
 # Runs the factory's control plane in the server when the user config's `[factory] repos` lists a repo
