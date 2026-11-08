@@ -263,6 +263,8 @@ struct Setup {
     _lock: File,
     store: Arc<Store>,
     ctx: Ctx,
+    /// Whether this runs inside the server, sharing its store.
+    in_server: bool,
 }
 
 /// The user config's `[factory]` table; a missing file is the default.
@@ -458,7 +460,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Option<Arc<Stor
         repos.push(Entry { factory: Arc::new(factory), slug });
     }
     feed.set(repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect());
-    Ok(Setup { repos, tunnel, _lock: lock, store, ctx })
+    Ok(Setup { repos, tunnel, _lock: lock, store, ctx, in_server })
 }
 
 /// Resolves once the watch channel it came from is set.
@@ -471,14 +473,18 @@ async fn run_repo(
     entry: Entry,
     store: Arc<Store>,
     ctx: Ctx,
+    in_server: bool,
     poll: Duration,
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> bool {
     let wake = Arc::new(Notify::new());
     let project = entry.factory.config.repo.project.clone();
+    // In the server every write commits in this process, so the commit signal is enough; standalone needs a timer.
+    let trigger =
+        if in_server { wake::Trigger::Commits(store.changes()) } else { wake::Trigger::Every(wake::INTERVAL) };
     let watcher = tokio::spawn(
-        wake::wake_on_changes(store, ctx, project, wake.clone(), wake::INTERVAL).instrument(tracing::Span::current()),
+        wake::wake_on_changes(store, ctx, project, wake.clone(), trigger).instrument(tracing::Span::current()),
     );
     let ran = entry.factory.clone().run_draining(wake, poll, fired(drain), fired(cancel)).await;
     watcher.abort();
@@ -768,7 +774,7 @@ async fn run_loops(
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let Setup { repos, tunnel, _lock, store, ctx } = setup;
+    let Setup { repos, tunnel, _lock, store, ctx, in_server } = setup;
     // Beside the lock, so it exists and says the same thing: this machine has one control plane.
     let boards = repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect();
     let serving = surface::serve(&paths.data_dir.join("factory"), boards).await?;
@@ -777,7 +783,7 @@ async fn run_loops(
     for entry in repos {
         let span = tracing::info_span!("repo", repo = %entry.slug);
         let (store, ctx, drain, cancel) = (store.clone(), ctx.clone(), drain.clone(), cancel.clone());
-        loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel).instrument(span));
+        loops.spawn(run_repo(entry, store, ctx, in_server, poll, drain, cancel).instrument(span));
     }
     let mut failed = 0;
     while let Some(joined) = loops.join_next().await {
