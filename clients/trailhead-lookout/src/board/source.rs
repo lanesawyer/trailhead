@@ -1,5 +1,6 @@
 use super::*;
 
+/// What the views of tasks build from: the mirror's rows, the factory's queues, and what says any of them changed.
 #[derive(SystemParam)]
 pub struct Sources<'w, 's> {
     mirror: Res<'w, Mirror>,
