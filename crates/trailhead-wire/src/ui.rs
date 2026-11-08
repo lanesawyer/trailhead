@@ -290,12 +290,16 @@ async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStrea
             loop {
                 match events.recv().await {
                     Ok(event) => {
-                        if tx.send(StatusFrame::Event { repo: repo.clone(), event }).await.is_err() {
+                        if tx.send(Some(StatusFrame::Event { repo: repo.clone(), event })).await.is_err() {
                             return;
                         }
                     }
-                    // Too slow to keep up: it misses some, which shows in the numbering.
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Too slow to keep up: it missed events and the UI's mirror can't repair a gap, so
+                    // end the stream and let the UI redial for a fresh snapshot.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let _ = tx.send(None).await;
+                        return;
+                    }
                     Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
@@ -305,12 +309,13 @@ async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStrea
     loop {
         tokio::select! {
             frame = rx.recv() => match frame {
-                Some(frame) => {
+                Some(Some(frame)) => {
                     if write_frame(&mut send, &frame).await.is_err() {
                         return;
                     }
                 }
-                None => break,
+                // A forward lagged, or every feed ended.
+                Some(None) | None => break,
             },
             _ = send.stopped() => return,
         }
