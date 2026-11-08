@@ -108,7 +108,7 @@ pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
     inline_text_sized,
 };
-pub use input::text_input;
+pub use input::{text_input, text_input_sized};
 pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu, menu_item};
@@ -125,7 +125,7 @@ pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
 pub use search::{
     ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
 };
-pub use select::{Picked, SelectEdit, SelectOptions, select};
+pub use select::{Picked, SelectEdit, SelectOptions, SelectTones, select, select_toned};
 pub use skeleton::{SkeletonBar, spawn_skeleton};
 pub use slider::spawn_slider;
 pub use spacing::{check as spacing_check, extent, radius, space};
@@ -162,6 +162,7 @@ impl Plugin for UiPlugin {
                     tabs::fit_tabs,
                     tabs::style_tabs,
                     nav::paint_nav_items,
+                    select::style_select_captions,
                 )
                     .chain()
                     .in_set(UiPlace),

@@ -47,7 +47,7 @@ use crate::widgets::{
     ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, bubble, button, danger_button,
     display, extent, grade_tone, icon_menu, inline_field, inline_text_sized, layer, menu_item, open_modal, panel,
     panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select, size, space,
-    spawn_detail_panes, status_label, text, text_dim, text_input, text_toned, token, tool_button,
+    spawn_detail_panes, status_label, status_token, text, text_dim, text_input, text_toned, token, tool_button,
 };
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
@@ -982,8 +982,14 @@ enum Block {
     /// survives a change from elsewhere.
     Inline { field: Field, value: String },
     /// A sidebar field picked from a dropdown where it is read: `options[i]` is shown for what `statuses[i]` (status)
-    /// or the field's scale (priority, grade) means.
-    Choice { field: Field, options: Vec<String>, selected: Option<usize>, statuses: Vec<Status> },
+    /// or the field's scale (priority, grade) means, in `tones[i]`, the color it has everywhere else.
+    Choice {
+        field: Field,
+        options: Vec<String>,
+        tones: Vec<Option<Token>>,
+        selected: Option<usize>,
+        statuses: Vec<Status>,
+    },
     /// The button that opens the new-task form under this task.
     AddSubtask { key: String, live: bool },
 }
@@ -1319,21 +1325,24 @@ fn layout_task(
         let moves = view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(*st) } else { None });
         let statuses: Vec<Status> = std::iter::once(status).chain(moves).collect();
         let options = status_labels(&statuses);
+        let tones = statuses.iter().map(|s| Some(status_token(*s))).collect();
         fields.push((
             "s/fields/status".to_string(),
-            Block::Choice { field: Field::Status, options, selected: Some(0), statuses },
+            Block::Choice { field: Field::Status, options, tones, selected: Some(0), statuses },
         ));
         let priorities = Priority::ALL.iter().map(|p| format!("P{p}")).collect();
+        let tones = Priority::ALL.iter().map(|p| Some(priority_tone(*p))).collect();
         let selected = view.priority.and_then(|p| Priority::ALL.iter().position(|q| *q == p));
         fields.push((
             "s/fields/priority".to_string(),
-            Block::Choice { field: Field::Priority, options: priorities, selected, statuses: Vec::new() },
+            Block::Choice { field: Field::Priority, options: priorities, tones, selected, statuses: Vec::new() },
         ));
         fields.push((
             "s/fields/grade".to_string(),
             Block::Choice {
                 field: Field::Grade,
                 options: grade_options(human),
+                tones: grade_choices().map(|g| Some(g.map_or(token::TEXT_DIM, grade_tone))).collect(),
                 selected: grade_index(view.grade),
                 statuses: Vec::new(),
             },
@@ -1655,8 +1664,8 @@ fn spawn_block(
                 .insert(Edits { field: *field, statuses: Vec::new(), pending: None })
                 .id()
         }
-        Block::Choice { field, options, selected, statuses } => commands
-            .spawn_scene(inline_field(field.label(), options.clone(), *selected))
+        Block::Choice { field, options, tones, selected, statuses } => commands
+            .spawn_scene(inline_field(field.label(), options.clone(), tones.clone(), *selected))
             .insert(Edits { field: *field, statuses: statuses.clone(), pending: None })
             .id(),
         Block::AddSubtask { key, live } => {
@@ -1783,9 +1792,9 @@ fn dress(
                 }
                 continue;
             }
-            Block::Choice { options, selected, statuses, .. } => {
+            Block::Choice { options, tones, selected, statuses, .. } => {
                 if let Ok(mut f) = fields.get_mut(entity) {
-                    f.set(options.clone(), *selected);
+                    f.set(options.clone(), tones.clone(), *selected);
                 }
                 if let Ok(mut e) = edits.get_mut(entity)
                     && e.statuses != *statuses
