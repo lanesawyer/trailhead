@@ -42,6 +42,8 @@ jobs:
       - run: cargo clippy --profile ci --all-targets --locked -- -D warnings
       # The live Docker test builds only with this feature, and nothing else turns it on.
       - run: cargo clippy --profile ci -p trailhead-factory-host --features docker --all-targets --locked -- -D warnings
+      # The server's control plane is off by default until TRAIL-1073, so plain clippy doesn't compile it.
+      - run: cargo clippy --profile ci -p trailhead --features docker --all-targets --locked -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -85,7 +87,7 @@ jobs:
           # restored a stale cache that was an exact hit, so every run rebuilt every dependency and nothing was saved.
           key: ${{ hashFiles('Cargo.toml') }}
       # Only the published crates; the factory crates are publish = false until they're ready.
-      - run: cargo package --locked -p trailhead-model -p trailhead-core -p trailhead-client -p trailhead-log -p trailhead-server -p trailhead
+      - run: cargo package --locked -p trailhead-model -p trailhead-core -p trailhead-client -p trailhead-log
       # rust-cache's cleanup trips over the unpacked crates and logs ENOENT errors.
       - if: always()
         run: rm -rf target/package

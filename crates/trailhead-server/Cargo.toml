@@ -11,7 +11,15 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# Runs the factory's control plane in the server when the user config's `[factory] repos` lists a repo
+# (docs/factory/server-control-plane.md). Off by default until the CLI's install covers it (TRAIL-1073).
+factory = ["dep:trailhead-factory-server"]
+# The Docker compute for the factory.
+docker = ["factory", "trailhead-factory-server/docker"]
+
 [dependencies]
+trailhead-factory-server = { workspace = true, optional = true }
 trailhead-client.workspace = true
 trailhead-core = { workspace = true, features = ["openapi"] }
 axum.workspace = true

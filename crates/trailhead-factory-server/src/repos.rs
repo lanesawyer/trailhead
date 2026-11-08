@@ -9,6 +9,7 @@ use trailhead_factory::{FactoryConfig, HostConfig, Repo};
 use crate::find;
 
 /// A repo to run: where it lives, its `.trailhead.toml` and the `[factory]` settings read from it.
+#[derive(Clone)]
 pub struct RepoSpec {
     pub dir: PathBuf,
     pub config_path: PathBuf,

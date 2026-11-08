@@ -12,5 +12,6 @@ pub fn local_config(dir: &Path) -> LocalConfig {
         user_name: "lane".into(),
         pid_file: None,
         instance: None,
+        factory: None,
     }
 }

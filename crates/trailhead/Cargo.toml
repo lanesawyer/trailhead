@@ -16,7 +16,13 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ targe
 bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
+[features]
+# The factory's control plane in `trailhead serve` (docs/factory/server-control-plane.md).
+factory = ["trailhead-server/factory", "dep:trailhead-factory-server"]
+docker = ["factory", "trailhead-server/docker"]
+
 [dependencies]
+trailhead-factory-server = { workspace = true, optional = true }
 trailhead-client.workspace = true
 trailhead-core.workspace = true
 trailhead-server.workspace = true

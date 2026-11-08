@@ -511,6 +511,19 @@ fn note_unscoped(mut log: &std::fs::File, why: &str) {
     );
 }
 
+/// What `log` gained after byte `from`, at most its last 40 lines.
+fn log_since(log: &std::path::Path, from: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = Vec::new();
+    if let Ok(mut file) = std::fs::File::open(log) {
+        let _ = file.seek(SeekFrom::Start(from));
+        let _ = file.take(1 << 20).read_to_end(&mut bytes);
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(40)..].join("\n")
+}
+
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
 /// after this command exits.
 pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()> {
@@ -545,6 +558,7 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     // systemd-oomd killing that app (an editor, say) would take the server with it. Its own
     // scope keeps it alive; `systemd-run --scope` execs the server, so the pid is unchanged.
     let mut scoped = scope_env.is_some();
+    let mut started_at = log.metadata().map(|m| m.len()).unwrap_or(0);
     if !scoped && systemd_run_on_path() {
         note_unscoped(&log, "no user systemd runtime directory found");
     }
@@ -558,7 +572,19 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
             // No usable user manager (a container, a bare ssh session): run it unscoped.
             scoped = false;
             note_unscoped(&log, "systemd-run --user failed");
+            let from = log.metadata().map(|m| m.len()).unwrap_or(0);
             child = spawn(false).context("couldn't start the local server")?;
+            started_at = from;
+        } else if let Some(status) = child.try_wait()? {
+            // Another CLI's server may have taken the port first.
+            if health(http, base, None).await.is_some() {
+                return remember_tunnel(&paths, base, false);
+            }
+            // It refused to start (a broken factory configuration, say): say why rather than wait for it.
+            return Err(anyhow!(
+                "the local server stopped ({status}):\n{}",
+                log_since(&paths.server_log(), started_at).trim_end()
+            ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

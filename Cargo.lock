@@ -8021,6 +8021,7 @@ dependencies = [
  "trailhead-client",
  "trailhead-core",
  "trailhead-factory",
+ "trailhead-factory-server",
  "trailhead-log",
  "trailhead-server",
  "uuid",
@@ -8212,6 +8213,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "trailhead-client",
  "trailhead-codehost-github",
  "trailhead-compute-docker",
@@ -8322,6 +8324,7 @@ dependencies = [
  "tracing",
  "trailhead-client",
  "trailhead-core",
+ "trailhead-factory-server",
  "utoipa",
  "uuid",
 ]
