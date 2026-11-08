@@ -1,8 +1,10 @@
-//! Text and choices edited where they are read: click, change, and Enter or blur saves, Esc puts it back.
+//! Text and choices edited where they are read: click, change, and save, or put it back.
 //!
-//! [`inline_text`] is a text (a task's title, its description) that turns into a text input when clicked. One line
-//! saves on Enter; several lines take Enter as a new line. Both save on blur and cancel on Esc, and a value that
-//! didn't change saves nothing. [`inline_field`] is a sidebar row, a label and a value that becomes the kit's
+//! [`inline_text`] is a text (a task's title, its description) that turns into a text input when clicked, typing at
+//! the text's own size and lined up with it, so starting an edit moves nothing. Under the input are Save and Cancel.
+//! One line also saves on Enter; several lines take Enter as a new line. Esc cancels either. Clicking away leaves the
+//! edit open: with a Save button there, saving on blur would be a surprise, and throwing the words away worse. A value
+//! that didn't change saves nothing. [`inline_field`] is a sidebar row, a label and a value that becomes the kit's
 //! [`select`] when clicked (status, priority, grade).
 //!
 //! Neither saves anything itself. A change triggers [`InlineEdited`] (or [`InlineChosen`]) on the widget with the old
@@ -20,14 +22,16 @@ use bevy::feathers::theme::ThemeTextColor;
 use bevy::feathers::tokens;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::tab_navigation::NavAction;
-use bevy::input_focus::{FocusCause, FocusLost, FocusedInput, InputFocus};
+use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::picking::events::PointerClick;
 use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::text::EditableText;
-use bevy::ui_widgets::{MenuAction, MenuEvent};
+use bevy::ui_widgets::{Activate, MenuAction, MenuEvent};
 
-use crate::input::text_input;
+use crate::buttons::{ButtonKind, button};
+use crate::containers::row;
+use crate::input::text_input_sized;
 use crate::notice::{Notice, Tone, notice};
 use crate::patch::{display, patch_node, set_text};
 use crate::select::{Picked, SelectEdit, select};
@@ -194,8 +198,6 @@ impl InlineField {
     }
 }
 
-/// How far the hint over an empty input sits from its left edge, where the input's text starts (as in the search box).
-const HINT_LEFT: f32 = 6.0;
 /// What a field with nothing chosen reads.
 const NO_CHOICE: &str = "None";
 /// How many options a field's select shows before it scrolls.
@@ -221,6 +223,14 @@ enum Part {
 #[derive(Component, Clone, Default)]
 struct InlineInput;
 
+/// A button under an [`inline_text`]'s input.
+#[derive(Component, Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum EditAction {
+    #[default]
+    Save,
+    Cancel,
+}
+
 /// A text that becomes an input when clicked, `lines` high while editing (more than one allows newlines). `hint`
 /// shows while it is empty.
 pub fn inline_text(value: impl Into<String>, hint: impl Into<String>, lines: f32) -> impl Scene {
@@ -236,15 +246,36 @@ pub fn inline_text_sized(value: impl Into<String>, hint: impl Into<String>, line
         Children [
             @shown(value, hint.clone(), font_size)
             --
-            Node { display: { Display::None }, width: percent(100) }
+            Node {
+                display: { Display::None },
+                flex_direction: FlexDirection::Column,
+                row_gap: { px(space::ROWS) },
+                width: percent(100),
+            }
             Part::Editor
             Children [
-                @text_input(lines, bsn! { InlineInput })
+                Node { width: percent(100) }
+                Children [
+                    // Pulled out by the input's own inset, so its text sits where the shown text did.
+                    @text_input_sized(lines, font_size, bsn! { InlineInput })
+                    Node {
+                        width: { Val::Auto },
+                        padding: { UiRect::horizontal(px(space::INPUT_INSET)) },
+                        margin: { UiRect::horizontal(px(-space::INPUT_INSET)) },
+                    }
+                    --
+                    @text_dim(hint.clone(), font_size)
+                    Part::EditHint
+                    Node { display: { Display::None }, position_type: { PositionType::Absolute }, left: px(0) }
+                    Pickable::IGNORE
+                ]
                 --
-                @text_dim(hint, size::BODY)
-                Part::EditHint
-                Node { display: { Display::None }, position_type: { PositionType::Absolute }, left: { px(HINT_LEFT) } }
-                Pickable::IGNORE
+                @row()
+                Children [
+                    @button("Save", None, ButtonKind::Primary) EditAction::Save
+                    --
+                    @button("Cancel", None, ButtonKind::Normal) EditAction::Cancel
+                ]
             ]
             --
             @status()
@@ -401,32 +432,49 @@ fn on_key(
     };
     // Whoever is behind this text (a modal) doesn't also get the Esc.
     key.propagate(false);
-    let draft = save.then(|| editable.value().to_string());
+    end_edit(root, &mut text, save.then(|| editable.value().to_string()), &mut focus, &mut commands);
+}
+
+/// Save or Cancel under a text being edited.
+#[allow(clippy::too_many_arguments)]
+fn on_action(
+    pressed: On<Activate>,
+    actions: Query<&EditAction>,
+    parents: Query<&ChildOf>,
+    roots: Roots,
+    children: Query<&Children>,
+    inputs: Query<&EditableText, With<InlineInput>>,
+    mut texts: Query<&mut InlineText>,
+    mut focus: ResMut<InputFocus>,
+    mut commands: Commands,
+) {
+    let Ok(action) = actions.get(pressed.entity) else { return };
+    let Some(root) = root_of(pressed.entity, &parents, &roots) else { return };
+    let Ok(mut text) = texts.get_mut(root) else { return };
+    let draft = match action {
+        EditAction::Cancel => None,
+        EditAction::Save => {
+            children.iter_descendants(root).find_map(|e| inputs.get(e).ok()).map(|i| i.value().to_string())
+        }
+    };
+    end_edit(root, &mut text, draft, &mut focus, &mut commands);
+}
+
+/// Ends the edit of `text` (on `root`): saves `draft`, or puts the value back if `None`, and gives the keyboard back.
+fn end_edit(
+    root: Entity,
+    text: &mut InlineText,
+    draft: Option<String>,
+    focus: &mut InputFocus,
+    commands: &mut Commands,
+) {
+    if text.mode != InlineMode::Editing {
+        return;
+    }
     if let Some((old, new)) = text.finish(draft) {
         commands.trigger(InlineEdited { entity: root, old, new });
     }
     focus.clear();
-}
-
-/// Losing the keyboard saves a text being edited.
-fn on_blur(
-    lost: On<FocusLost>,
-    inputs: Query<&EditableText, With<InlineInput>>,
-    parents: Query<&ChildOf>,
-    roots: Roots,
-    mut texts: Query<&mut InlineText>,
-    mut commands: Commands,
-) {
-    let start = lost.original_event_target();
-    if lost.event_target() != start {
-        return;
-    }
-    let Ok(editable) = inputs.get(start) else { return };
-    let Some(root) = root_of(start, &parents, &roots) else { return };
-    let Ok(mut text) = texts.get_mut(root) else { return };
-    if let Some((old, new)) = text.finish(Some(editable.value().to_string())) {
-        commands.trigger(InlineEdited { entity: root, old, new });
-    }
 }
 
 /// A pick in an inline field's select: a different option is a change, the same one is nothing.
@@ -587,14 +635,14 @@ fn draw(
     }
 }
 
-/// The behavior of inline widgets: the click, the keys, the blur and the picks.
+/// The behavior of inline widgets: the click, the keys, the buttons and the picks.
 pub struct InlinePlugin;
 
 impl Plugin for InlinePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputFocus>()
             .add_observer(on_key)
-            .add_observer(on_blur)
+            .add_observer(on_action)
             .add_observer(on_picked)
             .add_systems(Update, sync_inline.in_set(crate::UiPlace));
     }
@@ -605,6 +653,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
     use bevy::input::ButtonState;
     use bevy::input::keyboard::Key;
+    use bevy::input_focus::FocusLost;
 
     use super::*;
 
@@ -670,6 +719,13 @@ mod tests {
 
     fn blur(app: &mut App, input: Entity) {
         app.world_mut().trigger(FocusLost { entity: input });
+        settle(app);
+    }
+
+    fn press_button(app: &mut App, action: EditAction) {
+        let button = app.world_mut().query::<(Entity, &EditAction)>().iter(app.world()).find(|(_, a)| **a == action);
+        let button = button.unwrap().0;
+        app.world_mut().trigger(Activate { entity: button });
         settle(app);
     }
 
@@ -740,14 +796,51 @@ mod tests {
     }
 
     #[test]
-    fn blur_saves_too() {
+    fn save_saves_what_was_typed_and_gives_the_keyboard_back() {
+        let mut app = app();
+        let (root, input) = text(&mut app, "a", 1.0);
+        click(&mut app, root);
+        type_in(&mut app, input, "b");
+        press_button(&mut app, EditAction::Save);
+        assert_eq!(edits(&app), vec![("a".to_string(), "b".to_string())]);
+        assert_eq!(mode(&app, root), InlineMode::Saving);
+        assert_eq!(app.world().resource::<InputFocus>().get(), None);
+    }
+
+    #[test]
+    fn cancel_puts_the_text_back_without_saving() {
+        let mut app = app();
+        let (root, input) = text(&mut app, "keep me", 4.0);
+        click(&mut app, root);
+        type_in(&mut app, input, "lose me");
+        press_button(&mut app, EditAction::Cancel);
+        assert!(edits(&app).is_empty());
+        assert_eq!(app.world().get::<InlineText>(root).unwrap().value(), "keep me");
+        assert_eq!((mode(&app, root), display_of(&mut app, Part::Editor)), (InlineMode::Reading, Display::None));
+    }
+
+    #[test]
+    fn clicking_away_keeps_the_edit_open_with_what_was_typed() {
         let mut app = app();
         let (root, input) = text(&mut app, "a", 1.0);
         click(&mut app, root);
         type_in(&mut app, input, "b");
         blur(&mut app, input);
-        assert_eq!(edits(&app), vec![("a".to_string(), "b".to_string())]);
-        assert_eq!(mode(&app, root), InlineMode::Saving);
+        assert!(edits(&app).is_empty());
+        assert_eq!(mode(&app, root), InlineMode::Editing);
+        assert_eq!(app.world().get::<EditableText>(input).unwrap().value().to_string(), "b");
+    }
+
+    #[test]
+    fn the_input_types_at_the_size_of_the_text_it_stands_in_for() {
+        let mut app = app();
+        app.world_mut().commands().spawn_scene(inline_text_sized("Fix the board", "", 1.0, size::DETAIL_TITLE));
+        settle(&mut app);
+        let world = app.world_mut();
+        let input = world.query_filtered::<&TextFont, With<InlineInput>>().single(world).unwrap().font_size;
+        let shown = world.query::<(&Part, &TextFont)>().iter(world).find(|(p, _)| **p == Part::Value).unwrap().1;
+        assert_eq!(input, shown.font_size);
+        assert_eq!(input, FontSize::Px(size::DETAIL_TITLE));
     }
 
     #[test]
@@ -774,13 +867,13 @@ mod tests {
         enter(&mut app, input);
         assert_eq!(mode(&app, root), InlineMode::Reading);
         click(&mut app, root);
-        blur(&mut app, input);
+        press_button(&mut app, EditAction::Save);
         assert_eq!(mode(&app, root), InlineMode::Reading);
         assert!(edits(&app).is_empty());
     }
 
     #[test]
-    fn enter_in_a_multi_line_text_adds_a_line_and_blur_saves() {
+    fn enter_in_a_multi_line_text_adds_a_line_and_save_saves() {
         let mut app = app();
         let (root, input) = text(&mut app, "one", 4.0);
         assert!(app.world().get::<EditableText>(input).unwrap().allow_newlines);
@@ -789,7 +882,7 @@ mod tests {
         assert_eq!(mode(&app, root), InlineMode::Editing);
         assert!(edits(&app).is_empty());
         type_in(&mut app, input, "one\ntwo");
-        blur(&mut app, input);
+        press_button(&mut app, EditAction::Save);
         assert_eq!(edits(&app), vec![("one".to_string(), "one\ntwo".to_string())]);
     }
 

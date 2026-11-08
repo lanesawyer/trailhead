@@ -108,7 +108,7 @@ pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
     inline_text_sized,
 };
-pub use input::text_input;
+pub use input::{text_input, text_input_sized};
 pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu, menu_item};
