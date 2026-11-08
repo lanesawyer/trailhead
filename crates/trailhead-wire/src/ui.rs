@@ -41,7 +41,8 @@ pub enum UiRequest {
     /// The rest of the stream is raw bytes to and from the Trailhead server.
     Api,
     /// The stream carries [`StatusFrame`]s: a snapshot of every repo, then each event after it, until either side
-    /// closes it.
+    /// closes it. The control plane ends it when the UI falls behind and misses events, so a UI that sees it end
+    /// redials for a fresh snapshot.
     Status,
     /// The stream carries [`LogFrame`]s: the control plane's last log lines, then each new one.
     Logs,
@@ -290,12 +291,16 @@ async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStrea
             loop {
                 match events.recv().await {
                     Ok(event) => {
-                        if tx.send(StatusFrame::Event { repo: repo.clone(), event }).await.is_err() {
+                        if tx.send(Some(StatusFrame::Event { repo: repo.clone(), event })).await.is_err() {
                             return;
                         }
                     }
-                    // Too slow to keep up: it misses some, which shows in the numbering.
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Too slow to keep up: it missed events and the UI's mirror can't repair a gap, so
+                    // end the stream and let the UI redial for a fresh snapshot.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let _ = tx.send(None).await;
+                        return;
+                    }
                     Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
@@ -305,12 +310,13 @@ async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStrea
     loop {
         tokio::select! {
             frame = rx.recv() => match frame {
-                Some(frame) => {
+                Some(Some(frame)) => {
                     if write_frame(&mut send, &frame).await.is_err() {
                         return;
                     }
                 }
-                None => break,
+                // A forward lagged, or every feed ended.
+                Some(None) | None => break,
             },
             _ = send.stopped() => return,
         }
