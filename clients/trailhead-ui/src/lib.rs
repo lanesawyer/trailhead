@@ -21,6 +21,8 @@
 //! - A dot and a few words of state: [`chip`].
 //! - A form or dialog: a [`Modal`] marker type and [`open_modal`]; fill its [`ModalBody`], buttons in its [`ModalFooter`].
 //! - A hint over anything: put a [`Hint`] on it.
+//! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
+//!   [`sidebar_footer`]; mark the page shown with [`set_nav_current`]. Pages fill [`beside_sidebar`].
 //! - Colors: [`token`] (the kit's) and `bevy::feathers::tokens` (the controls'). An app adds its own tokens with
 //!   [`paint`] on top of [`theme_props`].
 //! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`]; one that scrolls down only,
@@ -34,7 +36,8 @@
 //!   controls to its header with [`spawn_header_button`].
 //! - Text cut to a width with an ellipsis: [`truncate_to_width`], measured by the same estimate as [`width_of`].
 //! - A number picked on a track: [`spawn_slider`]. Its value is written back for you.
-//! - A search box with a hint while empty and a clear button: [`spawn_search_field`]; match items with
+//! - A search box with a hint while empty and a clear button: [`spawn_search_field`], or
+//!   [`spawn_search_field_filling`] to fill a sidebar; match items with
 //!   [`matches_search`]. A text field straight on a pane or menu goes in a [`field_well`] to be seen.
 //! - A detail modal's body, a main column beside a sidebar of facts: [`spawn_detail_panes`], in a modal
 //!   [`extent::DETAIL_WIDTH`] wide.
@@ -65,6 +68,7 @@ pub mod layer;
 mod link;
 mod menu;
 mod modal;
+mod nav;
 mod notice;
 mod panel_header;
 mod patch;
@@ -104,12 +108,17 @@ pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
     open_modal,
 };
+pub use nav::{
+    NavItem, beside_sidebar, nav_heading, nav_item, nav_item_noted, set_nav_current, sidebar, sidebar_footer,
+};
 pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
-pub use search::{ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field};
+pub use search::{
+    ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
+};
 pub use select::{Picked, SelectEdit, SelectOptions, select};
 pub use skeleton::{SkeletonBar, spawn_skeleton};
 pub use slider::spawn_slider;

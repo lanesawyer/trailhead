@@ -20,6 +20,7 @@ pub mod net;
 pub mod project;
 pub mod search;
 pub mod settings;
+pub mod sidebar;
 pub mod sync;
 pub mod widgets;
 

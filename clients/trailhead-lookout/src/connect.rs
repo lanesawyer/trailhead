@@ -10,7 +10,7 @@ use bevy::ui_widgets::Activate;
 
 use crate::connection::{Connection, ConnectionStatus, LocalEndpoint, SendNet};
 use crate::net::{NetCommand, Reason};
-use crate::widgets::{Icon, button, field, layer, panel, row, size, text_dim, text_input, tool_button};
+use crate::widgets::{Icon, button, extent, field, layer, panel, row, size, text_dim, text_input, tool_button};
 
 /// A text field on the connect panel.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +112,7 @@ fn spawn_panel(mut commands: Commands) {
     let panel = commands
         .spawn_scene(bsn! {
             @panel()
-            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(0) }
+            Node { position_type: PositionType::Absolute, left: { px(extent::SIDEBAR_WIDTH) }, right: px(0), bottom: px(0) }
             // Above the board, which fills the window and is spawned later: without this it takes every click here.
             GlobalZIndex({ layer::CONNECT })
         })

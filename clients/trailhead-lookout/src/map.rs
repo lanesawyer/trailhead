@@ -17,10 +17,7 @@
 
 use std::collections::HashMap;
 
-use bevy::feathers::controls::FeathersButton;
-use bevy::feathers::display::caption;
 use bevy::prelude::*;
-use bevy::ui_widgets::Activate;
 use trailhead_factory::{RunPhase, SandboxState};
 use trailhead_model::{Agent, Claim, Comment, CommentKind, Status, Task};
 use uuid::Uuid;
@@ -366,7 +363,7 @@ struct Token {
 }
 
 fn spawn_panel(mut commands: Commands) {
-    commands.spawn((Name::new("trail map"), MapPanel, Node { width: percent(100), height: percent(100), ..default() }));
+    commands.spawn((Name::new("trail map"), MapPanel, crate::widgets::beside_sidebar()));
 }
 
 fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<MapPanel>>) {
@@ -395,14 +392,6 @@ fn plot(pos: Vec2, size: Vec2, color: Color) -> impl Bundle {
 
 fn line(commands: &mut Commands, parent: Entity, text: String, color: Color) {
     commands.spawn((Text::new(text), TextColor(color), TextFont::from_font_size(12.0), ChildOf(parent)));
-}
-
-fn board_button() -> impl Scene {
-    bsn! {
-        @FeathersButton
-        on(|_: On<Activate>, mut next: ResMut<NextState<View>>| next.set(View::Board))
-        Children [ @caption("board") ]
-    }
 }
 
 /// Tokens sit above the terrain, which is respawned (as later siblings) on every redraw.
@@ -446,7 +435,6 @@ fn redraw(
             ChildOf(panel),
         ))
         .id();
-    commands.queue_spawn_scene(board_button()).insert(ChildOf(bar));
     let note = if stopped { format!("{}: showing the last known state", factory.label()) } else { factory.label() };
     let color = if stopped { Color::srgb(0.9, 0.7, 0.3) } else { Color::srgb(0.7, 0.7, 0.7) };
     commands.spawn((Text::new(note), TextColor(color), ChildOf(bar)));
