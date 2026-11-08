@@ -42,6 +42,7 @@ use crate::connection::{Api, Connection, ConnectionStatus};
 use crate::detail::{Detail, Refetch};
 use crate::factory::FactoryStatus;
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
+use crate::project::OpenProject;
 use crate::sync::SyncItem;
 use crate::widgets::{
     DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed, ModalRoot,
@@ -172,8 +173,10 @@ pub struct TaskFacts {
     pub breadcrumb: String,
     pub title: String,
     pub description: String,
-    /// The project and the parent with its title.
-    pub project: String,
+    /// The project's key, which opens its page.
+    pub project: Option<String>,
+    /// The parent, a row the modal can open.
+    pub parent: Option<Subtask>,
     pub subtasks: Vec<Subtask>,
     /// Who holds the claim and for how long; none when nobody does.
     pub claim: Option<String>,
@@ -414,12 +417,13 @@ fn facts(
     let mut crumbs: Vec<String> = project_key.iter().cloned().collect();
     crumbs.extend(parent.map(|p| p.key.0.clone()));
     crumbs.push(task.key.0.clone());
-    let project = match (&project_key, parent) {
-        (Some(k), Some(p)) => format!("{k} › {} {}", p.key, p.title),
-        (Some(k), None) => k.clone(),
-        (None, Some(p)) => format!("{} {}", p.key, p.title),
-        (None, None) => String::new(),
-    };
+    let project = project_key.clone();
+    let parent = parent.map(|p| Subtask {
+        id: p.id.to_string(),
+        key: p.key.0.clone(),
+        title: p.title.clone(),
+        status: p.status,
+    });
 
     let mut subtasks: Vec<&Task> = input.tasks.iter().filter(|t| t.parent_id == Some(task.id)).collect();
     subtasks.sort_by_key(|t| (key_number(t.key.as_str()), t.key.0.clone()));
@@ -508,6 +512,7 @@ fn facts(
         title: task.title.clone(),
         description: task.description.clone(),
         project,
+        parent,
         subtasks,
         claim,
         dates,
@@ -724,6 +729,7 @@ impl Plugin for InspectorUiPlugin {
             .init_resource::<InputFocus>()
             .add_observer(on_modal_closed)
             .add_observer(on_open_task)
+            .add_observer(on_open_project)
             .add_observer(on_open_composer)
             .add_observer(on_compose_press)
             .add_observer(on_step)
@@ -964,6 +970,10 @@ enum Block {
     Act { action: Action, window: Option<i64>, note: Option<Control> },
     /// A subtask's row, which opens it. Its key holds what it shows, so a change is a new row.
     Subtask(Subtask),
+    /// The parent's key and title, which open it. Its key holds what it shows, so a change is a new button.
+    Parent(Subtask),
+    /// The project, by key, which opens its page.
+    Project(String),
     /// A comment in the activity. An open question has answer and resolve buttons; its key holds whether it is open.
     Entry { key: String, entry: Entry, live: bool, note: Option<Control> },
     /// The comment box at the foot of the activity, spawned once per task so what is typed survives redraws.
@@ -1295,8 +1305,12 @@ fn layout_task(
     }
 
     let mut side: Plan = Vec::new();
-    if !facts.project.is_empty() {
-        add(&mut side, "s/project", "Project", lines("s/project", std::slice::from_ref(&facts.project)));
+    if let Some(key) = &facts.project {
+        add(&mut side, "s/project", "Project", vec![(format!("s/project/{key}"), Block::Project(key.clone()))]);
+    }
+    if let Some(parent) = &facts.parent {
+        let row = (format!("s/parent/{}/{}", parent.id, parent.title), Block::Parent(parent.clone()));
+        add(&mut side, "s/parent", "Parent", vec![row]);
     }
     let status = view.status.unwrap_or(Status::Open);
     let mut fields = Vec::new();
@@ -1653,6 +1667,17 @@ fn spawn_block(
             gate_button(commands, button, *live);
             button
         }
+        Block::Parent(parent) => {
+            let caption = format!("{}  {}", parent.key, parent.title);
+            commands
+                .spawn_scene(bsn! { @button(caption, None, ButtonVariant::Plain) })
+                .insert(OpensTask(parent.id.clone()))
+                .id()
+        }
+        Block::Project(key) => commands
+            .spawn_scene(bsn! { @button(key.clone(), None, ButtonVariant::Plain) })
+            .insert(OpensProject(key.clone()))
+            .id(),
         Block::Subtask(sub) => {
             let line = commands.spawn_scene(bsn! { @row() }).id();
             let caption = format!("{}  {}", sub.key, sub.title);
@@ -1877,6 +1902,8 @@ fn dress(
             | Block::GradeBadge(_)
             | Block::Gates
             | Block::Subtask(_)
+            | Block::Project(_)
+            | Block::Parent(_)
             | Block::Inline { .. }
             | Block::Choice { .. }
             | Block::AddSubtask { .. } => {}
@@ -2253,7 +2280,24 @@ fn on_modal_closed(closed: On<ModalClosed>, modals: Query<(), With<TaskModal>>, 
     }
 }
 
-/// A subtask's row was pressed: show that task instead.
+/// A project's button in the modal: closes it and opens the project's page.
+#[derive(Component)]
+struct OpensProject(String);
+
+/// The project was pressed: close the modal and show the project's page.
+fn on_open_project(
+    activate: On<Activate>,
+    buttons: Query<&OpensProject>,
+    mut selection: ResMut<Selection>,
+    mut commands: Commands,
+) {
+    if let Ok(OpensProject(key)) = buttons.get(activate.entity) {
+        selection.0 = None;
+        commands.trigger(OpenProject(key.clone()));
+    }
+}
+
+/// A subtask's or the parent's row was pressed: show that task instead.
 fn on_open_task(activate: On<Activate>, rows: Query<&OpensTask>, mut selection: ResMut<Selection>) {
     if let Ok(OpensTask(id)) = rows.get(activate.entity) {
         selection.0 = Some(Subject::Task(id.clone()));
@@ -3251,6 +3295,40 @@ mod in_place_tests {
         assert!(texts(&mut app).iter().any(|t| t == "a part"));
         let still = app.world_mut().query_filtered::<Entity, With<TaskModal>>().single(app.world()).unwrap();
         assert_eq!(still, root, "the same modal shows the subtask");
+    }
+
+    #[test]
+    fn the_parent_opens_in_the_same_modal() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t9")));
+        settle(&mut app);
+        assert!(texts(&mut app).iter().any(|t| t == "Parent"));
+        let world = app.world_mut();
+        let row = world.query::<(Entity, &OpensTask)>().iter(world).find(|(_, o)| o.0 == sid("t7")).unwrap().0;
+        app.world_mut().trigger(Activate { entity: row });
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))));
+        assert!(texts(&mut app).iter().any(|t| t == "do it"));
+    }
+
+    #[test]
+    fn the_project_closes_the_modal_and_opens_its_page() {
+        let mut app = app();
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 200, "entity": "project", "entity_id": sid("p1"), "kind": "project.created",
+            "after": crate::fixture::project_json(json!({"id": "p1", "key": "TRAIL"})),
+        })));
+        settle(&mut app);
+        #[derive(Resource, Default)]
+        struct Opened(Vec<String>);
+        app.init_resource::<Opened>()
+            .add_observer(|open: On<OpenProject>, mut opened: ResMut<Opened>| opened.0.push(open.0.clone()));
+        let button = app.world_mut().query_filtered::<Entity, With<OpensProject>>().single(app.world()).unwrap();
+        app.world_mut().trigger(Activate { entity: button });
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Opened>().0, ["TRAIL"]);
+        assert_eq!(app.world().resource::<Selection>().0, None);
+        assert_eq!(modal_count(&mut app), 0);
     }
 
     #[test]
