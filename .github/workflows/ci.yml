@@ -87,7 +87,7 @@ jobs:
           # restored a stale cache that was an exact hit, so every run rebuilt every dependency and nothing was saved.
           key: ${{ hashFiles('Cargo.toml') }}
       # Only the published crates; the factory crates are publish = false until they're ready.
-      - run: cargo package --locked -p trailhead-model -p trailhead-core -p trailhead-client -p trailhead-log -p trailhead-server -p trailhead
+      - run: cargo package --locked -p trailhead-model -p trailhead-core -p trailhead-client -p trailhead-log
       # rust-cache's cleanup trips over the unpacked crates and logs ENOENT errors.
       - if: always()
         run: rm -rf target/package
