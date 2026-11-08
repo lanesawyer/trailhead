@@ -10,6 +10,9 @@ readme.workspace = true
 publish = false
 description = "Trailhead factory daemon: runs agents in a sandbox and speaks the daemon contract over iroh"
 
+[lints]
+workspace = true
+
 [features]
 default = ["net"]
 # The iroh transport. The testkit turns it off to reuse the runner in-process.
@@ -21,7 +24,6 @@ trailhead-factory.workspace = true
 trailhead-log.workspace = true
 trailhead-model.workspace = true
 async-trait.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tokio = { workspace = true, features = ["fs", "process", "io-util", "signal", "net"] }

@@ -10,6 +10,9 @@ readme.workspace = true
 publish = false
 description = "The Trailhead factory's iroh protocols: the daemon contract, the API tunnel and Lookout's UI protocol"
 
+[lints]
+workspace = true
+
 [dependencies]
 trailhead-factory.workspace = true
 async-trait.workspace = true

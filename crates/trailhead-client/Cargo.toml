@@ -11,6 +11,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 # The typed HTTP client. Off, the crate has no reqwest (the engine-only build).
 http = ["dep:reqwest"]
