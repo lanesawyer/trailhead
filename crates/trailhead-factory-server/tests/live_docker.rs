@@ -1,5 +1,5 @@
-//! A Trailhead task end to end on Docker sandboxes through the gateway, with the real `trailhead` server, the real
-//! `trailhead-factory` and a scratch GitHub repo (`docs/factory/sandbox.md#the-gateway-credentials-and-egress-for-docker-sandboxes`).
+//! A Trailhead task end to end on Docker sandboxes through the gateway, with the real `trailhead` server, a real
+//! `trailhead factory run` and a scratch GitHub repo (`docs/factory/sandbox.md#the-gateway-credentials-and-egress-for-docker-sandboxes`).
 //!
 //! The factory runs a worker on a small task, which clones the repo, edits it and opens a PR, and then a reviewer
 //! reviews that PR. While each agent works the test checks, from outside and inside its sandbox, that a host off the
@@ -10,7 +10,7 @@
 //! `mise run test-live-docker-factory` (after `mise run docker-up` and `mise run docker-image`). It needs a public
 //! scratch repo in `TRAILHEAD_LIVE_REPO` (`owner/name`, with a `main` branch), `GITHUB_TOKEN`, `GITHUB_WRITER_TOKEN`
 //! (which can push and open PRs there) and `CLAUDE_CODE_OAUTH_TOKEN`, plus `TRAILHEAD_DAEMON_BIN` and
-//! `TRAILHEAD_BIN` (the `trailhead` CLI). It spends real model calls and closes its PR and deletes its branch at the
+//! `TRAILHEAD_BIN` (the `trailhead` CLI, built with `--features docker`). It spends real model calls and closes its PR and deletes its branch at the
 //! end (and at the start, for what a dead run left). The label probe cuts the worker's GitHub for a few seconds
 //! mid-run, so a push in that window can fail; a worker that fails once with a 403 isn't necessarily a gateway bug.
 //! It shares the engine's `trailhead-gateway` with any other factory, so it refuses to start beside one.
@@ -349,8 +349,8 @@ async fn a_task_runs_on_docker_through_the_gateway() {
     assert!(key.contains(TASK), "{key}");
 
     let log = std::fs::File::create(dir.join("factory.log")).unwrap();
-    let mut factory = tokio::process::Command::new(env!("CARGO_BIN_EXE_trailhead-factory"))
-        .args(["run", "--create-agent", "--poll-secs", "5", "--server", &format!("127.0.0.1:{port}")])
+    let mut factory = tokio::process::Command::new(&env.cli)
+        .args(["factory", "run", "--create-agent", "--poll-secs", "5", "--server", &format!("127.0.0.1:{port}")])
         .arg("--config")
         .arg(dir.join(".trailhead.toml"))
         .arg("--daemon")

@@ -595,7 +595,7 @@ fn refusal_of(conn: &iroh::endpoint::Connection, error: &trailhead_factory::Erro
 /// What the map says of a factory that didn't know our request: what it was asked, what it serves, and its build.
 fn too_old_message(u: &trailhead_wire::ui::Unsupported) -> String {
     format!(
-        "the factory is older than this Lookout: reinstall trailhead-factory and restart it (it was asked {}, and \
+        "the factory is older than this Lookout: reinstall trailhead and restart its server (it was asked {}, and \
          serves {}; version {}, build {})",
         u.got,
         u.known.join(", "),

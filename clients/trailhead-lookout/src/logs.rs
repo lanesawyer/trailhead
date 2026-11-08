@@ -1,5 +1,5 @@
 //! The Logs page of the settings modal (`docs/factory/ui.md#settings`): the control plane's log, the same lines
-//! `trailhead-factory run` writes to `factory.log`, with newest at the bottom.
+//! the control plane writes to `factory.log`, with newest at the bottom.
 //!
 //! The stream is opened only while the page is showing and closed when it isn't. [`LogState`] keeps at most
 //! [`MAX_LINES`] lines, each with a number that never repeats, and the list under the page's scroll area is kept in

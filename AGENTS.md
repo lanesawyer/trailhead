@@ -10,8 +10,7 @@ Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). 
 
 - `trailhead-factory`: types, the five traits (compute, harness, provider, tracker, code host), the daemon protocol and the `[factory]` settings in `.trailhead.toml`.
 - `trailhead-control`: the control plane (run loop, budgets, reviews, reconcile, the sandbox pool).
-- `trailhead-factory-server`: the control plane's setup as a library: credentials, keys, the status surface, `check` and `run`.
-- `trailhead-factory-host`: the `trailhead-factory` binary, a thin command line over `trailhead-factory-server` that runs the control plane beside the server (`mise run factory`).
+- `trailhead-factory-server`: the control plane as the server runs it (behind `trailhead`'s default `factory` feature, when the user config lists `[factory] repos`): credentials, keys, the status surface and `/v1/factory` routes, and the `trailhead factory` commands (`mise run factory` runs one in the foreground).
 - `trailhead-daemon`: the daemon in each sandbox, and its side of the iroh transport.
 - `trailhead-wire`: the iroh protocols the control plane, the daemon and Lookout share: framing, the daemon contract's control-plane side (`RemoteDaemon`), the API tunnel and Lookout's `trailhead/ui/0`.
 - `trailhead-plugins`: the one list of harnesses and model providers a build carries, which the control plane and the daemon share.

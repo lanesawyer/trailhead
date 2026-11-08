@@ -41,7 +41,7 @@ jobs:
           key: ${{ hashFiles('Cargo.toml') }}
       - run: cargo clippy --profile ci --all-targets --locked -- -D warnings
       # The live Docker test builds only with this feature, and nothing else turns it on.
-      - run: cargo clippy --profile ci -p trailhead-factory-host --features docker --all-targets --locked -- -D warnings
+      - run: cargo clippy --profile ci -p trailhead-factory-server --features docker --all-targets --locked -- -D warnings
       - run: cargo clippy --profile ci -p trailhead --features docker --all-targets --locked -- -D warnings
       # The engine alone: no factory crates at all (iroh may move into the plain server, TRAIL-71, so it isn't checked).
       - run: cargo clippy --profile ci -p trailhead --no-default-features --all-targets --locked -- -D warnings
