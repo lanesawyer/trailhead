@@ -44,10 +44,10 @@ use crate::project::OpenProject;
 use crate::sync::SyncItem;
 use crate::widgets::{
     ButtonKind, DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed,
-    ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, TextTone, Token, badge, button, danger_button, display,
-    extent, grade_tone, icon_menu, inline_field, inline_text_sized, layer, menu_item, open_modal, panel, panel_header,
-    priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes,
-    status_label, text, text_dim, text_input, text_toned, token, tool_button,
+    ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, bubble, button, danger_button,
+    display, extent, grade_tone, icon_menu, inline_field, inline_text_sized, layer, menu_item, open_modal, panel,
+    panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select, size, space,
+    spawn_detail_panes, status_label, text, text_dim, text_input, text_toned, token, tool_button,
 };
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
@@ -207,6 +207,8 @@ pub struct Entry {
     pub body: String,
     /// A question nobody has resolved yet, which can be answered or resolved from here.
     pub open_question: bool,
+    /// Written by the reader, so it sits on the right.
+    pub mine: bool,
 }
 
 /// What the modal knows beyond the mirror: the task fetched in full, why it couldn't be, and who is reading (their
@@ -500,6 +502,7 @@ fn facts(
                 tags,
                 body: c.body.clone(),
                 open_question,
+                mine: me.is_some_and(|(id, _)| id == c.author_id.to_string()),
             }
         })
         .collect();
@@ -1282,7 +1285,8 @@ fn layout_task(
         .map(|e| {
             let note = if e.open_question { note(&Action::Resolve(e.id.clone())) } else { None };
             let block = Block::Entry { key: key.clone(), entry: e.clone(), live, note };
-            (format!("a/{}/{}", e.id, e.open_question), block)
+            // Who is reading may be learned after the first draw, which moves their entries to the right.
+            (format!("a/{}/{}/{}", e.id, e.open_question, e.mine), block)
         })
         .collect();
     if activity.is_empty() {
@@ -1563,9 +1567,8 @@ fn spawn_block(
             line
         }
         Block::Entry { key, entry, live, note } => {
-            let item = commands
-                .spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::STACKED), ..default() })
-                .id();
+            let side = if entry.mine { Side::Mine } else { Side::Theirs };
+            let item = commands.spawn_scene(bubble(side)).id();
             let mut head = vec![kind_label(entry.kind).to_string(), entry.author.clone(), entry.when.clone()];
             head.extend(entry.tags.iter().cloned());
             commands.spawn_scene(text_dim(head.join(" · "), size::SECONDARY)).insert(ChildOf(item));
@@ -2708,6 +2711,8 @@ mod tests {
         assert_eq!(activity[0].tags, ["to lane", "open"]);
         assert!(activity[0].open_question);
         assert_eq!(activity[1].author, "lane");
+        let mine: Vec<bool> = activity.iter().map(|e| e.mine).collect();
+        assert_eq!(mine, [false, true, false], "only what the reader wrote is theirs");
         assert_eq!(activity[2].tags, ["request changes", "m-1"]);
         assert!(!activity[2].open_question);
     }
