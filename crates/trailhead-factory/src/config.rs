@@ -43,8 +43,6 @@ pub struct FactoryConfig {
     #[serde(default)]
     pub egress: EgressConfig,
     #[serde(default)]
-    pub usage: UsageConfig,
-    #[serde(default)]
     pub compute: ComputeConfig,
     /// `[factory.targets.<name>]`: several computes at once. Not with `[factory.compute]`, which means one target.
     #[serde(default)]
@@ -322,34 +320,6 @@ pub const GATEWAY_GITHUB_ID: &str = "github";
 /// The git connection's id in the Docker gateway's list: smart-HTTP to `https://github.com`, read only.
 /// Deliberately equal to [`GATEWAY_GITHUB_ID`]: connections are keyed by (provider, id), so the two don't collide.
 pub const GATEWAY_GIT_ID: &str = "github";
-
-/// Subscription usage windows (`docs/factory/budgets.md`): at or past `pause_at[window]` percent, no new runs
-/// start until that window resets, leaving room for whatever else shares the subscription.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UsageConfig {
-    #[serde(default)]
-    pub pause_at: BTreeMap<String, u32>,
-}
-
-/// The usage windows `pause_at` can name.
-pub const USAGE_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
-
-/// Reject `pause_at` windows that aren't known (a typo would never trigger) and percentages over 100.
-pub(crate) fn validate_pause_at(pause_at: &BTreeMap<String, u32>, table: &str) -> Result<()> {
-    for (window, percent) in pause_at {
-        if !USAGE_WINDOWS.contains(&window.as_str()) {
-            return Err(Error::Config(format!(
-                "{table} pause_at has unknown window `{window}`; the windows are {}",
-                USAGE_WINDOWS.join(" and ")
-            )));
-        }
-        if *percent > 100 {
-            return Err(Error::Config(format!("{table} pause_at for {window} is {percent}; it's a percent, 0 to 100")));
-        }
-    }
-    Ok(())
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -841,7 +811,6 @@ impl FactoryConfig {
     }
 
     fn validate(&self) -> Result<()> {
-        validate_pause_at(&self.usage.pause_at, "[factory.usage]")?;
         self.stack.validate()?;
         for (name, target) in &self.targets {
             // Names go into sandbox names and labels.
@@ -1066,7 +1035,6 @@ mod tests {
         assert!(config.prepare_request(Role::Reviewer, None).tools.is_empty(), "reviewers don't install the stack");
         assert!(config.prepare_request(Role::Reviewer, None).tool_hosts.is_empty());
         assert_eq!(config.prepare_request(Role::Worker, None).tools, config.stack.tools);
-        assert!(config.usage.pause_at.is_empty(), "pause_at lives in the user config (TRAIL-516)");
         let mut documented = GradesConfig::default();
         documented.rules.get_mut("3").unwrap().push("clients/**".into());
         assert_eq!(
@@ -1243,12 +1211,9 @@ require = ["checks", "agent_review", "human"]
     }
 
     #[test]
-    fn repo_pause_at_rejects_unknown_windows_and_percents_over_100() {
-        for bad in ["five_hours = 80", "five_hour = 101"] {
-            let err = parse(&format!("{SAMPLE}\n[usage]\npause_at = {{ {bad} }}\n")).unwrap_err();
-            assert!(err.to_string().contains("pause_at"), "{err}");
-        }
-        assert!(parse(&format!("{SAMPLE}\n[usage]\npause_at = {{ seven_day = 100 }}\n")).is_ok());
+    fn pause_at_is_the_user_configs_not_the_repos() {
+        let err = parse(&format!("{SAMPLE}\n[usage]\npause_at = {{ five_hour = 80 }}\n")).unwrap_err();
+        assert!(err.to_string().contains("usage"), "{err}");
     }
 
     #[test]

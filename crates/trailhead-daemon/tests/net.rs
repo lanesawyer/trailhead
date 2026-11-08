@@ -12,6 +12,7 @@ use iroh::{Endpoint, RelayMode, SecretKey};
 use tokio::sync::Notify;
 use trailhead_control::{Factory, Host, Outcome};
 use trailhead_daemon::net::DaemonProtocol;
+use trailhead_factory::HostConfig;
 use trailhead_factory::{
     Commit, Compute, Credential, Daemon, DaemonSecrets, Error, FactoryConfig, FileChange, FromDaemon, Labels, Role,
     RunEvent, RunOutcome, RunRequest, RunResult, SandboxId, SandboxSpec, Status, TaskKey, ToDaemon, Tracker, Usd,
@@ -145,7 +146,7 @@ impl Rig {
             Arc::new(self.tracker.clone()),
             Arc::new(FakeProvider::new(1)),
             self.remote.clone(),
-            Host::new(None),
+            Host::new(&HostConfig::default()),
         )
     }
 }
