@@ -60,9 +60,17 @@ impl Client {
             && is_stale(&info)
             && !would_start_unscoped_under_systemd()
         {
-            eprintln!("note: restarting the local server on the updated trailhead binary");
-            stop_local(&http, &base, true).await?;
-            start_local_server(&http, &base).await?;
+            match info.runs_in_flight.unwrap_or(0) {
+                // A restart would cancel the factory's runs; the old server keeps working meanwhile.
+                runs @ 1.. => eprintln!(
+                    "note: a newer trailhead is installed, but the server has {runs} factory run(s) in flight; restart it with `trailhead server restart` when they finish"
+                ),
+                0 => {
+                    eprintln!("note: restarting the local server on the updated trailhead binary");
+                    stop_local(&http, &base, true).await?;
+                    start_local_server(&http, &base).await?;
+                }
+            }
         }
         Ok(Client { http, base: base.clone(), token, local: is_local(&base), ours, creds })
     }
@@ -384,8 +392,6 @@ pub fn is_stale(info: &Health) -> bool {
     same_binary && matches!((modified_ms(&me), info.exe_modified_ms), (Some(now), Some(then)) if now > then)
 }
 
-/// Asks the local server to stop and waits for it to go away. Returns the pid
-/// it stopped, or `None` if nothing was running.
 /// What [`stop_local`] did.
 pub enum Stop {
     NotRunning,
@@ -397,8 +403,8 @@ pub enum Stop {
     },
 }
 
-/// Stops the local server. With factory runs in flight it only starts a drain unless `now`, which cancels them
-/// (they're requeued on the next start) with a second signal.
+/// Asks the local server to stop and waits for it to go away. With factory runs in flight it only starts a drain
+/// unless `now`, which cancels them (they're requeued on the next start) with a second signal.
 pub async fn stop_local(http: &reqwest::Client, base: &Url, now: bool) -> Result<Stop> {
     let paths = Paths::from_env().context("no home directory")?;
     let running = health(http, base, user_token(&paths).as_deref()).await;
