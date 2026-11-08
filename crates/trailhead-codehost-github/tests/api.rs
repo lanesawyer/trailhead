@@ -194,10 +194,25 @@ async fn pulls(State(g): State<Shared>, Json(b): Json<Value>) -> Response {
 async fn list_pulls(
     State(g): State<Shared>,
     axum::extract::Query(q): axum::extract::Query<BTreeMap<String, String>>,
+    headers: HeaderMap,
 ) -> Response {
-    let g = g.lock().unwrap();
-    let branch = q["head"].split_once(':').unwrap().1.to_string();
-    Json(json!(g.prs.iter().filter(|p| p["head"] == branch).collect::<Vec<_>>())).into_response()
+    let mut g = g.lock().unwrap();
+    // The head lookup `open_pr` makes: PRs from one branch, whatever their state.
+    if let Some(head) = q.get("head") {
+        let branch = head.split_once(':').unwrap().1.to_string();
+        return Json(json!(g.prs.iter().filter(|p| p["head"] == branch).collect::<Vec<_>>())).into_response();
+    }
+    // The listing `open_prs` makes: open PRs on a base, oldest first, a page at a time.
+    let mut found: Vec<&Value> =
+        g.prs.iter().filter(|p| p["state"] == q["state"].as_str() && p["base"] == q["base"].as_str()).collect();
+    found.sort_by_key(|p| p["created_at"].as_u64().unwrap_or_default());
+    if q["direction"] == "desc" {
+        found.reverse();
+    }
+    let per_page: usize = q["per_page"].parse().unwrap();
+    let page: usize = q["page"].parse().unwrap();
+    let body = json!(found.into_iter().skip((page - 1) * per_page).take(per_page).collect::<Vec<_>>());
+    etagged(&mut g, &headers, body)
 }
 
 async fn pull_files(State(g): State<Shared>, Path((_, _, n)): Path<(String, String, u64)>) -> Response {
@@ -840,4 +855,58 @@ async fn the_rate_limit_is_read_from_the_response_headers() {
     git.lock().unwrap().rate = Some((5000, 122, 1_900_000_000));
     gh.title(&pr).await.unwrap();
     assert_eq!(gh.rate_limit().map(|r| r.remaining), Some(122));
+}
+
+#[tokio::test]
+async fn open_prs_lists_a_base_oldest_first_with_auto_merge_paged_and_cached() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let pr = |number: u64, base: &str, state: &str, created: u64, auto_merge: Value| {
+        json!({
+            "number": number, "html_url": format!("https://github.test/pull/{number}"), "head": format!("b{number}"),
+            "base": base, "state": state, "created_at": created, "auto_merge": auto_merge,
+        })
+    };
+    {
+        let mut g = git.lock().unwrap();
+        // Out of creation order, on two bases, one closed.
+        g.prs.push(pr(1, "main", "open", 30, json!(null)));
+        g.prs.push(pr(2, "main", "open", 10, json!({ "merge_method": "squash" })));
+        g.prs.push(pr(3, "release", "open", 5, json!(null)));
+        g.prs.push(pr(4, "main", "closed", 1, json!(null)));
+        g.prs.push(pr(5, "main", "open", 20, json!(null)));
+    }
+
+    let open = gh.open_prs(&repo(), "main").await.unwrap();
+    let listed: Vec<(u64, bool)> = open.iter().map(|o| (o.pr.number, o.auto_merge)).collect();
+    assert_eq!(listed, [(2, true), (5, false), (1, false)]);
+    assert_eq!(open[0].pr.url, "https://github.test/pull/2");
+    let release = gh.open_prs(&repo(), "release").await.unwrap();
+    assert_eq!(release.iter().map(|o| o.pr.number).collect::<Vec<_>>(), [3]);
+    assert!(gh.open_prs(&repo(), "nothing").await.unwrap().is_empty());
+
+    // Past a hundred, the next page is read too, and the order holds across pages.
+    {
+        let mut g = git.lock().unwrap();
+        g.prs.clear();
+        for n in 1..=150u64 {
+            g.prs.push(pr(n, "main", "open", 1000 - n, json!(null)));
+        }
+        g.full_reads = 0;
+        g.not_modified = 0;
+    }
+    let open = gh.open_prs(&repo(), "main").await.unwrap();
+    let numbers: Vec<u64> = open.iter().map(|o| o.pr.number).collect();
+    assert_eq!(numbers, (1..=150u64).rev().collect::<Vec<_>>());
+    {
+        let g = git.lock().unwrap();
+        assert_eq!((g.full_reads, g.not_modified), (2, 0));
+    }
+
+    // Unchanged, both pages are revalidated and answered from the cache.
+    assert_eq!(gh.open_prs(&repo(), "main").await.unwrap(), open);
+    {
+        let g = git.lock().unwrap();
+        assert_eq!((g.full_reads, g.not_modified), (2, 2));
+    }
 }

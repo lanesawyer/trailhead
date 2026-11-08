@@ -20,6 +20,7 @@ trailhead-core.workspace = true
 trailhead-factory.workspace = true
 trailhead-log.workspace = true
 trailhead-control.workspace = true
+trailhead-daemon = { workspace = true, features = ["net"] }
 trailhead-plugins.workspace = true
 trailhead-provider-anthropic.workspace = true
 trailhead-wire.workspace = true

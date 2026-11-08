@@ -577,6 +577,31 @@ async fn task_list_can_include_open_questions_and_last_handoff() {
 }
 
 #[tokio::test]
+async fn task_list_can_include_every_blocker() {
+    let api = Api::new().await;
+    api.seed().await;
+    for title in ["blocker", "other blocker"] {
+        api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": title}))).await;
+    }
+    let r = api
+        .as_human(
+            "POST",
+            "/v1/tasks",
+            Some(json!({"project": "AUTH", "title": "blocked", "blocked_by": ["AUTH-2", "AUTH-1"]})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "free"}))).await;
+    let r = api.as_human("GET", "/v1/tasks?sort=created_at&fields=id,key&include=blocked_by", None).await;
+    let items = r.body.as_array().unwrap();
+    assert_eq!(items[2]["blocked_by"], json!([items[0]["id"], items[1]["id"]]));
+    assert_eq!(items[0]["blocked_by"], json!([]));
+    assert_eq!(items[3]["blocked_by"], json!([]));
+    let r = api.as_human("GET", "/v1/tasks?fields=key", None).await;
+    assert!(r.body[0].get("blocked_by").is_none());
+}
+
+#[tokio::test]
 async fn review_comments_carry_a_typed_verdict() {
     let api = Api::new().await;
     api.seed().await;

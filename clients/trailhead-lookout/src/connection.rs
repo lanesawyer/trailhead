@@ -100,8 +100,8 @@ fn forward_commands(
             NetCommand::Connect(target) => dialed.0 = Some(target.trim().to_string()),
             NetCommand::Disconnect => {
                 dialed.0 = None;
-                // The status stream goes with the control plane; the mirror keeps its last state, marked stopped.
-                factory.write(FactoryItem(FactoryUpdate::Stopped));
+                // The status stream goes with the control plane; the mirror keeps its last state, marked unreachable.
+                factory.write(FactoryItem(FactoryUpdate::Unreachable));
             }
             _ => {}
         }
