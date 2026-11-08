@@ -1066,7 +1066,7 @@ mod tests {
         assert!(config.prepare_request(Role::Reviewer, None).tools.is_empty(), "reviewers don't install the stack");
         assert!(config.prepare_request(Role::Reviewer, None).tool_hosts.is_empty());
         assert_eq!(config.prepare_request(Role::Worker, None).tools, config.stack.tools);
-        assert_eq!(config.usage.pause_at.get("five_hour"), Some(&80));
+        assert!(config.usage.pause_at.is_empty(), "pause_at lives in the user config (TRAIL-516)");
         let mut documented = GradesConfig::default();
         documented.rules.get_mut("3").unwrap().push("clients/**".into());
         assert_eq!(
