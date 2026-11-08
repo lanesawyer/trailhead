@@ -217,7 +217,10 @@ mod tests {
             let hover = lightness(&token::BUTTON_PLAIN_BG_HOVER);
             for surface in [token::CARD_BG, token::PANEL_BG] {
                 let gap = (hover - lightness(&surface)).abs();
-                assert!(gap >= HOVER_CONTRAST, "a plain button's hover on {surface} is {gap:.3} away, too close to see");
+                assert!(
+                    gap >= HOVER_CONTRAST,
+                    "a plain button's hover on {surface} is {gap:.3} away, too close to see"
+                );
             }
         }
     }
