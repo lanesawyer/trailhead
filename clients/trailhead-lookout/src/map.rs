@@ -435,7 +435,11 @@ fn redraw(
             ChildOf(panel),
         ))
         .id();
-    let note = if stopped { format!("{}: showing the last known state", factory.label()) } else { factory.label() };
+    let note = if factory.link == crate::factory::FactoryLink::Unreachable {
+        format!("{}: showing the last known state", factory.label())
+    } else {
+        factory.label()
+    };
     let color = if stopped { Color::srgb(0.9, 0.7, 0.3) } else { Color::srgb(0.7, 0.7, 0.7) };
     commands.spawn((Text::new(note), TextColor(color), ChildOf(bar)));
 

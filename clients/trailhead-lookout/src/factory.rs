@@ -7,14 +7,15 @@
 //! than the repo's last is a duplicate. The stream numbers from 1 on every control plane boot, but each connection
 //! starts with a snapshot, so a restarted control plane never mixes its numbers with its predecessor's.
 //!
-//! When the control plane can't be reached everything here stays as it was, and [`FactoryStatus::link`] says
-//! [`FactoryLink::Stopped`], so the map can show Trailhead's last known state marked "factory stopped".
+//! When the server can't be reached everything here stays as it was, and [`FactoryStatus::link`] says
+//! [`FactoryLink::Unreachable`]. The control plane runs inside the server, so one that isn't running in a live server
+//! (no repos, disabled, starting) says so in the status frame's `control`, which is [`FactoryLink::Control`].
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bevy::prelude::*;
 use trailhead_factory::{
-    ControlState, FactoryEvent, Grade, RunPhase, RunStatus, SandboxStatus, Sequenced, TaskKey, Usd,
+    ControlState, FactoryEvent, FactoryState, Grade, RunPhase, RunStatus, SandboxStatus, Sequenced, TaskKey, Usd,
 };
 use trailhead_wire::ui::RepoSnapshot;
 
@@ -30,8 +31,11 @@ pub enum FactoryUpdate {
         repo: String,
         event: Sequenced,
     },
-    /// The control plane can't be reached: the mirror keeps its last state and says so.
-    Stopped,
+    /// The server's control plane state, from the status frame ahead of its snapshot; `None` from a server that
+    /// doesn't send one.
+    Control(Option<FactoryState>),
+    /// The server can't be reached: the mirror keeps its last state and says so.
+    Unreachable,
     /// The control plane answered a request with "I don't know that": it is older than this Lookout. Carries the
     /// message to show.
     TooOld(String),
@@ -66,8 +70,10 @@ pub enum FactoryLink {
     Unknown,
     /// Connected: the mirror is current.
     Running,
-    /// Not reachable. The mirror is the last state heard, and the board works from the server alone.
-    Stopped,
+    /// Connected, but the server's control plane isn't running (disabled, no repos, still starting).
+    Control(FactoryState),
+    /// Not reachable. The mirror is the last state heard.
+    Unreachable,
     /// Reachable, but older than this Lookout: it doesn't know the status request. The message says what to do.
     TooOld(String),
     /// The control plane refused the status request (this Lookout isn't allowed, or it serves no status). Carries the
@@ -100,18 +106,21 @@ pub struct Activity {
 #[derive(Resource, Debug, Default)]
 pub struct FactoryStatus {
     pub link: FactoryLink,
+    /// What the last status frame said of the server's control plane.
+    pub control: Option<FactoryState>,
     pub repos: BTreeMap<String, RepoState>,
     /// Newest last, at most [`ACTIVITY`] of them.
     pub activity: VecDeque<Activity>,
 }
 
 impl FactoryStatus {
-    /// What the map shows beside the factory: "factory stopped" when it can't be reached.
+    /// What the map shows beside the factory: why it isn't running, or that the server can't be reached.
     pub fn label(&self) -> String {
         match &self.link {
             FactoryLink::Unknown => "factory: connecting".into(),
             FactoryLink::Running => "factory running".into(),
-            FactoryLink::Stopped => "factory stopped".into(),
+            FactoryLink::Control(state) => format!("factory {}", state.label()),
+            FactoryLink::Unreachable => "unreachable".into(),
             FactoryLink::TooOld(why) | FactoryLink::Refused(why) => why.clone(),
         }
     }
@@ -311,7 +320,10 @@ pub fn apply_factory(
     for FactoryItem(update) in items.read() {
         match update.clone() {
             FactoryUpdate::Snapshot(repos) => {
-                status.link = FactoryLink::Running;
+                status.link = match status.control.clone() {
+                    Some(state) if state != FactoryState::Running => FactoryLink::Control(state),
+                    _ => FactoryLink::Running,
+                };
                 // A repo the control plane no longer serves goes with it.
                 let gone: Vec<_> =
                     status.repos.keys().filter(|r| !repos.iter().any(|s| &s.repo == *r)).cloned().collect();
@@ -337,7 +349,8 @@ pub fn apply_factory(
                 }
             }
             FactoryUpdate::Event { repo, event } => mirror.apply_event(&mut commands, &mut status, &repo, event),
-            FactoryUpdate::Stopped => status.link = FactoryLink::Stopped,
+            FactoryUpdate::Control(state) => status.control = state,
+            FactoryUpdate::Unreachable => status.link = FactoryLink::Unreachable,
             FactoryUpdate::TooOld(why) => status.link = FactoryLink::TooOld(why),
             FactoryUpdate::Refused(why) => status.link = FactoryLink::Refused(why),
         }
@@ -479,12 +492,27 @@ mod tests {
     }
 
     #[test]
-    fn stopping_keeps_the_last_known_state_and_says_so() {
+    fn a_control_plane_that_is_not_running_is_shown_until_it_is() {
+        let mut app = app();
+        let off = FactoryState::Starting { reason: Some("keyring locked".into()) };
+        send(&mut app, [FactoryUpdate::Control(Some(off.clone())), snapshot(1, vec![])]);
+        let status = app.world().resource::<FactoryStatus>();
+        assert_eq!(status.link, FactoryLink::Control(off));
+        assert_eq!(status.label(), "factory starting: keyring locked");
+        send(&mut app, [FactoryUpdate::Control(Some(FactoryState::Running)), snapshot(2, vec![])]);
+        assert_eq!(app.world().resource::<FactoryStatus>().link, FactoryLink::Running);
+        // A server that sends no state is taken to be running.
+        send(&mut app, [FactoryUpdate::Control(None), snapshot(3, vec![])]);
+        assert_eq!(app.world().resource::<FactoryStatus>().link, FactoryLink::Running);
+    }
+
+    #[test]
+    fn an_unreachable_server_keeps_the_last_known_state_and_says_so() {
         let mut app = app();
         send(&mut app, [snapshot(3, vec![sandbox("a", SandboxState::Idle)])]);
         assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory running");
-        send(&mut app, [FactoryUpdate::Stopped]);
-        assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory stopped");
+        send(&mut app, [FactoryUpdate::Unreachable]);
+        assert_eq!(app.world().resource::<FactoryStatus>().label(), "unreachable");
         assert_eq!(campsites(&mut app), [("a".into(), SandboxState::Idle)]);
         // Back again: the new snapshot makes it current.
         send(&mut app, [snapshot(1, vec![])]);
