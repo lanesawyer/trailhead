@@ -1,0 +1,16 @@
+[package]
+name = "trailhead-plugins"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+description = "The harnesses and model providers a Trailhead factory build carries, by the names config gives them"
+
+[dependencies]
+trailhead-factory.workspace = true
+trailhead-harness-claude-code.workspace = true
+trailhead-provider-anthropic.workspace = true

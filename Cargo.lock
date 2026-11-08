@@ -8070,8 +8070,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "trailhead-daemon",
  "trailhead-factory",
+ "trailhead-plugins",
  "trailhead-wire",
 ]
 
@@ -8157,9 +8157,9 @@ dependencies = [
  "trailhead-control",
  "trailhead-core",
  "trailhead-factory",
- "trailhead-harness-claude-code",
  "trailhead-log",
  "trailhead-model",
+ "trailhead-plugins",
  "trailhead-server",
  "trailhead-testkit",
  "trailhead-wire",
@@ -8204,9 +8204,9 @@ dependencies = [
  "trailhead-compute-sprites",
  "trailhead-control",
  "trailhead-core",
- "trailhead-daemon",
  "trailhead-factory",
  "trailhead-log",
+ "trailhead-plugins",
  "trailhead-provider-anthropic",
  "trailhead-server",
  "trailhead-wire",
@@ -8270,6 +8270,15 @@ dependencies = [
  "serde_json",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "trailhead-plugins"
+version = "0.1.0"
+dependencies = [
+ "trailhead-factory",
+ "trailhead-harness-claude-code",
+ "trailhead-provider-anthropic",
 ]
 
 [[package]]

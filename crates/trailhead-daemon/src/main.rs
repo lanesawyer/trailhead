@@ -279,9 +279,11 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
         Box::pin(async move { Ok(Arc::new(RestTracker::new(format!("http://{api}"), cred)) as Arc<dyn Tracker>) })
     });
     let conns = connections(&secrets.gateway_list).await;
-    let harness = (trailhead_daemon::plugins::harnesses().get(&secrets.harness).map_err(|e| e.to_string())?.build)(
-        &HarnessSetup { executable: args.harness_executable, secrets: secrets.harness_secrets.clone() },
-    );
+    let harness =
+        (trailhead_plugins::harnesses().get(&secrets.harness).map_err(|e| e.to_string())?.build)(&HarnessSetup {
+            executable: args.harness_executable,
+            secrets: secrets.harness_secrets.clone(),
+        });
     let runner = Runner {
         harness,
         codehost: codehost(Identity { name: args.author_name, email: args.author_email }, &conns),

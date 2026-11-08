@@ -6,8 +6,6 @@
 //! also has the control plane's side.
 
 mod mise;
-#[cfg(feature = "net")]
-pub mod plugins;
 mod runner;
 pub mod trim;
 mod workspace;

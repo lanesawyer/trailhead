@@ -12,12 +12,12 @@ use iroh::{Endpoint, RelayMode, SecretKey};
 use tokio::sync::Notify;
 use trailhead_control::{Factory, Host, Outcome};
 use trailhead_daemon::net::DaemonProtocol;
-use trailhead_daemon::plugins::CLAUDE_CODE;
 use trailhead_factory::{
     Commit, Compute, Credential, Daemon, DaemonSecrets, Error, FactoryConfig, FileChange, FromDaemon, Labels, Role,
     RunEvent, RunOutcome, RunRequest, RunResult, SandboxId, SandboxSpec, Status, TaskKey, ToDaemon, Tracker, Usd,
     VerdictKind,
 };
+use trailhead_plugins::CLAUDE_CODE;
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
 use trailhead_wire::daemon::{Launch, RemoteDaemon};
 use trailhead_wire::{ALPN, build_id, read_frame, sandbox_key, write_frame};

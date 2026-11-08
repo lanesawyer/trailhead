@@ -48,6 +48,7 @@ trailhead-testkit = { path = "crates/trailhead-testkit" }
 trailhead-control = { path = "crates/trailhead-control" }
 trailhead-daemon = { path = "crates/trailhead-daemon", default-features = false }
 trailhead-wire = { path = "crates/trailhead-wire" }
+trailhead-plugins = { path = "crates/trailhead-plugins" }
 trailhead-harness-claude-code = { path = "crates/trailhead-harness-claude-code" }
 trailhead-compute-sprites = { path = "crates/trailhead-compute-sprites" }
 trailhead-compute-docker = { path = "crates/trailhead-compute-docker" }

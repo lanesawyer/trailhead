@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use trailhead_compute_docker::{DockerCompute, DockerConfig};
-use trailhead_daemon::plugins::CLAUDE_CODE;
 use trailhead_factory::{Compute, Daemon, Egress, IROH_DOMAINS, Labels, PrepareRequest, Repo, SandboxId, SandboxSpec};
+use trailhead_plugins::CLAUDE_CODE;
 use trailhead_wire::daemon::{Launch, RemoteDaemon};
 
 fn request() -> PrepareRequest {

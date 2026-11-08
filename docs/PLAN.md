@@ -71,6 +71,7 @@ Remote machines reach the server through a tunnel (iroh via `dumbpipe`, Tailscal
 | `trailhead-factory-host` | The `trailhead-factory` binary that assembles and runs the control plane | `iroh`, `clap` |
 | `trailhead-daemon` | The in-sandbox daemon and its side of the iroh transport | `iroh` |
 | `trailhead-wire` | The iroh protocols the control plane, the daemon and Lookout share: framing, keys, `RemoteDaemon`, the API tunnel, `trailhead/ui/0` | `iroh` |
+| `trailhead-plugins` | The harnesses and model providers a build carries, by the names config gives them | |
 | `trailhead-testkit` | In-memory fakes for every seam and an in-process daemon | |
 
 The vendor implementations (Sprites compute, the Claude Code harness, Anthropic, GitHub) are listed in `docs/factory/seams.md`. Factory crates are `publish = false` while the factory is built from this repo; shipping it in the `trailhead` CLI is TRAIL-116.
