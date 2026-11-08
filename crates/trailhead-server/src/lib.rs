@@ -119,6 +119,9 @@ pub struct LocalConfig {
     pub pid_file: Option<PathBuf>,
     /// Reported by `/v1/health`; see [`ServerInfo::instance`].
     pub instance: Option<String>,
+    /// Where the factory's control plane finds the user config and keeps its state. With the `factory` feature and
+    /// `[factory] repos` listed there, the server runs the control plane; `None` never does.
+    pub factory: Option<Paths>,
 }
 
 /// Opens the local database, makes sure the workspace, user and a CLI token exist,
@@ -184,6 +187,23 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
         }
     });
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
+    // After the listener, so the API tunnel has a server to forward to; before the pid file, so a configuration error
+    // stops the server before it says it's up.
+    #[cfg(feature = "factory")]
+    let factory = match cfg.factory.clone() {
+        Some(paths) => {
+            let user_config = paths.config_dir.join("config.toml");
+            trailhead_factory_server::start(paths, state.store.clone(), cfg.bind).map_err(|e| {
+                format!(
+                    "the factory's configuration is broken, so the server won't start: {e}\nFix it, or take the repos out of `[factory] repos` in {} to run without the factory",
+                    user_config.display()
+                )
+            })?
+        }
+        None => None,
+    };
+    #[cfg(not(feature = "factory"))]
+    let _ = &cfg.factory;
     if let Some(pid_file) = &cfg.pid_file {
         if let Some(dir) = pid_file.parent() {
             std::fs::create_dir_all(dir)?;
@@ -207,6 +227,10 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
             Ok(())
         }
     };
+    #[cfg(feature = "factory")]
+    if let Some(factory) = factory {
+        factory.stop(DRAIN).await;
+    }
     if let Some(pid_file) = &cfg.pid_file
         && std::fs::read_to_string(pid_file).is_ok_and(|p| p.trim() == std::process::id().to_string())
     {

@@ -34,7 +34,7 @@ use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
-use trailhead_factory::{Compute, ComputeConfig, Daemon, FactoryConfig, HarnessSecrets, Target};
+use trailhead_factory::{Compute, ComputeConfig, Daemon, FactoryConfig, HarnessSecrets, HostConfig, Target};
 use trailhead_plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN, harnesses, providers};
 use trailhead_wire::api::ApiTunnel;
 use trailhead_wire::daemon::{Launch, RemoteDaemon};
@@ -213,13 +213,12 @@ async fn factory_ctx(store: &Store, create: bool) -> Result<Ctx, String> {
     store.agent_ctx(ws.id, agent.id).await.map_err(|e| e.to_string())
 }
 
-/// `opts` with the secrets the environment didn't set filled in from fnox, then from what `trailhead factory login`
-/// saved, and the fnox they were looked up in. It runs nothing until a name is missing from the environment, and
-/// reads its config once.
-fn resolve_opts(opts: &Opts, paths: &Paths) -> Result<(Opts, fnox::Fnox), String> {
+/// `opts` with the secrets the environment didn't set filled in from fnox (run in `dir`), then from what `trailhead
+/// factory login` saved, and the fnox they were looked up in. It runs nothing until a name is missing from the
+/// environment, and reads its config once.
+fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::Fnox), String> {
     let creds = paths.creds();
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let fnox = fnox::Fnox::new("fnox", &cwd, fnox::global_config().as_deref());
+    let fnox = fnox::Fnox::new("fnox", dir, fnox::global_config().as_deref());
     let resolved = Opts {
         sprites_token: login::resolve("SPRITES_TOKEN", opts.sprites_token.clone(), &fnox, &creds, login::SPRITES)?,
         github_token: login::resolve("GITHUB_TOKEN", opts.github_token.clone(), &fnox, &creds, login::GITHUB)?,
@@ -266,41 +265,69 @@ struct Setup {
     ctx: Ctx,
 }
 
-async fn setup(run: &RunOpts) -> Result<Setup, String> {
-    let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let (opts, fnox) = resolve_opts(&run.opts, &paths)?;
-    let opts = &opts;
+/// The user config's `[factory]` table; a missing file is the default.
+fn read_host_config(paths: &Paths) -> Result<HostConfig, String> {
     let user_config = paths.config_dir.join("config.toml");
-    let host_config = match std::fs::read_to_string(&user_config) {
-        Ok(src) => trailhead_factory::HostConfig::from_user_config(&src)
-            .map_err(|e| format!("{}: {e}", user_config.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
-        Err(e) => return Err(format!("{}: {e}", user_config.display())),
-    };
+    match std::fs::read_to_string(&user_config) {
+        Ok(src) => HostConfig::from_user_config(&src).map_err(|e| format!("{}: {e}", user_config.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(format!("{}: {e}", user_config.display())),
+    }
+}
+
+/// What the configuration says to run, read and checked without reaching anything outside this machine's files.
+/// An error here is a configuration error: retrying won't fix it.
+#[derive(Clone)]
+struct Plan {
+    opts: Opts,
+    host_config: HostConfig,
+    specs: Vec<repos::RepoSpec>,
+    /// The worker profile's harness, the same for every repo (`repos::validate`).
+    adapter: String,
+}
+
+fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let dirs = repos::dirs(&run.repo, opts.config.as_deref(), &host_config, home.as_deref(), &cwd)?;
-    let mut specs = repos::load_all(&dirs, opts.config.as_deref())?;
-    let harnesses = harnesses();
-    let providers = providers();
+    let dirs = repos::dirs(&run.repo, run.opts.config.as_deref(), &host_config, home.as_deref(), &cwd)?;
+    let mut specs = repos::load_all(&dirs, run.opts.config.as_deref())?;
+    let (harnesses, providers) = (harnesses(), providers());
     for spec in &specs {
         spec.config
             .check_plugins(&harnesses.names(), &providers.names())
             .map_err(|e| format!("{}: {e}", spec.config_path.display()))?;
     }
-    // `repos::validate` made the adapter the same for every repo.
     let (adapter, _) = specs[0].config.plugins().ok_or("the worker profile is missing")?;
     let adapter = adapter.to_string();
-    let mut harness_secrets = HarnessSecrets::new();
-    if let (Some(token), CLAUDE_CODE) = (&opts.claude_oauth_token, adapter.as_str()) {
-        harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
-    }
-
     let (pause_at, warnings) =
         host_config.effective_pause_at(specs.iter().map(|s| (s.config.repo.project.as_str(), &s.config.usage)));
     warnings.iter().for_each(|w| tracing::warn!("{w}"));
     for spec in &mut specs {
         spec.config.usage.pause_at = pause_at.clone();
+    }
+    Ok(Plan { opts: run.opts.clone(), host_config, specs, adapter })
+}
+
+async fn setup(run: &RunOpts) -> Result<Setup, String> {
+    let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+    let plan = plan(run, read_host_config(&paths)?)?;
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    wire(plan, &paths, &cwd, None).await
+}
+
+/// Reaches out from a [`Plan`]: secrets, the daemon binary, the lock, the store, the iroh endpoint and the
+/// computes. Fnox runs in `fnox_dir`. `store` is the server's own when it runs the control plane, which then needs no
+/// check that the server is up; without one this opens the database itself.
+async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Option<Arc<Store>>) -> Result<Setup, String> {
+    let Plan { opts, host_config, mut specs, adapter } = plan;
+    let (opts, fnox) = resolve_opts(&opts, paths, fnox_dir)?;
+    let opts = &opts;
+    let (harnesses, providers) = (harnesses(), providers());
+    let mut harness_secrets = HarnessSecrets::new();
+    if let (Some(token), CLAUDE_CODE) = (&opts.claude_oauth_token, adapter.as_str()) {
+        harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+    }
+    for spec in &mut specs {
         if !harness_secrets.is_empty() {
             tracing::warn!(repo = %spec.slug(), harness = %adapter, "subscription mode: sandboxes hold the harness's credential and can reach its API");
             spec.config
@@ -329,26 +356,34 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     let slugs: Vec<String> = specs.iter().map(|s| s.slug()).collect();
     // Before the store opens or the endpoint binds, so a refused start changes nothing.
     let lock = lock_control_plane(&paths.data_dir, &slugs.join(", "))?;
-    let db = paths.db();
-    if let Some(dir) = db.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    let store = Arc::new(Store::open_local(&db).await.map_err(|e| e.to_string())?);
+    let in_server = store.is_some();
+    let store = match store {
+        Some(store) => store,
+        None => {
+            let db = paths.db();
+            if let Some(dir) = db.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            Arc::new(Store::open_local(&db).await.map_err(|e| e.to_string())?)
+        }
+    };
     let ctx = factory_ctx(&store, opts.create_agent).await?;
     let tracker = Arc::new(CoreTracker::new(store.clone(), ctx.clone(), AGENT));
     let (key, master) = load_or_create_keys(&paths.creds())?;
 
+    // `repos::validate` made the compute and daemon settings the same for every repo. Built before the endpoint
+    // binds, so a failure here leaves no endpoint to close.
+    let shared = &specs[0].config;
+    let binary = Arc::new(binary);
+    let built = computes(shared, opts, &fnox, paths, binary.clone(), false)?;
     let endpoint = Endpoint::builder(presets::N0)
         .secret_key(key)
         .bind()
         .await
         .map_err(|e| format!("binding the iroh endpoint: {e}"))?;
-    // `repos::validate` made the compute and daemon settings the same for every repo.
-    let shared = &specs[0].config;
-    let binary = Arc::new(binary);
     let peers = trailhead_wire::Peers::default();
     let mut targets: Vec<Wired> = Vec::new();
-    for (compute, target) in computes(shared, opts, &fnox, &paths, binary.clone(), false)? {
+    for (compute, target) in built {
         let launch = Launch {
             harness_secrets: harness_secrets.clone(),
             log: shared.daemon.log.clone(),
@@ -360,7 +395,7 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     let feed = surface::BoardFeed::default();
     let build =
         std::env::current_exe().and_then(std::fs::read).map(|b| build_id(&b)).unwrap_or_else(|_| "unknown".into());
-    let ui = UiProtocol::new(opts.server, ui_allowlist(&paths)).with_status(Arc::new(feed.clone()));
+    let ui = UiProtocol::new(opts.server, ui_allowlist(paths)).with_status(Arc::new(feed.clone()));
     let ui = match LOGS.get() {
         Some(buffer) => ui.with_logs(Arc::new(LogsFeed(buffer.clone()))),
         None => ui,
@@ -393,15 +428,16 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
             })
             .collect();
         let mut factory = Factory::with_targets(config, placed, tracker.clone(), host.clone())
-            .with_spend_file(paths.data_dir.join("factory").join(format!("spend-{}.json", slug.replace('/', "-"))))
-            .with_server_check(server_check(opts.server))
-            .with_merge_mode_source(Box::new(move || {
-                let src =
-                    std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
-                FactoryConfig::from_repo_file(&src, remote.clone())
-                    .map(|c| c.merge.mode)
-                    .map_err(|e| format!("{}: {e}", config_path.display()))
-            }));
+            .with_spend_file(paths.data_dir.join("factory").join(format!("spend-{}.json", slug.replace('/', "-"))));
+        if !in_server {
+            factory = factory.with_server_check(server_check(opts.server));
+        }
+        factory = factory.with_merge_mode_source(Box::new(move || {
+            let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
+            FactoryConfig::from_repo_file(&src, remote.clone())
+                .map(|c| c.merge.mode)
+                .map_err(|e| format!("{}: {e}", config_path.display()))
+        }));
         match &opts.github_token {
             Some(token) => {
                 factory = factory
@@ -605,9 +641,7 @@ fn compute(
             Ok((Arc::new(compute), trailhead_compute_docker::target()))
         }
         #[cfg(not(feature = "docker"))]
-        ComputeConfig::Docker { .. } => {
-            Err("Docker compute needs trailhead-factory built with `--features docker`".into())
-        }
+        ComputeConfig::Docker { .. } => Err("Docker compute needs a build with the `docker` feature".into()),
     }
 }
 
@@ -704,12 +738,8 @@ pub async fn check(run: &RunOpts) -> Result<(), String> {
 
 /// Runs the control plane for every repo until Ctrl-C: the first drains, the second cancels what is left.
 pub async fn run(run: &RunOpts) -> Result<(), String> {
-    let Setup { repos, tunnel, _lock, store, ctx } = setup(run).await?;
+    let setup = setup(run).await?;
     let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    // Beside the lock, so it exists and says the same thing: this machine has one control plane.
-    let boards = repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect();
-    let serving = surface::serve(&paths.data_dir.join("factory"), boards).await?;
-    tracing::info!(addr = %serving.addr, "serving factory status for `trailhead-factory status` and `logs --follow`");
     // The first Ctrl-C drains; the second cancels what is left.
     let (drain_tx, drain) = tokio::sync::watch::channel(false);
     let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
@@ -720,7 +750,22 @@ pub async fn run(run: &RunOpts) -> Result<(), String> {
         tracing::info!("stopping; runs in flight are requeued on the next start");
         let _ = cancel_tx.send(true);
     });
-    let poll = Duration::from_secs(run.opts.poll_secs);
+    run_loops(setup, &paths, Duration::from_secs(run.opts.poll_secs), drain, cancel).await
+}
+
+/// Serves the status surface and runs every repo's loop until `drain` lets the runs finish or `cancel` stops them.
+async fn run_loops(
+    setup: Setup,
+    paths: &Paths,
+    poll: Duration,
+    drain: tokio::sync::watch::Receiver<bool>,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    let Setup { repos, tunnel, _lock, store, ctx } = setup;
+    // Beside the lock, so it exists and says the same thing: this machine has one control plane.
+    let boards = repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect();
+    let serving = surface::serve(&paths.data_dir.join("factory"), boards).await?;
+    tracing::info!(addr = %serving.addr, "serving factory status for `trailhead-factory status` and `logs --follow`");
     let mut loops = tokio::task::JoinSet::new();
     for entry in repos {
         let span = tracing::info_span!("repo", repo = %entry.slug);
@@ -744,6 +789,130 @@ pub async fn run(run: &RunOpts) -> Result<(), String> {
         0 => Ok(()),
         n => Err(format!("{n} repo loop(s) stopped on an error")),
     }
+}
+
+/// The control plane running inside the Trailhead server, from [`start`].
+pub struct Running {
+    task: tokio::task::JoinHandle<()>,
+    drain: tokio::sync::watch::Sender<bool>,
+    cancel: tokio::sync::watch::Sender<bool>,
+}
+
+impl Running {
+    /// Stops it: runs in flight are cancelled and requeued on the next start. Waits up to `within` for the loops to
+    /// finish.
+    pub async fn stop(self, within: Duration) {
+        self.drain.send_replace(true);
+        self.cancel.send_replace(true);
+        if tokio::time::timeout(within, self.task).await.is_err() {
+            tracing::warn!("the control plane didn't stop within {}s; leaving it to reconcile", within.as_secs());
+        }
+    }
+}
+
+/// How long the server waits before trying the control plane again after an outside failure, at first and at most.
+const RETRY_FIRST: Duration = Duration::from_secs(5);
+const RETRY_MAX: Duration = Duration::from_secs(300);
+
+/// Starts the control plane inside the Trailhead server on `store`, with the API tunnel forwarding to `server`
+/// (`docs/factory/server-control-plane.md`). Only the user config's `[factory] repos` turns it on: with none listed
+/// this returns `None` and runs nothing. A configuration error (a repo file that won't parse, repos that collide, an
+/// unknown harness or provider, a missing repo) is returned, and the server refuses to start. Outside failures
+/// (Sprites or GitHub unreachable, a locked keyring, a daemon download, another control plane holding the lock)
+/// are logged and retried with backoff while the server keeps serving.
+pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<Option<Running>, String> {
+    let host_config = read_host_config(&paths)?;
+    if host_config.repos.is_empty() {
+        return Ok(None);
+    }
+    #[derive(clap::Parser)]
+    struct Defaults {
+        #[command(flatten)]
+        run: RunOpts,
+    }
+    let mut run = <Defaults as clap::Parser>::try_parse_from(["serve"]).map_err(|e| e.to_string())?.run;
+    run.opts.server = server;
+    // Listing repos is the person's consent; the agent the factory acts as is the server's to make.
+    run.opts.create_agent = true;
+    let plan = plan(&run, host_config)?;
+    // Fnox finds a repo's `fnox.toml` from its directory; the server's working directory is an accident.
+    let fnox_dir = plan.specs[0].dir.clone();
+    let poll = Duration::from_secs(run.opts.poll_secs);
+    let (drain_tx, drain) = tokio::sync::watch::channel(false);
+    let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move {
+        let mut wait = RETRY_FIRST;
+        let setup = loop {
+            match wire(plan.clone(), &paths, &fnox_dir, Some(store.clone())).await {
+                Ok(setup) => break setup,
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    retry_secs = wait.as_secs(),
+                    "control: starting; the server keeps serving and tries the factory again"
+                ),
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = fired(cancel.clone()) => return,
+            }
+            wait = (wait * 2).min(RETRY_MAX);
+        };
+        if let Err(e) = run_loops(setup, &paths, poll, drain, cancel).await {
+            tracing::error!(error = %e, "the control plane stopped; the server keeps serving");
+        }
+    });
+    Ok(Some(Running { task, drain: drain_tx, cancel: cancel_tx }))
+}
+
+/// Whether the user config lists any repos for the factory, for a caller deciding whether to open `factory.log`.
+/// Unreadable config counts as yes, so [`start`]'s error is logged where the factory's lines go.
+pub fn configured(paths: &Paths) -> bool {
+    read_host_config(paths).map_or(true, |c| !c.repos.is_empty())
+}
+
+/// The server's logging when it may run the control plane: the factory's events (its crates, iroh and anything in a
+/// `repo` span) go to `factory.log` (when `configured`) and the buffer Lookout reads, everything else to stdout,
+/// which the CLI points at `server.log`.
+pub fn init_server_logging(paths: &Paths, default: &str) {
+    use tracing_subscriber::filter::{FilterExt, dynamic_filter_fn};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{Layer, registry::LookupSpan};
+
+    fn is_factory<S: tracing::Subscriber + for<'a> LookupSpan<'a>>(
+        meta: &tracing::Metadata<'_>,
+        cx: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        const TARGETS: [&str; 7] = [
+            "trailhead_factory",
+            "trailhead_control",
+            "trailhead_wire",
+            "trailhead_compute_",
+            "trailhead_codehost_",
+            "trailhead_provider_",
+            "iroh",
+        ];
+        TARGETS.iter().any(|t| meta.target().starts_with(t))
+            || cx.lookup_current().is_some_and(|span| span.scope().any(|s| s.name() == "repo"))
+    }
+
+    let buffer = LOGS.get_or_init(trailhead_control::logs::LogBuffer::default);
+    let file = if configured(paths) { open_log_file() } else { None };
+    let filter = trailhead_log::env_filter_or(default);
+    let stdout = tracing_subscriber::fmt::layer()
+        .with_timer(trailhead_log::local_timer())
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()));
+    let file = file.map(|w| {
+        tracing_subscriber::fmt::layer()
+            .with_timer(trailhead_log::local_timer())
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(w))
+    });
+    tracing_subscriber::registry()
+        .with(buffer.layer().with_filter(filter.clone().and(dynamic_filter_fn(is_factory))))
+        .with(file.with_filter(filter.clone().and(dynamic_filter_fn(is_factory))))
+        .with(stdout.with_filter(filter.and(dynamic_filter_fn(is_factory).not())))
+        .init();
 }
 
 /// Saves a secret for `run` in the OS keyring (`trailhead-factory login ...`).
@@ -855,6 +1024,40 @@ mod tests {
         assert!(err.contains(&format!("pid {}, running acme/app", std::process::id())), "{err}");
         drop(held);
         assert!(lock_control_plane(dir.path(), "acme/other").is_ok());
+    }
+
+    /// Paths under `dir`, and a store in it.
+    async fn instance(
+        dir: &std::path::Path,
+        user_config: &str,
+    ) -> (trailhead_client::paths::Paths, std::sync::Arc<trailhead_core::Store>) {
+        let paths = trailhead_client::paths::Paths { data_dir: dir.join("data"), config_dir: dir.join("config") };
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_dir.join("config.toml"), user_config).unwrap();
+        let store = trailhead_core::Store::open_local(&dir.join("t.db")).await.unwrap();
+        (paths, std::sync::Arc::new(store))
+    }
+
+    #[tokio::test]
+    async fn no_repos_listed_runs_no_factory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, store) = instance(dir.path(), "url = \"http://127.0.0.1:7241\"\n").await;
+        let started = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).unwrap();
+        assert!(started.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_configuration_error_is_returned_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-repo");
+        let config = format!("[factory]\nrepos = [{:?}]\n", missing.display().to_string());
+        let (paths, store) = instance(dir.path(), &config).await;
+        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap();
+        assert!(err.contains("no-such-repo"), "{err}");
+
+        let (paths, store) = instance(dir.path(), "[factory]\nrepos = 3\n").await;
+        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap();
+        assert!(err.contains("config.toml"), "{err}");
     }
 
     #[test]

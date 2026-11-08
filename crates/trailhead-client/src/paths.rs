@@ -9,6 +9,7 @@ use crate::creds;
 pub const DEFAULT_BIND: &str = "127.0.0.1:7241";
 
 /// OS-standard locations for Trailhead's data and config.
+#[derive(Debug, Clone)]
 pub struct Paths {
     pub data_dir: PathBuf,
     pub config_dir: PathBuf,

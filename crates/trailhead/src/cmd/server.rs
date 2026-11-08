@@ -79,8 +79,11 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
 }
 
 pub(crate) async fn serve(bind: &str) -> Result<()> {
-    trailhead_log::init_stdout(trailhead_log::env_filter_or("info,tower_http=warn"));
     let paths = trailhead_server::Paths::from_env().context("no home directory")?;
+    #[cfg(feature = "factory")]
+    trailhead_factory_server::init_server_logging(&paths, "info,tower_http=warn");
+    #[cfg(not(feature = "factory"))]
+    trailhead_log::init_stdout(trailhead_log::env_filter_or("info,tower_http=warn"));
     let cfg = trailhead_server::LocalConfig {
         bind: bind.parse().with_context(|| format!("bad bind address {bind}"))?,
         db: std::env::var_os("TRAILHEAD_DB").map(PathBuf::from).unwrap_or_else(|| paths.db()),
@@ -88,6 +91,7 @@ pub(crate) async fn serve(bind: &str) -> Result<()> {
         user_name: std::env::var("USER").unwrap_or_else(|_| "me".into()),
         pid_file: Some(paths.pid_file()),
         instance: Some(paths.instance_or_create()?),
+        factory: Some(paths.clone()),
     };
     trailhead_server::serve_local(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))
 }
