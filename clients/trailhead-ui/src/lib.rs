@@ -22,6 +22,7 @@
 //! - A dot and a few words of state: [`chip`].
 //! - A form or dialog: a [`Modal`] marker type and [`open_modal`]; fill its [`ModalBody`], buttons in its [`ModalFooter`].
 //! - A hint over anything: put a [`Hint`] on it.
+//! - Something pressable that isn't a button (a card, a row) answering the pointer: a [`HoverTone`] on it.
 //! - A message in a conversation, the reader's on the right and others' on the left: [`bubble`] on a [`Side`], headed by
 //!   [`bubble_head`].
 //! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
@@ -71,6 +72,7 @@ mod desktop;
 mod detail;
 mod field_well;
 mod hint;
+mod hover;
 mod icons;
 mod inline;
 mod input;
@@ -109,6 +111,7 @@ pub use containers::{field, panel, row, section, section_frame};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
 pub use hint::{Hint, HintBounds};
+pub use hover::HoverTone;
 pub use icons::{Icon, button_icon, icon_text};
 pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
@@ -170,6 +173,7 @@ impl Plugin for UiPlugin {
                     tabs::style_tabs,
                     nav::paint_nav_items,
                     button_group::paint_groups,
+                    hover::paint_hover_tones,
                     select::style_select_captions,
                     select::show_chosen_icons,
                 )

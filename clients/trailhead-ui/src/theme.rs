@@ -84,6 +84,8 @@ pub mod token {
     pub const TEXT_DIM: Token = Token(tokens::TEXT_DIM);
     /// A button's caption.
     pub const BUTTON_TEXT: Token = Token(tokens::BUTTON_TEXT);
+    /// A plain button's background at rest: none, so it shows what it sits on.
+    pub const BUTTON_PLAIN_BG: Token = Token(tokens::BUTTON_PLAIN_BG);
     /// A plain button's background under the pointer, for an app to check against the surfaces its plain buttons sit
     /// on: it has to show on each.
     pub const BUTTON_PLAIN_BG_HOVER: Token = Token(tokens::BUTTON_PLAIN_BG_HOVER);
@@ -340,6 +342,7 @@ mod tests {
             token::BUTTON_TEXT,
             token::BUTTON_BG,
             token::WINDOW_BG,
+            token::BUTTON_PLAIN_BG,
             token::BUTTON_PLAIN_BG_HOVER,
         ];
         for t in all {
