@@ -7,6 +7,7 @@
 //! at most once per `Fnox`, and only when a name is asked for. A defined name that fails is an error naming fnox; one
 //! the config doesn't define is just not found.
 
+use crate::error::{Error, Result};
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -46,22 +47,22 @@ impl Fnox {
     }
 
     /// `Ok(None)` when `program` isn't installed; `Err` (naming fnox) when it runs and fails.
-    fn command(program: &str, dir: &Path, args: &[&str]) -> Result<Option<Output>, String> {
+    fn command(program: &str, dir: &Path, args: &[&str]) -> Result<Option<Output>> {
         match Command::new(program).args(args).current_dir(dir).stdin(Stdio::null()).output() {
             Ok(out) if out.status.success() => Ok(Some(out)),
             Ok(out) => {
                 let why = String::from_utf8_lossy(&out.stderr);
                 let why = why.trim();
-                Err(format!("fnox failed ({}){}{why}", out.status, if why.is_empty() { "" } else { ": " }))
+                Err(Error::FnoxFailed { status: out.status, why: why.to_string() })
             }
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("running fnox: {e}")),
+            Err(e) => Err(Error::FnoxRun(e)),
         }
     }
 
     /// The value of `name`, if fnox defines it and it isn't blank. `Err` (naming fnox, never a value) when fnox fails
     /// to list the config or to read a name it defines.
-    pub fn get(&self, name: &str) -> Result<Option<String>, String> {
+    pub fn get(&self, name: &str) -> Result<Option<String>> {
         let Some((program, dir)) = &self.run else {
             return Ok(None);
         };

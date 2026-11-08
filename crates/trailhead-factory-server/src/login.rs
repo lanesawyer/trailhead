@@ -2,6 +2,7 @@
 //! (the OS keyring, else a `0600` file), so `run` needs no environment variables or fnox. The environment wins when
 //! set, then fnox, then these. Secrets are read from stdin and never printed.
 
+use crate::error::{Error, Result};
 use std::io::{BufRead, IsTerminal};
 
 use clap::Subcommand;
@@ -59,13 +60,7 @@ impl Source {
 
 /// A secret from the environment if it's set and not blank, else the one fnox defines, else the one saved by `login`.
 /// Logs which source it came from, never the value.
-pub fn resolve(
-    name: &str,
-    env: Option<String>,
-    fnox: &Fnox,
-    creds: &CredStore,
-    cred: Cred,
-) -> Result<Option<String>, String> {
+pub fn resolve(name: &str, env: Option<String>, fnox: &Fnox, creds: &CredStore, cred: Cred) -> Result<Option<String>> {
     let found = match env.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
         Some(v) => Some((v, Source::Env)),
         None => match fnox.get(name)? {
@@ -80,16 +75,16 @@ pub fn resolve(
 }
 
 /// The first line of `input`, trimmed; prompts on stderr first when stdin is a terminal.
-fn read_secret(prompt: &str, input: &mut impl BufRead, interactive: bool) -> Result<String, String> {
+fn read_secret(prompt: &str, input: &mut impl BufRead, interactive: bool) -> Result<String> {
     if interactive {
         eprint!("{prompt}: ");
     }
     let mut line = String::new();
     let _quiet = interactive.then(trailhead_client::echo::NoEcho::new);
-    input.read_line(&mut line).map_err(|e| format!("reading stdin: {e}"))?;
+    input.read_line(&mut line).map_err(Error::Stdin)?;
     let secret = line.trim().to_string();
     if secret.is_empty() {
-        return Err("no token on stdin".into());
+        return Err(Error::NoTokenOnStdin);
     }
     Ok(secret)
 }
@@ -99,30 +94,25 @@ fn clean_claude(input: &str) -> String {
     input.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-fn saved(what: &str, creds: &CredStore, cred: Cred, secret: &str) -> Result<String, String> {
-    let at = match creds.save(cred, secret).map_err(|e| format!("saving the {what}: {e}"))? {
+fn saved(what: &str, creds: &CredStore, cred: Cred, secret: &str) -> Result<String> {
+    let at = match creds.save(cred, secret).map_err(|e| Error::context(format!("saving the {what}"), e))? {
         Saved::Keyring => "the OS keyring".to_string(),
         Saved::File(path) => path.display().to_string(),
     };
     Ok(format!("saved the {what} in {at}"))
 }
 
-pub async fn sprites(
-    creds: &CredStore,
-    input: &mut impl BufRead,
-    interactive: bool,
-    api: &str,
-) -> Result<String, String> {
+pub async fn sprites(creds: &CredStore, input: &mut impl BufRead, interactive: bool, api: &str) -> Result<String> {
     let token = read_secret("Sprites token", input, interactive)?;
     SpritesCompute::with_url(api, &token)
-        .map_err(|e| e.to_string())?
+        .map_err(Error::backend)?
         .check()
         .await
-        .map_err(|e| format!("the Sprites API refused the token: {e}"))?;
+        .map_err(|e| Error::context("the Sprites API refused the token", e))?;
     saved("Sprites token", creds, SPRITES, &token)
 }
 
-pub fn claude(creds: &CredStore, input: &mut impl BufRead, interactive: bool) -> Result<String, String> {
+pub fn claude(creds: &CredStore, input: &mut impl BufRead, interactive: bool) -> Result<String> {
     // A wrapped token spans lines, so keep reading: to the end of input, or on a terminal (which has none until
     // Ctrl-D) until a blank line after the token's first line.
     if interactive {
@@ -133,18 +123,18 @@ pub fn claude(creds: &CredStore, input: &mut impl BufRead, interactive: bool) ->
     if interactive {
         loop {
             let mut line = String::new();
-            let n = input.read_line(&mut line).map_err(|e| format!("reading stdin: {e}"))?;
+            let n = input.read_line(&mut line).map_err(Error::Stdin)?;
             if n == 0 || (line.trim().is_empty() && !all.is_empty()) {
                 break;
             }
             all.push_str(&line);
         }
     } else {
-        input.read_to_string(&mut all).map_err(|e| format!("reading stdin: {e}"))?;
+        input.read_to_string(&mut all).map_err(Error::Stdin)?;
     }
     let token = clean_claude(&all);
     if token.is_empty() {
-        return Err("no token on stdin".into());
+        return Err(Error::NoTokenOnStdin);
     }
     check_claude_shape(&token)?;
     saved("Claude token", creds, CLAUDE, &token)
@@ -155,17 +145,12 @@ const CLAUDE_PREFIX: &str = "sk-ant-oat";
 const CLAUDE_MIN_LEN: usize = 90;
 
 /// Rejects what can't be a `claude setup-token` token, such as one cut short by a paste that spanned lines.
-fn check_claude_shape(token: &str) -> Result<(), String> {
+fn check_claude_shape(token: &str) -> Result<()> {
     if !token.starts_with(CLAUDE_PREFIX) {
-        return Err(format!(
-            "that doesn't look like a Claude token from `claude setup-token` (it starts `{CLAUDE_PREFIX}`)"
-        ));
+        return Err(Error::ClaudeTokenPrefix { prefix: CLAUDE_PREFIX });
     }
     if token.len() < CLAUDE_MIN_LEN {
-        return Err(format!(
-            "the Claude token is only {} characters, so it looks truncated (a pasted token may have wrapped); nothing was saved",
-            token.len()
-        ));
+        return Err(Error::ClaudeTokenShort { len: token.len() });
     }
     Ok(())
 }
@@ -176,12 +161,12 @@ pub async fn github(
     interactive: bool,
     api: &str,
     repo: &Repo,
-) -> Result<String, String> {
+) -> Result<String> {
     let token = read_secret("GitHub token", input, interactive)?;
     let user = GitHub::new(api, Some(token.clone()))
         .check_token(repo)
         .await
-        .map_err(|e| format!("GitHub refused the token: {e}"))?;
+        .map_err(|e| Error::context("GitHub refused the token", e))?;
     let msg = saved("GitHub token", creds, GITHUB, &token)?;
     Ok(format!("{msg} (user {user}, can read {}'s pull requests)", repo.slug()))
 }
@@ -192,23 +177,23 @@ pub async fn github_writer(
     interactive: bool,
     api: &str,
     repo: &Repo,
-) -> Result<String, String> {
+) -> Result<String> {
     let token = read_secret("GitHub token that can write", input, interactive)?;
     let user = GitHub::new(api, Some(token.clone()))
         .check_writer(repo)
         .await
-        .map_err(|e| format!("GitHub refused the token: {e}"))?;
+        .map_err(|e| Error::context("GitHub refused the token", e))?;
     let msg = saved("GitHub writer token", creds, GITHUB_WRITER, &token)?;
     Ok(format!("{msg} (user {user}, can push to {})", repo.slug()))
 }
 
 /// The gateway's GitHub token, from `GITHUB_WRITER_TOKEN` or the saved one. Never falls back to the read token.
 #[cfg_attr(not(feature = "docker"), allow(dead_code))]
-pub fn github_writer_token(fnox: &Fnox, creds: &CredStore) -> Result<Option<String>, String> {
+pub fn github_writer_token(fnox: &Fnox, creds: &CredStore) -> Result<Option<String>> {
     resolve("GITHUB_WRITER_TOKEN", std::env::var("GITHUB_WRITER_TOKEN").ok(), fnox, creds, GITHUB_WRITER)
 }
 
-pub async fn run(cmd: Login, creds: &CredStore) -> Result<(), String> {
+pub async fn run(cmd: Login, creds: &CredStore) -> Result<()> {
     let interactive = std::io::stdin().is_terminal();
     let mut input = std::io::stdin().lock();
     let msg = match cmd {
@@ -332,7 +317,7 @@ esac
         let got = resolve("SPRITES_TOKEN", None, &fnox, &creds, SPRITES).unwrap();
         assert_eq!(got.as_deref(), Some("from-fnox"));
         assert!(calls(&dir).iter().all(|c| !c.contains("BROKEN")), "{:?}", calls(&dir));
-        let err = resolve("BROKEN", None, &fnox, &creds, SPRITES).unwrap_err();
+        let err = resolve("BROKEN", None, &fnox, &creds, SPRITES).unwrap_err().to_string();
         assert!(err.contains("fnox") && err.contains("provider auth failed"), "{err}");
     }
 
@@ -367,7 +352,7 @@ esac
         let bare = dir.path().join("bare");
         std::fs::create_dir_all(&bare).unwrap();
         let fnox = load(&fake_fnox(&dir), &bare);
-        assert_eq!(fnox.get("BROKEN"), Ok(None));
+        assert!(matches!(fnox.get("BROKEN"), Ok(None)));
         assert!(calls(&dir).is_empty());
     }
 
@@ -380,7 +365,7 @@ esac
         let bare = dir.path().join("bare");
         std::fs::create_dir_all(&bare).unwrap();
         let fnox = Fnox::new(&fake_fnox(&dir), &bare, Some(&global));
-        let err = fnox.get("BROKEN").unwrap_err();
+        let err = fnox.get("BROKEN").unwrap_err().to_string();
         assert!(err.contains("fnox"), "{err}");
     }
 
@@ -414,9 +399,9 @@ esac
         let dir = tempfile::tempdir().unwrap();
         let creds = store(&dir);
         let cut = format!("{}\n", &TOKEN[..40]);
-        let err = claude(&creds, &mut cut.as_bytes(), false).unwrap_err();
+        let err = claude(&creds, &mut cut.as_bytes(), false).unwrap_err().to_string();
         assert!(err.contains("truncated") && !err.contains(&TOKEN[..40]), "{err}");
-        let err = claude(&creds, &mut format!("nope{TOKEN}\n").as_bytes(), false).unwrap_err();
+        let err = claude(&creds, &mut format!("nope{TOKEN}\n").as_bytes(), false).unwrap_err().to_string();
         assert!(err.contains("doesn't look like"), "{err}");
         assert!(creds.read(CLAUDE).is_none());
     }
@@ -437,7 +422,7 @@ esac
         let dir = tempfile::tempdir().unwrap();
         let creds = store(&dir);
 
-        let err = sprites(&creds, &mut "bad\n".as_bytes(), false, &api).await.unwrap_err();
+        let err = sprites(&creds, &mut "bad\n".as_bytes(), false, &api).await.unwrap_err().to_string();
         assert!(!err.contains("bad\n") && creds.read(SPRITES).is_none(), "{err}");
 
         let msg = sprites(&creds, &mut "good\n".as_bytes(), false, &api).await.unwrap();
@@ -473,7 +458,7 @@ esac
         let creds = store(&dir);
         let repo = Repo { owner: "acme".into(), name: "app".into() };
 
-        let err = github(&creds, &mut "other\n".as_bytes(), false, &api, &repo).await.unwrap_err();
+        let err = github(&creds, &mut "other\n".as_bytes(), false, &api, &repo).await.unwrap_err().to_string();
         assert!(!err.contains("other") && creds.read(GITHUB).is_none(), "{err}");
 
         let msg = github(&creds, &mut "good\n".as_bytes(), false, &api, &repo).await.unwrap();
@@ -496,7 +481,7 @@ esac
         let repo = Repo { owner: "acme".into(), name: "app".into() };
         creds.save(GITHUB, "reader").unwrap();
 
-        let err = github_writer(&creds, &mut "reader\n".as_bytes(), false, &api, &repo).await.unwrap_err();
+        let err = github_writer(&creds, &mut "reader\n".as_bytes(), false, &api, &repo).await.unwrap_err().to_string();
         assert!(err.contains("can't push") && creds.read(GITHUB_WRITER).is_none(), "{err}");
 
         let msg = github_writer(&creds, &mut "writer\n".as_bytes(), false, &api, &repo).await.unwrap();
