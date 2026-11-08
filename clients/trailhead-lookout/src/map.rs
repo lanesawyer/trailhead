@@ -698,8 +698,8 @@ mod tests {
         use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate};
         use crate::mirror::MirrorPlugin;
         use crate::sync::{Snapshot, SyncItem};
-        use trailhead_daemon::ui::RepoSnapshot;
         use trailhead_factory::{ControlState, FactorySnapshot};
+        use trailhead_wire::ui::RepoSnapshot;
 
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins((MirrorPlugin, FactoryPlugin, MapPlugin));
@@ -781,8 +781,8 @@ mod tests {
         use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate};
         use crate::mirror::MirrorPlugin;
         use crate::sync::{Snapshot, SyncItem};
-        use trailhead_daemon::ui::RepoSnapshot;
         use trailhead_factory::{ControlState, FactorySnapshot};
+        use trailhead_wire::ui::RepoSnapshot;
 
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins((MirrorPlugin, FactoryPlugin, MapPlugin));

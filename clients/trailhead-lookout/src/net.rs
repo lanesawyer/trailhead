@@ -15,11 +15,11 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
-use trailhead_daemon::net::{parse_endpoint_id, parse_secret_key};
-use trailhead_daemon::ui::{
+use trailhead_factory::logs::LogLine;
+use trailhead_wire::ui::{
     CLOSE_NOT_ALLOWED, LogFrame, LogStream, StatusFrame, StatusStream, UI_ALPN, dial_ui, open_ui_tunnel,
 };
-use trailhead_factory::logs::LogLine;
+use trailhead_wire::{parse_endpoint_id, parse_secret_key};
 
 use crate::commands::{self, CommandId, Reply, Request};
 use crate::detail::{self, DetailReply};
@@ -593,7 +593,7 @@ fn refusal_of(conn: &iroh::endpoint::Connection, error: &trailhead_factory::Erro
 }
 
 /// What the map says of a factory that didn't know our request: what it was asked, what it serves, and its build.
-fn too_old_message(u: &trailhead_daemon::ui::Unsupported) -> String {
+fn too_old_message(u: &trailhead_wire::ui::Unsupported) -> String {
     format!(
         "the factory is older than this Lookout: reinstall trailhead-factory and restart it (it was asked {}, and \
          serves {}; version {}, build {})",

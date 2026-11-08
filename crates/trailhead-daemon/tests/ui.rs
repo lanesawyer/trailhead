@@ -9,13 +9,14 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tokio::sync::broadcast;
 use trailhead_core::{Ctx, NewProject, NewTask, Principal, Store};
-use trailhead_daemon::net::{API_ALPN, ApiTunnel, Peers, read_frame, write_frame};
-use trailhead_daemon::ui::{
+use trailhead_factory::logs::{LogLevel, LogLine};
+use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, Sequenced, TaskKey};
+use trailhead_wire::api::ApiTunnel;
+use trailhead_wire::ui::{
     LogFeed, LogFrame, LogStream, RepoFeed, StatusFeed, StatusFrame, StatusStream, UI_ALPN, UiAllowlist, UiProtocol,
     dial_ui, open_ui_tunnel,
 };
-use trailhead_factory::logs::{LogLevel, LogLine};
-use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, Sequenced, TaskKey};
+use trailhead_wire::{API_ALPN, Peers, read_frame, write_frame};
 
 /// One repo whose events the test sends.
 struct TestFeed(broadcast::Sender<Sequenced>);

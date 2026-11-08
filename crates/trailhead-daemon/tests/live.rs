@@ -12,11 +12,14 @@ use iroh::{Endpoint, SecretKey};
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::CoreTracker;
 use trailhead_core::{Ctx, EventFilter, NewProject, NewTask, Store};
-use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon};
+use trailhead_daemon::plugins::CLAUDE_CODE;
 use trailhead_factory::{
     Check, Compute, Daemon, Egress, Endpoint as ModelEndpoint, IROH_DOMAINS, Labels, ModelId, PrRef, PrepareRequest,
     Repo, Role, RunRequest, RunResult, SandboxSpec, TaskKey, TaskSpec, Tracker,
 };
+use trailhead_wire::API_ALPN;
+use trailhead_wire::api::ApiTunnel;
+use trailhead_wire::daemon::{Launch, RemoteDaemon};
 
 /// A Trailhead server on a local port with a `LIVE` project and task, and a tracker for the control plane.
 async fn trailhead(dir: &std::path::Path) -> (std::net::SocketAddr, CoreTracker, Arc<Store>, Ctx, TaskKey) {
@@ -96,7 +99,7 @@ async fn daemon_in_a_sprite() {
         Launch {
             log: std::env::var("LIVE_DAEMON_LOG").ok(),
             harness_secrets: subscription().map(|t| ("oauth_token".to_string(), t)).into_iter().collect(),
-            ..Launch::new(binary, &trailhead_compute_sprites::target())
+            ..Launch::new(binary, &trailhead_compute_sprites::target(), CLAUDE_CODE)
         },
     ));
     let _tunnel = Router::builder(control).accept(API_ALPN, ApiTunnel::new(server, remote.peers())).spawn();

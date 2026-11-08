@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use trailhead_compute_docker::{DockerCompute, DockerConfig};
-use trailhead_daemon::net::{Launch, RemoteDaemon};
+use trailhead_daemon::plugins::CLAUDE_CODE;
 use trailhead_factory::{Compute, Daemon, Egress, IROH_DOMAINS, Labels, PrepareRequest, Repo, SandboxId, SandboxSpec};
+use trailhead_wire::daemon::{Launch, RemoteDaemon};
 
 fn request() -> PrepareRequest {
     PrepareRequest {
@@ -48,7 +49,7 @@ async fn the_daemon_answers_promptly_after_a_restore() {
     let (c, sid) = (compute.clone(), sandbox.id.clone());
     let result = async move {
         let control = Endpoint::builder(presets::N0).bind().await.unwrap();
-        let launch = Launch::new(binary.to_vec(), &trailhead_compute_docker::target());
+        let launch = Launch::new(binary.to_vec(), &trailhead_compute_docker::target(), CLAUDE_CODE);
         let remote = RemoteDaemon::new(control, iroh::SecretKey::generate().to_bytes(), c.clone(), launch);
         let timed = async |what: &str| {
             let start = Instant::now();

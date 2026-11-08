@@ -31,7 +31,7 @@ The factory resolves Sprites, GitHub, GitHub-writer and Claude tokens from the e
 
 ### Crates and the `factory` feature
 
-The server gains, behind a `factory` feature, these dependencies: `trailhead-factory`, `trailhead-control`, `trailhead-daemon` (with `net`, for `ApiTunnel`, `UiProtocol`, `RemoteDaemon`), `trailhead-compute-sprites`, `trailhead-harness-claude-code` (through the daemon registry), `trailhead-provider-anthropic`, `trailhead-codehost-github`, `iroh`, and, under `factory-docker`, `trailhead-compute-docker` (and so `bollard`). The code from `trailhead-factory-host` becomes a `factory` module in `trailhead-server` (**Guess:** or a new `trailhead-factory-server` crate depended on by `trailhead-server`, if the module grows past what `lib.rs` should hold; a separate crate also keeps the compile-time cost out of the server's own tests).
+The server gains, behind a `factory` feature, these dependencies: `trailhead-factory`, `trailhead-control`, `trailhead-wire` (for `ApiTunnel`, `UiProtocol`, `RemoteDaemon`; TRAIL-1063 moved them out of `trailhead-daemon`), `trailhead-daemon` (for the harness registry), `trailhead-compute-sprites`, `trailhead-harness-claude-code` (through the daemon registry), `trailhead-provider-anthropic`, `trailhead-codehost-github`, `iroh`, and, under `factory-docker`, `trailhead-compute-docker` (and so `bollard`). The code from `trailhead-factory-host` becomes a `factory` module in `trailhead-server` (**Guess:** or a new `trailhead-factory-server` crate depended on by `trailhead-server`, if the module grows past what `lib.rs` should hold; a separate crate also keeps the compile-time cost out of the server's own tests).
 
 Rules that keep the engine lean:
 

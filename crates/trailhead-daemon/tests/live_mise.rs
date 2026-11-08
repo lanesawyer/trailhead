@@ -9,8 +9,9 @@ use std::sync::Arc;
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use trailhead_compute_sprites::SpritesCompute;
-use trailhead_daemon::net::{Launch, RemoteDaemon};
+use trailhead_daemon::plugins::CLAUDE_CODE;
 use trailhead_factory::{Check, Compute, Daemon, Egress, IROH_DOMAINS, Labels, PrepareRequest, Repo, SandboxSpec};
+use trailhead_wire::daemon::{Launch, RemoteDaemon};
 
 #[tokio::test]
 #[ignore = "needs SPRITES_TOKEN and TRAILHEAD_DAEMON_BIN, and creates a real Sprite"]
@@ -31,7 +32,7 @@ async fn a_stack_asking_for_node_26_gets_node_26() {
         control,
         iroh::SecretKey::generate().to_bytes(),
         compute.clone(),
-        Launch::new(binary, &trailhead_compute_sprites::target()),
+        Launch::new(binary, &trailhead_compute_sprites::target(), CLAUDE_CODE),
     );
     let prepare = PrepareRequest {
         repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },

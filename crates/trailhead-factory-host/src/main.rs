@@ -38,13 +38,15 @@ use trailhead_codehost_github::GitHub;
 use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
-use trailhead_daemon::net::{API_ALPN, ApiTunnel, Launch, RemoteDaemon, build_id};
 use trailhead_daemon::plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN};
-use trailhead_daemon::ui::{UI_ALPN, UiAllowlist, UiProtocol};
 use trailhead_factory::{
     Compute, ComputeConfig, Daemon, FactoryConfig, HarnessSecrets, ProviderKind, Registry, Target,
 };
 use trailhead_provider_anthropic::Anthropic;
+use trailhead_wire::api::ApiTunnel;
+use trailhead_wire::daemon::{Launch, RemoteDaemon};
+use trailhead_wire::ui::{UI_ALPN, UiAllowlist, UiProtocol};
+use trailhead_wire::{API_ALPN, build_id};
 
 mod find;
 mod fnox;
@@ -144,13 +146,13 @@ struct Keys {
 fn saved_endpoint_id(creds: &CredStore) -> Option<iroh::EndpointId> {
     let (saved, _) = creds.read(KEYS)?;
     let keys: Keys = serde_json::from_str(&saved).ok()?;
-    Some(trailhead_daemon::net::parse_secret_key(&keys.endpoint).ok()?.public())
+    Some(trailhead_wire::parse_secret_key(&keys.endpoint).ok()?.public())
 }
 
 fn load_or_create_keys(creds: &CredStore) -> Result<(SecretKey, [u8; 32]), String> {
     if let Some((saved, _)) = creds.read(KEYS) {
         let keys: Keys = serde_json::from_str(&saved).map_err(|e| format!("bad saved factory keys: {e}"))?;
-        let endpoint = trailhead_daemon::net::parse_secret_key(&keys.endpoint).map_err(|e| e.to_string())?;
+        let endpoint = trailhead_wire::parse_secret_key(&keys.endpoint).map_err(|e| e.to_string())?;
         let master = hex::decode(&keys.master).ok().and_then(|b| b.try_into().ok()).ok_or("bad saved master key")?;
         return Ok((endpoint, master));
     }
@@ -209,7 +211,7 @@ fn allowlist() -> Result<UiAllowlist, String> {
 
 /// `allow` (`add`) or `disallow` a UI endpoint id.
 fn allow(endpoint_id: &str, add: bool) -> Result<(), String> {
-    let id = trailhead_daemon::net::parse_endpoint_id(endpoint_id).map_err(|e| e.to_string())?;
+    let id = trailhead_wire::parse_endpoint_id(endpoint_id).map_err(|e| e.to_string())?;
     let list = allowlist()?;
     let changed = if add { list.add(id) } else { list.remove(&id) }.map_err(|e| e.to_string())?;
     match (add, changed) {
@@ -377,14 +379,13 @@ async fn setup(run: &RunOpts) -> Result<Setup, String> {
     // `repos::validate` made the compute and daemon settings the same for every repo.
     let shared = &specs[0].config;
     let binary = Arc::new(binary);
-    let peers = trailhead_daemon::net::Peers::default();
+    let peers = trailhead_wire::Peers::default();
     let mut targets: Vec<Wired> = Vec::new();
     for (compute, target) in computes(shared, opts, &fnox, &paths, binary.clone(), false)? {
         let launch = Launch {
-            harness: adapter.clone(),
             harness_secrets: harness_secrets.clone(),
             log: shared.daemon.log.clone(),
-            ..Launch::new(binary.clone(), &target)
+            ..Launch::new(binary.clone(), &target, adapter.clone())
         };
         let daemon = RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch).with_peers(peers.clone());
         targets.push((target, compute, Arc::new(daemon)));
@@ -816,7 +817,7 @@ static LOGS: std::sync::OnceLock<trailhead_control::logs::LogBuffer> = std::sync
 /// [`LOGS`] as the feed `trailhead/ui/0` serves.
 struct LogsFeed(trailhead_control::logs::LogBuffer);
 
-impl trailhead_daemon::ui::LogFeed for LogsFeed {
+impl trailhead_wire::ui::LogFeed for LogsFeed {
     fn subscribe(
         &self,
     ) -> (Vec<trailhead_factory::logs::LogLine>, tokio::sync::broadcast::Receiver<trailhead_factory::logs::LogLine>)

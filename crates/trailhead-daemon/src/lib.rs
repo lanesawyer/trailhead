@@ -2,8 +2,8 @@
 //! harness, runs checks, publishes and opens the PR, and reports back to the control plane over iroh.
 //!
 //! [`Runner`] holds the daemon's duties and has no network code, so the testkit runs it in-process. The `net`
-//! feature adds the iroh transport: [`net::DaemonProtocol`] in the sandbox and [`net::RemoteDaemon`] in the control
-//! plane.
+//! feature adds the iroh transport: [`net::DaemonProtocol`], on the framing and protocols in `trailhead-wire`, which
+//! also has the control plane's side.
 
 mod mise;
 #[cfg(feature = "net")]
@@ -20,8 +20,6 @@ pub mod gateway;
 pub mod net;
 #[cfg(feature = "net")]
 mod rest;
-#[cfg(feature = "net")]
-pub mod ui;
 
 #[cfg(feature = "net")]
 pub use rest::RestTracker;

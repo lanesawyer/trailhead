@@ -26,6 +26,7 @@ trailhead-factory.workspace = true
 trailhead-log.workspace = true
 trailhead-control.workspace = true
 trailhead-daemon = { workspace = true, features = ["net"] }
+trailhead-wire.workspace = true
 trailhead-compute-sprites.workspace = true
 trailhead-codehost-github.workspace = true
 trailhead-compute-docker = { workspace = true, optional = true }
