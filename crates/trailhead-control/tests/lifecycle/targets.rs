@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use trailhead_control::{Factory, Host, Placed};
+use trailhead_factory::HostConfig;
 use trailhead_factory::{
     Compute, FactoryConfig, Labels, Role, SandboxSpec, Status, Target, TaskKey, Tracker, Usd, label, run_name,
 };
@@ -63,7 +64,8 @@ fn two_with(targets: &str, spend_file: Option<std::path::PathBuf>) -> Two {
         });
         sides.push(Side { compute, harness });
     }
-    let mut factory = Factory::with_targets(config, placed, Arc::new(tracker.clone()), Host::new(None));
+    let mut factory =
+        Factory::with_targets(config, placed, Arc::new(tracker.clone()), Host::new(&HostConfig::default()));
     if let Some(path) = spend_file {
         factory = factory.with_spend_file(path);
     }
@@ -242,7 +244,7 @@ async fn a_review_counts_on_its_own_target_and_the_worker_no_longer_on_its() {
         });
         harnesses.push(harness);
     }
-    let factory = Factory::with_targets(config, placed, Arc::new(tracker.clone()), Host::new(None));
+    let factory = Factory::with_targets(config, placed, Arc::new(tracker.clone()), Host::new(&HostConfig::default()));
     let (local, cloud) = (&harnesses[0], &harnesses[1]);
     // A parked task keeps local's one place, so the next worker goes to the cloud.
     let parked = tracker.add_task("TRAIL", "Parked", "");

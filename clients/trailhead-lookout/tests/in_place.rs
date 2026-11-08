@@ -24,6 +24,7 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "dress_slots",
         "a column's \"Show more\" button, relabelled when its count changes; in place is a follow-up",
     ),
+    ("hint.rs", "hide_hint", "closes a hint, which lives as a child of what it describes"),
     ("map.rs", "redraw", "the trail map's terrain is respawned on every model change; in place is a follow-up"),
 ];
 

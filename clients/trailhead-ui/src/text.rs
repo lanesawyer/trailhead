@@ -5,9 +5,10 @@
 
 use bevy::app::PropagateOver;
 use bevy::feathers::display::{label, label_dim};
-use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 use bevy::prelude::*;
 use bevy::text::FontSource;
+
+use crate::theme::{TextTone, Token};
 
 /// The scale text is sized from.
 pub mod size {
@@ -46,23 +47,23 @@ pub fn text_dim(content: impl Into<String>, size: f32) -> impl Scene {
 }
 
 /// A label at `size` in a theme color, such as [`super::token::WARN`].
-pub fn text_toned(content: impl Into<String>, size: f32, tone: ThemeToken) -> impl Scene {
+pub fn text_toned(content: impl Into<String>, size: f32, tone: Token) -> impl Scene {
     let content = content.into();
     bsn! {
         @label(content)
         TextFont { font_size: { FontSize::Px(size) } }
-        ThemeTextColor({ tone })
+        TextTone({ tone })
     }
 }
 
-/// A label in the monospace face at `size`, in a theme color (`tokens::TEXT_MAIN` for the default one), for text where
+/// A label in the monospace face at `size`, in a theme color ([`super::token::TEXT`] for the default one), for text where
 /// columns should line up and every character counts: log lines, ids, code. The face is the system's monospace; the
 /// font is set on the text itself, as the others are.
-pub fn text_mono(content: impl Into<String>, size: f32, tone: ThemeToken) -> impl Bundle {
+pub fn text_mono(content: impl Into<String>, size: f32, tone: Token) -> impl Bundle {
     (
         Text::new(content),
         TextFont { font: FontSource::monospace(), font_size: FontSize::Px(size), ..default() },
-        ThemeTextColor(tone),
+        TextTone(tone),
         PropagateOver::<TextFont>::default(),
     )
 }

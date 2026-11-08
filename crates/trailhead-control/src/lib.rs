@@ -22,14 +22,14 @@ mod timing;
 pub use core_tracker::CoreTracker;
 pub use status::StatusBoard;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::time::Instant;
 use trailhead_factory::{
-    ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, GateKind, Grade, IROH_DOMAINS, Labels, MergeMode,
-    ModelProvider, PrRef, Sandbox, SandboxId, Target, Task, TaskKey, Tracker, Verdict, label,
+    ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, GateKind, Grade, HostConfig, IROH_DOMAINS, Labels,
+    MergeMode, ModelProvider, PrRef, Sandbox, SandboxId, Target, Task, TaskKey, Tracker, Verdict, label,
 };
 
 use crate::pool::Trouble;
@@ -66,6 +66,8 @@ pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String
 pub struct Host {
     /// The most sandboxes held for workers across all repos; `None` is no cross-repo cap.
     max_sandboxes: Option<usize>,
+    /// Per usage window, the percent at or past which no new runs start in any repo.
+    pause_at: BTreeMap<String, u32>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
     /// The reset a pause was last logged for, so a pause is logged once per host rather than on every poll.
@@ -77,8 +79,9 @@ pub struct Host {
 }
 
 impl Host {
-    pub fn new(max_sandboxes: Option<usize>) -> Arc<Host> {
-        Arc::new(Host { max_sandboxes, ..Host::default() })
+    /// The shared state for the host settings in the user config's `[factory]`.
+    pub fn new(config: &HostConfig) -> Arc<Host> {
+        Arc::new(Host { max_sandboxes: config.max_sandboxes, pause_at: config.pause_at.clone(), ..Host::default() })
     }
 }
 

@@ -21,7 +21,7 @@ use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, RequestClose};
 
-use super::{PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
+use super::{HintBounds, PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
 
 /// How much of the window's height the modal may take, with the barrier's margin around it.
 pub const MAX_HEIGHT_VH: f32 = 80.0;
@@ -102,6 +102,7 @@ fn frame(title: String, width: f32, tall: bool) -> Box<dyn SceneList> {
             max_height: { vh(MAX_HEIGHT_VH) },
         }
         ModalFrame
+        HintBounds
         Children [
             @panel_header(title, true)
             --

@@ -6,7 +6,8 @@
 //! widget never imports a view module.
 //!
 //! Which widget for what:
-//! - A button with words (and maybe an icon): [`button`]. Icon only, with a hint: [`tool_button`].
+//! - A button with words (and maybe an icon): [`button`]. Icon only, with a hint: [`tool_button`]. How much it
+//!   stands out: [`ButtonKind`].
 //! - A button that opens a menu: [`icon_menu`], then fill its popup with [`menu_item`]s; [`close_menu_holding`] when
 //!   something else in it is done.
 //! - A small chip with an icon and a word: [`badge`].
@@ -21,8 +22,12 @@
 //! - A dot and a few words of state: [`chip`].
 //! - A form or dialog: a [`Modal`] marker type and [`open_modal`]; fill its [`ModalBody`], buttons in its [`ModalFooter`].
 //! - A hint over anything: put a [`Hint`] on it.
-//! - Colors: [`token`] (the kit's) and `bevy::feathers::tokens` (the controls'). An app adds its own tokens with
-//!   [`paint`] on top of [`theme_props`].
+//! - A message in a conversation, the reader's on the right and others' on the left: [`bubble`] on a [`Side`].
+//! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
+//!   [`sidebar_footer`]; mark the page shown on its [`NavItem`]. Pages fill [`beside_sidebar`].
+//! - Colors: a [`Token`] from [`token`], on a node as a [`BackgroundTone`], [`BorderTone`] or [`TextTone`]. An app
+//!   adds its own tokens with [`Theme::paint`] on top of [`Theme::new`], from the [`palette`], and adds [`ThemePlugin`]
+//!   with it beside [`UiPlugin`].
 //! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`]; one that scrolls down only,
 //!   inside it: [`ScrollDown`].
 //! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
@@ -34,7 +39,8 @@
 //!   controls to its header with [`spawn_header_button`].
 //! - Text cut to a width with an ellipsis: [`truncate_to_width`], measured by the same estimate as [`width_of`].
 //! - A number picked on a track: [`spawn_slider`]. Its value is written back for you.
-//! - A search box with a hint while empty and a clear button: [`spawn_search_field`]; match items with
+//! - A search box with a hint while empty and a clear button: [`spawn_search_field`], or
+//!   [`spawn_search_field_filling`] to fill a sidebar; match items with
 //!   [`matches_search`]. A text field straight on a pane or menu goes in a [`field_well`] to be seen.
 //! - A detail modal's body, a main column beside a sidebar of facts: [`spawn_detail_panes`], in a modal
 //!   [`extent::DETAIL_WIDTH`] wide.
@@ -45,12 +51,16 @@
 //! - Writing a `Node` or `Text` only when it changes: [`patch_node`], [`set_display`], [`set_text`].
 //!
 //! The kit's per-frame systems run in [`UiPlace`] in `Update`; order an app's own systems around it.
+//!
+//! Feathers, which the controls are built on, stays inside the kit: an app names only what the kit exports, so a
+//! change in feathers is a change here and nowhere else. Lookout's CI checks it never imports feathers.
 
 use bevy::feathers::theme::UiTheme;
 use bevy::prelude::*;
 
 mod accordion;
 mod badge;
+mod bubble;
 mod buttons;
 mod chip;
 mod containers;
@@ -65,6 +75,7 @@ pub mod layer;
 mod link;
 mod menu;
 mod modal;
+mod nav;
 mod notice;
 mod panel_header;
 mod patch;
@@ -85,12 +96,13 @@ pub use accordion::{
     spawn_header_button,
 };
 pub use badge::badge;
-pub use buttons::{button, button_text, danger_button, tool_button};
+pub use bubble::{Side, bubble};
+pub use buttons::{ButtonKind, button, button_text, danger_button, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{field, panel, row, section, section_frame};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
-pub use hint::Hint;
+pub use hint::{Hint, HintBounds};
 pub use icons::{Icon, button_icon, icon_text};
 pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
@@ -104,19 +116,22 @@ pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
     open_modal,
 };
+pub use nav::{NavItem, beside_sidebar, nav_heading, nav_item, nav_item_noted, sidebar, sidebar_footer};
 pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
-pub use search::{ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field};
+pub use search::{
+    ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
+};
 pub use select::{Picked, SelectEdit, SelectOptions, select};
 pub use skeleton::{SkeletonBar, spawn_skeleton};
 pub use slider::spawn_slider;
 pub use spacing::{check as spacing_check, extent, radius, space};
 pub use tabs::{TabCaption, fit_tabs, style_tabs, tab, tab_strip};
 pub use text::{size, text, text_dim, text_mono, text_toned};
-pub use theme::{paint, props as theme_props, theme, token};
+pub use theme::{BackgroundTone, BorderTone, TextTone, Theme, ThemePlugin, Token, palette, token};
 pub use truncate::{truncate_to_width, width_of};
 
 /// Where the kit's per-frame systems run in `Update`: opening and closing accordions, cutting titles and captions to
@@ -146,6 +161,7 @@ impl Plugin for UiPlugin {
                     skeleton::pulse_skeletons.run_if(resource_exists::<UiTheme>),
                     tabs::fit_tabs,
                     tabs::style_tabs,
+                    nav::paint_nav_items,
                 )
                     .chain()
                     .in_set(UiPlace),

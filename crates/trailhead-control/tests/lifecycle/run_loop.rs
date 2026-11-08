@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use trailhead_control::Outcome;
+use trailhead_control::{Host, Outcome};
 use trailhead_factory::{Compute, Role, RunOutcome, SandboxSpec, Status, TaskKey, Usd, label, run_name};
 use trailhead_testkit::Script;
 
@@ -350,9 +350,10 @@ fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-/// The test config, pausing at 80% of the five-hour window.
+/// The test config on a host pausing at 80% of the five-hour window.
 fn pausing_rig() -> Rig {
-    rig_with(&format!("{CONFIG}\n[usage]\npause_at = {{ five_hour = 80 }}\n"))
+    let pause_at = [("five_hour".to_string(), 80)].into();
+    rig_on(CONFIG, Host::new(&trailhead_factory::HostConfig { pause_at, ..Default::default() }))
 }
 
 /// Runs one task whose agent reports the five-hour window `used` percent full, resetting in `resets_in` seconds.
