@@ -1,12 +1,13 @@
 //! What the daemon reports when it fails after the agent's outcome is known (TRAIL-214).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{Notify, mpsc};
 use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner};
 use trailhead_factory::{
-    Credential, Endpoint, ModelId, Repo, Role, RunOutcome, RunRequest, RunResult, TaskKey, TaskSpec, Tracker,
-    VerdictKind,
+    Commit, Credential, Endpoint, FileChange, ModelId, Repo, Role, RunOutcome, RunRequest, RunResult, TaskKey,
+    TaskSpec, Tracker, VerdictKind,
 };
 use trailhead_testkit::{FakeCodeHost, FakeTracker, FakeWorkspace, Script, ScriptedHarness};
 
@@ -75,4 +76,49 @@ fn request(key: TaskKey) -> RunRequest {
         env: Default::default(),
         credential: Credential { agent: "factory".into(), token: String::new() },
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_worker_keeps_renewing_its_claim_while_publishing_retries() {
+    let tracker = FakeTracker::new("factory");
+    let key = tracker.add_task("TRAIL", "Add a greeting", "");
+    let harness = Arc::new(ScriptedHarness::new());
+    harness.push(
+        Role::Worker,
+        Script::new(RunOutcome::Changes {
+            commits: vec![Commit {
+                message: format!("feat: greet [{}]", key.0),
+                changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+                merges: vec![],
+            }],
+            summary: "Adds a greeting.".into(),
+        }),
+    );
+    let codehost = Arc::new(FakeCodeHost::new());
+    // Waits of 5, 10 and 20 seconds before the fourth try gets through.
+    codehost.flaky_publish(3);
+    let connect: Connect = {
+        let tracker = tracker.clone();
+        Arc::new(move |_| {
+            let tracker = tracker.clone();
+            Box::pin(async move { Ok(Arc::new(tracker) as Arc<dyn Tracker>) })
+        })
+    };
+    let runner = Runner {
+        harness,
+        codehost: codehost.clone(),
+        workspace: Arc::new(FakeWorkspace::default()),
+        connect,
+        renew_every: Duration::from_secs(10),
+        heartbeat_every: HEARTBEAT_EVERY,
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut req = request(key.clone());
+    req.role = Role::Worker;
+
+    let report = runner.run(req, tx, Arc::new(Notify::new())).await.unwrap();
+
+    assert!(matches!(report.result, RunResult::PrOpened(_)), "{:?}", report.result);
+    assert_eq!(codehost.publish_attempts(), 4);
+    assert!(tracker.renews(&key) >= 3, "renewed {} times", tracker.renews(&key));
 }

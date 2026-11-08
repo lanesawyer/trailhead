@@ -205,9 +205,23 @@ impl Runner {
                 let _ = events.send(RunEvent::Heartbeat { quiet_secs: 0 });
             }
         };
+        // The checks and publishing retries can outlast a lease too, so a worker keeps renewing through them.
+        let renewing = async {
+            if req.role != Role::Worker {
+                return std::future::pending::<()>().await;
+            }
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + self.renew_every, self.renew_every);
+            loop {
+                tick.tick().await;
+                if let Err(e) = tracker.renew(&req.task.key).await {
+                    tracing::warn!(task = %req.task.key.0, error = %e, "renewing the claim failed");
+                }
+            }
+        };
         let finished = tokio::select! {
             done = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge, &events) => done,
             () = beating => unreachable!("heartbeats don't end"),
+            () = renewing => unreachable!("renewals don't end"),
         };
         let (result, checks) = match finished {
             Ok(done) => done,
