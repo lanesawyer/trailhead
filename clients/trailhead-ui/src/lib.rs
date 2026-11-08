@@ -122,8 +122,8 @@ pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu, menu_item};
 pub use modal::{
-    MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
-    open_modal,
+    MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,
+    ModalSlots, open_modal,
 };
 pub use nav::{NavItem, beside_sidebar, nav_heading, nav_item, nav_item_noted, sidebar, sidebar_footer};
 pub use notice::{Notice, Tone, notice};
