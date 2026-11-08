@@ -7,8 +7,9 @@ docker-cli = "latest"
 fnox = { version = "latest", workflow = "release.yml" }
 lima = "latest"
 mdbook = "0.5.4"
+# Pinned exactly, and upgraded together with mdbook above: a newer mdbook-mermaid built for a newer mdBook could break the docs build unseen.
 # Not in the mise registry; the preprocessor ships prebuilt binaries on GitHub (0.16 can't act as an mdBook 0.5 preprocessor, so only its bundled mermaid.min.js is used; see the docs tasks).
-"github:badboy/mdbook-mermaid" = "0.16"
+"github:badboy/mdbook-mermaid" = "0.16.0"
 rust = "latest"
 
 [tasks.test-live-sprites]
