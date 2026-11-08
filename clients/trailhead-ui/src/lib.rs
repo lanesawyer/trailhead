@@ -90,7 +90,7 @@ pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{field, panel, row, section, section_frame};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
-pub use hint::Hint;
+pub use hint::{Hint, HintBounds};
 pub use icons::{Icon, button_icon, icon_text};
 pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
