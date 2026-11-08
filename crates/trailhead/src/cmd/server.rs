@@ -48,7 +48,7 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                 if let Some(runs) = info.runs_in_flight {
                     println!("factory runs in flight: {runs}");
                 }
-                if info.upgrade_pending {
+                if info.upgrade_pending == Some(true) {
                     println!(
                         "restarting onto the new binary once those finish (`trailhead server restart --now` cancels them)"
                     );
@@ -57,7 +57,7 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                 }
                 if local && !client::is_ours(&paths, &info) {
                     println!("served from another data directory or machine (a tunnel?), not this CLI's");
-                } else if local && client::is_stale(&info) && !info.upgrade_pending {
+                } else if local && client::is_stale(&info) && info.upgrade_pending != Some(true) {
                     println!("the binary has been rebuilt since; the next command restarts the server");
                 }
             }

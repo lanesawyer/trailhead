@@ -62,17 +62,23 @@ impl Client {
         {
             match info.runs_in_flight.unwrap_or(0) {
                 // A restart now would cancel the factory's runs: the server drains them and restarts itself, and keeps
-                // working meanwhile.
-                runs @ 1.. => {
-                    if !info.upgrade_pending
-                        && let Some(pid) = info.pid
-                    {
+                // working meanwhile. A server that doesn't report `upgrade_pending` predates that and would die of
+                // the SIGUSR1, so it is only told about; one already draining to stop is left to.
+                runs @ 1.. => match (info.upgrade_pending, info.draining, info.pid) {
+                    (Some(false), false, Some(pid)) => {
                         signal(pid, "-USR1")?;
+                        eprintln!(
+                            "note: a newer trailhead is installed; the server restarts onto it once its {runs} factory run(s) finish (`trailhead server restart --now` cancels them)"
+                        );
                     }
-                    eprintln!(
+                    (Some(true), ..) => eprintln!(
                         "note: a newer trailhead is installed; the server restarts onto it once its {runs} factory run(s) finish (`trailhead server restart --now` cancels them)"
-                    );
-                }
+                    ),
+                    (_, true, _) => {}
+                    _ => eprintln!(
+                        "note: a newer trailhead is installed; {runs} factory run(s) are in flight, so the server keeps running. Restart it with `trailhead server restart` when they finish"
+                    ),
+                },
                 0 => {
                     eprintln!("note: restarting the local server on the updated trailhead binary");
                     stop_local(&http, &base, true).await?;
@@ -446,23 +452,25 @@ pub async fn stop_local(http: &reqwest::Client, base: &Url, now: bool) -> Result
     };
     let runs = running.as_ref().and_then(|h| h.runs_in_flight).unwrap_or(0);
     let draining = running.as_ref().is_some_and(|h| h.draining);
-    if !now && runs > 0 {
-        if !draining && !signal_stop(pid)? {
-            return Ok(Stop::NotRunning);
-        }
-        return Ok(Stop::Draining { pid, runs });
-    }
-    if now && !draining && runs > 0 {
+    let upgrading = running.as_ref().is_some_and(|h| h.upgrade_pending == Some(true));
+    if runs > 0 && (!draining || upgrading) {
+        // The first stop starts a drain, or turns an upgrade's drain into a stop's: the server exits once the runs
+        // finish instead of restarting onto the new binary.
         if !signal_stop(pid)? {
             return Ok(Stop::NotRunning);
         }
-        // The second signal only cancels once the first has started the drain; two at once could arrive as one.
+        if !now {
+            return Ok(Stop::Draining { pid, runs });
+        }
+        // The next signal only cancels once this one has landed; two at once could arrive as one.
         for _ in 0..50 {
-            if health(http, base, None).await.is_none_or(|h| h.draining) {
+            if health(http, base, None).await.is_none_or(|h| h.draining && h.upgrade_pending != Some(true)) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    } else if !now && runs > 0 {
+        return Ok(Stop::Draining { pid, runs });
     }
     if !signal_stop(pid)? {
         return Ok(Stop::NotRunning);

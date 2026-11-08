@@ -275,14 +275,22 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
                 }
             }
             factory.drain();
-            tokio::select! {
-                _ = factory.finished() => tracing::info!("the factory drained"),
-                _ = signals.next() => {
-                    tracing::info!("cancelling the factory's runs; they're requeued on the next start");
-                    factory.stop(FACTORY_STOP).await;
-                    // A stop asked for during an upgrade's drain is a stop.
-                    upgrade = false;
+            loop {
+                tokio::select! {
+                    _ = factory.finished() => tracing::info!("the factory drained"),
+                    _ = signals.next() => {
+                        // A stop asked for during an upgrade's drain is a stop: it still waits for the runs, and a
+                        // further signal cancels them.
+                        if std::mem::take(&mut upgrade) {
+                            signal_state.upgrade_pending.store(false, SeqCst);
+                            tracing::info!("stopping instead of restarting once the factory's runs finish; a second signal cancels them");
+                            continue;
+                        }
+                        tracing::info!("cancelling the factory's runs; they're requeued on the next start");
+                        factory.stop(FACTORY_STOP).await;
+                    }
                 }
+                break;
             }
         }
         restarting.store(upgrade, SeqCst);
