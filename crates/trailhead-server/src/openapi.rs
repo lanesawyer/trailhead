@@ -400,3 +400,21 @@ pub(crate) mod tests {
         assert_eq!(codes, ERROR_CODES);
     }
 }
+
+#[cfg(test)]
+mod client_routes {
+    use super::ApiDoc;
+    use trailhead_client::http::routes;
+    use utoipa::OpenApi;
+
+    /// Every endpoint the typed client calls is in the document, with the method it uses, so the two can't drift.
+    #[test]
+    fn the_clients_routes_are_in_the_document() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        for route in routes::all() {
+            let item = &doc["paths"][route.path];
+            let method = route.method.as_str().to_ascii_lowercase();
+            assert!(item.get(&method).is_some(), "{} {} isn't in the OpenAPI document", route.method, route.path);
+        }
+    }
+}
