@@ -12,7 +12,9 @@ use trailhead_lookout::icon::{IconUiPlugin, primary_window};
 use trailhead_lookout::inspector::InspectorUiPlugin;
 use trailhead_lookout::map::MapUiPlugin;
 use trailhead_lookout::net::{NetCommand, NetConfig};
+use trailhead_lookout::project::ProjectUiPlugin;
 use trailhead_lookout::settings::SettingsUiPlugin;
+use trailhead_lookout::sidebar::SidebarUiPlugin;
 
 /// `lookout [<control plane endpoint id>]`, with `LOOKOUT_TOKEN` to sign in with a pasted user token and
 /// `LOOKOUT_QUEUE` for the task new tasks go under (default: the factory's own
@@ -40,10 +42,12 @@ fn main() {
             LookoutPlugin,
             BoardUiPlugin,
             MapUiPlugin,
+            ProjectUiPlugin,
             AuthorUiPlugin,
             InspectorUiPlugin,
             ConnectUiPlugin,
             SettingsUiPlugin,
+            SidebarUiPlugin,
             IconUiPlugin,
         ))
         .add_systems(Startup, |mut authoring: ResMut<Authoring>| {

@@ -8,11 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use bevy::ecs::system::SystemParam;
 use bevy::feathers::controls::ButtonVariant;
-use bevy::input::keyboard::KeyboardInput;
-use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
-use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
@@ -20,26 +18,25 @@ use trailhead_model::{Agent, Claim, Comment, CommentKind, Dependency, Project, S
 use uuid::Uuid;
 
 use crate::author::{Act, Authoring};
-use crate::connection::{Connection, ConnectionStatus};
-use crate::factory::{FactoryLink, FactoryStatus, Run};
+use crate::connection::Connection;
+use crate::factory::{FactoryStatus, Run};
 use crate::inspector::{Neighbours, Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::search::{Deep, DeepHit};
-use crate::settings::SettingsButton;
 use crate::widgets;
 use crate::widgets::{
-    ChipEdit, ChipWords, Hint, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell,
-    card_found, card_row, card_title, card_under, chip, field, grade_tone, priority_tone, select, size, space,
-    spawn_search_field, status_label, text as label_text, token, tool_button,
+    Hint, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_found, card_row,
+    card_title, card_under, field, grade_tone, priority_tone, select, space, status_label, token, tool_button,
 };
 use bevy::feathers::theme::ThemeToken;
 
-/// The views of the app: the task board and the trail map.
+/// The views of the app: the task board, the trail map, and one project's page ([`crate::project`]).
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum View {
     #[default]
     Board,
     Map,
+    Project,
 }
 
 /// How many cards a column builds at first, and how many more each "show more" adds. A column holds hundreds
@@ -245,15 +242,22 @@ pub struct Input<'a> {
     pub now: Timestamp,
 }
 
-/// The first moment a claim still live at `now` runs out, if any does.
-fn next_expiry(claims: &[Claim], now: Timestamp) -> Option<Timestamp> {
-    claims.iter().filter(|c| c.is_live(now)).filter_map(|c| c.expires_at).min()
-}
-
 /// Groups the tasks passing `filter` into one column per status (empty ones included; done and cancelled
 /// only when `closed`), with subtasks under their parent, and works out
 /// what each filter can offer.
 pub fn build(input: Input, filter: &Filter) -> BoardView {
+    build_with(input, filter, true)
+}
+
+/// Every task in the project keyed `project`, closed ones included, as cards in the board's order (by status, then
+/// urgency) without nesting: a subtask is a card of its own that names its parent.
+pub fn grid(input: Input, project: &str) -> Vec<Card> {
+    let filter = Filter { project: Some(project.to_string()), closed: true, ..default() };
+    build_with(input, &filter, false).columns.into_iter().flat_map(|c| c.cards).collect()
+}
+
+/// [`build`], with subtasks under their parent in a column when `nest`, else each a top-level card naming its parent.
+fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView {
     let project_key: HashMap<Uuid, &str> = input.projects.iter().map(|p| (p.id, p.key.as_str())).collect();
     let task_key: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.key.as_str())).collect();
     // Holders are agents or, for a claim a person made, users.
@@ -410,11 +414,13 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         // Urgent first, then by key number, so the order doesn't shuffle with every update.
         here.sort_by_key(|t| (t.priority, key_number(t.key.as_str()), t.key.clone()));
         let ids: HashSet<Uuid> = here.iter().map(|t| t.id).collect();
-        let nested = |t: &Task| t.parent_id.is_some_and(|p| ids.contains(&p));
+        let nested = |t: &Task| nest && t.parent_id.is_some_and(|p| ids.contains(&p));
         let mut cards = Vec::new();
         for t in here.iter().filter(|t| !nested(t)) {
             cards.push(card(t, 0, true));
-            cards.extend(here.iter().filter(|c| c.parent_id == Some(t.id)).map(|c| card(c, 1, false)));
+            if nest {
+                cards.extend(here.iter().filter(|c| c.parent_id == Some(t.id)).map(|c| card(c, 1, false)));
+            }
         }
         columns.push(Column { status, cards });
     }
@@ -506,64 +512,109 @@ fn key_number(key: &str) -> i64 {
     key.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
 }
 
-#[allow(clippy::type_complexity)]
-#[allow(clippy::too_many_arguments)]
+/// What the views of tasks build from: the mirror's rows, the factory's queues, and what says any of them changed.
+#[derive(SystemParam)]
+pub struct Sources<'w, 's> {
+    mirror: Res<'w, Mirror>,
+    changed: Query<'w, 's, (), Changed<Rev>>,
+    removed: RemovedComponents<'w, 's, Rev>,
+    removed_runs: RemovedComponents<'w, 's, Run>,
+    projects: Query<'w, 's, &'static Mirrored<Project>>,
+    tasks: Query<'w, 's, &'static Mirrored<Task>>,
+    claims: Query<'w, 's, &'static Mirrored<Claim>>,
+    dependencies: Query<'w, 's, &'static Mirrored<Dependency>>,
+    comments: Query<'w, 's, &'static Mirrored<Comment>>,
+    agents: Query<'w, 's, &'static Mirrored<Agent>>,
+    users: Query<'w, 's, &'static Mirrored<User>>,
+    runs: Query<'w, 's, &'static Run>,
+    runs_changed: Query<'w, 's, (), Changed<Run>>,
+    authoring: Res<'w, Authoring>,
+    factory: Option<Res<'w, FactoryStatus>>,
+}
+
+impl Sources<'_, '_> {
+    /// Whether anything changed since the system using this last ran. It reads the removals, so call it on every run.
+    pub fn changed(&mut self) -> bool {
+        let gone = self.removed.read().count() + self.removed_runs.read().count() > 0;
+        gone || self.mirror.is_changed()
+            || self.authoring.is_changed()
+            || self.factory.as_ref().is_some_and(|f| f.is_changed())
+            || !self.changed.is_empty()
+            || !self.runs_changed.is_empty()
+    }
+
+    /// The rows, copied out of the mirror for [`Rows::input`].
+    pub fn rows(&self) -> Rows {
+        Rows {
+            projects: rows(&self.projects),
+            tasks: rows(&self.tasks),
+            claims: rows(&self.claims),
+            dependencies: rows(&self.dependencies),
+            comments: rows(&self.comments),
+            agents: rows(&self.agents),
+            users: rows(&self.users),
+            runs: self.runs.iter().cloned().collect(),
+            queues: queue_keys(&self.authoring, self.factory.as_deref()),
+        }
+    }
+}
+
+/// The mirror's rows as [`Sources::rows`] copied them.
+pub struct Rows {
+    pub projects: Vec<Project>,
+    pub tasks: Vec<Task>,
+    pub claims: Vec<Claim>,
+    pub dependencies: Vec<Dependency>,
+    pub comments: Vec<Comment>,
+    pub agents: Vec<Agent>,
+    pub users: Vec<User>,
+    pub runs: Vec<Run>,
+    pub queues: Vec<String>,
+}
+
+impl Rows {
+    pub fn input<'a>(&'a self, deep: &'a [DeepHit], now: Timestamp) -> Input<'a> {
+        Input {
+            projects: &self.projects,
+            tasks: &self.tasks,
+            claims: &self.claims,
+            dependencies: &self.dependencies,
+            comments: &self.comments,
+            agents: &self.agents,
+            users: &self.users,
+            runs: &self.runs,
+            queues: &self.queues,
+            deep,
+            now,
+        }
+    }
+}
+
 fn rebuild_view(
     filter: Res<Filter>,
-    mirror: Res<Mirror>,
-    changed: Query<(), Changed<Rev>>,
-    (mut removed, mut removed_runs): (RemovedComponents<Rev>, RemovedComponents<Run>),
-    projects: Query<&Mirrored<Project>>,
-    tasks: Query<&Mirrored<Task>>,
-    (claims, dependencies): (Query<&Mirrored<Claim>>, Query<&Mirrored<Dependency>>),
-    comments: Query<&Mirrored<Comment>>,
-    (agents, users): (Query<&Mirrored<Agent>>, Query<&Mirrored<User>>),
-    runs: Query<&Run>,
-    runs_changed: Query<(), Changed<Run>>,
-    authoring: Res<Authoring>,
-    factory: Option<Res<FactoryStatus>>,
+    mut sources: Sources,
     deep: Option<Res<Deep>>,
     mut view: ResMut<BoardView>,
     mut expiry: Local<Option<Timestamp>>,
 ) {
-    let gone = removed.read().count() + removed_runs.read().count() > 0;
+    let changed = sources.changed();
     let now = Timestamp::now();
     let expired = expiry.is_some_and(|at| at <= now);
-    if !(filter.is_changed()
-        || authoring.is_changed()
-        || factory.as_ref().is_some_and(|f| f.is_changed())
-        || deep.as_ref().is_some_and(|d| d.is_changed())
-        || mirror.is_changed()
-        || gone
-        || !changed.is_empty()
-        || !runs_changed.is_empty()
-        || expired)
-    {
+    if !(changed || filter.is_changed() || deep.as_ref().is_some_and(|d| d.is_changed()) || expired) {
         return;
     }
-    let (projects, tasks, claims, comments, agents, users) =
-        (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents), rows(&users));
-    let dependencies = rows(&dependencies);
-    let runs: Vec<Run> = runs.iter().cloned().collect();
-    let queues = queue_keys(&authoring, factory.as_deref());
-    let input = Input {
-        projects: &projects,
-        tasks: &tasks,
-        claims: &claims,
-        dependencies: &dependencies,
-        comments: &comments,
-        agents: &agents,
-        users: &users,
-        runs: &runs,
-        queues: &queues,
-        deep: deep.as_ref().map_or(&[], |d| d.for_query(filter.query.trim())),
-        now,
-    };
-    *expiry = next_expiry(&claims, now);
-    let next = build(input, &filter);
+    let rows = sources.rows();
+    *expiry = next_expiry(&rows.claims, now);
+    let deep = deep.as_ref().map_or(&[][..], |d| d.for_query(filter.query.trim()));
+    let next = build(rows.input(deep, now), &filter);
     if *view != next {
         *view = next;
     }
+}
+
+/// The first moment a claim still live at `now` runs out, if any does.
+pub fn next_expiry(claims: &[Claim], now: Timestamp) -> Option<Timestamp> {
+    claims.iter().filter(|c| c.is_live(now)).filter_map(|c| c.expires_at).min()
 }
 
 /// The cards before and after the task `id` in its column, in the board's order (a subtask under its parent counts
@@ -801,7 +852,7 @@ impl Plugin for BoardPlugin {
     }
 }
 
-/// Draws the board while in [`View::Board`].
+/// Draws the board while in [`View::Board`], and every [`BoardCard`] in any view.
 pub struct BoardUiPlugin;
 
 impl Plugin for BoardUiPlugin {
@@ -813,23 +864,15 @@ impl Plugin for BoardUiPlugin {
             .init_resource::<BoardScroll>()
             .add_observer(on_card_press)
             .add_observer(on_more_press)
-            .add_observer(clear_search_on_escape)
             .add_systems(
                 Update,
-                (
-                    dress_columns,
-                    dress_cards,
-                    dress_slots,
-                    update_counts,
-                    tools_follow_connection,
-                    read_search_box,
-                    dress_header,
-                    update_header,
-                )
+                (dress_columns, dress_slots, update_counts, dress_header, update_header)
                     .chain()
                     .after(sync_tree)
                     .run_if(in_state(View::Board)),
-            );
+            )
+            // Cards are drawn wherever they are, on the board or on a project's page.
+            .add_systems(Update, (dress_cards, tools_follow_connection));
     }
 }
 
@@ -842,17 +885,15 @@ fn spawn_panel(mut commands: Commands, kept: Res<BoardScroll>) {
             Name::new("board"),
             BoardPanel,
             Node {
-                width: percent(100),
-                height: percent(100),
                 // A layout node is never smaller than its content unless told so: without these the panel grew past
                 // the window to fit every card, so the board and its columns never overflowed (TRAIL-836).
                 min_width: px(0),
                 min_height: px(0),
                 overflow: Overflow::clip(),
                 flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(8)),
-                row_gap: px(6),
-                ..default()
+                padding: UiRect::all(px(space::PANEL_INSET)),
+                row_gap: px(space::ROWS),
+                ..widgets::beside_sidebar()
             },
         ))
         .id();
@@ -1056,45 +1097,6 @@ fn on_more_press(activate: On<Activate>, more: Query<&ColumnMore>, mut shown: Re
     }
 }
 
-/// The connection chip in the header.
-#[derive(Component)]
-struct ConnectionChip;
-
-/// The connection chip's tone, words and hint. It shows two links: the Trailhead server, which wins when it isn't
-/// live, and the factory's control plane, which must be running for the chip to be green.
-pub fn connection_chip(
-    connection: Connection,
-    status: &ConnectionStatus,
-    factory: &FactoryLink,
-) -> (bevy::feathers::theme::ThemeToken, &'static str, String) {
-    let reason = status.reason.as_ref().map(|r| r.to_string());
-    match connection {
-        Connection::Syncing => {
-            (token::WARN, "Syncing", reason.unwrap_or_else(|| "Catching up with the Trailhead server".into()))
-        }
-        Connection::Offline => {
-            (token::DANGER, "Offline", reason.unwrap_or_else(|| "Not connected to the Trailhead server".into()))
-        }
-        Connection::Live => match factory {
-            FactoryLink::Running => (token::OK, "Live", "Connected to the Trailhead server and the factory".into()),
-            FactoryLink::Unknown => {
-                (token::WARN, "Factory connecting", "Server connected; the factory hasn't been heard from yet".into())
-            }
-            FactoryLink::Stopped => (
-                token::WARN,
-                "Factory down",
-                "Server connected; the factory can't be reached, so the map shows its last known state".into(),
-            ),
-            FactoryLink::TooOld(why) => {
-                (token::WARN, "Factory too old", format!("Server connected; the factory is too old: {why}"))
-            }
-            FactoryLink::Refused(why) => {
-                (token::WARN, "Factory refused", format!("Server connected; the factory refused Lookout: {why}"))
-            }
-        },
-    }
-}
-
 /// The names a filter dropdown lists, and which is chosen. A chosen value that is no longer offered shows as "all".
 fn select_state(key: FilterKey, filter: &Filter, options: &Options) -> (Vec<String>, Option<usize>) {
     let choices = options.of(key);
@@ -1113,22 +1115,16 @@ fn closed_caption(filter: &Filter) -> String {
     format!("{closed}: {}", if filter.closed { "shown" } else { "hidden" })
 }
 
-/// Spawns the header bar's widgets once, when the bar appears: the app name, a dropdown per filter, New task, and
-/// the connection chip. [`update_header`] changes them in place afterwards.
+/// Spawns the header bar's widgets once, when the bar appears: a dropdown per filter, the toggles and New task.
+/// [`update_header`] changes them in place afterwards.
 fn dress_header(
     bar: Query<Entity, Added<HeaderBar>>,
     view: Res<BoardView>,
     filter: Res<Filter>,
     connection: Res<State<Connection>>,
-    status: Res<ConnectionStatus>,
-    factory: Res<FactoryStatus>,
     mut commands: Commands,
 ) {
     for bar in &bar {
-        commands.queue_spawn_scene(label_text("Lookout", size::APP_TITLE)).insert(ChildOf(bar));
-        let search = spawn_search_field(&mut commands, "Search tasks");
-        commands.entity(search.field).insert(SearchBox);
-        commands.entity(search.entry).insert(ChildOf(bar));
         for key in FilterKey::ALL {
             let (names, at) = select_state(key, &filter, &view.options);
             let control = bsn_list! { @select(names, at, 8) FilterSelect({ key }) };
@@ -1140,45 +1136,11 @@ fn dress_header(
         commands
             .queue_spawn_scene(button(factory_caption(&filter), None, ButtonVariant::Normal))
             .insert((FactoryToggle, ChildOf(bar)));
-        commands
-            .queue_spawn_scene(button("Trail map", None, ButtonVariant::Normal))
-            .insert(ChildOf(bar))
-            .observe(|_: On<Activate>, mut next: ResMut<NextState<View>>| next.set(View::Map));
         let mut new = commands.queue_spawn_scene(button("New task", Some(Icon::Plus), ButtonVariant::Primary));
         new.insert((Act::New, NewTask, ChildOf(bar)));
         if *connection.get() != Connection::Live {
             new.insert(InteractionDisabled);
         }
-        let (tone, words, hint) = connection_chip(*connection.get(), &status, &factory.link);
-        commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(bar)));
-        commands.queue_spawn_scene(chip(tone, words, hint)).insert((ConnectionChip, ChildOf(bar)));
-        commands
-            .queue_spawn_scene(tool_button(Icon::Settings, "Settings", ButtonVariant::Plain))
-            .insert((SettingsButton, ChildOf(bar)));
-    }
-}
-
-/// Tags the header's search field, the text entity that holds what is typed.
-#[derive(Component)]
-struct SearchBox;
-
-/// Copies what the search box says into the [`Filter`].
-fn read_search_box(boxes: Query<&EditableText, With<SearchBox>>, mut filter: ResMut<Filter>) {
-    let Ok(text) = boxes.single() else { return };
-    let typed = text.value().to_string();
-    if filter.query != typed {
-        filter.query = typed;
-    }
-}
-
-/// Escape in the search box empties it.
-fn clear_search_on_escape(key: On<FocusedInput<KeyboardInput>>, mut boxes: Query<&mut EditableText, With<SearchBox>>) {
-    let pressed = &key.input;
-    if pressed.key_code != KeyCode::Escape || !pressed.state.is_pressed() {
-        return;
-    }
-    if let Ok(mut text) = boxes.get_mut(key.original_event_target()) {
-        text.clear();
     }
 }
 
@@ -1192,39 +1154,27 @@ struct HeaderDrawn {
     filter: Filter,
     options: Options,
     connection: Connection,
-    reason: String,
-    factory: FactoryLink,
 }
 
-/// Brings the header's widgets up to date in place: each select's rows and chosen row, the closed toggle's caption,
-/// the chip, and New task's disabled state. Nothing is despawned, so a dropdown just used stays the same entity. A
+/// Brings the header's widgets up to date in place: each select's rows and chosen row, the toggles' captions, and
+/// New task's disabled state. Nothing is despawned, so a dropdown just used stays the same entity. A
 /// select whose popup is open is left alone and tried again once it has closed.
 #[allow(clippy::too_many_arguments)]
 fn update_header(
     view: Res<BoardView>,
     filter: Res<Filter>,
     connection: Res<State<Connection>>,
-    status: Res<ConnectionStatus>,
-    factory: Res<FactoryStatus>,
     selects: Query<(Entity, &FilterSelect)>,
     toggle: Single<Entity, With<ClosedToggle>>,
     factory_toggle: Single<Entity, With<FactoryToggle>>,
     new: Single<Entity, With<NewTask>>,
-    chips: Query<Entity, With<ConnectionChip>>,
     children: Query<&Children>,
-    mut texts: Query<&mut Text, Without<ChipWords>>,
+    mut texts: Query<&mut Text>,
     mut edit: SelectEdit,
-    mut chip_edit: ChipEdit,
     mut commands: Commands,
     mut drawn: Local<Option<HeaderDrawn>>,
 ) {
-    let now = HeaderDrawn {
-        filter: filter.clone(),
-        options: view.options.clone(),
-        connection: *connection.get(),
-        reason: status.reason.as_ref().map(|r| r.to_string()).unwrap_or_default(),
-        factory: factory.link.clone(),
-    };
+    let now = HeaderDrawn { filter: filter.clone(), options: view.options.clone(), connection: *connection.get() };
     if drawn.as_ref() == Some(&now) {
         return;
     }
@@ -1246,10 +1196,6 @@ fn update_header(
         commands.entity(*new).remove::<InteractionDisabled>();
     } else {
         commands.entity(*new).insert(InteractionDisabled);
-    }
-    let (tone, words, hint) = connection_chip(*connection.get(), &status, &factory.link);
-    for chip in &chips {
-        chip_edit.set(chip, tone.clone(), words, &hint);
     }
     // A select that was open is looked at again next frame.
     *drawn = settled.then_some(now);
@@ -2211,8 +2157,6 @@ mod header_tests {
             .init_asset::<Image>()
             .init_state::<Connection>()
             .init_resource::<Filter>()
-            .init_resource::<ConnectionStatus>()
-            .init_resource::<FactoryStatus>()
             .insert_resource(run(&Filter::default()))
             .add_systems(Update, (dress_header, update_header).chain());
         app.world_mut().spawn(HeaderBar);
@@ -2254,20 +2198,6 @@ mod header_tests {
         one::<ClosedToggle>(&mut app);
         one::<FactoryToggle>(&mut app);
         one::<NewTask>(&mut app);
-        one::<ConnectionChip>(&mut app);
-    }
-
-    #[test]
-    fn the_header_has_a_search_box_that_feeds_the_filter_and_survives_typing() {
-        let mut app = app();
-        let field = one::<SearchBox>(&mut app);
-        let before = header(&mut app);
-        assert!(before.contains(&field));
-        app.add_systems(Update, read_search_box);
-        app.world_mut().entity_mut(field).insert(EditableText::new("trail-8"));
-        settle(&mut app);
-        assert_eq!(app.world().resource::<Filter>().query, "trail-8");
-        assert_eq!(header(&mut app), before);
     }
 
     #[test]
@@ -2327,40 +2257,6 @@ mod header_tests {
         settle(&mut app);
         assert_eq!(header(&mut app), before);
         assert!(app.world().get::<InteractionDisabled>(new).is_none());
-    }
-
-    #[test]
-    fn the_chip_is_green_only_while_both_links_are_up() {
-        let status = ConnectionStatus::default();
-        let words = |c, f: FactoryLink| connection_chip(c, &status, &f).1;
-        assert_eq!(words(Connection::Live, FactoryLink::Running), "Live");
-        assert_eq!(words(Connection::Live, FactoryLink::Stopped), "Factory down");
-        assert_eq!(words(Connection::Live, FactoryLink::Unknown), "Factory connecting");
-        assert_eq!(words(Connection::Live, FactoryLink::TooOld("x".into())), "Factory too old");
-        assert_eq!(words(Connection::Live, FactoryLink::Refused("x".into())), "Factory refused");
-        assert_eq!(words(Connection::Syncing, FactoryLink::Stopped), "Syncing");
-        assert_eq!(words(Connection::Offline, FactoryLink::Running), "Offline");
-        let tone = |f| connection_chip(Connection::Live, &status, &f).0;
-        assert_ne!(tone(FactoryLink::Running), tone(FactoryLink::Stopped));
-    }
-
-    #[test]
-    fn the_header_chip_follows_the_factory_link() {
-        let mut app = app();
-        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
-        app.world_mut().resource_mut::<FactoryStatus>().link = FactoryLink::Running;
-        settle(&mut app);
-        let before = header(&mut app);
-        let words = |app: &mut App| {
-            let world = app.world_mut();
-            world.query::<(&Text, &ChildOf)>().iter(world).map(|(t, _)| t.0.clone()).collect::<Vec<_>>()
-        };
-        assert!(words(&mut app).contains(&"Live".to_string()));
-        app.world_mut().resource_mut::<FactoryStatus>().link = FactoryLink::Stopped;
-        settle(&mut app);
-        let now = words(&mut app);
-        assert!(now.contains(&"Factory down".to_string()) && !now.contains(&"Live".to_string()), "{now:?}");
-        assert_eq!(header(&mut app), before, "the chip is edited in place");
     }
 
     #[test]
