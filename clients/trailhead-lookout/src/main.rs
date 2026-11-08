@@ -1,4 +1,3 @@
-use bevy::feathers::FeathersPlugins;
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -28,14 +27,12 @@ fn main() {
     let token = std::env::var("LOOKOUT_TOKEN").ok().filter(|t| !t.is_empty());
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(primary_window()), ..default() }))
-        .add_plugins(FeathersPlugins)
         // Update on input, and often enough for the net thread's news to show, instead of redrawing every frame.
         .insert_resource(WinitSettings {
             focused_mode: UpdateMode::reactive(Duration::from_millis(100)),
             unfocused_mode: UpdateMode::reactive_low_power(Duration::from_secs(1)),
         })
-        // Without a theme every feathers color is missing, and feathers draws missing ones in fuchsia.
-        .insert_resource(trailhead_lookout::widgets::theme())
+        .add_plugins(trailhead_lookout::widgets::ThemePlugin(trailhead_lookout::widgets::theme()))
         .add_plugins(trailhead_lookout::widgets::UiPlugin)
         .add_plugins(ConnectionPlugin::new(config, target))
         .add_plugins((

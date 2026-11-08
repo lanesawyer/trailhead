@@ -6,7 +6,6 @@
 //! The modal is spawned once, when it opens, and its texts are set in place as what they show changes.
 
 use bevy::clipboard::Clipboard;
-use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ControlOrientation, SelectedTab, ValueChange};
 use trailhead_model::Task;
@@ -18,8 +17,8 @@ use crate::logs::{LogsUiPlugin, logs_page};
 use crate::mirror::{Mirrored, rows};
 use crate::net::NetCommand;
 use crate::widgets::{
-    Icon, Modal, ModalRoot, ModalSlots, button, field, open_modal, row, set_text, size, space, tab, tab_strip, text,
-    tool_button,
+    ButtonKind, Icon, Modal, ModalRoot, ModalSlots, button, field, open_modal, row, set_text, size, space, tab,
+    tab_strip, text, tool_button,
 };
 
 /// A page of the modal, in tab order.
@@ -177,11 +176,11 @@ fn connection_page(commands: &mut Commands, page: Entity) {
         commands.spawn_scene(bsn! { @row() Node { align_items: AlignItems::FlexEnd } }).insert(ChildOf(page)).id();
     commands.spawn_scene(value(Value::Endpoint, "This app's endpoint id")).insert(ChildOf(line));
     commands
-        .spawn_scene(tool_button(Icon::Copy, "Copy the endpoint id", ButtonVariant::Plain))
+        .spawn_scene(tool_button(Icon::Copy, "Copy the endpoint id", ButtonKind::Plain))
         .insert((SettingsAct::CopyEndpoint, ChildOf(line)));
     commands.spawn_scene(value(Value::Identity, "Signed in as")).insert(ChildOf(page));
     commands
-        .spawn_scene(button("Disconnect", None, ButtonVariant::Normal))
+        .spawn_scene(button("Disconnect", None, ButtonKind::Normal))
         .insert((SettingsAct::Disconnect, ChildOf(page)));
 }
 

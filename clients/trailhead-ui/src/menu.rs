@@ -6,15 +6,13 @@
 //! ending at the button's right edge when there's no room to the right) and closes it on Escape or a click outside.
 
 use bevy::feathers::controls::{FeathersMenu, FeathersMenuItem, FeathersMenuPopup, FeathersMenuToolButton};
-use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
-use bevy::feathers::tokens;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::prelude::*;
 use bevy::ui_widgets::popover::{Popover, PopoverAlign, PopoverPlacement, PopoverSide};
 use bevy::ui_widgets::{MenuAction, MenuEvent};
 
 use super::buttons::toned_text;
-use super::{Hint, Icon, button_icon, icon_text, layer, space, token};
+use super::{Hint, Icon, TextTone, button_icon, icon_text, layer, space, token};
 
 /// Width of a menu popup.
 pub const MENU_WIDTH: f32 = 280.0;
@@ -47,10 +45,10 @@ pub fn icon_menu(commands: &mut Commands, parent: Entity, icon: Icon, hint: impl
 /// Pressing it sends `Activate` from it and closes the menu.
 pub fn menu_item(caption: impl Into<String>, icon: Option<Icon>, danger: bool) -> impl Scene {
     let caption = caption.into();
-    let tone: ThemeToken = if danger { token::DANGER } else { tokens::BUTTON_TEXT };
+    let tone = if danger { token::DANGER } else { token::BUTTON_TEXT };
     let inside: Box<dyn SceneList> = match icon {
         Some(icon) => Box::new(bsn_list! {
-            @icon_text(icon) ThemeTextColor({ tone.clone() }) -- @toned_text(caption, tone)
+            @icon_text(icon) TextTone({ tone.clone() }) -- @toned_text(caption, tone)
         }),
         None => Box::new(bsn_list! { @toned_text(caption, tone) }),
     };

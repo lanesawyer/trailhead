@@ -5,13 +5,14 @@
 //! [`BoardCard`]s, drawn and opened in the inspector as on the board. [`ProjectUiPlugin`] draws the page while in
 //! [`View::Project`].
 
-use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
 
 use crate::board::{BoardCard, Card, PAGE, Sources, View, grid, next_expiry};
-use crate::widgets::{self, COLUMN_WIDTH, Keyed, ScrollDown, button, set_text, size, space, text, text_dim};
+use crate::widgets::{
+    self, ButtonKind, COLUMN_WIDTH, Keyed, ScrollDown, button, set_text, size, space, text, text_dim,
+};
 
 /// Shows the page of the project with this key (`TRAIL`).
 #[derive(Event, Debug, Clone, PartialEq, Eq)]
@@ -272,7 +273,7 @@ fn dress_slots(
     for (entity, ProjectMore(next), changed) in &more {
         let label = format!("Show {next} more");
         if changed.is_added() {
-            commands.entity(entity).queue_apply_scene(button(label, None, ButtonVariant::Normal));
+            commands.entity(entity).queue_apply_scene(button(label, None, ButtonKind::Normal));
         } else if changed.is_changed() {
             for e in children.iter_descendants(entity) {
                 if let Ok(text) = texts.get_mut(e) {
