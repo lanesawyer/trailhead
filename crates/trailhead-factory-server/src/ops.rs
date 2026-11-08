@@ -2,6 +2,7 @@
 //! factory file and open no iroh endpoint, so they work beside the server's control plane.  They read tasks through the
 //! server's API, so only the server opens the database.
 
+use crate::error::{Error, Result};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,10 +34,9 @@ pub struct LogsOpts {
     opts: Opts,
 }
 
-pub async fn status(opts: &Opts) -> Result<(), String> {
-    let paths =
-        trailhead_client::paths::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let (opts, fnox) = resolve_opts(opts, &paths, &std::env::current_dir().map_err(|e| e.to_string())?)?;
+pub async fn status(opts: &Opts) -> Result<()> {
+    let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
+    let (opts, fnox) = resolve_opts(opts, &paths, &std::env::current_dir().map_err(Error::backend)?)?;
     let (_, _, config) = load_config(&opts)?;
     let tracker = api_tracker(&opts, &paths)?;
 
@@ -88,15 +88,14 @@ pub async fn status(opts: &Opts) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
-    let paths =
-        trailhead_client::paths::Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let (opts, fnox) = resolve_opts(&logs.opts, &paths, &std::env::current_dir().map_err(|e| e.to_string())?)?;
+pub async fn logs(logs: &LogsOpts) -> Result<()> {
+    let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
+    let (opts, fnox) = resolve_opts(&logs.opts, &paths, &std::env::current_dir().map_err(Error::backend)?)?;
     let (_, _, config) = load_config(&opts)?;
 
     let tracker = api_tracker(&opts, &paths)?;
     let key = TaskKey(logs.task.to_ascii_uppercase());
-    let task = tracker.show(&key).await.map_err(|e| format!("{}: {}", key.0, reach(e)))?;
+    let task = tracker.show(&key).await.map_err(|e| Error::context(key.0.clone(), reach(e)))?;
 
     // With a control plane to ask, `--follow` follows its stream of the task's events rather than polling the log.
     let streaming = match (logs.follow, server(&opts, &paths)) {
@@ -115,7 +114,8 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
 
     let mut printed = String::new();
     loop {
-        let log = compute.logs(&sandbox.id, DAEMON_PROGRAM).await.map_err(|e| format!("{}: {e}", sandbox.name))?;
+        let log =
+            compute.logs(&sandbox.id, DAEMON_PROGRAM).await.map_err(|e| Error::context(sandbox.name.clone(), e))?;
         print!("{}", new_output(&printed, &log));
         printed = log;
         if !logs.follow {
@@ -133,22 +133,14 @@ pub async fn logs(logs: &LogsOpts) -> Result<(), String> {
 }
 
 /// A tracker over the local server's API, with the user's token.
-pub(crate) fn api_tracker(opts: &Opts, paths: &trailhead_client::paths::Paths) -> Result<RestTracker, String> {
-    let (token, _) = paths
-        .creds()
-        .read(trailhead_client::creds::Cred::User)
-        .ok_or("no user token yet; start the server with `trailhead server start`")?;
+pub(crate) fn api_tracker(opts: &Opts, paths: &trailhead_client::paths::Paths) -> Result<RestTracker> {
+    let (token, _) = paths.creds().read(trailhead_client::creds::Cred::User).ok_or(Error::NoUserToken)?;
     Ok(RestTracker::new(format!("http://{}", opts.server), Credential { agent: "user".into(), token }))
 }
 
-/// `e` as text, with a hint when the server didn't answer.
-pub(crate) fn reach(e: trailhead_factory::Error) -> String {
-    let text = e.to_string();
-    if text.contains("error sending request") {
-        format!("{text}; is the server running? (`trailhead server start`)")
-    } else {
-        text
-    }
+/// `e`, with a hint when the server didn't answer.
+pub(crate) fn reach(e: trailhead_factory::Error) -> Error {
+    if e.to_string().contains("error sending request") { Error::ServerDown(e.into()) } else { Error::backend(e) }
 }
 
 /// The local server's `/v1/factory`, when there is a user token to ask it with.
@@ -158,7 +150,7 @@ fn server(opts: &Opts, paths: &trailhead_client::paths::Paths) -> Option<surface
 }
 
 /// Prints the control plane's events about `key` as they happen, until Ctrl-C or it stops.
-async fn stream_events(remote: &surface::Remote, key: &TaskKey) -> Result<(), String> {
+async fn stream_events(remote: &surface::Remote, key: &TaskKey) -> Result<()> {
     surface::follow(remote, Some(&key.0), |e| println!("{}", e.event.event.line()), async {
         let _ = tokio::signal::ctrl_c().await;
     })
@@ -172,7 +164,7 @@ async fn log_source(
     fnox: &crate::fnox::Fnox,
     paths: &trailhead_client::paths::Paths,
     task: &Task,
-) -> Result<(Arc<dyn trailhead_factory::Compute>, Sandbox), String> {
+) -> Result<(Arc<dyn trailhead_factory::Compute>, Sandbox)> {
     let computes = computes(config, opts, fnox, paths, Default::default(), true)?;
     let wanted =
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
@@ -184,10 +176,10 @@ async fn log_source(
         } else {
             format!("; target(s) {} couldn't be reached, so it may be there", unreachable.join(", "))
         };
-        format!(
+        Error::NoSandbox(format!(
             "{} has no sandbox right now (it isn't running, or its sandbox was released or destroyed){unknown}",
             task.key.0
-        )
+        ))
     })?;
     let compute = computes[found.iter().find(|(_, s)| s.name == sandbox.name).map_or(0, |(i, _)| *i)].0.clone();
     Ok((compute, sandbox.clone()))
@@ -348,23 +340,23 @@ fn task_line(t: &Task) -> String {
 
 /// The sandboxes matching `labels` on every target, each with the index of the target it is on, and the names of the
 /// targets that couldn't be reached. An error only when none could.
-async fn list_everywhere(
-    computes: &[crate::Built],
-    labels: &Labels,
-) -> Result<(Vec<(usize, Sandbox)>, Vec<String>), String> {
+async fn list_everywhere(computes: &[crate::Built], labels: &Labels) -> Result<(Vec<(usize, Sandbox)>, Vec<String>)> {
     let mut found = Vec::new();
     let mut unreachable = Vec::new();
-    let mut last = String::new();
+    let mut last = None;
     for (i, (compute, target)) in computes.iter().enumerate() {
         match compute.list(labels).await {
             Ok(listed) => found.extend(listed.into_iter().map(|s| (i, s))),
             Err(e) => {
-                last = format!("listing sandboxes on {}: {e}", target.name);
+                last = Some(Error::context(format!("listing sandboxes on {}", target.name), e));
                 unreachable.push(target.name.clone());
             }
         }
     }
-    if unreachable.len() == computes.len() { Err(last) } else { Ok((found, unreachable)) }
+    match last {
+        Some(last) if unreachable.len() == computes.len() => Err(last),
+        _ => Ok((found, unreachable)),
+    }
 }
 
 #[cfg(test)]
@@ -537,9 +529,9 @@ mod tests {
     #[test]
     fn an_unanswered_server_gets_a_hint() {
         let down = trailhead_factory::Error::Other("trailhead: error sending request for url (http://x)".into());
-        assert!(reach(down).contains("is the server running?"));
+        assert!(reach(down).to_string().contains("is the server running?"));
         let refused = trailhead_factory::Error::NotFound("trailhead 404 not_found: no such task".into());
-        assert!(!reach(refused).contains("is the server running?"));
+        assert!(!reach(refused).to_string().contains("is the server running?"));
     }
     #[test]
     fn an_empty_factory_says_so() {
