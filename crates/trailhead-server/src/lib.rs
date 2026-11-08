@@ -104,6 +104,13 @@ pub fn modified_ms(path: &Path) -> Option<u64> {
     Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
 }
 
+/// `app` with the factory's status routes under `/v1/factory`. Their event stream carries every run's tool calls,
+/// which can name commands and paths, so only the user's token reads them, not an agent's (a sandbox's included).
+#[cfg(feature = "factory")]
+pub fn with_factory_routes(app: Router, state: Arc<AppState>, api: Router) -> Router {
+    app.nest("/v1/factory", api.layer(axum::middleware::from_fn_with_state(state, auth::human_only)))
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     let mcp = Router::new()
         .nest_service("/mcp", mcp::service(state.clone()))
@@ -237,10 +244,9 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
     #[cfg(feature = "factory")]
     let (draining, signal_state) = (factory.clone(), state.clone());
     let app = router(state.clone());
-    // The factory's status stream carries tool calls, which can name commands and paths: any valid token, as MCP.
     #[cfg(feature = "factory")]
     let app = match factory_api {
-        Some(api) => app.nest("/v1/factory", api.layer(axum::middleware::from_fn_with_state(state.clone(), mcp::auth))),
+        Some(api) => with_factory_routes(app, state.clone(), api),
         None => app,
     };
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {

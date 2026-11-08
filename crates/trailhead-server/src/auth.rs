@@ -50,6 +50,22 @@ impl FromRequestParts<Arc<AppState>> for Auth {
     }
 }
 
+/// Lets only a human's token through: the factory's status routes, whose event stream names commands and paths from
+/// every run. Agent tokens, a sandbox's sub-agents included (they reach the server through the API tunnel), get 403.
+#[cfg(feature = "factory")]
+pub async fn human_only(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    use axum::response::IntoResponse;
+    match authenticate(&state, req.headers()).await {
+        Ok((ctx, _)) if ctx.is_human() => next.run(req).await,
+        Ok(_) => ApiError(Error::Forbidden("only the user can read the factory's status".into())).into_response(),
+        Err(e) => ApiError(e).into_response(),
+    }
+}
+
 pub fn require_human(ctx: &Ctx) -> Result<(), ApiError> {
     if ctx.is_human() { Ok(()) } else { Err(ApiError(Error::Forbidden("only a human can do this".into()))) }
 }

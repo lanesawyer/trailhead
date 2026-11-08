@@ -3,8 +3,9 @@
 //! and, for the standalone binary, a loopback port ([`serve`]). `status` and `logs --follow` read the server's routes,
 //! or the standalone's port, whose address is in a small file removed on a clean stop.
 //!
-//! The stream carries tool calls, which can name commands and paths, so both need a bearer token: the server's own
-//! for its routes, and for the port one that only the user who runs the control plane can read (the file is `0600`).
+//! The stream carries tool calls, which can name commands and paths, so only the user reads it: the server mounts its
+//! routes behind the user's token (agent tokens, a sandbox's included, are refused), and the port takes a token only
+//! the user who runs the control plane can read (the file is `0600`).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
