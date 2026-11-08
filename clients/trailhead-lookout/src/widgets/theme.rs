@@ -18,6 +18,8 @@ pub mod token {
     pub const BOARD_BG: Token = Token::new("lookout.board.bg");
     /// A task card.
     pub const CARD_BG: Token = Token::new("lookout.card.bg");
+    /// A task card under the pointer.
+    pub const CARD_BG_HOVER: Token = Token::new("lookout.card.bg.hover");
 
     /// One tone per priority, the same wherever a priority shows: P1 red, P2 orange, P3 blue, P4 gray.
     pub const PRIORITY_1: Token = Token::new("lookout.priority.1");
@@ -105,6 +107,7 @@ pub fn theme() -> Theme {
     let mut theme = Theme::new();
     theme.paint(&token::BOARD_BG, palette::GRAY_0);
     theme.paint(&token::CARD_BG, palette::GRAY_2);
+    theme.paint(&token::CARD_BG_HOVER, palette::GRAY_3);
 
     // The most urgent priority is the kit's danger red, read from the theme so the two can't drift apart.
     let danger = theme.color(&token::DANGER);
@@ -147,6 +150,7 @@ mod tests {
             token::BOARD_BG,
             token::PANEL_BG,
             token::CARD_BG,
+            token::CARD_BG_HOVER,
             token::DIVIDER,
             token::BADGE_BG,
             token::HINT_BG,
@@ -240,6 +244,15 @@ mod tests {
                     "a plain button's hover on {surface} is {gap:.3} away, too close to see"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_cards_hover_shows_on_the_card_in_either_theme() {
+        for theme in [theme(), theme().light()] {
+            let lightness = |t: &Token| Oklcha::from(theme.color(t)).lightness;
+            let gap = (lightness(&token::CARD_BG_HOVER) - lightness(&token::CARD_BG)).abs();
+            assert!(gap >= HOVER_CONTRAST, "a card's hover is {gap:.3} away from the card, too close to see");
         }
     }
 
