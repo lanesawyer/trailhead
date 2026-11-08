@@ -520,8 +520,16 @@ impl Factory {
                 }
                 Err(e) => {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; reconcile will requeue it");
-                    // Not parked, so the count mustn't start again: the next failure tries to park once more.
-                    let keep = RunUpdate { infra_failures: Some(failures), ..RunUpdate::default() };
+                    // Not parked, so the count mustn't start again (the next failure tries to park once more), and
+                    // the task needs its backoff, or reconcile requeues it to retry at once.
+                    if waiting {
+                        self.set_back_waiting(&task.key, failures - 1);
+                    } else {
+                        self.set_back(&task.key, failures);
+                    }
+                    // A resource wait isn't an infrastructure failure, so it doesn't add to the count.
+                    let kept = if waiting { prior.unwrap_or(0) } else { failures };
+                    let keep = RunUpdate { infra_failures: Some(kept), ..RunUpdate::default() };
                     if let Err(e) = sub.report(&task.key, keep).await {
                         tracing::warn!(task = %task.key.0, error = %e, "couldn't keep the infrastructure failure count");
                     }
