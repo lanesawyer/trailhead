@@ -61,6 +61,9 @@ struct State {
     /// Publishes still to fail with a transient error, and how many were attempted.
     flaky_publishes: usize,
     publish_attempts: usize,
+    /// `open_pr` and `comment` calls still to fail with a transient error.
+    flaky_open_prs: usize,
+    flaky_comments: usize,
     refuse_merge: Option<String>,
     rate_limit: Option<RateLimit>,
 }
@@ -102,6 +105,16 @@ impl FakeCodeHost {
     /// Makes the next `times` publishes fail with a transient error (`Error::Other`), like a GitHub 500.
     pub fn flaky_publish(&self, times: usize) {
         self.state.lock().unwrap().flaky_publishes = times;
+    }
+
+    /// Makes the next `times` `open_pr` calls fail with a transient error, like a GitHub 502.
+    pub fn flaky_open_pr(&self, times: usize) {
+        self.state.lock().unwrap().flaky_open_prs = times;
+    }
+
+    /// Makes the next `times` `comment` calls fail with a transient error.
+    pub fn flaky_comment(&self, times: usize) {
+        self.state.lock().unwrap().flaky_comments = times;
     }
 
     /// How many times `publish` was called.
@@ -294,6 +307,10 @@ impl CodeHost for FakeCodeHost {
     async fn open_pr(&self, repo: &Repo, pr: NewPr) -> Result<PrRef> {
         self.count("open_pr");
         let mut s = self.state.lock().unwrap();
+        if s.flaky_open_prs > 0 {
+            s.flaky_open_prs -= 1;
+            return Err(Error::Other("github 502 Bad Gateway on POST /repos/o/r/pulls: \"\"".into()));
+        }
         if !s.branches.contains_key(&(repo.slug(), pr.branch.clone())) {
             return Err(Error::NotFound(format!("branch {}", pr.branch)));
         }
@@ -340,6 +357,13 @@ impl CodeHost for FakeCodeHost {
 
     async fn comment(&self, pr: &PrRef, body: &str) -> Result<u64> {
         self.count("comment");
+        {
+            let mut s = self.state.lock().unwrap();
+            if s.flaky_comments > 0 {
+                s.flaky_comments -= 1;
+                return Err(Error::Other("github 502 Bad Gateway on POST /repos/o/r/issues/1/comments: \"\"".into()));
+            }
+        }
         self.find(pr, |p, _| {
             p.comments.push(body.to_string());
             p.comments.len() as u64
