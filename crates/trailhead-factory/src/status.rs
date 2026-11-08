@@ -1,6 +1,6 @@
 //! What the running control plane knows that neither Trailhead nor the compute labels do: the shapes of the factory
 //! status snapshot and event stream (`docs/factory/ui.md#factory-status`). The control plane keeps them in memory and
-//! serves them; `trailhead-factory status` and `logs --follow` and, later, the UI read them. None of it is stored.
+//! serves them; `trailhead factory status`, `logs --follow` and Lookout read them. None of it is stored.
 
 use serde::{Deserialize, Serialize};
 

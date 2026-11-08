@@ -16,7 +16,7 @@ The factory turns Trailhead tasks into agent runs inside locked-down Fly.io Spri
 
 Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into it. The task engine becomes one part of the factory, and the todo-app use case becomes a separate client (working names `trailhead-todo` or `trailhead-ticklist`).
 
-- **One process for coordination.** With the factory feature on, the Trailhead server is the control plane. The orchestrator follows the events table in-process. Today the control plane is still a separate `trailhead-factory` process beside the server, sharing its database (TRAIL-164).
+- **One process for coordination.** With the factory feature on, the Trailhead server is the control plane. The orchestrator follows the events table in-process, woken by the store's commit signal (TRAIL-164).
 - **One tunnel.** Trailhead already reaches other machines through an iroh tunnel to its loopback port (`dumbpipe`). Sandboxes use the same tunnel, and the factory's daemon protocol rides on it as server routes alongside REST and MCP.
 - **Keep the `Tracker` trait.** In-process inside the server, REST from the daemon. It keeps the engine/factory boundary clean, makes test fakes possible, and leaves other trackers open.
 - **Engine still usable alone.** Factory crates sit behind a Cargo feature, so `cargo install trailhead` without it stays a small task engine for existing users (OpenClaw, the maintainer's reader app). Today the factory is a separate binary built from this repo, so `cargo install trailhead` is the engine alone either way (TRAIL-116).
@@ -36,7 +36,7 @@ flowchart LR
     subgraph trailhead["Task engine"]
         server["Server"] --> core["Core"] --> db[("SQLite")]
     end
-    cp["Control plane<br/>trailhead-factory"] --> core
+    cp["Control plane<br/>in trailhead serve"] --> core
     cp -->|"Compute"| compute["Sandbox provider<br/>Sprites or Docker"]
     cp <-->|"iroh"| daemon
     cp -->|"CodeHost"| host["GitHub"]

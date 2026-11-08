@@ -159,7 +159,7 @@ const BAD_REQUEST: u32 = 2;
 const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The endpoint ids allowed to use `trailhead/ui/0`, one per line in a file. It is read on every connection and
-/// stream, and an open connection is rechecked every second, so `trailhead-factory allow` and `disallow` take
+/// stream, and an open connection is rechecked every second, so `trailhead factory allow` and `disallow` take
 /// effect without restarting the control plane.
 #[derive(Debug, Clone)]
 pub struct UiAllowlist {

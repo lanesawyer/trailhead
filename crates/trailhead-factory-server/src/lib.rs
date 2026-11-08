@@ -1,9 +1,9 @@
-//! The factory's control plane, as a library (`docs/factory/server-control-plane.md`): the setup the
-//! `trailhead-factory` binary runs today and the Trailhead server will run behind its `factory` feature.
+//! The factory's control plane, as a library (`docs/factory/server-control-plane.md`): the Trailhead server runs it
+//! behind its `factory` feature ([`start`]), and `trailhead factory <cmd>` ([`Command`]) checks, inspects and runs it.
 //!
-//! The factory's settings are the `[factory]` table of each repo's `.trailhead.toml`: every `--repo <dir>`, else the
-//! `repos` in `[factory]` of the user config, else the nearest one at or above the working directory, or `--config
-//! <path>`. Repos share one process, so their `[factory.compute]` and `[factory.daemon]` must match.
+//! The factory's settings are the `[factory]` table of each repo's `.trailhead.toml`. The server runs the `repos` in
+//! `[factory]` of the user config; `trailhead factory run` and `check` take every `--repo <dir>`, else those, else the
+//! nearest one at or above the working directory, or `--config <path>`. Repos share one process, so their `[factory.compute]` and `[factory.daemon]` must match.
 //!
 //! The daemon uploaded to sandboxes is `--daemon <path>`, else a `trailhead-daemon` next to this binary or on PATH,
 //! else the release asset matching this binary's version.
@@ -792,7 +792,7 @@ async fn run_loops(
         true => None,
         false => {
             let serving = surface::serve(&paths.data_dir.join("factory"), feed.clone()).await?;
-            tracing::info!(addr = %serving.addr, "serving factory status for `trailhead-factory status` and `logs --follow`");
+            tracing::info!(addr = %serving.addr, "serving factory status for `trailhead factory status` and `logs --follow`");
             Some(serving)
         }
     };
@@ -1022,7 +1022,7 @@ fn server_subscriber(
         .with(stdout.with_filter(filter.and(dynamic_filter_fn(server))))
 }
 
-/// The factory's commands, as `trailhead factory <cmd>` and the standalone `trailhead-factory <cmd>` take them.
+/// The factory's commands, as `trailhead factory <cmd>` takes them.
 #[derive(clap::Subcommand)]
 pub enum Command {
     /// Set everything up and report, without running anything.
@@ -1060,7 +1060,7 @@ pub async fn command(cmd: Command) -> Result<(), String> {
     }
 }
 
-/// Saves a secret for `run` in the OS keyring (`trailhead-factory login ...`).
+/// Saves a secret for `run` in the OS keyring (`trailhead factory login ...`).
 pub async fn login(cmd: login::Login) -> Result<(), String> {
     let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
     login::run(cmd, &paths.creds()).await
@@ -1074,7 +1074,7 @@ pub fn open_log_file() -> Option<logfile::Rotating> {
         Ok(file) => Some(file),
         Err(e) => {
             eprintln!(
-                "trailhead-factory: can't open the log file {}: {e}; logging to the terminal only",
+                "trailhead: can't open the factory's log file {}: {e}; logging to the terminal only",
                 path.display()
             );
             None

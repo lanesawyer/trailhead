@@ -510,7 +510,10 @@ async fn a_factory_older_than_lookout_says_so() {
     allowed_and_live(&mut app, &rig).await;
     until(&mut app, "factory too old", |a| matches!(link(a), FactoryLink::TooOld(_))).await;
     let label = app.world().resource::<FactoryStatus>().label();
-    assert!(label.contains("older than this Lookout") && label.contains("reinstall trailhead-factory"), "{label}");
+    assert!(
+        label.contains("older than this Lookout") && label.contains("reinstall trailhead and restart its server"),
+        "{label}"
+    );
     assert!(label.contains("status") && label.contains("old"), "the request and the build are named: {label}");
     // A later retry doesn't turn it into "factory stopped".
     for _ in 0..20 {

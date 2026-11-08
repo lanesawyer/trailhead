@@ -41,3 +41,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[test]]
+name = "live_docker"
+required-features = ["docker"]

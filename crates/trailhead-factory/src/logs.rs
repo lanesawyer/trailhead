@@ -1,5 +1,5 @@
 //! A line of the control plane's log as Lookout reads it over `trailhead/ui/0` (`docs/factory/ui.md#settings`): the same
-//! events `trailhead-factory run` writes to `factory.log`, split into fields instead of formatted.
+//! events the control plane writes to `factory.log`, split into fields instead of formatted.
 
 use serde::{Deserialize, Serialize};
 

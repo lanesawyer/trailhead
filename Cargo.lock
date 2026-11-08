@@ -8184,20 +8184,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trailhead-factory-host"
-version = "0.1.0"
-dependencies = [
- "clap",
- "reqwest",
- "serde_json",
- "tempfile",
- "tokio",
- "trailhead-compute-docker",
- "trailhead-factory",
- "trailhead-factory-server",
-]
-
-[[package]]
 name = "trailhead-factory-server"
 version = "0.1.0"
 dependencies = [

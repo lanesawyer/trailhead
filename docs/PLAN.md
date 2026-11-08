@@ -26,7 +26,7 @@ The long-term ambition is to replace other task tools, not to sync with them.
 4. **Agents pay for every token.** Responses are compact by default, with full detail on request.
 5. **One server, reachable anywhere.** An instance is one server and one SQLite file, the single authority for its data. It runs on a Linux box, wherever is convenient (a desktop PC, a home box, a VPS), and agents on other machines reach it over a tunnel. Trailhead assumes it is online and connected; there are no replicas and nothing syncs between instances.
 6. **Trailhead is the source of truth.** Other tools can be notified or imported from, never synced with.
-7. **The factory coordinates; sandboxes act.** The control plane (today a separate `trailhead-factory` process beside the server, sharing its database; moving inside the server, one process, per the decided plan in `docs/factory/server-control-plane.md`, TRAIL-164) orchestrates, enforces budgets and decides review gates, and holds no agent credentials. Sandboxes are untrusted and disposable, reach only declared egress, and call model providers and the code host through injected credentials.
+7. **The factory coordinates; sandboxes act.** The control plane (inside the Trailhead server, one process, since TRAIL-164; `docs/factory/server-control-plane.md`) orchestrates, enforces budgets and decides review gates, and holds no agent credentials. Sandboxes are untrusted and disposable, reach only declared egress, and call model providers and the code host through injected credentials.
 8. **Humans review by risk, not by habit.** Per-repo policy decides when a human is required; loosening it always needs one.
 9. **Pluggable where vendors differ.** Compute, agent harness, model provider, tracker and code host are traits with in-memory fakes, so the whole lifecycle runs in CI with no network or spend.
 10. **The engine works without the factory.** The factory is a default-on `factory` feature of the `trailhead` CLI and server (decided 2026-11-07, TRAIL-164; built in TRAIL-1073): a build with it but no `[factory] repos` runs no factory code, and `--no-default-features` builds the engine with no factory crates at all. `trailhead-core` and `trailhead-client` never depend on the factory crates.
@@ -37,7 +37,7 @@ Everything is **AGPL-3.0**: the server, CLI, MCP server, SDKs and plugins. Clien
 
 ## Architecture
 
-One Rust workspace around a core crate that every interface shares. It builds three binaries: `trailhead` (the CLI, which also runs the server), `trailhead-factory` (the factory's control plane) and `trailhead-daemon` (uploaded into each sandbox).
+One Rust workspace around a core crate that every interface shares. It builds two binaries: `trailhead` (the CLI, which also runs the server and, with the default `factory` feature, the factory's control plane) and `trailhead-daemon` (uploaded into each sandbox).
 
 ```
  Your app        Agents        OpenClaw         trailhead CLI
@@ -48,7 +48,7 @@ One Rust workspace around a core crate that every interface shares. It builds th
               trailhead-server (axum)
       REST /v1 · MCP (rmcp) · SSE events · outbound webhooks
                             |                         \
-                    trailhead-core  <-----------  trailhead-factory (control plane)
+                    trailhead-core  <-----------  trailhead-factory-server (control plane, in the server)
    domain rules · claims/leases · ready queue        |  run loop · pool · budgets · reconcile
    event log, undo, outbox                           |  iroh: daemon protocol + API tunnel
                             |                        v
@@ -56,7 +56,7 @@ One Rust workspace around a core crate that every interface shares. It builds th
                                                (Claude Code, checks, publish to GitHub)
 ```
 
-The control plane shares the server's database through `trailhead-core` and forwards the daemons' API tunnel to the server's loopback port, so sandboxes reach Trailhead as their own sub-agents without the server being exposed. It runs as a separate process for now; moving it into the server is TRAIL-164.
+The control plane runs inside the server on its `Store` and forwards the daemons' API tunnel to the server's loopback port, so sandboxes reach Trailhead as their own sub-agents without the server being exposed (TRAIL-164).
 
 Remote machines reach the server through a tunnel (iroh via `dumbpipe`, Tailscale, SSH), never by binding it to a public interface. The CLI is a REST client of the server wherever it runs. Pointed at its own machine's server, it starts `trailhead serve` in the background if none is running.
 
@@ -68,8 +68,7 @@ Remote machines reach the server through a tunnel (iroh via `dumbpipe`, Tailscal
 | `trailhead` (CLI) | REST client for people and shell-capable agents; auto-starts a local server | `clap`, `reqwest` |
 | `trailhead-factory` | Factory domain types, the five plugin traits, the daemon contract, the per-repo factory file | `async-trait`, `toml` |
 | `trailhead-control` | Control plane: run loop, sandbox pool, budget metering, review dispatch, reconcile; in-process `Tracker` over `trailhead-core` | `tokio` |
-| `trailhead-factory-server` | The control plane's setup as a library: credentials, keys, iroh endpoint, status surface, run loops | `iroh` |
-| `trailhead-factory-host` | The `trailhead-factory` binary, a thin command line over `trailhead-factory-server` | `clap` |
+| `trailhead-factory-server` | The control plane as the server runs it: credentials, keys, iroh endpoint, status surface and routes, run loops, and the `trailhead factory` commands | `iroh`, `clap` |
 | `trailhead-daemon` | The in-sandbox daemon and its side of the iroh transport | `iroh` |
 | `trailhead-wire` | The iroh protocols the control plane, the daemon and Lookout share: framing, keys, `RemoteDaemon`, the API tunnel, `trailhead/ui/0` | `iroh` |
 | `trailhead-plugins` | The harnesses and model providers a build carries, by the names config gives them | |
@@ -265,7 +264,7 @@ Decisions made while building, including where the build refines or departs from
 - **Compute targets (Phase 5, TRAIL-504, 2026-10-31).** A factory can run on several computes at once: local Docker first, Sprites as paid overflow under a daily spend cap, workers and reviewers placed separately. Runs don't move between targets; local work drains, or is frozen or stopped in place. Design in [factory/targets.md](factory/targets.md).
 - **One control plane, many repos (Phase 5, TRAIL-167, 2026-10-31).** One `trailhead-factory` per machine runs every repo, a run loop each, sharing the store, iroh endpoint, compute and a `Host` handle. Per-repo settings stay in each repo's `.trailhead.toml`; host-wide settings (the cross-repo `max_sandboxes`, `pause_at`, the `repos` list) live in `[factory]` of the user `config.toml`, since the subscription's usage and the machine's capacity are shared. Repos that would collide (same slug, lowercase name, or a shared (project, queue entry); see Queue lists below) or differ in compute or daemon settings are refused at start. This supersedes the note under One repo file that `pause_at` stays in the repo file. **The user config's `[factory]` table (TRAIL-516, 2026-11-01):** `<config dir>/config.toml` holds `url` and a `[factory]` table with `max_sandboxes`, `pause_at` and `repos`. The CLI keeps the table unparsed (so it stays free of the factory crates, principle 10), and `trailhead_factory::HostConfig` checks its keys, so an unknown key is an error there. The repo-level `[factory.usage] pause_at` is deprecated for one release, then removed. Once TRAIL-116 lands, the table can become a typed struct behind the CLI's `factory` feature. **Queue lists (TRAIL-519, 2026-11-01):** `[factory.repo] queue` is a list of task keys, and the collision rule above reads as (project, queue entry): two repos in one project collide when their lists share any entry, not only when the lists are equal. **Decided (TRAIL-555):** a queue entry reaches only its direct subtasks. A nested parent is listed as its own entry, and there is no depth limit, so a grandchild is reached by listing its own parent, never by listing an ancestor. A repo with no queue still takes every ready task in its project, so it collides with any other repo in that project. With no queue the grade filter is skipped on purpose: the grade marks what the factory may pick up under a queue task, and a repo that takes the whole project has no such boundary to mark, so ungraded tasks are taken too.
 
-- **The control plane inside the server (Phase 5, TRAIL-164, 2026-11-07).** One process: `trailhead serve` runs the control plane when the `factory` feature (default on) is built in and `[factory] repos` lists a repo. The moved host code is its own crate, `trailhead-factory-server`, reached only through that feature. Configuration errors stop the server; outside failures (network, keyring) retry while the API keeps serving; `trailhead factory disable` works with no server as the escape hatch. A reinstall doesn't restart a server with runs in flight, and later restarts it once they finish. `server.log` and `factory.log` stay separate. Iroh is meant to become the only way to reach a server remotely, so its endpoint becomes the server's, not the factory's (TRAIL-71). Publishing the factory crates is deferred. The full plan, with migration steps, is `docs/factory/server-control-plane.md`.
+- **The control plane inside the server (Phase 5, TRAIL-164, 2026-11-07; built through TRAIL-1076, and `trailhead-factory-host` deleted).** One process: `trailhead serve` runs the control plane when the `factory` feature (default on) is built in and `[factory] repos` lists a repo. The moved host code is its own crate, `trailhead-factory-server`, reached only through that feature. Configuration errors stop the server; outside failures (network, keyring) retry while the API keeps serving; `trailhead factory disable` works with no server as the escape hatch. A reinstall doesn't restart a server with runs in flight, and later restarts it once they finish. `server.log` and `factory.log` stay separate. Iroh is meant to become the only way to reach a server remotely, so its endpoint becomes the server's, not the factory's (TRAIL-71). Publishing the factory crates is deferred. The full plan, with migration steps, is `docs/factory/server-control-plane.md`.
 
 ## Non-goals
 
