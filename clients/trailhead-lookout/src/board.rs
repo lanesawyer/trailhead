@@ -16,7 +16,7 @@ use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
-use trailhead_model::{Agent, Claim, Comment, CommentKind, Project, Status, Task, User};
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Dependency, Project, Status, Task, User};
 use uuid::Uuid;
 
 use crate::author::{Act, Authoring};
@@ -28,9 +28,9 @@ use crate::search::{Deep, DeepHit};
 use crate::settings::SettingsButton;
 use crate::widgets;
 use crate::widgets::{
-    ChipEdit, ChipWords, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell, card_found,
-    card_row, card_title, card_under, chip, field, grade_tone, priority_tone, select, size, space, spawn_search_field,
-    status_label, text as label_text, token, tool_button,
+    ChipEdit, ChipWords, Hint, Icon, Keyed, Picked, ScrollBoth, SelectEdit, badge, button, card as card_shell,
+    card_found, card_row, card_title, card_under, chip, field, grade_tone, priority_tone, select, size, space,
+    spawn_search_field, status_label, text as label_text, token, tool_button,
 };
 use bevy::feathers::theme::ThemeToken;
 
@@ -154,6 +154,8 @@ pub enum BadgeKind {
     /// An in-review task whose newest review asks for changes, with no handoff since: the rework is the factory's
     /// move (or a person's), not the reviewer's.
     ChangesRequested,
+    /// An open task with unfinished blockers, with their count; the hint names them.
+    Blocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +164,8 @@ pub struct Badge {
     pub label: String,
     /// The theme token that tints the badge; none leaves it dim.
     pub tone: Option<ThemeToken>,
+    /// What a hover says, for a badge whose label is short for something longer.
+    pub hint: Option<String>,
 }
 
 /// A tool button on a card. What each does is [`CardAction::act`].
@@ -225,6 +229,8 @@ pub struct Input<'a> {
     pub projects: &'a [Project],
     pub tasks: &'a [Task],
     pub claims: &'a [Claim],
+    /// The blocker edges.
+    pub dependencies: &'a [Dependency],
     pub comments: &'a [Comment],
     pub agents: &'a [Agent],
     pub users: &'a [User],
@@ -270,6 +276,17 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
             _ => short(id),
         },
     };
+    // The blockers of each task that haven't finished, by the statuses mirrored now (the rule of core's `ready`), so
+    // one finishing clears the badge with no fetch. A blocker the mirror lacks (deleted, out of scope) doesn't count.
+    let status_of: HashMap<Uuid, Status> = input.tasks.iter().map(|t| (t.id, t.status)).collect();
+    let mut unfinished: HashMap<Uuid, Vec<&str>> = HashMap::new();
+    for d in input.dependencies {
+        if let (Some(status), Some(key)) = (status_of.get(&d.blocker_id), task_key.get(&d.blocker_id))
+            && !status.is_closed()
+        {
+            unfinished.entry(d.blocked_id).or_default().push(key);
+        }
+    }
     let parent_key = |t: &Task| t.parent_id.and_then(|p| task_key.get(&p).copied());
 
     let mut questions: HashMap<Uuid, Vec<&Comment>> = HashMap::new();
@@ -307,20 +324,36 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
         open.sort_by_key(|c| c.created_at);
         let p = t.priority;
         let mut badges =
-            vec![Badge { kind: BadgeKind::Priority, label: format!("P{p}"), tone: Some(priority_tone(p)) }];
+            vec![Badge { kind: BadgeKind::Priority, label: format!("P{p}"), tone: Some(priority_tone(p)), hint: None }];
         if is_factory(t) {
-            badges.push(Badge { kind: BadgeKind::Factory, label: "factory".into(), tone: Some(token::INFO) });
+            badges.push(Badge {
+                kind: BadgeKind::Factory,
+                label: "factory".into(),
+                tone: Some(token::INFO),
+                hint: None,
+            });
         }
         if let Some(grade) = t.grade {
-            badges.push(Badge { kind: BadgeKind::Grade, label: format!("G{grade}"), tone: Some(grade_tone(grade)) });
+            badges.push(Badge {
+                kind: BadgeKind::Grade,
+                label: format!("G{grade}"),
+                tone: Some(grade_tone(grade)),
+                hint: None,
+            });
         } else if !t.status.is_closed() && in_queue(t) {
-            badges.push(Badge { kind: BadgeKind::NeedsGrade, label: "needs grade".into(), tone: Some(token::WARN) });
+            badges.push(Badge {
+                kind: BadgeKind::NeedsGrade,
+                label: "needs grade".into(),
+                tone: Some(token::WARN),
+                hint: None,
+            });
         }
         if let Some(holder) = holder_of.get(&t.id) {
             badges.push(Badge {
                 kind: BadgeKind::Holder,
                 label: holder_badge(&holder_label(t.id, *holder)),
                 tone: None,
+                hint: None,
             });
         }
         if trailhead_model::changes_requested(t.status, reviews.get(&t.id).into_iter().flatten().copied()).is_some() {
@@ -328,6 +361,19 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
                 kind: BadgeKind::ChangesRequested,
                 label: "changes requested".into(),
                 tone: Some(token::WARN),
+                hint: None,
+            });
+        }
+        if !t.status.is_closed()
+            && let Some(keys) = unfinished.get(&t.id)
+        {
+            let mut keys = keys.clone();
+            keys.sort_unstable();
+            badges.push(Badge {
+                kind: BadgeKind::Blocked,
+                label: format!("blocked · {}", keys.len()),
+                tone: Some(token::WARN),
+                hint: Some(format!("Blocked by {}", keys.join(", "))),
             });
         }
         if !open.is_empty() {
@@ -335,6 +381,7 @@ pub fn build(input: Input, filter: &Filter) -> BoardView {
                 kind: BadgeKind::Questions,
                 label: format!("? {}", open.len()),
                 tone: Some(token::WARN),
+                hint: None,
             });
         }
         let mut actions = vec![CardAction::Edit, CardAction::Comment];
@@ -468,7 +515,7 @@ fn rebuild_view(
     (mut removed, mut removed_runs): (RemovedComponents<Rev>, RemovedComponents<Run>),
     projects: Query<&Mirrored<Project>>,
     tasks: Query<&Mirrored<Task>>,
-    claims: Query<&Mirrored<Claim>>,
+    (claims, dependencies): (Query<&Mirrored<Claim>>, Query<&Mirrored<Dependency>>),
     comments: Query<&Mirrored<Comment>>,
     (agents, users): (Query<&Mirrored<Agent>>, Query<&Mirrored<User>>),
     runs: Query<&Run>,
@@ -496,12 +543,14 @@ fn rebuild_view(
     }
     let (projects, tasks, claims, comments, agents, users) =
         (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents), rows(&users));
+    let dependencies = rows(&dependencies);
     let runs: Vec<Run> = runs.iter().cloned().collect();
     let queues = queue_keys(&authoring, factory.as_deref());
     let input = Input {
         projects: &projects,
         tasks: &tasks,
         claims: &claims,
+        dependencies: &dependencies,
         comments: &comments,
         agents: &agents,
         users: &users,
@@ -934,7 +983,11 @@ fn dress_cards(
         }
         let badges = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
         for b in &card.badges {
-            commands.queue_spawn_scene(badge(b.label.clone(), None, b.tone.clone())).insert(ChildOf(badges));
+            let mut shown = commands.queue_spawn_scene(badge(b.label.clone(), None, b.tone.clone()));
+            shown.insert(ChildOf(badges));
+            if let Some(hint) = &b.hint {
+                shown.insert(Hint(hint.clone()));
+            }
         }
         let tools = commands.queue_spawn_scene(card_row()).insert(ChildOf(shell)).id();
         for action in &card.actions {
@@ -1273,6 +1326,7 @@ mod tests {
                 projects: &projects,
                 tasks: &tasks,
                 claims,
+                dependencies: &[],
                 comments: &comments,
                 agents: &agents,
                 users: &[],
@@ -1311,6 +1365,7 @@ mod tests {
                 projects: &projects,
                 tasks: &tasks,
                 claims: &claims,
+                dependencies: &[],
                 comments: &comments,
                 agents: &agents,
                 users: &[],
@@ -1370,6 +1425,50 @@ mod tests {
 
     fn badges(card: &Card) -> Vec<(BadgeKind, &str)> {
         card.badges.iter().map(|b| (b.kind, b.label.as_str())).collect()
+    }
+
+    #[test]
+    fn a_task_with_unfinished_blockers_says_how_many_and_names_them() {
+        let (projects, mut tasks, claims, comments, agents) = input_json();
+        // OPS-1 is finished, so it blocks nothing any more, and being done it shows no badge of its own.
+        tasks[4]["status"] = json!("done");
+        let dep = |blocker: &str, blocked: &str| json!({"workspace_id": sid("w1"), "blocker_id": sid(blocker), "blocked_id": sid(blocked), "created_at": at(1)});
+        let dependencies = typed::<Dependency>(vec![
+            dep("t104", "t105"),
+            dep("t103", "t105"),
+            dep("t200", "t105"),
+            dep("t104", "t200"),
+            dep("t999", "t102"),
+        ]);
+        let (projects, tasks, claims, comments, agents) = (
+            typed::<Project>(projects),
+            typed::<Task>(tasks),
+            typed::<Claim>(claims),
+            typed::<Comment>(comments),
+            typed::<Agent>(agents),
+        );
+        let view = build(
+            Input {
+                projects: &projects,
+                tasks: &tasks,
+                claims: &claims,
+                dependencies: &dependencies,
+                comments: &comments,
+                agents: &agents,
+                now: at_now(),
+                ..Default::default()
+            },
+            &Filter { closed: true, ..Default::default() },
+        );
+        let blocked = |key: &str| card(&view, key).badges.iter().find(|b| b.kind == BadgeKind::Blocked).cloned();
+        let badge = blocked("TRAIL-105").unwrap();
+        assert_eq!(badge.label, "blocked · 2");
+        assert_eq!(badge.hint.as_deref(), Some("Blocked by TRAIL-103, TRAIL-104"));
+        assert_eq!(badge.tone, Some(token::WARN));
+        // Done, or blocked only by a task the mirror doesn't have: nothing to say.
+        assert_eq!(blocked("OPS-1"), None);
+        assert_eq!(blocked("TRAIL-102"), None);
+        assert_eq!(blocked("TRAIL-103"), None);
     }
 
     #[test]
