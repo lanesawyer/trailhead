@@ -176,7 +176,7 @@ mod tests {
         let a = spec("/a", "o", "app", "ALPHA", &[]);
         let b = spec("/b", "o", "app", "BETA", &[]);
         let err = validate(&[a, b]).unwrap_err().to_string();
-        assert!(err.to_string().contains("/a") && err.contains("/b") && err.contains("the same repo, o/app"), "{err}");
+        assert!(err.contains("/a") && err.contains("/b") && err.contains("the same repo, o/app"), "{err}");
     }
 
     #[test]

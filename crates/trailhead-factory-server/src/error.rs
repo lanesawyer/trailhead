@@ -14,17 +14,17 @@ pub enum Error {
     #[error("no {file} at or above {}; run from inside the repo or pass --config <path>", dir.display())]
     NoConfig { file: &'static str, dir: PathBuf },
     /// A file that couldn't be read or parsed.
-    #[error("{}: {source}", path.display())]
-    At { path: PathBuf, source: Source },
+    #[error("{}: {cause}", path.display())]
+    At { path: PathBuf, cause: Source },
     /// A step that failed, named by `what`.
-    #[error("{what}: {source}")]
-    Context { what: String, source: Source },
+    #[error("{what}: {cause}")]
+    Context { what: String, cause: Source },
     #[error("no `{agent}` agent yet; create it with `trailhead --as-me agent add {agent}`")]
     NoAgent { agent: &'static str },
     #[error("the worker profile is missing")]
     NoWorkerProfile,
     #[error("bad saved factory keys: {0}")]
-    BadKeys(#[source] serde_json::Error),
+    BadKeys(serde_json::Error),
     #[error("bad saved master key")]
     BadMasterKey,
     #[error("Sprites compute needs SPRITES_TOKEN or `trailhead factory login sprites`")]
@@ -37,9 +37,9 @@ pub enum Error {
     #[error("fnox failed ({status}){}{why}", if why.is_empty() { "" } else { ": " })]
     FnoxFailed { status: std::process::ExitStatus, why: String },
     #[error("running fnox: {0}")]
-    FnoxRun(#[source] std::io::Error),
+    FnoxRun(std::io::Error),
     #[error("reading stdin: {0}")]
-    Stdin(#[source] std::io::Error),
+    Stdin(std::io::Error),
     #[error("no token on stdin")]
     NoTokenOnStdin,
     #[error("that doesn't look like a Claude token from `claude setup-token` (it starts `{prefix}`)")]
@@ -56,7 +56,7 @@ pub enum Error {
     #[error("{0} repo loop(s) stopped on an error")]
     LoopsFailed(usize),
     #[error("the control plane doesn't answer: {0}")]
-    Unreachable(#[source] reqwest::Error),
+    Unreachable(reqwest::Error),
     #[error("the control plane refused the stream: {0}")]
     StreamRefused(reqwest::StatusCode),
     #[error("the control plane stopped")]
@@ -79,10 +79,27 @@ impl Error {
     }
 
     pub fn context(what: impl Into<String>, e: impl Into<Source>) -> Self {
-        Error::Context { what: what.into(), source: e.into() }
+        Error::Context { what: what.into(), cause: e.into() }
     }
 
     pub fn at(path: &Path, e: impl Into<Source>) -> Self {
-        Error::At { path: path.to_path_buf(), source: e.into() }
+        Error::At { path: path.to_path_buf(), cause: e.into() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wrapped_cause_shows_once_in_the_chain() {
+        let io = std::io::Error::other("disk on fire");
+        let err = Error::at(Path::new("/repo/.trailhead.toml"), io);
+        let shown = format!("{:#}", anyhow::Error::from(err));
+        assert_eq!(shown, "/repo/.trailhead.toml: disk on fire");
+        let err = Error::context("GitHub refused the token", std::io::Error::other("401"));
+        assert_eq!(format!("{:#}", anyhow::Error::from(err)), "GitHub refused the token: 401");
+        let err = Error::FnoxRun(std::io::Error::other("no fnox"));
+        assert_eq!(format!("{:#}", anyhow::Error::from(err)), "running fnox: no fnox");
     }
 }
