@@ -8,7 +8,7 @@
 //! it describes (a modal) when it fits there: it is centred under its target, else lined up with the target's end or
 //! start edge, else put above it. Its size is known only after its first layout, so it is hidden until then.
 
-use bevy::feathers::theme::ThemeBackgroundColor;
+use crate::theme::BackgroundTone;
 use bevy::picking::events::{PointerEnter, PointerLeave};
 use bevy::prelude::*;
 use bevy::ui::{ComputedUiRenderTargetInfo, OverrideClip};
@@ -77,7 +77,7 @@ fn show_hint(
                 border_radius: BorderRadius::all(px(radius::SMALL)),
                 ..default()
             },
-            ThemeBackgroundColor(token::HINT_BG),
+            BackgroundTone(token::HINT_BG),
             GlobalZIndex(layer::HINT),
             Popover { positions: PLACEMENTS.map(placement).to_vec(), window_margin: space::HINT_MARGIN },
             // Not clipped by a scrolling list or card the target sits in.

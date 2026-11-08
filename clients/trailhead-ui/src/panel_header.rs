@@ -7,11 +7,10 @@
 //!
 //! [`PanelTools`] holds the X; a panel puts its own header controls (a modal's arrows and menu) in it before the X.
 
-use bevy::feathers::controls::ButtonVariant;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, RequestClose};
 
-use super::{Icon, size, space, text, tool_button};
+use super::{ButtonKind, Icon, size, space, text, tool_button};
 
 /// Marks the title's text, so a title that changes is set in place.
 #[derive(Component, Default, Clone)]
@@ -26,7 +25,7 @@ pub fn panel_header(title: impl Into<String>, closable: bool) -> impl Scene {
     let title = title.into();
     let close: Box<dyn SceneList> = if closable {
         Box::new(bsn_list! {
-            @tool_button(Icon::X, "Close", ButtonVariant::Plain)
+            @tool_button(Icon::X, "Close", ButtonKind::Plain)
             Node { flex_shrink: 0.0 }
             on(|activate: On<Activate>, mut commands: Commands| {
                 commands.trigger(RequestClose { source: activate.event_target() });

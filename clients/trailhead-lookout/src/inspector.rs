@@ -20,8 +20,6 @@
 
 use std::collections::HashMap;
 
-use bevy::feathers::controls::ButtonVariant;
-use bevy::feathers::tokens;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::prelude::*;
@@ -42,15 +40,15 @@ use crate::connection::{Api, Connection, ConnectionStatus};
 use crate::detail::{Detail, Refetch};
 use crate::factory::FactoryStatus;
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
+use crate::project::OpenProject;
 use crate::sync::SyncItem;
 use crate::widgets::{
-    DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed, ModalRoot,
-    ModalSlots, PanelTitle, Picked, SelectEdit, badge, button, danger_button, display, extent, grade_tone, icon_menu,
-    inline_field, inline_text_sized, layer, menu_item, open_modal, panel, panel_header, priority_tone, row,
-    scroll_body, scroll_frame, scrollbar, section_frame, select, size, space, spawn_detail_panes, status_label, text,
-    text_dim, text_input, text_toned, token, tool_button,
+    ButtonKind, DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed,
+    ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, bubble, button, danger_button,
+    display, extent, grade_tone, icon_menu, inline_field, inline_text_sized, layer, menu_item, open_modal, panel,
+    panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select, size, space,
+    spawn_detail_panes, status_label, text, text_dim, text_input, text_toned, token, tool_button,
 };
-use bevy::feathers::theme::{ThemeTextColor, ThemeToken};
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -172,8 +170,10 @@ pub struct TaskFacts {
     pub breadcrumb: String,
     pub title: String,
     pub description: String,
-    /// The project and the parent with its title.
-    pub project: String,
+    /// The project's key, which opens its page.
+    pub project: Option<String>,
+    /// The parent, a row the modal can open.
+    pub parent: Option<Subtask>,
     pub subtasks: Vec<Subtask>,
     /// Who holds the claim and for how long; none when nobody does.
     pub claim: Option<String>,
@@ -207,6 +207,8 @@ pub struct Entry {
     pub body: String,
     /// A question nobody has resolved yet, which can be answered or resolved from here.
     pub open_question: bool,
+    /// Written by the reader, so it sits on the right.
+    pub mine: bool,
 }
 
 /// What the modal knows beyond the mirror: the task fetched in full, why it couldn't be, and who is reading (their
@@ -414,12 +416,13 @@ fn facts(
     let mut crumbs: Vec<String> = project_key.iter().cloned().collect();
     crumbs.extend(parent.map(|p| p.key.0.clone()));
     crumbs.push(task.key.0.clone());
-    let project = match (&project_key, parent) {
-        (Some(k), Some(p)) => format!("{k} › {} {}", p.key, p.title),
-        (Some(k), None) => k.clone(),
-        (None, Some(p)) => format!("{} {}", p.key, p.title),
-        (None, None) => String::new(),
-    };
+    let project = project_key.clone();
+    let parent = parent.map(|p| Subtask {
+        id: p.id.to_string(),
+        key: p.key.0.clone(),
+        title: p.title.clone(),
+        status: p.status,
+    });
 
     let mut subtasks: Vec<&Task> = input.tasks.iter().filter(|t| t.parent_id == Some(task.id)).collect();
     subtasks.sort_by_key(|t| (key_number(t.key.as_str()), t.key.0.clone()));
@@ -499,6 +502,7 @@ fn facts(
                 tags,
                 body: c.body.clone(),
                 open_question,
+                mine: me.is_some_and(|(id, _)| id == c.author_id.to_string()),
             }
         })
         .collect();
@@ -508,6 +512,7 @@ fn facts(
         title: task.title.clone(),
         description: task.description.clone(),
         project,
+        parent,
         subtasks,
         claim,
         dates,
@@ -724,6 +729,7 @@ impl Plugin for InspectorUiPlugin {
             .init_resource::<InputFocus>()
             .add_observer(on_modal_closed)
             .add_observer(on_open_task)
+            .add_observer(on_open_project)
             .add_observer(on_open_composer)
             .add_observer(on_compose_press)
             .add_observer(on_step)
@@ -964,6 +970,10 @@ enum Block {
     Act { action: Action, window: Option<i64>, note: Option<Control> },
     /// A subtask's row, which opens it. Its key holds what it shows, so a change is a new row.
     Subtask(Subtask),
+    /// The parent's key and title, which open it. Its key holds what it shows, so a change is a new button.
+    Parent(Subtask),
+    /// The project, by key, which opens its page.
+    Project(String),
     /// A comment in the activity. An open question has answer and resolve buttons; its key holds whether it is open.
     Entry { key: String, entry: Entry, live: bool, note: Option<Control> },
     /// The comment box at the foot of the activity, spawned once per task so what is typed survives redraws.
@@ -1275,7 +1285,8 @@ fn layout_task(
         .map(|e| {
             let note = if e.open_question { note(&Action::Resolve(e.id.clone())) } else { None };
             let block = Block::Entry { key: key.clone(), entry: e.clone(), live, note };
-            (format!("a/{}/{}", e.id, e.open_question), block)
+            // Who is reading may be learned after the first draw, which moves their entries to the right.
+            (format!("a/{}/{}/{}", e.id, e.open_question, e.mine), block)
         })
         .collect();
     if activity.is_empty() {
@@ -1295,8 +1306,12 @@ fn layout_task(
     }
 
     let mut side: Plan = Vec::new();
-    if !facts.project.is_empty() {
-        add(&mut side, "s/project", "Project", lines("s/project", std::slice::from_ref(&facts.project)));
+    if let Some(key) = &facts.project {
+        add(&mut side, "s/project", "Project", vec![(format!("s/project/{key}"), Block::Project(key.clone()))]);
+    }
+    if let Some(parent) = &facts.parent {
+        let row = (format!("s/parent/{}/{}", parent.id, parent.title), Block::Parent(parent.clone()));
+        add(&mut side, "s/parent", "Parent", vec![row]);
     }
     let status = view.status.unwrap_or(Status::Open);
     let mut fields = Vec::new();
@@ -1438,13 +1453,13 @@ fn window_labels() -> Vec<String> {
 }
 
 /// The words beside a control for where its command stands, and their color; no words for none.
-fn note_look(note: &Option<Control>) -> (String, ThemeToken) {
+fn note_look(note: &Option<Control>) -> (String, Token) {
     match note {
-        Some(Control::Busy) => ("sending…".into(), tokens::TEXT_DIM),
+        Some(Control::Busy) => ("sending…".into(), token::TEXT_DIM),
         // The command went through: not the task's status, so not `status_label`'s.
-        Some(Control::Done) => (String::from("done"), tokens::TEXT_DIM),
+        Some(Control::Done) => (String::from("done"), token::TEXT_DIM),
         Some(Control::Refused(why)) => (why.clone(), token::DANGER),
-        _ => (String::new(), tokens::TEXT_DIM),
+        _ => (String::new(), token::TEXT_DIM),
     }
 }
 
@@ -1500,14 +1515,14 @@ fn spawn_block(
             // The same form the board opens; it saves even after the inspector moves on.
             let act = Act::Answer { key: key.clone(), comment_id: id.clone(), question: body.clone() };
             let answer = commands
-                .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonVariant::Normal) })
+                .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonKind::Normal) })
                 .insert((act, ChildOf(line)))
                 .id();
             let resolve_action = Action::Resolve(id.clone());
             let source = control(controls, commands, subject, &resolve_action);
             let resolve = commands
                 .spawn_scene(bsn! {
-                    @tool_button(Icon::Check, "Resolve without an answer", ButtonVariant::Normal)
+                    @tool_button(Icon::Check, "Resolve without an answer", ButtonKind::Normal)
                     @sends(source, subject.clone(), resolve_action.clone())
                 })
                 .insert(ChildOf(line))
@@ -1552,26 +1567,25 @@ fn spawn_block(
             line
         }
         Block::Entry { key, entry, live, note } => {
-            let item = commands
-                .spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::STACKED), ..default() })
-                .id();
+            let side = if entry.mine { Side::Mine } else { Side::Theirs };
+            let item = commands.spawn_scene(bubble(side)).id();
             let mut head = vec![kind_label(entry.kind).to_string(), entry.author.clone(), entry.when.clone()];
             head.extend(entry.tags.iter().cloned());
             commands.spawn_scene(text_dim(head.join(" · "), size::SECONDARY)).insert(ChildOf(item));
-            let tone = if entry.open_question { token::WARN } else { tokens::TEXT_MAIN };
+            let tone = if entry.open_question { token::WARN } else { token::TEXT };
             commands.spawn_scene(text_toned(entry.body.clone(), size::BODY, tone)).insert(ChildOf(item));
             if entry.open_question {
                 let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
                 let act = Act::Answer { key: key.clone(), comment_id: entry.id.clone(), question: entry.body.clone() };
                 let answer = commands
-                    .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonVariant::Normal) })
+                    .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonKind::Normal) })
                     .insert((act, ChildOf(line)))
                     .id();
                 let resolve_action = Action::Resolve(entry.id.clone());
                 let source = control(controls, commands, subject, &resolve_action);
                 let resolve = commands
                     .spawn_scene(bsn! {
-                        @tool_button(Icon::Check, "Resolve without an answer", ButtonVariant::Normal)
+                        @tool_button(Icon::Check, "Resolve without an answer", ButtonKind::Normal)
                         @sends(source, subject.clone(), resolve_action.clone())
                     })
                     .insert(ChildOf(line))
@@ -1603,7 +1617,7 @@ fn spawn_block(
                 .insert((ComposePart::Answering, ChildOf(line)))
                 .id();
             let stop = commands
-                .spawn_scene(bsn! { @tool_button(Icon::X, "Comment instead", ButtonVariant::Plain) })
+                .spawn_scene(bsn! { @tool_button(Icon::X, "Comment instead", ButtonKind::Plain) })
                 .insert((ComposePart::StopAnswering, ChildOf(line)))
                 .id();
             let labels: Vec<String> = COMPOSE_KINDS.iter().map(|k| kind_label(*k).to_string()).collect();
@@ -1614,7 +1628,7 @@ fn spawn_block(
             commands.spawn_scene(text_input(COMPOSE_LINES, bsn! { ComposePart::Input })).insert(ChildOf(item));
             let foot = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
             let send = commands
-                .spawn_scene(bsn! { @button("Send", Some(Icon::Send), ButtonVariant::Primary) })
+                .spawn_scene(bsn! { @button("Send", Some(Icon::Send), ButtonKind::Primary) })
                 .insert((ComposePart::Send, ChildOf(foot)))
                 .id();
             gate_button(commands, send, *live);
@@ -1647,17 +1661,28 @@ fn spawn_block(
             .id(),
         Block::AddSubtask { key, live } => {
             let button = commands
-                .spawn_scene(bsn! { @button("Add sub-task", Some(Icon::Plus), ButtonVariant::Normal) })
+                .spawn_scene(bsn! { @button("Add sub-task", Some(Icon::Plus), ButtonKind::Normal) })
                 .insert(Act::NewSubtask(key.clone()))
                 .id();
             gate_button(commands, button, *live);
             button
         }
+        Block::Parent(parent) => {
+            let caption = format!("{}  {}", parent.key, parent.title);
+            commands
+                .spawn_scene(bsn! { @button(caption, None, ButtonKind::Plain) })
+                .insert(OpensTask(parent.id.clone()))
+                .id()
+        }
+        Block::Project(key) => commands
+            .spawn_scene(bsn! { @button(key.clone(), None, ButtonKind::Plain) })
+            .insert(OpensProject(key.clone()))
+            .id(),
         Block::Subtask(sub) => {
             let line = commands.spawn_scene(bsn! { @row() }).id();
             let caption = format!("{}  {}", sub.key, sub.title);
             commands
-                .spawn_scene(bsn! { @button(caption, None, ButtonVariant::Plain) })
+                .spawn_scene(bsn! { @button(caption, None, ButtonKind::Plain) })
                 .insert((OpensTask(sub.id.clone()), ChildOf(line)));
             commands.spawn_scene(text_dim(status_label(sub.status), size::SECONDARY)).insert(ChildOf(line));
             line
@@ -1668,9 +1693,9 @@ fn spawn_block(
             let press = sends(source, subject.clone(), action.clone());
             match action {
                 Action::Release => commands
-                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonVariant::Normal) @{press} }),
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonKind::Normal) @{press} }),
                 Action::Undo => commands
-                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonVariant::Normal) @{press} }),
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonKind::Normal) @{press} }),
                 Action::Cancel => {
                     commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} })
                 }
@@ -1722,7 +1747,7 @@ fn dress_note(
     {
         node.display = display;
     }
-    commands.entity(note).insert(ThemeTextColor(tone));
+    commands.entity(note).insert(TextTone(tone));
 }
 
 /// Brings the parts of changed blocks in line with them: words, notes, disabled buttons, dropdown rows.
@@ -1877,6 +1902,8 @@ fn dress(
             | Block::GradeBadge(_)
             | Block::Gates
             | Block::Subtask(_)
+            | Block::Project(_)
+            | Block::Parent(_)
             | Block::Inline { .. }
             | Block::Choice { .. }
             | Block::AddSubtask { .. } => {}
@@ -2082,7 +2109,7 @@ fn spawn_tools(commands: &mut Commands, tools: Entity) -> Tools {
         commands.spawn(Node { align_items: AlignItems::Center, column_gap: px(space::CONTROLS), ..default() }).id();
     let note = spawn_note(commands, row, &None);
     let arrow = |commands: &mut Commands, icon, hint: &str, step| {
-        commands.spawn_scene(tool_button(icon, hint, ButtonVariant::Plain)).insert((step, ChildOf(row))).id()
+        commands.spawn_scene(tool_button(icon, hint, ButtonKind::Plain)).insert((step, ChildOf(row))).id()
     };
     let previous = arrow(commands, Icon::ChevronUp, "Previous task in the column (K)", Step::Previous);
     let next = arrow(commands, Icon::ChevronDown, "Next task in the column (J)", Step::Next);
@@ -2253,7 +2280,24 @@ fn on_modal_closed(closed: On<ModalClosed>, modals: Query<(), With<TaskModal>>, 
     }
 }
 
-/// A subtask's row was pressed: show that task instead.
+/// A project's button in the modal: closes it and opens the project's page.
+#[derive(Component)]
+struct OpensProject(String);
+
+/// The project was pressed: close the modal and show the project's page.
+fn on_open_project(
+    activate: On<Activate>,
+    buttons: Query<&OpensProject>,
+    mut selection: ResMut<Selection>,
+    mut commands: Commands,
+) {
+    if let Ok(OpensProject(key)) = buttons.get(activate.entity) {
+        selection.0 = None;
+        commands.trigger(OpenProject(key.clone()));
+    }
+}
+
+/// A subtask's or the parent's row was pressed: show that task instead.
 fn on_open_task(activate: On<Activate>, rows: Query<&OpensTask>, mut selection: ResMut<Selection>) {
     if let Ok(OpensTask(id)) = rows.get(activate.entity) {
         selection.0 = Some(Subject::Task(id.clone()));
@@ -2527,7 +2571,7 @@ fn sync_panel(
         |commands, _, gate| {
             let (icon, tone) = match gate.state {
                 GateState::Passed => (Icon::CircleCheck, token::OK),
-                GateState::Waiting => (Icon::Circle, tokens::TEXT_DIM),
+                GateState::Waiting => (Icon::Circle, token::TEXT_DIM),
             };
             commands.spawn_scene(badge(gate.name.clone(), Some(icon), Some(tone))).id()
         },
@@ -2667,6 +2711,8 @@ mod tests {
         assert_eq!(activity[0].tags, ["to lane", "open"]);
         assert!(activity[0].open_question);
         assert_eq!(activity[1].author, "lane");
+        let mine: Vec<bool> = activity.iter().map(|e| e.mine).collect();
+        assert_eq!(mine, [false, true, false], "only what the reader wrote is theirs");
         assert_eq!(activity[2].tags, ["request changes", "m-1"]);
         assert!(!activity[2].open_question);
     }
@@ -3251,6 +3297,40 @@ mod in_place_tests {
         assert!(texts(&mut app).iter().any(|t| t == "a part"));
         let still = app.world_mut().query_filtered::<Entity, With<TaskModal>>().single(app.world()).unwrap();
         assert_eq!(still, root, "the same modal shows the subtask");
+    }
+
+    #[test]
+    fn the_parent_opens_in_the_same_modal() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t9")));
+        settle(&mut app);
+        assert!(texts(&mut app).iter().any(|t| t == "Parent"));
+        let world = app.world_mut();
+        let row = world.query::<(Entity, &OpensTask)>().iter(world).find(|(_, o)| o.0 == sid("t7")).unwrap().0;
+        app.world_mut().trigger(Activate { entity: row });
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))));
+        assert!(texts(&mut app).iter().any(|t| t == "do it"));
+    }
+
+    #[test]
+    fn the_project_closes_the_modal_and_opens_its_page() {
+        let mut app = app();
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 200, "entity": "project", "entity_id": sid("p1"), "kind": "project.created",
+            "after": crate::fixture::project_json(json!({"id": "p1", "key": "TRAIL"})),
+        })));
+        settle(&mut app);
+        #[derive(Resource, Default)]
+        struct Opened(Vec<String>);
+        app.init_resource::<Opened>()
+            .add_observer(|open: On<OpenProject>, mut opened: ResMut<Opened>| opened.0.push(open.0.clone()));
+        let button = app.world_mut().query_filtered::<Entity, With<OpensProject>>().single(app.world()).unwrap();
+        app.world_mut().trigger(Activate { entity: button });
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Opened>().0, ["TRAIL"]);
+        assert_eq!(app.world().resource::<Selection>().0, None);
+        assert_eq!(modal_count(&mut app), 0);
     }
 
     #[test]

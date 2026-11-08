@@ -3,9 +3,8 @@
 //! and settings.
 //!
 //! It is spawned once and updated in place: the projects follow the mirror through [`Keyed`], the page shown is marked
-//! with [`set_nav_current`], and the chip is edited with [`ChipEdit`]. Searching shows the results on the board.
+//! on its [`NavItem`], and the chip is edited with [`ChipEdit`]. Searching shows the results on the board.
 
-use bevy::feathers::controls::ButtonVariant;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
@@ -20,7 +19,7 @@ use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
 use crate::settings::SettingsButton;
 use crate::widgets::{
-    ChipEdit, Icon, Keyed, chip, nav_heading, nav_item, nav_item_noted, set_nav_current, set_text, sidebar,
+    ButtonKind, ChipEdit, Icon, Keyed, NavItem, Token, chip, nav_heading, nav_item, nav_item_noted, set_text, sidebar,
     sidebar_footer, size, spawn_search_field_filling, text, token, tool_button,
 };
 
@@ -98,7 +97,7 @@ fn spawn_sidebar(mut commands: Commands) {
         connection_chip(Connection::default(), &ConnectionStatus::default(), &FactoryLink::Unknown);
     commands.queue_spawn_scene(chip(tone, words, hint)).insert((ConnectionChip, ChildOf(footer)));
     commands
-        .queue_spawn_scene(tool_button(Icon::Settings, "Settings", ButtonVariant::Plain))
+        .queue_spawn_scene(tool_button(Icon::Settings, "Settings", ButtonKind::Plain))
         .insert((SettingsButton, ChildOf(footer)));
 }
 
@@ -186,11 +185,11 @@ fn sync_projects(
 }
 
 /// Marks the entry for the page shown.
-fn mark_current(view: Res<State<View>>, page: Res<ProjectPage>, mut items: Query<(&NavTo, Mut<ButtonVariant>)>) {
+fn mark_current(view: Res<State<View>>, page: Res<ProjectPage>, mut items: Query<(&NavTo, Mut<NavItem>)>) {
     let moved = view.is_changed() || page.is_changed();
-    for (to, variant) in &mut items {
-        // An entry spawned from a queued scene gets its variant after its `NavTo`.
-        if !(moved || variant.is_added()) {
+    for (to, mut item) in &mut items {
+        // An entry spawned from a queued scene gets its `NavItem` after its `NavTo`.
+        if !(moved || item.is_added()) {
             continue;
         }
         let current = match (to, view.get()) {
@@ -198,7 +197,7 @@ fn mark_current(view: Res<State<View>>, page: Res<ProjectPage>, mut items: Query
             (NavTo::Project(key), View::Project) => page.0.as_ref() == Some(key),
             _ => false,
         };
-        set_nav_current(variant, current);
+        item.set_if_neq(NavItem { current });
     }
 }
 
@@ -226,7 +225,7 @@ pub fn connection_chip(
     connection: Connection,
     status: &ConnectionStatus,
     factory: &FactoryLink,
-) -> (bevy::feathers::theme::ThemeToken, &'static str, String) {
+) -> (Token, &'static str, String) {
     let reason = status.reason.as_ref().map(|r| r.to_string());
     match connection {
         Connection::Syncing => {
@@ -316,10 +315,10 @@ mod tests {
     fn entries(app: &mut App) -> Vec<(NavTo, bool)> {
         let order = tree(app);
         let world = app.world_mut();
-        let mut q = world.query::<(Entity, &NavTo, &ButtonVariant)>();
+        let mut q = world.query::<(Entity, &NavTo, &NavItem)>();
         let mut found: Vec<(usize, NavTo, bool)> = q
             .iter(world)
-            .map(|(e, to, v)| (order.iter().position(|o| *o == e).unwrap(), to.clone(), *v == ButtonVariant::Normal))
+            .map(|(e, to, v)| (order.iter().position(|o| *o == e).unwrap(), to.clone(), v.current))
             .collect();
         found.sort_by_key(|(at, _, _)| *at);
         found.into_iter().map(|(_, to, current)| (to, current)).collect()

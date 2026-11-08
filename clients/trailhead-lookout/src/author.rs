@@ -10,8 +10,6 @@
 //! [`AuthorUiPlugin`] draws the form with feathers. The description and comment boxes are feathers' text input
 //! with `allow_newlines` and `visible_lines` set, which is all multiline takes.
 
-use bevy::feathers::controls::ButtonVariant;
-use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
@@ -25,8 +23,8 @@ use crate::factory::FactoryStatus;
 use crate::inspector::{OpenComposer, Selection, Subject};
 use crate::mirror::Mirrored;
 use crate::widgets::{
-    Modal, ModalClosed, ModalLocked, ModalSlots, Picked, button, dot, field, open_modal, priority_tone, row, select,
-    size, space, status_label, text_dim, text_input, token,
+    BackgroundTone, ButtonKind, Modal, ModalClosed, ModalLocked, ModalSlots, Picked, button, dot, field, open_modal,
+    priority_tone, row, select, size, space, status_label, text_dim, text_input, token,
 };
 
 /// The priority the form starts a new task at.
@@ -475,7 +473,7 @@ fn add_drawing(app: &mut App) {
 /// A button for `act`: a normal one, with no icon.
 pub fn act_button(label: String, act: Act) -> impl Scene {
     bsn! {
-        @button(label, None, ButtonVariant::Normal)
+        @button(label, None, ButtonKind::Normal)
         act
     }
 }
@@ -535,7 +533,7 @@ fn on_pick(
             if let Some(priority) = Priority::ALL.get(picked.index) {
                 open.draft.priority = *priority;
                 for dot in &dots {
-                    commands.entity(dot).insert(ThemeBackgroundColor(priority_tone(*priority)));
+                    commands.entity(dot).insert(BackgroundTone(priority_tone(*priority)));
                 }
             }
         }
@@ -625,8 +623,8 @@ fn fill_form(
             }
         }
         let footer = slots.footer;
-        c.spawn_scene(bsn! { @button("Save", None, ButtonVariant::Primary) Act::Save }).insert(ChildOf(footer));
-        c.spawn_scene(bsn! { @button("Cancel", None, ButtonVariant::Normal) Act::Cancel }).insert(ChildOf(footer));
+        c.spawn_scene(bsn! { @button("Save", None, ButtonKind::Primary) Act::Save }).insert(ChildOf(footer));
+        c.spawn_scene(bsn! { @button("Cancel", None, ButtonKind::Normal) Act::Cancel }).insert(ChildOf(footer));
         c.spawn_scene(text_dim(form.message.clone(), size::SECONDARY)).insert((FormMessage, ChildOf(footer)));
     }
 }
@@ -833,11 +831,11 @@ mod tests {
     fn the_priority_dot_follows_the_picked_priority() {
         let mut app = app();
         open_edit_form(&mut app);
-        let dot = app.world_mut().spawn((PriorityDot, ThemeBackgroundColor(token::BADGE_BG))).id();
+        let dot = app.world_mut().spawn((PriorityDot, BackgroundTone(token::BADGE_BG))).id();
         pick(&mut app, FormChoice::Priority, 0);
-        assert_eq!(app.world().get::<ThemeBackgroundColor>(dot).unwrap().0, token::PRIORITY_1);
+        assert_eq!(app.world().get::<BackgroundTone>(dot).unwrap().0, token::PRIORITY_1);
         pick(&mut app, FormChoice::Priority, 3);
-        assert_eq!(app.world().get::<ThemeBackgroundColor>(dot).unwrap().0, token::PRIORITY_4);
+        assert_eq!(app.world().get::<BackgroundTone>(dot).unwrap().0, token::PRIORITY_4);
     }
 
     fn app() -> App {

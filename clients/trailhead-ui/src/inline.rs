@@ -620,7 +620,7 @@ mod tests {
             .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>()
-            .insert_resource(crate::theme::theme())
+            .insert_resource(crate::theme::Theme::new().resource())
             .add_plugins(InlinePlugin)
             .init_resource::<Edits>()
             .init_resource::<Choices>()

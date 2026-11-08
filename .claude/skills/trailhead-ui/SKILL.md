@@ -29,9 +29,15 @@ Before you write a `Node` with a background, a button, a dropdown or a text styl
 Much of the kit is ported from Lane's `bevy-data-explorer` (`~/Dev/bevy-data-explorer/src/widgets/`, also on GitHub at
 lanesawyer/bevy-data-explorer). Porting a widget from there is better than writing a new one.
 
-## 2. Build on feathers, and prefer upstream
+## 2. Build on feathers inside the kit, and prefer upstream
 
-`bevy_feathers` 0.20 has buttons (`ButtonVariant`: normal, primary), tool buttons, menu buttons and popups,
+**Feathers stays in the kit.** Only `clients/trailhead-ui` imports `bevy::feathers`; an app (Lookout, the explorer)
+names only what the kit exports. When a view needs something feathers has and the kit doesn't expose (a token, a
+control, a component to query in a test), grow the kit: wrap it in a kit type or function and export that. Never
+re-export a feathers type as it is, and never reach past the kit from an app, even in a test. The kit's API is the
+seam that keeps a feathers upgrade to one crate.
+
+`bevy_feathers` 0.20 has buttons (`ButtonVariant`: normal, primary, plain; the kit's `ButtonKind`), tool buttons, menu buttons and popups,
 `FeathersSelect` for dropdowns, text inputs, checkboxes, toggles, sliders, scrollbars, list views, and panes. The kit
 wraps these; it doesn't draw its own where feathers has one. Where feathers lacks something or has a bug, work around
 it in one kit widget with a comment saying what upstream is missing, and prefer upstreaming the fix over growing a
@@ -48,9 +54,10 @@ private copy.
 
 ## 3. Colors, sizes, spacing, icons
 
-- **Colors are theme tokens** (`ThemeBackgroundColor`, `ThemeTextColor`, `ThemeBorderColor`), never `Color::srgb(..)`
-  literals. The kit's base palette is in `clients/trailhead-ui/src/theme.rs`; an app's own colors are tokens it paints
-  onto that with `trailhead_ui::paint`, defined once where the theme is built. A missing token renders fuchsia
+- **Colors are theme tokens**, a kit `Token` on a node as `BackgroundTone`, `TextTone` or `BorderTone`, never
+  `Color::srgb(..)` literals. The kit's base palette is in `clients/trailhead-ui/src/theme.rs`; an app's own colors
+  are `Token`s it paints onto `Theme::new()` with `Theme::paint` (from the kit's `palette` or its own colors), defined
+  once where the theme is built. The tone components are immutable: insert a new one to change the token. A missing token renders fuchsia
   (TRAIL-777): if you see magenta, a token isn't in the theme.
 - **Text sizes** come from the kit's `size` scale and **gaps, padding and margins** from its `space` scale, named for
   what they're for. A test fails on a literal. If no name fits, add one with a doc comment.
@@ -80,15 +87,15 @@ private copy.
   (`SelectEdit`; never while its popup is open), a button's caption, a chip's tone and words (`ChipEdit`), a
   disabled state. Lists that gain, lose and reorder items go through `widgets::keyed`. Each app guards this with a
   test (Lookout's is in the `lookout-ui` skill).
-- Presses arrive as feathers `Activate` events, not `Interaction`.
+- Presses arrive as `Activate` events (from `bevy::ui_widgets`, which feathers builds on), not `Interaction`.
 - `system_clipboard` must stay in the Bevy features, or no text field can paste.
 
 ## 5. Plugins and tests
 
 - **Logic and drawing are separate plugins.** `XPlugin` holds the state and observers and runs under `MinimalPlugins`
   in tests; `XUiPlugin` spawns and draws, and only `main.rs` adds it.
-- **The app wires its own dependencies** in `main.rs` (`DefaultPlugins`, `FeathersPlugins`, the theme, winit
-  settings). A plugin never adds `StatesPlugin` or other app-level plugins for its tests' sake; the test app adds what
+- **The app wires its own dependencies** in `main.rs` (`DefaultPlugins`, the kit's `ThemePlugin` with its `Theme`,
+  which brings feathers' plugins, the kit's `UiPlugin`, winit settings). A plugin never adds `StatesPlugin` or other app-level plugins for its tests' sake; the test app adds what
   `MinimalPlugins` lacks (TRAIL-774).
 - **Test the logic headless.** Pure functions that turn state into a view model carry most of the tests.
 
