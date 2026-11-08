@@ -14,7 +14,12 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The typed HTTP client. Off, the crate has no reqwest (the engine-only build).
+http = ["dep:reqwest"]
+
 [dependencies]
+reqwest = { workspace = true, optional = true }
 trailhead-model.workspace = true
 jiff.workspace = true
 uuid.workspace = true

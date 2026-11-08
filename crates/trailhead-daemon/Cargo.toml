@@ -16,7 +16,7 @@ workspace = true
 [features]
 default = ["net"]
 # The iroh transport. The testkit turns it off to reuse the runner in-process.
-net = ["dep:iroh", "dep:trailhead-wire", "dep:clap", "dep:tracing-subscriber", "dep:trailhead-plugins", "dep:trailhead-codehost-github", "dep:reqwest"]
+net = ["dep:iroh", "dep:trailhead-wire", "dep:clap", "dep:tracing-subscriber", "dep:trailhead-plugins", "dep:trailhead-codehost-github", "dep:reqwest", "dep:trailhead-client"]
 
 [dependencies]
 base64.workspace = true
@@ -32,6 +32,7 @@ iroh = { workspace = true, optional = true }
 trailhead-wire = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+trailhead-client = { workspace = true, features = ["http"], optional = true }
 trailhead-codehost-github = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 trailhead-plugins = { workspace = true, optional = true }
