@@ -23,8 +23,8 @@ use crate::factory::FactoryStatus;
 use crate::inspector::{OpenComposer, Selection, Subject};
 use crate::mirror::Mirrored;
 use crate::widgets::{
-    BackgroundTone, ButtonKind, Modal, ModalClosed, ModalLocked, ModalSlots, Picked, button, dot, field, open_modal,
-    priority_tone, row, select, size, space, status_label, text_dim, text_input, token,
+    BackgroundTone, ButtonKind, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, button, dot, field,
+    open_modal, priority_tone, row, select, size, space, status_label, text_dim, text_input, token,
 };
 
 /// The priority the form starts a new task at.
@@ -479,8 +479,13 @@ pub fn act_button(label: String, act: Act) -> impl Scene {
 }
 
 /// A text input of the form for `kind`, `lines` high, holding `initial` when it appears.
-fn input(kind: FieldKind, generation: u64, initial: String, lines: f32) -> impl SceneList {
-    bsn_list! { @text_input(lines, bsn! { Field(kind, generation) InitialText(initial) }) }
+fn input(kind: FieldKind, generation: u64, initial: String, lines: f32) -> Box<dyn SceneList> {
+    // The title is the first thing to type, so the keyboard starts there.
+    if kind == FieldKind::Title {
+        Box::new(bsn_list! { @text_input(lines, bsn! { Field(kind, generation) InitialText(initial) ModalFocus }) })
+    } else {
+        Box::new(bsn_list! { @text_input(lines, bsn! { Field(kind, generation) InitialText(initial) }) })
+    }
 }
 
 /// A text field of the form: `label` over its input.

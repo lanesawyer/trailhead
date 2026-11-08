@@ -7,7 +7,10 @@
 //!   asks the newest one to close too (from bevy-data-explorer). That is the default for every modal, so no form can opt out by accident; one that can't
 //!   close right now (a save in flight) says so with [`ModalLocked`] and stays. [`ModalClosed`] is sent first, for the
 //!   owner to drop what it holds.
-//! - **Focus.** Feathers' dialog takes focus when it opens and keeps Tab inside it.
+//! - **Focus.** Feathers' dialog keeps Tab inside it, but would hand the keyboard to the last control and draw a focus
+//!   ring there. So a modal opens with the keyboard on its title (which takes focus without joining the Tab order), or,
+//!   for a form, on the control that carries [`ModalFocus`] (a new task's title field). The one rule: a modal focuses
+//!   its first thing to act on, and one with nothing to type into focuses its title.
 //! - **Never taller than the window.** The frame is capped to [`MAX_HEIGHT_VH`] of the window and only the body
 //!   scrolls, with the kit's scrollbar, so the footer (Save, Cancel) stays in view.
 //! - **Use.** A marker type implements [`Modal`] (title, width); [`open_modal`] spawns it. Once it has spawned,
@@ -17,11 +20,12 @@
 
 use bevy::feathers::controls::FeathersDialog;
 use bevy::input::keyboard::KeyboardInput;
-use bevy::input_focus::FocusedInput;
+use bevy::input_focus::tab_navigation::TabIndex;
+use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, RequestClose};
 
-use super::{HintBounds, PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
+use super::{HintBounds, PanelTitle, PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
 
 /// How much of the window's height the modal may take, with the barrier's margin around it.
 pub const MAX_HEIGHT_VH: f32 = 80.0;
@@ -56,6 +60,11 @@ pub struct ModalBody;
 /// Where the modal's buttons go; it never scrolls away.
 #[derive(Component, Clone, Default)]
 pub struct ModalFooter;
+
+/// Put on a control inside a modal (a form's first text field) to give it the keyboard when it appears, instead of the
+/// modal's title.
+#[derive(Component, Clone, Default)]
+pub struct ModalFocus;
 
 /// Put on a modal's root while it can't close: a request to close it is ignored.
 #[derive(Component, Clone, Default)]
@@ -167,12 +176,15 @@ fn close_on_escape(
 }
 
 /// Finds a new modal's body and footer, and gives the body its scrollbar.
+#[allow(clippy::too_many_arguments)]
 fn link_slots(
     bodies: Query<Entity, Added<ModalBody>>,
     parents: Query<&ChildOf>,
     roots: Query<(), With<ModalRoot>>,
     footers: Query<Entity, With<ModalFooter>>,
     tools: Query<Entity, With<PanelTools>>,
+    titles: Query<Entity, With<PanelTitle>>,
+    mut focus: ResMut<InputFocus>,
     mut commands: Commands,
 ) {
     for body in &bodies {
@@ -184,6 +196,18 @@ fn link_slots(
             commands.queue_spawn_scene(scrollbar(body, ControlOrientation::Vertical)).insert(ChildOf(holder.parent()));
         }
         commands.entity(root).insert(ModalSlots { body, footer, tools });
+        // The keyboard starts on the title; a [`ModalFocus`] control takes it from there.
+        if let Some(title) = titles.iter().find(inside) {
+            commands.entity(title).insert(TabIndex(-1));
+            focus.set(title, FocusCause::Navigated);
+        }
+    }
+}
+
+/// Gives a [`ModalFocus`] control the keyboard when it appears.
+fn focus_requested(new: Query<Entity, Added<ModalFocus>>, mut focus: ResMut<InputFocus>) {
+    if let Some(wanted) = new.iter().last() {
+        focus.set(wanted, FocusCause::Navigated);
     }
 }
 
@@ -192,7 +216,10 @@ pub struct ModalPlugin;
 
 impl Plugin for ModalPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_request_close).add_observer(close_on_escape).add_systems(Update, link_slots);
+        app.init_resource::<InputFocus>()
+            .add_observer(on_request_close)
+            .add_observer(close_on_escape)
+            .add_systems(Update, (link_slots, focus_requested).chain());
     }
 }
 
@@ -246,6 +273,25 @@ mod tests {
         let tools = app.world().get::<Children>(slots.tools).map_or(0, |c| c.len());
         assert_eq!(tools, 1, "the tools hold the X until the modal adds its own");
         assert_eq!(app.world().get::<GlobalZIndex>(modal).map(|z| z.0), Some(layer::MODAL));
+    }
+
+    #[test]
+    fn a_modal_opens_with_the_keyboard_on_its_title() {
+        let mut app = app();
+        open(&mut app);
+        let title = app.world_mut().query_filtered::<Entity, With<PanelTitle>>().single(app.world()).unwrap();
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(title));
+        assert_eq!(app.world().get::<TabIndex>(title), Some(&TabIndex(-1)));
+    }
+
+    #[test]
+    fn a_control_marked_for_focus_takes_the_keyboard_from_the_title() {
+        let mut app = app();
+        let modal = open(&mut app);
+        let slots = *app.world().get::<ModalSlots>(modal).unwrap();
+        let field = app.world_mut().spawn((ModalFocus, ChildOf(slots.body))).id();
+        app.update();
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(field));
     }
 
     #[test]
