@@ -119,6 +119,12 @@ fn created(body: impl Serialize) -> Response {
 async fn health(State(s): S, headers: HeaderMap) -> Json<Value> {
     let mut v = json!(s.info);
     v["ok"] = json!(true);
+    if let Some(runs) = s.runs_in_flight.get() {
+        v["runs_in_flight"] = json!(runs());
+    }
+    if s.draining.load(std::sync::atomic::Ordering::SeqCst) {
+        v["draining"] = json!(true);
+    }
     // Paths name the local user, so over a tunnel only token holders see them.
     let authed = headers.contains_key(header::AUTHORIZATION) && crate::auth::authenticate(&s, &headers).await.is_ok();
     if !authed && let Some(o) = v.as_object_mut() {

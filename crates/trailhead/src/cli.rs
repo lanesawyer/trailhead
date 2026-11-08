@@ -358,10 +358,18 @@ pub(crate) enum ServerCmd {
     Status,
     /// Start it in the background if it isn't running.
     Start,
-    /// Stop it gracefully.
-    Stop,
-    /// Stop it and start it again, e.g. after a rebuild.
-    Restart,
+    /// Stop it gracefully. With factory runs in flight it drains: no new runs, and it stops when those finish.
+    Stop {
+        /// Cancel the factory's runs in flight instead of waiting; they're requeued on the next start.
+        #[arg(long)]
+        now: bool,
+    },
+    /// Stop it and start it again, e.g. after a rebuild. Refuses while factory runs are in flight, unless `--now`.
+    Restart {
+        /// Cancel the factory's runs in flight; they're requeued on the next start.
+        #[arg(long)]
+        now: bool,
+    },
 }
 
 #[derive(Subcommand)]

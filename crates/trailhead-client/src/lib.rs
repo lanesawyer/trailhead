@@ -25,6 +25,10 @@ pub struct Health {
     pub exe_modified_ms: Option<u64>,
     pub db: Option<PathBuf>,
     pub started_at: Option<String>,
+    /// The factory's runs in flight, from a server that runs its control plane.
+    pub runs_in_flight: Option<usize>,
+    /// Whether a stop signal has the server draining the factory before it exits.
+    pub draining: bool,
 }
 
 /// An API error with its stable code, so a client can print `error[claim_held]: ...`.

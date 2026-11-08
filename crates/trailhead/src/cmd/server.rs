@@ -64,12 +64,21 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                 println!("started");
             }
         },
-        ServerCmd::Stop => match client::stop_local(&http, &base).await? {
-            Some(pid) => println!("stopped (pid {pid})"),
-            None => println!("not running"),
+        ServerCmd::Stop { now } => match client::stop_local(&http, &base, *now).await? {
+            client::Stop::Stopped(pid) => println!("stopped (pid {pid})"),
+            client::Stop::NotRunning => println!("not running"),
+            client::Stop::Draining { pid, runs } => println!(
+                "draining {runs} factory run(s) (pid {pid}); it stops when they finish. `trailhead server stop --now` cancels them"
+            ),
         },
-        ServerCmd::Restart => {
-            client::stop_local(&http, &base).await?;
+        ServerCmd::Restart { now } => {
+            let runs = health().await.and_then(|h| h.runs_in_flight).unwrap_or(0);
+            if runs > 0 && !now {
+                bail!(
+                    "{runs} factory run(s) in flight; `trailhead server restart --now` cancels them (they're requeued on the next start)"
+                );
+            }
+            client::stop_local(&http, &base, true).await?;
             client::start_local_server(&http, &base).await?;
             let pid = health().await.and_then(|i| i.pid).map(|p| p.to_string()).unwrap_or_default();
             println!("restarted (pid {pid})");
