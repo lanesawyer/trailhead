@@ -51,6 +51,10 @@ pub fn props() -> ThemeProps {
     paint(&mut theme, &tokens::BUTTON_BG_HOVER, palette::GRAY_3.lighter(0.14));
     paint(&mut theme, &tokens::BUTTON_BG_PRESSED, palette::ACCENT.darker(0.12));
     paint(&mut theme, &tokens::BUTTON_PRIMARY_BG_HOVER, palette::ACCENT.lighter(0.08));
+    // Plain buttons (icon buttons on cards and lists) hover like normal ones: feathers' plain hover is a shade of
+    // the surface they sit on, so on a card it can't be seen.
+    paint(&mut theme, &tokens::BUTTON_PLAIN_BG_HOVER, palette::GRAY_3.lighter(0.14));
+    paint(&mut theme, &tokens::BUTTON_PLAIN_BG_PRESSED, palette::ACCENT.darker(0.12));
 
     paint(&mut theme, &token::PANEL_BG, palette::GRAY_1);
     paint(&mut theme, &token::DIVIDER, palette::GRAY_3);
@@ -96,6 +100,14 @@ mod tests {
         }
         // Feathers' own controls still resolve.
         assert!(theme.token_assignments.contains_key(&tokens::BUTTON_BG));
+    }
+
+    #[test]
+    fn every_button_variant_hovers_to_a_color_other_than_its_rest() {
+        let theme = UiTheme(props());
+        assert_ne!(theme.color(&tokens::BUTTON_BG), theme.color(&tokens::BUTTON_BG_HOVER));
+        assert_ne!(theme.color(&tokens::BUTTON_PRIMARY_BG), theme.color(&tokens::BUTTON_PRIMARY_BG_HOVER));
+        assert_ne!(theme.color(&tokens::BUTTON_PLAIN_BG), theme.color(&tokens::BUTTON_PLAIN_BG_HOVER));
     }
 
     #[test]
