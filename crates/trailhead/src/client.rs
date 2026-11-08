@@ -61,7 +61,7 @@ impl Client {
             && !would_start_unscoped_under_systemd()
         {
             eprintln!("note: restarting the local server on the updated trailhead binary");
-            stop_local(&http, &base).await?;
+            stop_local(&http, &base, true).await?;
             start_local_server(&http, &base).await?;
         }
         Ok(Client { http, base: base.clone(), token, local: is_local(&base), ours, creds })
@@ -386,7 +386,20 @@ pub fn is_stale(info: &Health) -> bool {
 
 /// Asks the local server to stop and waits for it to go away. Returns the pid
 /// it stopped, or `None` if nothing was running.
-pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32>> {
+/// What [`stop_local`] did.
+pub enum Stop {
+    NotRunning,
+    Stopped(u32),
+    /// Signalled once: the server is draining the factory's runs and exits when they finish.
+    Draining {
+        pid: u32,
+        runs: usize,
+    },
+}
+
+/// Stops the local server. With factory runs in flight it only starts a drain unless `now`, which cancels them
+/// (they're requeued on the next start) with a second signal.
+pub async fn stop_local(http: &reqwest::Client, base: &Url, now: bool) -> Result<Stop> {
     let paths = Paths::from_env().context("no home directory")?;
     let running = health(http, base, user_token(&paths).as_deref()).await;
     // Only stop a server that serves this CLI's database, so stopping one
@@ -412,15 +425,36 @@ pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32
         || std::fs::read_to_string(&pid_file).ok().and_then(|p| p.trim().parse().ok()).filter(|&pid| is_trailhead(pid));
     let pid = match (&running, running.as_ref().and_then(|h| h.pid).or_else(from_file)) {
         (_, Some(pid)) => pid,
-        (None, None) => return Ok(None),
+        (None, None) => return Ok(Stop::NotRunning),
         (Some(_), None) => bail!(
             "a server is answering at {base} but didn't report its pid (it may predate `trailhead server`); stop it by hand"
         ),
     };
-    if !signal_stop(pid)? {
-        return Ok(None);
+    let runs = running.as_ref().and_then(|h| h.runs_in_flight).unwrap_or(0);
+    let draining = running.as_ref().is_some_and(|h| h.draining);
+    if !now && runs > 0 {
+        if !draining && !signal_stop(pid)? {
+            return Ok(Stop::NotRunning);
+        }
+        return Ok(Stop::Draining { pid, runs });
     }
-    for _ in 0..100 {
+    if now && !draining && runs > 0 {
+        if !signal_stop(pid)? {
+            return Ok(Stop::NotRunning);
+        }
+        // The second signal only cancels once the first has started the drain; two at once could arrive as one.
+        for _ in 0..50 {
+            if health(http, base, None).await.is_none_or(|h| h.draining) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    if !signal_stop(pid)? {
+        return Ok(Stop::NotRunning);
+    }
+    // Cancelled factory runs get up to 30 s to record and tear down, then requests 10 s to finish.
+    for _ in 0..450 {
         if health(http, base, None).await.is_none() {
             // It stops answering before it has finished exiting; it removes its pid file last.
             let ours = || std::fs::read_to_string(&pid_file).is_ok_and(|p| p.trim() == pid.to_string());
@@ -430,7 +464,7 @@ pub async fn stop_local(http: &reqwest::Client, base: &Url) -> Result<Option<u32
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            return Ok(Some(pid));
+            return Ok(Stop::Stopped(pid));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

@@ -39,6 +39,10 @@ pub struct AppState {
     /// Public-only unless this is the local server, where receivers on the same
     /// machine or network are the point.
     pub webhook_targets: webhooks::Targets,
+    /// The factory's runs in flight, when this server runs its control plane; `/v1/health` reports it.
+    pub runs_in_flight: std::sync::OnceLock<Box<dyn Fn() -> usize + Send + Sync>>,
+    /// Set once a stop signal has started draining the control plane; `/v1/health` reports it.
+    pub draining: std::sync::atomic::AtomicBool,
 }
 
 impl AppState {
@@ -49,12 +53,18 @@ impl AppState {
             shutdown: tokio::sync::watch::Sender::new(false),
             limits: Default::default(),
             webhook_targets: webhooks::Targets::PublicOnly,
+            runs_in_flight: Default::default(),
+            draining: Default::default(),
         }
     }
 }
 
 /// How long in-flight requests get to finish after a shutdown signal.
 const DRAIN: Duration = Duration::from_secs(10);
+
+/// How long cancelled factory runs get to record what they produced and tear down.
+#[cfg(feature = "factory")]
+const FACTORY_STOP: Duration = Duration::from_secs(30);
 
 /// What `/v1/health` reports, so the CLI can tell which binary a server runs
 /// and restart it after an upgrade. Everyone sees the version, instance and start
@@ -190,7 +200,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
     // After the listener, so the API tunnel has a server to forward to; before the pid file, so a configuration error
     // stops the server before it says it's up.
     #[cfg(feature = "factory")]
-    let factory = match cfg.factory.clone() {
+    let factory: Option<Arc<trailhead_factory_server::Running>> = match cfg.factory.clone() {
         Some(paths) => {
             let user_config = paths.config_dir.join("config.toml");
             trailhead_factory_server::start(paths, state.store.clone(), cfg.bind).map_err(|e| {
@@ -199,9 +209,14 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
                     user_config.display()
                 )
             })?
+            .map(Arc::new)
         }
         None => None,
     };
+    #[cfg(feature = "factory")]
+    if let Some(running) = factory.clone() {
+        let _ = state.runs_in_flight.set(Box::new(move || running.runs_in_flight()));
+    }
     #[cfg(not(feature = "factory"))]
     let _ = &cfg.factory;
     if let Some(pid_file) = &cfg.pid_file {
@@ -213,8 +228,30 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
     tracing::info!(addr = %cfg.bind, db = %cfg.db.display(), "trailhead listening");
     let stopping = state.shutdown.clone();
     let mut stopped = state.shutdown.subscribe();
+    let mut signals = Signals::new()?;
+    #[cfg(feature = "factory")]
+    let (draining, signal_state) = (factory.clone(), state.clone());
     let server = axum::serve(listener, router(state)).with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        signals.next().await;
+        // The API keeps serving while the control plane drains, since its runs reach it through the tunnel.
+        #[cfg(feature = "factory")]
+        if let Some(factory) = draining {
+            signal_state.draining.store(true, std::sync::atomic::Ordering::SeqCst);
+            match factory.runs_in_flight() {
+                0 => tracing::info!("stopping the factory; no runs in flight"),
+                runs => {
+                    tracing::info!(runs, "draining the factory: no new runs; a second signal cancels those in flight")
+                }
+            }
+            factory.drain();
+            tokio::select! {
+                _ = factory.finished() => tracing::info!("the factory drained"),
+                _ = signals.next() => {
+                    tracing::info!("cancelling the factory's runs; they're requeued on the next start");
+                    factory.stop(FACTORY_STOP).await;
+                }
+            }
+        }
         stopping.send_replace(true);
     });
     let served = tokio::select! {
@@ -229,7 +266,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<(), Box<dyn std::error::Err
     };
     #[cfg(feature = "factory")]
     if let Some(factory) = factory {
-        factory.stop(DRAIN).await;
+        factory.stop(FACTORY_STOP).await;
     }
     if let Some(pid_file) = &cfg.pid_file
         && std::fs::read_to_string(pid_file).is_ok_and(|p| p.trim() == std::process::id().to_string())
@@ -264,11 +301,22 @@ fn spawn_archiver(state: Arc<AppState>) {
     });
 }
 
-async fn shutdown_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => tracing::info!("received SIGINT; shutting down"),
-        _ = term.recv() => tracing::info!("received SIGTERM; shutting down"),
+/// SIGINT and SIGTERM, each delivery once. The first starts a shutdown; with the factory, a second cancels its runs.
+struct Signals {
+    int: tokio::signal::unix::Signal,
+    term: tokio::signal::unix::Signal,
+}
+
+impl Signals {
+    fn new() -> std::io::Result<Signals> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Signals { int: signal(SignalKind::interrupt())?, term: signal(SignalKind::terminate())? })
+    }
+
+    async fn next(&mut self) {
+        tokio::select! {
+            _ = self.int.recv() => tracing::info!("received SIGINT; shutting down"),
+            _ = self.term.recv() => tracing::info!("received SIGTERM; shutting down"),
+        }
     }
 }

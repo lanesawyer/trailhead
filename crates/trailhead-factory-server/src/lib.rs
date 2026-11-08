@@ -800,18 +800,41 @@ async fn run_loops(
 
 /// The control plane running inside the Trailhead server, from [`start`].
 pub struct Running {
-    task: tokio::task::JoinHandle<()>,
     drain: tokio::sync::watch::Sender<bool>,
     cancel: tokio::sync::watch::Sender<bool>,
+    /// Set when the control plane has stopped, drained or not.
+    done: tokio::sync::watch::Receiver<bool>,
+    /// Each repo's board, once the control plane is up.
+    boards: Arc<std::sync::Mutex<Vec<Arc<trailhead_control::StatusBoard>>>>,
 }
 
 impl Running {
-    /// Stops it: runs in flight are cancelled and requeued on the next start. Waits up to `within` for the loops to
-    /// finish.
-    pub async fn stop(self, within: Duration) {
+    /// The runs and reviews in flight across every repo.
+    pub fn runs_in_flight(&self) -> usize {
+        self.boards.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|b| b.snapshot().runs.len()).sum()
+    }
+
+    /// Starts no new runs or reviews; the ones in flight finish, then the control plane stops. A control plane
+    /// still retrying its start gives up.
+    pub fn drain(&self) {
+        self.drain.send_replace(true);
+    }
+
+    /// Cancels the runs in flight, which are requeued on the next start.
+    pub fn cancel(&self) {
         self.drain.send_replace(true);
         self.cancel.send_replace(true);
-        if tokio::time::timeout(within, self.task).await.is_err() {
+    }
+
+    /// Resolves once the control plane has stopped.
+    pub async fn finished(&self) {
+        let _ = self.done.clone().wait_for(|done| *done).await;
+    }
+
+    /// [`Running::cancel`], then waits up to `within` for it to stop.
+    pub async fn stop(&self, within: Duration) {
+        self.cancel();
+        if tokio::time::timeout(within, self.finished()).await.is_err() {
             tracing::warn!("the control plane didn't stop within {}s; leaving it to reconcile", within.as_secs());
         }
     }
@@ -851,7 +874,10 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<Opti
     let poll = Duration::from_secs(run.opts.poll_secs);
     let (drain_tx, drain) = tokio::sync::watch::channel(false);
     let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(async move {
+    let (done_tx, done) = tokio::sync::watch::channel(false);
+    let boards = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let filled = boards.clone();
+    let control = async move {
         let mut wait = RETRY_FIRST;
         let setup = loop {
             match wire(plan.clone(), &paths, &fnox_dir, Some(store.clone())).await {
@@ -864,15 +890,21 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<Opti
             }
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
-                _ = fired(cancel.clone()) => return,
+                _ = fired(drain.clone()) => return,
             }
             wait = (wait * 2).min(RETRY_MAX);
         };
+        *filled.lock().unwrap_or_else(|e| e.into_inner()) =
+            setup.repos.iter().map(|e| e.factory.status().clone()).collect();
         if let Err(e) = run_loops(setup, &paths, poll, drain, cancel).await {
             tracing::error!(error = %e, "the control plane stopped; the server keeps serving");
         }
+    };
+    tokio::spawn(async move {
+        control.await;
+        done_tx.send_replace(true);
     });
-    Ok(Some(Running { task, drain: drain_tx, cancel: cancel_tx }))
+    Ok(Some(Running { drain: drain_tx, cancel: cancel_tx, done, boards }))
 }
 
 /// Whether the user config lists any repos for the factory, for a caller deciding whether to open `factory.log`.
