@@ -81,8 +81,23 @@ fn option_rows(
     icons: &[Icon],
     selected: Option<usize>,
 ) -> Box<dyn SceneList> {
-    let rows = options.iter().enumerate().map(|(i, label)| -> Box<dyn SceneList> {
-        let label = label.clone();
+    let rows = (0..options.len()).map(|i| -> Box<dyn SceneList> {
+        let row = option_row(options, tones, icons, selected, i);
+        Box::new(bsn_list! { @{row} })
+    });
+    Box::new(rows.collect::<Vec<_>>())
+}
+
+/// Row `i` of [`option_rows`].
+fn option_row(
+    options: &[String],
+    tones: &[Option<Token>],
+    icons: &[Icon],
+    selected: Option<usize>,
+    i: usize,
+) -> Box<dyn Scene> {
+    {
+        let label = options[i].clone();
         let tone = tones.get(i).cloned().flatten().unwrap_or(token::TEXT);
         let icon_tone = tone.clone();
         let inside: Box<dyn SceneList> = match icons.get(i) {
@@ -95,12 +110,11 @@ fn option_rows(
             }
         };
         if Some(i) == selected {
-            bsn! { @FeathersListRow Selected OptionIndex(i) Children [ { inside } ] }.into()
+            Box::new(bsn! { @FeathersListRow Selected OptionIndex(i) Children [ { inside } ] })
         } else {
-            bsn! { @FeathersListRow OptionIndex(i) Children [ { inside } ] }.into()
+            Box::new(bsn! { @FeathersListRow OptionIndex(i) Children [ { inside } ] })
         }
-    });
-    Box::new(rows.collect::<Vec<_>>())
+    }
 }
 
 /// An option's icon in `tone`, boxed so feathers doesn't take it for the option's words.
@@ -262,8 +276,7 @@ impl SelectEdit<'_, '_> {
     }
 
     /// Shows `selected` of `options`. The rows are rebuilt only if `options` differ from the last ones, and nothing
-    /// is touched while the popup is open or the last rebuild's rows haven't spawned yet (returns `false` then, so the
-    /// caller can try again).
+    /// is touched while the popup is open (returns `false` then, so the caller can try again once it has closed).
     pub fn set(&mut self, select: Entity, options: &[String], selected: Option<usize>) -> bool {
         let tones = self.tones.get(select).map(|t| t.0.clone()).unwrap_or_default();
         self.set_toned(select, options, &tones, selected)
@@ -281,11 +294,6 @@ impl SelectEdit<'_, '_> {
             return false;
         }
         let rows: Vec<_> = self.children.iter_descendants(select).filter(|e| self.rows.contains(*e)).collect();
-        // New rows are spawned from a queued scene, so they aren't there to despawn until it has run. Rebuilding again
-        // before then would leave them in the list, under the new ones (TRAIL-1146).
-        if self.options.get(select).is_ok_and(|o| o.0.len() != rows.len()) {
-            return false;
-        }
         let same_tones = self.tones.get(select).map_or(tones.is_empty(), |t| t.0 == tones);
         if self.options.get(select).is_ok_and(|o| o.0 == options) && same_tones {
             for row in rows {
@@ -306,9 +314,13 @@ impl SelectEdit<'_, '_> {
             self.commands.entity(row).despawn();
         }
         let icons = self.icons.get(select).map(|i| i.0.clone()).unwrap_or_default();
-        self.commands
-            .entity(area)
-            .queue_spawn_related_scenes::<Children>(option_rows(options, tones, &icons, selected));
+        // Each row is a child of the list from the start, so a select despawned before its rows' scenes resolve takes
+        // them with it. Queued as related scenes, they would arrive after it had gone, as roots drawn over the
+        // window's top left corner.
+        for i in 0..options.len() {
+            let row = option_row(options, tones, &icons, selected, i);
+            self.commands.spawn_scene(bsn! { @{row} }).insert(ChildOf(area));
+        }
         self.commands.entity(select).insert((SelectOptions(options.to_vec()), SelectTones(tones.to_vec())));
         true
     }
@@ -376,13 +388,27 @@ mod tests {
         let edit_now = |app: &mut App, select: Entity, n: usize| {
             app.world_mut().run_system_once(move |mut edit: SelectEdit| edit.set(select, &names(n), Some(0))).unwrap()
         };
+        // The second rebuild comes before a frame has passed: the first one's rows are already there to replace.
         assert!(edit_now(&mut app, select, 3));
-        assert!(!edit_now(&mut app, select, 2), "the 3 rows haven't spawned yet: try again later");
-        settle(&mut app);
         assert!(edit_now(&mut app, select, 2));
         settle(&mut app);
         assert_eq!(area_children(&mut app).len(), 2);
         assert!(area_children(&mut app).iter().all(|(_, row)| *row));
+    }
+
+    #[test]
+    fn rows_queued_for_a_select_despawned_before_they_spawn_leave_nothing_behind() {
+        let mut app = app();
+        let select = app.world_mut().commands().spawn_scene(select(vec!["a".into(), "b".into()], Some(0), 8)).id();
+        settle(&mut app);
+        let names = vec!["a".to_string(), "b".into(), "c".into()];
+        app.world_mut().run_system_once(move |mut edit: SelectEdit| edit.set(select, &names, Some(0))).unwrap();
+        // The select goes before its new rows have spawned, as the board does when the page changes.
+        app.world_mut().entity_mut(select).despawn();
+        settle(&mut app);
+        let world = app.world_mut();
+        let orphans = world.query_filtered::<Entity, (With<FeathersListRow>, Without<ChildOf>)>().iter(world).count();
+        assert_eq!(orphans, 0, "no row outlives its select");
     }
 
     #[test]

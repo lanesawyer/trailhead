@@ -12,6 +12,7 @@ use trailhead_lookout::inspector::InspectorUiPlugin;
 use trailhead_lookout::map::MapUiPlugin;
 use trailhead_lookout::net::{NetCommand, NetConfig};
 use trailhead_lookout::project::ProjectUiPlugin;
+use trailhead_lookout::project_form::ProjectFormUiPlugin;
 use trailhead_lookout::settings::{SettingsUiPlugin, ThemeFile};
 use trailhead_lookout::sidebar::SidebarUiPlugin;
 use trailhead_lookout::widgets::{ThemePlugin, theme};
@@ -43,6 +44,7 @@ fn main() {
             BoardUiPlugin,
             MapUiPlugin,
             ProjectUiPlugin,
+            ProjectFormUiPlugin,
             AuthorUiPlugin,
             InspectorUiPlugin,
             ConnectUiPlugin,

@@ -23,9 +23,10 @@ use crate::connection::{Connection, ConnectionStatus};
 use crate::factory::{FactoryLink, FactoryStatus};
 use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
+use crate::project_form::NewProject;
 use crate::settings::SettingsButton;
 use crate::widgets::{
-    ButtonKind, ChipEdit, Icon, Keyed, NavItem, NavPart, Token, Truncated, button, chip, nav_heading, nav_item,
+    ButtonKind, ChipEdit, Icon, Keyed, NavItem, NavPart, Token, Truncated, button, chip, nav_heading_action, nav_item,
     nav_item_noted, scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size,
     spawn_search_field_filling, text, token, tool_button,
 };
@@ -117,7 +118,9 @@ fn spawn_sidebar(mut commands: Commands) {
     for (caption, icon, to) in [("Switchbacks", Icon::Board, NavTo::Board), ("Trail map", Icon::Map, NavTo::Map)] {
         commands.queue_spawn_scene(nav_item(caption, Some(icon))).insert((to, ChildOf(places)));
     }
-    commands.queue_spawn_scene(nav_heading("Projects")).insert(ChildOf(places));
+    commands
+        .queue_spawn_scene(nav_heading_action("Projects", Icon::Plus, "New project", bsn! { NewProject }))
+        .insert(ChildOf(places));
     commands.spawn((
         Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0, ..default() },
         ProjectList,

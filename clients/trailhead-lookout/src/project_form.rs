@@ -1,0 +1,485 @@
+//! Creating a project from the sidebar's Projects heading: a modal with the project's key, name, brief, whether its
+//! work needs review, and how long a claim lasts.
+//!
+//! As with the task form (`author`), the form is a resource, [`ProjectForm`], and [`create_request`] turns its draft
+//! into the one request that saves it; it is pure, so it is tested without a window. Saving sends a [`Submit`] with
+//! the modal as the source. An `Ok` closes the form and opens the new project's page; anything else stays on the form
+//! to be fixed. Nothing is applied locally: the event stream brings the project to the sidebar.
+
+use bevy::prelude::*;
+use bevy::text::EditableText;
+use bevy::ui_widgets::Activate;
+use reqwest::Method;
+use serde_json::{Map, Value, json};
+
+use crate::author::describe;
+use crate::commands::{CommandDone, Outcome, Request, Submit};
+use crate::connection::Connection;
+use crate::project::OpenProject;
+use crate::widgets::{
+    ButtonKind, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, button, button_group, field,
+    open_modal, size, text_dim, text_input,
+};
+
+/// Lines tall the brief's box is.
+const BRIEF_LINES: f32 = 8.0;
+/// The longest claim lease the server takes, in minutes (24 hours).
+const MAX_CLAIM_MINUTES: u32 = 24 * 60;
+/// The review choice's options, in order: not required, then required.
+const REVIEW_OPTIONS: [&str; 2] = ["Not required", "Required"];
+
+/// What is typed into the form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectDraft {
+    pub key: String,
+    pub name: String,
+    pub brief: String,
+    /// Whether finished work waits for a reviewer's approval.
+    pub require_review: bool,
+    /// Minutes a claim lasts before it lapses; empty for the workspace's default.
+    pub claim_minutes: String,
+}
+
+/// The form on screen. `generation` changes whenever it opens or closes, which is when the modal is redrawn.
+#[derive(Resource, Default, Debug)]
+pub struct ProjectForm {
+    pub draft: Option<ProjectDraft>,
+    /// The last refusal, or what is in progress.
+    pub message: String,
+    /// The save awaiting its answer, so it can't be sent twice.
+    pub saving: bool,
+    pub generation: u64,
+}
+
+impl ProjectForm {
+    pub fn open(&mut self) {
+        self.draft = Some(ProjectDraft::default());
+        self.reset();
+    }
+
+    pub fn close(&mut self) {
+        self.draft = None;
+        self.reset();
+    }
+
+    fn reset(&mut self) {
+        self.message.clear();
+        self.saving = false;
+        self.generation += 1;
+    }
+}
+
+/// Whether `key` is one the server takes: 2 to 10 uppercase letters or digits, starting with a letter.
+fn valid_key(key: &str) -> bool {
+    (2..=10).contains(&key.len())
+        && key.starts_with(|c: char| c.is_ascii_uppercase())
+        && key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+/// The key as it will be saved: trimmed and in capitals, so `trail` is `TRAIL`.
+fn key_of(draft: &ProjectDraft) -> String {
+    draft.key.trim().to_ascii_uppercase()
+}
+
+/// The request that creates the project in `draft`, or why it can't be sent yet.
+pub fn create_request(draft: &ProjectDraft) -> Result<Request, String> {
+    let key = key_of(draft);
+    if !valid_key(&key) {
+        return Err("the key is 2 to 10 letters or digits, starting with a letter, e.g. TRAIL".into());
+    }
+    let mut body = Map::new();
+    body.insert("key".into(), json!(key));
+    body.insert("name".into(), json!(draft.name.trim()));
+    body.insert("brief".into(), json!(draft.brief));
+    body.insert("require_review".into(), json!(draft.require_review));
+    let minutes = draft.claim_minutes.trim();
+    if !minutes.is_empty() {
+        match minutes.parse::<u32>() {
+            Ok(m) if (1..=MAX_CLAIM_MINUTES).contains(&m) => {
+                body.insert("claim_ttl".into(), json!(m * 60));
+            }
+            _ => return Err(format!("a claim lasts 1 to {MAX_CLAIM_MINUTES} minutes, or leave it empty")),
+        }
+    }
+    Ok(Request::new(Method::POST, "/v1/projects", Some(Value::Object(body)), None))
+}
+
+/// The sidebar's button that opens the form.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct NewProject;
+
+/// What a button of the form does.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum FormAct {
+    #[default]
+    Save,
+    Cancel,
+}
+
+/// Which draft field a text input holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum FieldKind {
+    #[default]
+    Key,
+    Name,
+    Brief,
+    ClaimMinutes,
+}
+
+/// A text input of the form, and the generation it was drawn for: a closing form's inputs go late and must not feed
+/// the next one's draft.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct ProjectField(FieldKind, u64);
+
+/// The review choice.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct ReviewPick;
+
+/// The text showing the form's last message.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct ProjectFormMessage;
+
+/// The form's modal, and the source of its commands.
+#[derive(Component, Default)]
+pub struct ProjectFormPanel;
+
+impl Modal for ProjectFormPanel {
+    fn title(&self) -> String {
+        "New project".into()
+    }
+}
+
+fn field_value(draft: &mut ProjectDraft, kind: FieldKind) -> &mut String {
+    match kind {
+        FieldKind::Key => &mut draft.key,
+        FieldKind::Name => &mut draft.name,
+        FieldKind::Brief => &mut draft.brief,
+        FieldKind::ClaimMinutes => &mut draft.claim_minutes,
+    }
+}
+
+fn on_new_project(activate: On<Activate>, buttons: Query<(), With<NewProject>>, mut form: ResMut<ProjectForm>) {
+    if buttons.contains(activate.entity) {
+        form.open();
+    }
+}
+
+fn on_form_act(
+    activate: On<Activate>,
+    acts: Query<&FormAct>,
+    mut form: ResMut<ProjectForm>,
+    connection: Res<State<Connection>>,
+    panel: Query<Entity, With<ProjectFormPanel>>,
+    mut submit: MessageWriter<Submit>,
+) {
+    let Ok(act) = acts.get(activate.entity) else { return };
+    match act {
+        // A save in flight can't be withdrawn, so the form stays until it is answered.
+        FormAct::Cancel if !form.saving => form.close(),
+        FormAct::Cancel => {}
+        FormAct::Save => {
+            let Some(draft) = &form.draft else { return };
+            if form.saving {
+                return;
+            }
+            if *connection.get() != Connection::Live {
+                form.message = "Not connected to the server; saving waits for Live.".into();
+                return;
+            }
+            match create_request(draft) {
+                Err(why) => form.message = why,
+                Ok(request) => {
+                    let Ok(source) = panel.single() else { return };
+                    submit.write(Submit { source, request });
+                    form.saving = true;
+                    form.message = "Saving...".into();
+                }
+            }
+        }
+    }
+}
+
+fn on_review_pick(picked: On<Picked>, picks: Query<(), With<ReviewPick>>, mut form: ResMut<ProjectForm>) {
+    if !picks.contains(picked.entity) {
+        return;
+    }
+    if let Some(draft) = &mut form.draft {
+        draft.require_review = picked.index == 1;
+    }
+}
+
+/// A close request (the X, Escape, a click outside) closes the form too; the modal is already going.
+fn on_modal_closed(closed: On<ModalClosed>, panels: Query<(), With<ProjectFormPanel>>, mut form: ResMut<ProjectForm>) {
+    if panels.contains(closed.modal) {
+        form.close();
+    }
+}
+
+/// Copies what is typed into the draft.
+fn read_fields(mut form: ResMut<ProjectForm>, fields: Query<(&ProjectField, &EditableText)>) {
+    let Some(draft) = &form.draft else { return };
+    let mut typed = draft.clone();
+    for (ProjectField(kind, generation), text) in &fields {
+        if *generation == form.generation {
+            *field_value(&mut typed, *kind) = text.value().to_string();
+        }
+    }
+    if typed != *draft {
+        form.draft = Some(typed);
+    }
+}
+
+/// The save's answer: `Ok` closes the form and opens the new project, anything else stays on it.
+fn finish(
+    mut done: MessageReader<CommandDone>,
+    panel: Query<Entity, With<ProjectFormPanel>>,
+    mut form: ResMut<ProjectForm>,
+    mut commands: Commands,
+) {
+    for d in done.read() {
+        if !panel.contains(d.source) || !form.saving {
+            continue;
+        }
+        if matches!(d.outcome, Outcome::Ok { .. }) {
+            if let Some(draft) = &form.draft {
+                commands.trigger(OpenProject(key_of(draft)));
+            }
+            form.close();
+        } else {
+            form.saving = false;
+            form.message = describe(&d.outcome);
+        }
+    }
+}
+
+/// The form's logic, without drawing.
+pub struct ProjectFormPlugin;
+
+impl Plugin for ProjectFormPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ProjectForm>()
+            .add_observer(on_new_project)
+            .add_observer(on_form_act)
+            .add_observer(on_review_pick)
+            .add_observer(on_modal_closed)
+            .add_systems(Update, (read_fields, finish).chain());
+    }
+}
+
+/// Draws the form in a modal.
+pub struct ProjectFormUiPlugin;
+
+impl Plugin for ProjectFormUiPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(ProjectFormPlugin)
+            .add_systems(Update, (redraw_form, fill_form, lock_while_saving, update_message).chain());
+    }
+}
+
+fn redraw_form(
+    form: Res<ProjectForm>,
+    panels: Query<Entity, With<ProjectFormPanel>>,
+    mut commands: Commands,
+    mut drawn: Local<u64>,
+) {
+    if *drawn == form.generation {
+        return;
+    }
+    *drawn = form.generation;
+    for e in &panels {
+        commands.entity(e).despawn();
+    }
+    if form.draft.is_some() {
+        open_modal(&mut commands, ProjectFormPanel);
+    }
+}
+
+/// A text input for `kind`, `lines` high.
+fn input(kind: FieldKind, generation: u64, lines: f32) -> Box<dyn SceneList> {
+    // The key is the first thing to type, so the keyboard starts there.
+    if kind == FieldKind::Key {
+        Box::new(bsn_list! { @text_input(lines, bsn! { ProjectField(kind, generation) ModalFocus }) })
+    } else {
+        Box::new(bsn_list! { @text_input(lines, bsn! { ProjectField(kind, generation) }) })
+    }
+}
+
+/// Fills a new form's modal: the fields in its body, the buttons and message in its footer.
+fn fill_form(
+    new: Query<&ModalSlots, (With<ProjectFormPanel>, Added<ModalSlots>)>,
+    form: Res<ProjectForm>,
+    mut commands: Commands,
+) {
+    let generation = form.generation;
+    for slots in &new {
+        let body = slots.body;
+        let text_field = |commands: &mut Commands, label: &str, kind: FieldKind, lines: f32| {
+            commands.queue_spawn_scene(field(label.to_string(), input(kind, generation, lines))).insert(ChildOf(body));
+        };
+        text_field(&mut commands, "Key (e.g. TRAIL: its tasks are TRAIL-1, TRAIL-2…)", FieldKind::Key, 1.0);
+        text_field(&mut commands, "Name", FieldKind::Name, 1.0);
+        text_field(&mut commands, "Brief: what the project is for, for agents to read", FieldKind::Brief, BRIEF_LINES);
+        let options = REVIEW_OPTIONS.iter().map(|o| (o.to_string(), None)).collect();
+        commands
+            .queue_spawn_scene(field(
+                "Review of finished work",
+                bsn_list! { @button_group(options, Some(0)) ReviewPick },
+            ))
+            .insert(ChildOf(body));
+        text_field(&mut commands, "Claim lease in minutes (empty for the default)", FieldKind::ClaimMinutes, 1.0);
+        let footer = slots.footer;
+        commands
+            .spawn_scene(bsn! { @button("Create", None, ButtonKind::Primary) FormAct::Save })
+            .insert(ChildOf(footer));
+        commands
+            .spawn_scene(bsn! { @button("Cancel", None, ButtonKind::Normal) FormAct::Cancel })
+            .insert(ChildOf(footer));
+        commands
+            .spawn_scene(text_dim(form.message.clone(), size::SECONDARY))
+            .insert((ProjectFormMessage, ChildOf(footer)));
+    }
+}
+
+/// A save in flight can't be withdrawn, so the modal stays open until it is answered.
+fn lock_while_saving(form: Res<ProjectForm>, panels: Query<Entity, With<ProjectFormPanel>>, mut commands: Commands) {
+    if !form.is_changed() {
+        return;
+    }
+    for e in &panels {
+        if form.saving {
+            commands.entity(e).insert(ModalLocked);
+        } else {
+            commands.entity(e).remove::<ModalLocked>();
+        }
+    }
+}
+
+fn update_message(form: Res<ProjectForm>, mut messages: Query<&mut Text, With<ProjectFormMessage>>) {
+    if !form.is_changed() {
+        return;
+    }
+    for mut text in &mut messages {
+        if text.0 != form.message {
+            text.0.clone_from(&form.message);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::state::app::StatesPlugin;
+
+    use super::*;
+    use crate::commands::{CommandId, CommandsPlugin, Outbox};
+
+    fn draft(key: &str) -> ProjectDraft {
+        ProjectDraft { key: key.into(), name: " Trailhead ".into(), brief: "the task engine".into(), ..default() }
+    }
+
+    #[test]
+    fn create_sends_the_key_in_capitals_and_the_rest_as_typed() {
+        let r = create_request(&draft(" trail ")).unwrap();
+        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::POST, "/v1/projects", None));
+        assert_eq!(
+            r.body,
+            Some(json!({"key": "TRAIL", "name": "Trailhead", "brief": "the task engine", "require_review": false}))
+        );
+    }
+
+    #[test]
+    fn a_key_the_server_would_refuse_is_caught_first() {
+        for bad in ["", "T", "1ABC", "TRAIL-1", "ELEVENCHARS"] {
+            assert!(create_request(&draft(bad)).unwrap_err().contains("key"), "{bad:?}");
+        }
+        assert!(create_request(&draft("OPS2")).is_ok());
+    }
+
+    #[test]
+    fn the_claim_lease_goes_in_seconds_and_empty_leaves_the_default() {
+        let mut d = draft("OPS");
+        d.claim_minutes = " 45 ".into();
+        d.require_review = true;
+        let body = create_request(&d).unwrap().body.unwrap();
+        assert_eq!((body["claim_ttl"].clone(), body["require_review"].clone()), (json!(2700), json!(true)));
+        for bad in ["0", "abc", "1441", "-5"] {
+            d.claim_minutes = bad.into();
+            assert!(create_request(&d).unwrap_err().contains("minutes"), "{bad:?}");
+        }
+    }
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .init_state::<Connection>()
+            .add_plugins((CommandsPlugin, ProjectFormPlugin));
+        app.add_observer(|open: On<OpenProject>, mut opened: ResMut<Opened>| opened.0 = Some(open.0.clone()));
+        app.init_resource::<Opened>();
+        app.update();
+        app
+    }
+
+    #[derive(Resource, Default)]
+    struct Opened(Option<String>);
+
+    fn press(app: &mut App, act: FormAct) {
+        let button = app.world_mut().spawn(act).id();
+        app.world_mut().trigger(Activate { entity: button });
+    }
+
+    #[test]
+    fn the_button_opens_the_form_and_a_saved_project_opens_its_page() {
+        let mut app = app();
+        let button = app.world_mut().spawn(NewProject).id();
+        app.world_mut().trigger(Activate { entity: button });
+        assert!(app.world().resource::<ProjectForm>().draft.is_some());
+        app.world_mut().resource_mut::<ProjectForm>().draft = Some(draft("ops"));
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
+        app.update();
+        let panel = app.world_mut().spawn(ProjectFormPanel).id();
+        press(&mut app, FormAct::Save);
+        let form = app.world().resource::<ProjectForm>();
+        assert!(form.saving, "{}", form.message);
+        app.update();
+        assert_eq!(app.world().resource::<Outbox>().len(), 1);
+        press(&mut app, FormAct::Save);
+        app.update();
+        assert_eq!(app.world().resource::<Outbox>().len(), 1, "a save out isn't sent twice");
+        app.world_mut().write_message(CommandDone {
+            id: CommandId(0),
+            source: panel,
+            outcome: Outcome::Ok { version: Some(1) },
+        });
+        app.update();
+        assert!(app.world().resource::<ProjectForm>().draft.is_none(), "an Ok closes the form");
+        assert_eq!(app.world().resource::<Opened>().0.as_deref(), Some("OPS"));
+    }
+
+    #[test]
+    fn a_refusal_stays_on_the_form_and_says_why() {
+        let mut app = app();
+        app.world_mut().resource_mut::<ProjectForm>().open();
+        app.world_mut().resource_mut::<ProjectForm>().draft = Some(draft("OPS"));
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
+        app.update();
+        let panel = app.world_mut().spawn(ProjectFormPanel).id();
+        press(&mut app, FormAct::Save);
+        app.world_mut().write_message(CommandDone {
+            id: CommandId(0),
+            source: panel,
+            outcome: Outcome::Failed("project key OPS is taken".into()),
+        });
+        app.update();
+        let form = app.world().resource::<ProjectForm>();
+        assert!(form.draft.is_some() && !form.saving);
+        assert_eq!(form.message, "project key OPS is taken");
+    }
+
+    #[test]
+    fn picking_required_makes_review_required() {
+        let mut app = app();
+        app.world_mut().resource_mut::<ProjectForm>().open();
+        let pick = app.world_mut().spawn(ReviewPick).id();
+        app.world_mut().trigger(Picked { entity: pick, index: 1 });
+        assert!(app.world().resource::<ProjectForm>().draft.as_ref().unwrap().require_review);
+    }
+}

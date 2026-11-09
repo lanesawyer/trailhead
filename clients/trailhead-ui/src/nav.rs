@@ -20,7 +20,7 @@ use bevy::window::SystemCursorIcon;
 
 use super::{
     BackgroundTone, BorderTone, ButtonKind, Icon, Surface, Truncated, button, button_text, extent, layer, size, space,
-    stroke, text_dim, token,
+    stroke, text_dim, token, tool_button,
 };
 
 /// How far the drag edge reaches past the sidebar's border, so it straddles the line rather than sitting inside it.
@@ -212,6 +212,31 @@ pub fn nav_heading(words: impl Into<String>) -> impl Scene {
     bsn! {
         @text_dim(words, size::SECONDARY)
         Node { margin: { UiRect::top(px(space::GROUPS)) }, flex_shrink: { 0.0_f32 } }
+    }
+}
+
+/// A [`nav_heading`] with a plain tool button at its end, for something done to the group (adding to it): `icon`,
+/// with `hint` under the pointer. `own` goes on the button, where the caller puts what its press does.
+pub fn nav_heading_action(
+    words: impl Into<String>,
+    icon: Icon,
+    hint: impl Into<String>,
+    own: impl Scene,
+) -> impl Scene {
+    let (words, hint) = (words.into(), hint.into());
+    bsn! {
+        Node {
+            margin: { UiRect::top(px(space::GROUPS)) },
+            flex_shrink: { 0.0_f32 },
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::SpaceBetween,
+        }
+        Children [
+            @text_dim(words, size::SECONDARY)
+            --
+            @tool_button(icon, hint, ButtonKind::Plain)
+            @{own}
+        ]
     }
 }
 
