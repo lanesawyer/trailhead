@@ -42,10 +42,12 @@ pub enum Error {
     Stdin(std::io::Error),
     #[error("no token on stdin")]
     NoTokenOnStdin,
-    #[error("that doesn't look like a Claude token from `claude setup-token` (it starts `{prefix}`)")]
+    #[error(
+        "that doesn't look like a Claude token from `claude setup-token` (it starts `{prefix}`); if you are sure it is valid, rerun with `--force`"
+    )]
     ClaudeTokenPrefix { prefix: &'static str },
     #[error(
-        "the Claude token is only {len} characters, so it looks truncated (a pasted token may have wrapped); nothing was saved"
+        "the Claude token is only {len} characters, so it looks truncated (a pasted token may have wrapped); nothing was saved; if it is complete, rerun with `--force`"
     )]
     ClaudeTokenShort { len: usize },
     /// The repos in one process can't run together; names both.
