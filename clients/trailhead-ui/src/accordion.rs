@@ -15,9 +15,11 @@ use bevy::feathers::controls::{ButtonVariant, FeathersButton, FeathersToolButton
 use bevy::feathers::display::label;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::rounded_corners::RoundedCorners;
-use bevy::feathers::theme::{SurfaceLevel, ThemeBorderColor, ThemeContext, ThemeTextColor};
+use bevy::feathers::theme::{SurfaceLevel, ThemeBorderColor, ThemeContext};
 use bevy::feathers::tokens;
 use bevy::prelude::*;
+
+use crate::theme::{TextTone, token};
 use bevy::ui_widgets::Activate;
 
 use crate::icons::{Icon, button_icon, icon_text};
@@ -149,7 +151,7 @@ pub fn spawn_accordion(commands: &mut Commands, title: &str, open: bool, level: 
             Children [
                 AccordionCaret
                 @icon_text(caret(open))
-                ThemeTextColor({ tokens::TEXT_MAIN })
+                TextTone({ token::TEXT })
                 --
                 AccordionTitle { full: { title.to_string() } }
                 Node {

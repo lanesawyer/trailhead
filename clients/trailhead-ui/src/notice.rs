@@ -6,7 +6,6 @@
 //!
 //! Ported from bevy-data-explorer's `widgets/notice.rs`, with its palette swapped for the kit's tokens.
 
-use bevy::feathers::theme::UiTheme;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
 
@@ -14,7 +13,7 @@ use crate::icons::{Icon, icon_text};
 use crate::patch::{display, patch_node, set_text};
 use crate::spacing::{radius, space};
 use crate::text::{size, text};
-use crate::theme::{Token, token};
+use crate::theme::{BackgroundTone, BorderTone, TextTone, Token, token};
 
 /// What kind of news a message is, which picks its icon and color.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -41,10 +40,20 @@ impl Tone {
     /// The token a notice of this tone is drawn in.
     pub fn token(self) -> Token {
         match self {
-            Tone::Info => token::INFO,
-            Tone::Success => token::OK,
-            Tone::Warning => token::WARN,
-            Tone::Error => token::DANGER,
+            Tone::Info => token::STATUS_INFO,
+            Tone::Success => token::STATUS_OK,
+            Tone::Warning => token::STATUS_WARN,
+            Tone::Error => token::STATUS_DANGER,
+        }
+    }
+
+    /// The faint token a notice of this tone is filled with.
+    pub fn subtle(self) -> Token {
+        match self {
+            Tone::Info => token::STATUS_INFO_SUBTLE,
+            Tone::Success => token::STATUS_OK_SUBTLE,
+            Tone::Warning => token::STATUS_WARN_SUBTLE,
+            Tone::Error => token::STATUS_DANGER_SUBTLE,
         }
     }
 }
@@ -79,9 +88,6 @@ const LINE_HEIGHT: f32 = 18.0;
 const TEXT_DROP: f32 = 1.5;
 /// How thick the box's border is.
 const OUTLINE: f32 = 1.0;
-/// How strongly the tone tints the box's background and its border.
-const FILL_ALPHA: f32 = 0.12;
-const BORDER_ALPHA: f32 = 0.45;
 
 /// A notice, hidden until something is written to it.
 pub fn notice() -> impl Scene {
@@ -96,10 +102,10 @@ pub fn notice() -> impl Scene {
             border: { UiRect::all(px(OUTLINE)) },
             border_radius: { BorderRadius::all(px(radius::CONTROL)) },
         }
-        BackgroundColor
-        BorderColor
+        BackgroundTone({ Tone::Info.subtle() })
+        BorderTone({ Tone::Info.token() })
         Children [
-            @icon_text(Icon::Info) NoticeIcon TextColor LineHeight::Px(LINE_HEIGHT)
+            @icon_text(Icon::Info) NoticeIcon TextTone({ Tone::Info.token() }) LineHeight::Px(LINE_HEIGHT)
             --
             @text(String::new(), size::SECONDARY)
             NoticeText
@@ -113,27 +119,27 @@ pub fn notice() -> impl Scene {
     }
 }
 
-/// Draw each notice from what it says, and again when the theme changes. The tint is the tone's color at a fraction
-/// of its strength, which a theme token can't say, so the colors are set here rather than named.
+/// Draw each notice from what it says: shown or hidden, its words, and its tone's icon and tokens.
 #[allow(clippy::type_complexity)]
 pub(crate) fn sync_notices(
-    theme: Res<UiTheme>,
-    mut notices: Query<(Ref<Notice>, &Children, &mut Node, &mut BackgroundColor, &mut BorderColor)>,
-    mut icons: Query<(&mut Text, &mut TextColor), (With<NoticeIcon>, Without<NoticeText>)>,
+    notices: Query<(Entity, Ref<Notice>, &Children, &mut Node, &BorderTone)>,
+    mut icons: Query<(Entity, &mut Text), (With<NoticeIcon>, Without<NoticeText>)>,
     mut texts: Query<&mut Text, (With<NoticeText>, Without<NoticeIcon>)>,
+    mut commands: Commands,
 ) {
-    for (notice, children, node, mut background, mut border) in &mut notices {
-        if !notice.is_changed() && !theme.is_changed() {
+    for (entity, notice, children, node, border) in notices {
+        if !notice.is_changed() {
             continue;
         }
         patch_node(node, |node| node.display = display(!notice.message.is_empty()));
-        let color = theme.color(&notice.tone.token().0);
-        background.set_if_neq(BackgroundColor(color.with_alpha(FILL_ALPHA)));
-        border.set_if_neq(BorderColor::all(color.with_alpha(BORDER_ALPHA)));
+        let tone = notice.tone.token();
+        if border.0 != tone {
+            commands.entity(entity).insert((BackgroundTone(notice.tone.subtle()), BorderTone(tone.clone())));
+        }
         for &child in children {
-            if let Ok((glyph, mut glyph_color)) = icons.get_mut(child) {
+            if let Ok((icon, glyph)) = icons.get_mut(child) {
                 set_text(glyph, notice.tone.icon().glyph());
-                glyph_color.set_if_neq(TextColor(color));
+                commands.entity(icon).insert(TextTone(tone.clone()));
             }
             if let Ok(text) = texts.get_mut(child) {
                 set_text(text, &notice.message);
@@ -154,6 +160,7 @@ mod tests {
             for b in &tones[i + 1..] {
                 assert_ne!(a.icon(), b.icon());
                 assert_ne!(theme.color(&a.token()), theme.color(&b.token()));
+                assert_ne!(theme.color(&a.subtle()), theme.color(&b.subtle()));
             }
         }
     }
@@ -165,7 +172,6 @@ mod tests {
             .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>()
-            .insert_resource(crate::theme::Theme::new().resource())
             .add_systems(Update, sync_notices);
         let notice = app.world_mut().commands().spawn_scene(notice()).id();
         app.world_mut().flush();
@@ -177,5 +183,6 @@ mod tests {
         assert_eq!(app.world().get::<Node>(notice).unwrap().display, Display::Flex);
         let mut texts = app.world_mut().query_filtered::<&Text, With<NoticeText>>();
         assert_eq!(texts.single(app.world()).unwrap().0, "couldn't open it");
+        assert_eq!(app.world().get::<BackgroundTone>(notice).unwrap().0, token::STATUS_DANGER_SUBTLE);
     }
 }

@@ -12,7 +12,7 @@
 use bevy::prelude::*;
 use bevy::ui_widgets::Button;
 
-use super::{BackgroundTone, BorderTone, HoverTone, radius, size, space, text, text_dim, token};
+use super::{BorderTone, HoverTone, Surface, radius, size, space, text, text_dim, token};
 
 /// How many lines of a title a card shows.
 pub const TITLE_LINES: f32 = 2.0;
@@ -32,9 +32,9 @@ pub fn card(depth: usize) -> impl Scene {
             border: { UiRect::all(px(1)) },
             border_radius: { BorderRadius::all(px(radius::CONTROL)) },
         }
-        BackgroundTone({ token::CARD_BG })
-        HoverTone { rest: { token::CARD_BG }, hover: { token::CARD_BG_HOVER } }
-        BorderTone({ token::DIVIDER })
+        Surface::Raised
+        HoverTone { rest: { token::SURFACE_RAISED }, hover: { token::FILL_SOLID } }
+        BorderTone({ token::BORDER })
     }
 }
 

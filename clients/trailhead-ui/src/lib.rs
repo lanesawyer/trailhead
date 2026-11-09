@@ -27,9 +27,9 @@
 //!   [`bubble_head`].
 //! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
 //!   [`sidebar_footer`]; mark the page shown on its [`NavItem`]. Pages fill [`beside_sidebar`].
-//! - Colors: a [`Token`] from [`token`], on a node as a [`BackgroundTone`], [`BorderTone`] or [`TextTone`]. An app
-//!   adds its own tokens with [`Theme::paint`] on top of [`Theme::new`], from the [`palette`], and adds [`ThemePlugin`]
-//!   with it beside [`UiPlugin`].
+//! - Colors: a meaning from [`token`], on a node as a [`BackgroundTone`], [`BorderTone`] or [`TextTone`]. A surface (a
+//!   panel, a card, a hint): a [`Surface`]. An app builds on [`Theme::new`]: [`Theme::alias`] a token of its own to a
+//!   meaning, [`Theme::paint`] only colors that encode data, and adds [`ThemePlugin`] with it beside [`UiPlugin`].
 //! - An area that scrolls both ways (Shift + wheel goes sideways): [`ScrollBoth`]; one that scrolls down only,
 //!   inside it: [`ScrollDown`].
 //! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
@@ -140,7 +140,7 @@ pub use slider::spawn_slider;
 pub use spacing::{check as spacing_check, extent, radius, space};
 pub use tabs::{TabCaption, fit_tabs, style_tabs, tab, tab_strip};
 pub use text::{size, text, text_dim, text_mono, text_toned};
-pub use theme::{BackgroundTone, BorderTone, TextTone, Theme, Token, palette, token};
+pub use theme::{BackgroundTone, BorderTone, Surface, TextTone, Theme, Token, palette, token};
 pub use truncate::{truncate_to_width, width_of};
 
 /// Where the kit's per-frame systems run in `Update`: opening and closing accordions, cutting titles and captions to
@@ -167,7 +167,7 @@ impl Plugin for UiPlugin {
                     accordion::truncate_accordion_titles,
                     search::sync_search_hints,
                     slider::repaint_sliders.run_if(resource_exists_and_changed::<UiTheme>),
-                    notice::sync_notices.run_if(resource_exists::<UiTheme>),
+                    notice::sync_notices,
                     skeleton::pulse_skeletons.run_if(resource_exists::<UiTheme>),
                     tabs::fit_tabs,
                     tabs::style_tabs,

@@ -19,8 +19,6 @@
 //! input has no placeholder of its own; the hint is laid over it, as the kit's search box does).
 
 use bevy::ecs::system::SystemParam;
-use bevy::feathers::theme::ThemeTextColor;
-use bevy::feathers::tokens;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::picking::events::PointerClick;
@@ -37,7 +35,7 @@ use crate::patch::{display, patch_node, set_text};
 use crate::select::{Picked, SelectEdit, select_toned};
 use crate::spacing::{extent, space};
 use crate::text::{size, text, text_dim};
-use crate::theme::Token;
+use crate::theme::{TextTone, Token, token};
 
 /// Where an inline widget is in its edit.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -490,7 +488,7 @@ fn sync_inline(
     fields: Query<(Entity, Ref<InlineField>)>,
     children: Query<&Children>,
     inputs: Query<Ref<EditableText>, With<InlineInput>>,
-    mut parts: Query<(&Part, &mut Node, Option<&mut Text>, Option<&ThemeTextColor>)>,
+    mut parts: Query<(&Part, &mut Node, Option<&mut Text>, Option<&TextTone>)>,
     mut notices: Query<(&Part, &mut Notice)>,
     selects: Query<(), With<crate::select::SelectOptions>>,
     mut select_edit: SelectEdit,
@@ -560,7 +558,7 @@ fn draw(
     root: Entity,
     view: &View,
     children: &Query<&Children>,
-    parts: &mut Query<(&Part, &mut Node, Option<&mut Text>, Option<&ThemeTextColor>)>,
+    parts: &mut Query<(&Part, &mut Node, Option<&mut Text>, Option<&TextTone>)>,
     notices: &mut Query<(&Part, &mut Notice)>,
     commands: &mut Commands,
 ) {
@@ -589,9 +587,9 @@ fn draw(
             }
             // A value being saved is dimmed until the caller answers.
             if *kind == Part::Value {
-                let wanted = if view.mode == InlineMode::Saving { tokens::TEXT_DIM } else { tokens::TEXT_MAIN };
+                let wanted = if view.mode == InlineMode::Saving { token::TEXT_DIM } else { token::TEXT };
                 if color.is_none_or(|c| c.0 != wanted) {
-                    commands.entity(part).insert(ThemeTextColor(wanted));
+                    commands.entity(part).insert(TextTone(wanted));
                 }
             }
         }
@@ -1010,9 +1008,9 @@ mod tests {
         assert_eq!(app.world().get::<InlineField>(root).unwrap().mode(), InlineMode::Reading);
     }
 
-    fn value_color(app: &mut App) -> Option<bevy::feathers::theme::ThemeToken> {
+    fn value_color(app: &mut App) -> Option<Token> {
         let world = app.world_mut();
-        let mut q = world.query::<(&Part, Option<&ThemeTextColor>)>();
+        let mut q = world.query::<(&Part, Option<&TextTone>)>();
         q.iter(world).find(|(p, _)| **p == Part::Value).and_then(|(_, c)| c.map(|c| c.0.clone()))
     }
 
@@ -1020,15 +1018,15 @@ mod tests {
     fn a_value_being_saved_is_dimmed_until_the_caller_answers() {
         let mut app = app();
         let (root, input) = text(&mut app, "Fix the board", 1.0);
-        assert_eq!(value_color(&mut app), Some(tokens::TEXT_MAIN));
+        assert_eq!(value_color(&mut app), Some(token::TEXT));
         click(&mut app, root);
         type_in(&mut app, input, "Fix the card");
         enter(&mut app, input);
         assert_eq!(mode(&app, root), InlineMode::Saving);
-        assert_eq!(value_color(&mut app), Some(tokens::TEXT_DIM));
+        assert_eq!(value_color(&mut app), Some(token::TEXT_DIM));
         app.world_mut().get_mut::<InlineText>(root).unwrap().confirm();
         settle(&mut app);
-        assert_eq!(value_color(&mut app), Some(tokens::TEXT_MAIN));
+        assert_eq!(value_color(&mut app), Some(token::TEXT));
     }
 
     #[test]

@@ -326,7 +326,7 @@ pub(super) fn sync_panel(
         &wanted,
         |commands, _, gate| {
             let (icon, tone) = match gate.state {
-                GateState::Passed => (Icon::CircleCheck, token::OK),
+                GateState::Passed => (Icon::CircleCheck, token::STATUS_OK),
                 GateState::Waiting => (Icon::Circle, token::TEXT_DIM),
             };
             commands.spawn_scene(badge(gate.name.clone(), Some(icon), Some(tone))).id()

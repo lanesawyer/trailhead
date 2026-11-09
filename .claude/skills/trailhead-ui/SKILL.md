@@ -55,14 +55,25 @@ over growing a private copy.
 ## 3. Colors, sizes, spacing, icons
 
 - **Colors are theme tokens**, a kit `Token` on a node as `BackgroundTone`, `TextTone` or `BorderTone`, never
-  `Color::srgb(..)` literals. The kit's base palette is in `clients/trailhead-ui/src/theme.rs`; an app's own colors
-  are `Token`s it paints onto `Theme::new()` with `Theme::paint` (from the kit's `palette` or its own colors), defined
-  once where the theme is built. The tone components are immutable: insert a new one to change the token. A missing
+  `Color::srgb(..)` literals. The tone components are immutable: insert a new one to change the token. A missing
   token renders fuchsia (TRAIL-777): if you see magenta, a token isn't in the theme.
+- **Name a meaning.** The kit's `token` module is semantic: surfaces (`SURFACE_WINDOW`, `_PANEL`, `_RAISED`,
+  `_FLOATING`), text (`TEXT`, `TEXT_DIM`, `TEXT_DISABLED`), one `BORDER`, fills with hover and pressed (`FILL_SOLID`,
+  `FILL_ITEM`, `FILL_ACCENT`, `FILL_FIELD`) and statuses (`STATUS_OK`, `_WARN`, `_DANGER`, `_INFO`, each with a
+  `_SUBTLE`). Each sits on one of feathers' semantic slots where feathers has one, so feathers' controls wear it too.
+  Views and widgets name these. Don't add a token for a widget unless it has to be restyled on its own; then
+  `Theme::alias` it to a meaning. Feathers' own `tokens::` appear only inside the kit widget wrapping that control.
+- **A surface is a `Surface`** (`Window`, `Panel`, `Raised`, `Floating`), not a `BackgroundTone` of a surface token:
+  it also tells feathers what the controls inside sit on, so a field or solid fill on a card takes the color that
+  shows there. Check a color against a surface in a test with `Theme::color_on`.
+- **Theme API.** `Theme::set` repaints a meaning everywhere (`set_accent` for a shade of `palette::ACCENT`, which then
+  follows the desktop's accent); `Theme::alias` points a token at a meaning; `Theme::paint` is only for an app's
+  categorical colors, which encode data (Lookout's statuses, priorities, grades). `palette` and color literals appear
+  only where the theme is built. `Theme::repeated_colors` lists a painted color some meaning already has: an app's
+  test asserts it's empty.
 - **Paint dark; the kit derives light and the accent.** `Theme::light` turns near-neutrals over and darkens colors
-  that mean something; `Theme::with_accent` moves the accent's shades onto the desktop's. Paint a shade of
-  `palette::ACCENT` with `Theme::paint_accent`, or it stays feathers' blue. A color written as a literal follows
-  neither, so it stays dark in a light theme.
+  that mean something; `Theme::with_accent` moves the accent's shades onto the desktop's. A color written as a
+  literal follows neither, so it stays dark in a light theme.
 - **Text sizes** come from the kit's `size` scale and **gaps, padding and margins** from its `space` scale, named for
   what they're for. A test fails on a literal. If no name fits, add one with a doc comment.
 - **Icons** are `Icon` variants (Lucide glyphs from the embedded font). The text font has no icon glyphs, so anything

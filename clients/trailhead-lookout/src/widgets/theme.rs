@@ -1,25 +1,20 @@
 //! The colors Lookout adds on top of the kit's theme.
 //!
-//! The kit's ([`trailhead_ui::Theme::new`]) is the base; Lookout paints its own tokens onto it with
-//! [`trailhead_ui::Theme::paint`]: one background per status column, the board and card surfaces, and a tone per priority.
-//! A view names a token, never a color.
+//! The kit's ([`trailhead_ui::Theme::new`]) is the base, and its semantic tokens (surfaces, text, fills, statuses) are
+//! what Lookout's views name. Lookout's own colors are categorical, encoding data rather than meaning something to the
+//! kit: one background and one text tone per status, a tone per priority and per grade, each painted with
+//! [`trailhead_ui::Theme::paint`]. The top priority is the kit's danger color, an alias. A view names a token, never a
+//! color.
 
 use bevy::prelude::*;
 use trailhead_model::{CommentKind, Grade, Priority, Status};
-use trailhead_ui::{Icon, Theme, Token, palette};
+use trailhead_ui::{Icon, Theme, Token};
 
 /// The kit's tokens and Lookout's own.
 pub mod token {
     pub use trailhead_ui::token::*;
 
     use trailhead_ui::Token;
-
-    /// What the board's columns and the panels sit on.
-    pub const BOARD_BG: Token = Token::new("lookout.board.bg");
-    /// A task card.
-    pub const CARD_BG: Token = Token::new("lookout.card.bg");
-    /// A task card under the pointer.
-    pub const CARD_BG_HOVER: Token = Token::new("lookout.card.bg.hover");
 
     /// One tone per priority, the same wherever a priority shows: P1 red, P2 orange, P3 blue, P4 gray.
     pub const PRIORITY_1: Token = Token::new("lookout.priority.1");
@@ -128,13 +123,8 @@ pub fn comment_icon(kind: CommentKind) -> Icon {
 /// The kit's theme with Lookout's tokens added, which `main.rs` hands to the kit's `ThemePlugin`.
 pub fn theme() -> Theme {
     let mut theme = Theme::new();
-    theme.paint(&token::BOARD_BG, palette::GRAY_0);
-    theme.paint(&token::CARD_BG, palette::GRAY_2);
-    theme.paint(&token::CARD_BG_HOVER, palette::GRAY_3);
-
-    // The most urgent priority is the kit's danger red, read from the theme so the two can't drift apart.
-    let danger = theme.color(&token::DANGER);
-    theme.paint(&token::PRIORITY_1, danger);
+    // The most urgent priority is the kit's danger red.
+    theme.alias(&token::PRIORITY_1, &token::STATUS_DANGER);
     theme.paint(&token::PRIORITY_2, Color::oklch(0.76, 0.15, 60.0));
     theme.paint(&token::PRIORITY_3, Color::oklch(0.70, 0.13, 250.0));
     theme.paint(&token::PRIORITY_4, Color::oklch(0.65, 0.0, 0.0));
@@ -168,6 +158,8 @@ pub fn theme() -> Theme {
 
 #[cfg(test)]
 mod tests {
+    use trailhead_ui::Surface;
+
     use super::*;
 
     #[test]
@@ -179,45 +171,17 @@ mod tests {
     #[test]
     fn every_lookout_token_resolves_rather_than_falling_back_to_fuchsia() {
         let theme = theme();
-        let all = [
-            token::BOARD_BG,
-            token::PANEL_BG,
-            token::CARD_BG,
-            token::CARD_BG_HOVER,
-            token::DIVIDER,
-            token::BADGE_BG,
-            token::HINT_BG,
-            token::WARN,
-            token::DANGER,
-            token::OK,
-            token::PRIORITY_1,
-            token::PRIORITY_2,
-            token::PRIORITY_3,
-            token::PRIORITY_4,
-            token::GRADE_1,
-            token::GRADE_2,
-            token::GRADE_3,
-            token::GRADE_4,
-            token::STATUS_OPEN,
-            token::STATUS_IN_PROGRESS,
-            token::STATUS_NEEDS_INPUT,
-            token::STATUS_IN_REVIEW,
-            token::STATUS_APPROVED,
-            token::STATUS_DONE,
-            token::STATUS_CANCELLED,
-            token::STATUS_OPEN_TEXT,
-            token::STATUS_IN_PROGRESS_TEXT,
-            token::STATUS_NEEDS_INPUT_TEXT,
-            token::STATUS_IN_REVIEW_TEXT,
-            token::STATUS_APPROVED_TEXT,
-            token::STATUS_DONE_TEXT,
-            token::STATUS_CANCELLED_TEXT,
-        ];
-        for t in all {
+        let lookouts = Priority::ALL.map(priority_tone).into_iter().chain(Grade::ALL.map(grade_tone));
+        let statuses = Status::ALL.into_iter().flat_map(|s| [status_token(s), status_tone(s)]);
+        for t in lookouts.chain(statuses).chain(token::ALL) {
             assert!(theme.has(&t), "{t} isn't in the theme");
         }
-        // Feathers' own controls still resolve.
-        assert!(theme.has(&token::BUTTON_BG));
+    }
+
+    #[test]
+    fn no_color_is_painted_that_a_meaning_already_has() {
+        let repeated = theme().repeated_colors();
+        assert!(repeated.is_empty(), "alias these to the meaning instead:\n{}", repeated.join("\n"));
     }
 
     #[test]
@@ -234,7 +198,7 @@ mod tests {
     #[test]
     fn the_top_priority_is_the_danger_color() {
         let theme = theme();
-        assert_eq!(theme.color(&token::PRIORITY_1), theme.color(&token::DANGER));
+        assert_eq!(theme.color(&token::PRIORITY_1), theme.color(&token::STATUS_DANGER));
     }
 
     #[test]
@@ -259,7 +223,7 @@ mod tests {
     fn in_the_light_theme_priorities_and_grades_still_read_on_a_card() {
         let light = theme().light();
         let lightness = |t: &Token| Oklcha::from(light.color(t)).lightness;
-        let card = lightness(&token::CARD_BG);
+        let card = lightness(&token::SURFACE_RAISED);
         assert!(card > 0.5, "the card turns light");
         for tone in written_tones() {
             assert!(card - lightness(&tone) > 0.1, "{tone} is too faint on a light card");
@@ -280,7 +244,7 @@ mod tests {
         // The status select once wrote each status in its column's background, near-black on a dark panel.
         let dark = theme();
         let lightness = |t: &Token| Oklcha::from(dark.color(t)).lightness;
-        for surface in [token::PANEL_BG, token::CARD_BG] {
+        for surface in [token::SURFACE_PANEL, token::SURFACE_RAISED] {
             for tone in written_tones() {
                 let gap = lightness(&tone) - lightness(&surface);
                 assert!(gap >= TEXT_CONTRAST, "{tone} on {surface} is {gap:.2} lighter, too dark to read");
@@ -292,27 +256,30 @@ mod tests {
     const HOVER_CONTRAST: f32 = 0.05;
 
     #[test]
-    fn a_plain_buttons_hover_shows_on_the_card_and_the_panel_in_either_theme() {
+    fn a_plain_buttons_hover_shows_on_a_card_resting_or_hovered_and_on_the_panel_in_either_theme() {
         // The card's Edit, Comment and Answer buttons are plain, as are the inspector's and settings' (TRAIL-1091).
         // Feathers' own plain hover is a shade of the surface, a gap too small to see.
         for theme in [theme(), theme().light()] {
-            let lightness = |t: &Token| Oklcha::from(theme.color(t)).lightness;
-            let hover = lightness(&token::BUTTON_PLAIN_BG_HOVER);
-            for surface in [token::CARD_BG, token::PANEL_BG] {
-                let gap = (hover - lightness(&surface)).abs();
-                assert!(
-                    gap >= HOVER_CONTRAST,
-                    "a plain button's hover on {surface} is {gap:.3} away, too close to see"
-                );
+            let on = |t: &Token, surface| Oklcha::from(theme.color_on(t, surface)).lightness;
+            for (surface, under) in [
+                (Surface::Raised, token::SURFACE_RAISED),
+                (Surface::Raised, CARD_HOVER),
+                (Surface::Panel, token::SURFACE_PANEL),
+            ] {
+                let gap = (on(&token::FILL_ITEM_HOVER, surface) - on(&under, surface)).abs();
+                assert!(gap >= HOVER_CONTRAST, "a plain button's hover on {under} is {gap:.3} away, too close to see");
             }
         }
     }
 
+    /// What a card wears under the pointer (`widgets/card.rs`).
+    const CARD_HOVER: Token = token::FILL_SOLID;
+
     #[test]
     fn a_cards_hover_shows_on_the_card_in_either_theme() {
         for theme in [theme(), theme().light()] {
-            let lightness = |t: &Token| Oklcha::from(theme.color(t)).lightness;
-            let gap = (lightness(&token::CARD_BG_HOVER) - lightness(&token::CARD_BG)).abs();
+            let on = |t: &Token| Oklcha::from(theme.color_on(t, Surface::Raised)).lightness;
+            let gap = (on(&CARD_HOVER) - on(&token::SURFACE_RAISED)).abs();
             assert!(gap >= HOVER_CONTRAST, "a card's hover is {gap:.3} away from the card, too close to see");
         }
     }
