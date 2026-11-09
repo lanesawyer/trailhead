@@ -23,8 +23,8 @@ const MAX_WIDTH_PERCENT: f32 = 80.0;
 /// A message box on `side`.
 pub fn bubble(side: Side) -> impl Scene {
     let (align, tone) = match side {
-        Side::Theirs => (AlignSelf::FlexStart, token::BUBBLE_BG),
-        Side::Mine => (AlignSelf::FlexEnd, token::BUBBLE_MINE_BG),
+        Side::Theirs => (AlignSelf::FlexStart, token::SURFACE_RAISED),
+        Side::Mine => (AlignSelf::FlexEnd, token::FILL_ACCENT),
     };
     bsn! {
         Node {

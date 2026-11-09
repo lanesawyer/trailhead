@@ -120,7 +120,7 @@ impl Plugin for ThemePlugin {
         let appearance = Appearance::new(self.choice);
         let worn = appearance.wear(&self.theme);
         app.add_plugins(FeathersPlugins)
-            .insert_resource(ClearColor(worn.color(&token::WINDOW_BG)))
+            .insert_resource(ClearColor(worn.color(&token::SURFACE_WINDOW)))
             .insert_resource(worn.resource())
             .insert_resource(appearance)
             .insert_resource(Painted(self.theme.clone()))
@@ -173,7 +173,7 @@ fn follow_window(mut changed: MessageReader<WindowThemeChanged>, mut appearance:
 fn wear(appearance: Res<Appearance>, painted: Res<Painted>, mut theme: ResMut<UiTheme>, mut clear: ResMut<ClearColor>) {
     if appearance.is_changed() && !appearance.is_added() {
         let worn = appearance.wear(&painted.0);
-        clear.0 = worn.color(&token::WINDOW_BG);
+        clear.0 = worn.color(&token::SURFACE_WINDOW);
         *theme = worn.resource();
     }
 }
@@ -206,8 +206,8 @@ mod tests {
         let purple = Color::srgb(0.568627, 0.254902, 0.67451);
         let appearance = Appearance { desktop: Some(WindowTheme::Light), accent: Some(purple), ..default() };
         let worn = appearance.wear(&Theme::new());
-        assert!(lightness(worn.color(&token::PANEL_BG)) > 0.5);
-        let hue = Oklcha::from(worn.color(&token::BUBBLE_MINE_BG)).hue;
+        assert!(lightness(worn.color(&token::SURFACE_PANEL)) > 0.5);
+        let hue = Oklcha::from(worn.color(&token::FILL_ACCENT)).hue;
         assert!((hue - Oklcha::from(purple).hue).abs() < 1.0);
     }
 
@@ -221,7 +221,7 @@ mod tests {
             .init_resource::<ClearColor>()
             .add_systems(Update, wear);
         app.update();
-        let panel = |app: &App| app.world().resource::<UiTheme>().color(&token::PANEL_BG.0);
+        let panel = |app: &App| app.world().resource::<UiTheme>().color(&token::SURFACE_PANEL.0);
         assert!(lightness(panel(&app)) < 0.5);
         app.world_mut().resource_mut::<Appearance>().choice = ThemeChoice::Light;
         app.update();

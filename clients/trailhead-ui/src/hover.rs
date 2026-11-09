@@ -42,17 +42,17 @@ mod tests {
     fn a_surface_takes_its_hover_tone_under_the_pointer_and_its_rest_tone_after() {
         let mut app = App::new();
         app.add_systems(Update, paint_hover_tones);
-        let tone = HoverTone { rest: token::PANEL_BG, hover: token::BUTTON_PLAIN_BG_HOVER };
+        let tone = HoverTone { rest: token::SURFACE_PANEL, hover: token::FILL_ITEM_HOVER };
         let surface = app.world_mut().spawn(tone).id();
         let shown = |app: &mut App, hovered: bool| {
             app.world_mut().entity_mut(surface).insert(Hovered(hovered));
             app.update();
             app.world().get::<BackgroundTone>(surface).unwrap().0.clone()
         };
-        assert_eq!(shown(&mut app, false), token::PANEL_BG);
-        assert_eq!(shown(&mut app, true), token::BUTTON_PLAIN_BG_HOVER);
-        assert_eq!(shown(&mut app, false), token::PANEL_BG);
+        assert_eq!(shown(&mut app, false), token::SURFACE_PANEL);
+        assert_eq!(shown(&mut app, true), token::FILL_ITEM_HOVER);
+        assert_eq!(shown(&mut app, false), token::SURFACE_PANEL);
         app.world_mut().entity_mut(surface).insert(InteractionDisabled);
-        assert_eq!(shown(&mut app, true), token::PANEL_BG, "a disabled surface doesn't answer");
+        assert_eq!(shown(&mut app, true), token::SURFACE_PANEL, "a disabled surface doesn't answer");
     }
 }

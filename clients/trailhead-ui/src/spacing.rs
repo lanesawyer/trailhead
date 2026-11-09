@@ -2,8 +2,8 @@
 //!
 //! [`step`] is the scale: few values, far enough apart to tell neighbors apart. [`space`] names what a space is for,
 //! and each name points at a step. UI code uses [`space`], never a step and never a literal, so changing how roomy
-//! an app is is an edit here. A space with a new meaning gets a new name here. `a_spacing_is_named_rather_than_typed`
-//! fails on any gap, padding or margin written as a number.
+//! an app is is an edit here. A space with a new meaning gets a new name here. [`crate::lint`]'s `spacing` rule finds
+//! a gap, padding or margin written as a number.
 //!
 //! Ported from bevy-data-explorer's `widgets/spacing.rs`.
 
@@ -87,65 +87,14 @@ pub mod extent {
     pub const DETAIL_SIDEBAR_WIDTH: f32 = 280.0;
 }
 
-/// The check that keeps spacings named, for an app to run over its own sources (see [`check::typed_spacings`]).
-pub mod check {
-    use std::path::Path;
-
-    /// Whether `line` writes a gap, padding or margin as a number: `px(8)`, `Val::Px(8.0)`, or a constant named for
-    /// one.
-    pub fn types_a_spacing(line: &str) -> bool {
-        let code = line.split("//").next().unwrap_or("");
-        if let Some((name, value)) = code.split_once("const ").and_then(|(_, rest)| rest.split_once(": f32 = ")) {
-            let spacing = ["GAP", "INSET", "INDENT", "MARGIN", "PADDING"].iter().any(|word| name.contains(word));
-            return spacing && value.trim_start().starts_with(|c: char| c.is_ascii_digit());
-        }
-        if !["gap", "padding", "margin"].iter().any(|word| code.contains(word)) {
-            return false;
-        }
-        ["Val::Px(", "px("].iter().any(|call| {
-            code.match_indices(call).any(|(at, found)| {
-                // `px(` also ends `Val::Px(`'s lowercase cousins; only a call that starts a word counts.
-                let before = code[..at].chars().last();
-                if *call == "px(" && before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':') {
-                    return false;
-                }
-                let rest = code[at + found.len()..].trim_start_matches('-');
-                rest.starts_with(|c: char| c.is_ascii_digit()) && !rest.starts_with("0)") && !rest.starts_with("0.0)")
-            })
-        })
-    }
-
-    /// Every line of the `.rs` files under `root` that writes a spacing as a number, as `path:line: code`. Files whose
-    /// name is in `skip` are left out. Run it from a test over `env!("CARGO_MANIFEST_DIR")/src` and assert it's empty.
-    pub fn typed_spacings(root: &Path, skip: &[&str]) -> Vec<String> {
-        let mut typed = Vec::new();
-        let mut folders = vec![root.to_path_buf()];
-        while let Some(folder) = folders.pop() {
-            for entry in std::fs::read_dir(&folder).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    folders.push(path);
-                    continue;
-                }
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-                if path.extension().is_none_or(|ext| ext != "rs") || skip.contains(&name) {
-                    continue;
-                }
-                let source = std::fs::read_to_string(&path).unwrap();
-                for (number, line) in source.lines().enumerate() {
-                    if types_a_spacing(line) {
-                        typed.push(format!("{}:{}: {}", path.display(), number + 1, line.trim()));
-                    }
-                }
-            }
-        }
-        typed
-    }
+/// How thick a line is: a border, a rule between panes.
+pub mod stroke {
+    /// The thinnest line: a border, a divider.
+    pub const HAIRLINE: f32 = 1.0;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::check::{typed_spacings, types_a_spacing};
     use super::{space, step};
 
     const STEPS: [f32; 4] = [step::XXS, step::XS, step::S, step::M];
@@ -176,27 +125,5 @@ mod tests {
         for pair in STEPS.windows(2) {
             assert!(pair[1] / pair[0] >= 4.0 / 3.0, "{pair:?} are too close");
         }
-    }
-
-    #[test]
-    fn the_check_finds_what_it_is_meant_to() {
-        assert!(types_a_spacing("row_gap: px(6),"));
-        assert!(types_a_spacing("padding: UiRect::all(px(8)),"));
-        assert!(types_a_spacing("row_gap: { Val::Px(6.0) },"));
-        assert!(types_a_spacing("margin: UiRect::left(px(16 * indent)),"));
-        assert!(types_a_spacing("const CHROME_GAP: f32 = 4.0;"));
-        assert!(!types_a_spacing("row_gap: px(space::ROWS),"));
-        assert!(!types_a_spacing("padding: UiRect::all(px(0)),"));
-        assert!(!types_a_spacing("width: px(260),"));
-        assert!(!types_a_spacing("// row_gap: px(6) was too loose"));
-        assert!(!types_a_spacing("const CHROME_GAP: f32 = space::CONTROLS;"));
-    }
-
-    #[test]
-    fn a_spacing_is_named_rather_than_typed() {
-        // This file writes numbers for the scale itself, and in the examples the check is tested against.
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let typed = typed_spacings(&root, &["spacing.rs"]);
-        assert!(typed.is_empty(), "name these spacings with space instead:\n{}", typed.join("\n"));
     }
 }
