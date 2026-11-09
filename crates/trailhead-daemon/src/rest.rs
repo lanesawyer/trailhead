@@ -38,7 +38,7 @@ impl RestTracker {
     }
 
     async fn comment(&self, task: &TaskKey, kind: CommentKind, body: &str) -> Result<()> {
-        self.client.add_comment(task, &NewComment::new(kind, body)).await.map_err(error)
+        self.client.add_comment(task, &NewComment::new(kind, body)).await.map(drop).map_err(error)
     }
 }
 
@@ -132,15 +132,15 @@ impl Tracker for RestTracker {
     }
 
     async fn claim(&self, key: &TaskKey) -> Result<()> {
-        self.client.claim(key).await.map_err(error)
+        self.client.claim(key, None).await.map(drop).map_err(error)
     }
 
     async fn renew(&self, key: &TaskKey) -> Result<()> {
-        self.client.renew(key).await.map_err(error)
+        self.client.renew(key, None).await.map(drop).map_err(error)
     }
 
     async fn release(&self, key: &TaskKey) -> Result<()> {
-        self.client.release(key).await.map_err(error)
+        self.client.release(key).await.map(drop).map_err(error)
     }
 
     async fn report(&self, key: &TaskKey, update: RunUpdate) -> Result<()> {
@@ -183,7 +183,7 @@ impl Tracker for RestTracker {
             model: verdict.model.as_ref().map(|m| m.0.clone()),
             ..NewComment::new(CommentKind::Review, verdict.body.clone())
         };
-        self.client.add_comment(key, &comment).await.map_err(error)
+        self.client.add_comment(key, &comment).await.map(drop).map_err(error)
     }
 
     async fn ask(&self, key: &TaskKey, question: &str) -> Result<()> {

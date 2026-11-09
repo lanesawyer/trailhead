@@ -1,49 +1,49 @@
-use anyhow::{Result, bail};
-use serde_json::{Value, json};
-use trailhead_core::CommentKind;
+use anyhow::{Context, Result, bail};
+use trailhead_client::http::NewComment;
+use trailhead_core::{Comment, CommentKind, TaskKey, Verdict};
+use uuid::Uuid;
 
 use super::Ctx;
-use crate::output::s;
+use crate::client::api_err;
 
 pub(crate) async fn comment(cx: &Ctx, task: &str, kind: CommentKind, body: &str, to: Option<String>) -> Result<()> {
-    let v =
-        cx.c.post(&format!("tasks/{task}/comments"), json!({ "kind": kind, "body": body, "addressed_to": to })).await?;
-    cx.show(&v, |v| format!("{} {}", s(v, "kind"), s(v, "id")));
+    let mut new = NewComment::new(kind, body);
+    new.addressed_to = to.as_deref().map(|t| t.parse().context("--to takes a user or agent id")).transpose()?;
+    let c = cx.c.api().add_comment(&TaskKey(task.into()), &new).await.map_err(api_err)?;
+    cx.emit(&c, |c| format!("{} {}", c.kind.as_str(), c.id));
     Ok(())
 }
 
 pub(crate) async fn verdict(cx: &Ctx, task: &str, verdict: &str, body: &str, model: Option<String>) -> Result<()> {
-    let verdict = verdict.replace('-', "_");
-    let body = json!({ "kind": "review", "body": body, "verdict": verdict, "model": model });
-    let v = cx.c.post(&format!("tasks/{task}/comments"), body).await?;
-    cx.show(&v, |v| format!("review {} {}", s(v, "verdict"), s(v, "id")));
+    let verdict: Verdict = verdict.replace('-', "_").parse()?;
+    let mut new = NewComment::new(CommentKind::Review, body);
+    new.verdict = Some(verdict);
+    new.model = model;
+    let c = cx.c.api().add_comment(&TaskKey(task.into()), &new).await.map_err(api_err)?;
+    cx.emit(&c, |c| format!("review {} {}", c.verdict.map_or("", |v| v.as_str()), c.id));
     Ok(())
 }
 
 /// Resolves a question given by its comment id, or a task's only open question given the task.
 pub(crate) async fn answer(cx: &Ctx, comment_id: &str, body: Option<String>) -> Result<()> {
-    let id = match uuid::Uuid::parse_str(comment_id) {
-        Ok(id) => id.to_string(),
+    let id = match Uuid::parse_str(comment_id) {
+        Ok(id) => id,
         Err(_) => {
-            let detail = cx.c.get(&format!("tasks/{comment_id}"), &[]).await?;
-            let open: Vec<&Value> = detail["comments"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|q| q["kind"] == CommentKind::Question.as_str() && q["resolved_at"].is_null())
-                .collect();
+            let detail = cx.c.api().show_task(&TaskKey(comment_id.into())).await.map_err(api_err)?;
+            let open: Vec<&Comment> =
+                detail.comments.iter().filter(|q| q.kind == CommentKind::Question && q.resolved_at.is_none()).collect();
             match open.as_slice() {
-                [q] => s(q, "id").to_string(),
+                [q] => q.id,
                 [] => bail!("{comment_id} has no open question"),
                 many => bail!(
                     "{comment_id} has {} open questions; answer one by id:\n{}",
                     many.len(),
-                    many.iter().map(|q| format!("  {}  {}", s(q, "id"), s(q, "body"))).collect::<Vec<_>>().join("\n")
+                    many.iter().map(|q| format!("  {}  {}", q.id, q.body)).collect::<Vec<_>>().join("\n")
                 ),
             }
         }
     };
-    let v = cx.c.post(&format!("comments/{id}/resolve"), json!({ "answer": body })).await?;
-    cx.show(&v, |_| "resolved".into());
+    let c = cx.c.api().resolve_comment(id, body.as_deref()).await.map_err(api_err)?;
+    cx.emit(&c, |_| "resolved".into());
     Ok(())
 }
