@@ -22,7 +22,9 @@
 //! - A dot and a few words of state: [`chip`].
 //! - A form or dialog: a [`Modal`] marker type and [`open_modal`]; fill its [`ModalBody`], buttons in its [`ModalFooter`].
 //! - A hint over anything: put a [`Hint`] on it.
-//! - A message in a conversation, the reader's on the right and others' on the left: [`bubble`] on a [`Side`].
+//! - Something pressable that isn't a button (a card, a row) answering the pointer: a [`HoverTone`] on it.
+//! - A message in a conversation, the reader's on the right and others' on the left: [`bubble`] on a [`Side`], headed by
+//!   [`bubble_head`].
 //! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
 //!   [`sidebar_footer`]; mark the page shown on its [`NavItem`]. Pages fill [`beside_sidebar`].
 //! - Colors: a [`Token`] from [`token`], on a node as a [`BackgroundTone`], [`BorderTone`] or [`TextTone`]. An app
@@ -70,6 +72,7 @@ mod desktop;
 mod detail;
 mod field_well;
 mod hint;
+mod hover;
 mod icons;
 mod inline;
 mod input;
@@ -100,7 +103,7 @@ pub use accordion::{
 };
 pub use appearance::{Appearance, ThemeChoice, ThemePlugin};
 pub use badge::badge;
-pub use bubble::{Side, bubble};
+pub use bubble::{Side, bubble, bubble_head};
 pub use button_group::{ButtonGroup, button_group};
 pub use buttons::{ButtonKind, button, button_text, danger_button, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
@@ -108,6 +111,7 @@ pub use containers::{field, panel, row, section, section_frame};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
 pub use hint::{Hint, HintBounds};
+pub use hover::HoverTone;
 pub use icons::{Icon, button_icon, icon_text};
 pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
@@ -118,8 +122,8 @@ pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu, menu_item};
 pub use modal::{
-    MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFooter, ModalLocked, ModalPlugin, ModalRoot, ModalSlots,
-    open_modal,
+    MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,
+    ModalSlots, open_modal,
 };
 pub use nav::{NavItem, beside_sidebar, nav_heading, nav_item, nav_item_noted, sidebar, sidebar_footer};
 pub use notice::{Notice, Tone, notice};
@@ -130,7 +134,7 @@ pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
 pub use search::{
     ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
 };
-pub use select::{Picked, SelectEdit, SelectOptions, SelectTones, select, select_toned};
+pub use select::{Picked, SelectEdit, SelectIcons, SelectOptions, SelectTones, select, select_iconed, select_toned};
 pub use skeleton::{SkeletonBar, spawn_skeleton};
 pub use slider::spawn_slider;
 pub use spacing::{check as spacing_check, extent, radius, space};
@@ -169,7 +173,9 @@ impl Plugin for UiPlugin {
                     tabs::style_tabs,
                     nav::paint_nav_items,
                     button_group::paint_groups,
+                    hover::paint_hover_tones,
                     select::style_select_captions,
+                    select::show_chosen_icons,
                 )
                     .chain()
                     .in_set(UiPlace),

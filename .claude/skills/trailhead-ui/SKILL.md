@@ -47,8 +47,8 @@ private copy.
   cycles through values.
 - **A button that opens a menu** shows a chevron. One that acts when pressed doesn't.
 - **Every button changes background on hover**, `Plain` ones included (a tool button on a card is `Plain`). The hover
-  colors are theme tokens painted in `theme.rs`; a new variant or hand-built clickable row needs its own hover token,
-  visible against the surface it sits on.
+  colors are theme tokens painted in `theme.rs`. Something pressable that isn't a button (a tab, a card, a hand-built
+  row) carries the kit's `HoverTone`, with a hover token visible against the surface it sits on.
 - **One primary button per surface** ("New task", "Save"). Everything else is normal or an icon-only tool button with a
   tooltip.
 
