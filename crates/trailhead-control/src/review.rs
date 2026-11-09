@@ -233,7 +233,11 @@ impl Factory {
         if cancelled {
             tracing::info!(task = %task.key.0, "review cancelled; the round doesn't count");
         } else {
-            tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "reviewer failed on the infrastructure; the round doesn't count");
+            if no_verdict {
+                tracing::warn!(task = %task.key.0, %error, failures, max, "reviewer ended without a verdict; the round doesn't count");
+            } else {
+                tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "reviewer failed on the infrastructure; the round doesn't count");
+            }
             if park {
                 // Parked below; the count starts again when Lane reopens it.
             } else if waiting {
