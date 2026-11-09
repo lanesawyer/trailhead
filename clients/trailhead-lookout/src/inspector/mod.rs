@@ -27,13 +27,15 @@ use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation, RequestClose};
 use reqwest::Method;
-use serde_json::{Value, json};
+use serde_json::json;
 use trailhead_client::text::Text as Wording;
-use trailhead_factory::{GateKind, METADATA_KEY, MergeDecision, MergedBy, RunUpdate};
+use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunUpdate};
 use trailhead_model::{Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, User};
 use uuid::Uuid;
 
-use crate::author::{Act, grade_choices, grade_index, grade_options};
+use crate::author::{
+    Act, grade_choices, grade_index, grade_options, grade_tones, priority_options, priority_tones, status_tones,
+};
 use crate::board::Input;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::{Api, Connection, ConnectionStatus};
@@ -45,10 +47,10 @@ use crate::sync::SyncItem;
 use crate::widgets::{
     ButtonKind, DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed,
     ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, bubble, bubble_head, button,
-    comment_icon, danger_button, display, extent, grade_tone, icon_menu, inline_field, inline_text_sized, layer,
-    menu_item, open_modal, panel, panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar,
-    section_frame, select, select_iconed, size, space, spawn_detail_panes, status_label, status_tone, text, text_dim,
-    text_input, text_toned, token, tool_button,
+    comment_icon, display, extent, grade_tone, inline_field, inline_text_sized, layer, menu_item, open_modal, panel,
+    panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select, select_iconed, size,
+    space, spawn_detail_panes, spawn_icon_menu, status_label, text, text_dim, text_input, text_toned, token,
+    tool_button,
 };
 
 mod compose;
@@ -237,7 +239,7 @@ impl Plugin for InspectorUiPlugin {
             // After the view is rebuilt: a modal closed from inside must not be reopened from the view it just left.
             .add_systems(
                 Update,
-                (follow_compose, sync_modal, sync_panel, sync_tools, dress, focus_composer, clear_sent)
+                (follow_compose, sync_modal, sync_panel, sync_tools, dress, gate_send, focus_composer, clear_sent)
                     .chain()
                     .after(rebuild),
             );

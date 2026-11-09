@@ -5,6 +5,8 @@
 //! It is spawned once and updated in place: the projects follow the mirror through [`Keyed`], the page shown is marked
 //! on its [`NavItem`], and the chip is edited with [`ChipEdit`]. Searching shows the results on the board.
 
+use std::collections::HashMap;
+
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
@@ -12,7 +14,8 @@ use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::FactoryState;
-use trailhead_model::Project;
+use trailhead_model::{Project, ProjectStatus, Task};
+use uuid::Uuid;
 
 use crate::author::Act;
 use crate::board::{Filter, View};
@@ -20,18 +23,22 @@ use crate::connection::{Connection, ConnectionStatus};
 use crate::factory::{FactoryLink, FactoryStatus};
 use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
+use crate::project_form::NewProject;
 use crate::settings::SettingsButton;
 use crate::widgets::{
-    ButtonKind, ChipEdit, Icon, Keyed, NavItem, Token, button, chip, nav_heading, nav_item, nav_item_noted,
-    scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size, spawn_search_field_filling, text,
-    token, tool_button,
+    ButtonKind, ChipEdit, Icon, Keyed, NavItem, NavPart, Token, Truncated, button, chip, nav_heading_action, nav_item,
+    nav_item_noted, scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size,
+    spawn_search_field_filling, text, token, tool_button,
 };
 
 /// Where a sidebar entry goes.
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
 pub enum NavTo {
+    #[default]
     Board,
     Map,
+    /// The page listing every project.
+    Projects,
     Project(String),
 }
 
@@ -59,17 +66,24 @@ pub struct NewTask;
 #[derive(Component)]
 pub struct ConnectionChip;
 
-/// A project's entry: its name, with its key after it.
+/// A project's entry: its name, its key after it, and how many of its tasks are open at the end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
     key: String,
     name: String,
+    open: usize,
 }
 
 impl Entry {
-    /// The caption and the note: the name with the key, or the key alone for a project without a name.
-    fn words(&self) -> (String, String) {
-        if self.name.is_empty() { (self.key.clone(), String::new()) } else { (self.name.clone(), self.key.clone()) }
+    /// The caption, the note and the end: the name, the key and the open count, or the key alone for a project
+    /// without a name.
+    fn words(&self) -> [String; 3] {
+        let open = self.open.to_string();
+        if self.name.is_empty() {
+            [self.key.clone(), String::new(), open]
+        } else {
+            [self.name.clone(), self.key.clone(), open]
+        }
     }
 }
 
@@ -107,7 +121,15 @@ fn spawn_sidebar(mut commands: Commands) {
     for (caption, icon, to) in [("Switchbacks", Icon::Board, NavTo::Board), ("Trail map", Icon::Map, NavTo::Map)] {
         commands.queue_spawn_scene(nav_item(caption, Some(icon))).insert((to, ChildOf(places)));
     }
-    commands.queue_spawn_scene(nav_heading("Projects")).insert(ChildOf(places));
+    commands
+        .queue_spawn_scene(nav_heading_action(
+            "Projects",
+            bsn! { NavTo::Projects },
+            Icon::Plus,
+            "New project",
+            bsn! { NewProject },
+        ))
+        .insert(ChildOf(places));
     commands.spawn((
         Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0, ..default() },
         ProjectList,
@@ -126,6 +148,7 @@ fn on_nav(activate: On<Activate>, to: Query<&NavTo>, mut next: ResMut<NextState<
     match to.get(activate.entity) {
         Ok(NavTo::Board) => next.set_if_different(View::Board),
         Ok(NavTo::Map) => next.set_if_different(View::Map),
+        Ok(NavTo::Projects) => next.set_if_different(View::Projects),
         Ok(NavTo::Project(key)) => commands.trigger(OpenProject(key.clone())),
         Err(_) => {}
     }
@@ -160,45 +183,72 @@ fn clear_search_on_escape(key: On<FocusedInput<KeyboardInput>>, mut boxes: Query
     }
 }
 
-/// One entry per project, by key, following the mirror.
-#[allow(clippy::too_many_arguments)]
+/// One entry per project, by key, following the mirror's projects and their tasks.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync_projects(
     projects: Query<&Mirrored<Project>>,
-    changed: Query<(), Changed<Mirrored<Project>>>,
-    mut removed: RemovedComponents<Mirrored<Project>>,
+    tasks: Query<&Mirrored<Task>>,
+    changed: Query<(), Or<(Changed<Mirrored<Project>>, Changed<Mirrored<Task>>)>>,
+    (mut removed, mut removed_tasks): (RemovedComponents<Mirrored<Project>>, RemovedComponents<Mirrored<Task>>),
     list: Query<Entity, With<ProjectList>>,
     children: Query<&Children>,
-    mut texts: Query<&mut Text>,
+    (mut texts, mut truncated, parts): (Query<&mut Text>, Query<&mut Truncated>, Query<&NavPart>),
     mut entries: ResMut<Entries>,
     mut commands: Commands,
     mut drawn: Local<Option<Entity>>,
 ) {
-    let gone = removed.read().count() > 0;
+    let gone = removed.read().count() + removed_tasks.read().count() > 0;
     let Ok(list) = list.single() else { return };
     if *drawn == Some(list) && changed.is_empty() && !gone {
         return;
     }
     *drawn = Some(list);
-    let mut wanted: Vec<Entry> =
-        projects.iter().map(|p| Entry { key: p.0.key.clone(), name: p.0.name.clone() }).collect();
+    let mut open: HashMap<Uuid, usize> = HashMap::new();
+    for task in tasks.iter().filter(|t| !t.0.status.is_closed()) {
+        *open.entry(task.0.project_id).or_default() += 1;
+    }
+    // Archived projects are on the projects page, not here.
+    let mut wanted: Vec<Entry> = projects
+        .iter()
+        .filter(|p| p.0.status != ProjectStatus::Archived)
+        .map(|p| Entry {
+            key: p.0.key.clone(),
+            name: p.0.name.clone(),
+            open: open.get(&p.0.id).copied().unwrap_or_default(),
+        })
+        .collect();
     wanted.sort_by(|a, b| a.key.cmp(&b.key));
     let wanted = [(list, wanted.into_iter().map(|e| (e.key.clone(), e)).collect::<Vec<_>>())];
     entries.0.sync(
         &mut commands,
         &wanted,
         |commands, _, entry| {
-            let (caption, note) = entry.words();
-            commands.spawn_scene(nav_item_noted(caption, note)).insert(NavTo::Project(entry.key.clone())).id()
+            let [caption, note, end] = entry.words();
+            commands.spawn_scene(nav_item_noted(caption, note, end)).insert(NavTo::Project(entry.key.clone())).id()
         },
         |_, entity, entry| {
-            // The caption, then the note.
-            let (caption, note) = entry.words();
-            let mut words = [caption, note].into_iter();
+            let [caption, note, end] = entry.words();
             for e in children.iter_descendants(entity) {
-                if let Ok(text) = texts.get_mut(e)
-                    && let Some(wanted) = words.next()
-                {
-                    set_text(text, &wanted);
+                match parts.get(e) {
+                    // Cut to fit, so it changes through its `Truncated`.
+                    Ok(NavPart::Caption) => {
+                        if let Ok(mut shown) = truncated.get_mut(e)
+                            && shown.full != caption
+                        {
+                            shown.full = caption.clone();
+                        }
+                    }
+                    Ok(NavPart::Note) => {
+                        if let Ok(text) = texts.get_mut(e) {
+                            set_text(text, &note);
+                        }
+                    }
+                    Ok(NavPart::End) => {
+                        if let Ok(text) = texts.get_mut(e) {
+                            set_text(text, &end);
+                        }
+                    }
+                    Err(_) => {}
                 }
             }
         },
@@ -214,7 +264,7 @@ fn mark_current(view: Res<State<View>>, page: Res<ProjectPage>, mut items: Query
             continue;
         }
         let current = match (to, view.get()) {
-            (NavTo::Board, View::Board) | (NavTo::Map, View::Map) => true,
+            (NavTo::Board, View::Board) | (NavTo::Map, View::Map) | (NavTo::Projects, View::Projects) => true,
             (NavTo::Project(key), View::Project) => page.0.as_ref() == Some(key),
             _ => false,
         };
@@ -266,18 +316,22 @@ pub fn connection_chip(
     let reason = status.reason.as_ref().map(|r| r.to_string());
     match connection {
         Connection::Syncing => {
-            (token::WARN, "Syncing", reason.unwrap_or_else(|| "Catching up with the Trailhead server".into()))
+            (token::STATUS_WARN, "Syncing", reason.unwrap_or_else(|| "Catching up with the Trailhead server".into()))
         }
         Connection::Offline => {
-            (token::DANGER, "Offline", reason.unwrap_or_else(|| "Not connected to the Trailhead server".into()))
+            (token::STATUS_DANGER, "Offline", reason.unwrap_or_else(|| "Not connected to the Trailhead server".into()))
         }
         Connection::Live => match factory {
-            FactoryLink::Running => (token::OK, "Live", "Connected to the Trailhead server and the factory".into()),
-            FactoryLink::Unknown => {
-                (token::WARN, "Factory connecting", "Server connected; the factory hasn't been heard from yet".into())
+            FactoryLink::Running => {
+                (token::STATUS_OK, "Live", "Connected to the Trailhead server and the factory".into())
             }
+            FactoryLink::Unknown => (
+                token::STATUS_WARN,
+                "Factory connecting",
+                "Server connected; the factory hasn't been heard from yet".into(),
+            ),
             FactoryLink::Control(state) => (
-                token::WARN,
+                token::STATUS_WARN,
                 match state {
                     FactoryState::Off => "Factory off",
                     FactoryState::Disabled => "Factory disabled",
@@ -288,15 +342,15 @@ pub fn connection_chip(
                 format!("Server connected; the factory is {}", state.label()),
             ),
             FactoryLink::Unreachable => (
-                token::WARN,
+                token::STATUS_WARN,
                 "Factory down",
                 "Server connected; the factory can't be reached, so the map shows its last known state".into(),
             ),
             FactoryLink::TooOld(why) => {
-                (token::WARN, "Factory too old", format!("Server connected; the factory is too old: {why}"))
+                (token::STATUS_WARN, "Factory too old", format!("Server connected; the factory is too old: {why}"))
             }
             FactoryLink::Refused(why) => {
-                (token::WARN, "Factory refused", format!("Server connected; the factory refused Lookout: {why}"))
+                (token::STATUS_WARN, "Factory refused", format!("Server connected; the factory refused Lookout: {why}"))
             }
         },
     }
@@ -309,7 +363,7 @@ mod tests {
 
     use super::*;
     use crate::board::BoardPlugin;
-    use crate::fixture::{project_json, sid};
+    use crate::fixture::{project_json, sid, task_json};
     use crate::mirror::MirrorPlugin;
     use crate::project::ProjectPlugin;
     use crate::sync::{Snapshot, SyncItem};
@@ -328,7 +382,12 @@ mod tests {
             project_json(json!({"id": "p2", "key": "OPS", "name": "Operations"})),
             project_json(json!({"id": "p1", "key": "TRAIL", "name": "Trailhead"})),
         ];
-        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, ..Default::default() }));
+        let tasks = vec![
+            task_json(json!({"id": "t1", "key": "TRAIL-1", "status": "open"})),
+            task_json(json!({"id": "t2", "key": "TRAIL-2", "status": "in_review"})),
+            task_json(json!({"id": "t3", "key": "TRAIL-3", "status": "done"})),
+        ];
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, ..Default::default() }));
         settle(&mut app);
         app
     }
@@ -390,6 +449,7 @@ mod tests {
             [
                 (NavTo::Board, true),
                 (NavTo::Map, false),
+                (NavTo::Projects, false),
                 (NavTo::Project("OPS".into()), false),
                 (NavTo::Project("TRAIL".into()), false),
             ]
@@ -408,11 +468,12 @@ mod tests {
         assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0), "the frame may shrink so the places scroll");
         // The title and the search box above it, the footer below.
         let top: Vec<Entity> = world.get::<Children>(root).unwrap().iter().collect();
-        assert_eq!(top.len(), 5, "title, New task, search, places, footer");
-        assert_eq!(top[3], frame);
+        assert_eq!(top.len(), 6, "the drag edge, title, New task, search, places, footer");
+        assert!(world.get::<crate::widgets::SidebarEdge>(top[0]).is_some());
+        assert_eq!(top[4], frame);
         let mut entries = world.query_filtered::<Entity, With<NavTo>>();
         let entries: Vec<Entity> = entries.iter(world).collect();
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 5, "the places, the Projects heading and the projects");
         for entry in entries {
             let mut at = entry;
             while let Some(parent) = world.get::<ChildOf>(at) {
@@ -426,7 +487,7 @@ mod tests {
         // In a short window the places scroll rather than squash, and the footer keeps its height.
         let mut shrinks = world.query_filtered::<&Node, With<NavItem>>();
         assert!(shrinks.iter(world).all(|n| n.flex_shrink == 0.0));
-        assert_eq!(world.get::<Node>(top[4]).unwrap().flex_shrink, 0.0);
+        assert_eq!(world.get::<Node>(top[5]).unwrap().flex_shrink, 0.0);
     }
 
     #[test]
@@ -434,7 +495,7 @@ mod tests {
         let mut app = app();
         let new = one::<NewTask>(&mut app);
         let root = one::<Sidebar>(&mut app);
-        assert_eq!(app.world().get::<Children>(root).unwrap()[1], new);
+        assert_eq!(app.world().get::<Children>(root).unwrap()[2], new);
         assert_eq!(app.world().get::<Act>(new), Some(&Act::New));
         let disabled = |app: &App| app.world().get::<InteractionDisabled>(new).is_some();
         let set = |app: &mut App, to| {
@@ -468,6 +529,14 @@ mod tests {
 
     #[derive(Resource, Default)]
     struct Entered(usize);
+
+    #[test]
+    fn the_projects_heading_opens_the_projects_page_and_is_marked_while_it_shows() {
+        let mut app = app();
+        press(&mut app, NavTo::Projects);
+        assert_eq!(*app.world().resource::<State<View>>().get(), View::Projects);
+        assert!(entries(&mut app).contains(&(NavTo::Projects, true)));
+    }
 
     #[test]
     fn going_to_the_page_shown_leaves_it_as_it_was() {
@@ -508,22 +577,74 @@ mod tests {
         );
     }
 
+    /// An entry's words: the caption (whole, before it is cut to fit), the note, the end.
+    fn entry_words(app: &mut App, key: &str) -> Vec<String> {
+        let world = app.world_mut();
+        let to = NavTo::Project(key.into());
+        let entry = world.query::<(Entity, &NavTo)>().iter(world).find(|(_, t)| **t == to).unwrap().0;
+        let mut kids = world.query::<&Children>();
+        let mut found = vec![entry];
+        let mut at = 0;
+        while at < found.len() {
+            if let Ok(children) = kids.get(world, found[at]) {
+                found.extend(children.iter());
+            }
+            at += 1;
+        }
+        let word = |part: NavPart| {
+            let at = found.iter().find(|e| world.get::<NavPart>(**e) == Some(&part)).unwrap();
+            match world.get::<Truncated>(*at) {
+                Some(caption) => caption.full.clone(),
+                None => world.get::<Text>(*at).unwrap().0.clone(),
+            }
+        };
+        vec![word(NavPart::Caption), word(NavPart::Note), word(NavPart::End)]
+    }
+
+    #[test]
+    fn an_entry_counts_its_projects_open_tasks_and_follows_one_closing_in_place() {
+        let mut app = app();
+        assert_eq!(entry_words(&mut app, "TRAIL"), ["Trailhead", "TRAIL", "2"], "done isn't open");
+        assert_eq!(entry_words(&mut app, "OPS"), ["Operations", "OPS", "0"]);
+        let before = tree(&mut app);
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 2, "entity": "task", "entity_id": sid("t2"), "kind": "task.updated",
+            "after": task_json(json!({"id": "t2", "key": "TRAIL-2", "status": "done", "version": 2})),
+        })));
+        settle(&mut app);
+        assert_eq!(entry_words(&mut app, "TRAIL"), ["Trailhead", "TRAIL", "1"]);
+        assert_eq!(tree(&mut app), before);
+    }
+
+    #[test]
+    fn an_archived_project_leaves_the_sidebar_and_comes_back_unarchived() {
+        let mut app = app();
+        let archive = |app: &mut App, id: i64, status: &str| {
+            app.world_mut().write_message(SyncItem::Event(json!({
+                "id": id, "entity": "project", "entity_id": sid("p2"), "kind": "project.updated",
+                "after": project_json(json!({"id": "p2", "key": "OPS", "name": "Operations", "status": status,
+                                             "version": id})),
+            })));
+            settle(app);
+        };
+        let ops = NavTo::Project("OPS".into());
+        archive(&mut app, 2, "archived");
+        assert!(!entries(&mut app).iter().any(|(to, _)| *to == ops));
+        archive(&mut app, 3, "active");
+        assert!(entries(&mut app).iter().any(|(to, _)| *to == ops));
+    }
+
     #[test]
     fn an_entry_shows_the_name_then_the_key_and_follows_a_rename_in_place() {
         let mut app = app();
-        let words = |app: &mut App| {
-            let world = app.world_mut();
-            world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect::<Vec<_>>()
-        };
-        let now = words(&mut app);
-        assert!(now.contains(&"Trailhead".to_string()) && now.contains(&"TRAIL".to_string()), "{now:?}");
+        assert_eq!(entry_words(&mut app, "TRAIL")[..2], ["Trailhead", "TRAIL"]);
         let before = tree(&mut app);
         app.world_mut().write_message(SyncItem::Event(json!({
             "id": 2, "entity": "project", "entity_id": sid("p1"), "kind": "project.updated",
             "after": project_json(json!({"id": "p1", "key": "TRAIL", "name": "Trailhead engine", "version": 2})),
         })));
         settle(&mut app);
-        assert!(words(&mut app).contains(&"Trailhead engine".to_string()));
+        assert_eq!(entry_words(&mut app, "TRAIL")[..2], ["Trailhead engine", "TRAIL"]);
         assert_eq!(tree(&mut app), before);
     }
 

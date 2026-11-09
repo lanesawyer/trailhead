@@ -263,6 +263,93 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
     assert_eq!(ws.head().await.unwrap(), rev(&src, "main"));
 }
 
+/// A workspace prepared on `factory/w-1`, whose branch and `main` each have a commit of their own touching different
+/// files, so merging one into the other never conflicts. Returns the workspace and the start commit.
+async fn branch_behind_main(root: &Path) -> (GitWorkspace, String) {
+    let src = upstream(root);
+    let bare = root.join("remote/acme/widget.git");
+    git(&src, &["checkout", "--quiet", "-b", "factory/w-1"]);
+    std::fs::write(src.join("branch.txt"), "branch\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "--quiet", "-m", "branch edit"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "factory/w-1"]);
+    git(&src, &["checkout", "--quiet", "main"]);
+    std::fs::write(src.join("main.txt"), "main\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "--quiet", "-m", "main edit"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "main"]);
+
+    let remote = format!("file://{}", root.join("remote").display());
+    let ws = GitWorkspace::with_remote(root.join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: Some("factory/w-1".into()),
+        merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        setup: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+        env: Default::default(),
+    };
+    ws.prepare(&req).await.unwrap();
+    let start = ws.head().await.unwrap();
+    (ws, start)
+}
+
+fn agent_git(dir: &Path, args: &[&str]) {
+    let mut full = vec!["-c", "user.name=agent", "-c", "user.email=a@example.com"];
+    full.extend(args);
+    git(dir, &full);
+}
+
+#[tokio::test]
+async fn merged_base_is_the_tip_of_the_base_once_the_agent_commits_its_merge() {
+    let root = tempfile::tempdir().unwrap();
+    let (ws, start) = branch_behind_main(root.path()).await;
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), None, "nothing merged yet");
+    agent_git(&ws.dir(), &["merge", "--quiet", "--no-edit", "origin/main"]);
+    let tip = rev(&ws.dir(), "origin/main");
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), Some(tip));
+}
+
+#[tokio::test]
+async fn merged_base_is_none_after_an_ordinary_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let (ws, start) = branch_behind_main(root.path()).await;
+    std::fs::write(ws.dir().join("work.txt"), "work\n").unwrap();
+    git(&ws.dir(), &["add", "."]);
+    agent_git(&ws.dir(), &["commit", "--quiet", "-m", "work"]);
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn merged_base_is_none_when_the_base_branch_does_not_exist() {
+    let root = tempfile::tempdir().unwrap();
+    let (ws, start) = branch_behind_main(root.path()).await;
+    agent_git(&ws.dir(), &["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(ws.merged_base(&start, "no-such-branch").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn merged_base_is_none_when_the_merge_is_of_something_other_than_the_base() {
+    let root = tempfile::tempdir().unwrap();
+    let (ws, start) = branch_behind_main(root.path()).await;
+    let dir = ws.dir();
+    git(&dir, &["checkout", "--quiet", "-b", "side", &start]);
+    std::fs::write(dir.join("side.txt"), "side\n").unwrap();
+    git(&dir, &["add", "."]);
+    agent_git(&dir, &["commit", "--quiet", "-m", "side"]);
+    git(&dir, &["checkout", "--quiet", "--detach", &start]);
+    std::fs::write(dir.join("work.txt"), "work\n").unwrap();
+    git(&dir, &["add", "."]);
+    agent_git(&dir, &["commit", "--quiet", "-m", "work"]);
+    agent_git(&dir, &["merge", "--quiet", "--no-ff", "--no-edit", "side"]);
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), None);
+}
+
 /// A stand-in for mise that logs its arguments, and runs `exec -- sh -c` with a marker in the environment.
 fn fake_mise(dir: &Path) -> std::path::PathBuf {
     let bin = dir.join("mise");
@@ -375,6 +462,38 @@ async fn conflict_markers_added_since_the_start_are_found_in_any_file() {
     std::fs::write(dir.join("a.md"), "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> main\n").unwrap();
     std::fs::write(dir.join("new.toml"), ">>>>>>> main\n").unwrap();
     assert_eq!(ws.conflict_markers(&start).await.unwrap(), ["a.md", "new.toml"]);
+}
+
+#[tokio::test]
+async fn conflict_markers_the_merged_in_side_already_has_are_not_the_agents() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "--quiet", "-b", "main"]);
+    git(&dir, &["config", "user.email", "a@b.c"]);
+    git(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("a.md"), "a\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "one"]);
+    git(&dir, &["checkout", "--quiet", "-b", "pr"]);
+    std::fs::write(dir.join("pr.txt"), "pr\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "pr"]);
+    git(&dir, &["checkout", "--quiet", "main"]);
+    std::fs::write(dir.join("doc.md"), ">>>>>>> quoted\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "base"]);
+    git(&dir, &["checkout", "--quiet", "pr"]);
+    let ws = GitWorkspace::new(&dir);
+    let start = ws.head().await.unwrap();
+
+    git(&dir, &["merge", "--quiet", "--no-ff", "--no-commit", "main"]);
+    assert!(ws.conflict_markers(&start).await.unwrap().is_empty(), "uncommitted merge");
+    std::fs::write(dir.join("pr.txt"), "<<<<<<< HEAD\n").unwrap();
+    assert_eq!(ws.conflict_markers(&start).await.unwrap(), ["pr.txt"]);
+    std::fs::write(dir.join("pr.txt"), "pr\n").unwrap();
+    git(&dir, &["commit", "--quiet", "-am", "merge"]);
+    assert!(ws.conflict_markers(&start).await.unwrap().is_empty(), "committed merge");
 }
 
 #[tokio::test]

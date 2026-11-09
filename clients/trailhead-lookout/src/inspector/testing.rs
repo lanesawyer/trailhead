@@ -1,6 +1,7 @@
 //! Fixtures the inspector's tests share.
 
 use bevy::state::app::StatesPlugin;
+use serde_json::Value;
 
 use super::*;
 use crate::fixture::{agent, claim, comment, task};

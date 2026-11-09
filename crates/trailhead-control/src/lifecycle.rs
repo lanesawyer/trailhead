@@ -211,7 +211,7 @@ impl Factory {
         tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
         self.daemon_of(sandbox).forget(&sandbox.id).await;
         if let Err(e) = self.target_of(sandbox).compute.destroy(&sandbox.id).await {
-            tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile will");
+            tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile retries");
             return BreachedSandbox::Stuck;
         }
         BreachedSandbox::Destroyed
@@ -225,10 +225,12 @@ impl Factory {
         key: &TaskKey,
         sub: &Arc<dyn Tracker>,
         breach: &WorkerBreach,
+        state: BreachedSandbox,
         question: &str,
     ) -> Result<()> {
+        let stuck = state == BreachedSandbox::Stuck;
         let mark = |parked| RunUpdate {
-            worker_breach: Some(WorkerBreach { parked, ..breach.clone() }),
+            worker_breach: Some(WorkerBreach { parked, stuck, ..breach.clone() }),
             ..RunUpdate::default()
         };
         if let Err(e) = sub.report(key, mark(true)).await {
@@ -280,7 +282,12 @@ impl Factory {
                 let update = RunUpdate {
                     spend: Some(spend),
                     concluded: Some(name.to_string()),
-                    worker_breach: Some(WorkerBreach { run: name.to_string(), reason: reason.clone(), parked: false }),
+                    worker_breach: Some(WorkerBreach {
+                        run: name.to_string(),
+                        reason: reason.clone(),
+                        parked: false,
+                        stuck: false,
+                    }),
                     ..RunUpdate::default()
                 };
                 let recorded = sub.report(&task.key, update).await;
@@ -293,9 +300,10 @@ impl Factory {
                     tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't checkpoint the breached sandbox");
                 }
                 let state = self.cut_off_breached(task, sandbox).await;
-                let breach = WorkerBreach { run: name.to_string(), reason: reason.clone(), parked: false };
+                let breach =
+                    WorkerBreach { run: name.to_string(), reason: reason.clone(), parked: false, stuck: false };
                 let question = messages::budget_breach_question(&reason, &sandbox.name, state);
-                let asked = self.park_worker_breach(&task.key, sub, &breach, &question).await;
+                let asked = self.park_worker_breach(&task.key, sub, &breach, state, &question).await;
                 recorded?;
                 asked?;
                 self.status.paused(&sandbox.name);
@@ -315,6 +323,7 @@ impl Factory {
         let api_trouble = matches!(&report.result, RunResult::Failed(reason) if is_transient_api_error(reason));
         if !api_trouble {
             self.setbacks.lock().unwrap().remove(&task.key);
+            self.setup_failures.lock().unwrap().remove(&task.key);
         }
         let infra_failures = if api_trouble { None } else { task.run.infra_failures.filter(|n| *n > 0).map(|_| 0) };
         let update =
@@ -340,7 +349,7 @@ impl Factory {
                 // MVP: no suspend during review; requested changes leave the task in review as changes requested
                 // (`request_rework`) and a new run starts from the PR branch.
                 if let Err(e) = self.release_worker(sandbox).await {
-                    tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile will");
+                    tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile retries");
                 }
                 // The worker is done with its target; the review takes its own place.
                 drop(place);
@@ -352,7 +361,7 @@ impl Factory {
                         Ok(()) => Ok(Outcome::Conflicted { pr }),
                         // Still in review and conflicting, so reconcile reworks it.
                         Err(e) => {
-                            tracing::warn!(task = %task.key.0, error = %e, "couldn't request a rework of the conflicting PR; reconcile will");
+                            tracing::warn!(task = %task.key.0, error = %e, "couldn't request a rework of the conflicting PR; reconcile retries");
                             Ok(Outcome::AwaitingReview { pr })
                         }
                     };
@@ -379,7 +388,7 @@ impl Factory {
                     }
                     // Any other failure to release leaves the sandbox to reconcile; the park below still happens.
                     Err(e) => {
-                        tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile will");
+                        tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile retries");
                     }
                     Ok(()) => {}
                 }
@@ -473,7 +482,20 @@ impl Factory {
         let rejected = matches!(error, Error::Rejected(_));
         // A `setup` that fails on a fresh run fails on the base branch itself, so a second failure is proof enough:
         // more retries would only spend `max_infra_failures` on the same compile error (TRAIL-652).
-        let broken_base = matches!(error, Error::SetupFailed(_)) && failures >= SETUP_FAILURES_TO_PARK;
+        // Counted apart from the other infrastructure failures, so it takes two `setup` failures in a row, not one
+        // after some unrelated failure (TRAIL-876).
+        let setup_failures = {
+            let mut counts = self.setup_failures.lock().unwrap();
+            if matches!(error, Error::SetupFailed(_)) {
+                let n = counts.entry(task.key.clone()).or_insert(0);
+                *n += 1;
+                *n
+            } else {
+                counts.remove(&task.key);
+                0
+            }
+        };
+        let broken_base = setup_failures >= SETUP_FAILURES_TO_PARK;
         let park = rejected || broken_base || if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
         tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "infrastructure failure; the attempt doesn't count");
         if park {
@@ -505,7 +527,7 @@ impl Factory {
         }
         if park {
             let question = if broken_base {
-                messages::setup_failed_question(failures, &error.to_string())
+                messages::setup_failed_question(setup_failures, &error.to_string())
             } else if rejected {
                 messages::rejected_question(&error.to_string())
             } else if waiting {
@@ -517,6 +539,7 @@ impl Factory {
                 // Reopened by Lane, it starts again with no wait, as its count does.
                 Ok(()) => {
                     self.setbacks.lock().unwrap().remove(&task.key);
+                    self.setup_failures.lock().unwrap().remove(&task.key);
                 }
                 Err(e) => {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; reconcile will requeue it");
@@ -536,10 +559,10 @@ impl Factory {
                 }
             }
         } else if let Err(e) = sub.release(&task.key).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't release the task; reconcile will");
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't release the task; reconcile retries");
         }
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the run's sub-agent; reconcile will");
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the run's sub-agent; reconcile retries");
         }
         error
     }

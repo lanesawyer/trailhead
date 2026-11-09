@@ -264,7 +264,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     }
 
     let in_queue = |t: &Task| parent_key(t).is_some_and(|k| input.queues.iter().any(|q| q == k));
-    let is_factory = |t: &Task| in_queue(t) || has_run(t);
+    let is_factory = |t: &Task| in_queue(t) || crate::factory::factory_ran(t);
 
     let in_project = |t: &Task| filter.project.as_deref().is_none_or(|k| project_key.get(&t.project_id) == Some(&k));
     let passes = |t: &Task| {
@@ -290,7 +290,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::Factory,
                 label: "factory".into(),
-                tone: Some(token::INFO),
+                tone: Some(token::STATUS_INFO),
                 hint: None,
             });
         }
@@ -305,7 +305,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::NeedsGrade,
                 label: "needs grade".into(),
-                tone: Some(token::WARN),
+                tone: Some(token::STATUS_WARN),
                 hint: None,
             });
         }
@@ -321,7 +321,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::ChangesRequested,
                 label: "changes requested".into(),
-                tone: Some(token::WARN),
+                tone: Some(token::STATUS_WARN),
                 hint: None,
             });
         }
@@ -333,7 +333,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::Blocked,
                 label: format!("blocked · {}", keys.len()),
-                tone: Some(token::WARN),
+                tone: Some(token::STATUS_WARN),
                 hint: Some(format!("Blocked by {}", keys.join(", "))),
             });
         }
@@ -341,7 +341,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::Questions,
                 label: format!("? {}", open.len()),
-                tone: Some(token::WARN),
+                tone: Some(token::STATUS_WARN),
                 hint: None,
             });
         }
@@ -412,11 +412,6 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         v
     };
     BoardView { columns, options: Options { projects, parents, holders } }
-}
-
-/// Whether a run left `factory` metadata on the task (in progress, in review, parked or waiting for a rework).
-pub(super) fn has_run(t: &Task) -> bool {
-    t.metadata.get("factory").is_some_and(|v| !v.is_null())
 }
 
 /// Whether every word of `query` matches the task's key or title, ignoring case. A word matches the key when it starts
@@ -538,7 +533,7 @@ mod tests {
         let badge = blocked("TRAIL-105").unwrap();
         assert_eq!(badge.label, "blocked · 2");
         assert_eq!(badge.hint.as_deref(), Some("Blocked by TRAIL-103, TRAIL-104"));
-        assert_eq!(badge.tone, Some(token::WARN));
+        assert_eq!(badge.tone, Some(token::STATUS_WARN));
         // Done, or blocked only by a task the mirror doesn't have: nothing to say.
         assert_eq!(blocked("OPS-1"), None);
         assert_eq!(blocked("TRAIL-102"), None);
@@ -620,7 +615,7 @@ mod tests {
         let flagged = badges(card(&view, "TRAIL-105"));
         assert_eq!(flagged.last(), Some(&(BadgeKind::NeedsGrade, "needs grade")));
         let tone = card(&view, "TRAIL-105").badges.last().unwrap().tone.clone();
-        assert_eq!(tone, Some(token::WARN));
+        assert_eq!(tone, Some(token::STATUS_WARN));
         // TRAIL-103 is under it too but graded; TRAIL-104 and OPS-1 are not under a queue; the queue itself isn't.
         for key in ["TRAIL-103", "TRAIL-104", "OPS-1", "TRAIL-102"] {
             assert!(card(&view, key).badges.iter().all(|b| b.kind != BadgeKind::NeedsGrade), "{key}");
@@ -633,7 +628,7 @@ mod tests {
             |key: &str, kind: BadgeKind| card(&view, key).badges.iter().find(|b| b.kind == kind).unwrap().tone.clone();
         assert_eq!(badge("TRAIL-103", BadgeKind::Priority), Some(token::PRIORITY_2));
         assert_eq!(badge("TRAIL-103", BadgeKind::Grade), Some(token::GRADE_3));
-        assert_eq!(badge("TRAIL-103", BadgeKind::Questions), Some(token::WARN));
+        assert_eq!(badge("TRAIL-103", BadgeKind::Questions), Some(token::STATUS_WARN));
         let tones = Priority::ALL.map(priority_tone);
         assert_eq!(tones, [token::PRIORITY_1, token::PRIORITY_2, token::PRIORITY_3, token::PRIORITY_4]);
     }
@@ -676,7 +671,8 @@ mod tests {
         };
         let all = run(&Filter::default());
         let only = run(&Filter { factory: true, ..Default::default() });
-        // 103 and 105 are under the queue task, 104 has a run's metadata; 102 and OPS-1 are neither.
+        // 103 and 105 are under the queue task, 104 has a run's metadata; 102 and OPS-1 (only skipped as ungraded) are
+        // neither.
         assert_eq!(keys(&only), ["TRAIL-105", "TRAIL-103", "TRAIL-104"].map(String::from));
         assert!(keys(&all).len() > keys(&only).len());
         // They stay in their usual columns.

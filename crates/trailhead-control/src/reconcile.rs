@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use trailhead_factory::messages::{self, BreachedSandbox};
 use trailhead_factory::{
-    ChangesRequested, Error, Merged, MergedBy, PrRef, PrState, Result, RunUpdate, Sandbox, Status, Task, TaskKey,
-    WorkerBreach, label,
+    ChangesRequested, Error, Merged, MergedBy, PrRef, PrState, Result, ReviewBreach, RunUpdate, Sandbox, Status, Task,
+    TaskKey, WorkerBreach, label,
 };
 
 use crate::lifecycle::worker_name;
@@ -101,17 +101,26 @@ impl Factory {
             if live_runs.iter().any(|(_, s)| s.name == sandbox.name) {
                 continue;
             }
-            // A run parked for its breach, or one whose park is yet to land, keeps its suspended sandbox.
-            let parked = tasks.iter().any(|t| {
+            // A run parked for its breach, or one whose park is yet to land, keeps its suspended sandbox, unless the
+            // breach left it live (stuck): that one is destroyed, not released for reuse, until it is gone.
+            let (mut parked, mut stuck) = (false, false);
+            for t in tasks.iter().filter(|t| {
                 (t.status == Status::NeedsInput || self.unparked_breach(t).is_some())
                     && t.run.released.is_none_or(|at| at <= 0)
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
-            });
+            }) {
+                // An earlier run's stuck flag outlives it in the run record, so only the current run's breach counts.
+                if t.run.worker_breach.as_ref().is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) {
+                    stuck = true;
+                } else {
+                    parked = true;
+                }
+            }
             if parked {
                 continue;
             }
             // One sandbox's failure is logged and skipped rather than stopping the control plane from starting.
-            if sandbox.labels.contains_key(label::POOL) {
+            if sandbox.labels.contains_key(label::POOL) && !stuck {
                 self.reconcile_pooled(sandbox, &mut done).await;
                 continue;
             }
@@ -137,7 +146,9 @@ impl Factory {
                 continue;
             }
             // A task that is only waiting on its PR costs the code host requests; those wait out a nearly spent limit.
+            // Finishing a reviewer-breach park only needs the tracker, so a pause doesn't hold it back.
             if task.status != Status::InProgress
+                && self.unparked_review_breach(task).is_none()
                 && let Some(resets_at) = self.code_host_pause()
             {
                 tracing::warn!(task = %task.key.0, resumes_in = ?until(resets_at), "code host rate limit nearly spent; leaving its PR alone");
@@ -179,7 +190,7 @@ impl Factory {
             None => BreachedSandbox::Destroyed,
         };
         let question = messages::budget_breach_question(reason, host, state);
-        match self.park_worker_breach(&task.key, &self.tracker.sub_agent(name), breach, &question).await {
+        match self.park_worker_breach(&task.key, &self.tracker.sub_agent(name), breach, state, &question).await {
             Ok(()) => done.breached.push(task.key.0.clone()),
             Err(e) => {
                 tracing::warn!(task = %task.key.0, error = %e, "couldn't park the breached task; the next reconcile retries")
@@ -381,25 +392,27 @@ impl Factory {
         }
     }
 
+    /// The reviewer's breach this attempt's park was cut short of, with whether the park has to claim the task first.
+    fn unparked_review_breach<'a>(&self, task: &'a Task) -> Option<(&'a ReviewBreach, bool)> {
+        let breach =
+            task.run.review_breach.as_ref().filter(|b| !b.parked && b.attempt == task.run.attempt.unwrap_or(1))?;
+        let mine = task.holder.as_deref() == Some(self.tracker.agent());
+        match task.status {
+            Status::Open => Some((breach, true)),
+            Status::InProgress if mine => Some((breach, false)),
+            _ => None,
+        }
+    }
+
     /// Puts one in-flight task right; true when its PR is due a review.
     pub(crate) async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
         let Some(name) = &task.run.sandbox else { return Ok(false) };
         // A park for the reviewer's breach that was cut short: finish it rather than let a worker rerun the task.
-        if let Some(breach) =
-            task.run.review_breach.as_ref().filter(|b| !b.parked && b.attempt == task.run.attempt.unwrap_or(1))
-        {
-            let mine = task.holder.as_deref() == Some(self.tracker.agent());
-            let claim = match task.status {
-                Status::Open => Some(true),
-                Status::InProgress if mine => Some(false),
-                _ => None,
-            };
-            if let Some(claim) = claim {
-                tracing::warn!(task = %task.key.0, "finishing the park for the reviewer's breach");
-                self.park_review_breach(&task.key, breach.clone(), claim, task.run.retries.unwrap_or(0)).await?;
-                done.breached.push(task.key.0.clone());
-                return Ok(false);
-            }
+        if let Some((breach, claim)) = self.unparked_review_breach(task) {
+            tracing::warn!(task = %task.key.0, "finishing the park for the reviewer's breach");
+            self.park_review_breach(&task.key, breach.clone(), claim, task.run.retries.unwrap_or(0)).await?;
+            done.breached.push(task.key.0.clone());
+            return Ok(false);
         }
         match task.status {
             Status::InProgress => {

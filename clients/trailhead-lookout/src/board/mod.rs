@@ -36,6 +36,8 @@ pub enum View {
     Board,
     Map,
     Project,
+    /// Every project, in a table.
+    Projects,
 }
 
 /// How many cards a column builds at first, and how many more each "show more" adds. A column holds hundreds

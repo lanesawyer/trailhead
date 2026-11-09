@@ -1401,6 +1401,16 @@ async fn similar_tasks_finds_unfinished_titles_that_share_most_words() {
 }
 
 #[tokio::test]
+async fn similar_tasks_counts_capitalized_two_letter_acronyms() {
+    let env = Env::new().await;
+    let ui = env.task("UI and CI tests").await;
+    let similar = env.store.similar_tasks(&env.human, "AUTH", "CI UI", None).await.unwrap();
+    assert_eq!(similar.into_iter().map(|t| t.key).collect::<Vec<_>>(), vec![ui.key]);
+    // Lowercase two-letter words are still noise.
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "ci ui", None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn listing_by_title_ignores_case_and_surrounding_space() {
     let env = Env::new().await;
     let wanted = env.task("Cover the edge").await;
@@ -1495,4 +1505,21 @@ async fn revert_actor_skips_a_parent_cycle_and_still_reverts_the_rest() {
     assert!(report.skipped[0].reason.contains("can't become its parent"), "{}", report.skipped[0].reason);
     assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().title, "other");
     assert_eq!(env.store.get_task(&env.human, &a.key).await.unwrap().parent_id, None);
+}
+
+#[tokio::test]
+async fn with_unfinished_blockers_names_only_tasks_held_up_by_open_blockers() {
+    let env = Env::new().await;
+    let open = env.task("open").await;
+    let finished = env.task("finished").await;
+    let held = env.task("held").await;
+    let freed = env.task("freed").await;
+    let free = env.task("free").await;
+    env.store.add_dependency(&env.human, &open.key, &held.key).await.unwrap();
+    env.store.add_dependency(&env.human, &finished.key, &freed.key).await.unwrap();
+    env.store.update_task(&env.human, &finished.key, status(Status::Done), None).await.unwrap();
+
+    let ids = [held.id, freed.id, free.id];
+    let blocked = env.store.with_unfinished_blockers(&ids).await.unwrap();
+    assert_eq!(blocked, std::collections::HashSet::from([held.id]));
 }

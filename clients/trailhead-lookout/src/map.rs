@@ -25,7 +25,7 @@ use uuid::Uuid;
 use crate::board::View;
 use crate::factory::{Campsite, FactoryStatus, Run};
 use crate::mirror::{Mirrored, Rev, rows};
-use crate::widgets::{space, status_label};
+use crate::widgets::{self, BackgroundTone, sandbox_token, size, space, status_label, status_tone, text_toned, token};
 
 /// Campsites sit on a grid on the left, this many to a row.
 const CAMP_COLUMNS: usize = 3;
@@ -36,6 +36,8 @@ const WAY_COLUMNS: usize = 2;
 const WAY_CELL: Vec2 = Vec2::new(230.0, 76.0);
 const WAY_SIZE: Vec2 = Vec2::new(210.0, 60.0);
 const ORIGIN: Vec2 = Vec2::new(16.0, 56.0);
+/// An agent's token on the map.
+const AGENT_SIZE: Vec2 = Vec2::new(20.0, 20.0);
 /// A walker stands this far from the corner of its spot, below the text.
 const STAND: Vec2 = Vec2::new(6.0, 52.0);
 
@@ -253,26 +255,16 @@ pub fn build(input: Input) -> MapModel {
     MapModel { camps, waypoints, walkers }
 }
 
-fn state_color(state: SandboxState) -> Color {
-    match state {
-        SandboxState::Idle => Color::srgb(0.22, 0.30, 0.24),
-        SandboxState::Busy => Color::srgb(0.20, 0.34, 0.50),
-        SandboxState::Paused => Color::srgb(0.46, 0.38, 0.16),
-        SandboxState::Broken => Color::srgb(0.50, 0.18, 0.18),
-    }
-}
-
-fn marker_line(m: &Marker) -> (String, Color) {
-    let warn = Color::srgb(0.95, 0.75, 0.3);
-    let dim = Color::srgb(0.7, 0.7, 0.7);
+/// A marker's words and their tone: a verdict in its status's tone, as on the board.
+fn marker_line(m: &Marker) -> (String, widgets::Token) {
     match m {
-        Marker::Claim(who) => (format!("held by {who}"), dim),
-        Marker::Questions(n) => (format!("? {n} open question{}", if *n == 1 { "" } else { "s" }), warn),
-        Marker::Handoff(h) => (format!("handoff: {h}"), dim),
-        Marker::Reviewing => ("reviewing".into(), Color::srgb(0.6, 0.8, 1.0)),
-        Marker::InReview => (status_label(Status::InReview).into(), Color::srgb(0.6, 0.8, 1.0)),
-        Marker::Approved => (status_label(Status::Approved).into(), Color::srgb(0.5, 0.9, 0.5)),
-        Marker::Spend(d) => (format!("${d:.2}"), dim),
+        Marker::Claim(who) => (format!("held by {who}"), token::TEXT_DIM),
+        Marker::Questions(n) => (format!("? {n} open question{}", if *n == 1 { "" } else { "s" }), token::STATUS_WARN),
+        Marker::Handoff(h) => (format!("handoff: {h}"), token::TEXT_DIM),
+        Marker::Reviewing => ("reviewing".into(), status_tone(Status::InReview)),
+        Marker::InReview => (status_label(Status::InReview).into(), status_tone(Status::InReview)),
+        Marker::Approved => (status_label(Status::Approved).into(), status_tone(Status::Approved)),
+        Marker::Spend(d) => (format!("${d:.2}"), token::TEXT_DIM),
     }
 }
 
@@ -363,7 +355,7 @@ struct Token {
 }
 
 fn spawn_panel(mut commands: Commands) {
-    commands.spawn((Name::new("trail map"), MapPanel, crate::widgets::beside_sidebar()));
+    commands.spawn((Name::new("trail map"), MapPanel, crate::widgets::beside_sidebar(), crate::widgets::BesideSidebar));
 }
 
 fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<MapPanel>>) {
@@ -373,7 +365,7 @@ fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<MapPanel>>) {
 }
 
 /// A box at a map position, absolute inside the panel.
-fn plot(pos: Vec2, size: Vec2, color: Color) -> impl Bundle {
+fn plot(pos: Vec2, size: Vec2, tone: widgets::Token) -> impl Bundle {
     (
         Node {
             position_type: PositionType::Absolute,
@@ -386,12 +378,12 @@ fn plot(pos: Vec2, size: Vec2, color: Color) -> impl Bundle {
             overflow: Overflow::clip(),
             ..default()
         },
-        BackgroundColor(color),
+        BackgroundTone(tone),
     )
 }
 
-fn line(commands: &mut Commands, parent: Entity, text: String, color: Color) {
-    commands.spawn((Text::new(text), TextColor(color), TextFont::from_font_size(12.0), ChildOf(parent)));
+fn line(commands: &mut Commands, parent: Entity, text: String, tone: widgets::Token) {
+    commands.spawn_scene(text_toned(text, size::SECONDARY, tone)).insert(ChildOf(parent));
 }
 
 /// Tokens sit above the terrain, which is respawned (as later siblings) on every redraw.
@@ -420,7 +412,6 @@ fn redraw(
     for e in &terrain {
         commands.entity(e).despawn();
     }
-    let ink = Color::WHITE;
     let stopped = factory.link != crate::factory::FactoryLink::Running;
     let bar = commands
         .spawn((
@@ -428,7 +419,7 @@ fn redraw(
             Node {
                 position_type: PositionType::Absolute,
                 left: px(ORIGIN.x),
-                top: px(8),
+                top: px(space::PANEL_INSET),
                 column_gap: px(space::ROWS),
                 ..default()
             },
@@ -440,19 +431,20 @@ fn redraw(
     } else {
         factory.label()
     };
-    let color = if stopped { Color::srgb(0.9, 0.7, 0.3) } else { Color::srgb(0.7, 0.7, 0.7) };
-    commands.spawn((Text::new(note), TextColor(color), ChildOf(bar)));
+    let tone = if stopped { token::STATUS_WARN } else { token::TEXT_DIM };
+    commands.spawn_scene(text_toned(note, size::BODY, tone)).insert(ChildOf(bar));
 
     for c in &map.0.camps {
-        let tint = if stopped { Color::srgb(0.2, 0.2, 0.2) } else { state_color(c.state) };
+        // A stopped factory's camps are grayed out: their state is the last known, not live.
+        let tint = if stopped { token::SURFACE_RAISED } else { sandbox_token(c.state) };
         let node = commands.spawn((Terrain, plot(c.pos, CAMP_SIZE, tint), ChildOf(panel))).id();
         for l in camp_lines(c) {
-            line(&mut commands, node, l, ink);
+            line(&mut commands, node, l, token::TEXT);
         }
     }
     for w in &map.0.waypoints {
-        let node = commands.spawn((Terrain, plot(w.pos, WAY_SIZE, Color::srgb(0.16, 0.16, 0.18)), ChildOf(panel))).id();
-        line(&mut commands, node, format!("{} {}", w.key, w.title), ink);
+        let node = commands.spawn((Terrain, plot(w.pos, WAY_SIZE, token::SURFACE_RAISED), ChildOf(panel))).id();
+        line(&mut commands, node, format!("{} {}", w.key, w.title), token::TEXT);
         for (l, c) in w.markers.iter().map(marker_line) {
             line(&mut commands, node, l, c);
         }
@@ -476,9 +468,9 @@ fn redraw(
         let name = Name::new(format!("agent {}", w.name));
         let node =
             commands.spawn((Token { id: w.id.clone(), target: w.pos }, name, ZIndex(TOKEN_Z), ChildOf(panel))).id();
-        commands.entity(node).insert(plot(w.pos, Vec2::new(20.0, 20.0), Color::srgb(0.95, 0.75, 0.3)));
+        commands.entity(node).insert(plot(w.pos, AGENT_SIZE, token::AGENT));
         let initial = w.name.rsplit(['/', '-']).next().unwrap_or("a").to_string();
-        commands.spawn((Text::new(initial), TextColor(Color::BLACK), TextFont::from_font_size(11.0), ChildOf(node)));
+        commands.spawn_scene(text_toned(initial, size::SMALL, token::AGENT_TEXT)).insert(ChildOf(node));
     }
 }
 

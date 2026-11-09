@@ -576,6 +576,24 @@ fn would_start_unscoped_under_systemd() -> bool {
     systemd_run_on_path() && current_scope_env().is_none()
 }
 
+/// The systemd unit (the last cgroup path component, e.g. `trailhead-server-123.scope`) a `/proc/<pid>/cgroup`
+/// says its process runs in. Only the unified (v2) hierarchy line is read.
+pub fn cgroup_unit(proc_cgroup: &str) -> Option<String> {
+    let path = proc_cgroup.lines().find_map(|l| l.strip_prefix("0::"))?;
+    path.trim().rsplit('/').find(|c| !c.is_empty()).map(str::to_string)
+}
+
+/// True for a scope that belongs to a desktop app (`app-gnome-code-1234.scope`), whose death (systemd-oomd killing
+/// the app) would take the server with it: the TRAIL-178 regression.
+pub fn is_app_scope(unit: &str) -> bool {
+    unit.starts_with("app-") && unit.ends_with(".scope")
+}
+
+/// The cgroup unit the server with this pid runs in, when this machine can say.
+pub fn server_unit(pid: u32) -> Option<String> {
+    cgroup_unit(&std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?)
+}
+
 /// Says in server.log that the server is running outside its own scope, so a death with its launcher can be traced.
 fn note_unscoped(mut log: &std::fs::File, why: &str) {
     use std::io::Write;
@@ -596,6 +614,13 @@ fn log_since(log: &std::path::Path, from: u64) -> String {
     let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.lines().collect();
     lines[lines.len().saturating_sub(40)..].join("\n")
+}
+
+/// True when a scoped child's early exit was `systemd-run` itself failing (no usable user manager),
+/// not the server it exec'd stopping on its own. systemd-run exits 1 and prints "Failed to ..."
+/// before it execs; the server's own exits (port taken, bad database) don't.
+fn systemd_run_failed(status: std::process::ExitStatus, log: &str) -> bool {
+    status.code() == Some(1) && log.lines().any(|l| l.starts_with("Failed to "))
 }
 
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
@@ -645,14 +670,15 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
         if health(http, base, None).await.is_some() {
             return remember_tunnel(&paths, base, false);
         }
-        if scoped && child.try_wait()?.is_some() {
+        let exited = child.try_wait()?;
+        if scoped && exited.is_some_and(|s| systemd_run_failed(s, &log_since(&paths.server_log(), started_at))) {
             // No usable user manager (a container, a bare ssh session): run it unscoped.
             scoped = false;
             note_unscoped(&log, "systemd-run --user failed");
             let from = log.metadata().map(|m| m.len()).unwrap_or(0);
             child = spawn(false).context("couldn't start the local server")?;
             started_at = from;
-        } else if let Some(status) = child.try_wait()? {
+        } else if let Some(status) = exited {
             // Another CLI's server may have taken the port first.
             if health(http, base, None).await.is_some() {
                 return remember_tunnel(&paths, base, false);
@@ -666,6 +692,26 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Err(anyhow!("started a local server but it isn't answering; see {}", paths.server_log().display()))
+}
+
+#[cfg(test)]
+mod cgroup_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_unit_from_the_v2_line() {
+        let own = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/trailhead-server-42.scope\n";
+        assert_eq!(cgroup_unit(own).as_deref(), Some("trailhead-server-42.scope"));
+        assert_eq!(cgroup_unit("1:name=systemd:/x\n0::/\n"), None);
+        assert_eq!(cgroup_unit(""), None);
+    }
+
+    #[test]
+    fn app_scopes_are_flagged_but_the_servers_own_is_not() {
+        assert!(is_app_scope("app-gnome-code-1234.scope"));
+        assert!(!is_app_scope("trailhead-server-42.scope"));
+        assert!(!is_app_scope("app-dbus.service"));
+    }
 }
 
 #[cfg(test)]
@@ -691,6 +737,17 @@ mod scope_env_tests {
     #[test]
     fn no_run_user_dir_of_ours_means_unscoped() {
         assert_eq!(scope_env(None, None, 1000, |_| false), None);
+    }
+
+    #[test]
+    fn only_systemd_runs_own_failure_triggers_the_fallback() {
+        use std::os::unix::process::ExitStatusExt;
+        let one = std::process::ExitStatus::from_raw(1 << 8);
+        let signal = std::process::ExitStatus::from_raw(9);
+        assert!(systemd_run_failed(one, "Failed to connect to bus: No medium found\n"));
+        assert!(!systemd_run_failed(one, "Error: address already in use\n"));
+        assert!(!systemd_run_failed(one, ""));
+        assert!(!systemd_run_failed(signal, "Failed to connect to bus\n"));
     }
 }
 

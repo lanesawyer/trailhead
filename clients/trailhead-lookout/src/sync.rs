@@ -118,7 +118,8 @@ impl Remote {
 
     /// Step 2. `at` is what step 1 found.
     pub async fn load_snapshot(&self, at: i64) -> Result<Snapshot, String> {
-        let projects = self.list("/v1/projects").await?;
+        // Archived ones too: the sidebar lists them apart, and unarchiving one needs it there.
+        let projects = self.list("/v1/projects?archived=true").await?;
         let agents = self.list("/v1/agents").await?;
         let users = self.list("/v1/users").await?;
         // Pages are by offset, and a task deleted from an earlier page moves the rest up one, so the one at the

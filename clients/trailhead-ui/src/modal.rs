@@ -122,14 +122,16 @@ fn frame(title: String, width: Val, tall: bool) -> Box<dyn SceneList> {
         ModalFrame
         HintBounds
         Children [
-            @panel_header(title, true)
+            @panel_header(title)
             --
             // The body's box may shrink below its content, so the body scrolls and the footer keeps its place, and grows
             // into a tall modal's height.
             Node { flex_direction: FlexDirection::Column, min_height: px(0), flex_shrink: 1.0, flex_grow: 1.0 }
             Children [
+                // Grows into a tall modal's height too, so content can fill it (the settings Logs page's list).
                 Node {
                     flex_direction: FlexDirection::Column,
+                    flex_grow: 1.0,
                     min_height: px(0),
                     row_gap: { px(space::ROWS) },
                     overflow: { Overflow::scroll_y() },
@@ -471,5 +473,6 @@ mod tests {
         let slots = *app.world().get::<ModalSlots>(modal).unwrap();
         let wrap = app.world().get::<ChildOf>(slots.body).unwrap().parent();
         assert_eq!(app.world().get::<Node>(wrap).unwrap().flex_grow, 1.0);
+        assert_eq!(app.world().get::<Node>(slots.body).unwrap().flex_grow, 1.0, "and the body its box, to be filled");
     }
 }
