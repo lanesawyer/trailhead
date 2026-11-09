@@ -793,6 +793,26 @@ async fn the_merger_keeps_one_status_comment_and_edits_it() {
 }
 
 #[tokio::test]
+async fn the_status_comment_lists_when_the_status_changed() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (_key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    let status = || r.codehost.prs()[0].comments[1].clone();
+    assert_eq!(status(), "Grade 3: waiting for CI and a person.", "no History before a change");
+
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    let body = status();
+    let (now, history) = body.split_once("\n\nHistory:\n").expect("a History list");
+    assert_eq!(now, "Grade 3: waiting for a person.");
+    let lines: Vec<&str> = history.lines().collect();
+    assert_eq!(lines.len(), 2, "{history}");
+    assert!(
+        lines[0].starts_with("- 20") && lines[0].ends_with(" UTC: Grade 3: waiting for CI and a person."),
+        "{history}"
+    );
+    assert!(lines[1].ends_with(" UTC: Grade 3: waiting for a person."), "{history}");
+}
+#[tokio::test]
 async fn a_deleted_status_comment_is_posted_again() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
