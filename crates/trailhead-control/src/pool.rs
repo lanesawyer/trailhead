@@ -103,8 +103,8 @@ impl Factory {
         labels
     }
 
-    /// A worker sandbox for `task` from the repo's pool (`docs/factory/sandbox.md`): an idle one restored to its warm
-    /// checkpoint, or a new one when none is idle. The tick's room check keeps the pool within `max_sandboxes`.
+    /// A worker sandbox for `task` from the repo's pool (`docs/factory/sandbox.md`): the one it already holds, else an idle
+    /// one, restored to its warm checkpoint, or a new one when none is idle. The tick's room check keeps the pool within `max_sandboxes`.
     /// The prepared checkout becomes the new warm checkpoint when the old one has gone stale (TRAIL-707).
     /// A rework whose `setup` fails still gets its sandbox, with the failure output returned beside it.
     pub(crate) async fn acquire_worker(
@@ -115,7 +115,9 @@ impl Factory {
         merge_base: bool,
     ) -> Result<(Sandbox, Option<String>)> {
         let pick = self.pool_pick.lock().await;
-        let idle = p.list(&self.pooled(None, label::IDLE, None, None)).await?;
+        // The task's own sandbox first, when it holds one (a parked rework resumes in it, TRAIL-1121); then idle ones.
+        let mut idle = p.list(&self.pooled(None, label::BUSY, None, Some(task))).await?;
+        idle.extend(p.list(&self.pooled(None, label::IDLE, None, None)).await?);
         let stack = self.config.stack.tag();
         let mut current = Vec::new();
         for s in idle {

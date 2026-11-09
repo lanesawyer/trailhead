@@ -182,7 +182,7 @@ impl Factory {
         let busy: HashSet<TaskKey> = keys.values().cloned().collect();
         let mut others = self.held_by_others(&busy).await?;
         let mut room = self.room(keys.len() - reviewing + others.len()).await?;
-        if room == 0 && self.release_parked_for_waiting(&busy).await > 0 {
+        if room == 0 && self.release_parked_for_waiting(&busy, &others).await > 0 {
             others = self.held_by_others(&busy).await?;
             room = self.room(keys.len() - reviewing + others.len()).await?;
         }
@@ -243,7 +243,7 @@ impl Factory {
     /// have passed and releasing loses nothing: the daemon finds no work in the checkout that isn't on the remote
     /// branch the task resumes from. The task keeps its place in the queue; answered, it starts like a rework on a
     /// pooled sandbox. Returns how many were released. A failure is logged and the sandbox kept or left to reconcile.
-    async fn release_parked_for_waiting(&self, busy: &HashSet<TaskKey>) -> usize {
+    async fn release_parked_for_waiting(&self, busy: &HashSet<TaskKey>, others: &Others) -> usize {
         let after = self.config.repo.release_parked_after;
         if after == 0 {
             return 0;
@@ -269,12 +269,10 @@ impl Factory {
                 return 0;
             }
         };
-        // A ready task that holds a sandbox resumes in it; it isn't waiting for a place.
-        let held_for = |t: &Task| held.iter().any(|s| s.labels.get(label::TASK).is_some_and(|k| *k == t.key.0));
         let waiting = match self.ready_graded().await {
             Ok(ready) => ready
                 .into_iter()
-                .filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key) && !held_for(t))
+                .filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key) && !others.contains(&t.key))
                 .count(),
             Err(e) => {
                 tracing::warn!(error = %e, "couldn't list the ready tasks to see whether a parked task's sandbox is wanted");
@@ -530,7 +528,7 @@ impl Factory {
         let none = HashSet::new();
         let mut others = self.held_by_others(&none).await?;
         let mut room = self.room(others.len()).await?;
-        if room == 0 && self.release_parked_for_waiting(&none).await > 0 {
+        if room == 0 && self.release_parked_for_waiting(&none, &others).await > 0 {
             others = self.held_by_others(&none).await?;
             room = self.room(others.len()).await?;
         }
