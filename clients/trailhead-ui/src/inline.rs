@@ -34,7 +34,7 @@ use crate::notice::{Notice, Tone, notice};
 use crate::patch::{display, patch_node, set_text};
 use crate::select::{Picked, SelectEdit, select_toned};
 use crate::spacing::{extent, space};
-use crate::text::{size, text, text_dim};
+use crate::text::{Size, size, text, text_dim};
 use crate::theme::{TextTone, Token, token};
 
 /// Where an inline widget is in its edit.
@@ -234,7 +234,7 @@ pub fn inline_text(value: impl Into<String>, hint: impl Into<String>, lines: f32
 }
 
 /// An [`inline_text`] read at `font_size` (one of [`size`]'s), such as a detail view's title.
-pub fn inline_text_sized(value: impl Into<String>, hint: impl Into<String>, lines: f32, font_size: f32) -> impl Scene {
+pub fn inline_text_sized(value: impl Into<String>, hint: impl Into<String>, lines: f32, font_size: Size) -> impl Scene {
     let (value, hint) = (value.into(), hint.into());
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: { px(space::STACKED) } }
@@ -306,7 +306,7 @@ pub fn inline_field(
 }
 
 /// The clickable value, and its hint while the value is empty.
-fn shown(value: String, hint: String, font_size: f32) -> impl Scene {
+fn shown(value: String, hint: String, font_size: Size) -> impl Scene {
     bsn! {
         Node { flex_direction: FlexDirection::Column, width: percent(100) }
         Part::Shown
@@ -807,7 +807,7 @@ mod tests {
         let input = world.query_filtered::<&TextFont, With<InlineInput>>().single(world).unwrap().font_size;
         let shown = world.query::<(&Part, &TextFont)>().iter(world).find(|(p, _)| **p == Part::Value).unwrap().1;
         assert_eq!(input, shown.font_size);
-        assert_eq!(input, FontSize::Px(size::DETAIL_TITLE));
+        assert_eq!(input, FontSize::from(size::DETAIL_TITLE));
     }
 
     #[test]

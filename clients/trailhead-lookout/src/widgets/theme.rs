@@ -7,6 +7,7 @@
 //! color.
 
 use bevy::prelude::*;
+use trailhead_factory::SandboxState;
 use trailhead_model::{CommentKind, Grade, Priority, Status};
 use trailhead_ui::{Icon, Theme, Token};
 
@@ -45,6 +46,16 @@ pub mod token {
     pub const STATUS_APPROVED_TEXT: Token = Token::new("lookout.status.approved.text");
     pub const STATUS_DONE_TEXT: Token = Token::new("lookout.status.done.text");
     pub const STATUS_CANCELLED_TEXT: Token = Token::new("lookout.status.cancelled.text");
+
+    /// One background per sandbox state, for a campsite on the trail map.
+    pub const SANDBOX_IDLE: Token = Token::new("lookout.sandbox.idle");
+    pub const SANDBOX_BUSY: Token = Token::new("lookout.sandbox.busy");
+    pub const SANDBOX_PAUSED: Token = Token::new("lookout.sandbox.paused");
+    pub const SANDBOX_BROKEN: Token = Token::new("lookout.sandbox.broken");
+
+    /// An agent walking the trail map, and the initial written on it.
+    pub const AGENT: Token = Token::new("lookout.agent");
+    pub const AGENT_TEXT: Token = Token::new("lookout.agent.text");
 }
 
 /// The background token of a status column.
@@ -57,6 +68,16 @@ pub fn status_token(status: Status) -> Token {
         Status::Approved => token::STATUS_APPROVED,
         Status::Done => token::STATUS_DONE,
         Status::Cancelled => token::STATUS_CANCELLED,
+    }
+}
+
+/// The background of a campsite whose sandbox is in `state`.
+pub fn sandbox_token(state: SandboxState) -> Token {
+    match state {
+        SandboxState::Idle => token::SANDBOX_IDLE,
+        SandboxState::Busy => token::SANDBOX_BUSY,
+        SandboxState::Paused => token::SANDBOX_PAUSED,
+        SandboxState::Broken => token::SANDBOX_BROKEN,
     }
 }
 
@@ -153,6 +174,17 @@ pub fn theme() -> Theme {
     theme.paint(&token::STATUS_APPROVED_TEXT, words(150.0));
     theme.paint(&token::STATUS_DONE_TEXT, Color::oklch(0.76, 0.0, 0.0));
     theme.paint(&token::STATUS_CANCELLED_TEXT, Color::oklch(0.66, 0.0, 0.0));
+
+    // Campsites, each toward the hue of what its state means (green resting, blue working, amber paused, red broken),
+    // all as dark, so a camp's text reads on any of them.
+    let camp = |hue: f32| Color::oklch(0.38, 0.07, hue);
+    theme.paint(&token::SANDBOX_IDLE, camp(150.0));
+    theme.paint(&token::SANDBOX_BUSY, camp(245.0));
+    theme.paint(&token::SANDBOX_PAUSED, camp(80.0));
+    theme.paint(&token::SANDBOX_BROKEN, camp(25.0));
+
+    theme.paint(&token::AGENT, Color::srgb(0.95, 0.75, 0.3));
+    theme.paint(&token::AGENT_TEXT, Color::BLACK);
     theme
 }
 
@@ -182,6 +214,21 @@ mod tests {
     fn no_color_is_painted_that_a_meaning_already_has() {
         let repeated = theme().repeated_colors();
         assert!(repeated.is_empty(), "alias these to the meaning instead:\n{}", repeated.join("\n"));
+    }
+
+    #[test]
+    fn each_sandbox_state_has_its_own_color_and_a_camps_text_reads_on_it() {
+        let theme = theme();
+        let lightness = |t: &Token| Oklcha::from(theme.color(t)).lightness;
+        let states = [SandboxState::Idle, SandboxState::Busy, SandboxState::Paused, SandboxState::Broken];
+        let colors: std::collections::HashSet<_> =
+            states.iter().map(|s| format!("{:?}", theme.color(&sandbox_token(*s)))).collect();
+        assert_eq!(colors.len(), states.len());
+        for state in states {
+            let gap = lightness(&token::TEXT) - lightness(&sandbox_token(state));
+            assert!(gap >= TEXT_CONTRAST, "a camp's text on {state:?} is {gap:.2} lighter, too dark to read");
+        }
+        assert!(lightness(&token::AGENT) - lightness(&token::AGENT_TEXT) >= TEXT_CONTRAST);
     }
 
     #[test]

@@ -74,9 +74,11 @@ over growing a private copy.
 - **Paint dark; the kit derives light and the accent.** `Theme::light` turns near-neutrals over and darkens colors
   that mean something; `Theme::with_accent` moves the accent's shades onto the desktop's. A color written as a
   literal follows neither, so it stays dark in a light theme.
-- **Text sizes** come from the kit's `size` scale, **gaps, padding, margins and offsets** from its `space` scale,
-  **corners** from `radius` and **border widths** from `stroke`, named for what they're for. The lint finds a literal.
-  If no name fits, add one with a doc comment.
+- **Text sizes** are the kit's `Size`, which only the kit makes: the text functions take one, so a size typed as a
+  number doesn't compile. Pick one from `size`; `Size::px` is for measuring (a line's height). **Gaps, padding,
+  margins and offsets** come from the `space` scale, **corners** from `radius` and **border widths** from `stroke`,
+  named for what they're for. Those go into a `Node`'s `Val`s, which take any number, so the lint is what finds a
+  literal there. If no name fits, add one to the kit with a doc comment.
 - **Icons** are `Icon` variants (Lucide glyphs from the embedded font). The text font has no icon glyphs, so anything
   else shows as a box or a question mark. Adding an icon is one variant; take its codepoint from the same
   `lucide-static` release the font came from.
