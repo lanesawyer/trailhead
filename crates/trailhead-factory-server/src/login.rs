@@ -348,12 +348,18 @@ esac
         creds.save(GITHUB, "saved").unwrap();
         assert_eq!(resolve("GITHUB_TOKEN", None, &fnox, &creds, GITHUB).unwrap().as_deref(), Some("saved"));
         assert_eq!(resolve("SPRITES_TOKEN", None, &fnox, &creds, SPRITES).unwrap(), None);
-        // Even a fnox that would fail isn't run when there's no config for it to read.
+        // With no config to read, fnox is still run, but failing to list one defines nothing.
         let bare = dir.path().join("bare");
         std::fs::create_dir_all(&bare).unwrap();
-        let fnox = load(&fake_fnox(&dir), &bare);
+        let failing = dir.path().join("failing-fnox");
+        std::fs::write(&failing, "#!/bin/sh\necho 'no config' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&failing, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let fnox = load(&failing.display().to_string(), &bare);
         assert!(matches!(fnox.get("BROKEN"), Ok(None)));
-        assert!(calls(&dir).is_empty());
+        // A fnox that lists a name is believed even if its config wasn't found from here.
+        let fnox = load(&fake_fnox(&dir), &bare);
+        assert!(fnox.get("BROKEN").is_err());
+        assert_eq!(calls(&dir).first().map(String::as_str), Some("list --complete"));
     }
 
     #[test]
