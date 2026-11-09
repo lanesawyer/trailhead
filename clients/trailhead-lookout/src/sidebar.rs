@@ -5,6 +5,8 @@
 //! It is spawned once and updated in place: the projects follow the mirror through [`Keyed`], the page shown is marked
 //! on its [`NavItem`], and the chip is edited with [`ChipEdit`]. Searching shows the results on the board.
 
+use std::collections::HashMap;
+
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
@@ -12,7 +14,8 @@ use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::FactoryState;
-use trailhead_model::Project;
+use trailhead_model::{Project, Task};
+use uuid::Uuid;
 
 use crate::author::Act;
 use crate::board::{Filter, View};
@@ -59,17 +62,24 @@ pub struct NewTask;
 #[derive(Component)]
 pub struct ConnectionChip;
 
-/// A project's entry: its name, with its key after it.
+/// A project's entry: its name, its key after it, and how many of its tasks are open at the end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
     key: String,
     name: String,
+    open: usize,
 }
 
 impl Entry {
-    /// The caption and the note: the name with the key, or the key alone for a project without a name.
-    fn words(&self) -> (String, String) {
-        if self.name.is_empty() { (self.key.clone(), String::new()) } else { (self.name.clone(), self.key.clone()) }
+    /// The caption, the note and the end: the name, the key and the open count, or the key alone for a project
+    /// without a name.
+    fn words(&self) -> [String; 3] {
+        let open = self.open.to_string();
+        if self.name.is_empty() {
+            [self.key.clone(), String::new(), open]
+        } else {
+            [self.name.clone(), self.key.clone(), open]
+        }
     }
 }
 
@@ -160,12 +170,13 @@ fn clear_search_on_escape(key: On<FocusedInput<KeyboardInput>>, mut boxes: Query
     }
 }
 
-/// One entry per project, by key, following the mirror.
-#[allow(clippy::too_many_arguments)]
+/// One entry per project, by key, following the mirror's projects and their tasks.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync_projects(
     projects: Query<&Mirrored<Project>>,
-    changed: Query<(), Changed<Mirrored<Project>>>,
-    mut removed: RemovedComponents<Mirrored<Project>>,
+    tasks: Query<&Mirrored<Task>>,
+    changed: Query<(), Or<(Changed<Mirrored<Project>>, Changed<Mirrored<Task>>)>>,
+    (mut removed, mut removed_tasks): (RemovedComponents<Mirrored<Project>>, RemovedComponents<Mirrored<Task>>),
     list: Query<Entity, With<ProjectList>>,
     children: Query<&Children>,
     mut texts: Query<&mut Text>,
@@ -173,27 +184,36 @@ fn sync_projects(
     mut commands: Commands,
     mut drawn: Local<Option<Entity>>,
 ) {
-    let gone = removed.read().count() > 0;
+    let gone = removed.read().count() + removed_tasks.read().count() > 0;
     let Ok(list) = list.single() else { return };
     if *drawn == Some(list) && changed.is_empty() && !gone {
         return;
     }
     *drawn = Some(list);
-    let mut wanted: Vec<Entry> =
-        projects.iter().map(|p| Entry { key: p.0.key.clone(), name: p.0.name.clone() }).collect();
+    let mut open: HashMap<Uuid, usize> = HashMap::new();
+    for task in tasks.iter().filter(|t| !t.0.status.is_closed()) {
+        *open.entry(task.0.project_id).or_default() += 1;
+    }
+    let mut wanted: Vec<Entry> = projects
+        .iter()
+        .map(|p| Entry {
+            key: p.0.key.clone(),
+            name: p.0.name.clone(),
+            open: open.get(&p.0.id).copied().unwrap_or_default(),
+        })
+        .collect();
     wanted.sort_by(|a, b| a.key.cmp(&b.key));
     let wanted = [(list, wanted.into_iter().map(|e| (e.key.clone(), e)).collect::<Vec<_>>())];
     entries.0.sync(
         &mut commands,
         &wanted,
         |commands, _, entry| {
-            let (caption, note) = entry.words();
-            commands.spawn_scene(nav_item_noted(caption, note)).insert(NavTo::Project(entry.key.clone())).id()
+            let [caption, note, end] = entry.words();
+            commands.spawn_scene(nav_item_noted(caption, note, end)).insert(NavTo::Project(entry.key.clone())).id()
         },
         |_, entity, entry| {
-            // The caption, then the note.
-            let (caption, note) = entry.words();
-            let mut words = [caption, note].into_iter();
+            // The caption, the note, then the end.
+            let mut words = entry.words().into_iter();
             for e in children.iter_descendants(entity) {
                 if let Ok(text) = texts.get_mut(e)
                     && let Some(wanted) = words.next()
@@ -313,7 +333,7 @@ mod tests {
 
     use super::*;
     use crate::board::BoardPlugin;
-    use crate::fixture::{project_json, sid};
+    use crate::fixture::{project_json, sid, task_json};
     use crate::mirror::MirrorPlugin;
     use crate::project::ProjectPlugin;
     use crate::sync::{Snapshot, SyncItem};
@@ -332,7 +352,12 @@ mod tests {
             project_json(json!({"id": "p2", "key": "OPS", "name": "Operations"})),
             project_json(json!({"id": "p1", "key": "TRAIL", "name": "Trailhead"})),
         ];
-        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, ..Default::default() }));
+        let tasks = vec![
+            task_json(json!({"id": "t1", "key": "TRAIL-1", "status": "open"})),
+            task_json(json!({"id": "t2", "key": "TRAIL-2", "status": "in_review"})),
+            task_json(json!({"id": "t3", "key": "TRAIL-3", "status": "done"})),
+        ];
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, ..Default::default() }));
         settle(&mut app);
         app
     }
@@ -510,6 +535,38 @@ mod tests {
             projects,
             [NavTo::Project("BDE".into()), NavTo::Project("OPS".into()), NavTo::Project("TRAIL".into())]
         );
+    }
+
+    /// An entry's texts in order: the caption, the note, the end.
+    fn entry_words(app: &mut App, key: &str) -> Vec<String> {
+        let world = app.world_mut();
+        let to = NavTo::Project(key.into());
+        let entry = world.query::<(Entity, &NavTo)>().iter(world).find(|(_, t)| **t == to).unwrap().0;
+        let mut kids = world.query::<&Children>();
+        let mut found = vec![entry];
+        let mut at = 0;
+        while at < found.len() {
+            if let Ok(children) = kids.get(world, found[at]) {
+                found.extend(children.iter());
+            }
+            at += 1;
+        }
+        found.iter().filter_map(|e| world.get::<Text>(*e)).map(|t| t.0.clone()).collect()
+    }
+
+    #[test]
+    fn an_entry_counts_its_projects_open_tasks_and_follows_one_closing_in_place() {
+        let mut app = app();
+        assert_eq!(entry_words(&mut app, "TRAIL"), ["Trailhead", "TRAIL", "2"], "done isn't open");
+        assert_eq!(entry_words(&mut app, "OPS"), ["Operations", "OPS", "0"]);
+        let before = tree(&mut app);
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 2, "entity": "task", "entity_id": sid("t2"), "kind": "task.updated",
+            "after": task_json(json!({"id": "t2", "key": "TRAIL-2", "status": "done", "version": 2})),
+        })));
+        settle(&mut app);
+        assert_eq!(entry_words(&mut app, "TRAIL"), ["Trailhead", "TRAIL", "1"]);
+        assert_eq!(tree(&mut app), before);
     }
 
     #[test]
