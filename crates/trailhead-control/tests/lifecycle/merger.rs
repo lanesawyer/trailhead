@@ -632,6 +632,27 @@ async fn an_update_that_never_lands_is_asked_for_again_after_the_patience() {
     assert_eq!(r.codehost.update_requests(), 2, "asked again once the wait outlasted the patience");
 }
 
+#[tokio::test(start_paused = true)]
+async fn an_update_the_host_keeps_dropping_is_sent_to_rework() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.queue_updates(true);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    for _ in 1..trailhead_control::UPDATE_ASKS {
+        tokio::time::advance(trailhead_control::UPDATE_PATIENCE + std::time::Duration::from_secs(1)).await;
+        r.factory.reconcile().await.unwrap();
+    }
+    assert_eq!(r.codehost.update_requests(), trailhead_control::UPDATE_ASKS as usize);
+    assert_eq!(r.tracker.task(&key).run.conflict_reworks, None);
+
+    tokio::time::advance(trailhead_control::UPDATE_PATIENCE + std::time::Duration::from_secs(1)).await;
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.codehost.update_requests(), trailhead_control::UPDATE_ASKS as usize, "no further ask");
+    assert_eq!(r.tracker.task(&key).run.conflict_reworks, Some(1), "sent to a conflict rework");
+}
+
 #[tokio::test]
 async fn shadow_mode_says_it_would_bring_a_behind_pr_up_to_date_first() {
     let (r, queue) = queued_rig_with(SHADOW);
