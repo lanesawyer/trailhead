@@ -15,11 +15,12 @@ use bevy::feathers::controls::{ButtonVariant, FeathersButton};
 use bevy::picking::cursor::{EntityCursor, OverrideCursor};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::text::LineBreak;
 use bevy::window::SystemCursorIcon;
 
 use super::{
-    BackgroundTone, BorderTone, ButtonKind, Icon, Surface, button, button_text, extent, layer, size, space, stroke,
-    text_dim, token,
+    BackgroundTone, BorderTone, ButtonKind, Icon, Surface, Truncated, button, button_text, extent, layer, size, space,
+    stroke, text_dim, token,
 };
 
 /// How far the drag edge reaches past the sidebar's border, so it straddles the line rather than sitting inside it.
@@ -227,24 +228,51 @@ pub fn nav_item(caption: impl Into<String>, icon: Option<Icon>) -> impl Scene {
 }
 
 /// A [`nav_item`] with `note` just after `caption` and `end` at the far right, both smaller and dimmer: a project's
-/// name, its key, and how many of its tasks are open. Their texts come in that order, for updating in place.
+/// name, its key, and how many of its tasks are open. Each text carries its [`NavPart`], for updating in place. A
+/// caption too long for the sidebar is cut with an ellipsis: change it through its [`Truncated`], not its `Text`.
 pub fn nav_item_noted(caption: impl Into<String>, note: impl Into<String>, end: impl Into<String>) -> impl Scene {
     let (caption, note, end) = (caption.into(), note.into(), end.into());
+    let full = caption.clone();
     bsn! {
         @FeathersButton {
             @caption: { bsn_list! {
-                @button_text(caption)
-                --
-                @text_dim(note, size::SMALL)
+                // The caption and its note take what the end leaves, so the caption has a width to be cut to.
+                Node {
+                    flex_grow: 1.0,
+                    min_width: px(0),
+                    overflow: Overflow::clip_x(),
+                    align_items: AlignItems::Center,
+                    column_gap: { px(space::ICON_LABEL) },
+                }
+                Children [
+                    @button_text(caption)
+                    Truncated { full: { full }, size: { size::BODY } }
+                    TextLayout { linebreak: LineBreak::NoWrap }
+                    NavPart::Caption
+                    --
+                    @text_dim(note, size::SMALL)
+                    Node { flex_shrink: 0.0 }
+                    NavPart::Note
+                ]
                 --
                 @text_dim(end, size::SMALL)
-                Node { margin: { UiRect::left(Val::Auto) } }
+                Node { flex_shrink: 0.0 }
+                NavPart::End
             } },
             @variant: { ButtonVariant::Plain },
         }
         Node { justify_content: JustifyContent::Start, column_gap: { px(space::ICON_LABEL) }, flex_shrink: { 0.0_f32 } }
         NavItem
     }
+}
+
+/// Which text of a [`nav_item_noted`] this is.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum NavPart {
+    #[default]
+    Caption,
+    Note,
+    End,
 }
 
 /// A [`nav_item`], and whether it is the page shown, which gives it a background. Set `current` with `set_if_neq`.

@@ -25,9 +25,9 @@ use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
 use crate::settings::SettingsButton;
 use crate::widgets::{
-    ButtonKind, ChipEdit, Icon, Keyed, NavItem, Token, button, chip, nav_heading, nav_item, nav_item_noted,
-    scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size, spawn_search_field_filling, text,
-    token, tool_button,
+    ButtonKind, ChipEdit, Icon, Keyed, NavItem, NavPart, Token, Truncated, button, chip, nav_heading, nav_item,
+    nav_item_noted, scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size,
+    spawn_search_field_filling, text, token, tool_button,
 };
 
 /// Where a sidebar entry goes.
@@ -179,7 +179,7 @@ fn sync_projects(
     (mut removed, mut removed_tasks): (RemovedComponents<Mirrored<Project>>, RemovedComponents<Mirrored<Task>>),
     list: Query<Entity, With<ProjectList>>,
     children: Query<&Children>,
-    mut texts: Query<&mut Text>,
+    (mut texts, mut truncated, parts): (Query<&mut Text>, Query<&mut Truncated>, Query<&NavPart>),
     mut entries: ResMut<Entries>,
     mut commands: Commands,
     mut drawn: Local<Option<Entity>>,
@@ -212,13 +212,28 @@ fn sync_projects(
             commands.spawn_scene(nav_item_noted(caption, note, end)).insert(NavTo::Project(entry.key.clone())).id()
         },
         |_, entity, entry| {
-            // The caption, the note, then the end.
-            let mut words = entry.words().into_iter();
+            let [caption, note, end] = entry.words();
             for e in children.iter_descendants(entity) {
-                if let Ok(text) = texts.get_mut(e)
-                    && let Some(wanted) = words.next()
-                {
-                    set_text(text, &wanted);
+                match parts.get(e) {
+                    // Cut to fit, so it changes through its `Truncated`.
+                    Ok(NavPart::Caption) => {
+                        if let Ok(mut shown) = truncated.get_mut(e)
+                            && shown.full != caption
+                        {
+                            shown.full = caption.clone();
+                        }
+                    }
+                    Ok(NavPart::Note) => {
+                        if let Ok(text) = texts.get_mut(e) {
+                            set_text(text, &note);
+                        }
+                    }
+                    Ok(NavPart::End) => {
+                        if let Ok(text) = texts.get_mut(e) {
+                            set_text(text, &end);
+                        }
+                    }
+                    Err(_) => {}
                 }
             }
         },
@@ -538,7 +553,7 @@ mod tests {
         );
     }
 
-    /// An entry's texts in order: the caption, the note, the end.
+    /// An entry's words: the caption (whole, before it is cut to fit), the note, the end.
     fn entry_words(app: &mut App, key: &str) -> Vec<String> {
         let world = app.world_mut();
         let to = NavTo::Project(key.into());
@@ -552,7 +567,14 @@ mod tests {
             }
             at += 1;
         }
-        found.iter().filter_map(|e| world.get::<Text>(*e)).map(|t| t.0.clone()).collect()
+        let word = |part: NavPart| {
+            let at = found.iter().find(|e| world.get::<NavPart>(**e) == Some(&part)).unwrap();
+            match world.get::<Truncated>(*at) {
+                Some(caption) => caption.full.clone(),
+                None => world.get::<Text>(*at).unwrap().0.clone(),
+            }
+        };
+        vec![word(NavPart::Caption), word(NavPart::Note), word(NavPart::End)]
     }
 
     #[test]
@@ -573,19 +595,14 @@ mod tests {
     #[test]
     fn an_entry_shows_the_name_then_the_key_and_follows_a_rename_in_place() {
         let mut app = app();
-        let words = |app: &mut App| {
-            let world = app.world_mut();
-            world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect::<Vec<_>>()
-        };
-        let now = words(&mut app);
-        assert!(now.contains(&"Trailhead".to_string()) && now.contains(&"TRAIL".to_string()), "{now:?}");
+        assert_eq!(entry_words(&mut app, "TRAIL")[..2], ["Trailhead", "TRAIL"]);
         let before = tree(&mut app);
         app.world_mut().write_message(SyncItem::Event(json!({
             "id": 2, "entity": "project", "entity_id": sid("p1"), "kind": "project.updated",
             "after": project_json(json!({"id": "p1", "key": "TRAIL", "name": "Trailhead engine", "version": 2})),
         })));
         settle(&mut app);
-        assert!(words(&mut app).contains(&"Trailhead engine".to_string()));
+        assert_eq!(entry_words(&mut app, "TRAIL")[..2], ["Trailhead engine", "TRAIL"]);
         assert_eq!(tree(&mut app), before);
     }
 
