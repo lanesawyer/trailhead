@@ -25,14 +25,14 @@ use bevy::ui_widgets::Activate;
 use crate::icons::{Icon, button_icon, icon_text};
 use crate::patch::{display, patch_node, set_text};
 use crate::spacing::{radius, space, stroke};
-use crate::text::size;
+use crate::text::{Size, size};
 use crate::truncate::truncate_to_width;
 
 /// Space between a body's sides and what is in it, the same on both so its contents sit centered in the box rather
 /// than against its right edge.
 pub const ACCORDION_INDENT: f32 = space::CONTROL_INSET;
 /// Size the accordion titles are drawn at, which sets how many characters fit.
-const TITLE_FONT: f32 = size::BODY;
+const TITLE_FONT: Size = size::BODY;
 /// How deep a section sits, which decides what it is drawn as.
 ///
 /// Both are feathers containers, and the difference is only which set of tokens they take: a pane reads as one of a
@@ -113,7 +113,7 @@ pub fn spawn_accordion(commands: &mut Commands, title: &str, open: bool, level: 
                 border_radius: { header_corners(open).to_border_radius(radius::CONTROL) },
                 overflow: { Overflow::clip() },
             }
-            InheritableFont { font_size: { FontSize::Px(TITLE_FONT) } }
+            InheritableFont { font_size: { FontSize::from(TITLE_FONT) } }
         })
         .id();
 

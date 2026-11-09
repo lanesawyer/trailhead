@@ -46,7 +46,7 @@ Decided 2026-11-05 (TRAIL-796), after Lane's first real use: Lookout worked but 
 **Built on feathers.** Buttons, menus, dropdowns (`FeathersSelect`), text inputs, scrollbars, list views and panes come from `bevy_feathers` 0.20, wrapped by the kit so their props are set in one place. The kit doesn't draw its own controls where feathers has one. Feathers stays inside the kit: an app imports only `trailhead-ui`, never `bevy::feathers`, so a feathers upgrade touches one crate (TRAIL-1102). Much of it is ported from Lane's `bevy-data-explorer` (`src/widgets/`, `src/app/theme.rs`), whose rules have already paid for themselves:
 
 - **Theme tokens, not literal colors** (the kit's `Token`, as `BackgroundTone`, `TextTone`, `BorderTone`), so a theme switch repaints everything. Which tokens, and how they relate, is under "Colors" below.
-- **Named sizes and spacing.** Text sizes come from a `size` scale, every gap, padding, margin and offset from a `space` scale named for its purpose, corners from `radius` and border widths from `stroke`; the kit's lint fails on a literal one.
+- **Named sizes and spacing.** Text sizes are the kit's `Size`, which only the kit makes, from its `size` scale (a size typed as a number doesn't compile); every gap, padding, margin and offset from a `space` scale named for its purpose, corners from `radius` and border widths from `stroke`; the kit's lint fails on a literal one.
 - **Icons are Lucide glyphs** from an embedded icon font (`Icon`), so they take the button's text color and stay sharp. Its license ships beside it.
 - **Button roles.** A primary button (one per surface, like "New task"), a normal one, and an icon-only tool button with a tooltip. A button that opens a menu shows a chevron; one that acts doesn't.
 
