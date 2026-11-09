@@ -1107,11 +1107,6 @@ mod tests {
         compute.write_state("trail-1-a1", &state).await.unwrap();
         assert_eq!(compute.read_state("trail-1-a1").await.unwrap(), state);
     }
-}
-
-#[cfg(test)]
-mod target_tests {
-    use super::*;
 
     #[test]
     fn a_program_log_is_under_the_target_dir() {
