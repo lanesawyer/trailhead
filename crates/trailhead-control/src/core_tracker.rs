@@ -393,10 +393,15 @@ impl Tracker for CoreTracker {
         let mut tasks = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for parent in parents {
-            let filter = TaskFilter { project: Some(project.to_string()), parent, ..TaskFilter::default() };
+            let filter = TaskFilter {
+                project: Some(project.to_string()),
+                parent,
+                metadata_exists: vec![METADATA_KEY.to_string()],
+                ..TaskFilter::default()
+            };
             tasks.extend(self.list_all(&ctx, filter).await?.into_iter().filter(|t| seen.insert(t.id)));
         }
-        self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
+        self.tasks(&ctx, tasks).await
     }
 
     async fn strays(&self, project: &str, queues: &[TaskKey]) -> Result<Vec<Task>> {

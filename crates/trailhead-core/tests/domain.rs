@@ -583,6 +583,10 @@ async fn metadata_merges_and_filters() {
     let found = env.store.list_tasks(&env.human, filter).await.unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].key, t.key);
+    let exists = |p: &str| TaskFilter { metadata_exists: vec![p.into()], ..Default::default() };
+    assert_eq!(env.store.list_tasks(&env.human, exists("area.x")).await.unwrap().len(), 1);
+    assert_eq!(env.store.list_tasks(&env.human, exists("team")).await.unwrap().len(), 1);
+    assert!(env.store.list_tasks(&env.human, exists("size")).await.unwrap().is_empty());
 }
 
 #[tokio::test]

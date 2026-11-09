@@ -85,6 +85,7 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
         grade: parse_grade_filter(q.grade.as_deref())?,
         changes_requested: q.changes_requested,
         metadata,
+        metadata_exists: Vec::new(),
         sort: q.sort.as_deref().map(str::parse).transpose()?.unwrap_or_default(),
         limit: q.limit,
         offset: q.offset,
