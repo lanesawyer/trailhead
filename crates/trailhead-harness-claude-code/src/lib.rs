@@ -46,13 +46,13 @@ impl Default for ClaudeCode {
 /// How the factory's registry builds this harness and which egress it needs (`trailhead-plugins` lists it).
 pub fn kind() -> trailhead_factory::HarnessKind {
     trailhead_factory::HarnessKind {
-        build: |setup| {
+        build: std::sync::Arc::new(|setup| {
             let claude = ClaudeCode::new(setup.executable.clone());
             std::sync::Arc::new(match setup.secrets.get(OAUTH_TOKEN) {
                 Some(token) => claude.with_oauth_token(token.clone()),
                 None => claude,
             })
-        },
+        }),
         egress: |secrets| if secrets.contains_key(OAUTH_TOKEN) { vec![API_HOST.into()] } else { Vec::new() },
     }
 }

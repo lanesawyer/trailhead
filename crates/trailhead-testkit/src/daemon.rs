@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 use trailhead_daemon::{HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, InstallHost, PrepareRequest, Repo, Result,
-    RunEvent, RunReport, RunRequest, SandboxId, Tracker,
+    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, HarnessKind, HarnessSetup, InstallHost,
+    PrepareRequest, Registry, Repo, Result, RunEvent, RunReport, RunRequest, SandboxId, Tracker,
 };
 
 pub use trailhead_daemon::Connect;
@@ -215,6 +215,19 @@ impl LocalDaemon {
             Box::pin(async move { Ok(Arc::new(tracker.authenticate(&cred)?) as Arc<dyn Tracker>) })
         });
         LocalDaemon::connecting(harness, codehost, connect)
+    }
+
+    /// [`LocalDaemon::new`] with its harness built the way the real daemon builds its own: from a registry, by the
+    /// `adapter` name the profile gives.
+    pub fn from_registry(
+        harnesses: &Registry<HarnessKind>,
+        adapter: &str,
+        codehost: Arc<dyn CodeHost>,
+        tracker: FakeTracker,
+    ) -> Result<LocalDaemon> {
+        let setup = HarnessSetup { executable: "unused".into(), secrets: Default::default() };
+        let harness = (harnesses.get(adapter)?.build)(&setup);
+        Ok(LocalDaemon::new(harness, codehost, tracker))
     }
 
     pub fn connecting(harness: Arc<dyn Harness>, codehost: Arc<dyn CodeHost>, connect: Connect) -> LocalDaemon {

@@ -16,6 +16,5 @@ workspace = true
 [dependencies]
 trailhead-factory.workspace = true
 trailhead-daemon.workspace = true
-trailhead-plugins.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
