@@ -1053,6 +1053,51 @@ async fn a_breach_park_finished_when_the_sandbox_cant_be_cut_off_destroys_it_and
 }
 
 #[tokio::test]
+async fn a_breached_sandbox_that_couldnt_be_destroyed_is_destroyed_by_a_later_reconcile_while_parked() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    // The cut-off fails, and so does the destroy that follows it, once.
+    r.compute.fail_after("trailhead-w1", "set_labels", 2);
+    r.compute.fail_once_after("trailhead-w1", "destroy", 0);
+    assert!(matches!(r.factory.run_task(&r.tracker.task(&key)).await.unwrap(), Outcome::Parked { .. }));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert!(task.run.worker_breach.as_ref().is_some_and(|b| b.parked && b.stuck));
+    assert!(r.compute.get("trailhead-w1").is_some(), "the destroy failed, so the sandbox is still live");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.destroyed.contains(&"trailhead-w1".to_string()), "{done:?}");
+    assert!(r.compute.get("trailhead-w1").is_none());
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "still parked");
+}
+
+#[tokio::test]
+async fn a_stale_stuck_breach_doesnt_get_a_later_runs_parked_sandbox_destroyed() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.compute.fail_after("trailhead-w1", "set_labels", 2);
+    r.compute.fail_once_after("trailhead-w1", "destroy", 0);
+    assert!(matches!(r.factory.run_task(&r.tracker.task(&key)).await.unwrap(), Outcome::Parked { .. }));
+    assert!(r.tracker.task(&key).run.worker_breach.as_ref().is_some_and(|b| b.parked && b.stuck));
+
+    // Lane answers and the task is requeued; its next run parks with an ordinary question.
+    r.tracker.answer(&key, "Raised the budget; carry on.");
+    r.factory.reconcile().await.unwrap();
+    r.compute.heal("trailhead-w1");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    let host = task.run.host.clone().expect("the parked run has a host");
+    assert!(r.compute.get(&host).is_some(), "the parked run's sandbox is suspended");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(!done.destroyed.contains(&host), "{done:?}");
+    assert!(r.compute.get(&host).is_some(), "the later run's parked sandbox is kept");
+}
+#[tokio::test]
 async fn an_answer_to_a_breach_within_the_lease_requeues_the_task_without_asking_again() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Expensive", "");
