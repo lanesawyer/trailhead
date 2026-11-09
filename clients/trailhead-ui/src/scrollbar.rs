@@ -3,14 +3,16 @@
 //! A vertical one lies just outside the area's right edge, in the padding of the node that holds the area, so the area is as wide with it as without and the spacing left and right stays equal; a horizontal one along the bottom (the board).
 //! Spawn it as a child of the node that holds the area; that node needs `space::PANEL_INSET` of padding on the right,
 //! which the bar sits in the middle of, the same gap on either side of it.
-//! It takes its color from feathers' scrollbar tokens and hides while the area fits, so there is nothing to scroll. It
-//! starts hidden and shows once layout has found the area overflowing: shown from the start, it was drawn for a frame
-//! before its area's height was known, a flash on every page that opens (TRAIL-1139).
+//! It takes its color from feathers' scrollbar tokens. It shows only while the area overflows and the pointer is over
+//! the area or the bar (anywhere in the node holding both), or while its thumb is being dragged, which carries on past
+//! the holder's edge (TRAIL-1145). It starts hidden: shown from the start, it was drawn for a frame before its area's
+//! height was known, a flash on every page that opens (TRAIL-1139).
 
 use bevy::ecs::template::EntityTemplate;
 use bevy::feathers::controls::FeathersScrollbar;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui_widgets::{ControlOrientation, Scrollbar};
+use bevy::ui_widgets::{ControlOrientation, Scrollbar, ScrollbarDragState};
 
 use crate::space;
 
@@ -31,7 +33,7 @@ pub fn scrollbar(target: Entity, orientation: ControlOrientation) -> impl Scene 
     }
 }
 
-/// The node that puts the bar along its edge, hidden until [`hide_when_fits`] has seen the area overflow.
+/// The node that puts the bar along its edge, hidden until [`show_scrollbars`] shows it.
 fn placement(orientation: ControlOrientation) -> Node {
     let node = match orientation {
         ControlOrientation::Vertical => Node {
@@ -62,15 +64,28 @@ fn overflows(orientation: ControlOrientation, size: Vec2, content: Vec2) -> bool
     }
 }
 
-/// Hides each scrollbar whose target has no range to scroll.
-pub(super) fn hide_when_fits(mut bars: Query<(&Scrollbar, &mut Node)>, targets: Query<&ComputedNode>) {
-    for (bar, mut node) in &mut bars {
+/// Shows each scrollbar while its target has range to scroll and the pointer is over the node holding the two, or its
+/// thumb is being dragged; hides it otherwise. A holder is given [`Hovered`] the first time it is seen.
+pub(super) fn show_scrollbars(
+    mut bars: Query<(Entity, &Scrollbar, &ChildOf, &mut Node)>,
+    targets: Query<&ComputedNode>,
+    holders: Query<&Hovered>,
+    children: Query<&Children>,
+    drags: Query<&ScrollbarDragState>,
+    mut commands: Commands,
+) {
+    for (entity, bar, holder, mut node) in &mut bars {
         let Ok(target) = targets.get(bar.target) else { continue };
-        let display = if overflows(bar.orientation, target.size(), target.content_size()) {
-            Display::Flex
-        } else {
-            Display::None
+        let hovered = match holders.get(holder.parent()) {
+            Ok(hovered) => hovered.0,
+            Err(_) => {
+                commands.entity(holder.parent()).insert(Hovered::default());
+                false
+            }
         };
+        let dragging = children.iter_descendants(entity).any(|e| drags.get(e).is_ok_and(|d| d.dragging));
+        let overflowing = overflows(bar.orientation, target.size(), target.content_size());
+        let display = if overflowing && (hovered || dragging) { Display::Flex } else { Display::None };
         if node.display != display {
             node.display = display;
         }
@@ -107,14 +122,56 @@ mod tests {
         assert!(!overflows(ControlOrientation::Horizontal, size, size));
     }
 
-    #[test]
-    fn hiding_follows_the_target() {
+    /// A holder with an area of `content` height in 100 and a vertical bar, in an app that runs [`show_scrollbars`].
+    fn holder(content: f32) -> (App, Entity, Entity) {
         let mut app = App::new();
-        app.add_systems(Update, hide_when_fits);
-        let target = app.world_mut().spawn(ComputedNode::default()).id();
-        let bar =
-            app.world_mut().spawn((Scrollbar::new(target, ControlOrientation::Horizontal, 8.0), Node::default())).id();
+        app.add_systems(Update, show_scrollbars);
+        let holder = app.world_mut().spawn_empty().id();
+        let area = ComputedNode { size: Vec2::new(100.0, 100.0), content_size: Vec2::new(100.0, content), ..default() };
+        let target = app.world_mut().spawn((area, ChildOf(holder))).id();
+        let bar = app
+            .world_mut()
+            .spawn((Scrollbar::new(target, ControlOrientation::Vertical, 8.0), placement(ControlOrientation::Vertical)))
+            .insert(ChildOf(holder))
+            .id();
         app.update();
-        assert_eq!(app.world().get::<Node>(bar).unwrap().display, Display::None);
+        (app, holder, bar)
+    }
+
+    fn shown(app: &App, bar: Entity) -> bool {
+        app.world().get::<Node>(bar).unwrap().display == Display::Flex
+    }
+
+    #[test]
+    fn an_overflowing_area_shows_its_bar_only_under_the_pointer() {
+        let (mut app, holder, bar) = holder(300.0);
+        assert_eq!(app.world().get::<Hovered>(holder), Some(&Hovered(false)), "the holder is watched for the pointer");
+        assert!(!shown(&app, bar));
+        app.world_mut().entity_mut(holder).insert(Hovered(true));
+        app.update();
+        assert!(shown(&app, bar));
+        app.world_mut().entity_mut(holder).insert(Hovered(false));
+        app.update();
+        assert!(!shown(&app, bar));
+    }
+
+    #[test]
+    fn an_area_that_fits_shows_no_bar_even_under_the_pointer() {
+        let (mut app, holder, bar) = holder(100.0);
+        app.world_mut().entity_mut(holder).insert(Hovered(true));
+        app.update();
+        assert!(!shown(&app, bar));
+    }
+
+    #[test]
+    fn a_bar_stays_while_its_thumb_is_dragged_past_the_holder() {
+        let (mut app, _, bar) = holder(300.0);
+        let thumb = app.world_mut().spawn((ScrollbarDragState::default(), ChildOf(bar))).id();
+        app.world_mut().get_mut::<ScrollbarDragState>(thumb).unwrap().dragging = true;
+        app.update();
+        assert!(shown(&app, bar));
+        app.world_mut().get_mut::<ScrollbarDragState>(thumb).unwrap().dragging = false;
+        app.update();
+        assert!(!shown(&app, bar));
     }
 }
