@@ -35,8 +35,8 @@ use bollard::query_parameters::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use trailhead_factory::{
-    CheckpointId, Compute, Egress, Error, GATEWAY_ANTHROPIC_ID, GATEWAY_HOST, GATEWAY_PORT, GatewayConnection,
-    GatewayRequest, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec, Target,
+    CheckpointId, Compute, ComputeConfig, Egress, Error, GATEWAY_ANTHROPIC_ID, GATEWAY_HOST, GATEWAY_PORT,
+    GatewayConnection, GatewayRequest, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec, Target,
 };
 
 mod gateway;
@@ -81,6 +81,36 @@ pub fn target() -> Target {
         hold_socket: None,
         ..Target::default()
     }
+}
+
+/// A Docker compute from its `[compute]` settings (unset ones keep `docker`'s defaults), with its launch facts.
+/// `read_only` is as for [`DockerCompute::read_only`]. Settings of another kind are an error.
+pub fn build(
+    settings: &ComputeConfig,
+    mut docker: DockerConfig,
+    read_only: bool,
+) -> Result<(Arc<dyn Compute>, Target)> {
+    let ComputeConfig::Docker { image, network, runtime, memory_mib, min_free_bytes, concurrent_checkpoints } =
+        settings
+    else {
+        return Err(Error::Other("not a Docker compute's settings".into()));
+    };
+    if let Some(image) = image {
+        docker.image = image.clone();
+    }
+    if let Some(network) = network {
+        docker.network = network.clone();
+    }
+    docker.runtime = runtime.clone();
+    docker.memory_bytes = memory_mib.map(|m| m * 1024 * 1024);
+    if let Some(min_free) = min_free_bytes {
+        docker.min_free_bytes = *min_free;
+    }
+    if let Some(n) = concurrent_checkpoints {
+        docker.concurrent_checkpoints = *n;
+    }
+    let compute = if read_only { DockerCompute::read_only(docker) } else { DockerCompute::new(docker) }?;
+    Ok((Arc::new(compute), target()))
 }
 
 const SUPERVISE: &str = include_str!("supervise.sh");
@@ -833,6 +863,12 @@ fn io_err(path: &Path, e: std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_refuses_another_kinds_settings() {
+        let docker = DockerConfig::new("/tmp/unused", Default::default());
+        assert!(build(&ComputeConfig::Sprites, docker, true).is_err());
+    }
 
     /// A Docker API on a unix socket that answers every request with an empty list and records the paths asked for.
     async fn recording_docker(dir: &Path) -> (Docker, Arc<std::sync::Mutex<Vec<String>>>) {
