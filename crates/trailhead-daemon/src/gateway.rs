@@ -423,7 +423,10 @@ async fn pipe_plain(
         _ = &mut lease.kill => return Ok(()),
     };
     if done.is_ok() {
-        linger(&mut client_r).await;
+        tokio::select! {
+            _ = linger(&mut client_r) => {}
+            _ = &mut lease.kill => {}
+        }
     }
     done
 }
@@ -990,6 +993,26 @@ mod tests {
         // And new requests are refused at once.
         let (_s, status) = connect_via(proxy, &format!("127.0.0.1:{port}")).await;
         assert!(status.contains("403"), "{status}");
+    }
+
+    #[tokio::test]
+    async fn narrowing_does_not_wait_out_a_lingering_plain_request() {
+        let port = origin().await;
+        let (gw, proxy) = setup(&["127.0.0.1", "example.com"]).await;
+        let mut s = TcpStream::connect(proxy).await.unwrap();
+        s.write_all(format!("GET http://127.0.0.1:{port}/ HTTP/1.1\r\n\r\n").as_bytes()).await.unwrap();
+        // The gateway half-closes after the response; this client keeps its own side open.
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        assert_eq!(gw.state().sandboxes[0].open_tunnels, 1);
+
+        let started = std::time::Instant::now();
+        gw.handle(GatewayRequest::SetEgress { name: "a".into(), egress: Egress { domains: list(&["example.com"]) } })
+            .await;
+        assert!(started.elapsed() < LINGER / 2, "{:?}", started.elapsed());
+        assert_eq!(gw.state().sandboxes[0].open_tunnels, 0);
+        drop(s);
     }
 
     #[tokio::test]
