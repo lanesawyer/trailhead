@@ -151,7 +151,8 @@ pub(crate) async fn edit(cx: &Ctx, a: EditArgs) -> Result<()> {
     Ok(())
 }
 
-/// Builds a JSON merge patch from `a.b=value` pairs; a value that isn't JSON is a string.
+/// Builds a JSON merge patch from `a.b=value` pairs; a value that isn't JSON is a string,
+/// and so is any value for a string `factory.*` field (`factory.sandbox=123`) except `null`, which removes it.
 fn meta_patch(pairs: &[String]) -> Result<Value> {
     let mut patch = json!({});
     for pair in pairs {
@@ -159,7 +160,10 @@ fn meta_patch(pairs: &[String]) -> Result<Value> {
             .split_once('=')
             .filter(|(p, _)| !p.is_empty() && p.split('.').all(|k| !k.is_empty()))
             .ok_or_else(|| anyhow::anyhow!("--meta takes key=value (dots nest), not {pair:?}"))?;
-        let value = serde_json::from_str(raw).unwrap_or_else(|_| json!(raw));
+        let mut value = serde_json::from_str(raw).unwrap_or_else(|_| json!(raw));
+        if !value.is_null() && !value.is_string() && factory_kind(path).is_some_and(|k| matches!(k, Kind::String)) {
+            value = json!(raw);
+        }
         check_factory_field(path, &value)?;
         let mut at = &mut patch;
         for key in path.split('.') {
@@ -201,45 +205,102 @@ const FACTORY_FIELDS: &[(&str, Kind)] = &[
 #[derive(Clone, Copy)]
 enum Kind {
     Unsigned,
+    Unsigned64,
     Integer,
     String,
     Bool,
+    Object,
 }
 
 impl Kind {
     fn accepts(self, v: &Value) -> bool {
         match self {
             Kind::Unsigned => v.as_u64().is_some_and(|n| u32::try_from(n).is_ok()),
+            Kind::Unsigned64 => v.as_u64().is_some(),
             Kind::Integer => v.as_i64().is_some(),
             Kind::String => v.is_string(),
             Kind::Bool => v.is_boolean(),
+            Kind::Object => v.is_object(),
         }
     }
 
     fn name(self) -> &'static str {
         match self {
-            Kind::Unsigned => "a non-negative integer",
+            Kind::Unsigned | Kind::Unsigned64 => "a non-negative integer",
             Kind::Integer => "an integer",
             Kind::String => "a string",
             Kind::Bool => "true or false",
+            Kind::Object => "an object",
         }
     }
 }
 
-/// Rejects a value for a scalar `factory.<field>` key of the wrong kind, such as `factory.attempt_base=3x`, which
-/// the factory couldn't read back. `null` removes a field, so it always passes; nested paths, structured fields and
-/// unknown keys are left alone.
+/// The kind of a known `factory.<field>` key (or nested path, like `factory.pr.url`), if `path` is one.
+fn factory_kind(path: &str) -> Option<Kind> {
+    let (_, field) = path.split_once('.').filter(|(ns, _)| *ns == "factory")?;
+    FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == field).map(|(_, k)| *k)
+}
+
+/// `pr`, the one structured field whose leaves have a fixed kind, and those leaves, by dotted path.
+const FACTORY_NESTED: &[(&str, Kind)] = &[
+    ("pr", Kind::Object),
+    ("pr.repo", Kind::Object),
+    ("pr.number", Kind::Unsigned64),
+    ("pr.url", Kind::String),
+    ("pr.repo.owner", Kind::String),
+    ("pr.repo.name", Kind::String),
+];
+
+/// Rejects a value for a known `factory.<field>` key (or nested path, like `factory.pr.number`) of the wrong kind,
+/// such as `factory.attempt_base=3x` or `factory.attempt_base={"a":1}`, which the factory couldn't read back. A
+/// whole-object `factory={...}` value is checked field by field, and anything but an object or `null` is rejected.
+/// `null` removes a field, so it always passes; other structured fields and unknown keys are left alone. The check
+/// is client-side and can't see the stored task, so `factory={"pr":{"number":7}}` passes even where there is no `pr`
+/// yet to merge into, and would store a partial one.
 fn check_factory_field(path: &str, value: &Value) -> Result<()> {
-    let Some(("factory", field)) = path.split_once('.') else {
-        return Ok(());
-    };
-    let Some((_, kind)) = FACTORY_FIELDS.iter().find(|(f, _)| *f == field) else {
-        return Ok(());
-    };
-    if value.is_null() || kind.accepts(value) {
-        return Ok(());
+    match path.split_once('.') {
+        Some(("factory", field)) => {
+            check_factory_prefixes(field)?;
+            check_factory_leaves(path, field, value)
+        }
+        None if path == "factory" => match value {
+            Value::Null => Ok(()),
+            Value::Object(map) => map.iter().try_for_each(|(k, v)| check_factory_leaves(&format!("{path}.{k}"), k, v)),
+            _ => anyhow::bail!("--meta factory must be an object, not {value}"),
+        },
+        _ => Ok(()),
     }
-    anyhow::bail!("--meta {path} must be {}, not {value}", kind.name())
+}
+
+/// Rejects a dotted `field` that goes under a known non-object field, like `attempt_base.a` or `pr.number.x`, which
+/// as a merge patch would replace the scalar with an object.
+fn check_factory_prefixes(field: &str) -> Result<()> {
+    for (i, _) in field.match_indices('.') {
+        let prefix = &field[..i];
+        if let Some((_, kind)) = FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == prefix)
+            && !matches!(kind, Kind::Object)
+        {
+            anyhow::bail!("--meta factory.{prefix} is {}, so factory.{field} can't be set", kind.name());
+        }
+    }
+    Ok(())
+}
+
+/// Checks `value` against the kind of `field` if it's a known path, then descends into an object, so an unknown
+/// field holding an object still has its known leaves checked.
+fn check_factory_leaves(path: &str, field: &str, value: &Value) -> Result<()> {
+    if let Some((_, kind)) = FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == field)
+        && !value.is_null()
+        && !kind.accepts(value)
+    {
+        anyhow::bail!("--meta {path} must be {}, not {value}", kind.name());
+    }
+    match value {
+        Value::Object(map) => {
+            map.iter().try_for_each(|(k, v)| check_factory_leaves(&format!("{path}.{k}"), &format!("{field}.{k}"), v))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// A grade is 1 to 4; "none" clears it. The rules live in core.
@@ -310,15 +371,25 @@ mod tests {
     fn factory_fields_match_run_update() {
         for (field, kind) in FACTORY_FIELDS {
             let sample = match kind {
-                Kind::Unsigned | Kind::Integer => json!(3),
+                Kind::Unsigned | Kind::Unsigned64 | Kind::Integer => json!(3),
                 Kind::String => json!("x"),
                 Kind::Bool => json!(true),
+                Kind::Object => unreachable!(),
             };
             assert!(kind.accepts(&sample), "{field}");
             let run: trailhead_factory::RunUpdate = serde_json::from_value(json!({ *field: sample.clone() })).unwrap();
             let back = serde_json::to_value(&run).unwrap();
             assert_eq!(back, json!({ *field: sample }), "{field} isn't a {} on RunUpdate", kind.name());
         }
+    }
+
+    #[test]
+    fn string_factory_fields_keep_raw_text() {
+        let p = meta_patch(&["factory.sandbox=123".into(), "factory.failure=true".into(), "factory.host=null".into()])
+            .unwrap();
+        assert_eq!(p, json!({ "factory": { "sandbox": "123", "failure": "true", "host": null } }));
+        assert!(meta_patch(&["factory.attempt=true".into()]).is_err());
+        assert_eq!(meta_patch(&["other.x=123".into()]).unwrap(), json!({ "other": { "x": 123 } }));
     }
 
     /// Fields of `RunUpdate` that hold objects, which `FACTORY_FIELDS` leaves to the factory to read.
@@ -354,7 +425,12 @@ mod tests {
                 reason: "x".into(),
                 parked: false,
             }),
-            worker_breach: Some(trailhead_factory::WorkerBreach { run: "x".into(), reason: "x".into(), parked: false }),
+            worker_breach: Some(trailhead_factory::WorkerBreach {
+                run: "x".into(),
+                reason: "x".into(),
+                parked: false,
+                stuck: false,
+            }),
             conflict_reworks: Some(1),
             attempt_base: Some(1),
             gave_up: Some(1),
@@ -381,5 +457,38 @@ mod tests {
         for key in STRUCTURED {
             assert!(map.contains_key(*key), "STRUCTURED lists {key}, which RunUpdate doesn't serialize");
         }
+    }
+
+    /// `FACTORY_NESTED` matches the leaves of `PrRef`.
+    #[test]
+    fn factory_nested_match_pr_ref() {
+        let pr = json!({ "repo": { "owner": "o", "name": "n" }, "number": 3, "url": "u" });
+        let parsed: trailhead_factory::PrRef = serde_json::from_value(pr.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), pr);
+        for (path, kind) in FACTORY_NESTED {
+            let root = json!({ "pr": pr });
+            let leaf = path.split('.').fold(&root, |v, k| &v[k]);
+            assert!(kind.accepts(leaf), "{path}");
+        }
+    }
+
+    #[test]
+    fn meta_patch_checks_whole_object_and_nested_factory_paths() {
+        let bad = |p: &str| meta_patch(&[p.to_string()]).unwrap_err().to_string();
+        assert!(bad(r#"factory={"attempt_base":"3x"}"#).contains("factory.attempt_base"));
+        assert!(bad("factory.pr.number=x").contains("factory.pr.number"));
+        assert!(bad(r#"factory={"pr":{"number":"x"}}"#).contains("factory.pr.number"));
+        assert!(bad(r#"factory.attempt_base={"a":1}"#).contains("factory.attempt_base"));
+        assert!(bad(r#"factory={"attempt_base":{"a":1}}"#).contains("factory.attempt_base"));
+        assert!(bad(r#"factory={"pr":{"number":{}}}"#).contains("factory.pr.number"));
+        assert!(bad("factory.attempt_base.a=1").contains("factory.attempt_base"));
+        assert!(bad("factory.pr.number.x=1").contains("factory.pr.number"));
+        assert!(bad("factory.pr.url.x=1").contains("factory.pr.url"));
+        assert!(bad("factory.pr=5").contains("factory.pr"));
+        assert!(bad(r#"factory.pr.repo="x""#).contains("factory.pr.repo"));
+        assert!(bad(r#"factory={"pr":5}"#).contains("factory.pr"));
+        assert!(bad("factory=3").contains("factory"));
+        assert!(meta_patch(&[r#"factory={"attempt_base":3,"pr":{"number":7},"other":"x"}"#.into()]).is_ok());
+        assert!(meta_patch(&["factory.pr=null".into(), "factory=null".into()]).is_ok());
     }
 }

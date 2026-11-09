@@ -69,6 +69,7 @@ impl Factory {
             self.forget_install_opened(&sandbox);
             // Not handed out, so nothing else would clean it up before reconcile.
             self.status.sandbox_gone(&sandbox.name);
+            p.daemon.forget(&sandbox.id).await;
             if let Err(d) = p.compute.destroy(&sandbox.id).await {
                 tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
             }
@@ -128,7 +129,10 @@ impl Factory {
             // Built for another stack: reinstalling on top would keep the old tools, so start over.
             tracing::info!(sandbox = %s.name, "[stack] changed; destroying the pooled sandbox to reinstall");
             if let Err(e) = p.compute.destroy(&s.id).await {
-                tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack");
+                // Left idle it would count toward `max_sandboxes` and be retried on every acquire; broken, it counts
+                // for nothing and reconcile destroys it.
+                tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack; labelling it broken");
+                self.mark_broken(&s).await;
             }
         }
         let (sandbox, warm) = match current.into_iter().find(|s| !self.abandoned(&s.name)) {
@@ -373,13 +377,19 @@ impl Factory {
             self.troubled.lock().unwrap().remove(name);
             return;
         }
+        self.mark_broken(sandbox).await;
+    }
+
+    /// Labels a sandbox [`label::BROKEN`], without a role, for a later reconcile to destroy.
+    async fn mark_broken(&self, sandbox: &Sandbox) {
+        let p = self.target_of(sandbox);
         let mut labels = self.pool_labels();
         labels.insert(label::STATE.into(), label::BROKEN.into());
         labels.insert(label::TARGET.into(), p.target.name.clone());
         match p.compute.set_labels(&sandbox.id, &labels).await {
             Ok(()) => self.status.sandbox(&Sandbox { labels, ..sandbox.clone() }),
             Err(e) => tracing::error!(
-                sandbox = %name,
+                sandbox = %sandbox.name,
                 error = %e,
                 "couldn't label it broken either; it's out of the pool until this control plane restarts"
             ),

@@ -1473,3 +1473,53 @@ async fn changes_requested_is_computed_from_the_latest_verdict_and_handoff() {
     s.claim(&a, &t.key, None).await.unwrap();
     assert_eq!(s.release(&a, &t.key).await.unwrap().status, Status::Open);
 }
+
+#[tokio::test]
+async fn revert_actor_skips_a_parent_cycle_and_still_reverts_the_rest() {
+    let env = Env::new().await;
+    let a = env.task("a").await;
+    let b = env.task("b").await;
+    let other = env.task("other").await;
+    let under = |p: Option<&str>| TaskPatch { parent: Some(p.map(str::to_string)), ..Default::default() };
+    env.store.update_task(&env.human, &a.key, under(Some(&b.key)), None).await.unwrap();
+    let agent = env.agent("rogue").await;
+    let since = env.now();
+    env.advance(1);
+    env.store.update_task(&agent.next_batch(), &a.key, under(None), None).await.unwrap();
+    env.store
+        .update_task(
+            &agent.next_batch(),
+            &other.key,
+            TaskPatch { title: Some("vandalised".into()), ..Default::default() },
+            None,
+        )
+        .await
+        .unwrap();
+    env.store.update_task(&env.human, &b.key, under(Some(&a.key)), None).await.unwrap();
+
+    // Restoring a under b would form a cycle with the human's move, so it's skipped, not fatal.
+    let report = env.store.revert_actor(&env.human.next_batch(), agent.actor_id(), since).await.unwrap();
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].entity_id, a.id.to_string());
+    assert_eq!(report.skipped[0].later_event, None);
+    assert!(report.skipped[0].reason.contains("can't become its parent"), "{}", report.skipped[0].reason);
+    assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().title, "other");
+    assert_eq!(env.store.get_task(&env.human, &a.key).await.unwrap().parent_id, None);
+}
+
+#[tokio::test]
+async fn with_unfinished_blockers_names_only_tasks_held_up_by_open_blockers() {
+    let env = Env::new().await;
+    let open = env.task("open").await;
+    let finished = env.task("finished").await;
+    let held = env.task("held").await;
+    let freed = env.task("freed").await;
+    let free = env.task("free").await;
+    env.store.add_dependency(&env.human, &open.key, &held.key).await.unwrap();
+    env.store.add_dependency(&env.human, &finished.key, &freed.key).await.unwrap();
+    env.store.update_task(&env.human, &finished.key, status(Status::Done), None).await.unwrap();
+
+    let ids = [held.id, freed.id, free.id];
+    let blocked = env.store.with_unfinished_blockers(&ids).await.unwrap();
+    assert_eq!(blocked, std::collections::HashSet::from([held.id]));
+}

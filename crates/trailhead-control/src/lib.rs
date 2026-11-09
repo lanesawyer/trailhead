@@ -127,6 +127,9 @@ pub struct Factory {
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, u32, Instant)>>,
+    /// Tasks whose last runs all failed in `setup`: how many in a row. Any other outcome clears it, so a broken base
+    /// is only declared when `setup` itself failed twice running (TRAIL-876).
+    setup_failures: Mutex<HashMap<TaskKey, u32>>,
     /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
     /// unchanged grades from them instead of asking the host again (TRAIL-266).
     listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
@@ -138,8 +141,9 @@ pub struct Factory {
     held: Mutex<Option<person::Held>>,
     /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
     host: Arc<Host>,
-    /// The ready tasks last reported as starved by parked sandboxes, so a poll says it once per change.
-    starved: Mutex<Option<Vec<TaskKey>>>,
+    /// The tasks holding the sandboxes last reported as starving ready ones, each with whether it is parked, so a
+    /// poll says it once per change.
+    starved: Mutex<Option<Vec<(TaskKey, bool)>>>,
     /// When each task holding a pooled sandbox was first seen parked, so `release_parked_after` counts from there. In
     /// memory: a restart starts the wait again (TRAIL-601).
     parked_since: Mutex<HashMap<TaskKey, Instant>>,
@@ -252,6 +256,7 @@ impl Factory {
             merge_mode,
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
+            setup_failures: Mutex::default(),
             listed: Mutex::default(),
             updating: Mutex::default(),
             held: Mutex::default(),

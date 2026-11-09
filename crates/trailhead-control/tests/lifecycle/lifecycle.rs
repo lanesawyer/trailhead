@@ -167,6 +167,19 @@ async fn a_task_that_fails_its_last_attempt_is_parked_even_when_the_sandbox_wont
 }
 
 #[tokio::test]
+async fn a_failed_park_after_giving_up_does_not_leave_the_gave_up_marker() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 1"));
+    let key = r.tracker.add_task("TRAIL", "Fails", "");
+    r.tracker.fail_next("factory/trail-1-a1", "ask", 1);
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "no luck".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    assert!(ran.is_err(), "{ran:?}");
+    let task = r.tracker.task(&key);
+    assert_ne!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.gave_up.unwrap_or(0), 0, "a task that wasn't parked doesn't get a fresh count");
+}
+
+#[tokio::test]
 async fn too_many_steps_is_a_breach() {
     let r = rig();
     r.tracker.add_task("TRAIL", "Chatty", "");
@@ -348,6 +361,30 @@ async fn a_transient_failure_opening_the_pr_is_retried() {
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Reviewed { .. } | Outcome::AwaitingReview { .. }), "{:?}", ran[0].1);
     assert_eq!(r.codehost.calls("open_pr"), 3);
+    assert_ne!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_transient_failure_commenting_on_an_existing_pr_is_retried() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Tidy up.")));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.codehost.prs().len(), 1, "the PR is already open");
+
+    // The rework's run retries a check, so its note goes on the PR as a comment, which fails twice first.
+    r.daemon.fail_check_times("test", "flaked", 1);
+    r.codehost.flaky_comment(2);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. } | Outcome::AwaitingReview { .. }), "{:?}", ran[0].1);
+
+    let pr = &r.codehost.prs()[0];
+    let flaky = trailhead_factory::messages::flaky_checks(&["test".into()]);
+    assert_eq!(pr.comments.iter().filter(|c| c.contains(flaky.trim_start())).count(), 1, "{:?}", pr.comments);
+    assert_eq!(r.codehost.calls("comment"), pr.comments.len() + 2, "two failed posts, each retried");
     assert_ne!(r.tracker.task(&key).status, Status::NeedsInput);
 }
 
@@ -879,6 +916,30 @@ async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a
     assert_eq!(r.compute.checkpoints("trailhead-w1").len(), 1, "built from scratch, not restored: {fresh:?}");
 }
 
+#[tokio::test]
+async fn a_reviewer_sandbox_that_fails_prepare_is_destroyed_and_its_daemon_forgotten() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    let forgotten_before = r.daemon.forgotten().len();
+
+    // The worker's prepare worked; the next review's sandbox is the one that fails.
+    r.daemon.fail_prepares(1, "git clone failed");
+    let shown = r.tracker.task(&key);
+    let pr = shown.run.pr.clone().expect("a PR");
+    let reviewer = trailhead_factory::review_name(&key, shown.run.attempt.unwrap_or(1), 2);
+    let err = r.factory.review(&shown, &pr, 1, &[]).await.unwrap_err();
+    assert!(err.to_string().contains("git clone failed"), "{err}");
+    assert!(r.compute.get(&reviewer).is_none(), "the reviewer's sandbox is destroyed");
+    let forgotten = r.daemon.forgotten();
+    assert!(
+        forgotten[forgotten_before..].iter().any(|id| id.0 == reviewer),
+        "the reviewer's daemon connection is forgotten with its sandbox: {forgotten:?}"
+    );
+}
+
 fn with_setup() -> Rig {
     rig_with(&CONFIG.replace("[checks]\n", "[checks]\nsetup = \"cargo build --all-targets\"\n"))
 }
@@ -932,6 +993,26 @@ async fn a_fresh_run_whose_setup_fails_is_retried_once_then_parked_with_the_outp
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("base branch") && questions[0].body.contains("E0063"), "{}", questions[0].body);
     assert!(r.compute.get("trailhead-w1").is_none(), "a new sandbox has no warm checkpoint, so release destroys it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_setup_failure_after_an_unrelated_infra_failure_is_retried_not_parked() {
+    let r = with_setup();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000).hang());
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("stalled"), "{err}");
+
+    r.daemon.fail_setups(1, "error[E0063]: broken base");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("setup failed"), "{err}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open, "one setup failure after a stall isn't a broken base");
+    assert_eq!(task.run.infra_failures, Some(2));
+
+    r.daemon.fail_setups(1, "error[E0063]: broken base");
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "the second setup failure in a row parks it");
 }
 
 #[tokio::test]
@@ -1032,6 +1113,51 @@ async fn a_breach_park_finished_when_the_sandbox_cant_be_cut_off_destroys_it_and
     assert!(r.compute.get("trailhead-w1").is_none(), "a sandbox that can't be cut off is destroyed");
 }
 
+#[tokio::test]
+async fn a_breached_sandbox_that_couldnt_be_destroyed_is_destroyed_by_a_later_reconcile_while_parked() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    // The cut-off fails, and so does the destroy that follows it, once.
+    r.compute.fail_after("trailhead-w1", "set_labels", 2);
+    r.compute.fail_once_after("trailhead-w1", "destroy", 0);
+    assert!(matches!(r.factory.run_task(&r.tracker.task(&key)).await.unwrap(), Outcome::Parked { .. }));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert!(task.run.worker_breach.as_ref().is_some_and(|b| b.parked && b.stuck));
+    assert!(r.compute.get("trailhead-w1").is_some(), "the destroy failed, so the sandbox is still live");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.destroyed.contains(&"trailhead-w1".to_string()), "{done:?}");
+    assert!(r.compute.get("trailhead-w1").is_none());
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "still parked");
+}
+
+#[tokio::test]
+async fn a_stale_stuck_breach_doesnt_get_a_later_runs_parked_sandbox_destroyed() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.compute.fail_after("trailhead-w1", "set_labels", 2);
+    r.compute.fail_once_after("trailhead-w1", "destroy", 0);
+    assert!(matches!(r.factory.run_task(&r.tracker.task(&key)).await.unwrap(), Outcome::Parked { .. }));
+    assert!(r.tracker.task(&key).run.worker_breach.as_ref().is_some_and(|b| b.parked && b.stuck));
+
+    // Lane answers and the task is requeued; its next run parks with an ordinary question.
+    r.tracker.answer(&key, "Raised the budget; carry on.");
+    r.factory.reconcile().await.unwrap();
+    r.compute.heal("trailhead-w1");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    let host = task.run.host.clone().expect("the parked run has a host");
+    assert!(r.compute.get(&host).is_some(), "the parked run's sandbox is suspended");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(!done.destroyed.contains(&host), "{done:?}");
+    assert!(r.compute.get(&host).is_some(), "the later run's parked sandbox is kept");
+}
 #[tokio::test]
 async fn an_answer_to_a_breach_within_the_lease_requeues_the_task_without_asking_again() {
     let r = rig();

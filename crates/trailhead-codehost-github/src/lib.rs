@@ -190,7 +190,7 @@ impl GitHub {
     }
 
     async fn read(&self, res: reqwest::Response, call: String) -> Result<(StatusCode, Value, String, Option<String>)> {
-        if let Some(rate) = rate_limit(res.headers()) {
+        if let Some(rate) = rate_limit(res.headers()).filter(|_| is_core(res.headers())) {
             *self.rate.lock().unwrap() = Some(rate);
         }
         let status = res.status();
@@ -262,6 +262,28 @@ impl GitHub {
         }
     }
 
+    /// Whether `head` is exactly `commits` on top of `start`: walking back one commit per entry meets their messages
+    /// in order and ends at `start`.
+    async fn is_published(&self, repo: &Repo, head: &str, start: &str, commits: &[Commit]) -> Result<bool> {
+        if commits.is_empty() {
+            return Ok(false);
+        }
+        let r = Self::repo_path(repo);
+        let mut sha = head.to_string();
+        for commit in commits.iter().rev() {
+            let found = self.call(self.request(Method::GET, &format!("{r}/git/commits/{sha}"))).await?;
+            if found["message"].as_str() != Some(commit.message.as_str()) {
+                return Ok(false);
+            }
+            let first = &found["parents"][0];
+            match first["sha"].as_str().or_else(|| first.as_str()) {
+                Some(parent) => sha = parent.to_string(),
+                None => return Ok(false),
+            }
+        }
+        Ok(sha == start)
+    }
+
     /// Writes one commit on top of `parent` and returns its sha.
     async fn write_commit(&self, repo: &Repo, parent: &str, commit: &Commit) -> Result<String> {
         let r = Self::repo_path(repo);
@@ -301,6 +323,13 @@ impl GitHub {
             self.call(self.request(Method::GET, &path).query(&[("head", head.as_str()), ("state", "open")])).await?;
         Ok(prs.as_array().and_then(|a| a.first()).map(|p| pr_ref(repo, p)))
     }
+}
+
+/// Whether a response counts against the core rate limit, the one that gates this client. GitHub names the pool in
+/// `x-ratelimit-resource`; a response that doesn't say is taken as core. Search (30 a minute) and graphql have
+/// pools of their own, and their readings must not stand in for core's.
+fn is_core(headers: &reqwest::header::HeaderMap) -> bool {
+    headers.get("x-ratelimit-resource").and_then(|v| v.to_str().ok()).is_none_or(|r| r.trim() == "core")
 }
 
 /// The rate limit a response's headers report, if they all do.
@@ -433,6 +462,11 @@ impl CodeHost for GitHub {
     async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let existing = self.head(repo, branch).await?;
         if let Some(head) = existing.as_deref().filter(|head| *head != start) {
+            // An earlier attempt may have moved the ref and still answered 5xx or timed out; its work is on the
+            // branch already, so the retry has nothing left to do.
+            if self.is_published(repo, head, start, commits).await? {
+                return Ok(());
+            }
             return Err(Error::Conflict(format!(
                 "branch {branch} is at {head}, not at {start} where this work started; publishing would overwrite it"
             )));
@@ -586,8 +620,9 @@ impl CodeHost for GitHub {
     }
 
     async fn carries_verdict(&self, pr: &PrRef, reviewed: &str) -> Result<bool> {
+        // Conditional GETs throughout: a pass that asks again about an unchanged PR gets 304s, which cost no rate limit.
         let r = Self::repo_path(&pr.repo);
-        let p = self.call(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
+        let p = self.call_cached(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
         let (Some(base), Some(head)) = (p["base"]["ref"].as_str(), p["head"]["sha"].as_str()) else {
             return Err(Error::Other(format!("github: PR {} has no base or head", pr.number)));
         };
@@ -596,9 +631,10 @@ impl CodeHost for GitHub {
         }
         // What the PR has that its base lacks: its own commits. A merge of the base brings in base commits, which
         // aren't among them, so a commit since `reviewed` that is one of them must be a merge of the base itself.
-        let own = self.call(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
+        let own = self.call_cached(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
         // A reviewed sha the host no longer has (a force push, then GC) 404s: it can't be vouched for.
-        let since = match self.call(self.request(Method::GET, &format!("{r}/compare/{reviewed}...{head}"))).await {
+        let since = match self.call_cached(self.request(Method::GET, &format!("{r}/compare/{reviewed}...{head}"))).await
+        {
             Ok(since) => since,
             Err(Error::NotFound(_)) => return Ok(false),
             Err(e) => return Err(e),

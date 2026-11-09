@@ -39,6 +39,8 @@ struct Git {
     not_modified: usize,
     /// The `x-ratelimit-*` headers (limit, remaining, reset) pull reads carry, when a test sets them.
     rate: Option<(u64, u64, i64)>,
+    /// The `x-ratelimit-resource` those headers name, when a test sets one.
+    rate_resource: Option<&'static str>,
 }
 
 impl Git {
@@ -285,8 +287,10 @@ async fn get_pull(
 /// Answers with `body` and an ETag of it, or 304 when the request already has that ETag.
 fn etagged(g: &mut Git, headers: &HeaderMap, body: Value) -> Response {
     let etag = format!("\"{}\"", body);
+    let resource = g.rate_resource;
     let rate = g.rate.map(|(limit, remaining, reset)| {
         [
+            ("x-ratelimit-resource", resource.unwrap_or("core").to_string()),
             ("x-ratelimit-limit", limit.to_string()),
             ("x-ratelimit-remaining", remaining.to_string()),
             ("x-ratelimit-reset", reset.to_string()),
@@ -328,8 +332,12 @@ fn parents(commit: &Value) -> Vec<Value> {
 }
 
 /// `behind_by` for `main...<sha>`: 1 unless the head's history includes main's tip.
-async fn compare(State(g): State<Shared>, Path((_, _, spec)): Path<(String, String, String)>) -> Response {
-    let g = g.lock().unwrap();
+async fn compare(
+    State(g): State<Shared>,
+    Path((_, _, spec)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let mut g = g.lock().unwrap();
     let (base, head) = spec.split_once("...").unwrap();
     let tip = g.refs.get(base).cloned().unwrap_or_else(|| base.to_string());
     if !g.commits.contains_key(&tip) || !g.commits.contains_key(head) {
@@ -344,13 +352,13 @@ async fn compare(State(g): State<Shared>, Path((_, _, spec)): Path<(String, Stri
         (false, true) => "behind",
         _ => "diverged",
     };
-    Json(json!({
+    let body = json!({
         "behind_by": g.behind_by(&tip, head),
         "status": status,
         "total_commits": commits.len(),
         "commits": commits,
-    }))
-    .into_response()
+    });
+    etagged(&mut g, &headers, body)
 }
 
 async fn update_branch(
@@ -502,9 +510,15 @@ async fn publish_builds_commits_on_a_new_branch_then_on_top_of_it() {
         "stacked on the branch"
     );
 
+    let published_head = head(&git, "factory/trail-1");
+
     // Work that started from an older commit than the branch is at would overwrite it, so it's refused.
-    let moved = gh.publish(&repo(), &main, "factory/trail-1", &[second]).await.unwrap_err();
+    let moved = gh.publish(&repo(), &main, "factory/trail-1", std::slice::from_ref(&second)).await.unwrap_err();
     assert!(matches!(&moved, Error::Conflict(m) if m.contains("would overwrite")), "{moved:?}");
+
+    // A retry after a ref write that landed behind a 5xx finds its own commits on the branch: done, not a conflict.
+    gh.publish(&repo(), &branch, "factory/trail-1", std::slice::from_ref(&second)).await.unwrap();
+    assert_eq!(head(&git, "factory/trail-1"), published_head, "the retry changed nothing");
 
     let missing = gh.publish(&repo(), "nope", "factory/trail-2", &[first]).await.unwrap_err();
     assert!(matches!(missing, Error::NotFound(_)), "{missing:?}");
@@ -787,6 +801,32 @@ async fn a_verdict_carries_over_merges_of_the_base_but_not_other_commits() {
 }
 
 #[tokio::test]
+async fn asking_again_whether_a_verdict_carries_revalidates_instead_of_rereading() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let started = head(&git, "main");
+    let work = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))], merges: vec![] };
+    gh.publish(&repo(), &started, "factory/trail-1", &[work]).await.unwrap();
+    let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };
+    let pr = gh.open_pr(&repo(), new).await.unwrap();
+    let reviewed = head(&git, "factory/trail-1");
+    let main = head(&git, "main");
+    let landed = Commit { message: "meanwhile".into(), changes: vec![change("b.txt", Some(b"b"))], merges: vec![] };
+    gh.publish(&repo(), &main, "main", &[landed]).await.unwrap();
+    gh.update_branch(&pr).await.unwrap();
+
+    // The pull and both compares are read in full once, then only revalidated: a 304 isn't counted against the limit.
+    assert!(gh.carries_verdict(&pr, &reviewed).await.unwrap());
+    let (full, revalidated) = {
+        let g = git.lock().unwrap();
+        (g.full_reads, g.not_modified)
+    };
+    assert!(gh.carries_verdict(&pr, &reviewed).await.unwrap());
+    let g = git.lock().unwrap();
+    assert_eq!((g.full_reads, g.not_modified), (full, revalidated + 3));
+}
+
+#[tokio::test]
 async fn a_verdict_does_not_carry_when_the_reviewed_sha_is_gone() {
     let (git, url) = serve().await;
     let gh = GitHub::gateway(&url);
@@ -855,6 +895,15 @@ async fn the_rate_limit_is_read_from_the_response_headers() {
     git.lock().unwrap().rate = Some((5000, 122, 1_900_000_000));
     gh.title(&pr).await.unwrap();
     assert_eq!(gh.rate_limit().map(|r| r.remaining), Some(122));
+
+    // A reading of another resource (search, graphql) doesn't replace core's.
+    {
+        let mut g = git.lock().unwrap();
+        g.rate = Some((30, 0, 1_900_000_060));
+        g.rate_resource = Some("search");
+    }
+    gh.title(&pr).await.unwrap();
+    assert_eq!(gh.rate_limit(), Some(RateLimit { limit: 5000, remaining: 122, resets_at: 1_900_000_000 }));
 }
 
 #[tokio::test]
