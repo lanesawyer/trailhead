@@ -224,6 +224,10 @@ pub struct ChangesRequested {
     /// host couldn't say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// A person has taken the request over: the task was parked on it and then answered or reopened, which settles
+    /// it whether or not they pushed. A settled request is kept for the record but is no longer pending.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settled: bool,
 }
 
 /// A reviewer that overran its budget, and whether the task was parked for it yet.
@@ -320,9 +324,9 @@ impl RunUpdate {
     }
 
     /// The review the next run has to address: the last one that asked for changes, unless a later review has
-    /// since finished on another attempt.
+    /// since finished on another attempt, or a person settled it.
     pub fn pending_changes(&self) -> Option<&ChangesRequested> {
-        self.changes_requested.as_ref().filter(|c| self.reviewed.is_none_or(|r| r == c.attempt))
+        self.changes_requested.as_ref().filter(|c| !c.settled && self.reviewed.is_none_or(|r| r == c.attempt))
     }
 
     /// The attempt `max_attempts` counts from: the last review that asked for changes, or the attempt the control

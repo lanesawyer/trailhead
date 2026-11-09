@@ -315,7 +315,8 @@ impl Factory {
             Some(codehost) => codehost.head(pr).await.ok(),
             None => None,
         };
-        let requested = ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true, head };
+        let requested =
+            ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true, head, settled: false };
         self.request_rework(task, requested, round).await
     }
 
@@ -347,7 +348,8 @@ impl Factory {
         self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
         tracing::warn!(task = %task.key.0, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
         let head = Some(head.to_string());
-        let requested = ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head };
+        let requested =
+            ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head, settled: false };
         self.request_rework(task, requested, round).await
     }
 
@@ -495,8 +497,9 @@ impl Factory {
                     // Waiting for a worker: the task is listed as ready, and the worker's handoff answers the request.
                     // One that no longer applies (the PR was pushed to, or a person settled the park) is answered
                     // here, and the PR is looked at as it stands.
-                    let stale =
-                        task.run.pending_changes().is_some_and(|c| c.attempt == attempt) && applicable.is_none();
+                    let recorded = task.run.changes_requested.as_ref().filter(|c| c.attempt == attempt);
+                    let stale = recorded.is_some_and(|c| c.settled || task.run.pending_changes().is_some())
+                        && applicable.is_none();
                     let (Some(pr), true) = (&task.run.pr, stale) else { return Ok(false) };
                     self.tracker.handoff(&task.key, &messages::stale_request_handoff(&pr.url)).await?;
                 }

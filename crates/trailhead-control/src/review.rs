@@ -160,6 +160,7 @@ impl Factory {
                         attempt,
                         conflict: false,
                         head: reviewed_head_at_request,
+                        settled: false,
                     };
                     let round = before + 1;
                     // While the task is still in review, so the PR says the review asked for changes at any grade.
@@ -317,6 +318,7 @@ impl Factory {
         let max =
             if requested.conflict { self.config.repo.max_conflict_reworks } else { self.config.repo.max_review_rounds };
         let (reviewer, body, conflict) = (requested.reviewer.clone(), requested.body.clone(), requested.conflict);
+        let settled = ChangesRequested { settled: true, ..requested.clone() };
         // Recorded before the request is made visible, so the run that picks it up can't miss the review.
         // A review's round goes in the same write, so a stop between the two can't count it twice (TRAIL-322).
         let update = RunUpdate {
@@ -342,7 +344,10 @@ impl Factory {
             // A fresh count for when a human reopens the task after sorting it out, and a fresh run name: with the
             // counts back at zero the next review would be named for a round whose reviewer is already revoked. Last,
             // so a reconcile that finishes a park cut short still sees the round that hit the limit.
+            // The request is settled with them: whoever answers or reopens the task has taken it over, so it isn't
+            // asked for again even if they push nothing.
             let fresh = RunUpdate {
+                changes_requested: Some(settled),
                 review_rounds: Some(0),
                 conflict_reworks: Some(0),
                 retries: Some(task.run.retries.unwrap_or(0) + 1),

@@ -363,6 +363,9 @@ async fn a_parked_request_a_person_settled_is_not_reworked_by_reconcile() {
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    let run = r.tracker.task(&key).run;
+    assert!(run.changes_requested.as_ref().is_some_and(|c| c.settled), "parking settles the request");
+    assert_eq!(run.pending_changes(), None);
 
     // A person fixes the PR by hand and moves the task back to review.
     r.tracker.set_status(&key, Status::InReview);
