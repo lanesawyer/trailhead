@@ -365,6 +365,38 @@ async fn a_parked_task_whose_pr_is_merged_is_finished() {
 }
 
 #[tokio::test]
+async fn a_merged_pr_closes_a_task_still_claimed_by_the_sub_agent_that_parked_it() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    r.codehost.close(&pr);
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+
+    // The park was the sub-agent's, as a breach or an infra failure is: it holds the claim.
+    let name = "trail-1-parker".to_string();
+    let tracker: Arc<dyn Tracker> = Arc::new(r.tracker.clone());
+    tracker.release(&key).await.unwrap();
+    tracker.create_sub_agent(&name, "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
+    let sub = tracker.sub_agent(&name);
+    sub.claim(&key).await.unwrap();
+    assert_eq!(r.tracker.task(&key).holder.as_deref(), Some(sub.agent()));
+    sub.ask(&key, "Over budget.").await.unwrap();
+    tracker.revoke_sub_agent(&name).await.unwrap();
+
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.merged, std::slice::from_ref(&key.0));
+    assert_eq!(r.tracker.task(&key).status, Status::Done, "closed at once, not when the lease runs out");
+}
+
+#[tokio::test]
 async fn reconcile_finishes_an_open_task_whose_pr_merged() {
     let mut r = rig();
     r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));

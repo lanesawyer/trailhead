@@ -504,9 +504,15 @@ impl Tracker for FakeTracker {
             s.claimed_from_review.contains(task) && review_asks_changes(&s, task)
         };
         let released = self.write(task, |t, me| {
-            held_by_me(t, me)?;
+            // As in core, an agent can also release a claim held by one of its sub-agents.
+            let below = t.holder.as_deref().is_some_and(|h| h.starts_with(&format!("{me}/")));
+            if !below {
+                held_by_me(t, me)?;
+            }
             t.holder = None;
-            t.status = if back { Status::InReview } else { Status::Open };
+            if t.status == Status::InProgress {
+                t.status = if back { Status::InReview } else { Status::Open };
+            }
             Ok(())
         });
         if released.is_ok() {
