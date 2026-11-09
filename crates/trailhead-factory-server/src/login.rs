@@ -268,7 +268,7 @@ esac
             .unwrap_or_default()
     }
 
-    /// A working directory holding a `fnox.toml`, which is all the host looks for before running fnox.
+    /// A working directory holding a `fnox.toml`, so fnox's config counts as found.
     fn repo_with_config(dir: &tempfile::TempDir) -> std::path::PathBuf {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -371,6 +371,18 @@ esac
         let bare = dir.path().join("bare");
         std::fs::create_dir_all(&bare).unwrap();
         let fnox = Fnox::new(&fake_fnox(&dir), &bare, Some(&global));
+        let err = fnox.get("BROKEN").unwrap_err().to_string();
+        assert!(err.contains("fnox"), "{err}");
+    }
+
+    #[test]
+    fn a_dotfile_fnox_config_counts_as_a_config() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join(".fnox.toml"), "").unwrap();
+        let fnox = load(&fake_fnox(&dir), &repo);
         let err = fnox.get("BROKEN").unwrap_err().to_string();
         assert!(err.contains("fnox"), "{err}");
     }
