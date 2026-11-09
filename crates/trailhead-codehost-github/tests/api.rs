@@ -39,6 +39,8 @@ struct Git {
     not_modified: usize,
     /// The `x-ratelimit-*` headers (limit, remaining, reset) pull reads carry, when a test sets them.
     rate: Option<(u64, u64, i64)>,
+    /// The `x-ratelimit-resource` those headers name, when a test sets one.
+    rate_resource: Option<&'static str>,
 }
 
 impl Git {
@@ -285,8 +287,10 @@ async fn get_pull(
 /// Answers with `body` and an ETag of it, or 304 when the request already has that ETag.
 fn etagged(g: &mut Git, headers: &HeaderMap, body: Value) -> Response {
     let etag = format!("\"{}\"", body);
+    let resource = g.rate_resource;
     let rate = g.rate.map(|(limit, remaining, reset)| {
         [
+            ("x-ratelimit-resource", resource.unwrap_or("core").to_string()),
             ("x-ratelimit-limit", limit.to_string()),
             ("x-ratelimit-remaining", remaining.to_string()),
             ("x-ratelimit-reset", reset.to_string()),
@@ -855,6 +859,15 @@ async fn the_rate_limit_is_read_from_the_response_headers() {
     git.lock().unwrap().rate = Some((5000, 122, 1_900_000_000));
     gh.title(&pr).await.unwrap();
     assert_eq!(gh.rate_limit().map(|r| r.remaining), Some(122));
+
+    // A reading of another resource (search, graphql) doesn't replace core's.
+    {
+        let mut g = git.lock().unwrap();
+        g.rate = Some((30, 0, 1_900_000_060));
+        g.rate_resource = Some("search");
+    }
+    gh.title(&pr).await.unwrap();
+    assert_eq!(gh.rate_limit(), Some(RateLimit { limit: 5000, remaining: 122, resets_at: 1_900_000_000 }));
 }
 
 #[tokio::test]
