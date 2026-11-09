@@ -352,6 +352,30 @@ async fn a_transient_failure_opening_the_pr_is_retried() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_transient_failure_commenting_on_an_existing_pr_is_retried() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Tidy up.")));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.codehost.prs().len(), 1, "the PR is already open");
+
+    // The rework's run retries a check, so its note goes on the PR as a comment, which fails twice first.
+    r.daemon.fail_check_times("test", "flaked", 1);
+    r.codehost.flaky_comment(2);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. } | Outcome::AwaitingReview { .. }), "{:?}", ran[0].1);
+
+    let pr = &r.codehost.prs()[0];
+    let flaky = trailhead_factory::messages::flaky_checks(&["test".into()]);
+    assert_eq!(pr.comments.iter().filter(|c| c.contains(flaky.trim_start())).count(), 1, "{:?}", pr.comments);
+    assert_eq!(r.codehost.calls("comment"), pr.comments.len() + 2, "two failed posts, each retried");
+    assert_ne!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_publish_that_keeps_failing_transiently_parks_the_task_after_the_retries() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Fix CI", "");
