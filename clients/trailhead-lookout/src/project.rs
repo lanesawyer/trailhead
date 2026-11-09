@@ -8,6 +8,7 @@
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
+use trailhead_model::ProjectStatus;
 
 use crate::board::{BoardCard, Card, PAGE, Sources, View, grid, next_expiry};
 use crate::project_form::EditProject;
@@ -28,6 +29,7 @@ pub struct ProjectPage(pub Option<String>);
 pub struct ProjectView {
     pub key: String,
     pub name: String,
+    pub archived: bool,
     pub cards: Vec<Card>,
 }
 
@@ -121,8 +123,10 @@ fn rebuild_view(
     let Some(key) = &page.0 else { return };
     let rows = sources.rows();
     *expiry = next_expiry(&rows.claims, now);
-    let name = rows.projects.iter().find(|p| &p.key == key).map(|p| p.name.clone()).unwrap_or_default();
-    let next = ProjectView { key: key.clone(), name, cards: grid(rows.input(&[], now), key) };
+    let project = rows.projects.iter().find(|p| &p.key == key);
+    let name = project.map(|p| p.name.clone()).unwrap_or_default();
+    let archived = project.is_some_and(|p| p.status == ProjectStatus::Archived);
+    let next = ProjectView { key: key.clone(), name, archived, cards: grid(rows.input(&[], now), key) };
     if *view != next {
         *view = next;
     }
@@ -263,9 +267,12 @@ fn despawn_page(mut commands: Commands, panel: Query<Entity, With<ProjectPanel>>
     }
 }
 
-/// "TRAIL · Trailhead", in place.
+/// "TRAIL · Trailhead", with "(archived)" after an archived one, in place.
 fn update_title(view: Res<ProjectView>, mut titles: Query<&mut Text, With<ProjectTitle>>) {
-    let words = if view.name.is_empty() { view.key.clone() } else { format!("{} · {}", view.key, view.name) };
+    let mut words = if view.name.is_empty() { view.key.clone() } else { format!("{} · {}", view.key, view.name) };
+    if view.archived {
+        words.push_str(" (archived)");
+    }
     for mut title in &mut titles {
         if title.0 != words {
             title.0.clone_from(&words);

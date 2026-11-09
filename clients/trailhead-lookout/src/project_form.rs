@@ -13,7 +13,7 @@ use bevy::ui_widgets::Activate;
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 
-use trailhead_model::Project;
+use trailhead_model::{Project, ProjectStatus};
 
 use crate::author::describe;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
@@ -44,11 +44,12 @@ pub struct ProjectDraft {
     pub claim_minutes: String,
 }
 
-/// What saving does: create a project, or change the one with `key`, as it was at `version` (sent as `If-Match`).
+/// What saving does: create a project, or change the one with `key`, as it was at `version` (sent as `If-Match`), and
+/// archived or not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Create,
-    Edit { key: String, version: i64 },
+    Edit { key: String, version: i64, archived: bool },
 }
 
 /// The form as it is open: what it saves to, what it started with, and what is typed now.
@@ -74,7 +75,11 @@ impl ProjectOpen {
             require_review: project.require_review,
             claim_minutes: project.claim_ttl.map(|s| (s / 60).max(1).to_string()).unwrap_or_default(),
         };
-        let target = Target::Edit { key: project.key.clone(), version: project.version };
+        let target = Target::Edit {
+            key: project.key.clone(),
+            version: project.version,
+            archived: project.status == ProjectStatus::Archived,
+        };
         ProjectOpen { target, original: draft.clone(), draft }
     }
 
@@ -159,7 +164,7 @@ pub fn request(open: &ProjectOpen) -> Result<Request, String> {
             }
             Ok(Request::new(Method::POST, "/v1/projects", Some(Value::Object(body)), None))
         }
-        Target::Edit { key, version } => {
+        Target::Edit { key, version, .. } => {
             let o = &open.original;
             let mut patch = Map::new();
             if d.name.trim() != o.name {
@@ -184,6 +189,13 @@ pub fn request(open: &ProjectOpen) -> Result<Request, String> {
     }
 }
 
+/// The request that archives the project `open` edits, or brings it back when it is archived; nothing for a new one.
+pub fn archive_request(open: &ProjectOpen) -> Option<Request> {
+    let Target::Edit { key, version, archived } = &open.target else { return None };
+    let status = if *archived { ProjectStatus::Active } else { ProjectStatus::Archived };
+    Some(Request::new(Method::PATCH, format!("/v1/projects/{key}"), Some(json!({"status": status})), Some(*version)))
+}
+
 /// The sidebar's button that opens the form on a new project.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct NewProject;
@@ -198,6 +210,8 @@ enum FormAct {
     #[default]
     Save,
     Cancel,
+    /// Archive the project, or unarchive it.
+    Archive,
 }
 
 /// Which draft field a text input holds.
@@ -288,15 +302,38 @@ fn on_form_act(
                 form.message = "Not connected to the server; saving waits for Live.".into();
                 return;
             }
-            match request(open) {
-                Err(why) => form.message = why,
-                Ok(request) => {
-                    let Ok(source) = panel.single() else { return };
-                    submit.write(Submit { source, request });
-                    form.saving = true;
-                    form.message = "Saving...".into();
-                }
+            let request = request(open);
+            send(&mut form, request, &panel, &mut submit);
+        }
+        FormAct::Archive => {
+            let Some(open) = &form.open else { return };
+            if form.saving {
+                return;
             }
+            if *connection.get() != Connection::Live {
+                form.message = "Not connected to the server; archiving waits for Live.".into();
+                return;
+            }
+            let Some(request) = archive_request(open) else { return };
+            send(&mut form, Ok(request), &panel, &mut submit);
+        }
+    }
+}
+
+/// Sends `request` from the form's modal, or shows why it can't be sent.
+fn send(
+    form: &mut ProjectForm,
+    request: Result<Request, String>,
+    panel: &Query<Entity, With<ProjectFormPanel>>,
+    submit: &mut MessageWriter<Submit>,
+) {
+    match request {
+        Err(why) => form.message = why,
+        Ok(request) => {
+            let Ok(source) = panel.single() else { return };
+            submit.write(Submit { source, request });
+            form.saving = true;
+            form.message = "Saving...".into();
         }
     }
 }
@@ -451,6 +488,13 @@ fn fill_form(
         commands
             .spawn_scene(bsn! { @button("Cancel", None, ButtonKind::Normal) FormAct::Cancel })
             .insert(ChildOf(footer));
+        // Archiving is undone with the same button, so it asks for no confirmation.
+        if let Target::Edit { archived, .. } = &open.target {
+            let caption = if *archived { "Unarchive" } else { "Archive" };
+            commands
+                .spawn_scene(bsn! { @button(caption, None, ButtonKind::Normal) FormAct::Archive })
+                .insert(ChildOf(footer));
+        }
         commands
             .spawn_scene(text_dim(form.message.clone(), size::SECONDARY))
             .insert((ProjectFormMessage, ChildOf(footer)));
@@ -518,6 +562,17 @@ mod tests {
         let r = request(&open).unwrap();
         assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::PATCH, "/v1/projects/TRAIL", Some(7)));
         assert_eq!(r.body, Some(json!({"name": "Trailhead engine", "require_review": true})));
+    }
+
+    #[test]
+    fn archive_flips_the_status_with_the_version_it_saw() {
+        assert!(archive_request(&ProjectOpen::create()).is_none(), "a new project has nothing to archive");
+        let r = archive_request(&ProjectOpen::edit(&trail())).unwrap();
+        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::PATCH, "/v1/projects/TRAIL", Some(7)));
+        assert_eq!(r.body, Some(json!({"status": "archived"})));
+        let mut shelved = trail();
+        shelved.status = ProjectStatus::Archived;
+        assert_eq!(archive_request(&ProjectOpen::edit(&shelved)).unwrap().body, Some(json!({"status": "active"})));
     }
 
     #[test]
@@ -646,7 +701,7 @@ mod tests {
         app.world_mut().trigger(Activate { entity: button });
         let form = app.world().resource::<ProjectForm>();
         let open = form.open.as_ref().unwrap();
-        assert_eq!(open.target, Target::Edit { key: "TRAIL".into(), version: 7 });
+        assert_eq!(open.target, Target::Edit { key: "TRAIL".into(), version: 7, archived: false });
         assert_eq!(open.title(), "Edit TRAIL");
     }
 
