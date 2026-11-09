@@ -13,7 +13,9 @@ use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use trailhead_model::{Claim, Comment, CommentKind, Grade, Priority, Status, Task, TaskDetail, TaskKey, Verdict};
+use trailhead_model::{
+    Claim, ClaimResult, Comment, CommentKind, Grade, HeldClaim, Priority, Status, Task, TaskDetail, TaskKey, Verdict,
+};
 use uuid::Uuid;
 
 use crate::ApiError;
@@ -153,24 +155,6 @@ impl NewComment {
     pub fn new(kind: CommentKind, body: impl Into<String>) -> NewComment {
         NewComment { kind, body: body.into(), verdict: None, model: None, addressed_to: None }
     }
-}
-
-/// A claim the caller holds, as `GET /v1/claims` lists it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HeldClaim {
-    pub key: String,
-    pub title: String,
-    pub status: Status,
-    pub claim: Claim,
-}
-
-/// What `POST /v1/tasks/{task}/claim` returns.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClaimResult {
-    pub task: Task,
-    pub claim: Claim,
-    /// The last handoff left on the task.
-    pub handoff: Option<Comment>,
 }
 
 /// Starts the server again after a request couldn't connect; true if it did, and the request should be retried.
