@@ -30,7 +30,7 @@ usd_per_vcpu_hour = 0.0385
 usd_per_gb_hour = 0.021875
 ```
 
-`daily_usd` and the two rates are the spend cap (TRAIL-506, below). The rates default to the ones shown, and need `daily_usd`. `kind = "docker"` targets take `image`, `network`, `runtime` and `memory_mib` as `[factory.compute]` does. `priority` defaults to 0.
+`daily_usd` and the two rates are the spend cap (TRAIL-506, below). The rates default to the ones shown, and need `daily_usd`. `kind = "docker"` targets take `image`, `network`, `runtime`, `memory_mib` and `min_free_bytes` as `[factory.compute]` does. `priority` defaults to 0.
 
 `[factory.compute]` keeps working and means one target, so existing files don't change. Setting both is an error. Listing only `local` is how a factory stays local.
 
