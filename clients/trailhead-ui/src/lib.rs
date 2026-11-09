@@ -135,7 +135,10 @@ pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,
     ModalSlots, open_modal,
 };
-pub use nav::{NavItem, beside_sidebar, nav_heading, nav_item, nav_item_noted, sidebar, sidebar_footer};
+pub use nav::{
+    BesideSidebar, NavItem, SidebarEdge, SidebarWidth, beside_sidebar, nav_heading, nav_item, nav_item_noted, sidebar,
+    sidebar_footer,
+};
 pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
@@ -165,6 +168,10 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin))
+            .init_resource::<nav::SidebarWidth>()
+            .add_observer(nav::start_edge_drag)
+            .add_observer(nav::drag_edge)
+            .add_observer(nav::end_edge_drag)
             .add_observer(scroll::on_scroll)
             .add_observer(button_group::on_option)
             .add_observer(bevy::ui_widgets::slider_self_update)
@@ -183,6 +190,8 @@ impl Plugin for UiPlugin {
                     tabs::fit_tabs,
                     tabs::style_tabs,
                     nav::paint_nav_items,
+                    nav::fit_to_sidebar,
+                    nav::show_edge_lines,
                     button_group::paint_groups,
                     hover::paint_hover_tones,
                     buttons::dim_disabled_captions,

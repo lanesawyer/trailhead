@@ -437,8 +437,9 @@ mod tests {
         assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0), "the frame may shrink so the places scroll");
         // The title and the search box above it, the footer below.
         let top: Vec<Entity> = world.get::<Children>(root).unwrap().iter().collect();
-        assert_eq!(top.len(), 5, "title, New task, search, places, footer");
-        assert_eq!(top[3], frame);
+        assert_eq!(top.len(), 6, "the drag edge, title, New task, search, places, footer");
+        assert!(world.get::<crate::widgets::SidebarEdge>(top[0]).is_some());
+        assert_eq!(top[4], frame);
         let mut entries = world.query_filtered::<Entity, With<NavTo>>();
         let entries: Vec<Entity> = entries.iter(world).collect();
         assert_eq!(entries.len(), 4);
@@ -455,7 +456,7 @@ mod tests {
         // In a short window the places scroll rather than squash, and the footer keeps its height.
         let mut shrinks = world.query_filtered::<&Node, With<NavItem>>();
         assert!(shrinks.iter(world).all(|n| n.flex_shrink == 0.0));
-        assert_eq!(world.get::<Node>(top[4]).unwrap().flex_shrink, 0.0);
+        assert_eq!(world.get::<Node>(top[5]).unwrap().flex_shrink, 0.0);
     }
 
     #[test]
@@ -463,7 +464,7 @@ mod tests {
         let mut app = app();
         let new = one::<NewTask>(&mut app);
         let root = one::<Sidebar>(&mut app);
-        assert_eq!(app.world().get::<Children>(root).unwrap()[1], new);
+        assert_eq!(app.world().get::<Children>(root).unwrap()[2], new);
         assert_eq!(app.world().get::<Act>(new), Some(&Act::New));
         let disabled = |app: &App| app.world().get::<InteractionDisabled>(new).is_some();
         let set = |app: &mut App, to| {
