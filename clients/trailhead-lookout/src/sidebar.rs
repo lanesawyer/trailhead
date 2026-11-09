@@ -1,6 +1,6 @@
 //! The sidebar down the left of the window, the same in every view: Lookout's name, the search box, the places to go
 //! (Switchbacks, which is the board, the trail map, then each project's page), and a footer with the connection chip
-//! and settings.
+//! and settings. The places scroll between the search box and the footer, which stay put.
 //!
 //! It is spawned once and updated in place: the projects follow the mirror through [`Keyed`], the page shown is marked
 //! on its [`NavItem`], and the chip is edited with [`ChipEdit`]. Searching shows the results on the board.
@@ -9,7 +9,7 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::text::EditableText;
-use bevy::ui_widgets::Activate;
+use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::FactoryState;
 use trailhead_model::Project;
 
@@ -20,8 +20,9 @@ use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
 use crate::settings::SettingsButton;
 use crate::widgets::{
-    ButtonKind, ChipEdit, Icon, Keyed, NavItem, Token, chip, nav_heading, nav_item, nav_item_noted, set_text, sidebar,
-    sidebar_footer, size, spawn_search_field_filling, text, token, tool_button,
+    ButtonKind, ChipEdit, Icon, Keyed, NavItem, Token, chip, nav_heading, nav_item, nav_item_noted, scroll_body,
+    scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size, spawn_search_field_filling, text, token,
+    tool_button,
 };
 
 /// Where a sidebar entry goes.
@@ -39,6 +40,10 @@ pub struct Sidebar;
 /// The search field, the text entity that holds what is typed.
 #[derive(Component)]
 pub struct SearchBox;
+
+/// The part that scrolls: the places and the projects, between the search box and the footer.
+#[derive(Component)]
+struct Places;
 
 /// The node the projects' entries are kept under.
 #[derive(Component)]
@@ -84,14 +89,17 @@ fn spawn_sidebar(mut commands: Commands) {
     let search = spawn_search_field_filling(&mut commands, "Search tasks");
     commands.entity(search.field).insert(SearchBox);
     commands.entity(search.entry).insert(ChildOf(root));
+    let frame = commands.spawn(scroll_frame()).insert(ChildOf(root)).id();
+    let places = commands.spawn((scroll_body(), Places)).insert(ChildOf(frame)).id();
+    commands.queue_spawn_scene(scrollbar(places, ControlOrientation::Vertical)).insert(ChildOf(frame));
     for (caption, icon, to) in [("Switchbacks", Icon::Board, NavTo::Board), ("Trail map", Icon::Map, NavTo::Map)] {
-        commands.queue_spawn_scene(nav_item(caption, Some(icon))).insert((to, ChildOf(root)));
+        commands.queue_spawn_scene(nav_item(caption, Some(icon))).insert((to, ChildOf(places)));
     }
-    commands.queue_spawn_scene(nav_heading("Projects")).insert(ChildOf(root));
+    commands.queue_spawn_scene(nav_heading("Projects")).insert(ChildOf(places));
     commands.spawn((
-        Node { flex_direction: FlexDirection::Column, min_height: px(0), overflow: Overflow::scroll_y(), ..default() },
+        Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0, ..default() },
         ProjectList,
-        ChildOf(root),
+        ChildOf(places),
     ));
     let footer = commands.queue_spawn_scene(sidebar_footer()).insert(ChildOf(root)).id();
     let (tone, words, hint) =
@@ -358,6 +366,39 @@ mod tests {
                 (NavTo::Project("TRAIL".into()), false),
             ]
         );
+    }
+
+    #[test]
+    fn the_places_scroll_between_the_search_box_and_the_footer() {
+        let mut app = app();
+        let places = one::<Places>(&mut app);
+        let root = one::<Sidebar>(&mut app);
+        let world = app.world_mut();
+        assert!(world.get::<crate::widgets::ScrollDown>(places).is_some());
+        assert_eq!(world.get::<Node>(places).unwrap().overflow, Overflow::scroll_y());
+        let frame = world.get::<ChildOf>(places).unwrap().parent();
+        assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0), "the frame may shrink so the places scroll");
+        // The title and the search box above it, the footer below.
+        let top: Vec<Entity> = world.get::<Children>(root).unwrap().iter().collect();
+        assert_eq!(top.len(), 4, "title, search, places, footer");
+        assert_eq!(top[2], frame);
+        let mut entries = world.query_filtered::<Entity, With<NavTo>>();
+        let entries: Vec<Entity> = entries.iter(world).collect();
+        assert_eq!(entries.len(), 4);
+        for entry in entries {
+            let mut at = entry;
+            while let Some(parent) = world.get::<ChildOf>(at) {
+                at = parent.parent();
+                if at == places {
+                    break;
+                }
+            }
+            assert_eq!(at, places, "every place scrolls");
+        }
+        // In a short window the places scroll rather than squash, and the footer keeps its height.
+        let mut shrinks = world.query_filtered::<&Node, With<NavItem>>();
+        assert!(shrinks.iter(world).all(|n| n.flex_shrink == 0.0));
+        assert_eq!(world.get::<Node>(top[3]).unwrap().flex_shrink, 0.0);
     }
 
     #[test]
