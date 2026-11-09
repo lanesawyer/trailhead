@@ -375,6 +375,35 @@ async fn a_parked_request_a_person_settled_is_not_reworked_by_reconcile() {
 }
 
 #[tokio::test]
+async fn a_park_whose_settling_write_was_lost_is_finished_before_a_person_answers() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 1"));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    // The factory's reports in this tick: the review's round and the park's own, which settles the request and resets
+    // the counts, is the third (`fail_after` skips the first two); when that order changes, change the count.
+    r.tracker.fail_after("factory", "report", 2, 1);
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.review_rounds, Some(1), "the reset was lost with the settling");
+    assert!(task.run.changes_requested.as_ref().is_some_and(|c| !c.settled));
+
+    // Reconcile finishes it while the task waits, so a person who answers without pushing isn't second-guessed.
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(0));
+    assert!(task.run.changes_requested.as_ref().is_some_and(|c| c.settled));
+    assert_eq!(task.run.pending_changes(), None);
+
+    // Reopened with nothing pushed: no rework.
+    r.tracker.set_status(&key, Status::InReview);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reworked.is_empty(), "{done:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+}
+
+#[tokio::test]
 async fn a_parked_pr_a_person_fixed_gets_a_fresh_review() {
     async fn parked(push: bool) -> (Rig, TaskKey) {
         let mut r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 1"));

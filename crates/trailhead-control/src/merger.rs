@@ -203,7 +203,7 @@ impl Factory {
         let attempt = task.run.attempt.unwrap_or(0);
         let pushed = task
             .run
-            .pending_changes()
+            .last_changes()
             .is_some_and(|c| !c.conflict && attempt > c.attempt && c.head.as_deref().is_some_and(|h| h != head));
         Ok(pushed.then_some(Rework::Pushed))
     }

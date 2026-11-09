@@ -35,7 +35,7 @@ impl Factory {
         if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) {
             match codehost.pr_state(pr).await? {
                 PrState::Open { mergeable: Some(true), .. }
-                    if task.run.pending_changes().is_some_and(|c| c.conflict && c.reviewer != CI_REVIEWER) =>
+                    if task.run.last_changes().is_some_and(|c| c.conflict && c.reviewer != CI_REVIEWER) =>
                 {
                     tracing::info!(task = %task.key.0, pr = %pr.url, "the host no longer reports a conflict; back to review");
                     self.settle_gone_conflict(task, pr).await?;
@@ -113,7 +113,7 @@ impl Factory {
             let context = self.tracker.human_context(&task.key).await?;
             // A review that never went through request_rework (an older one, or a task reopened by hand) left no
             // changes_requested; the review comment is the feedback then (TRAIL-218).
-            let feedback = match task.run.pending_changes().filter(|_| rework) {
+            let feedback = match task.run.last_changes().filter(|_| rework) {
                 Some(c) => Some(Feedback { body: messages::review_feedback(&c.reviewer, &c.body) }),
                 None if rework => match self.tracker.last_review(&task.key).await? {
                     Some(v) if v.kind == VerdictKind::RequestChanges => {
@@ -123,7 +123,7 @@ impl Factory {
                 },
                 None => None,
             };
-            let merge_base = task.run.pending_changes().is_some_and(|c| c.conflict);
+            let merge_base = task.run.last_changes().is_some_and(|c| c.conflict);
             let (sandbox, setup_failure) =
                 self.acquire_worker(target, task, rework.then(|| Self::branch(task)), merge_base).await?;
             // The agent starts with the output so it can fix what broke, after whatever the review asked for.
@@ -338,7 +338,7 @@ impl Factory {
                 // The daemon may have opened the PR without being able to write it down (TRAIL-441). Whatever is
                 // missing is recorded here; a failure is logged, since the PR is open either way.
                 self.record_opened_pr(task, sub, &pr).await;
-                if let Some(stale) = task.run.pending_changes().filter(|c| c.conflict).and_then(|c| c.head.clone()) {
+                if let Some(stale) = task.run.last_changes().filter(|c| c.conflict).and_then(|c| c.head.clone()) {
                     // Recorded so a `mergeable` reading for the head from before the push is ignored, across a restart
                     // too. A request whose head the host couldn't say leaves the mark off; readings count as they come.
                     let update = RunUpdate { stale_head: Some(stale), ..RunUpdate::default() };
@@ -747,7 +747,7 @@ impl Factory {
         let Some(codehost) = &self.codehost else { return false };
         let before = match &task.run.pr {
             None => None,
-            Some(_) => match task.run.pending_changes().and_then(|c| c.head.clone()) {
+            Some(_) => match task.run.last_changes().and_then(|c| c.head.clone()) {
                 Some(head) => Some(head),
                 None => return false,
             },

@@ -234,7 +234,7 @@ impl Factory {
         let attempt = task.run.attempt.unwrap_or(1);
         let pr = task.run.pr.as_ref().ok_or_else(|| Error::Other(format!("{} has no PR to review", task.key.0)))?;
         // The round the interrupted review was named for: one past the rounds counted before it, whether or not it counted.
-        let after_conflict = task.run.pending_changes().is_some_and(|c| c.conflict);
+        let after_conflict = task.run.last_changes().is_some_and(|c| c.conflict);
         let rounds = task.run.review_rounds.unwrap_or(0);
         if let Some(round) = Some(rounds + u32::from(after_conflict)).filter(|r| *r > 0) {
             let retries = task.run.retries.unwrap_or(0);
@@ -448,6 +448,19 @@ impl Factory {
                 {
                     self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
                     done.merged.push(task.key.0.clone());
+                }
+                // A park whose settling write was lost: the request still stands at the limit it parked on. Finished
+                // here, before a person can answer, so that answering without a push doesn't have it reworked again.
+                if let Some(c) = task.run.changes_requested.as_ref().filter(|c| !c.settled) {
+                    let (count, max) = if c.conflict {
+                        (task.run.conflict_reworks, self.config.repo.max_conflict_reworks)
+                    } else {
+                        (task.run.review_rounds, self.config.repo.max_review_rounds)
+                    };
+                    if count.is_some_and(|n| n >= max) {
+                        tracing::warn!(task = %task.key.0, "finishing the park's settling of its changes request");
+                        self.settle_parked_request(task, c).await;
+                    }
                 }
             }
             Status::Approved => {

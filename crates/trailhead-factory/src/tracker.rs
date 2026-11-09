@@ -323,10 +323,15 @@ impl RunUpdate {
         self.released = released.or(self.released.take());
     }
 
-    /// The review the next run has to address: the last one that asked for changes, unless a later review has
-    /// since finished on another attempt, or a person settled it.
+    /// The last request for changes, unless a later review has since finished on another attempt. It may be settled:
+    /// a worker that takes the task over after a person answered a park still needs to know it was a conflict.
+    pub fn last_changes(&self) -> Option<&ChangesRequested> {
+        self.changes_requested.as_ref().filter(|c| self.reviewed.is_none_or(|r| r == c.attempt))
+    }
+
+    /// The request still waiting for a worker: the last one, unless a person settled it.
     pub fn pending_changes(&self) -> Option<&ChangesRequested> {
-        self.changes_requested.as_ref().filter(|c| !c.settled && self.reviewed.is_none_or(|r| r == c.attempt))
+        self.last_changes().filter(|c| !c.settled)
     }
 
     /// The attempt `max_attempts` counts from: the last review that asked for changes, or the attempt the control
