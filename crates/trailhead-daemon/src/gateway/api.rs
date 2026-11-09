@@ -125,7 +125,9 @@ impl Gateway {
         if let Err(why) = policy::check(provider, &labels, &req.method, &upstream_path) {
             return respond_with(client, 403, "text/plain", &why).await;
         }
-        if provider == "git" && query.is_some_and(|q| q != "service=git-upload-pack") {
+        // Discovery must name upload-pack; the upload-pack POST itself takes no query.
+        let want_query = upstream_path.ends_with("/info/refs").then_some("service=git-upload-pack");
+        if provider == "git" && query != want_query {
             return respond_with(client, 403, "text/plain", "only git-upload-pack is allowed").await;
         }
         if header("transfer-encoding").is_some() {
@@ -511,6 +513,10 @@ mod tests {
             for (m, p) in [
                 ("GET", "/lane/trail.git/info/refs?service=git-receive-pack"),
                 ("GET", "/lane/trail.git/info/refs?service=git-upload-pack&x=1"),
+                ("GET", "/lane/trail.git/info/refs"),
+                ("GET", "/lane/trail.git/info/refs/x?service=git-upload-pack"),
+                ("POST", "/lane/trail.git/git-upload-pack/x"),
+                ("POST", "/lane/trail.git/git-upload-pack?service=git-upload-pack"),
                 ("POST", "/lane/trail.git/git-receive-pack"),
                 ("GET", "/lane/other.git/info/refs?service=git-upload-pack"),
                 ("POST", "/lane/other.git/git-upload-pack"),
