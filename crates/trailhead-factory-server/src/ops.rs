@@ -340,8 +340,9 @@ fn render_status(
     if !waiting.is_empty() && parked > 0 && parked >= max_sandboxes {
         let _ = writeln!(
             out,
-            "\n{} ready tasks waiting; all {max_sandboxes} sandboxes held by parked tasks (answer or cancel them)",
-            waiting.len()
+            "\n{} ready {} waiting; all {max_sandboxes} sandboxes held by parked tasks (answer or cancel them)",
+            waiting.len(),
+            if waiting.len() == 1 { "task" } else { "tasks" }
         );
     }
 
@@ -576,7 +577,7 @@ mod tests {
         ];
         let waiting = [task("TRAIL-3", Status::Open, Default::default())];
         let out = render_status(&rows(&boxes), &parked, &waiting, 2, false);
-        assert!(out.contains("1 ready tasks waiting; all 2 sandboxes held by parked tasks"), "{out}");
+        assert!(out.contains("1 ready task waiting; all 2 sandboxes held by parked tasks"), "{out}");
         assert!(!render_status(&rows(&boxes), &parked, &[], 2, false).contains("waiting;"));
         assert!(!render_status(&rows(&boxes), &parked, &waiting, 3, false).contains("waiting;"));
     }
