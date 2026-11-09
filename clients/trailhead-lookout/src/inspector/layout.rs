@@ -648,12 +648,10 @@ pub(super) fn spawn_block(
                     .spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonKind::Normal) @{press} }),
                 Action::Undo => commands
                     .spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonKind::Normal) @{press} }),
-                Action::Cancel => {
-                    commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} })
-                }
-                Action::Revert(_) => {
-                    commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::History)) @{press} })
-                }
+                Action::Cancel => commands
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Stop), ButtonKind::Danger) @{press} }),
+                Action::Revert(_) => commands
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::History), ButtonKind::Danger) @{press} }),
                 // Not drawn as an action block: they have their own controls, or none.
                 Action::Status(_) | Action::Resolve(_) | Action::Grade(_) | Action::Comment | Action::Menu => {
                     commands.spawn_empty()

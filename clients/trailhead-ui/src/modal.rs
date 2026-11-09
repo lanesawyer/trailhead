@@ -122,7 +122,7 @@ fn frame(title: String, width: Val, tall: bool) -> Box<dyn SceneList> {
         ModalFrame
         HintBounds
         Children [
-            @panel_header(title, true)
+            @panel_header(title)
             --
             // The body's box may shrink below its content, so the body scrolls and the footer keeps its place, and grows
             // into a tall modal's height.
