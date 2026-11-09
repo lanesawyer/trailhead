@@ -324,12 +324,19 @@ impl Factory {
     /// (a clean update keeps the verdict, so nothing else would look at it; TRAIL-390): the task, unapproved if it was,
     /// goes back for a rework told which checks failed and the end of their logs. It counts toward
     /// `max_conflict_reworks`, not review rounds, since CI breaking as main moves isn't a review finding.
-    pub(crate) async fn rework_ci_failure(&self, task: &Task, pr: &PrRef, head: &str, checks: &[String]) -> Result<()> {
-        let Some(codehost) = &self.codehost else { return Ok(()) };
+    /// True when a rework was requested, false when there was nothing to do (no code host, or one already asked for).
+    pub(crate) async fn rework_ci_failure(
+        &self,
+        task: &Task,
+        pr: &PrRef,
+        head: &str,
+        checks: &[String],
+    ) -> Result<bool> {
+        let Some(codehost) = &self.codehost else { return Ok(false) };
         let attempt = task.run.attempt.unwrap_or(1);
         // Already asked for on this attempt: reconcile finishes reopening it, and the head isn't reworked twice.
         if task.run.pending_changes().is_some_and(|c| c.attempt == attempt) {
-            return Ok(());
+            return Ok(false);
         }
         let after_update = match &task.run.reviewed_head {
             Some(reviewed) => reviewed != head && codehost.carries_verdict(pr, reviewed).await?,
@@ -350,7 +357,8 @@ impl Factory {
         let head = Some(head.to_string());
         let requested =
             ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head, settled: false };
-        self.request_rework(task, requested, round).await
+        self.request_rework(task, requested, round).await?;
+        Ok(true)
     }
 
     /// Whether the task's PR was merged or closed, which is dealt with here: a merge, by whoever, finishes the task and
@@ -552,6 +560,10 @@ impl Factory {
                 if !owed {
                     // CI may have finished, or Lane approved, since the gates were last looked at.
                     self.evaluate_gates(&task.key).await?;
+                } else if self.rework_if_ci_failed(&task.key).await? {
+                    // A failed CI is reworked without waiting for the review, which would only look at a head that
+                    // is about to change.
+                    return Ok(false);
                 } else if task.run.pending_changes().is_some_and(|c| !c.conflict) {
                     // The rework has pushed and its head awaits review: say so, without approving.
                     self.say_gates(&task.key, false).await?;
