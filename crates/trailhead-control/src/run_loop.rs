@@ -304,6 +304,12 @@ impl Factory {
             if task.status != Status::NeedsInput || task.run.worker_breach.is_some() {
                 continue;
             }
+            // The asker's lease keeps everyone else's writes out until it lapses, so the release couldn't be recorded
+            // below; don't wake the suspended daemon to check for unpublished work until then.
+            if task.holder.as_deref().is_some_and(|h| h != self.tracker.agent()) {
+                tracing::debug!(task = %key.0, holder = ?task.holder, "a parked task is still claimed; keeping its sandbox for now");
+                continue;
+            }
             // What the task resumes from: its PR branch on a rework, else the base branch.
             let remote = if task.run.pr.is_some() { Self::branch(&task) } else { self.config.repo.base_branch.clone() };
             match self.daemon_of(sandbox).unpublished(&sandbox.id, &remote).await {
