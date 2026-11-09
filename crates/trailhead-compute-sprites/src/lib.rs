@@ -47,6 +47,11 @@ pub fn target() -> Target {
     }
 }
 
+/// A Sprites compute from its API token, with its launch facts.
+pub fn build(token: impl Into<String>) -> Result<(std::sync::Arc<dyn Compute>, Target)> {
+    Ok((std::sync::Arc::new(SpritesCompute::new(token)?), target()))
+}
+
 const PAGE_SIZE: u32 = 500;
 
 /// How long a wake keeps the Sprite up for its program to reconnect.
