@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use trailhead_factory::{AuthScheme, GatewayConnection, Labels};
 
-use super::{Gateway, policy, respond_with};
+use super::{BODY_IDLE_TIMEOUT, Gateway, policy, respond_with};
 
 /// The largest request body forwarded.
 const MAX_BODY: usize = 32 * 1024 * 1024;
@@ -141,7 +141,17 @@ impl Gateway {
         if body.len() < length {
             let have = body.len();
             body.resize(length, 0);
-            client.read_exact(&mut body[have..]).await?;
+            let mut filled = have;
+            while filled < length {
+                match tokio::time::timeout(BODY_IDLE_TIMEOUT, client.read(&mut body[filled..])).await {
+                    Ok(Ok(0)) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                    Ok(Ok(n)) => filled += n,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        return respond_with(client, 408, "text/plain", "timed out reading the request body").await;
+                    }
+                }
+            }
         }
         body.truncate(length);
 
@@ -403,6 +413,29 @@ mod tests {
             .iter()
             .map(|c| (c["provider"].as_str().unwrap().to_string(), c["gateway_base_url"].as_str().unwrap().to_string()))
             .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_request_body_times_out() {
+        let (gw, addr) = gateway(worker()).await;
+        connect(&gw, "anthropic", "an1", "http://127.0.0.1:1", AuthScheme::XApiKey, "sk-secret").await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"POST /v1/gateway/anthropic/an1/v1/messages HTTP/1.1\r\nContent-Length: 100\r\n\r\nabc")
+            .await
+            .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.starts_with("HTTP/1.1 408"), "{out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_request_head_times_out() {
+        let (_gw, addr) = gateway(worker()).await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /v1/gateway/list HTTP/1.1\r\nHost: x\r\n").await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.starts_with("HTTP/1.1 408"), "{out}");
     }
 
     #[tokio::test]

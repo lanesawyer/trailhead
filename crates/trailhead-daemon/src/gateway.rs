@@ -25,6 +25,11 @@ mod policy;
 /// The longest request head the proxy reads.
 const MAX_HEAD: usize = 64 * 1024;
 
+/// How long a client has to send a whole request head, and then how long a request body may sit idle between reads.
+/// Only the request side is bounded: responses stream with no total timeout.
+const HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const BODY_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Whether `domains` allow `host`: exact names and `*.` wildcards (subdomains only), trailing dots stripped from
 /// both sides, case ignored. An empty list allows nothing.
 pub fn allows(domains: &[String], host: &str) -> bool {
@@ -311,9 +316,13 @@ impl Gateway {
 
     async fn proxy(self: Arc<Self>, mut client: TcpStream) -> std::io::Result<()> {
         let local = client.local_addr()?.ip();
-        let (head, rest) = match read_head(&mut client).await? {
-            Some(h) => h,
-            None => return Ok(()),
+        let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client)).await;
+        let (head, rest) = match head {
+            Ok(read) => match read? {
+                Some(h) => h,
+                None => return Ok(()),
+            },
+            Err(_) => return respond(&mut client, 408, "timed out reading the request head").await,
         };
         if api::is_api_request(&head) {
             return self.api(&mut client, &head, rest).await;
