@@ -69,6 +69,7 @@ impl Factory {
             self.forget_install_opened(&sandbox);
             // Not handed out, so nothing else would clean it up before reconcile.
             self.status.sandbox_gone(&sandbox.name);
+            p.daemon.forget(&sandbox.id).await;
             if let Err(d) = p.compute.destroy(&sandbox.id).await {
                 tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
             }
