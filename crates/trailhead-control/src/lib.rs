@@ -157,6 +157,8 @@ pub struct Factory {
     install_opened: Mutex<HashMap<SandboxId, Vec<String>>>,
     /// How long each pooled sandbox's last warm checkpoint took, to weigh against its next prepare (TRAIL-707).
     warm_cost: Mutex<HashMap<SandboxId, Duration>>,
+    /// Consecutive failed prepares of each pooled sandbox, cleared by a good one (TRAIL-561).
+    prepare_failures: Mutex<HashMap<SandboxId, u32>>,
     /// The target each worker or review being started has been placed on, until it ends. Its sandbox may not exist yet, so
     /// without this a target's limit would be passed by runs starting together.
     placed: Arc<Mutex<HashMap<(TaskKey, trailhead_factory::Role), String>>>,
@@ -267,6 +269,7 @@ impl Factory {
             pool_pick: tokio::sync::Mutex::default(),
             install_opened: Mutex::default(),
             warm_cost: Mutex::default(),
+            prepare_failures: Mutex::default(),
             placed: Arc::default(),
             ledger: Arc::default(),
             capped: Mutex::default(),
