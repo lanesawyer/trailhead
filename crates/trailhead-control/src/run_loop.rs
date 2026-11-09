@@ -376,11 +376,12 @@ impl Factory {
         }
         let parked: Vec<&str> = holders.iter().filter(|(_, p)| *p).map(|(k, _)| k.0.as_str()).collect();
         let max_sandboxes = self.config.repo.max_sandboxes;
+        let tasks = if waiting == 1 { "task" } else { "tasks" };
         if parked_fill_repo_cap(parked.len(), max_sandboxes) {
             tracing::warn!(
                 held_by = parked.join(", "),
                 max_sandboxes,
-                "{waiting} ready tasks waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
+                "{waiting} ready {tasks} waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
             );
         } else {
             let held: Vec<String> = holders
@@ -390,7 +391,7 @@ impl Factory {
                     describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
                 })
                 .collect();
-            tracing::info!(max_sandboxes, "{waiting} ready tasks waiting; sandboxes held by {}", held.join(", "));
+            tracing::info!(max_sandboxes, "{waiting} ready {tasks} waiting; sandboxes held by {}", held.join(", "));
         }
         *last = Some(holders);
     }
