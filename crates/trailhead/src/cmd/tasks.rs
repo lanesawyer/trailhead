@@ -201,6 +201,7 @@ const FACTORY_FIELDS: &[(&str, Kind)] = &[
 #[derive(Clone, Copy)]
 enum Kind {
     Unsigned,
+    Unsigned64,
     Integer,
     String,
     Bool,
@@ -210,6 +211,7 @@ impl Kind {
     fn accepts(self, v: &Value) -> bool {
         match self {
             Kind::Unsigned => v.as_u64().is_some_and(|n| u32::try_from(n).is_ok()),
+            Kind::Unsigned64 => v.as_u64().is_some(),
             Kind::Integer => v.as_i64().is_some(),
             Kind::String => v.is_string(),
             Kind::Bool => v.is_boolean(),
@@ -218,7 +220,7 @@ impl Kind {
 
     fn name(self) -> &'static str {
         match self {
-            Kind::Unsigned => "a non-negative integer",
+            Kind::Unsigned | Kind::Unsigned64 => "a non-negative integer",
             Kind::Integer => "an integer",
             Kind::String => "a string",
             Kind::Bool => "true or false",
@@ -226,14 +228,36 @@ impl Kind {
     }
 }
 
-/// Rejects a value for a scalar `factory.<field>` key of the wrong kind, such as `factory.attempt_base=3x`, which
-/// the factory couldn't read back. `null` removes a field, so it always passes; nested paths, structured fields and
-/// unknown keys are left alone.
+/// Nested leaves under `factory`, by dotted path. `pr` is the one structured field whose leaves have a fixed kind.
+const FACTORY_NESTED: &[(&str, Kind)] = &[
+    ("pr.number", Kind::Unsigned64),
+    ("pr.url", Kind::String),
+    ("pr.repo.owner", Kind::String),
+    ("pr.repo.name", Kind::String),
+];
+
+/// Rejects a value for a known `factory.<field>` key (or nested leaf, like `factory.pr.number`) of the wrong kind,
+/// such as `factory.attempt_base=3x`, which the factory couldn't read back. A whole-object `factory={...}` value is
+/// checked leaf by leaf. `null` removes a field, so it always passes; other structured fields and unknown keys are
+/// left alone.
 fn check_factory_field(path: &str, value: &Value) -> Result<()> {
-    let Some(("factory", field)) = path.split_once('.') else {
-        return Ok(());
-    };
-    let Some((_, kind)) = FACTORY_FIELDS.iter().find(|(f, _)| *f == field) else {
+    match path.split_once('.') {
+        Some(("factory", field)) => check_factory_leaves(path, field, value),
+        None if path == "factory" => match value {
+            Value::Object(map) => map.iter().try_for_each(|(k, v)| check_factory_leaves(&format!("{path}.{k}"), k, v)),
+            _ => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+fn check_factory_leaves(path: &str, field: &str, value: &Value) -> Result<()> {
+    if let Value::Object(map) = value {
+        return map
+            .iter()
+            .try_for_each(|(k, v)| check_factory_leaves(&format!("{path}.{k}"), &format!("{field}.{k}"), v));
+    }
+    let Some((_, kind)) = FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == field) else {
         return Ok(());
     };
     if value.is_null() || kind.accepts(value) {
@@ -310,7 +334,7 @@ mod tests {
     fn factory_fields_match_run_update() {
         for (field, kind) in FACTORY_FIELDS {
             let sample = match kind {
-                Kind::Unsigned | Kind::Integer => json!(3),
+                Kind::Unsigned | Kind::Unsigned64 | Kind::Integer => json!(3),
                 Kind::String => json!("x"),
                 Kind::Bool => json!(true),
             };
@@ -386,5 +410,27 @@ mod tests {
         for key in STRUCTURED {
             assert!(map.contains_key(*key), "STRUCTURED lists {key}, which RunUpdate doesn't serialize");
         }
+    }
+
+    /// `FACTORY_NESTED` matches the leaves of `PrRef`.
+    #[test]
+    fn factory_nested_match_pr_ref() {
+        let pr = json!({ "repo": { "owner": "o", "name": "n" }, "number": 3, "url": "u" });
+        let parsed: trailhead_factory::PrRef = serde_json::from_value(pr.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), pr);
+        for (path, kind) in FACTORY_NESTED {
+            let leaf = path.strip_prefix("pr.").unwrap().split('.').fold(&pr, |v, k| &v[k]);
+            assert!(kind.accepts(leaf), "{path}");
+        }
+    }
+
+    #[test]
+    fn meta_patch_checks_whole_object_and_nested_factory_paths() {
+        let bad = |p: &str| meta_patch(&[p.to_string()]).unwrap_err().to_string();
+        assert!(bad(r#"factory={"attempt_base":"3x"}"#).contains("factory.attempt_base"));
+        assert!(bad("factory.pr.number=x").contains("factory.pr.number"));
+        assert!(bad(r#"factory={"pr":{"number":"x"}}"#).contains("factory.pr.number"));
+        assert!(meta_patch(&[r#"factory={"attempt_base":3,"pr":{"number":7},"other":"x"}"#.into()]).is_ok());
+        assert!(meta_patch(&["factory.pr=null".into(), "factory=null".into()]).is_ok());
     }
 }
