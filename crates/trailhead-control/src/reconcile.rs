@@ -109,7 +109,8 @@ impl Factory {
                     && t.run.released.is_none_or(|at| at <= 0)
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
             }) {
-                if t.run.worker_breach.as_ref().is_some_and(|b| b.stuck) {
+                // An earlier run's stuck flag outlives it in the run record, so only the current run's breach counts.
+                if t.run.worker_breach.as_ref().is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) {
                     stuck = true;
                 } else {
                     parked = true;
