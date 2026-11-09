@@ -202,8 +202,13 @@ mod tests {
     fn repos_with_different_compute_are_refused() {
         let a = spec("/a", "o", "alpha", "ALPHA", &[]);
         let mut b = spec("/b", "o", "beta", "BETA", &[]);
-        b.config.compute =
-            trailhead_factory::ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: None };
+        b.config.compute = trailhead_factory::ComputeConfig::Docker {
+            image: None,
+            network: None,
+            runtime: None,
+            memory_mib: None,
+            min_free_bytes: None,
+        };
         let err = validate(&[a, b]).unwrap_err().to_string();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("[factory.compute]"), "{err}");
     }
