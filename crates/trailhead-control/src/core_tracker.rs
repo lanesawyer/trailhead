@@ -152,35 +152,30 @@ impl CoreTracker {
     /// The unheld, unblocked in-review tasks of `project` (of the `queue`'s subtasks, when there is one) waiting on a
     /// rework, in priority order.
     async fn reworks(&self, ctx: &Ctx, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
-        let filter = TaskFilter {
+        let base = TaskFilter {
             project: Some(project.to_string()),
             statuses: vec![trailhead_core::Status::InReview],
             changes_requested: Some(true),
             ..TaskFilter::default()
         };
-        let mut waiting = self.list_all(ctx, filter).await?;
-        if !queue.is_empty() {
-            let mut queued = std::collections::HashSet::new();
+        // Under a queue, only the queue tasks' subtasks count, so the parent narrows the query itself.
+        let mut waiting = Vec::new();
+        if queue.is_empty() {
+            waiting = self.list_all(ctx, base).await?;
+        } else {
             for q in queue {
-                let filter = TaskFilter {
-                    project: Some(project.to_string()),
-                    parent: Some(q.0.clone()),
-                    ..TaskFilter::default()
-                };
-                queued.extend(self.list_all(ctx, filter).await?.into_iter().map(|t| t.id));
+                let filter = TaskFilter { parent: Some(q.0.clone()), ..base.clone() };
+                waiting.extend(self.list_all(ctx, filter).await?);
             }
-            waiting.retain(|t| queued.contains(&t.id));
+            let mut seen = std::collections::HashSet::new();
+            waiting.retain(|t| seen.insert(t.id));
         }
         let ids: Vec<_> = waiting.iter().map(|t| t.id).collect();
         let claims = self.store.live_claims(ctx, &ids).await.map_err(map_err)?;
-        let mut free = Vec::new();
-        for t in waiting.into_iter().filter(|t| !claims.contains_key(&t.id)) {
-            // A blocked task can't be claimed, so it isn't ready.
-            let detail = self.store.task_detail(ctx, &t.key).await.map_err(map_err)?;
-            if detail.blocked_by.is_empty() {
-                free.push(t);
-            }
-        }
+        // A blocked task can't be claimed, so it isn't ready.
+        let blocked = self.store.with_unfinished_blockers(&ids).await.map_err(map_err)?;
+        let free: Vec<_> =
+            waiting.into_iter().filter(|t| !claims.contains_key(&t.id) && !blocked.contains(&t.id)).collect();
         let mut tasks = self.tasks(ctx, free).await?;
         tasks.sort_by_key(|t| t.priority);
         Ok(tasks)
