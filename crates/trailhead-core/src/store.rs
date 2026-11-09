@@ -108,6 +108,9 @@ pub struct Store {
     changes: tokio::sync::watch::Sender<u64>,
 }
 
+/// How long [`Store::ping`] waits on a lock another process holds.
+const PING_BUSY: Duration = Duration::from_millis(300);
+
 pub(crate) struct ReadConn<'a> {
     conn: Option<Connection>,
     pool: Option<&'a std::sync::Mutex<Vec<Connection>>>,
@@ -203,13 +206,26 @@ impl Store {
     }
 
     /// Takes the write lock and an immediate transaction and reads one row, so it fails or stalls when the store
-    /// can't serve a claim. Callers bound it with a timeout.
+    /// can't serve a claim. It queues behind real writes, so callers bound the wait with a timeout. Another
+    /// process's lock is waited on for at most [`PING_BUSY`] rather than the usual five seconds: SQLite waits
+    /// inline, where a timeout around this future can't interrupt it.
     pub async fn ping(&self) -> Result<()> {
-        self.maintain(async |conn| {
-            conn.query("SELECT 1", ()).await?.next().await?;
-            Ok(())
-        })
-        .await
+        let conn = self.writer.lock().await;
+        conn.busy_timeout(PING_BUSY)?;
+        let out = match conn.transaction_with_behavior(TransactionBehavior::Immediate).await {
+            Ok(tx) => {
+                let read = tx.query("SELECT 1", ()).await;
+                let read = match read {
+                    Ok(mut rows) => rows.next().await.map(|_| ()),
+                    Err(e) => Err(e),
+                };
+                tx.rollback().await.ok();
+                read.map_err(Into::into)
+            }
+            Err(e) => Err(e.into()),
+        };
+        conn.busy_timeout(Duration::from_secs(5))?;
+        out
     }
 
     /// One immediate transaction outside any workspace, for maintenance that

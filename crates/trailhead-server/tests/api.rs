@@ -748,3 +748,22 @@ async fn task_list_can_include_the_last_review() {
     assert_eq!(items[0]["last_review"]["verdict"], "request_changes");
     assert!(items[1]["last_review"].is_null());
 }
+
+#[tokio::test]
+async fn health_reports_a_store_another_connection_has_locked() {
+    let api = Api::new().await;
+    let db = libsql::Builder::new_local(api._dir.path().join("t.db")).build().await.unwrap();
+    let other = db.connect().unwrap();
+    other.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let health = api.call(None, "GET", "/v1/health", None, &[]).await;
+    assert!(started.elapsed() < std::time::Duration::from_millis(1500), "{:?}", started.elapsed());
+    assert_eq!(health.status, StatusCode::OK);
+    assert_eq!(health.body["ok"], false);
+    assert!(health.body["store_error"].is_string(), "{}", health.body);
+
+    other.execute("ROLLBACK", ()).await.unwrap();
+    let health = api.call(None, "GET", "/v1/health", None, &[]).await;
+    assert_eq!(health.body["ok"], true);
+}

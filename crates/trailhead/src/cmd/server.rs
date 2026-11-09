@@ -39,6 +39,9 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                     parts.push(format!("up {}h {}m (since {since})", up.as_hours(), up.as_mins() % 60));
                 }
                 println!("{}", parts.join(" · "));
+                if info.ok == Some(false) {
+                    println!("store can't serve requests: {}", info.store_error.as_deref().unwrap_or("unknown error"));
+                }
                 if let Some(exe) = &info.exe {
                     println!("binary {}", exe.display());
                 }
