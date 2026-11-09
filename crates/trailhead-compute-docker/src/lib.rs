@@ -49,6 +49,9 @@ pub const MARKER: &str = "dev.trailhead.sandbox";
 pub const CHECKPOINT_OF: &str = "dev.trailhead.checkpoint-of";
 /// The label on checkpoint images holding the note they were taken with.
 pub const CHECKPOINT_NOTE: &str = "dev.trailhead.checkpoint-note";
+/// The label on checkpoint images holding, as a JSON array of `NAME=value`, the environment variables whose values
+/// have a line break: a Dockerfile `ENV` can't carry one, so a restore sets them on the container instead.
+const CHECKPOINT_ENV: &str = "dev.trailhead.checkpoint-env";
 /// The note of a pool's warm checkpoints, the only ones a later checkpoint may remove: the rest (a parked
 /// sandbox's) stay until the sandbox is destroyed.
 const WARM_NOTE: &str = "warm";
@@ -304,12 +307,12 @@ impl DockerCompute {
 
     /// Creates and starts the sandbox's container from `image`. A fresh image gets the supervisor first; a checkpoint
     /// already has it.
-    async fn run_container(&self, name: &str, image: &str, fresh: bool) -> Result<()> {
+    async fn run_container(&self, name: &str, image: &str, fresh: bool, extra_env: Vec<String>) -> Result<()> {
         let body = ContainerCreateBody {
             image: Some(image.into()),
             cmd: Some(vec![SUPERVISE_PATH.into()]),
             entrypoint: Some(vec![]),
-            env: Some(self.sandbox_env()),
+            env: Some([self.sandbox_env(), extra_env].concat()),
             labels: Some(HashMap::from([(MARKER.to_string(), name.to_string())])),
             host_config: Some(HostConfig {
                 init: Some(true),
@@ -493,7 +496,7 @@ impl Compute for DockerCompute {
         let state = State { labels: spec.labels.clone(), egress: spec.egress.clone() };
         self.write_state(&spec.name, &state).await?;
         self.attach(&spec.name, &state).await?;
-        match self.run_container(&spec.name, &self.config.image, true).await {
+        match self.run_container(&spec.name, &self.config.image, true, Vec::new()).await {
             // Lost a race with another create of the same name.
             Err(Error::Conflict(_)) => {}
             other => other?,
@@ -575,7 +578,8 @@ impl Compute for DockerCompute {
     /// Recreates the container from the checkpoint's image, keeping its name, labels and egress. Its programs start
     /// again from the image.
     async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()> {
-        self.docker.inspect_image(&cp.0).await.map_err(docker_err)?;
+        let image = self.docker.inspect_image(&cp.0).await.map_err(docker_err)?;
+        let multi_line = multi_line_env(image.config.as_ref().and_then(|c| c.labels.as_ref()));
         let _link = self.gateway().await?;
         let state = self.read_state(&id.0).await?;
         let opts = RemoveContainerOptions { force: true, ..Default::default() };
@@ -584,7 +588,7 @@ impl Compute for DockerCompute {
             _ => {}
         }
         self.attach(&id.0, &state).await?;
-        self.run_container(&id.0, &cp.0, false).await?;
+        self.run_container(&id.0, &cp.0, false, multi_line).await?;
         // The container no longer runs from the previous checkpoint, which checkpoint() couldn't remove while it did.
         if let Err(e) = self.prune_checkpoints(id, Some(cp)).await {
             tracing::warn!(sandbox = %id.0, error = %e, "couldn't remove old checkpoints after the restore");
@@ -758,13 +762,15 @@ pub fn shell_quote(s: &str) -> String {
 /// user, working directory and environment. (Its command and entrypoint are set again when it is restored.)
 fn image_changes(sandbox: &str, note: &str, config: Option<&ContainerConfig>) -> Vec<String> {
     // Docker joins the changes with newlines and parses them as a Dockerfile, so a line break would end the
-    // instruction early; turn each into a space.
+    // instruction early, and no escape keeps one (`\n` stays a backslash and an n); turn each into a space. An
+    // environment variable's value keeps its own through `CHECKPOINT_ENV`, whose JSON has none.
     let quote = |s: &str| {
         let s = s.replace(['\r', '\n'], " ");
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('$', "\\$"))
     };
     let mut out =
         vec![format!("LABEL {CHECKPOINT_OF}={}", quote(sandbox)), format!("LABEL {CHECKPOINT_NOTE}={}", quote(note))];
+    let mut multi_line = Vec::new();
     if let Some(config) = config {
         if let Some(user) = config.user.as_deref().filter(|u| !u.is_empty()) {
             out.push(format!("USER {user}"));
@@ -775,11 +781,23 @@ fn image_changes(sandbox: &str, note: &str, config: Option<&ContainerConfig>) ->
         for var in config.env.iter().flatten() {
             // Left out so a restore sets it afresh from the current `memory_mib`, and drops it once that is unset.
             if let Some((k, v)) = var.split_once('=').filter(|(k, _)| *k != BUILD_JOBS_VAR) {
-                out.push(format!("ENV {k}={}", quote(v)));
+                if v.contains(['\r', '\n']) {
+                    multi_line.push(var.clone());
+                } else {
+                    out.push(format!("ENV {k}={}", quote(v)));
+                }
             }
         }
     }
+    if !multi_line.is_empty() {
+        out.push(format!("LABEL {CHECKPOINT_ENV}={}", quote(&serde_json::to_string(&multi_line).unwrap_or_default())));
+    }
     out
+}
+
+/// The variables a checkpoint image's [`CHECKPOINT_ENV`] label carries, for the restored container to set.
+fn multi_line_env(labels: Option<&HashMap<String, String>>) -> Vec<String> {
+    labels.and_then(|l| l.get(CHECKPOINT_ENV)).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default()
 }
 
 /// The largest of `images` (the sandbox each is a checkpoint of, its size and its name) made by `sandbox`, or else the
@@ -1038,6 +1056,22 @@ mod tests {
             ]
         );
         assert_eq!(image_changes("t-w1", "warm", None).len(), 2);
+    }
+
+    #[test]
+    fn a_multi_line_env_value_rides_in_a_label_and_comes_back_whole() {
+        let value = "-----BEGIN-----\nabc \"q\" \\n $x\r\n-----END-----";
+        let config = ContainerConfig { env: Some(vec![format!("KEY={value}"), "A=b".into()]), ..Default::default() };
+        let changes = image_changes("t-w1", "warm", Some(&config));
+        assert!(changes.iter().all(|c| !c.contains(['\n', '\r'])));
+        assert!(!changes.iter().any(|c| c.starts_with("ENV KEY")));
+        assert!(changes.contains(&"ENV A=\"b\"".to_string()));
+        let label = changes.iter().find_map(|c| c.strip_prefix(&format!("LABEL {CHECKPOINT_ENV}="))).unwrap();
+        // Undo the Dockerfile quoting the way its parser does.
+        let unquoted = label[1..label.len() - 1].replace("\\\"", "\"").replace("\\$", "$").replace("\\\\", "\\");
+        let labels = HashMap::from([(CHECKPOINT_ENV.to_string(), unquoted)]);
+        assert_eq!(multi_line_env(Some(&labels)), [format!("KEY={value}")]);
+        assert!(multi_line_env(None).is_empty());
     }
 
     #[test]
