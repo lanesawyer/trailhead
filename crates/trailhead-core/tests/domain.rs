@@ -1473,3 +1473,20 @@ async fn changes_requested_is_computed_from_the_latest_verdict_and_handoff() {
     s.claim(&a, &t.key, None).await.unwrap();
     assert_eq!(s.release(&a, &t.key).await.unwrap().status, Status::Open);
 }
+
+#[tokio::test]
+async fn with_unfinished_blockers_names_only_tasks_held_up_by_open_blockers() {
+    let env = Env::new().await;
+    let open = env.task("open").await;
+    let finished = env.task("finished").await;
+    let held = env.task("held").await;
+    let freed = env.task("freed").await;
+    let free = env.task("free").await;
+    env.store.add_dependency(&env.human, &open.key, &held.key).await.unwrap();
+    env.store.add_dependency(&env.human, &finished.key, &freed.key).await.unwrap();
+    env.store.update_task(&env.human, &finished.key, status(Status::Done), None).await.unwrap();
+
+    let ids = [held.id, freed.id, free.id];
+    let blocked = env.store.with_unfinished_blockers(&ids).await.unwrap();
+    assert_eq!(blocked, std::collections::HashSet::from([held.id]));
+}
