@@ -1,10 +1,11 @@
-//! Creating a project from the sidebar's Projects heading: a modal with the project's key, name, brief, whether its
-//! work needs review, and how long a claim lasts.
+//! Creating a project from the sidebar's Projects heading, and editing one from its page: a modal with the project's
+//! key, name, brief, whether its work needs review, and how long a claim lasts. Editing shows the same form filled in,
+//! without the key, which can't change.
 //!
-//! As with the task form (`author`), the form is a resource, [`ProjectForm`], and [`create_request`] turns its draft
-//! into the one request that saves it; it is pure, so it is tested without a window. Saving sends a [`Submit`] with
-//! the modal as the source. An `Ok` closes the form and opens the new project's page; anything else stays on the form
-//! to be fixed. Nothing is applied locally: the event stream brings the project to the sidebar.
+//! As with the task form (`author`), the form is a resource, [`ProjectForm`], and [`request`] turns what is open into
+//! the one request that saves it; it is pure, so it is tested without a window. Saving sends a [`Submit`] with the
+//! modal as the source. An `Ok` closes the form (and opens a new project's page); anything else stays on the form to be
+//! fixed. Nothing is applied locally: the event stream brings the change to the sidebar and the page.
 
 use bevy::prelude::*;
 use bevy::text::EditableText;
@@ -12,13 +13,16 @@ use bevy::ui_widgets::Activate;
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 
+use trailhead_model::Project;
+
 use crate::author::describe;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
-use crate::project::OpenProject;
+use crate::mirror::Mirrored;
+use crate::project::{OpenProject, ProjectPage};
 use crate::widgets::{
-    ButtonKind, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, button, button_group, field,
-    open_modal, size, text_dim, text_input,
+    ButtonKind, InitialText, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, button, button_group,
+    field, open_modal, size, text_dim, text_input,
 };
 
 /// Lines tall the brief's box is.
@@ -40,10 +44,53 @@ pub struct ProjectDraft {
     pub claim_minutes: String,
 }
 
+/// What saving does: create a project, or change the one with `key`, as it was at `version` (sent as `If-Match`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Create,
+    Edit { key: String, version: i64 },
+}
+
+/// The form as it is open: what it saves to, what it started with, and what is typed now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectOpen {
+    pub target: Target,
+    /// So an edit sends only what changed.
+    pub original: ProjectDraft,
+    pub draft: ProjectDraft,
+}
+
+impl ProjectOpen {
+    pub fn create() -> Self {
+        ProjectOpen { target: Target::Create, original: ProjectDraft::default(), draft: ProjectDraft::default() }
+    }
+
+    /// An edit of `project`, as the mirror holds it.
+    pub fn edit(project: &Project) -> Self {
+        let draft = ProjectDraft {
+            key: project.key.clone(),
+            name: project.name.clone(),
+            brief: project.brief.clone(),
+            require_review: project.require_review,
+            claim_minutes: project.claim_ttl.map(|s| (s / 60).max(1).to_string()).unwrap_or_default(),
+        };
+        let target = Target::Edit { key: project.key.clone(), version: project.version };
+        ProjectOpen { target, original: draft.clone(), draft }
+    }
+
+    /// What the modal's heading says.
+    fn title(&self) -> String {
+        match &self.target {
+            Target::Create => "New project".into(),
+            Target::Edit { key, .. } => format!("Edit {key}"),
+        }
+    }
+}
+
 /// The form on screen. `generation` changes whenever it opens or closes, which is when the modal is redrawn.
 #[derive(Resource, Default, Debug)]
 pub struct ProjectForm {
-    pub draft: Option<ProjectDraft>,
+    pub open: Option<ProjectOpen>,
     /// The last refusal, or what is in progress.
     pub message: String,
     /// The save awaiting its answer, so it can't be sent twice.
@@ -52,13 +99,13 @@ pub struct ProjectForm {
 }
 
 impl ProjectForm {
-    pub fn open(&mut self) {
-        self.draft = Some(ProjectDraft::default());
+    pub fn open(&mut self, open: ProjectOpen) {
+        self.open = Some(open);
         self.reset();
     }
 
     pub fn close(&mut self) {
-        self.draft = None;
+        self.open = None;
         self.reset();
     }
 
@@ -81,32 +128,69 @@ fn key_of(draft: &ProjectDraft) -> String {
     draft.key.trim().to_ascii_uppercase()
 }
 
-/// The request that creates the project in `draft`, or why it can't be sent yet.
-pub fn create_request(draft: &ProjectDraft) -> Result<Request, String> {
-    let key = key_of(draft);
-    if !valid_key(&key) {
-        return Err("the key is 2 to 10 letters or digits, starting with a letter, e.g. TRAIL".into());
+/// The claim lease typed as minutes, in seconds: `None` when empty, for the workspace's default.
+fn lease_seconds(minutes: &str) -> Result<Option<u32>, String> {
+    let minutes = minutes.trim();
+    if minutes.is_empty() {
+        return Ok(None);
     }
-    let mut body = Map::new();
-    body.insert("key".into(), json!(key));
-    body.insert("name".into(), json!(draft.name.trim()));
-    body.insert("brief".into(), json!(draft.brief));
-    body.insert("require_review".into(), json!(draft.require_review));
-    let minutes = draft.claim_minutes.trim();
-    if !minutes.is_empty() {
-        match minutes.parse::<u32>() {
-            Ok(m) if (1..=MAX_CLAIM_MINUTES).contains(&m) => {
-                body.insert("claim_ttl".into(), json!(m * 60));
-            }
-            _ => return Err(format!("a claim lasts 1 to {MAX_CLAIM_MINUTES} minutes, or leave it empty")),
-        }
+    match minutes.parse::<u32>() {
+        Ok(m) if (1..=MAX_CLAIM_MINUTES).contains(&m) => Ok(Some(m * 60)),
+        _ => Err(format!("a claim lasts 1 to {MAX_CLAIM_MINUTES} minutes, or leave it empty")),
     }
-    Ok(Request::new(Method::POST, "/v1/projects", Some(Value::Object(body)), None))
 }
 
-/// The sidebar's button that opens the form.
+/// The request that saves `open`, or why it can't be sent yet.
+pub fn request(open: &ProjectOpen) -> Result<Request, String> {
+    let d = &open.draft;
+    match &open.target {
+        Target::Create => {
+            let key = key_of(d);
+            if !valid_key(&key) {
+                return Err("the key is 2 to 10 letters or digits, starting with a letter, e.g. TRAIL".into());
+            }
+            let mut body = Map::new();
+            body.insert("key".into(), json!(key));
+            body.insert("name".into(), json!(d.name.trim()));
+            body.insert("brief".into(), json!(d.brief));
+            body.insert("require_review".into(), json!(d.require_review));
+            if let Some(seconds) = lease_seconds(&d.claim_minutes)? {
+                body.insert("claim_ttl".into(), json!(seconds));
+            }
+            Ok(Request::new(Method::POST, "/v1/projects", Some(Value::Object(body)), None))
+        }
+        Target::Edit { key, version } => {
+            let o = &open.original;
+            let mut patch = Map::new();
+            if d.name.trim() != o.name {
+                patch.insert("name".into(), json!(d.name.trim()));
+            }
+            if d.brief != o.brief {
+                patch.insert("brief".into(), json!(d.brief));
+            }
+            if d.require_review != o.require_review {
+                patch.insert("require_review".into(), json!(d.require_review));
+            }
+            // Compared as typed: a lease the form shows rounded to minutes isn't sent back unless it was changed.
+            if d.claim_minutes.trim() != o.claim_minutes {
+                // `null` goes back to the workspace's default.
+                patch.insert("claim_ttl".into(), json!(lease_seconds(&d.claim_minutes)?));
+            }
+            if patch.is_empty() {
+                return Err("nothing changed".into());
+            }
+            Ok(Request::new(Method::PATCH, format!("/v1/projects/{key}"), Some(Value::Object(patch)), Some(*version)))
+        }
+    }
+}
+
+/// The sidebar's button that opens the form on a new project.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct NewProject;
+
+/// The project page's button that opens the form on the project it shows.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct EditProject;
 
 /// What a button of the form does.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -139,13 +223,15 @@ struct ReviewPick;
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ProjectFormMessage;
 
-/// The form's modal, and the source of its commands.
+/// The form's modal, and the source of its commands. `title` is what its heading says.
 #[derive(Component, Default)]
-pub struct ProjectFormPanel;
+pub struct ProjectFormPanel {
+    pub title: String,
+}
 
 impl Modal for ProjectFormPanel {
     fn title(&self) -> String {
-        "New project".into()
+        self.title.clone()
     }
 }
 
@@ -160,7 +246,23 @@ fn field_value(draft: &mut ProjectDraft, kind: FieldKind) -> &mut String {
 
 fn on_new_project(activate: On<Activate>, buttons: Query<(), With<NewProject>>, mut form: ResMut<ProjectForm>) {
     if buttons.contains(activate.entity) {
-        form.open();
+        form.open(ProjectOpen::create());
+    }
+}
+
+fn on_edit_project(
+    activate: On<Activate>,
+    buttons: Query<(), With<EditProject>>,
+    page: Res<ProjectPage>,
+    projects: Query<&Mirrored<Project>>,
+    mut form: ResMut<ProjectForm>,
+) {
+    if !buttons.contains(activate.entity) {
+        return;
+    }
+    let Some(key) = &page.0 else { return };
+    if let Some(project) = projects.iter().find(|p| p.0.key == *key) {
+        form.open(ProjectOpen::edit(&project.0));
     }
 }
 
@@ -178,7 +280,7 @@ fn on_form_act(
         FormAct::Cancel if !form.saving => form.close(),
         FormAct::Cancel => {}
         FormAct::Save => {
-            let Some(draft) = &form.draft else { return };
+            let Some(open) = &form.open else { return };
             if form.saving {
                 return;
             }
@@ -186,7 +288,7 @@ fn on_form_act(
                 form.message = "Not connected to the server; saving waits for Live.".into();
                 return;
             }
-            match create_request(draft) {
+            match request(open) {
                 Err(why) => form.message = why,
                 Ok(request) => {
                     let Ok(source) = panel.single() else { return };
@@ -203,8 +305,8 @@ fn on_review_pick(picked: On<Picked>, picks: Query<(), With<ReviewPick>>, mut fo
     if !picks.contains(picked.entity) {
         return;
     }
-    if let Some(draft) = &mut form.draft {
-        draft.require_review = picked.index == 1;
+    if let Some(open) = &mut form.open {
+        open.draft.require_review = picked.index == 1;
     }
 }
 
@@ -217,19 +319,19 @@ fn on_modal_closed(closed: On<ModalClosed>, panels: Query<(), With<ProjectFormPa
 
 /// Copies what is typed into the draft.
 fn read_fields(mut form: ResMut<ProjectForm>, fields: Query<(&ProjectField, &EditableText)>) {
-    let Some(draft) = &form.draft else { return };
-    let mut typed = draft.clone();
+    let Some(open) = &form.open else { return };
+    let mut typed = open.draft.clone();
     for (ProjectField(kind, generation), text) in &fields {
         if *generation == form.generation {
             *field_value(&mut typed, *kind) = text.value().to_string();
         }
     }
-    if typed != *draft {
-        form.draft = Some(typed);
+    if typed != open.draft {
+        form.open.as_mut().expect("checked above").draft = typed;
     }
 }
 
-/// The save's answer: `Ok` closes the form and opens the new project, anything else stays on it.
+/// The save's answer: `Ok` closes the form (and opens a new project), anything else stays on it.
 fn finish(
     mut done: MessageReader<CommandDone>,
     panel: Query<Entity, With<ProjectFormPanel>>,
@@ -241,8 +343,10 @@ fn finish(
             continue;
         }
         if matches!(d.outcome, Outcome::Ok { .. }) {
-            if let Some(draft) = &form.draft {
-                commands.trigger(OpenProject(key_of(draft)));
+            if let Some(open) = &form.open
+                && open.target == Target::Create
+            {
+                commands.trigger(OpenProject(key_of(&open.draft)));
             }
             form.close();
         } else {
@@ -258,7 +362,9 @@ pub struct ProjectFormPlugin;
 impl Plugin for ProjectFormPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ProjectForm>()
+            .init_resource::<ProjectPage>()
             .add_observer(on_new_project)
+            .add_observer(on_edit_project)
             .add_observer(on_form_act)
             .add_observer(on_review_pick)
             .add_observer(on_modal_closed)
@@ -289,18 +395,19 @@ fn redraw_form(
     for e in &panels {
         commands.entity(e).despawn();
     }
-    if form.draft.is_some() {
-        open_modal(&mut commands, ProjectFormPanel);
+    if let Some(open) = &form.open {
+        open_modal(&mut commands, ProjectFormPanel { title: open.title() });
     }
 }
 
-/// A text input for `kind`, `lines` high.
-fn input(kind: FieldKind, generation: u64, lines: f32) -> Box<dyn SceneList> {
-    // The key is the first thing to type, so the keyboard starts there.
-    if kind == FieldKind::Key {
-        Box::new(bsn_list! { @text_input(lines, bsn! { ProjectField(kind, generation) ModalFocus }) })
+/// A text input for `kind`, `lines` high, holding `initial` when it appears, with the keyboard in it when `focus`.
+fn input(kind: FieldKind, generation: u64, initial: String, lines: f32, focus: bool) -> Box<dyn SceneList> {
+    if focus {
+        Box::new(
+            bsn_list! { @text_input(lines, bsn! { ProjectField(kind, generation) InitialText(initial) ModalFocus }) },
+        )
     } else {
-        Box::new(bsn_list! { @text_input(lines, bsn! { ProjectField(kind, generation) }) })
+        Box::new(bsn_list! { @text_input(lines, bsn! { ProjectField(kind, generation) InitialText(initial) }) })
     }
 }
 
@@ -310,27 +417,37 @@ fn fill_form(
     form: Res<ProjectForm>,
     mut commands: Commands,
 ) {
-    let generation = form.generation;
+    let Some(open) = &form.open else { return };
+    let (d, generation) = (&open.draft, form.generation);
+    let creating = open.target == Target::Create;
     for slots in &new {
         let body = slots.body;
-        let text_field = |commands: &mut Commands, label: &str, kind: FieldKind, lines: f32| {
-            commands.queue_spawn_scene(field(label.to_string(), input(kind, generation, lines))).insert(ChildOf(body));
+        let text_field = |commands: &mut Commands, label: &str, kind: FieldKind, initial: &str, lines: f32| {
+            // The keyboard starts in the first field: the key for a new project, the name for an edit, whose key
+            // can't change.
+            let focus = kind == if creating { FieldKind::Key } else { FieldKind::Name };
+            let input = input(kind, generation, initial.to_string(), lines, focus);
+            commands.queue_spawn_scene(field(label.to_string(), input)).insert(ChildOf(body));
         };
-        text_field(&mut commands, "Key (e.g. TRAIL: its tasks are TRAIL-1, TRAIL-2…)", FieldKind::Key, 1.0);
-        text_field(&mut commands, "Name", FieldKind::Name, 1.0);
-        text_field(&mut commands, "Brief: what the project is for, for agents to read", FieldKind::Brief, BRIEF_LINES);
+        if creating {
+            text_field(&mut commands, "Key (e.g. TRAIL: its tasks are TRAIL-1, TRAIL-2…)", FieldKind::Key, &d.key, 1.0);
+        }
+        text_field(&mut commands, "Name", FieldKind::Name, &d.name, 1.0);
+        let brief = "Brief: what the project is for, for agents to read";
+        text_field(&mut commands, brief, FieldKind::Brief, &d.brief, BRIEF_LINES);
         let options = REVIEW_OPTIONS.iter().map(|o| (o.to_string(), None)).collect();
+        let review = Some(usize::from(d.require_review));
         commands
             .queue_spawn_scene(field(
                 "Review of finished work",
-                bsn_list! { @button_group(options, Some(0)) ReviewPick },
+                bsn_list! { @button_group(options, review) ReviewPick },
             ))
             .insert(ChildOf(body));
-        text_field(&mut commands, "Claim lease in minutes (empty for the default)", FieldKind::ClaimMinutes, 1.0);
+        let lease = "Claim lease in minutes (empty for the default)";
+        text_field(&mut commands, lease, FieldKind::ClaimMinutes, &d.claim_minutes, 1.0);
         let footer = slots.footer;
-        commands
-            .spawn_scene(bsn! { @button("Create", None, ButtonKind::Primary) FormAct::Save })
-            .insert(ChildOf(footer));
+        let save = if creating { "Create" } else { "Save" };
+        commands.spawn_scene(bsn! { @button(save, None, ButtonKind::Primary) FormAct::Save }).insert(ChildOf(footer));
         commands
             .spawn_scene(bsn! { @button("Cancel", None, ButtonKind::Normal) FormAct::Cancel })
             .insert(ChildOf(footer));
@@ -372,8 +489,55 @@ mod tests {
     use super::*;
     use crate::commands::{CommandId, CommandsPlugin, Outbox};
 
+    use crate::fixture::project;
+
     fn draft(key: &str) -> ProjectDraft {
         ProjectDraft { key: key.into(), name: " Trailhead ".into(), brief: "the task engine".into(), ..default() }
+    }
+
+    fn create_request(draft: &ProjectDraft) -> Result<Request, String> {
+        request(&ProjectOpen { draft: draft.clone(), ..ProjectOpen::create() })
+    }
+
+    fn creating(key: &str) -> ProjectOpen {
+        ProjectOpen { draft: draft(key), ..ProjectOpen::create() }
+    }
+
+    fn trail() -> Project {
+        project(serde_json::json!({"key": "TRAIL", "name": "Trailhead", "brief": "engine", "claim_ttl": 1800,
+                                   "version": 7}))
+    }
+
+    #[test]
+    fn edit_starts_filled_in_and_sends_only_what_changed_with_the_version_it_saw() {
+        let mut open = ProjectOpen::edit(&trail());
+        assert_eq!((open.draft.name.as_str(), open.draft.claim_minutes.as_str()), ("Trailhead", "30"));
+        assert_eq!(request(&open).unwrap_err(), "nothing changed");
+        open.draft.name = "Trailhead engine ".into();
+        open.draft.require_review = true;
+        let r = request(&open).unwrap();
+        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::PATCH, "/v1/projects/TRAIL", Some(7)));
+        assert_eq!(r.body, Some(json!({"name": "Trailhead engine", "require_review": true})));
+    }
+
+    #[test]
+    fn emptying_the_lease_goes_back_to_the_default() {
+        let mut open = ProjectOpen::edit(&trail());
+        open.draft.claim_minutes = "".into();
+        assert_eq!(request(&open).unwrap().body, Some(json!({"claim_ttl": null})));
+        open.draft.claim_minutes = "60".into();
+        assert_eq!(request(&open).unwrap().body, Some(json!({"claim_ttl": 3600})));
+        open.draft.claim_minutes = "lots".into();
+        assert!(request(&open).unwrap_err().contains("minutes"));
+    }
+
+    #[test]
+    fn a_lease_shown_rounded_is_not_sent_back_untouched() {
+        let mut odd = trail();
+        odd.claim_ttl = Some(90);
+        let open = ProjectOpen::edit(&odd);
+        assert_eq!(open.draft.claim_minutes, "1");
+        assert_eq!(request(&open).unwrap_err(), "nothing changed");
     }
 
     #[test]
@@ -431,11 +595,11 @@ mod tests {
         let mut app = app();
         let button = app.world_mut().spawn(NewProject).id();
         app.world_mut().trigger(Activate { entity: button });
-        assert!(app.world().resource::<ProjectForm>().draft.is_some());
-        app.world_mut().resource_mut::<ProjectForm>().draft = Some(draft("ops"));
+        assert_eq!(app.world().resource::<ProjectForm>().open.as_ref().unwrap().target, Target::Create);
+        app.world_mut().resource_mut::<ProjectForm>().open = Some(creating("ops"));
         app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
         app.update();
-        let panel = app.world_mut().spawn(ProjectFormPanel).id();
+        let panel = app.world_mut().spawn(ProjectFormPanel::default()).id();
         press(&mut app, FormAct::Save);
         let form = app.world().resource::<ProjectForm>();
         assert!(form.saving, "{}", form.message);
@@ -450,18 +614,17 @@ mod tests {
             outcome: Outcome::Ok { version: Some(1) },
         });
         app.update();
-        assert!(app.world().resource::<ProjectForm>().draft.is_none(), "an Ok closes the form");
+        assert!(app.world().resource::<ProjectForm>().open.is_none(), "an Ok closes the form");
         assert_eq!(app.world().resource::<Opened>().0.as_deref(), Some("OPS"));
     }
 
     #[test]
     fn a_refusal_stays_on_the_form_and_says_why() {
         let mut app = app();
-        app.world_mut().resource_mut::<ProjectForm>().open();
-        app.world_mut().resource_mut::<ProjectForm>().draft = Some(draft("OPS"));
+        app.world_mut().resource_mut::<ProjectForm>().open(creating("OPS"));
         app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
         app.update();
-        let panel = app.world_mut().spawn(ProjectFormPanel).id();
+        let panel = app.world_mut().spawn(ProjectFormPanel::default()).id();
         press(&mut app, FormAct::Save);
         app.world_mut().write_message(CommandDone {
             id: CommandId(0),
@@ -470,16 +633,29 @@ mod tests {
         });
         app.update();
         let form = app.world().resource::<ProjectForm>();
-        assert!(form.draft.is_some() && !form.saving);
+        assert!(form.open.is_some() && !form.saving);
         assert_eq!(form.message, "project key OPS is taken");
+    }
+
+    #[test]
+    fn edit_opens_the_form_on_the_project_the_page_shows() {
+        let mut app = app();
+        app.insert_resource(ProjectPage(Some("TRAIL".into())));
+        app.world_mut().spawn(Mirrored(trail()));
+        let button = app.world_mut().spawn(EditProject).id();
+        app.world_mut().trigger(Activate { entity: button });
+        let form = app.world().resource::<ProjectForm>();
+        let open = form.open.as_ref().unwrap();
+        assert_eq!(open.target, Target::Edit { key: "TRAIL".into(), version: 7 });
+        assert_eq!(open.title(), "Edit TRAIL");
     }
 
     #[test]
     fn picking_required_makes_review_required() {
         let mut app = app();
-        app.world_mut().resource_mut::<ProjectForm>().open();
+        app.world_mut().resource_mut::<ProjectForm>().open(ProjectOpen::create());
         let pick = app.world_mut().spawn(ReviewPick).id();
         app.world_mut().trigger(Picked { entity: pick, index: 1 });
-        assert!(app.world().resource::<ProjectForm>().draft.as_ref().unwrap().require_review);
+        assert!(app.world().resource::<ProjectForm>().open.as_ref().unwrap().draft.require_review);
     }
 }
