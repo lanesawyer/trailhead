@@ -344,3 +344,14 @@ async fn a_task_whose_sandbox_is_gone_is_placed_by_priority_again() {
     t.factory.tick().await.unwrap();
     assert_eq!(ran(&t.local, Role::Worker), vec![key.0.clone()]);
 }
+
+#[tokio::test]
+async fn the_spend_board_shows_without_a_pass_that_places_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = two_with(CAPPED, Some(spend_file(&dir, 5_000_000, &today())));
+    // Nothing is ready, so no pass reaches placement.
+    t.factory.tick().await.unwrap();
+    let board = t.factory.status().snapshot().targets;
+    assert_eq!(board.len(), 1, "{board:?}");
+    assert_eq!((board[0].target.as_str(), board[0].capped), ("cloud", true));
+}

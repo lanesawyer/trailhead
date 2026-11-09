@@ -176,6 +176,8 @@ impl Factory {
         keys: &mut HashMap<task::Id, TaskKey>,
         reviewing: usize,
     ) -> Result<()> {
+        // Before any early return, so the status board's spend keeps moving while the factory is full or paused.
+        self.capped();
         if self.usage_paused() {
             return Ok(());
         }
@@ -541,6 +543,7 @@ impl Factory {
 
     /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
     pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
+        self.capped();
         if self.usage_paused() {
             return Ok(Vec::new());
         }
