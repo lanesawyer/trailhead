@@ -118,7 +118,15 @@ fn created(body: impl Serialize) -> Response {
 )]
 async fn health(State(s): S, headers: HeaderMap) -> Json<Value> {
     let mut v = json!(s.info);
-    v["ok"] = json!(true);
+    // A store that is locked or stuck can't serve claims, so say so rather than reporting up. The status stays 200:
+    // the CLI reads any other as no server running.
+    let store = tokio::time::timeout(std::time::Duration::from_secs(2), s.store.ping()).await;
+    v["ok"] = json!(matches!(store, Ok(Ok(()))));
+    match store {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => v["store_error"] = json!(e.to_string()),
+        Err(_) => v["store_error"] = json!("the store did not answer in time"),
+    }
     if let Some(runs) = s.runs_in_flight.get() {
         v["runs_in_flight"] = json!(runs());
     }

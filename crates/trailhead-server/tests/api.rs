@@ -76,6 +76,7 @@ async fn health_is_open_and_everything_else_needs_a_token() {
     let health = api.call(None, "GET", "/v1/health", None, &[]).await;
     assert_eq!(health.status, StatusCode::OK);
     assert_eq!(health.body["ok"], true);
+    assert!(health.body.get("store_error").is_none(), "{}", health.body);
     assert!(health.body["version"].is_string());
     // The pid and paths name the local user, so they need a token.
     for k in ["pid", "exe", "exe_modified_ms", "db"] {

@@ -202,6 +202,16 @@ impl Store {
         self.transact(ctx, false, f).await
     }
 
+    /// Takes the write lock and an immediate transaction and reads one row, so it fails or stalls when the store
+    /// can't serve a claim. Callers bound it with a timeout.
+    pub async fn ping(&self) -> Result<()> {
+        self.maintain(async |conn| {
+            conn.query("SELECT 1", ()).await?.next().await?;
+            Ok(())
+        })
+        .await
+    }
+
     /// One immediate transaction outside any workspace, for maintenance that
     /// emits no events.
     pub(crate) async fn maintain<T>(&self, f: impl AsyncFnOnce(&Connection) -> Result<T>) -> Result<T> {
