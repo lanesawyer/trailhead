@@ -299,8 +299,12 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
     let opts = &opts;
     let (harnesses, providers) = (harnesses(), providers());
     let mut harness_secrets = HarnessSecrets::new();
-    if let (Some(token), CLAUDE_CODE) = (&opts.claude_oauth_token, adapter.as_str()) {
-        harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+    if let Some(token) = &opts.claude_oauth_token {
+        if adapter == CLAUDE_CODE {
+            harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+        } else {
+            tracing::warn!(harness = %adapter, "a Claude subscription token is set but this harness can't use it; ignoring it");
+        }
     }
     let baselines: Vec<_> = specs.iter().map(|spec| started_baseline(&spec.config)).collect();
     for spec in &mut specs {
