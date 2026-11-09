@@ -27,7 +27,7 @@ docker = ["factory", "trailhead-server/docker"]
 
 [dependencies]
 trailhead-factory-server = { workspace = true, optional = true }
-trailhead-client.workspace = true
+trailhead-client = { workspace = true, features = ["http"] }
 trailhead-core.workspace = true
 trailhead-server.workspace = true
 trailhead-log.workspace = true

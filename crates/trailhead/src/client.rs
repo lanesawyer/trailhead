@@ -25,6 +25,7 @@ pub struct Client {
     pub ours: bool,
     /// Where this server's tokens are saved on this machine.
     pub creds: CredStore,
+    api: trailhead_client::http::Client,
 }
 
 pub fn is_local(url: &Url) -> bool {
@@ -92,7 +93,8 @@ impl Client {
                 }
             }
         }
-        Ok(Client { http, base: base.clone(), token, local: is_local(&base), ours, creds })
+        let api = typed(&http, &base, &token, ours);
+        Ok(Client { http, base: base.clone(), token, local: is_local(&base), ours, creds, api })
     }
 
     /// Sends `req`. If the local server has gone away since `connect` (stopped, or
@@ -230,6 +232,11 @@ impl Client {
             }
         }
         Ok(out)
+    }
+
+    /// The typed client, for the commands moved onto it.
+    pub fn api(&self) -> &trailhead_client::http::Client {
+        &self.api
     }
 
     pub async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
@@ -710,5 +717,32 @@ mod sse_tests {
         assert_eq!(take_sse_frame(&mut buf).unwrap().data, "a\nb");
         assert_eq!(take_sse_frame(&mut buf).unwrap().data, "c");
         assert_eq!(take_sse_frame(&mut buf), None);
+    }
+}
+
+/// A typed client for the server at `base`. Like [`Client::send`], it starts this machine's server again if it has gone
+/// away.
+fn typed(http: &reqwest::Client, base: &Url, token: &str, ours: bool) -> trailhead_client::http::Client {
+    let root = base.join("/").map_or_else(|_| base.to_string(), String::from);
+    let api = trailhead_client::http::Client::new(root, token);
+    if !ours {
+        return api;
+    }
+    let (http, base) = (http.clone(), base.clone());
+    api.with_reconnect(std::sync::Arc::new(move || {
+        let (http, base) = (http.clone(), base.clone());
+        Box::pin(async move {
+            eprintln!("note: the local server isn't running; starting it");
+            start_local_server(&http, &base).await.is_ok()
+        })
+    }))
+}
+
+/// A typed client's error as the CLI's: an API error keeps its stable code, which `main` prints.
+pub fn api_err(e: trailhead_client::http::Error) -> anyhow::Error {
+    use trailhead_client::http::Error;
+    match e {
+        Error::Api { error, .. } => error.into(),
+        Error::Transport(e) => anyhow::Error::new(e).context("request to Trailhead failed"),
     }
 }
