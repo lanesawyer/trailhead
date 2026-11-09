@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
-use trailhead_factory::{EventSink, Feedback, Harness, Result, Role, RunContext, RunEvent, RunOutcome, Usage};
+use trailhead_factory::{
+    EventSink, Feedback, Harness, HarnessKind, Registry, Result, Role, RunContext, RunEvent, RunOutcome, Usage,
+};
 
 /// What a scripted agent does in one run: a model call per step, then an outcome.
 #[derive(Debug, Clone)]
@@ -53,6 +55,16 @@ impl Script {
         self.steps.extend((0..n).map(|_| Usage { output_tokens: tokens, ..Usage::default() }));
         self
     }
+}
+
+/// The `adapter` name the scripted harness is registered under in [`harnesses`].
+pub const SCRIPTED: &str = "scripted";
+
+/// The build's harness registry plus the scripted harness as `scripted`, so a profile can select it by name. One built
+/// from the registry has no scripts queued, so every run fails with "no script for <role>".
+pub fn harnesses() -> Registry<HarnessKind> {
+    trailhead_plugins::harnesses()
+        .with(SCRIPTED, HarnessKind { build: |_| Arc::new(ScriptedHarness::new()), egress: |_| Vec::new() })
 }
 
 /// Plays a script per role; each run takes the next script queued for its role.
@@ -122,5 +134,67 @@ impl Harness for ScriptedHarness {
     async fn resume(&self, ctx: RunContext, feedback: Feedback, events: EventSink) -> Result<RunOutcome> {
         self.feedbacks.lock().unwrap().push(feedback);
         self.run(ctx, events).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use trailhead_factory::{FactoryConfig, HarnessSetup, ModelId, TaskKey, TaskSpec};
+
+    use super::*;
+
+    const CONFIG: &str = r#"
+[repo]
+owner = "o"
+name = "n"
+
+[profiles.worker]
+role = "worker"
+adapter = "scripted"
+provider = "anthropic"
+model = "sonnet"
+budget = { usd = 5, minutes = 60, steps = 40 }
+
+[profiles.reviewer]
+role = "reviewer"
+adapter = "scripted"
+provider = "anthropic"
+model = "opus"
+budget = { usd = 2, minutes = 20, steps = 20 }
+"#;
+
+    #[tokio::test]
+    async fn a_profile_selects_the_scripted_harness_by_name() {
+        let config = FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap();
+        let (known, providers) = (harnesses(), trailhead_plugins::providers());
+        config.check_plugins(&known.names(), &providers.names()).unwrap();
+        let (adapter, _) = config.plugins().unwrap();
+        assert_eq!(adapter, SCRIPTED);
+
+        let kind = known.get(adapter).unwrap();
+        assert!((kind.egress)(&Default::default()).is_empty());
+        let harness = (kind.build)(&HarnessSetup { executable: "unused".into(), secrets: Default::default() });
+        let ctx = RunContext {
+            role: Role::Worker,
+            task: TaskSpec {
+                key: TaskKey("TRAIL-1".into()),
+                title: "t".into(),
+                description: String::new(),
+                previous_failure: None,
+                context: Default::default(),
+            },
+            workdir: ".".into(),
+            model: ModelId("sonnet".into()),
+            endpoint: trailhead_factory::Endpoint { base_url: String::new() },
+            max_steps: 1,
+            diff: None,
+            checks: Vec::new(),
+            title: None,
+            base_branch: None,
+            env: Default::default(),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = harness.run(ctx, tx).await.unwrap();
+        assert_eq!(outcome, RunOutcome::Failed { reason: "no script for worker".into() });
     }
 }
