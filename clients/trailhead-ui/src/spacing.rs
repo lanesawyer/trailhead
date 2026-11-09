@@ -70,8 +70,14 @@ pub mod radius {
 
 /// How big a panel is and where it sits.
 pub mod extent {
-    /// An app's sidebar, down the left of the window.
+    /// An app's sidebar, down the left of the window, until its edge is dragged.
     pub const SIDEBAR_WIDTH: f32 = 220.0;
+    /// The narrowest a sidebar is dragged to: its places' names and its footer still read.
+    pub const SIDEBAR_MIN_WIDTH: f32 = 200.0;
+    /// The widest a sidebar is dragged to, so it never crowds out the page beside it.
+    pub const SIDEBAR_MAX_WIDTH: f32 = 500.0;
+    /// How wide the strip along a sidebar's edge that drags it is, half over the sidebar and half over the page.
+    pub const DRAG_EDGE: f32 = 6.0;
     /// A panel down the right of the window, beside the page: an inspector.
     pub const SIDE_PANEL_WIDTH: f32 = 360.0;
     /// A modal's width, unless its kind says otherwise.
@@ -91,6 +97,8 @@ pub mod extent {
 pub mod stroke {
     /// The thinnest line: a border, a divider.
     pub const HAIRLINE: f32 = 1.0;
+    /// The line a drag edge shows under the pointer and while dragged.
+    pub const GRIP: f32 = 2.0;
 }
 
 #[cfg(test)]

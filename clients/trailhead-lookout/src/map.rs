@@ -355,7 +355,7 @@ struct Token {
 }
 
 fn spawn_panel(mut commands: Commands) {
-    commands.spawn((Name::new("trail map"), MapPanel, crate::widgets::beside_sidebar()));
+    commands.spawn((Name::new("trail map"), MapPanel, crate::widgets::beside_sidebar(), crate::widgets::BesideSidebar));
 }
 
 fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<MapPanel>>) {
