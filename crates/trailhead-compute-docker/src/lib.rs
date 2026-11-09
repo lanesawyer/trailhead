@@ -93,8 +93,8 @@ pub const DEFAULT_MIN_FREE_BYTES: u64 = 10 << 30;
 /// How many times its size a checkpoint takes while it is imported: the containerd snapshotter keeps an import as a
 /// content blob and again as an unpacked snapshot (`docker system df` showed twice the sizes' sum).
 const IMPORT_COPIES: u64 = 2;
-/// How many sandboxes may be checkpointing at once, which the free disk has to cover.
-const CONCURRENT_CHECKPOINTS: u64 = 2;
+/// How many sandboxes may be checkpointing at once by default (`DockerConfig::concurrent_checkpoints`).
+pub const DEFAULT_CONCURRENT_CHECKPOINTS: u64 = 2;
 
 /// How long `start` watches a new program for an early exit.
 const START_WATCH: Duration = Duration::from_secs(3);
@@ -117,6 +117,8 @@ pub struct DockerConfig {
     pub connections: Vec<GatewayConnection>,
     /// The least free space the Docker engine's disk may have when a run is about to start.
     pub min_free_bytes: u64,
+    /// How many sandboxes may checkpoint at once, which the free-disk check reserves room for: set it to the pool size.
+    pub concurrent_checkpoints: u64,
     /// Each sandbox's memory limit, swap included. None leaves sandboxes unlimited, so concurrent builds can take each
     /// other's memory and the engine's OOM killer picks among them. Also sets `CARGO_BUILD_JOBS` ([`build_jobs`]).
     pub memory_bytes: Option<u64>,
@@ -133,6 +135,7 @@ impl DockerConfig {
             daemon,
             connections: Vec::new(),
             min_free_bytes: DEFAULT_MIN_FREE_BYTES,
+            concurrent_checkpoints: DEFAULT_CONCURRENT_CHECKPOINTS,
             memory_bytes: None,
         }
     }
@@ -645,7 +648,7 @@ impl Compute for DockerCompute {
         // largest checkpoint image, or the host's largest while it has none.
         let checkpoint = self.largest_checkpoint(id).await;
         let size = checkpoint.as_ref().map_or(fs, |(big, _)| fs.max(*big));
-        let need = disk_needed(self.config.min_free_bytes, size);
+        let need = disk_needed(self.config.min_free_bytes, self.config.concurrent_checkpoints, size);
         if free < need {
             return Err(Error::Unavailable(disk_short(&id.0, free, need, fs, checkpoint.as_ref())));
         }
@@ -731,9 +734,9 @@ fn pick_checkpoint(sandbox: &str, images: Vec<(Option<&str>, u64, String)>) -> O
 }
 
 /// The free disk a sandbox whose filesystem is `size` bytes needs before a run: its checkpoint is imported as
-/// [`IMPORT_COPIES`] copies of it, for as many sandboxes as may checkpoint together, and never less than `floor`.
-fn disk_needed(floor: u64, size: u64) -> u64 {
-    floor.max(size.saturating_mul(IMPORT_COPIES * CONCURRENT_CHECKPOINTS))
+/// [`IMPORT_COPIES`] copies of it, for `concurrent` sandboxes checkpointing together, and never less than `floor`.
+fn disk_needed(floor: u64, concurrent: u64, size: u64) -> u64 {
+    floor.max(size.saturating_mul(IMPORT_COPIES.saturating_mul(concurrent)))
 }
 
 /// How many parallel build jobs fit in `memory_bytes`: one per GiB (a rust-lld link or rustc codegen unit can take that
@@ -1000,9 +1003,11 @@ mod tests {
     #[test]
     fn the_disk_a_checkpoint_needs_follows_the_filesystem() {
         let gib = 1u64 << 30;
-        assert_eq!(disk_needed(10 * gib, gib), 10 * gib, "the floor holds for a small filesystem");
-        assert_eq!(disk_needed(10 * gib, 14 * gib), 56 * gib, "twice over, for two sandboxes");
-        assert_eq!(disk_needed(10 * gib, u64::MAX), u64::MAX);
+        assert_eq!(disk_needed(10 * gib, 2, gib), 10 * gib, "the floor holds for a small filesystem");
+        assert_eq!(disk_needed(10 * gib, 2, 14 * gib), 56 * gib, "twice over, for two sandboxes");
+        assert_eq!(disk_needed(10 * gib, 1, 14 * gib), 28 * gib, "one sandbox needs half that");
+        assert_eq!(disk_needed(10 * gib, 4, 14 * gib), 112 * gib, "and four twice that");
+        assert_eq!(disk_needed(10 * gib, 2, u64::MAX), u64::MAX);
     }
 
     #[test]

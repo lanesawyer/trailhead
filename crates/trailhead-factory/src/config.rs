@@ -198,6 +198,9 @@ pub enum ComputeConfig {
         /// The least free disk, in bytes, the engine may have when a run starts; a floor, since a big sandbox needs
         /// more. Defaults to 10 GiB.
         min_free_bytes: Option<u64>,
+        /// How many sandboxes may checkpoint at once, which the free-disk check reserves room for. Defaults to 2; set it
+        /// to the pool size (`max_sandboxes`) for a pool that is not two.
+        concurrent_checkpoints: Option<u64>,
     },
 }
 
@@ -248,6 +251,7 @@ struct RawTarget {
     runtime: Option<String>,
     memory_mib: Option<u64>,
     min_free_bytes: Option<u64>,
+    concurrent_checkpoints: Option<u64>,
 }
 
 impl TryFrom<RawTarget> for TargetConfig {
@@ -263,6 +267,7 @@ impl TryFrom<RawTarget> for TargetConfig {
                     ("runtime", raw.runtime.is_some()),
                     ("memory_mib", raw.memory_mib.is_some()),
                     ("min_free_bytes", raw.min_free_bytes.is_some()),
+                    ("concurrent_checkpoints", raw.concurrent_checkpoints.is_some()),
                 ];
                 if let Some((key, _)) = docker_only.iter().find(|(_, set)| *set) {
                     return Err(format!("`{key}` is a setting of kind = \"docker\", not \"sprites\""));
@@ -275,6 +280,7 @@ impl TryFrom<RawTarget> for TargetConfig {
                 runtime: raw.runtime,
                 memory_mib: check_memory_mib(raw.memory_mib)?,
                 min_free_bytes: raw.min_free_bytes,
+                concurrent_checkpoints: raw.concurrent_checkpoints,
             },
             other => return Err(format!("unknown kind `{other}`; the kinds are sprites and docker")),
         };
@@ -1309,7 +1315,8 @@ require = ["checks", "agent_review", "human"]
                 network: None,
                 runtime: None,
                 memory_mib: Some(4096),
-                min_free_bytes: None
+                min_free_bytes: None,
+                concurrent_checkpoints: None
             }
         );
         assert_eq!((specs[2].compute.clone(), specs[2].max_sandboxes), (ComputeConfig::Sprites, Some(4)));
@@ -1372,7 +1379,8 @@ require = ["checks", "agent_review", "human"]
                 network: None,
                 runtime: Some("runsc".into()),
                 memory_mib: None,
-                min_free_bytes: None
+                min_free_bytes: None,
+                concurrent_checkpoints: None
             }
         );
         let sized = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 1536\n");
@@ -1383,7 +1391,8 @@ require = ["checks", "agent_review", "human"]
                 network: None,
                 runtime: None,
                 memory_mib: Some(1536),
-                min_free_bytes: None
+                min_free_bytes: None,
+                concurrent_checkpoints: None
             }
         );
         for mib in [0, 511] {
@@ -1397,6 +1406,11 @@ require = ["checks", "agent_review", "human"]
         let floor = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmin_free_bytes = 21474836480\n");
         let ComputeConfig::Docker { min_free_bytes, .. } = parse(&floor).unwrap().compute else { panic!("not docker") };
         assert_eq!(min_free_bytes, Some(20 << 30));
+        let pool = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nconcurrent_checkpoints = 4\n");
+        let ComputeConfig::Docker { concurrent_checkpoints, .. } = parse(&pool).unwrap().compute else {
+            panic!("not docker")
+        };
+        assert_eq!(concurrent_checkpoints, Some(4));
         let sprites = format!("{SAMPLE}\n[targets.t]\nkind = \"sprites\"\nmin_free_bytes = 1\n");
         assert!(matches!(parse(&sprites), Err(Error::Config(_))));
         let least = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 512\n");
