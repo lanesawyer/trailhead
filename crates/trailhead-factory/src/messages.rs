@@ -7,7 +7,7 @@
 //! and the feedback a rework's worker is given.
 
 use crate::{
-    CheckResult, GateKind, Grade, MergeDecision, MergedBy, ModelId, PrGrade, TaskKey, Usd, Verdict, VerdictKind,
+    CheckResult, GateKind, Grade, MergeDecision, MergedBy, ModelId, PrGrade, Said, TaskKey, Usd, Verdict, VerdictKind,
     raised_by,
 };
 
@@ -47,6 +47,15 @@ pub fn decision_message(grade: &PrGrade, d: &MergeDecision, said: Wording) -> St
         Some(Rework::Pushed) => format!("{message} The latest review asked for changes; the rework has pushed."),
         None => message,
     }
+}
+
+/// The merger's status comment: the current `message`, then a short timestamped History once the status has changed.
+pub fn status_comment(message: &str, history: &[Said]) -> String {
+    if history.len() < 2 {
+        return message.to_string();
+    }
+    let lines: Vec<String> = history.iter().map(|s| format!("- {}: {}", s.at, s.message)).collect();
+    format!("{message}\n\nHistory:\n{}", lines.join("\n"))
 }
 
 fn gate_message(grade: &PrGrade, d: &MergeDecision, said: &Wording) -> String {
@@ -627,6 +636,7 @@ mod tests {
             refused: None,
             comment: None,
             message: String::new(),
+            history: vec![],
         }
     }
 
