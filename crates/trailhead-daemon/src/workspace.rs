@@ -361,12 +361,23 @@ fn parse_df_used(out: &str) -> Option<u64> {
 }
 
 /// The files a unified diff adds a `<<<<<<<` or `>>>>>>>` line to.
+///
+/// A file's name is read only from its header, between its `diff --git` line and its first hunk, so an added line
+/// that happens to read `+++ ...` is never taken for one.
 fn marker_files(diff: &str) -> Vec<String> {
     let mut files: Vec<String> = Vec::new();
     let mut file = None;
+    let mut in_header = false;
     for line in diff.lines() {
-        if let Some(name) = line.strip_prefix("+++ ") {
-            file = Some(name.strip_prefix("b/").unwrap_or(name).to_string());
+        if line.starts_with("diff --git ") {
+            in_header = true;
+            file = None;
+        } else if in_header {
+            if let Some(name) = line.strip_prefix("+++ ") {
+                file = diff_path(name.strip_suffix('\t').unwrap_or(name));
+            } else if line.starts_with("@@") {
+                in_header = false;
+            }
         } else if let Some(added) = line.strip_prefix('+')
             && (added.starts_with("<<<<<<<") || added.starts_with(">>>>>>>"))
             && let Some(file) = &file
@@ -376,6 +387,48 @@ fn marker_files(diff: &str) -> Vec<String> {
         }
     }
     files
+}
+
+/// The path on a `+++` header: git quotes unusual ones C-style, and prefixes the new side with `b/`.
+fn diff_path(name: &str) -> Option<String> {
+    let name = match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
+        Some(quoted) => unquote(quoted),
+        None => name.to_string(),
+    };
+    if name == "/dev/null" {
+        return None;
+    }
+    Some(name.strip_prefix("b/").map(str::to_string).unwrap_or(name))
+}
+
+/// Undoes git's C-style quoting of a path (`\"`, `\\`, `\t`, `\n`, and `\ooo` octal bytes).
+fn unquote(s: &str) -> String {
+    let mut out = Vec::new();
+    let mut bytes = s.bytes().peekable();
+    while let Some(b) = bytes.next() {
+        if b != b'\\' {
+            out.push(b);
+            continue;
+        }
+        match bytes.next() {
+            Some(d @ b'0'..=b'7') => {
+                let mut n = u32::from(d - b'0');
+                for _ in 0..2 {
+                    match bytes.next_if(|c| (b'0'..=b'7').contains(c)) {
+                        Some(c) => n = n * 8 + u32::from(c - b'0'),
+                        None => break,
+                    }
+                }
+                out.push(n as u8);
+            }
+            Some(b'n') => out.push(b'\n'),
+            Some(b't') => out.push(b'\t'),
+            Some(b'r') => out.push(b'\r'),
+            Some(other) => out.push(other),
+            None => out.push(b'\\'),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn tail(mut s: String) -> String {
@@ -391,7 +444,30 @@ fn tail(mut s: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{oom_killed, parse_df_used};
+    use super::{marker_files, oom_killed, parse_df_used};
+
+    #[test]
+    fn marker_files_names_the_right_file() {
+        let diff = [
+            "diff --git a/a.txt b/a.txt",
+            "--- a/a.txt",
+            "+++ b/a.txt",
+            "@@ -0,0 +2 @@",
+            "++ not a header",
+            "+<<<<<<< HEAD",
+            r#"diff --git "a/q \"x.txt" "b/q \"x.txt""#,
+            r#"--- "a/q \"x.txt""#,
+            r#"+++ "b/q \"x.txt""#,
+            "@@ -0,0 +1 @@",
+            "+>>>>>>> main",
+            "diff --git a/c d.txt b/c d.txt",
+            "+++ b/c d.txt\t",
+            "@@ -0,0 +1 @@",
+            "+fine",
+        ]
+        .join("\n");
+        assert_eq!(marker_files(&diff), vec!["a.txt".to_string(), "q \"x.txt".to_string()]);
+    }
 
     #[test]
     fn an_oom_kill_is_told_apart_from_other_failures() {
