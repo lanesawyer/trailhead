@@ -42,7 +42,15 @@ fn two() -> Two {
 
 /// `two` with the given target tables, and the file its factory keeps the day's spend in.
 fn two_with(targets: &str, spend_file: Option<std::path::PathBuf>) -> Two {
-    let config = CONFIG.replace("name = \"trailhead\"\n", "name = \"trailhead\"\nmax_sandboxes = 3\n");
+    two_sized(targets, spend_file, 3)
+}
+
+/// `two_with` where the repo holds at most `max_sandboxes` sandboxes across its targets.
+fn two_sized(targets: &str, spend_file: Option<std::path::PathBuf>, max_sandboxes: u32) -> Two {
+    let config =
+        CONFIG.replace("name = \"trailhead\"\n", &format!("name = \"trailhead\"\nmax_sandboxes = {max_sandboxes}\n"));
+    // Paused-clock tests move time past the default stall limit while a run waits.
+    let config = config.replace("[profiles.worker]\n", "[profiles.worker]\nstall_timeout = 600\n");
     let config = FactoryConfig::parse_table(&format!("{config}{targets}"), "TRAIL", None).unwrap();
     let tracker = FakeTracker::new("factory");
     let codehost = FakeCodeHost::new();
@@ -369,4 +377,61 @@ async fn the_spend_board_shows_while_the_factory_is_full() {
     assert_eq!(board.len(), 1, "{board:?}");
     assert_eq!((board[0].target.as_str(), board[0].capped), ("cloud", true));
     assert_eq!((board[0].spent, board[0].cap), (Usd(5_000_000), Usd(5_000_000)));
+}
+
+const FULL: &str = r#"
+[targets.local]
+kind = "docker"
+priority = 1
+max_sandboxes = 1
+
+[targets.cloud]
+kind = "sprites"
+priority = 2
+max_sandboxes = 1
+daily_usd = 5
+"#;
+
+/// The spend file's count for `target`, in microdollars, 0 before the file exists.
+fn saved_spend(path: &std::path::Path, target: &str) -> u64 {
+    let Ok(text) = std::fs::read_to_string(path) else { return 0 };
+    let day: serde_json::Value = serde_json::from_str(&text).unwrap();
+    day["spent"][target].as_u64().unwrap_or(0)
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_spend_file_is_saved_on_a_pass_while_every_sandbox_is_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spend.json");
+    let t = two_sized(FULL, Some(path.clone()), 2);
+    // Local's one place is held for no running task, so the run goes to cloud; with it, the repo's cap of 2 is full.
+    let labels = Labels::from([
+        (label::FACTORY.into(), "trailhead".into()),
+        (label::REPO.into(), "lanesawyer/trailhead".into()),
+        (label::POOL.into(), "worker".into()),
+        (label::STATE.into(), label::BUSY.into()),
+        (label::TARGET.into(), "local".into()),
+    ]);
+    let spec = SandboxSpec { name: "trailhead-held".into(), labels, egress: Default::default() };
+    t.local.compute.create(&spec).await.unwrap();
+    let key = t.tracker.add_task("TRAIL", "Long", "");
+    // The run waits on a gate, so it is live on cloud while the pass below runs.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    t.cloud.harness.push(Role::Worker, Script::new(changes()).wait_for(gate.clone()));
+    t.cloud.harness.push(Role::Reviewer, Script::new(approve()));
+    let task = t.tracker.task(&key);
+    let check = async {
+        until("the worker to start", || !ran(&t.cloud, Role::Worker).is_empty()).await;
+        assert_eq!(saved_spend(&path, "cloud"), 0, "nothing counted yet");
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        // A pass with no room: no new run starts, but the time the cloud run has held its sandbox is saved.
+        t.tracker.add_task("TRAIL", "Waiting", "");
+        t.factory.tick().await.unwrap();
+        let saved = saved_spend(&path, "cloud");
+        gate.notify_one();
+        saved
+    };
+    let (run, saved) = tokio::join!(t.factory.run_task(&task), check);
+    run.unwrap();
+    assert!(saved > 0, "a pass while full saved the cloud run's time so far");
 }

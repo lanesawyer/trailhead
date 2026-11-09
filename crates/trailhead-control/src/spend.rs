@@ -78,15 +78,6 @@ impl Ledger {
         }
     }
 
-    /// Counts the time live runs have held sandboxes so far and saves it, so a crash or restart mid-run forgets
-    /// little. Called every pass of the run loop, whether or not a sandbox is free or a target has a cap.
-    pub(crate) fn checkpoint(&self, now: Instant, today: &str) {
-        let mut state = self.state.lock().unwrap();
-        if Self::accrue(&mut state, now, today) {
-            self.save(&state.day);
-        }
-    }
-
     /// What `target` has cost today so far, counting the runs still going.
     pub(crate) fn spent(&self, target: &str, now: Instant, today: &str) -> Usd {
         let mut state = self.state.lock().unwrap();
@@ -178,19 +169,6 @@ mod tests {
         let now = t0 + Duration::from_secs(1800);
         assert_eq!(Ledger::kept_in(path.clone(), "d1").spent("sprites", now, "d1"), Usd::dollars(0.5));
         assert_eq!(Ledger::kept_in(path, "d2").spent("sprites", now, "d2"), Usd::ZERO);
-    }
-
-    #[tokio::test]
-    async fn a_checkpoint_saves_time_counted_so_far() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("spend.json");
-        let ledger = Ledger::kept_in(path.clone(), "d1");
-        let t0 = Instant::now();
-        ledger.begin(key("T-1"), "sprites", Usd::dollars(1.0), t0);
-        let now = t0 + Duration::from_secs(1800);
-        ledger.checkpoint(now, "d1");
-        // The run is still live, as after a crash: a fresh ledger reads what the checkpoint saved.
-        assert_eq!(Ledger::kept_in(path, "d1").spent("sprites", now, "d1"), Usd::dollars(0.5));
     }
 
     #[tokio::test]
