@@ -146,6 +146,26 @@ async fn a_push_by_a_person_is_not_credited_to_the_rework() {
 }
 
 #[tokio::test]
+async fn a_push_by_a_person_during_a_running_rework_is_not_credited_to_the_rework() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 4);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    let ran = r.factory.tick().await.unwrap();
+    let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+    // The rework's attempt has started, but it hasn't handed off when a person pushes.
+    Tracker::report(&r.tracker, &key, trailhead_factory::RunUpdate { attempt: Some(2), ..Default::default() })
+        .await
+        .unwrap();
+    r.codehost.push_to(pr);
+    r.tracker.set_status(&key, Status::InReview);
+    r.factory.reconcile().await.unwrap();
+    let said = said(&r);
+    assert!(said.iter().all(|m| !m.contains("the rework has pushed")), "{said:?}");
+}
+
+#[tokio::test]
 async fn a_grade_three_pr_waits_for_lane_who_approves_it() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
