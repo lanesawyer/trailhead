@@ -23,8 +23,9 @@ use crate::factory::FactoryStatus;
 use crate::inspector::{OpenComposer, Selection, Subject};
 use crate::mirror::Mirrored;
 use crate::widgets::{
-    ButtonKind, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, Token, button, field, grade_tone,
-    open_modal, priority_tone, row, select_toned, size, status_label, status_tone, text_dim, text_input, token,
+    ButtonKind, InitialText, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, Token, button, field,
+    grade_tone, open_modal, priority_tone, row, select_toned, size, status_label, status_tone, text_dim, text_input,
+    token,
 };
 
 /// The priority the form starts a new task at.
@@ -307,10 +308,6 @@ pub enum FieldKind {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Field(pub FieldKind, pub u64);
 
-/// Text to put in an input when it appears.
-#[derive(Component, Debug, Clone, Default)]
-pub struct InitialText(pub String);
-
 /// Which draft field a dropdown of the form sets.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormChoice {
@@ -432,13 +429,6 @@ fn read_fields(mut form: ResMut<Form>, fields: Query<(&Field, &EditableText)>) {
     }
 }
 
-fn init_text(mut inputs: Query<(&InitialText, &mut EditableText), Added<InitialText>>) {
-    for (InitialText(initial), mut text) in &mut inputs {
-        text.editor_mut().set_text(initial);
-        text.queue_edit(bevy::text::TextEdit::TextEnd(false));
-    }
-}
-
 /// The save's answer: `Ok` closes the form, anything else stays on it.
 fn finish(mut done: MessageReader<CommandDone>, panel: Query<Entity, With<FormPanel>>, mut form: ResMut<Form>) {
     for d in done.read() {
@@ -466,7 +456,7 @@ impl Plugin for AuthorPlugin {
             .add_observer(on_act)
             .add_observer(on_pick)
             .add_observer(on_modal_closed)
-            .add_systems(Update, (follow_factory_queue, init_text, read_fields, finish).chain());
+            .add_systems(Update, (follow_factory_queue, read_fields, finish).chain());
     }
 }
 

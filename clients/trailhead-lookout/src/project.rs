@@ -10,8 +10,9 @@ use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
 
 use crate::board::{BoardCard, Card, PAGE, Sources, View, grid, next_expiry};
+use crate::project_form::EditProject;
 use crate::widgets::{
-    self, ButtonKind, COLUMN_WIDTH, Keyed, ScrollDown, button, set_text, size, space, text, text_dim,
+    self, ButtonKind, COLUMN_WIDTH, Icon, Keyed, ScrollDown, button, set_text, size, space, text, text_dim,
 };
 
 /// Shows the page of the project with this key (`TRAIL`).
@@ -209,7 +210,17 @@ fn spawn_page(mut commands: Commands) {
             },
         ))
         .id();
-    commands.queue_spawn_scene(text("", size::APP_TITLE)).insert((ProjectTitle, ChildOf(panel)));
+    // The title, and the button that edits the project, at the far end of its row.
+    let head = commands
+        .spawn((
+            Node { align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, ..default() },
+            ChildOf(panel),
+        ))
+        .id();
+    commands.queue_spawn_scene(text("", size::APP_TITLE)).insert((ProjectTitle, ChildOf(head)));
+    commands
+        .queue_spawn_scene(bsn! { @button("Edit", Some(Icon::Pencil), ButtonKind::Normal) })
+        .insert((EditProject, ChildOf(head)));
     // The body and its scrollbar share a row, so the bar runs the body's height.
     let frame = commands
         .spawn((
