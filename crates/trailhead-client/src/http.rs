@@ -14,7 +14,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
-    Claim, Comment, CommentKind, Grade, Priority, ProjectStatus, Status, Task, TaskDetail, TaskKey, Verdict,
+    Claim, ClaimResult, Comment, CommentKind, Grade, HeldClaim, Priority, ProjectStatus, Status, Task, TaskDetail,
+    TaskKey, Verdict,
 };
 use uuid::Uuid;
 
@@ -293,24 +294,6 @@ impl Call {
     }
 }
 
-/// A claim the caller holds, as `GET /v1/claims` lists it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HeldClaim {
-    pub key: String,
-    pub title: String,
-    pub status: Status,
-    pub claim: Claim,
-}
-
-/// What `POST /v1/tasks/{task}/claim` returns.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClaimResult {
-    pub task: Task,
-    pub claim: Claim,
-    /// The last handoff left on the task.
-    pub handoff: Option<Comment>,
-}
-
 /// Starts the server again after a request couldn't connect; true if it did, and the request should be retried.
 pub type Reconnect = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
 
@@ -322,6 +305,8 @@ pub struct TaskQuery {
     pub status: Vec<Status>,
     pub parent: Option<TaskKey>,
     pub title: Option<String>,
+    /// `Some(true)` keeps only the in-review tasks waiting on a rework (`changes_requested=true`).
+    pub changes_requested: Option<bool>,
     /// Adds each task's live claim (`include=claim`).
     pub with_claim: bool,
     pub limit: Option<usize>,
@@ -424,6 +409,9 @@ impl Client {
         }
         if let Some(t) = &q.title {
             query.push(("title", t.clone()));
+        }
+        if let Some(c) = q.changes_requested {
+            query.push(("changes_requested", c.to_string()));
         }
         if q.with_claim {
             query.push(("include", "claim".into()));

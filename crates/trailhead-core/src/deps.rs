@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use libsql::Connection;
 use uuid::Uuid;
@@ -148,6 +148,20 @@ impl Store {
         let mut blockers = unfinished_blockers(&conn, task.id).await?;
         blockers.retain(|b| ctx.in_scope(b.project_id));
         Ok(blockers)
+    }
+
+    /// The ids among `task_ids` that have a blocker which isn't done or cancelled, in one query.
+    pub async fn with_unfinished_blockers(&self, task_ids: &[Uuid]) -> Result<HashSet<Uuid>> {
+        let conn = self.reader()?;
+        let rows = conn
+            .query(
+                "SELECT DISTINCT d.blocked_id FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
+                 WHERE b.deleted_at IS NULL AND b.status NOT IN ('done', 'cancelled')
+                   AND d.blocked_id IN (SELECT value FROM json_each(?1))",
+                [json_ids(task_ids)?],
+            )
+            .await?;
+        Ok(collect(rows, |row| get_uuid(row, 0)).await?.into_iter().collect())
     }
 
     /// Every blocker of these tasks, finished or not, keyed by the blocked task's id; tasks without one are absent.

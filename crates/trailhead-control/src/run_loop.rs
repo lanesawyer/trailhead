@@ -176,6 +176,8 @@ impl Factory {
         keys: &mut HashMap<task::Id, TaskKey>,
         reviewing: usize,
     ) -> Result<()> {
+        // Before any early return, so the status board's spend keeps moving while the factory is full or paused.
+        self.capped();
         if self.usage_paused() {
             return Ok(());
         }
@@ -302,6 +304,12 @@ impl Factory {
             };
             // A budget breach leaves its sandbox suspended for a person to look at; that is what it is kept for.
             if task.status != Status::NeedsInput || task.run.worker_breach.is_some() {
+                continue;
+            }
+            // The asker's lease keeps everyone else's writes out until it lapses, so the release couldn't be recorded
+            // below; don't wake the suspended daemon to check for unpublished work until then.
+            if task.holder.as_deref().is_some_and(|h| h != self.tracker.agent()) {
+                tracing::debug!(task = %key.0, holder = ?task.holder, "a parked task is still claimed; keeping its sandbox for now");
                 continue;
             }
             // What the task resumes from: its PR branch on a rework, else the base branch.
@@ -541,6 +549,7 @@ impl Factory {
 
     /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
     pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
+        self.capped();
         if self.usage_paused() {
             return Ok(Vec::new());
         }

@@ -42,6 +42,66 @@ impl RestTracker {
     }
 }
 
+impl RestTracker {
+    /// The unheld, unblocked in-review tasks of `project` (of the `queue`'s subtasks, when there is one) waiting on a
+    /// rework, in priority order.
+    async fn reworks(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
+        let parents: Vec<Option<&TaskKey>> =
+            if queue.is_empty() { vec![None] } else { queue.iter().map(Some).collect() };
+        let mut seen = HashSet::new();
+        let mut reworks = Vec::new();
+        for parent in parents {
+            let query = TaskQuery {
+                project: Some(project.to_string()),
+                status: vec![Status::InReview],
+                parent: parent.cloned(),
+                changes_requested: Some(true),
+                with_claim: true,
+                limit: Some(1000),
+                ..TaskQuery::default()
+            };
+            for t in self.client.list_tasks(&query).await.map_err(error)? {
+                if t.claim.is_some() || !seen.insert(t.task.key.clone()) {
+                    continue;
+                }
+                // A blocked task can't be claimed, so it isn't ready.
+                let detail = self.client.show_task(&t.task.key).await.map_err(error)?;
+                if detail.blocked_by.is_empty() {
+                    reworks.push(Task { changes_requested: true, ..Task::from_model(t.task, None)? });
+                }
+            }
+        }
+        reworks.sort_by_key(|t| t.priority);
+        Ok(reworks)
+    }
+
+    /// Raises each task's priority to the highest among itself and the open tasks it blocks, directly or through a
+    /// chain, so work that holds up urgent work is listed as urgent. A task that can't be read is left out of the walk.
+    async fn raise_to_blocked_priority(&self, tasks: &mut [Task]) {
+        let mut seen: std::collections::HashMap<TaskKey, Option<(Priority, Vec<TaskKey>)>> = Default::default();
+        for task in tasks.iter_mut() {
+            let mut stack = vec![task.key.clone()];
+            let mut visited = HashSet::new();
+            while let Some(key) = stack.pop() {
+                if !visited.insert(key.clone()) {
+                    continue;
+                }
+                if !seen.contains_key(&key) {
+                    let read = match self.client.show_task(&key).await {
+                        Ok(d) if !d.task.status.is_closed() => Some((d.task.priority, d.blocks)),
+                        _ => None,
+                    };
+                    seen.insert(key.clone(), read);
+                }
+                if let Some((priority, blocks)) = &seen[&key] {
+                    task.priority = task.priority.min(*priority);
+                    stack.extend(blocks.iter().cloned());
+                }
+            }
+        }
+    }
+}
+
 /// The factory's error for a failed call.
 fn error(e: ApiError) -> Error {
     let ApiError::Api { status, error } = e else { return Error::Other(format!("trailhead: {e}")) };
@@ -85,17 +145,25 @@ impl Tracker for RestTracker {
             };
             queued.extend(self.client.list_tasks(&query).await.map_err(error)?.into_iter().map(|t| t.task.key));
         }
-        ready
+        let mut tasks = ready
             .into_iter()
             .filter(|t| queue.is_empty() || queued.contains(&t.key))
-            .take(limit)
             .map(|t| Task::from_model(t, None))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        // As `CoreTracker::ready` does: reworks are listed ahead of new work within a priority, and the merge happens
+        // before the cut so a pile of low-priority reworks can't hide a higher-priority new task.
+        tasks.extend(self.reworks(project, queue).await?);
+        tasks.sort_by_key(|t| (t.priority, !t.changes_requested));
+        tasks.truncate(limit);
+        self.raise_to_blocked_priority(&mut tasks).await;
+        Ok(tasks)
     }
 
     async fn show(&self, key: &TaskKey) -> Result<Task> {
         let detail = self.client.show_task(key).await.map_err(error)?;
+        let flag = detail.changes_requested.is_some();
         Task::from_model(detail.task, detail.claim.map(|c| c.holder_id.to_string()))
+            .map(|task| Task { changes_requested: flag, ..task })
     }
 
     async fn human_context(&self, _: &TaskKey) -> Result<HumanContext> {
