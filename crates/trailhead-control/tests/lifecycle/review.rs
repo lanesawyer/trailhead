@@ -939,3 +939,19 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_r
     assert_eq!(task.run.review_rounds, Some(2), "the first review and this one, not a third");
     assert!(task.run.pending_changes().is_some_and(|c| !c.conflict), "the review's changes are now pending");
 }
+
+#[tokio::test]
+async fn reconciling_a_reviewed_task_at_its_reviewed_head_looks_up_no_head() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    r.tracker.set_status(&key, Status::InReview);
+
+    let before = r.codehost.head_lookups();
+    r.factory.reconcile().await.unwrap();
+    // The head comes from the PR's state and from the checks; neither needs a lookup of its own.
+    assert_eq!(r.codehost.head_lookups(), before);
+}

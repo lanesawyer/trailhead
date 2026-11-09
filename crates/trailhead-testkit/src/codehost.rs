@@ -529,8 +529,11 @@ impl CodeHost for FakeCodeHost {
 
     async fn ci(&self, pr: &PrRef) -> Result<Ci> {
         self.count("ci");
-        let head = CodeHost::head(self, pr).await?;
-        self.find(pr, |p, _| Ci { head, state: p.ci.clone() })
+        // The head comes with the checks, as from a real host, so it isn't a lookup of its own.
+        self.find(pr, |p, s| Ci {
+            head: s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default(),
+            state: p.ci.clone(),
+        })
     }
 
     async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {
