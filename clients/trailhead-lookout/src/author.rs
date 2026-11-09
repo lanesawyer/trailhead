@@ -23,8 +23,8 @@ use crate::factory::FactoryStatus;
 use crate::inspector::{OpenComposer, Selection, Subject};
 use crate::mirror::Mirrored;
 use crate::widgets::{
-    BackgroundTone, ButtonKind, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, button, dot, field,
-    open_modal, priority_tone, row, select, size, space, status_label, text_dim, text_input, token,
+    ButtonKind, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, Token, button, field, grade_tone,
+    open_modal, priority_tone, row, select_toned, size, status_label, status_tone, text_dim, text_input, token,
 };
 
 /// The priority the form starts a new task at.
@@ -54,6 +54,26 @@ pub fn grade_options(human: &[Grade]) -> Vec<String> {
 /// The row of [`grade_options`] that shows `grade`.
 pub fn grade_index(grade: Option<Grade>) -> Option<usize> {
     grade_choices().position(|g| g == grade)
+}
+
+/// The tone of each row of [`grade_options`]: none is dim, each grade its own color.
+pub fn grade_tones() -> Vec<Option<Token>> {
+    grade_choices().map(|g| Some(g.map_or(token::TEXT_DIM, grade_tone))).collect()
+}
+
+/// The priority dropdown's rows, P1 to P4.
+pub fn priority_options() -> Vec<String> {
+    Priority::ALL.iter().map(|p| format!("P{p}")).collect()
+}
+
+/// The tone of each row of [`priority_options`].
+pub fn priority_tones() -> Vec<Option<Token>> {
+    Priority::ALL.iter().map(|p| Some(priority_tone(*p))).collect()
+}
+
+/// The tone of each of `statuses`, for a status dropdown's rows.
+pub fn status_tones(statuses: &[Status]) -> Vec<Option<Token>> {
+    statuses.iter().map(|s| Some(status_tone(*s))).collect()
 }
 
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
@@ -291,10 +311,6 @@ pub struct Field(pub FieldKind, pub u64);
 #[derive(Component, Debug, Clone, Default)]
 pub struct InitialText(pub String);
 
-/// The dot beside the priority dropdown, tinted with the draft's priority.
-#[derive(Component, Debug, Clone, Copy, Default)]
-struct PriorityDot;
-
 /// Which draft field a dropdown of the form sets.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormChoice {
@@ -493,43 +509,36 @@ fn text_field(commands: &mut Commands, parent: Entity, label: &str, input: impl 
     commands.queue_spawn_scene(field(label.to_string(), input)).insert(ChildOf(parent));
 }
 
-/// A dropdown of the form for `choice`, labelled, with `selected` showing.
+/// A dropdown of the form for `choice`, labelled, with `selected` showing and each row in its tone (none for a plain
+/// row), as the task's own dropdowns are.
 fn choice_field(
     commands: &mut Commands,
     parent: Entity,
     label: &str,
     choice: FormChoice,
-    options: Vec<String>,
+    (options, tones): (Vec<String>, Vec<Option<Token>>),
     selected: Option<usize>,
 ) {
     let max_visible = options.len();
     let control: Box<dyn SceneList> = match choice {
         FormChoice::Priority => {
-            let tone = selected.and_then(|i| Priority::ALL.get(i)).map_or(token::FILL_SOLID, |p| priority_tone(*p));
-            Box::new(bsn_list! {
-                Node { align_items: AlignItems::Center, column_gap: { px(space::ICON_LABEL) } }
-                Children [
-                    @dot(tone) PriorityDot
-                    -- @select(options, selected, max_visible) FormChoice::Priority
-                ]
-            })
+            Box::new(bsn_list! { @select_toned(options, tones, selected, max_visible) FormChoice::Priority })
         }
-        FormChoice::Status => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Status }),
-        FormChoice::Grade => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Grade }),
-        FormChoice::Parent => Box::new(bsn_list! { @select(options, selected, max_visible) FormChoice::Parent }),
+        FormChoice::Status => {
+            Box::new(bsn_list! { @select_toned(options, tones, selected, max_visible) FormChoice::Status })
+        }
+        FormChoice::Grade => {
+            Box::new(bsn_list! { @select_toned(options, tones, selected, max_visible) FormChoice::Grade })
+        }
+        FormChoice::Parent => {
+            Box::new(bsn_list! { @select_toned(options, tones, selected, max_visible) FormChoice::Parent })
+        }
     };
     commands.queue_spawn_scene(field(label.to_string(), control)).insert(ChildOf(parent));
 }
 
 /// Sets the draft's priority or status from the dropdown that was used.
-fn on_pick(
-    picked: On<Picked>,
-    choices: Query<&FormChoice>,
-    dots: Query<Entity, With<PriorityDot>>,
-    mut form: ResMut<Form>,
-    factory: Res<FactoryStatus>,
-    mut commands: Commands,
-) {
+fn on_pick(picked: On<Picked>, choices: Query<&FormChoice>, mut form: ResMut<Form>, factory: Res<FactoryStatus>) {
     let Ok(choice) = choices.get(picked.entity) else { return };
     let queues = factory.queues();
     let Some(open) = &mut form.open else { return };
@@ -537,9 +546,6 @@ fn on_pick(
         FormChoice::Priority => {
             if let Some(priority) = Priority::ALL.get(picked.index) {
                 open.draft.priority = *priority;
-                for dot in &dots {
-                    commands.entity(dot).insert(BackgroundTone(priority_tone(*priority)));
-                }
             }
         }
         FormChoice::Status => {
@@ -599,7 +605,10 @@ fn fill_form(
                     let queues = factory.queues();
                     // A new task under one of the factory's queues picks among them; any other parent is typed.
                     match queues.iter().position(|q| *q == d.parent) {
-                        Some(at) => choice_field(c, body, "Queue", FormChoice::Parent, queues, Some(at)),
+                        Some(at) => {
+                            let plain = vec![None; queues.len()];
+                            choice_field(c, body, "Queue", FormChoice::Parent, (queues, plain), Some(at))
+                        }
                         None => {
                             text_field(c, body, "Parent", input(FieldKind::Parent, generation, d.parent.clone(), 1.0))
                         }
@@ -607,22 +616,16 @@ fn fill_form(
                 }
                 text_field(c, body, "Title", input(FieldKind::Title, generation, d.title.clone(), 1.0));
                 let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(body)).id();
-                let priorities = Priority::ALL.iter().map(|p| format!("P{p}")).collect();
                 let priority = Priority::ALL.iter().position(|p| *p == d.priority);
+                let priorities = (priority_options(), priority_tones());
                 choice_field(c, line, "Priority", FormChoice::Priority, priorities, priority);
                 if !creating {
-                    let statuses = Status::ALL.iter().map(|s| status_label(*s).to_string()).collect();
+                    let labels = Status::ALL.iter().map(|s| status_label(*s).to_string()).collect();
                     let status = Status::ALL.iter().position(|s| *s == d.status);
-                    choice_field(c, line, "Status", FormChoice::Status, statuses, status);
+                    choice_field(c, line, "Status", FormChoice::Status, (labels, status_tones(&Status::ALL)), status);
                 }
-                choice_field(
-                    c,
-                    line,
-                    "Grade",
-                    FormChoice::Grade,
-                    grade_options(&factory.human_grades()),
-                    grade_index(d.grade),
-                );
+                let grades = (grade_options(&factory.human_grades()), grade_tones());
+                choice_field(c, line, "Grade", FormChoice::Grade, grades, grade_index(d.grade));
                 let spec = input(FieldKind::Description, generation, d.description.clone(), SPEC_LINES);
                 text_field(c, body, "Spec", spec);
             }
@@ -831,14 +834,12 @@ mod tests {
     }
 
     #[test]
-    fn the_priority_dot_follows_the_picked_priority() {
-        let mut app = app();
-        open_edit_form(&mut app);
-        let dot = app.world_mut().spawn((PriorityDot, BackgroundTone(token::FILL_SOLID))).id();
-        pick(&mut app, FormChoice::Priority, 0);
-        assert_eq!(app.world().get::<BackgroundTone>(dot).unwrap().0, token::PRIORITY_1);
-        pick(&mut app, FormChoice::Priority, 3);
-        assert_eq!(app.world().get::<BackgroundTone>(dot).unwrap().0, token::PRIORITY_4);
+    fn every_priority_status_and_grade_row_has_its_tone() {
+        assert_eq!(priority_tones().len(), priority_options().len());
+        assert_eq!(priority_tones()[0], Some(token::PRIORITY_1));
+        assert_eq!(grade_tones().len(), grade_options(&[]).len());
+        assert_eq!(grade_tones()[0], Some(token::TEXT_DIM), "none is dim");
+        assert_eq!(status_tones(&[Status::Done]), [Some(status_tone(Status::Done))]);
     }
 
     fn app() -> App {
