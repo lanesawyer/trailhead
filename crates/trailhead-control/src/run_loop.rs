@@ -473,8 +473,12 @@ impl Factory {
         let mut released = Vec::new();
         // One listing stands in for a lookup per sandbox: parked tasks, the common case, are in it. Only a task it
         // lacks (finished, cancelled, re-parented) is looked up on its own (TRAIL-258).
+        let mut listing_ok = false;
         let listed: HashMap<TaskKey, Task> = match self.tracker.in_flight(self.project(), &self.queue()).await {
-            Ok(tasks) => tasks.into_iter().map(|t| (t.key.clone(), t)).collect(),
+            Ok(tasks) => {
+                listing_ok = true;
+                tasks.into_iter().map(|t| (t.key.clone(), t)).collect()
+            }
             Err(e) => {
                 // Debug, not warn: this runs every poll, and the fallback below works, with its own warnings.
                 tracing::debug!(error = %e, "couldn't list the tasks in flight; looking parked ones up one by one");
@@ -487,8 +491,23 @@ impl Factory {
                 Some(task) => Ok(task.clone()),
                 None => self.tracker.show(&TaskKey(key.clone())).await,
             };
+            // A live task the queues' listing lacks was taken off its queue by hand (TRAIL-1147): the factory no
+            // longer owns it, so its sandbox is released rather than held until the task closes.
+            let off_queue = listing_ok && !self.queue().is_empty() && !listed.contains_key(&TaskKey(key.clone()));
             let task = match found {
                 Ok(task) if matches!(task.status, Status::Open | Status::Cancelled | Status::Done) => task,
+                Ok(task)
+                    if off_queue
+                        && matches!(task.status, Status::NeedsInput | Status::InProgress | Status::InReview) =>
+                {
+                    tracing::info!(task = %task.key.0, sandbox = %sandbox.name, "a task left the factory queue; releasing its sandbox");
+                    let mut done = Reconciled::default();
+                    self.reconcile_pooled(sandbox, &mut done).await;
+                    if !done.released.is_empty() || !done.abandoned.is_empty() || !done.destroyed.is_empty() {
+                        released.push(sandbox.name.clone());
+                    }
+                    continue;
+                }
                 Ok(task) => {
                     // The wait before a sandbox is given up (`release_parked_after`) counts from the first look.
                     if task.status == Status::NeedsInput {
