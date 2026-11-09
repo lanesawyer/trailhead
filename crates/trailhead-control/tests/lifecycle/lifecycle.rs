@@ -904,14 +904,27 @@ async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a
 }
 
 #[tokio::test]
-async fn a_new_sandbox_that_fails_prepare_is_destroyed_and_its_daemon_forgotten() {
+async fn a_reviewer_sandbox_that_fails_prepare_is_destroyed_and_its_daemon_forgotten() {
     let r = rig();
-    let key = r.tracker.add_task("TRAIL", "Hits the broken checkout", "");
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    let forgotten_before = r.daemon.forgotten().len();
+
+    // The worker's prepare worked; the next review's sandbox is the one that fails.
     r.daemon.fail_prepares(1, "git clone failed");
-    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    let shown = r.tracker.task(&key);
+    let pr = shown.run.pr.clone().expect("a PR");
+    let reviewer = trailhead_factory::review_name(&key, shown.run.attempt.unwrap_or(1), 2);
+    let err = r.factory.review(&shown, &pr, 1, &[]).await.unwrap_err();
     assert!(err.to_string().contains("git clone failed"), "{err}");
-    assert!(r.compute.get("trailhead-w1").is_none(), "the sandbox is destroyed");
-    assert_eq!(r.daemon.forgotten().len(), 1, "the daemon connection is forgotten with the sandbox");
+    assert!(r.compute.get(&reviewer).is_none(), "the reviewer's sandbox is destroyed");
+    let forgotten = r.daemon.forgotten();
+    assert!(
+        forgotten[forgotten_before..].iter().any(|id| id.0 == reviewer),
+        "the reviewer's daemon connection is forgotten with its sandbox: {forgotten:?}"
+    );
 }
 
 fn with_setup() -> Rig {
