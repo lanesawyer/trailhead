@@ -144,11 +144,13 @@ impl Factory {
                             holders.insert(TaskKey(task.clone()), p.target.name.clone());
                         }
                     }
+                    // A placement stands in only for sandboxes on its own target: an old one left on another
+                    // target still counts there.
                     let counted = held
                         .iter()
                         .filter(|s| {
                             let task = s.labels.get(label::TASK).cloned().unwrap_or_default();
-                            !placed.contains_key(&(TaskKey(task), role_of(s)))
+                            placed.get(&(TaskKey(task), role_of(s))) != Some(&p.target.name)
                         })
                         .count();
                     loads.insert(p.target.name.clone(), counted);
@@ -214,5 +216,87 @@ fn role_of(sandbox: &Sandbox) -> Role {
         Role::Reviewer
     } else {
         Role::Worker
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use trailhead_factory::{Compute, FactoryConfig, HostConfig, SandboxSpec, Target};
+    use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, ScriptedHarness};
+
+    use super::*;
+    use crate::Host;
+
+    const CONFIG: &str = r#"
+[repo]
+owner = "lanesawyer"
+name = "trailhead"
+
+[checks]
+test = "cargo test"
+
+[profiles.worker]
+role = "worker"
+adapter = "claude-code"
+provider = "anthropic"
+model = "sonnet"
+budget = { usd = 5, minutes = 60, steps = 40 }
+
+[profiles.reviewer]
+role = "reviewer"
+adapter = "claude-code"
+provider = "anthropic"
+model = "opus"
+budget = { usd = 2, minutes = 20, steps = 20 }
+
+[targets.local]
+kind = "docker"
+priority = 1
+
+[targets.cloud]
+kind = "sprites"
+priority = 2
+"#;
+
+    #[tokio::test]
+    async fn a_placement_on_another_target_leaves_the_old_sandbox_counted() {
+        let config = FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap();
+        let tracker = FakeTracker::new("factory");
+        let codehost = FakeCodeHost::new();
+        let local = FakeCompute::new();
+        let mut placed = Vec::new();
+        for spec in config.target_specs() {
+            let compute = if spec.name == "local" { local.clone() } else { FakeCompute::new() };
+            placed.push(Placed {
+                target: Target::default().listed(&spec),
+                compute: Arc::new(compute),
+                daemon: Arc::new(LocalDaemon::new(
+                    Arc::new(ScriptedHarness::new()),
+                    Arc::new(codehost.clone()),
+                    tracker.clone(),
+                )),
+                provider: Arc::new(FakeProvider::new(1)),
+            });
+        }
+        let factory = Factory::with_targets(config, placed, Arc::new(tracker), Host::new(&HostConfig::default()));
+
+        // A busy worker sandbox left on local by a parked task, which is then answered and placed on the cloud.
+        let key = TaskKey("TRAIL-1".into());
+        let labels = Labels::from([
+            (label::FACTORY.into(), "trailhead".into()),
+            (label::REPO.into(), "lanesawyer/trailhead".into()),
+            (label::POOL.into(), "worker".into()),
+            (label::STATE.into(), label::BUSY.into()),
+            (label::TASK.into(), key.0.clone()),
+            (label::ROLE.into(), "worker".into()),
+            (label::TARGET.into(), "local".into()),
+        ]);
+        local.create(&SandboxSpec { name: "trailhead-w1".into(), labels, egress: Default::default() }).await.unwrap();
+        let cloud = &factory.targets()[1];
+        let _held = factory.hold(&key, Role::Worker, cloud);
+
+        let survey = factory.survey().await;
+        assert_eq!(survey.loads.get("local"), Some(&1), "the old sandbox still fills a place on local");
+        assert_eq!(survey.loads.get("cloud"), Some(&1), "and the placement fills one on the cloud");
     }
 }
