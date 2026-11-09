@@ -205,6 +205,7 @@ enum Kind {
     Integer,
     String,
     Bool,
+    Object,
 }
 
 impl Kind {
@@ -215,6 +216,7 @@ impl Kind {
             Kind::Integer => v.as_i64().is_some(),
             Kind::String => v.is_string(),
             Kind::Bool => v.is_boolean(),
+            Kind::Object => v.is_object(),
         }
     }
 
@@ -224,46 +226,52 @@ impl Kind {
             Kind::Integer => "an integer",
             Kind::String => "a string",
             Kind::Bool => "true or false",
+            Kind::Object => "an object",
         }
     }
 }
 
-/// Nested leaves under `factory`, by dotted path. `pr` is the one structured field whose leaves have a fixed kind.
+/// `pr`, the one structured field whose leaves have a fixed kind, and those leaves, by dotted path.
 const FACTORY_NESTED: &[(&str, Kind)] = &[
+    ("pr", Kind::Object),
+    ("pr.repo", Kind::Object),
     ("pr.number", Kind::Unsigned64),
     ("pr.url", Kind::String),
     ("pr.repo.owner", Kind::String),
     ("pr.repo.name", Kind::String),
 ];
 
-/// Rejects a value for a known `factory.<field>` key (or nested leaf, like `factory.pr.number`) of the wrong kind,
-/// such as `factory.attempt_base=3x`, which the factory couldn't read back. A whole-object `factory={...}` value is
-/// checked leaf by leaf. `null` removes a field, so it always passes; other structured fields and unknown keys are
-/// left alone.
+/// Rejects a value for a known `factory.<field>` key (or nested path, like `factory.pr.number`) of the wrong kind,
+/// such as `factory.attempt_base=3x` or `factory.attempt_base={"a":1}`, which the factory couldn't read back. A
+/// whole-object `factory={...}` value is checked field by field, and anything but an object or `null` is rejected.
+/// `null` removes a field, so it always passes; other structured fields and unknown keys are left alone.
 fn check_factory_field(path: &str, value: &Value) -> Result<()> {
     match path.split_once('.') {
         Some(("factory", field)) => check_factory_leaves(path, field, value),
         None if path == "factory" => match value {
+            Value::Null => Ok(()),
             Value::Object(map) => map.iter().try_for_each(|(k, v)| check_factory_leaves(&format!("{path}.{k}"), k, v)),
-            _ => Ok(()),
+            _ => anyhow::bail!("--meta factory must be an object, not {value}"),
         },
         _ => Ok(()),
     }
 }
 
+/// Checks `value` against the kind of `field` if it's a known path, then descends into an object, so an unknown
+/// field holding an object still has its known leaves checked.
 fn check_factory_leaves(path: &str, field: &str, value: &Value) -> Result<()> {
-    if let Value::Object(map) = value {
-        return map
-            .iter()
-            .try_for_each(|(k, v)| check_factory_leaves(&format!("{path}.{k}"), &format!("{field}.{k}"), v));
+    if let Some((_, kind)) = FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == field)
+        && !value.is_null()
+        && !kind.accepts(value)
+    {
+        anyhow::bail!("--meta {path} must be {}, not {value}", kind.name());
     }
-    let Some((_, kind)) = FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == field) else {
-        return Ok(());
-    };
-    if value.is_null() || kind.accepts(value) {
-        return Ok(());
+    match value {
+        Value::Object(map) => {
+            map.iter().try_for_each(|(k, v)| check_factory_leaves(&format!("{path}.{k}"), &format!("{field}.{k}"), v))
+        }
+        _ => Ok(()),
     }
-    anyhow::bail!("--meta {path} must be {}, not {value}", kind.name())
 }
 
 /// A grade is 1 to 4; "none" clears it. The rules live in core.
@@ -337,6 +345,7 @@ mod tests {
                 Kind::Unsigned | Kind::Unsigned64 | Kind::Integer => json!(3),
                 Kind::String => json!("x"),
                 Kind::Bool => json!(true),
+                Kind::Object => unreachable!(),
             };
             assert!(kind.accepts(&sample), "{field}");
             let run: trailhead_factory::RunUpdate = serde_json::from_value(json!({ *field: sample.clone() })).unwrap();
@@ -419,7 +428,8 @@ mod tests {
         let parsed: trailhead_factory::PrRef = serde_json::from_value(pr.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), pr);
         for (path, kind) in FACTORY_NESTED {
-            let leaf = path.strip_prefix("pr.").unwrap().split('.').fold(&pr, |v, k| &v[k]);
+            let root = json!({ "pr": pr });
+            let leaf = path.split('.').fold(&root, |v, k| &v[k]);
             assert!(kind.accepts(leaf), "{path}");
         }
     }
@@ -430,6 +440,13 @@ mod tests {
         assert!(bad(r#"factory={"attempt_base":"3x"}"#).contains("factory.attempt_base"));
         assert!(bad("factory.pr.number=x").contains("factory.pr.number"));
         assert!(bad(r#"factory={"pr":{"number":"x"}}"#).contains("factory.pr.number"));
+        assert!(bad(r#"factory.attempt_base={"a":1}"#).contains("factory.attempt_base"));
+        assert!(bad(r#"factory={"attempt_base":{"a":1}}"#).contains("factory.attempt_base"));
+        assert!(bad(r#"factory={"pr":{"number":{}}}"#).contains("factory.pr.number"));
+        assert!(bad("factory.pr=5").contains("factory.pr"));
+        assert!(bad(r#"factory.pr.repo="x""#).contains("factory.pr.repo"));
+        assert!(bad(r#"factory={"pr":5}"#).contains("factory.pr"));
+        assert!(bad("factory=3").contains("factory"));
         assert!(meta_patch(&[r#"factory={"attempt_base":3,"pr":{"number":7},"other":"x"}"#.into()]).is_ok());
         assert!(meta_patch(&["factory.pr=null".into(), "factory=null".into()]).is_ok());
     }
