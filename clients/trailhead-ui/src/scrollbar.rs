@@ -3,7 +3,9 @@
 //! A vertical one lies just outside the area's right edge, in the padding of the node that holds the area, so the area is as wide with it as without and the spacing left and right stays equal; a horizontal one along the bottom (the board).
 //! Spawn it as a child of the node that holds the area; that node needs `space::PANEL_INSET` of padding on the right,
 //! which the bar sits in the middle of, the same gap on either side of it.
-//! It takes its color from feathers' scrollbar tokens and hides while the area fits, so there is nothing to scroll.
+//! It takes its color from feathers' scrollbar tokens and hides while the area fits, so there is nothing to scroll. It
+//! starts hidden and shows once layout has found the area overflowing: shown from the start, it was drawn for a frame
+//! before its area's height was known, a flash on every page that opens (TRAIL-1139).
 
 use bevy::ecs::template::EntityTemplate;
 use bevy::feathers::controls::FeathersScrollbar;
@@ -29,9 +31,9 @@ pub fn scrollbar(target: Entity, orientation: ControlOrientation) -> impl Scene 
     }
 }
 
-/// The node that puts the bar along its edge.
+/// The node that puts the bar along its edge, hidden until [`hide_when_fits`] has seen the area overflow.
 fn placement(orientation: ControlOrientation) -> Node {
-    match orientation {
+    let node = match orientation {
         ControlOrientation::Vertical => Node {
             position_type: PositionType::Absolute,
             right: px(-(SCROLLBAR_WIDTH + SCROLLBAR_EDGE)),
@@ -48,7 +50,8 @@ fn placement(orientation: ControlOrientation) -> Node {
             height: px(SCROLLBAR_WIDTH),
             ..default()
         },
-    }
+    };
+    Node { display: Display::None, ..node }
 }
 
 /// Whether content of `content` length in a node of `size` has anything to scroll along `orientation`.
@@ -86,6 +89,13 @@ mod tests {
         assert_eq!(v.right, px(-(SCROLLBAR_WIDTH + SCROLLBAR_EDGE)));
         let h = placement(ControlOrientation::Horizontal);
         assert_eq!((h.height, h.left, h.right), (px(SCROLLBAR_WIDTH), px(0), px(0)));
+    }
+
+    #[test]
+    fn it_starts_hidden_until_the_area_is_known_to_overflow() {
+        for orientation in [ControlOrientation::Vertical, ControlOrientation::Horizontal] {
+            assert_eq!(placement(orientation).display, Display::None);
+        }
     }
 
     #[test]
