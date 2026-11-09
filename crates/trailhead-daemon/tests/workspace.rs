@@ -378,6 +378,38 @@ async fn conflict_markers_added_since_the_start_are_found_in_any_file() {
 }
 
 #[tokio::test]
+async fn conflict_markers_the_merged_in_side_already_has_are_not_the_agents() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "--quiet", "-b", "main"]);
+    git(&dir, &["config", "user.email", "a@b.c"]);
+    git(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("a.md"), "a\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "one"]);
+    git(&dir, &["checkout", "--quiet", "-b", "pr"]);
+    std::fs::write(dir.join("pr.txt"), "pr\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "pr"]);
+    git(&dir, &["checkout", "--quiet", "main"]);
+    std::fs::write(dir.join("doc.md"), ">>>>>>> quoted\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "base"]);
+    git(&dir, &["checkout", "--quiet", "pr"]);
+    let ws = GitWorkspace::new(&dir);
+    let start = ws.head().await.unwrap();
+
+    git(&dir, &["merge", "--quiet", "--no-ff", "--no-commit", "main"]);
+    assert!(ws.conflict_markers(&start).await.unwrap().is_empty(), "uncommitted merge");
+    std::fs::write(dir.join("pr.txt"), "<<<<<<< HEAD\n").unwrap();
+    assert_eq!(ws.conflict_markers(&start).await.unwrap(), ["pr.txt"]);
+    std::fs::write(dir.join("pr.txt"), "pr\n").unwrap();
+    git(&dir, &["commit", "--quiet", "-am", "merge"]);
+    assert!(ws.conflict_markers(&start).await.unwrap().is_empty(), "committed merge");
+}
+
+#[tokio::test]
 async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
     let root = tempfile::tempdir().unwrap();
     let src = upstream(root.path());
