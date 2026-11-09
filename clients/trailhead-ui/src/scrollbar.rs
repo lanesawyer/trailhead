@@ -28,7 +28,7 @@ pub const SCROLLBAR_EDGE: f32 = (space::PANEL_INSET - SCROLLBAR_WIDTH) / 2.0;
 /// How long a scrollbar takes to fade in, in seconds.
 pub const FADE_IN: f32 = 0.12;
 /// How long a scrollbar takes to fade out, in seconds: a little slower, so it doesn't snap away.
-pub const FADE_OUT: f32 = 0.3;
+pub const FADE_OUT: f32 = 0.18;
 
 /// How far a scrollbar has faded in: 0 is gone (and not displayed), 1 is the theme's colors.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
