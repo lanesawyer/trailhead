@@ -395,6 +395,10 @@ mod tests {
             }
             assert_eq!(at, places, "every place scrolls");
         }
+        // In a short window the places scroll rather than squash, and the footer keeps its height.
+        let mut shrinks = world.query_filtered::<&Node, With<NavItem>>();
+        assert!(shrinks.iter(world).all(|n| n.flex_shrink == 0.0));
+        assert_eq!(world.get::<Node>(top[3]).unwrap().flex_shrink, 0.0);
     }
 
     #[test]
