@@ -10,6 +10,9 @@ use trailhead_factory::{
 use crate::timing::backoff;
 use crate::{Factory, Placed, RELEASE_ATTEMPTS, RELEASE_PATIENCE, Reconciled};
 
+/// How many prepares in a row may fail on a pooled sandbox before it is destroyed rather than released.
+const PREPARE_FAILURES_BEFORE_DESTROY: u32 = 2;
+
 impl Factory {
     /// Prepares `sandbox`'s checkout under install egress. The control plane can't see the checkout, so the daemon
     /// first says which hosts the `[stack]` tools it will install need; exactly
@@ -204,14 +207,28 @@ impl Factory {
                 self.give_back(&sandbox, &busy).await;
                 return Err(e);
             }
-            // A sandbox whose checkout won't prepare would fail the next task placed on it the same way, so it
-            // leaves the pool rather than going back with its warm checkpoint.
-            tracing::warn!(sandbox = %sandbox.name, error = %e, "prepare failed; destroying the sandbox");
+            // One failure is as likely a network blip or a briefly broken `main` as a bad sandbox, and releasing
+            // restores the warm checkpoint, wiping what the prepare left behind, so the cache survives. Failing
+            // again and again means the sandbox itself is the problem, so it leaves the pool.
+            let failures = {
+                let mut counts = self.prepare_failures.lock().unwrap();
+                let n = counts.entry(sandbox.id.clone()).or_default();
+                *n += 1;
+                *n
+            };
+            if failures < PREPARE_FAILURES_BEFORE_DESTROY {
+                tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed; releasing the sandbox");
+                self.give_back(&sandbox, &busy).await;
+                return Err(e);
+            }
+            tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed repeatedly; destroying the sandbox");
+            self.prepare_failures.lock().unwrap().remove(&sandbox.id);
             if let Err(d) = p.compute.destroy(&sandbox.id).await {
                 tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
             }
             return Err(e);
         }
+        self.prepare_failures.lock().unwrap().remove(&sandbox.id);
         let prepare_took = preparing.elapsed();
         // A checkpoint pauses the sandbox while its whole filesystem is copied (minutes on Docker), and what it saves the
         // next prepare is mostly dependencies, which rarely change. So the warm point is kept while a prepare from it

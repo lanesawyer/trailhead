@@ -888,7 +888,25 @@ async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_convent
 }
 
 #[tokio::test]
-async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a_fresh_one() {
+async fn a_warm_sandbox_that_fails_prepare_once_is_released_and_keeps_its_cache() {
+    let r = rig();
+    let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&first)).await.unwrap();
+
+    let second = r.tracker.add_task("TRAIL", "Hits a transient failure", "");
+    r.daemon.fail_prepares(1, "git fetch failed");
+    let err = r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
+    assert!(err.to_string().contains("git fetch failed"), "{err}");
+    let kept = r.compute.get("trailhead-w1").expect("the sandbox survives one failed prepare");
+    assert_eq!(kept.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert!(kept.labels.contains_key(label::WARM));
+    assert_eq!(r.tracker.task(&second).run.infra_failures, Some(1), "an infrastructure failure");
+}
+
+#[tokio::test]
+async fn a_warm_sandbox_that_fails_prepare_repeatedly_is_destroyed_and_the_next_task_gets_a_fresh_one() {
     let r = rig();
     let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
     r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
@@ -899,11 +917,13 @@ async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a
     assert!(idle.labels.contains_key(label::WARM));
 
     let second = r.tracker.add_task("TRAIL", "Hits the broken checkout", "");
-    r.daemon.fail_prepares(1, "git clone failed");
+    r.daemon.fail_prepares(2, "git clone failed");
+    r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
+    assert!(r.compute.get("trailhead-w1").is_some(), "kept after the first failure");
     let err = r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
     assert!(err.to_string().contains("git clone failed"), "{err}");
-    assert!(r.compute.get("trailhead-w1").is_none(), "the sandbox is destroyed, not relabelled idle");
-    assert_eq!(r.tracker.task(&second).run.infra_failures, Some(1), "an infrastructure failure");
+    assert!(r.compute.get("trailhead-w1").is_none(), "destroyed after the second, not relabelled idle");
+    assert_eq!(r.tracker.task(&second).run.infra_failures, Some(2), "an infrastructure failure");
     assert_eq!(r.tracker.task(&second).run.attempt.unwrap_or(0), 0, "no attempt was used");
 
     let third = r.tracker.add_task("TRAIL", "Gets a fresh sandbox", "");
