@@ -183,6 +183,33 @@ pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::
     Ok((store, ctx))
 }
 
+/// The factory's configuration is broken, so the server won't start. Keeps the factory's typed error as its source.
+#[cfg(feature = "factory")]
+#[derive(Debug)]
+struct FactoryConfigBroken {
+    source: trailhead_factory_server::Error,
+    user_config: std::path::PathBuf,
+}
+
+#[cfg(feature = "factory")]
+impl std::fmt::Display for FactoryConfigBroken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the factory's configuration is broken, so the server won't start: {}\nFix it, or run `trailhead factory disable` to run without the factory (it edits {})",
+            self.source,
+            self.user_config.display()
+        )
+    }
+}
+
+#[cfg(feature = "factory")]
+impl std::error::Error for FactoryConfigBroken {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first, or until SIGUSR1 asks it to
 /// restart onto a new binary.
 pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::Error>> {
@@ -232,12 +259,8 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     let started: Option<trailhead_factory_server::InServer> = match cfg.factory.clone() {
         Some(paths) => {
             let user_config = paths.config_dir.join("config.toml");
-            let started = trailhead_factory_server::start(paths, state.store.clone(), cfg.bind).map_err(|e| {
-                format!(
-                    "the factory's configuration is broken, so the server won't start: {e}\nFix it, or run `trailhead factory disable` to run without the factory (it edits {})",
-                    user_config.display()
-                )
-            })?;
+            let started = trailhead_factory_server::start(paths, state.store.clone(), cfg.bind)
+                .map_err(|source| FactoryConfigBroken { source, user_config })?;
             Some(started)
         }
         None => None,
