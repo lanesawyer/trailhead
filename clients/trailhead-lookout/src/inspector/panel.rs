@@ -39,7 +39,7 @@ pub(super) fn spawn_panel(mut commands: Commands) {
                 position_type: PositionType::Absolute,
                 right: px(0),
                 top: px(0),
-                width: { px(extent::INSPECTOR_WIDTH) },
+                width: { px(extent::SIDE_PANEL_WIDTH) },
                 height: percent(100),
                 display: Display::None,
             }
@@ -286,7 +286,7 @@ pub(super) fn sync_panel(
         None => {
             panel_node.display = Display::Flex;
             let root = *drawn.header.get_or_insert_with(|| {
-                commands.spawn_scene(panel_header(view.title.clone(), true)).insert(ChildOf(*header)).id()
+                commands.spawn_scene(panel_header(view.title.clone())).insert(ChildOf(*header)).id()
             });
             let plan = layout(view, live, &offline, window.0, &note);
             let keys = plan.iter().map(|(k, _)| (k.clone(), ())).collect::<Vec<_>>();
@@ -326,7 +326,7 @@ pub(super) fn sync_panel(
         &wanted,
         |commands, _, gate| {
             let (icon, tone) = match gate.state {
-                GateState::Passed => (Icon::CircleCheck, token::OK),
+                GateState::Passed => (Icon::CircleCheck, token::STATUS_OK),
                 GateState::Waiting => (Icon::Circle, token::TEXT_DIM),
             };
             commands.spawn_scene(badge(gate.name.clone(), Some(icon), Some(tone))).id()

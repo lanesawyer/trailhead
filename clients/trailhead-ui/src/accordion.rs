@@ -15,25 +15,24 @@ use bevy::feathers::controls::{ButtonVariant, FeathersButton, FeathersToolButton
 use bevy::feathers::display::label;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::rounded_corners::RoundedCorners;
-use bevy::feathers::theme::{SurfaceLevel, ThemeBorderColor, ThemeContext, ThemeTextColor};
+use bevy::feathers::theme::{SurfaceLevel, ThemeBorderColor, ThemeContext};
 use bevy::feathers::tokens;
 use bevy::prelude::*;
+
+use crate::theme::{TextTone, token};
 use bevy::ui_widgets::Activate;
 
 use crate::icons::{Icon, button_icon, icon_text};
 use crate::patch::{display, patch_node, set_text};
-use crate::spacing::{radius, space};
-use crate::text::size;
+use crate::spacing::{radius, space, stroke};
+use crate::text::{Size, size};
 use crate::truncate::truncate_to_width;
 
 /// Space between a body's sides and what is in it, the same on both so its contents sit centered in the box rather
 /// than against its right edge.
 pub const ACCORDION_INDENT: f32 = space::CONTROL_INSET;
 /// Size the accordion titles are drawn at, which sets how many characters fit.
-const TITLE_FONT: f32 = size::BODY;
-/// How thick a section's outline is.
-const OUTLINE: f32 = 1.0;
-
+const TITLE_FONT: Size = size::BODY;
 /// How deep a section sits, which decides what it is drawn as.
 ///
 /// Both are feathers containers, and the difference is only which set of tokens they take: a pane reads as one of a
@@ -77,16 +76,24 @@ pub struct AccordionParts {
     pub section: Entity,
     /// Fill this with the section's contents.
     pub body: Entity,
-    /// Add controls beside the title here, with [`spawn_header_button`] or an [`icon_menu`](crate::icon_menu).
+    /// Add controls beside the title here, with [`spawn_header_button`] or a [`spawn_icon_menu`](crate::spawn_icon_menu).
     pub header: Entity,
 }
 
-/// Spawn an accordion, drawn as the feathers container `level` names.
+/// Whether a section starts open or closed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fold {
+    Open,
+    Closed,
+}
+
+/// Spawn an accordion, drawn as the feathers container `level` names, starting `fold`.
 ///
 /// The container supplies the look (a headed box with its own background, border and rounded corners) and this
 /// supplies the behavior feathers has none of: a header that collapses the body under it. What the header holds
 /// beyond its title is the caller's business, so the header is returned along with the body.
-pub fn spawn_accordion(commands: &mut Commands, title: &str, open: bool, level: SectionLevel) -> AccordionParts {
+pub fn spawn_accordion(commands: &mut Commands, title: &str, fold: Fold, level: SectionLevel) -> AccordionParts {
+    let open = fold == Fold::Open;
     let accordion = commands
         .spawn_scene(bsn! {
             Accordion { open: { open } }
@@ -114,7 +121,7 @@ pub fn spawn_accordion(commands: &mut Commands, title: &str, open: bool, level: 
                 border_radius: { header_corners(open).to_border_radius(radius::CONTROL) },
                 overflow: { Overflow::clip() },
             }
-            InheritableFont { font_size: { FontSize::Px(TITLE_FONT) } }
+            InheritableFont { font_size: { FontSize::from(TITLE_FONT) } }
         })
         .id();
 
@@ -149,7 +156,7 @@ pub fn spawn_accordion(commands: &mut Commands, title: &str, open: bool, level: 
             Children [
                 AccordionCaret
                 @icon_text(caret(open))
-                ThemeTextColor({ tokens::TEXT_MAIN })
+                TextTone({ token::TEXT })
                 --
                 AccordionTitle { full: { title.to_string() } }
                 Node {
@@ -179,7 +186,7 @@ pub fn spawn_accordion(commands: &mut Commands, title: &str, open: bool, level: 
                 right: { px(0) },
                 top: { px(0) },
                 bottom: { px(0) },
-                border: { UiRect::all(px(OUTLINE)) },
+                border: { UiRect::all(px(stroke::HAIRLINE)) },
                 border_radius: { header_corners(open).to_border_radius(radius::CONTROL) },
             }
             ThemeBorderColor({ border })
@@ -223,7 +230,10 @@ pub struct AccordionTitle {
 }
 
 /// Cut each accordion title to whatever room its header leaves it.
-pub fn truncate_accordion_titles(titles: Query<(Entity, &AccordionTitle, &ComputedNode)>, mut texts: Query<&mut Text>) {
+pub(crate) fn truncate_accordion_titles(
+    titles: Query<(Entity, &AccordionTitle, &ComputedNode)>,
+    mut texts: Query<&mut Text>,
+) {
     for (entity, title, node) in &titles {
         let width = node.size().x * node.inverse_scale_factor();
         if width <= 0.0 {
@@ -246,7 +256,7 @@ fn body_patch(open: bool) -> impl Scene {
             display: { display(open) },
             width: { percent(100) },
             row_gap: { px(space::ROWS) },
-            border: { UiRect::new(px(OUTLINE), px(OUTLINE), px(0), px(OUTLINE)) },
+            border: { UiRect::new(px(stroke::HAIRLINE), px(stroke::HAIRLINE), px(0), px(stroke::HAIRLINE)) },
             padding: { UiRect::new(
                 px(ACCORDION_INDENT),
                 px(ACCORDION_INDENT),
@@ -384,7 +394,7 @@ mod tests {
     #[test]
     fn opening_a_section_shows_its_body_and_turns_its_caret_without_respawning_anything() {
         let mut app = app();
-        let parts = spawn_accordion(&mut app.world_mut().commands(), "Section", false, SectionLevel::Pane);
+        let parts = spawn_accordion(&mut app.world_mut().commands(), "Section", Fold::Closed, SectionLevel::Pane);
         app.world_mut().flush();
         app.update();
         let shown = |app: &App| app.world().get::<Node>(parts.body).unwrap().display;

@@ -81,24 +81,40 @@ fn option_rows(
     icons: &[Icon],
     selected: Option<usize>,
 ) -> Box<dyn SceneList> {
-    let rows = options.iter().enumerate().map(|(i, label)| -> Box<dyn SceneList> {
-        let label = label.clone();
+    let rows = (0..options.len()).map(|i| -> Box<dyn SceneList> {
+        let row = option_row(options, tones, icons, selected, i);
+        Box::new(bsn_list! { @{row} })
+    });
+    Box::new(rows.collect::<Vec<_>>())
+}
+
+/// Row `i` of [`option_rows`].
+fn option_row(
+    options: &[String],
+    tones: &[Option<Token>],
+    icons: &[Icon],
+    selected: Option<usize>,
+    i: usize,
+) -> Box<dyn Scene> {
+    {
+        let label = options[i].clone();
         let tone = tones.get(i).cloned().flatten().unwrap_or(token::TEXT);
         let icon_tone = tone.clone();
         let inside: Box<dyn SceneList> = match icons.get(i) {
             Some(&icon) => Box::new(bsn_list! {
                 @icon_box(icon, icon_tone)
-                -- @caption(label) TextTone({ tone })
+                -- @caption(label) TextTone({ tone }) TextLayout { linebreak: LineBreak::NoWrap }
             }),
-            None => Box::new(bsn_list! { @caption(label) TextTone({ tone }) }),
+            None => {
+                Box::new(bsn_list! { @caption(label) TextTone({ tone }) TextLayout { linebreak: LineBreak::NoWrap } })
+            }
         };
         if Some(i) == selected {
-            bsn! { @FeathersListRow Selected OptionIndex(i) Children [ { inside } ] }.into()
+            Box::new(bsn! { @FeathersListRow Selected OptionIndex(i) Children [ { inside } ] })
         } else {
-            bsn! { @FeathersListRow OptionIndex(i) Children [ { inside } ] }.into()
+            Box::new(bsn! { @FeathersListRow OptionIndex(i) Children [ { inside } ] })
         }
-    });
-    Box::new(rows.collect::<Vec<_>>())
+    }
 }
 
 /// An option's icon in `tone`, boxed so feathers doesn't take it for the option's words.
@@ -260,7 +276,7 @@ impl SelectEdit<'_, '_> {
     }
 
     /// Shows `selected` of `options`. The rows are rebuilt only if `options` differ from the last ones, and nothing
-    /// is touched while the popup is open (returns `false` then, so the caller can try again).
+    /// is touched while the popup is open (returns `false` then, so the caller can try again once it has closed).
     pub fn set(&mut self, select: Entity, options: &[String], selected: Option<usize>) -> bool {
         let tones = self.tones.get(select).map(|t| t.0.clone()).unwrap_or_default();
         self.set_toned(select, options, &tones, selected)
@@ -298,9 +314,13 @@ impl SelectEdit<'_, '_> {
             self.commands.entity(row).despawn();
         }
         let icons = self.icons.get(select).map(|i| i.0.clone()).unwrap_or_default();
-        self.commands
-            .entity(area)
-            .queue_spawn_related_scenes::<Children>(option_rows(options, tones, &icons, selected));
+        // Each row is a child of the list from the start, so a select despawned before its rows' scenes resolve takes
+        // them with it. Queued as related scenes, they would arrive after it had gone, as roots drawn over the
+        // window's top left corner.
+        for i in 0..options.len() {
+            let row = option_row(options, tones, &icons, selected, i);
+            self.commands.spawn_scene(bsn! { @{row} }).insert(ChildOf(area));
+        }
         self.commands.entity(select).insert((SelectOptions(options.to_vec()), SelectTones(tones.to_vec())));
         true
     }
@@ -348,6 +368,64 @@ mod tests {
             }
         }
         found
+    }
+
+    /// Every child of the select's scroll area: the rows, and anything else left in the list.
+    fn area_children(app: &mut App) -> Vec<(Entity, bool)> {
+        let world = app.world_mut();
+        let area = world.query_filtered::<Entity, With<ScrollArea>>().single(world).unwrap();
+        let kids: Vec<Entity> = world.get::<Children>(area).map_or(vec![], |c| c.iter().collect());
+        kids.into_iter().map(|e| (e, world.get::<FeathersListRow>(e).is_some())).collect()
+    }
+
+    #[test]
+    fn options_changed_twice_in_a_row_leave_only_the_last_rows() {
+        let mut app = app();
+        let names = |n: usize| (0..n).map(|i| format!("o{i}")).collect::<Vec<_>>();
+        let select = app.world_mut().commands().spawn_scene(select(names(5), Some(0), 8)).id();
+        settle(&mut app);
+        assert_eq!(area_children(&mut app).len(), 5);
+        let edit_now = |app: &mut App, select: Entity, n: usize| {
+            app.world_mut().run_system_once(move |mut edit: SelectEdit| edit.set(select, &names(n), Some(0))).unwrap()
+        };
+        // The second rebuild comes before a frame has passed: the first one's rows are already there to replace.
+        assert!(edit_now(&mut app, select, 3));
+        assert!(edit_now(&mut app, select, 2));
+        settle(&mut app);
+        assert_eq!(area_children(&mut app).len(), 2);
+        assert!(area_children(&mut app).iter().all(|(_, row)| *row));
+    }
+
+    #[test]
+    fn rows_queued_for_a_select_despawned_before_they_spawn_leave_nothing_behind() {
+        let mut app = app();
+        let select = app.world_mut().commands().spawn_scene(select(vec!["a".into(), "b".into()], Some(0), 8)).id();
+        settle(&mut app);
+        let names = vec!["a".to_string(), "b".into(), "c".into()];
+        app.world_mut().run_system_once(move |mut edit: SelectEdit| edit.set(select, &names, Some(0))).unwrap();
+        // The select goes before its new rows have spawned, as the board does when the page changes.
+        app.world_mut().entity_mut(select).despawn();
+        settle(&mut app);
+        let world = app.world_mut();
+        let orphans = world.query_filtered::<Entity, (With<FeathersListRow>, Without<ChildOf>)>().iter(world).count();
+        assert_eq!(orphans, 0, "no row outlives its select");
+    }
+
+    #[test]
+    fn an_options_words_stay_on_one_line_so_the_popup_fits_its_rows() {
+        let mut app = app();
+        let options = vec!["all".to_string(), "factory/trail-1121-a2".to_string()];
+        app.world_mut().commands().spawn_scene(select(options, Some(0), 8));
+        settle(&mut app);
+        let world = app.world_mut();
+        let rows: Vec<Entity> = world.query_filtered::<Entity, With<FeathersListRow>>().iter(world).collect();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let caption = world.get::<Children>(row).unwrap()[0];
+            assert!(world.get::<Text>(caption).is_some());
+            // Wrapped, the popup is measured with its words on several lines and comes out taller than its rows.
+            assert_eq!(world.get::<TextLayout>(caption).unwrap().linebreak, LineBreak::NoWrap);
+        }
     }
 
     #[test]

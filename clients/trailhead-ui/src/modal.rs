@@ -13,6 +13,8 @@
 //!   its first thing to act on, and one with nothing to type into focuses its title.
 //! - **Never taller than the window.** The frame is capped to [`MAX_HEIGHT_VH`] of the window and only the body
 //!   scrolls, with the kit's scrollbar, so the footer (Save, Cancel) stays in view.
+//! - **Inset like a panel.** The dialog's padding is [`space::PANEL_INSET`], not feathers' narrower one, so the body's
+//!   scrollbar sits in it as it does in every panel instead of hanging over the edge (TRAIL-1143).
 //! - **Use.** A marker type implements [`Modal`] (title, width); [`open_modal`] spawns it. Once it has spawned,
 //!   [`ModalSlots`] on the root names the [`ModalBody`] to fill, the [`ModalFooter`] for its buttons and the header's
 //!   tools, for controls beside the X. Close it by
@@ -23,13 +25,14 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::prelude::*;
-use bevy::ui_widgets::{ControlOrientation, RequestClose};
+use bevy::ui_widgets::{ControlOrientation, ModalDialog, RequestClose};
 
 use super::{HintBounds, PanelTitle, PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
 
 /// How much of the window's height the modal may take, with the barrier's margin around it.
 pub const MAX_HEIGHT_VH: f32 = 80.0;
-/// How much of the window's width, for a window narrower than the modal.
+/// How much of the window's width the modal may take: all of a [`Modal::wide`] one, and a cap on the rest for a window
+/// narrower than they are.
 pub const MAX_WIDTH_VW: f32 = 85.0;
 
 /// A kind of modal: a marker component that says what its title and width are.
@@ -41,6 +44,11 @@ pub trait Modal: Component {
     /// Whether the modal takes all the height it may ([`MAX_HEIGHT_VH`]) rather than its content's: for a detail view,
     /// which reads better at a steady size than one that jumps with what is in it.
     fn tall(&self) -> bool {
+        false
+    }
+    /// Whether the modal takes all the width it may ([`MAX_WIDTH_VW`]) instead of [`Modal::width`]: with
+    /// [`Modal::tall`], for a modal that holds a whole area of the app at one size (settings, whichever tab is shown).
+    fn wide(&self) -> bool {
         false
     }
 }
@@ -87,7 +95,8 @@ pub struct ModalClosed {
 
 /// Opens `modal` over everything on the board, and returns its root.
 pub fn open_modal<M: Modal>(commands: &mut Commands, modal: M) -> Entity {
-    let (title, width, tall) = (modal.title(), modal.width(), modal.tall());
+    let width = if modal.wide() { vw(MAX_WIDTH_VW) } else { px(modal.width()) };
+    let (title, tall) = (modal.title(), modal.tall());
     commands
         .spawn_scene(bsn! {
             @FeathersDialog {
@@ -99,13 +108,13 @@ pub fn open_modal<M: Modal>(commands: &mut Commands, modal: M) -> Entity {
         .id()
 }
 
-fn frame(title: String, width: f32, tall: bool) -> Box<dyn SceneList> {
+fn frame(title: String, width: Val, tall: bool) -> Box<dyn SceneList> {
     let height = if tall { vh(MAX_HEIGHT_VH) } else { Val::Auto };
     Box::new(bsn_list! {
         Node {
             flex_direction: FlexDirection::Column,
             row_gap: { px(space::ROWS) },
-            width: { px(width) },
+            width: { width },
             height: { height },
             max_width: { vw(MAX_WIDTH_VW) },
             max_height: { vh(MAX_HEIGHT_VH) },
@@ -113,14 +122,16 @@ fn frame(title: String, width: f32, tall: bool) -> Box<dyn SceneList> {
         ModalFrame
         HintBounds
         Children [
-            @panel_header(title, true)
+            @panel_header(title)
             --
             // The body's box may shrink below its content, so the body scrolls and the footer keeps its place, and grows
             // into a tall modal's height.
             Node { flex_direction: FlexDirection::Column, min_height: px(0), flex_shrink: 1.0, flex_grow: 1.0 }
             Children [
+                // Grows into a tall modal's height too, so content can fill it (the settings Logs page's list).
                 Node {
                     flex_direction: FlexDirection::Column,
+                    flex_grow: 1.0,
                     min_height: px(0),
                     row_gap: { px(space::ROWS) },
                     overflow: { Overflow::scroll_y() },
@@ -175,11 +186,12 @@ fn close_on_escape(
     }
 }
 
-/// Finds a new modal's body and footer, and gives the body its scrollbar.
+/// Finds a new modal's body and footer, gives the body its scrollbar and the dialog a panel's inset for it to sit in.
 #[allow(clippy::too_many_arguments)]
 fn link_slots(
     bodies: Query<Entity, Added<ModalBody>>,
     parents: Query<&ChildOf>,
+    mut dialogs: Query<&mut Node, With<ModalDialog>>,
     roots: Query<(), With<ModalRoot>>,
     footers: Query<Entity, With<ModalFooter>>,
     tools: Query<Entity, With<PanelTools>>,
@@ -192,6 +204,11 @@ fn link_slots(
         let inside = |e: &Entity| parents.iter_ancestors(*e).any(|a| a == root);
         let Some(footer) = footers.iter().find(inside) else { continue };
         let Some(tools) = tools.iter().find(inside) else { continue };
+        if let Some(dialog) = parents.iter_ancestors(body).find(|e| dialogs.contains(*e))
+            && let Ok(mut node) = dialogs.get_mut(dialog)
+        {
+            node.padding = UiRect::all(px(space::PANEL_INSET));
+        }
         if let Ok(holder) = parents.get(body) {
             commands.queue_spawn_scene(scrollbar(body, ControlOrientation::Vertical)).insert(ChildOf(holder.parent()));
         }
@@ -404,6 +421,41 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_is_inset_like_a_panel_so_the_scrollbar_fits_in_its_padding() {
+        let mut app = app();
+        open(&mut app);
+        let dialog = app.world_mut().query_filtered::<&Node, With<ModalDialog>>().single(app.world()).unwrap();
+        assert_eq!(dialog.padding, UiRect::all(px(space::PANEL_INSET)));
+    }
+
+    #[derive(Component)]
+    struct Wide;
+
+    impl Modal for Wide {
+        fn title(&self) -> String {
+            "Wide".into()
+        }
+        fn wide(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_wide_modal_takes_all_the_width_it_may_and_others_their_own() {
+        let mut app = app();
+        open(&mut app);
+        open_modal(&mut app.world_mut().commands(), Wide);
+        app.world_mut().flush();
+        for _ in 0..3 {
+            app.update();
+        }
+        let mut widths: Vec<Val> =
+            app.world_mut().query_filtered::<&Node, With<ModalFrame>>().iter(app.world()).map(|n| n.width).collect();
+        widths.sort_by_key(|w| format!("{w:?}"));
+        assert_eq!(widths, [px(extent::MODAL_WIDTH), vw(MAX_WIDTH_VW)]);
+    }
+
+    #[test]
     fn a_tall_modal_takes_all_the_height_it_may_and_others_their_contents() {
         let mut app = app();
         open(&mut app);
@@ -421,5 +473,6 @@ mod tests {
         let slots = *app.world().get::<ModalSlots>(modal).unwrap();
         let wrap = app.world().get::<ChildOf>(slots.body).unwrap().parent();
         assert_eq!(app.world().get::<Node>(wrap).unwrap().flex_grow, 1.0);
+        assert_eq!(app.world().get::<Node>(slots.body).unwrap().flex_grow, 1.0, "and the body its box, to be filled");
     }
 }

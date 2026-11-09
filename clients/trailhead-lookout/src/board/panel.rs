@@ -8,6 +8,7 @@ pub(super) fn spawn_panel(mut commands: Commands, kept: Res<BoardScroll>) {
         .spawn((
             Name::new("board"),
             BoardPanel,
+            widgets::BesideSidebar,
             Node {
                 // A layout node is never smaller than its content unless told so: without these the panel grew past
                 // the window to fit every card, so the board and its columns never overflowed (TRAIL-836).

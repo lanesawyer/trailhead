@@ -24,36 +24,30 @@ const PULSE_LOW: f32 = 0.35;
 pub struct SkeletonBar;
 
 /// A column of `rows` bars, each `row_height` tall.
-pub fn spawn_skeleton(commands: &mut Commands, rows: usize, row_height: f32) -> Entity {
-    let bars: Vec<Entity> = (0..rows)
+pub fn skeleton(rows: usize, row_height: f32) -> impl Scene {
+    let bars: Vec<_> = (0..rows)
         .map(|_| {
-            commands
-                .spawn((
-                    SkeletonBar,
-                    Node {
-                        width: percent(100),
-                        height: px(row_height),
-                        border_radius: BorderRadius::all(px(radius::CONTROL)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::NONE),
-                    Pickable::IGNORE,
-                ))
-                .id()
+            bsn! {
+                SkeletonBar
+                Node {
+                    width: { percent(100) },
+                    height: { px(row_height) },
+                    border_radius: { BorderRadius::all(px(radius::CONTROL)) },
+                }
+                BackgroundColor
+                Pickable::IGNORE
+            }
         })
         .collect();
-    commands
-        .spawn((
-            Node {
-                flex_direction: FlexDirection::Column,
-                width: percent(100),
-                row_gap: px(space::LIST_ITEMS),
-                ..default()
-            },
-            Pickable::IGNORE,
-        ))
-        .add_children(&bars)
-        .id()
+    bsn! {
+        Node {
+            flex_direction: { FlexDirection::Column },
+            width: { percent(100) },
+            row_gap: { px(space::LIST_ITEMS) },
+        }
+        Pickable::IGNORE
+        Children [ { bars } ]
+    }
 }
 
 /// How bright a bar is `secs` into the pulse, from [`PULSE_LOW`] to 1.
@@ -67,7 +61,7 @@ pub(crate) fn pulse_skeletons(
     theme: Res<UiTheme>,
     mut bars: Query<&mut BackgroundColor, With<SkeletonBar>>,
 ) {
-    let color = theme.color(&token::SKELETON.0).with_alpha(pulse(time.elapsed_secs()));
+    let color = theme.color(&token::FILL_SOLID.0).with_alpha(pulse(time.elapsed_secs()));
     for mut background in &mut bars {
         background.set_if_neq(BackgroundColor(color));
     }

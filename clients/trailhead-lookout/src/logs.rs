@@ -15,8 +15,8 @@ use trailhead_factory::logs::{LogLevel, LogLine};
 use crate::connection::SendNet;
 use crate::net::{LogUpdate, NetCommand};
 use crate::widgets::{
-    ButtonKind, Icon, Keyed, Picked, SelectEdit, Token, button, extent, field, row, scroll_body, scroll_frame,
-    scrollbar, select, set_display, set_text, size, space, text_mono, text_toned, token,
+    ButtonKind, Icon, Keyed, Picked, SelectEdit, Token, button, field, row, scroll_body, scroll_frame, scrollbar,
+    select, set_display, set_text, size, space, text_mono, text_toned, token,
 };
 
 /// How many lines are kept; past this the oldest are dropped.
@@ -174,8 +174,8 @@ pub fn line_text(line: &LogLine) -> String {
 /// The theme color a level is drawn in.
 pub fn level_tone(level: LogLevel) -> Token {
     match level {
-        LogLevel::Error => token::DANGER,
-        LogLevel::Warn => token::WARN,
+        LogLevel::Error => token::STATUS_DANGER,
+        LogLevel::Warn => token::STATUS_WARN,
         LogLevel::Info => token::TEXT,
         LogLevel::Debug | LogLevel::Trace => token::TEXT_DIM,
     }
@@ -246,7 +246,11 @@ struct LogRows(Keyed<Entry>);
 
 /// Fills the Logs page's box: the filters, the note, and the list with its scrollbar.
 pub fn logs_page(commands: &mut Commands, page: Entity) {
-    commands.entity(page).insert(LogsPage);
+    // The page fills the modal's body, so the list can take the rest of it.
+    commands.entity(page).insert(LogsPage).entry::<Node>().and_modify(|mut node| {
+        node.flex_grow = 1.0;
+        node.min_height = px(0);
+    });
     let filters = commands
         .spawn_scene(bsn! { @row() Node { align_items: AlignItems::FlexEnd, column_gap: { px(space::GROUPS) } } })
         .insert(ChildOf(page))
@@ -260,20 +264,14 @@ pub fn logs_page(commands: &mut Commands, page: Entity) {
     commands
         .spawn_scene(button("Jump to latest", Some(Icon::ChevronDown), ButtonKind::Normal))
         .insert((JumpToLatest, ChildOf(filters)));
-    commands.spawn_scene(text_toned("", size::BODY, token::WARN)).insert((
+    commands.spawn_scene(text_toned("", size::BODY, token::STATUS_WARN)).insert((
         LogNote,
         Node { display: Display::None, ..default() },
         ChildOf(page),
     ));
+    // The list takes the height the modal has left under the filters, and scrolls on its own: the wheel goes to the
+    // nearest area that scrolls.
     let frame = commands.spawn(scroll_frame()).insert(ChildOf(page)).id();
-    // A list of its own inside the modal, which scrolls too: the wheel goes to the nearest.
-    commands.entity(frame).insert(Node {
-        flex_direction: FlexDirection::Column,
-        flex_grow: 0.0,
-        min_height: px(0),
-        height: px(extent::LIST_HEIGHT),
-        ..default()
-    });
     let list = commands.spawn((scroll_body(), LogList)).insert(ChildOf(frame)).id();
     commands.entity(list).insert(Node {
         flex_direction: FlexDirection::Column,
@@ -669,7 +667,7 @@ mod tests {
                 .iter(world)
                 .map(|t| t.0.clone())
                 .collect();
-            assert_eq!(tones, [token::DANGER, token::TEXT]);
+            assert_eq!(tones, [token::STATUS_DANGER, token::TEXT]);
         }
     }
 }

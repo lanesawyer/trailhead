@@ -8,10 +8,12 @@
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
+use trailhead_model::ProjectStatus;
 
 use crate::board::{BoardCard, Card, PAGE, Sources, View, grid, next_expiry};
+use crate::project_form::EditProject;
 use crate::widgets::{
-    self, ButtonKind, COLUMN_WIDTH, Keyed, ScrollDown, button, set_text, size, space, text, text_dim,
+    self, ButtonKind, COLUMN_WIDTH, Icon, Keyed, ScrollDown, button, set_text, size, space, text, text_dim,
 };
 
 /// Shows the page of the project with this key (`TRAIL`).
@@ -27,6 +29,7 @@ pub struct ProjectPage(pub Option<String>);
 pub struct ProjectView {
     pub key: String,
     pub name: String,
+    pub archived: bool,
     pub cards: Vec<Card>,
 }
 
@@ -89,10 +92,13 @@ fn on_open(
     mut shown: ResMut<Shown>,
     mut next: ResMut<NextState<View>>,
 ) {
-    if page.0.as_deref() != Some(open.0.as_str()) {
-        page.0 = Some(open.0.clone());
-        shown.0 = PAGE;
+    if page.0.as_deref() == Some(open.0.as_str()) {
+        next.set_if_different(View::Project);
+        return;
     }
+    page.0 = Some(open.0.clone());
+    shown.0 = PAGE;
+    // Re-entering redraws the page, so another project's starts at the top.
     next.set(View::Project);
 }
 
@@ -117,8 +123,10 @@ fn rebuild_view(
     let Some(key) = &page.0 else { return };
     let rows = sources.rows();
     *expiry = next_expiry(&rows.claims, now);
-    let name = rows.projects.iter().find(|p| &p.key == key).map(|p| p.name.clone()).unwrap_or_default();
-    let next = ProjectView { key: key.clone(), name, cards: grid(rows.input(&[], now), key) };
+    let project = rows.projects.iter().find(|p| &p.key == key);
+    let name = project.map(|p| p.name.clone()).unwrap_or_default();
+    let archived = project.is_some_and(|p| p.status == ProjectStatus::Archived);
+    let next = ProjectView { key: key.clone(), name, archived, cards: grid(rows.input(&[], now), key) };
     if *view != next {
         *view = next;
     }
@@ -195,6 +203,7 @@ fn spawn_page(mut commands: Commands) {
         .spawn((
             Name::new("project"),
             ProjectPanel,
+            widgets::BesideSidebar,
             Node {
                 min_width: px(0),
                 min_height: px(0),
@@ -205,7 +214,17 @@ fn spawn_page(mut commands: Commands) {
             },
         ))
         .id();
-    commands.queue_spawn_scene(text("", size::APP_TITLE)).insert((ProjectTitle, ChildOf(panel)));
+    // The title, and the button that edits the project, at the far end of its row.
+    let head = commands
+        .spawn((
+            Node { align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, ..default() },
+            ChildOf(panel),
+        ))
+        .id();
+    commands.queue_spawn_scene(text("", size::APP_TITLE)).insert((ProjectTitle, ChildOf(head)));
+    commands
+        .queue_spawn_scene(bsn! { @button("Edit", Some(Icon::Pencil), ButtonKind::Normal) })
+        .insert((EditProject, ChildOf(head)));
     // The body and its scrollbar share a row, so the bar runs the body's height.
     let frame = commands
         .spawn((
@@ -248,9 +267,12 @@ fn despawn_page(mut commands: Commands, panel: Query<Entity, With<ProjectPanel>>
     }
 }
 
-/// "TRAIL · Trailhead", in place.
+/// "TRAIL · Trailhead", with "(archived)" after an archived one, in place.
 fn update_title(view: Res<ProjectView>, mut titles: Query<&mut Text, With<ProjectTitle>>) {
-    let words = if view.name.is_empty() { view.key.clone() } else { format!("{} · {}", view.key, view.name) };
+    let mut words = if view.name.is_empty() { view.key.clone() } else { format!("{} · {}", view.key, view.name) };
+    if view.archived {
+        words.push_str(" (archived)");
+    }
     for mut title in &mut titles {
         if title.0 != words {
             title.0.clone_from(&words);

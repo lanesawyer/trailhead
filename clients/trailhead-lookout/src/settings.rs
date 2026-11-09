@@ -57,6 +57,13 @@ impl Modal for SettingsModal {
     fn title(&self) -> String {
         "Settings".into()
     }
+    // One size whichever tab is shown, so switching tabs doesn't resize the modal.
+    fn tall(&self) -> bool {
+        true
+    }
+    fn wide(&self) -> bool {
+        true
+    }
 }
 
 /// The strip of tabs in the modal.

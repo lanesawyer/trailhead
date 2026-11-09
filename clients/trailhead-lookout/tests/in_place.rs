@@ -25,19 +25,9 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "a column's \"Show more\" button, relabelled when its count changes; in place is a follow-up",
     ),
     ("hint.rs", "hide_hint", "closes a hint, which lives as a child of what it describes"),
+    ("project_form.rs", "redraw_form", "opens and closes the new project form's modal"),
     ("map.rs", "redraw", "the trail map's terrain is respawned on every model change; in place is a follow-up"),
 ];
-
-fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-}
 
 fn flagged(source: &str) -> Vec<String> {
     let mut found = Vec::new();
@@ -71,9 +61,7 @@ fn no_view_redraws_a_surface_wholesale() {
     let mut bad = Vec::new();
     let mut allowed_seen = Vec::new();
     for dir in [root.join("src"), root.join("../trailhead-ui/src")] {
-        let mut paths = Vec::new();
-        rust_files(&dir, &mut paths);
-        for path in paths {
+        for path in trailhead_ui::lint::sources(&dir, &["."]) {
             let file = path.strip_prefix(&dir).unwrap().to_str().unwrap().to_string();
             // Only the code above the tests: a test may despawn what it likes.
             let source = fs::read_to_string(&path).unwrap();

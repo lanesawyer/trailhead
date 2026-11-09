@@ -13,7 +13,9 @@ use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use trailhead_model::{Claim, Comment, CommentKind, Grade, Priority, Status, Task, TaskDetail, TaskKey, Verdict};
+use trailhead_model::{
+    Claim, Comment, CommentKind, Grade, Priority, ProjectStatus, Status, Task, TaskDetail, TaskKey, Verdict,
+};
 use uuid::Uuid;
 
 use crate::ApiError;
@@ -30,10 +32,10 @@ impl Route {
         Route { method, path }
     }
 
-    /// The path with its `{task}` or `{id}` parameter filled in.
+    /// The path with its `{task}`, `{project}` or `{id}` parameter filled in.
     fn url(&self, param: Option<&str>) -> String {
         match param {
-            Some(p) => self.path.replace("{task}", p).replace("{id}", p),
+            Some(p) => self.path.replace("{task}", p).replace("{project}", p).replace("{id}", p),
             None => self.path.to_string(),
         }
     }
@@ -57,9 +59,11 @@ pub mod routes {
     pub const RESOLVE_COMMENT: Route = Route::new(Method::POST, "/v1/comments/{id}/resolve");
     pub const UNDO: Route = Route::new(Method::POST, "/v1/undo");
     pub const REVERT: Route = Route::new(Method::POST, "/v1/revert");
+    pub const CREATE_PROJECT: Route = Route::new(Method::POST, "/v1/projects");
+    pub const UPDATE_PROJECT: Route = Route::new(Method::PATCH, "/v1/projects/{project}");
 
     /// All of them.
-    pub fn all() -> [Route; 13] {
+    pub fn all() -> [Route; 15] {
         [
             READY,
             LIST_TASKS,
@@ -74,6 +78,8 @@ pub mod routes {
             REVERT,
             MY_CLAIMS,
             RESOLVE_COMMENT,
+            CREATE_PROJECT,
+            UPDATE_PROJECT,
         ]
     }
 }
@@ -152,6 +158,34 @@ pub struct TaskUpdate {
     pub metadata: Option<Value>,
 }
 
+/// `POST /v1/projects`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NewProject {
+    pub key: String,
+    pub name: String,
+    pub brief: String,
+    pub require_review: bool,
+    /// The claim lease in seconds; unset takes the workspace's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_ttl: Option<i64>,
+}
+
+/// `PATCH /v1/projects/{project}`: only the fields set are sent.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct ProjectUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_review: Option<bool>,
+    /// `Some(None)` sends `null`, which goes back to the workspace's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_ttl: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProjectStatus>,
+}
+
 /// `POST /v1/tasks/{task}/comments`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NewComment {
@@ -207,6 +241,11 @@ pub enum Call {
     Release(TaskKey),
     Undo(Undo),
     Revert(Revert),
+    CreateProject(NewProject),
+    UpdateProject {
+        key: String,
+        update: ProjectUpdate,
+    },
 }
 
 impl Call {
@@ -219,6 +258,8 @@ impl Call {
             Call::Release(key) => (routes::RELEASE, Some(&key.0)),
             Call::Undo(_) => (routes::UNDO, None),
             Call::Revert(_) => (routes::REVERT, None),
+            Call::CreateProject(_) => (routes::CREATE_PROJECT, None),
+            Call::UpdateProject { key, .. } => (routes::UPDATE_PROJECT, Some(key)),
         }
     }
 
@@ -235,6 +276,8 @@ impl Call {
             Call::ResolveComment { answer: None, .. } | Call::Release(_) => None,
             Call::Undo(b) => Some(json(b)),
             Call::Revert(b) => Some(json(b)),
+            Call::CreateProject(b) => Some(json(b)),
+            Call::UpdateProject { update, .. } => Some(json(update)),
         }
     }
 

@@ -62,13 +62,13 @@ pub(super) const MENU_ACTIONS: [Action; 7] = [
 ];
 
 /// A menu item's caption and icon, and whether it is destructive.
-pub(super) fn menu_look(action: &Action) -> (String, Icon, bool) {
+pub(super) fn menu_look(action: &Action) -> (String, Icon, ButtonKind) {
     match action {
-        Action::Release => ("Release the claim".into(), Icon::Release, false),
-        Action::Cancel => ("Cancel the task".into(), Icon::CircleX, true),
-        Action::Undo => ("Undo the last change".into(), Icon::Undo, false),
-        Action::Revert(h) => (format!("Revert the holder's last {h}h"), Icon::History, true),
-        other => (other.label(), Icon::Circle, false),
+        Action::Release => ("Release the claim".into(), Icon::Release, ButtonKind::Normal),
+        Action::Cancel => ("Cancel the task".into(), Icon::CircleX, ButtonKind::Danger),
+        Action::Undo => ("Undo the last change".into(), Icon::Undo, ButtonKind::Normal),
+        Action::Revert(h) => (format!("Revert the holder's last {h}h"), Icon::History, ButtonKind::Danger),
+        other => (other.label(), Icon::Circle, ButtonKind::Normal),
     }
 }
 
@@ -90,13 +90,14 @@ pub(super) fn spawn_tools(commands: &mut Commands, tools: Entity) -> Tools {
     };
     let previous = arrow(commands, Icon::ChevronUp, "Previous task in the column (K)", Step::Previous);
     let next = arrow(commands, Icon::ChevronDown, "Next task in the column (J)", Step::Next);
-    let menu = icon_menu(commands, row, Icon::Ellipsis, "More actions");
+    let menu = spawn_icon_menu(commands, Icon::Ellipsis, "More actions");
+    commands.entity(row).add_child(menu.root);
     let items = MENU_ACTIONS
         .iter()
         .map(|action| {
-            let (caption, icon, danger) = menu_look(action);
+            let (caption, icon, kind) = menu_look(action);
             let item = commands
-                .spawn_scene(menu_item(caption, Some(icon), danger))
+                .spawn_scene(menu_item(caption, Some(icon), kind))
                 .insert((MenuAct(action.clone()), ChildOf(menu.popup)))
                 .id();
             (action.clone(), item)
@@ -302,7 +303,7 @@ mod tests {
     #[test]
     fn an_update_leaves_an_open_modals_title_alone() {
         let mut app = app();
-        let modal = app.world_mut().commands().spawn_scene(panel_header("Answer TRAIL-7", true)).id();
+        let modal = app.world_mut().commands().spawn_scene(panel_header("Answer TRAIL-7")).id();
         settle(&mut app);
         app.world_mut().write_message(SyncItem::Event(json!({
             "id": 301, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",

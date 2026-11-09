@@ -1,4 +1,5 @@
 use super::*;
+use crate::widgets::Size;
 
 /// How a [`Block::Text`] is colored; fixed for the item that holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +14,7 @@ pub(super) enum Tone {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Block {
     /// A line of text; only the words change while the key stays.
-    Text { text: String, size: f32, tone: Tone },
+    Text { text: String, size: Size, tone: Tone },
     /// The `P1` badge. Its key holds the priority, so a new priority is a new badge.
     Priority(Priority),
     /// The `G2` badge, toned by grade. Its key holds the grade, so a new grade is a new badge.
@@ -83,7 +84,7 @@ pub(super) struct Parts {
 
 pub(super) type Plan = Vec<(String, Vec<(String, Block)>)>;
 
-pub(super) fn text_block(text: impl Into<String>, size: f32, tone: Tone) -> Block {
+pub(super) fn text_block(text: impl Into<String>, size: Size, tone: Tone) -> Block {
     Block::Text { text: text.into(), size, tone }
 }
 
@@ -319,24 +320,28 @@ pub(super) fn layout_task(
         let moves = view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(*st) } else { None });
         let statuses: Vec<Status> = std::iter::once(status).chain(moves).collect();
         let options = status_labels(&statuses);
-        let tones = statuses.iter().map(|s| Some(status_tone(*s))).collect();
+        let tones = status_tones(&statuses);
         fields.push((
             "s/fields/status".to_string(),
             Block::Choice { field: Field::Status, options, tones, selected: Some(0), statuses },
         ));
-        let priorities = Priority::ALL.iter().map(|p| format!("P{p}")).collect();
-        let tones = Priority::ALL.iter().map(|p| Some(priority_tone(*p))).collect();
         let selected = view.priority.and_then(|p| Priority::ALL.iter().position(|q| *q == p));
         fields.push((
             "s/fields/priority".to_string(),
-            Block::Choice { field: Field::Priority, options: priorities, tones, selected, statuses: Vec::new() },
+            Block::Choice {
+                field: Field::Priority,
+                options: priority_options(),
+                tones: priority_tones(),
+                selected,
+                statuses: Vec::new(),
+            },
         ));
         fields.push((
             "s/fields/grade".to_string(),
             Block::Choice {
                 field: Field::Grade,
                 options: grade_options(human),
-                tones: grade_choices().map(|g| Some(g.map_or(token::TEXT_DIM, grade_tone))).collect(),
+                tones: grade_tones(),
                 selected: grade_index(view.grade),
                 statuses: Vec::new(),
             },
@@ -404,7 +409,7 @@ pub(super) fn note_look(note: &Option<Control>) -> (String, Token) {
         Some(Control::Busy) => ("sending…".into(), token::TEXT_DIM),
         // The command went through: not the task's status, so not `status_label`'s.
         Some(Control::Done) => (String::from("done"), token::TEXT_DIM),
-        Some(Control::Refused(why)) => (why.clone(), token::DANGER),
+        Some(Control::Refused(why)) => (why.clone(), token::STATUS_DANGER),
         _ => (String::new(), token::TEXT_DIM),
     }
 }
@@ -440,7 +445,7 @@ pub(super) fn spawn_block(
             let scene: Box<dyn Scene> = match tone {
                 Tone::Body => Box::new(text(words.clone(), *size)),
                 Tone::Dim => Box::new(text_dim(words.clone(), *size)),
-                Tone::Warn => Box::new(text_toned(words.clone(), *size, token::WARN)),
+                Tone::Warn => Box::new(text_toned(words.clone(), *size, token::STATUS_WARN)),
             };
             commands.spawn_scene(scene).id()
         }
@@ -454,7 +459,7 @@ pub(super) fn spawn_block(
             let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
             let words = commands
                 .spawn_scene(
-                    bsn! { @text_toned(format!("? {body}"), size::BODY, token::WARN) Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0) } },
+                    bsn! { @text_toned(format!("? {body}"), size::BODY, token::STATUS_WARN) Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0) } },
                 )
                 .insert(ChildOf(line))
                 .id();
@@ -518,7 +523,7 @@ pub(super) fn spawn_block(
             let mut head = vec![kind_label(entry.kind).to_string(), entry.author.clone(), entry.when.clone()];
             head.extend(entry.tags.iter().cloned());
             commands.spawn_scene(bubble_head(comment_icon(entry.kind), head.join(" · "))).insert(ChildOf(item));
-            let tone = if entry.open_question { token::WARN } else { token::TEXT };
+            let tone = if entry.open_question { token::STATUS_WARN } else { token::TEXT };
             commands.spawn_scene(text_toned(entry.body.clone(), size::BODY, tone)).insert(ChildOf(item));
             if entry.open_question {
                 let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
@@ -548,7 +553,7 @@ pub(super) fn spawn_block(
             }
             item
         }
-        Block::Composer { answering, live, note } => {
+        Block::Composer { answering, note, .. } => {
             let item = commands
                 .spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::ROWS), ..default() })
                 .id();
@@ -580,9 +585,8 @@ pub(super) fn spawn_block(
             let foot = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
             let send = commands
                 .spawn_scene(bsn! { @button("Send", Some(Icon::Send), ButtonKind::Primary) })
-                .insert((ComposePart::Send, ChildOf(foot)))
+                .insert((ComposePart::Send, ChildOf(foot), InteractionDisabled))
                 .id();
-            gate_button(commands, send, *live);
             // The box's answer goes to its own control, which outlives redraws like every other.
             control(controls, commands, subject, &Action::Comment);
             let note = spawn_note(commands, foot, note);
@@ -647,12 +651,10 @@ pub(super) fn spawn_block(
                     .spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonKind::Normal) @{press} }),
                 Action::Undo => commands
                     .spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonKind::Normal) @{press} }),
-                Action::Cancel => {
-                    commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} })
-                }
-                Action::Revert(_) => {
-                    commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::History)) @{press} })
-                }
+                Action::Cancel => commands
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Stop), ButtonKind::Danger) @{press} }),
+                Action::Revert(_) => commands
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::History), ButtonKind::Danger) @{press} }),
                 // Not drawn as an action block: they have their own controls, or none.
                 Action::Status(_) | Action::Resolve(_) | Action::Grade(_) | Action::Comment | Action::Menu => {
                     commands.spawn_empty()
@@ -822,7 +824,7 @@ pub(super) fn dress(
                     dress_note(&mut commands, &mut texts, &mut nodes, n, note);
                 }
             }
-            Block::Composer { answering, live, note } => {
+            Block::Composer { answering, note, .. } => {
                 let words = answering.as_ref().map_or_else(String::new, |q| format!("Answering: {q}"));
                 if let Some(Ok(mut t)) = parts.text.map(|e| texts.get_mut(e))
                     && t.0 != words
@@ -840,9 +842,6 @@ pub(super) fn dress(
                     {
                         node.display = display(shown);
                     }
-                }
-                if let Some(send) = parts.resolve {
-                    gate_button(&mut commands, send, *live);
                 }
                 if let Some(n) = parts.note {
                     dress_note(&mut commands, &mut texts, &mut nodes, n, note);

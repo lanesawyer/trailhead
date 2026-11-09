@@ -79,7 +79,7 @@ impl Rows {
 }
 
 pub(super) fn rebuild_view(
-    filter: Res<Filter>,
+    mut filter: ResMut<Filter>,
     mut sources: Sources,
     deep: Option<Res<Deep>>,
     mut view: ResMut<BoardView>,
@@ -94,7 +94,18 @@ pub(super) fn rebuild_view(
     let rows = sources.rows();
     *expiry = next_expiry(&rows.claims, now);
     let deep = deep.as_ref().map_or(&[][..], |d| d.for_query(filter.query.trim()));
-    let next = build(rows.input(deep, now), &filter);
+    let mut next = build(rows.input(deep, now), &filter);
+    // A parent or holder no longer offered (another project picked, its subtasks gone, its claim over) would leave the
+    // board empty while its dropdown says "all", so it is dropped.
+    let unoffered =
+        |key: FilterKey| filter.get(key).as_ref().is_some_and(|v| !next.options.of(key).iter().any(|c| &c.value == v));
+    let stale: Vec<FilterKey> = [FilterKey::Parent, FilterKey::Holder].into_iter().filter(|k| unoffered(*k)).collect();
+    if !stale.is_empty() {
+        for key in stale {
+            *filter.get_mut(key) = None;
+        }
+        next = build(rows.input(deep, now), &filter);
+    }
     if *view != next {
         *view = next;
     }
@@ -203,6 +214,64 @@ mod tests {
         // Never across into another column.
         assert_eq!(around("TRAIL-102"), (None, Some("TRAIL-105".into())));
         assert_eq!(neighbours(&view, "not on the board"), Neighbours::default());
+    }
+
+    #[test]
+    fn picking_another_project_drops_a_parent_it_doesnt_have() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(BoardPlugin);
+        let (projects, tasks, _, _, agents) = input_json();
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 5,
+            projects,
+            tasks,
+            agents,
+            ..Default::default()
+        }));
+        app.update();
+        app.update();
+        app.world_mut().resource_mut::<Filter>().parent = Some("TRAIL-102".into());
+        app.update();
+        let shown =
+            |app: &App| app.world().resource::<BoardView>().columns.iter().map(|c| c.cards.len()).sum::<usize>();
+        assert_eq!(shown(&app), 2);
+        app.world_mut().resource_mut::<Filter>().project = Some("TRAIL".into());
+        app.update();
+        assert_eq!(app.world().resource::<Filter>().parent.as_deref(), Some("TRAIL-102"), "TRAIL has it");
+        app.world_mut().resource_mut::<Filter>().project = Some("OPS".into());
+        app.update();
+        assert_eq!(app.world().resource::<Filter>().parent, None);
+        assert_eq!(shown(&app), 1, "OPS-1 shows, not an empty board");
+    }
+
+    #[test]
+    fn picking_another_project_drops_a_holder_with_nothing_there() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(BoardPlugin);
+        let (projects, mut tasks, claims, _, agents) = input_json();
+        // The view runs on the clock, so the claims last past it.
+        for mut claim in claims {
+            claim["expires_at"] = json!("2099-01-01T00:00:00Z");
+            let task = tasks.iter_mut().find(|t| t["id"] == claim["task_id"]).unwrap();
+            task["claim"] = claim;
+        }
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 5,
+            projects,
+            tasks,
+            agents,
+            ..Default::default()
+        }));
+        app.update();
+        app.update();
+        app.world_mut().resource_mut::<Filter>().holder = Some(sid("a1"));
+        app.update();
+        app.world_mut().resource_mut::<Filter>().project = Some("TRAIL".into());
+        app.update();
+        assert_eq!(app.world().resource::<Filter>().holder, Some(sid("a1")), "a1 holds TRAIL-103");
+        app.world_mut().resource_mut::<Filter>().project = Some("OPS".into());
+        app.update();
+        assert_eq!(app.world().resource::<Filter>().holder, None);
     }
 
     #[test]

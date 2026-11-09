@@ -15,7 +15,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bevy::prelude::*;
 use trailhead_factory::{
-    ControlState, FactoryEvent, FactoryState, Grade, RunPhase, RunStatus, SandboxStatus, Sequenced, TaskKey, Usd,
+    ControlState, FactoryEvent, FactoryState, Grade, RunPhase, RunStatus, RunUpdate, SandboxStatus, Sequenced, TaskKey,
+    Usd,
 };
 use trailhead_wire::ui::RepoSnapshot;
 
@@ -301,6 +302,14 @@ impl FactoryMirror {
         };
         self.set_run(commands, repo, status);
     }
+}
+
+/// Whether the factory has taken `task` up: started a run on it (even one that failed before its agent started) or
+/// opened its PR. Its metadata alone doesn't say so: the control plane also marks a queued task it skipped for having
+/// no grade, which is how work done by hand is filed under a queue task (TRAIL-1159).
+pub fn factory_ran(task: &trailhead_model::Task) -> bool {
+    RunUpdate::of(task)
+        .is_ok_and(|run| run.attempt.is_some() || run.sandbox.is_some() || run.retries.is_some() || run.pr.is_some())
 }
 
 fn unix_now() -> i64 {
