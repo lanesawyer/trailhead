@@ -620,8 +620,9 @@ impl CodeHost for GitHub {
     }
 
     async fn carries_verdict(&self, pr: &PrRef, reviewed: &str) -> Result<bool> {
+        // Conditional GETs throughout: a pass that asks again about an unchanged PR gets 304s, which cost no rate limit.
         let r = Self::repo_path(&pr.repo);
-        let p = self.call(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
+        let p = self.call_cached(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
         let (Some(base), Some(head)) = (p["base"]["ref"].as_str(), p["head"]["sha"].as_str()) else {
             return Err(Error::Other(format!("github: PR {} has no base or head", pr.number)));
         };
@@ -630,9 +631,10 @@ impl CodeHost for GitHub {
         }
         // What the PR has that its base lacks: its own commits. A merge of the base brings in base commits, which
         // aren't among them, so a commit since `reviewed` that is one of them must be a merge of the base itself.
-        let own = self.call(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
+        let own = self.call_cached(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
         // A reviewed sha the host no longer has (a force push, then GC) 404s: it can't be vouched for.
-        let since = match self.call(self.request(Method::GET, &format!("{r}/compare/{reviewed}...{head}"))).await {
+        let since = match self.call_cached(self.request(Method::GET, &format!("{r}/compare/{reviewed}...{head}"))).await
+        {
             Ok(since) => since,
             Err(Error::NotFound(_)) => return Ok(false),
             Err(e) => return Err(e),
