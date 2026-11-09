@@ -21,8 +21,8 @@ use crate::connection::Connection;
 use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
 use crate::widgets::{
-    ButtonKind, InitialText, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, button, button_group,
-    field, open_modal, size, text_dim, text_input,
+    ButtonKind, Icon, InitialText, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, button,
+    button_group, field, open_modal, size, text_dim, text_input,
 };
 
 /// Lines tall the brief's box is.
@@ -488,16 +488,22 @@ fn fill_form(
         commands
             .spawn_scene(bsn! { @button("Cancel", None, ButtonKind::Normal) FormAct::Cancel })
             .insert(ChildOf(footer));
-        // Archiving is undone with the same button, so it asks for no confirmation.
-        if let Target::Edit { archived, .. } = &open.target {
-            let caption = if *archived { "Unarchive" } else { "Archive" };
-            commands
-                .spawn_scene(bsn! { @button(caption, None, ButtonKind::Normal) FormAct::Archive })
-                .insert(ChildOf(footer));
-        }
         commands
             .spawn_scene(text_dim(form.message.clone(), size::SECONDARY))
             .insert((ProjectFormMessage, ChildOf(footer)));
+        // In the footer's far corner, apart from saving. It is undone with the same button, so it asks for no
+        // confirmation.
+        if let Target::Edit { archived, .. } = &open.target {
+            let (caption, icon) =
+                if *archived { ("Unarchive", Icon::ArchiveRestore) } else { ("Archive", Icon::Archive) };
+            commands
+                .spawn_scene(bsn! {
+                    @button(caption, Some(icon), ButtonKind::Normal)
+                    Node { margin: { UiRect::left(Val::Auto) } }
+                    FormAct::Archive
+                })
+                .insert(ChildOf(footer));
+        }
     }
 }
 

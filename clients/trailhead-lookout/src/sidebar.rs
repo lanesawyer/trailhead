@@ -55,22 +55,6 @@ struct Places;
 #[derive(Component)]
 struct ProjectList;
 
-/// The "Archived" heading over the archived projects, shown only while there are any.
-#[derive(Component)]
-struct ArchivedHeading;
-
-/// The heading's button that shows or hides the archived projects.
-#[derive(Component, Clone, Copy, Default)]
-struct ArchivedToggle;
-
-/// The node the archived projects' entries are kept under, shown only when asked for.
-#[derive(Component)]
-struct ArchivedList;
-
-/// Whether the archived projects are shown. They start hidden: archived is out of the way.
-#[derive(Resource, Default)]
-struct ShowArchived(bool);
-
 /// The New task button under the title, off while the connection isn't live.
 #[derive(Component)]
 pub struct NewTask;
@@ -109,15 +93,10 @@ pub struct SidebarUiPlugin;
 impl Plugin for SidebarUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Entries>()
-            .init_resource::<ShowArchived>()
-            .add_observer(on_archived_toggle)
             .add_systems(Startup, spawn_sidebar)
             .add_observer(on_nav)
             .add_observer(clear_search_on_escape)
-            .add_systems(
-                Update,
-                (read_search_box, sync_projects, show_archived, mark_current, update_chip, gate_new_task).chain(),
-            );
+            .add_systems(Update, (read_search_box, sync_projects, mark_current, update_chip, gate_new_task).chain());
     }
 }
 
@@ -145,19 +124,6 @@ fn spawn_sidebar(mut commands: Commands) {
     commands.spawn((
         Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0, ..default() },
         ProjectList,
-        ChildOf(places),
-    ));
-    commands
-        .queue_spawn_scene(nav_heading_action(
-            "Archived",
-            Icon::ChevronRight,
-            "Show or hide archived projects",
-            bsn! { ArchivedToggle },
-        ))
-        .insert((ArchivedHeading, Node { display: Display::None, ..default() }, ChildOf(places)));
-    commands.spawn((
-        Node { display: Display::None, flex_direction: FlexDirection::Column, flex_shrink: 0.0, ..default() },
-        ArchivedList,
         ChildOf(places),
     ));
     let footer = commands.queue_spawn_scene(sidebar_footer()).insert(ChildOf(root)).id();
@@ -215,7 +181,6 @@ fn sync_projects(
     changed: Query<(), Or<(Changed<Mirrored<Project>>, Changed<Mirrored<Task>>)>>,
     (mut removed, mut removed_tasks): (RemovedComponents<Mirrored<Project>>, RemovedComponents<Mirrored<Task>>),
     list: Query<Entity, With<ProjectList>>,
-    archived_list: Query<Entity, With<ArchivedList>>,
     children: Query<&Children>,
     (mut texts, mut truncated, parts): (Query<&mut Text>, Query<&mut Truncated>, Query<&NavPart>),
     mut entries: ResMut<Entries>,
@@ -223,7 +188,7 @@ fn sync_projects(
     mut drawn: Local<Option<Entity>>,
 ) {
     let gone = removed.read().count() + removed_tasks.read().count() > 0;
-    let (Ok(list), Ok(archived_list)) = (list.single(), archived_list.single()) else { return };
+    let Ok(list) = list.single() else { return };
     if *drawn == Some(list) && changed.is_empty() && !gone {
         return;
     }
@@ -232,24 +197,18 @@ fn sync_projects(
     for task in tasks.iter().filter(|t| !t.0.status.is_closed()) {
         *open.entry(task.0.project_id).or_default() += 1;
     }
-    let mut sorted: Vec<&Project> = projects.iter().map(|p| &p.0).collect();
-    sorted.sort_by(|a, b| a.key.cmp(&b.key));
-    let entries_of = |archived: bool| {
-        sorted
-            .iter()
-            .filter(|p| (p.status == ProjectStatus::Archived) == archived)
-            .map(|p| {
-                let entry = Entry {
-                    key: p.key.clone(),
-                    name: p.name.clone(),
-                    open: open.get(&p.id).copied().unwrap_or_default(),
-                };
-                (entry.key.clone(), entry)
-            })
-            .collect::<Vec<_>>()
-    };
-    // An archived project's entry moves between the two lists rather than being drawn again.
-    let wanted = [(list, entries_of(false)), (archived_list, entries_of(true))];
+    // Archived projects are on the projects page, not here.
+    let mut wanted: Vec<Entry> = projects
+        .iter()
+        .filter(|p| p.0.status != ProjectStatus::Archived)
+        .map(|p| Entry {
+            key: p.0.key.clone(),
+            name: p.0.name.clone(),
+            open: open.get(&p.0.id).copied().unwrap_or_default(),
+        })
+        .collect();
+    wanted.sort_by(|a, b| a.key.cmp(&b.key));
+    let wanted = [(list, wanted.into_iter().map(|e| (e.key.clone(), e)).collect::<Vec<_>>())];
     entries.0.sync(
         &mut commands,
         &wanted,
@@ -284,50 +243,6 @@ fn sync_projects(
             }
         },
     );
-}
-
-fn on_archived_toggle(
-    activate: On<Activate>,
-    toggles: Query<(), With<ArchivedToggle>>,
-    mut show: ResMut<ShowArchived>,
-) {
-    if toggles.contains(activate.entity) {
-        show.0 = !show.0;
-    }
-}
-
-/// The "Archived" heading while there are archived projects, their list while asked for, and the heading's chevron
-/// pointing down while it is open.
-#[allow(clippy::type_complexity)]
-fn show_archived(
-    show: Res<ShowArchived>,
-    projects: Query<&Mirrored<Project>>,
-    mut heading: Query<&mut Node, (With<ArchivedHeading>, Without<ArchivedList>)>,
-    mut list: Query<&mut Node, (With<ArchivedList>, Without<ArchivedHeading>)>,
-    toggles: Query<Entity, With<ArchivedToggle>>,
-    children: Query<&Children>,
-    mut texts: Query<&mut Text>,
-) {
-    let any = projects.iter().any(|p| p.0.status == ProjectStatus::Archived);
-    let display = |shown: bool| if shown { Display::Flex } else { Display::None };
-    for mut node in &mut heading {
-        if node.display != display(any) {
-            node.display = display(any);
-        }
-    }
-    for mut node in &mut list {
-        if node.display != display(any && show.0) {
-            node.display = display(any && show.0);
-        }
-    }
-    let chevron = if show.0 { Icon::ChevronDown } else { Icon::ChevronRight }.glyph();
-    for toggle in &toggles {
-        for e in children.iter_descendants(toggle) {
-            if let Ok(text) = texts.get_mut(e) {
-                set_text(text, chevron);
-            }
-        }
-    }
 }
 
 /// Marks the entry for the page shown.
@@ -683,35 +598,21 @@ mod tests {
     }
 
     #[test]
-    fn an_archived_project_moves_under_archived_which_opens_and_closes() {
+    fn an_archived_project_leaves_the_sidebar_and_comes_back_unarchived() {
         let mut app = app();
-        let heading = one::<ArchivedHeading>(&mut app);
-        let list = one::<ArchivedList>(&mut app);
-        let display = |app: &App, e| app.world().get::<Node>(e).unwrap().display;
-        assert_eq!(display(&app, heading), Display::None, "no archived projects, no heading");
-        let ops = |app: &mut App| {
-            let world = app.world_mut();
-            let to = NavTo::Project("OPS".into());
-            world.query::<(Entity, &NavTo)>().iter(world).find(|(_, t)| **t == to).unwrap().0
+        let archive = |app: &mut App, id: i64, status: &str| {
+            app.world_mut().write_message(SyncItem::Event(json!({
+                "id": id, "entity": "project", "entity_id": sid("p2"), "kind": "project.updated",
+                "after": project_json(json!({"id": "p2", "key": "OPS", "name": "Operations", "status": status,
+                                             "version": id})),
+            })));
+            settle(app);
         };
-        let entry = ops(&mut app);
-        app.world_mut().write_message(SyncItem::Event(json!({
-            "id": 2, "entity": "project", "entity_id": sid("p2"), "kind": "project.updated",
-            "after": project_json(json!({"id": "p2", "key": "OPS", "name": "Operations", "status": "archived",
-                                         "version": 2})),
-        })));
-        settle(&mut app);
-        assert_eq!(ops(&mut app), entry, "the entry moves rather than being drawn again");
-        assert_eq!(app.world().get::<ChildOf>(entry).unwrap().parent(), list);
-        assert_eq!(display(&app, heading), Display::Flex);
-        assert_eq!(display(&app, list), Display::None, "archived starts out of the way");
-        let toggle = one::<ArchivedToggle>(&mut app);
-        app.world_mut().trigger(Activate { entity: toggle });
-        settle(&mut app);
-        assert_eq!(display(&app, list), Display::Flex);
-        app.world_mut().trigger(Activate { entity: toggle });
-        settle(&mut app);
-        assert_eq!(display(&app, list), Display::None);
+        let ops = NavTo::Project("OPS".into());
+        archive(&mut app, 2, "archived");
+        assert!(!entries(&mut app).iter().any(|(to, _)| *to == ops));
+        archive(&mut app, 3, "active");
+        assert!(entries(&mut app).iter().any(|(to, _)| *to == ops));
     }
 
     #[test]
