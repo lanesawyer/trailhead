@@ -760,3 +760,15 @@ async fn taking_a_parked_task_off_its_queue_frees_its_place() {
     assert!(ran.iter().any(|(t, _)| t.key == next), "the next task started in the released place");
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "the detached task is left to its new owner");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_parked_task_still_claimed_is_left_alone_without_waking_its_daemon() {
+    let r = releasing_after(1);
+    let (parked, waiting) = parked_with_one_waiting(&r).await;
+
+    tokio::time::advance(AFTER).await;
+    assert!(r.factory.tick().await.unwrap().is_empty(), "the asker's claim blocks the release");
+    assert!(r.daemon.unpublished_asked().is_empty(), "the daemon wasn't asked while the claim stood");
+    assert_eq!(r.tracker.task(&waiting).status, Status::Open);
+    assert_eq!(r.tracker.task(&parked).run.released, None);
+}
