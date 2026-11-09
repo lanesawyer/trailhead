@@ -107,7 +107,7 @@ impl Factory {
 
     /// The targets that have cost their daily cap today. Reaching the cap and leaving it (a new day, or a raised cap)
     /// are each logged once.
-    fn capped(&self) -> HashSet<String> {
+    pub(crate) fn capped(&self) -> HashSet<String> {
         let (now, today) = (Instant::now(), spend::today());
         let mut capped = HashSet::new();
         let mut board = Vec::new();
