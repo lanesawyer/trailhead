@@ -39,6 +39,8 @@ struct Git {
     not_modified: usize,
     /// The `x-ratelimit-*` headers (limit, remaining, reset) pull reads carry, when a test sets them.
     rate: Option<(u64, u64, i64)>,
+    /// The `x-ratelimit-resource` those headers name, when a test sets one.
+    rate_resource: Option<&'static str>,
 }
 
 impl Git {
@@ -285,8 +287,10 @@ async fn get_pull(
 /// Answers with `body` and an ETag of it, or 304 when the request already has that ETag.
 fn etagged(g: &mut Git, headers: &HeaderMap, body: Value) -> Response {
     let etag = format!("\"{}\"", body);
+    let resource = g.rate_resource;
     let rate = g.rate.map(|(limit, remaining, reset)| {
         [
+            ("x-ratelimit-resource", resource.unwrap_or("core").to_string()),
             ("x-ratelimit-limit", limit.to_string()),
             ("x-ratelimit-remaining", remaining.to_string()),
             ("x-ratelimit-reset", reset.to_string()),
@@ -502,9 +506,15 @@ async fn publish_builds_commits_on_a_new_branch_then_on_top_of_it() {
         "stacked on the branch"
     );
 
+    let published_head = head(&git, "factory/trail-1");
+
     // Work that started from an older commit than the branch is at would overwrite it, so it's refused.
-    let moved = gh.publish(&repo(), &main, "factory/trail-1", &[second]).await.unwrap_err();
+    let moved = gh.publish(&repo(), &main, "factory/trail-1", std::slice::from_ref(&second)).await.unwrap_err();
     assert!(matches!(&moved, Error::Conflict(m) if m.contains("would overwrite")), "{moved:?}");
+
+    // A retry after a ref write that landed behind a 5xx finds its own commits on the branch: done, not a conflict.
+    gh.publish(&repo(), &branch, "factory/trail-1", std::slice::from_ref(&second)).await.unwrap();
+    assert_eq!(head(&git, "factory/trail-1"), published_head, "the retry changed nothing");
 
     let missing = gh.publish(&repo(), "nope", "factory/trail-2", &[first]).await.unwrap_err();
     assert!(matches!(missing, Error::NotFound(_)), "{missing:?}");
@@ -855,6 +865,15 @@ async fn the_rate_limit_is_read_from_the_response_headers() {
     git.lock().unwrap().rate = Some((5000, 122, 1_900_000_000));
     gh.title(&pr).await.unwrap();
     assert_eq!(gh.rate_limit().map(|r| r.remaining), Some(122));
+
+    // A reading of another resource (search, graphql) doesn't replace core's.
+    {
+        let mut g = git.lock().unwrap();
+        g.rate = Some((30, 0, 1_900_000_060));
+        g.rate_resource = Some("search");
+    }
+    gh.title(&pr).await.unwrap();
+    assert_eq!(gh.rate_limit(), Some(RateLimit { limit: 5000, remaining: 122, resets_at: 1_900_000_000 }));
 }
 
 #[tokio::test]
