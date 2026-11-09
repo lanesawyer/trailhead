@@ -89,10 +89,13 @@ fn on_open(
     mut shown: ResMut<Shown>,
     mut next: ResMut<NextState<View>>,
 ) {
-    if page.0.as_deref() != Some(open.0.as_str()) {
-        page.0 = Some(open.0.clone());
-        shown.0 = PAGE;
+    if page.0.as_deref() == Some(open.0.as_str()) {
+        next.set_if_different(View::Project);
+        return;
     }
+    page.0 = Some(open.0.clone());
+    shown.0 = PAGE;
+    // Re-entering redraws the page, so another project's starts at the top.
     next.set(View::Project);
 }
 

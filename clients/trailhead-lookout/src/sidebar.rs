@@ -104,8 +104,8 @@ fn spawn_sidebar(mut commands: Commands) {
 
 fn on_nav(activate: On<Activate>, to: Query<&NavTo>, mut next: ResMut<NextState<View>>, mut commands: Commands) {
     match to.get(activate.entity) {
-        Ok(NavTo::Board) => next.set(View::Board),
-        Ok(NavTo::Map) => next.set(View::Map),
+        Ok(NavTo::Board) => next.set_if_different(View::Board),
+        Ok(NavTo::Map) => next.set_if_different(View::Map),
         Ok(NavTo::Project(key)) => commands.trigger(OpenProject(key.clone())),
         Err(_) => {}
     }
@@ -374,6 +374,29 @@ mod tests {
         let current: Vec<NavTo> = entries(&mut app).into_iter().filter(|(_, c)| *c).map(|(t, _)| t).collect();
         assert_eq!(current, [NavTo::Map]);
         assert_eq!(tree(&mut app), before);
+    }
+
+    #[derive(Resource, Default)]
+    struct Entered(usize);
+
+    #[test]
+    fn going_to_the_page_shown_leaves_it_as_it_was() {
+        let mut app = app();
+        app.init_resource::<Entered>();
+        for view in [View::Board, View::Map, View::Project] {
+            app.add_systems(OnEnter(view), |mut entered: ResMut<Entered>| entered.0 += 1);
+        }
+        let entered = |app: &App| app.world().resource::<Entered>().0;
+        press(&mut app, NavTo::Board);
+        assert_eq!(entered(&app), 0);
+        press(&mut app, NavTo::Map);
+        press(&mut app, NavTo::Map);
+        assert_eq!(entered(&app), 1);
+        press(&mut app, NavTo::Project("TRAIL".into()));
+        press(&mut app, NavTo::Project("TRAIL".into()));
+        assert_eq!(entered(&app), 2);
+        press(&mut app, NavTo::Project("OPS".into()));
+        assert_eq!(entered(&app), 3, "another project's page is drawn fresh");
     }
 
     #[test]
