@@ -184,6 +184,8 @@ pub struct TaskQuery {
     pub status: Vec<Status>,
     pub parent: Option<TaskKey>,
     pub title: Option<String>,
+    /// `Some(true)` keeps only the in-review tasks waiting on a rework (`changes_requested=true`).
+    pub changes_requested: Option<bool>,
     /// Adds each task's live claim (`include=claim`).
     pub with_claim: bool,
     pub limit: Option<usize>,
@@ -271,6 +273,9 @@ impl Client {
         }
         if let Some(t) = &q.title {
             query.push(("title", t.clone()));
+        }
+        if let Some(c) = q.changes_requested {
+            query.push(("changes_requested", c.to_string()));
         }
         if q.with_claim {
             query.push(("include", "claim".into()));
