@@ -208,6 +208,7 @@ mod tests {
             runtime: None,
             memory_mib: None,
             min_free_bytes: None,
+            concurrent_checkpoints: None,
         };
         let err = validate(&[a, b]).unwrap_err().to_string();
         assert!(err.contains("/a") && err.contains("/b") && err.contains("[factory.compute]"), "{err}");

@@ -502,7 +502,7 @@ fn compute(
             Ok((Arc::new(SpritesCompute::new(token).map_err(Error::backend)?), trailhead_compute_sprites::target()))
         }
         #[cfg(feature = "docker")]
-        ComputeConfig::Docker { image, network, runtime, memory_mib, min_free_bytes } => {
+        ComputeConfig::Docker { image, network, runtime, memory_mib, min_free_bytes, concurrent_checkpoints } => {
             use trailhead_compute_docker::{DockerCompute, DockerConfig};
             let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), binary);
             if let Some(image) = image {
@@ -515,6 +515,9 @@ fn compute(
             docker.memory_bytes = memory_mib.map(|m| m * 1024 * 1024);
             if let Some(min_free) = min_free_bytes {
                 docker.min_free_bytes = *min_free;
+            }
+            if let Some(n) = concurrent_checkpoints {
+                docker.concurrent_checkpoints = *n;
             }
             docker.connections = gateway_connections(login::github_writer_token(fnox, &paths.creds())?);
             if docker.connections.is_empty() {
