@@ -31,7 +31,8 @@ use super::{HintBounds, PanelTitle, PanelTools, ScrollDown, extent, layer, panel
 
 /// How much of the window's height the modal may take, with the barrier's margin around it.
 pub const MAX_HEIGHT_VH: f32 = 80.0;
-/// How much of the window's width, for a window narrower than the modal.
+/// How much of the window's width the modal may take: all of a [`Modal::wide`] one, and a cap on the rest for a window
+/// narrower than they are.
 pub const MAX_WIDTH_VW: f32 = 85.0;
 
 /// A kind of modal: a marker component that says what its title and width are.
@@ -43,6 +44,11 @@ pub trait Modal: Component {
     /// Whether the modal takes all the height it may ([`MAX_HEIGHT_VH`]) rather than its content's: for a detail view,
     /// which reads better at a steady size than one that jumps with what is in it.
     fn tall(&self) -> bool {
+        false
+    }
+    /// Whether the modal takes all the width it may ([`MAX_WIDTH_VW`]) instead of [`Modal::width`]: with
+    /// [`Modal::tall`], for a modal that holds a whole area of the app at one size (settings, whichever tab is shown).
+    fn wide(&self) -> bool {
         false
     }
 }
@@ -89,7 +95,8 @@ pub struct ModalClosed {
 
 /// Opens `modal` over everything on the board, and returns its root.
 pub fn open_modal<M: Modal>(commands: &mut Commands, modal: M) -> Entity {
-    let (title, width, tall) = (modal.title(), modal.width(), modal.tall());
+    let width = if modal.wide() { vw(MAX_WIDTH_VW) } else { px(modal.width()) };
+    let (title, tall) = (modal.title(), modal.tall());
     commands
         .spawn_scene(bsn! {
             @FeathersDialog {
@@ -101,13 +108,13 @@ pub fn open_modal<M: Modal>(commands: &mut Commands, modal: M) -> Entity {
         .id()
 }
 
-fn frame(title: String, width: f32, tall: bool) -> Box<dyn SceneList> {
+fn frame(title: String, width: Val, tall: bool) -> Box<dyn SceneList> {
     let height = if tall { vh(MAX_HEIGHT_VH) } else { Val::Auto };
     Box::new(bsn_list! {
         Node {
             flex_direction: FlexDirection::Column,
             row_gap: { px(space::ROWS) },
-            width: { px(width) },
+            width: { width },
             height: { height },
             max_width: { vw(MAX_WIDTH_VW) },
             max_height: { vh(MAX_HEIGHT_VH) },
@@ -417,6 +424,33 @@ mod tests {
         open(&mut app);
         let dialog = app.world_mut().query_filtered::<&Node, With<ModalDialog>>().single(app.world()).unwrap();
         assert_eq!(dialog.padding, UiRect::all(px(space::PANEL_INSET)));
+    }
+
+    #[derive(Component)]
+    struct Wide;
+
+    impl Modal for Wide {
+        fn title(&self) -> String {
+            "Wide".into()
+        }
+        fn wide(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_wide_modal_takes_all_the_width_it_may_and_others_their_own() {
+        let mut app = app();
+        open(&mut app);
+        open_modal(&mut app.world_mut().commands(), Wide);
+        app.world_mut().flush();
+        for _ in 0..3 {
+            app.update();
+        }
+        let mut widths: Vec<Val> =
+            app.world_mut().query_filtered::<&Node, With<ModalFrame>>().iter(app.world()).map(|n| n.width).collect();
+        widths.sort_by_key(|w| format!("{w:?}"));
+        assert_eq!(widths, [px(extent::MODAL_WIDTH), vw(MAX_WIDTH_VW)]);
     }
 
     #[test]
