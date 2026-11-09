@@ -380,6 +380,7 @@ async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
     assert_eq!(task.status, Status::Done);
     let merged = task.run.merged.expect("recorded");
     assert_eq!((merged.by, merged.pr), (MergedBy::Merger, pr.clone()));
+    assert_eq!(task.run.merge.expect("decision").message, "Grade 1: checks, CI and review passed; merged.");
     let handoff = r.tracker.comments(&key).into_iter().rev().find(|c| c.kind == "handoff").expect("a handoff").body;
     assert!(handoff.contains(&pr.url) && handoff.contains("gates passed: checks, ci, agent_review"), "{handoff}");
 }
