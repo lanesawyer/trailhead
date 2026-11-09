@@ -137,8 +137,8 @@ pub use modal::{
     ModalSlots, open_modal,
 };
 pub use nav::{
-    BesideSidebar, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_sidebar, nav_heading, nav_item, nav_item_noted,
-    sidebar, sidebar_footer,
+    BesideSidebar, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_sidebar, nav_heading, nav_heading_action,
+    nav_item, nav_item_noted, sidebar, sidebar_footer,
 };
 pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
