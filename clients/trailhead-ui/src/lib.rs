@@ -177,6 +177,7 @@ impl Plugin for UiPlugin {
                     accordion::truncate_accordion_titles,
                     search::sync_search_hints,
                     slider::repaint_sliders.run_if(resource_exists_and_changed::<UiTheme>),
+                    input::color_new_cursors.run_if(resource_exists::<UiTheme>),
                     notice::sync_notices,
                     skeleton::pulse_skeletons.run_if(resource_exists::<UiTheme>),
                     tabs::fit_tabs,
