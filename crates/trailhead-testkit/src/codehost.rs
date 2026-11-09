@@ -41,7 +41,7 @@ struct State {
     branches: BTreeMap<(String, String), Vec<Commit>>,
     /// Each branch's head: the commit it started from, then one made-up sha per publish.
     heads: BTreeMap<(String, String), String>,
-    /// The commit each branch was         if landed { published on top of.
+    /// The commit each branch was first published on top of.
     starts: BTreeMap<(String, String), String>,
     prs: Vec<FakePr>,
     conflicts: bool,
@@ -299,10 +299,17 @@ impl CodeHost for FakeCodeHost {
         // The work is already on the branch, from an attempt whose answer was lost: nothing left to do.
         let landed = !commits.is_empty()
             && s.branches.get(&key).is_some_and(|b| {
-                b.len() >= commits.len()
-                    && b[b.len() - commits.len()..].iter().map(|c| &c.message).eq(commits.iter().map(|c| &c.message))
+                let matches = b.len() >= commits.len()
+                    && b[b.len() - commits.len()..].iter().map(|c| &c.message).eq(commits.iter().map(|c| &c.message));
+                // The head that publish was made on top of: the branch's first start, or the head before it.
+                let before = if b.len() == commits.len() {
+                    s.starts.get(&key).cloned()
+                } else {
+                    Some(format!("{branch}@{}", b.len() - commits.len()))
+                };
+                matches && before.is_some_and(|before| before == start)
             });
-        if landed && s.starts.get(&key).is_some_and(|first| first == start) {
+        if landed {
             return Ok(());
         }
         if let Some(head) = s.heads.get(&key).filter(|head| *head != start) {
