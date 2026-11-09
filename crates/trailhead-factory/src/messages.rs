@@ -575,8 +575,10 @@ pub fn ci_failure_feedback(
     }
     body.push_str(&format!(
         "\n\nThe base branch `{base}` is already being merged into your checkout, uncommitted, so the changes you see \
-         staged beyond your own are that merge: keep them, and don't discard or rebase them. Reproduce the \
-         failure, fix it, run the checks and finish."
+         staged beyond your own are that merge: keep them, and don't discard or rebase them. If `{base}` has \
+         moved on, the merge may have stopped with conflicts, leaving conflict markers in the files that clash: \
+         resolve every one, keeping what both sides intended. Reproduce the failure, fix it, run the checks and \
+         finish."
     ));
     body
 }
@@ -602,6 +604,7 @@ mod tests {
         let updated = ci_failure_feedback("url", "abc", &["test".to_string()], true, &[], "main");
         assert!(updated.contains("merged into the PR after it was reviewed"), "{updated}");
         assert!(!updated.contains("It passed"), "{updated}");
+        assert!(updated.contains("conflict markers"), "{updated}");
     }
 
     #[test]
