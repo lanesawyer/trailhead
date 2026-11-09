@@ -41,7 +41,7 @@ struct State {
     branches: BTreeMap<(String, String), Vec<Commit>>,
     /// Each branch's head: the commit it started from, then one made-up sha per publish.
     heads: BTreeMap<(String, String), String>,
-    /// The commit each branch was first published on top of.
+    /// The commit each branch was         if landed { published on top of.
     starts: BTreeMap<(String, String), String>,
     prs: Vec<FakePr>,
     conflicts: bool,
@@ -60,6 +60,8 @@ struct State {
     refuse_publish: Option<String>,
     /// Publishes still to fail with a transient error, and how many were attempted.
     flaky_publishes: usize,
+    /// Publishes still to apply and then fail with a transient error, like a ref write that landed behind a 5xx.
+    flaky_after_publishes: usize,
     publish_attempts: usize,
     /// `open_pr` and `comment` calls still to fail with a transient error.
     flaky_open_prs: usize,
@@ -105,6 +107,12 @@ impl FakeCodeHost {
     /// Makes the next `times` publishes fail with a transient error (`Error::Other`), like a GitHub 500.
     pub fn flaky_publish(&self, times: usize) {
         self.state.lock().unwrap().flaky_publishes = times;
+    }
+
+    /// Makes the next `times` publishes land and then fail with a transient error, like a ref write that succeeded
+    /// behind a GitHub 502.
+    pub fn flaky_publish_after_applying(&self, times: usize) {
+        self.state.lock().unwrap().flaky_after_publishes = times;
     }
 
     /// Makes the next `times` `open_pr` calls fail with a transient error, like a GitHub 502.
@@ -288,6 +296,15 @@ impl CodeHost for FakeCodeHost {
             return Err(Error::NotFound(why.clone()));
         }
         let key = (repo.slug(), branch.to_string());
+        // The work is already on the branch, from an attempt whose answer was lost: nothing left to do.
+        let landed = !commits.is_empty()
+            && s.branches.get(&key).is_some_and(|b| {
+                b.len() >= commits.len()
+                    && b[b.len() - commits.len()..].iter().map(|c| &c.message).eq(commits.iter().map(|c| &c.message))
+            });
+        if landed && s.starts.get(&key).is_some_and(|first| first == start) {
+            return Ok(());
+        }
         if let Some(head) = s.heads.get(&key).filter(|head| *head != start) {
             return Err(Error::Conflict(format!("branch {branch} is at {head}, not at {start}")));
         }
@@ -301,6 +318,10 @@ impl CodeHost for FakeCodeHost {
             p.mergeable = Some(true);
         }
         s.branches.entry(key).or_default().extend_from_slice(commits);
+        if s.flaky_after_publishes > 0 {
+            s.flaky_after_publishes -= 1;
+            return Err(Error::Other("github 502 Bad Gateway on PATCH /repos/o/r/git/refs/heads/b: \"\"".into()));
+        }
         Ok(())
     }
 
