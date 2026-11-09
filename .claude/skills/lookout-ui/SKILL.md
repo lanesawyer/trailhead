@@ -21,9 +21,11 @@ updates, plugins. This file is only what is Lookout's own. The design is in `doc
   `Surface::Raised`. A Lookout color that means what a kit token means is an alias (`PRIORITY_1` is `STATUS_DANGER`);
   `no_color_is_painted_that_a_meaning_already_has` fails on a repeat.
 - **Lookout never imports `bevy::feathers`**, not even in a test. What it needs from feathers it gets from the kit;
-  when the kit lacks it, grow the kit (the `trailhead-ui` skill, section 2). A test in `widgets/theme.rs`
-  (`lookout_never_reaches_past_the_kit_to_feathers`) fails on any `feathers::` or `bevy_feathers` in its code or
-  `Cargo.toml`, so CI catches it.
+  when the kit lacks it, grow the kit (the `trailhead-ui` skill, section 2). The kit lint's `no-feathers` rule finds
+  any `feathers::` or `bevy_feathers` in its code, tests or `Cargo.toml`.
+- **`tests/design_system.rs`** runs the kit's lint (`trailhead_ui::lint::APP`, see the `trailhead-ui` skill, section
+  6) over Lookout's sources, plus Lookout's own `status-label` rule (a status is shown through `status_label`). Its
+  `ALLOWED` list says which file may break which rule and why; `src/map.rs` is there until TRAIL-1153.
 - **Cards and columns:** a card shows key, title (clamped to two lines), small badges and icon-button actions; never a
   handoff or question body in full, which belongs to the inspector. A column that can hold hundreds of cards builds
   only what's on screen.

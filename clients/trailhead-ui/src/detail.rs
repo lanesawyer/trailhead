@@ -3,11 +3,8 @@
 
 use bevy::prelude::*;
 
-use crate::spacing::{extent, space};
+use crate::spacing::{extent, space, stroke};
 use crate::theme::{BorderTone, token};
-
-/// How thick the line between the columns is.
-const DIVIDER: f32 = 1.0;
 
 /// The two columns [`spawn_detail_panes`] made, for the caller to fill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +52,7 @@ pub fn spawn_detail_panes(commands: &mut Commands, parent: Entity) -> DetailPane
                 width: px(extent::DETAIL_SIDEBAR_WIDTH),
                 row_gap: px(space::ROWS),
                 padding: UiRect::left(px(space::PANEL_INSET)),
-                border: UiRect::left(px(DIVIDER)),
+                border: UiRect::left(px(stroke::HAIRLINE)),
                 ..default()
             },
             BorderTone(token::BORDER),

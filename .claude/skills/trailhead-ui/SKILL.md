@@ -74,8 +74,9 @@ over growing a private copy.
 - **Paint dark; the kit derives light and the accent.** `Theme::light` turns near-neutrals over and darkens colors
   that mean something; `Theme::with_accent` moves the accent's shades onto the desktop's. A color written as a
   literal follows neither, so it stays dark in a light theme.
-- **Text sizes** come from the kit's `size` scale and **gaps, padding and margins** from its `space` scale, named for
-  what they're for. A test fails on a literal. If no name fits, add one with a doc comment.
+- **Text sizes** come from the kit's `size` scale, **gaps, padding, margins and offsets** from its `space` scale,
+  **corners** from `radius` and **border widths** from `stroke`, named for what they're for. The lint finds a literal.
+  If no name fits, add one with a doc comment.
 - **Icons** are `Icon` variants (Lucide glyphs from the embedded font). The text font has no icon glyphs, so anything
   else shows as a box or a question mark. Adding an icon is one variant; take its codepoint from the same
   `lucide-static` release the font came from.
@@ -120,6 +121,13 @@ No headless test builds what `main.rs` builds, and a factory sandbox can't open 
 
 - `cargo clippy -p trailhead-ui --all-targets -- -D warnings` and `cargo test -p trailhead-ui`, plus the same for the
   app that uses the change.
+- **The lint** (`trailhead_ui::lint`) runs these rules over a crate's sources from one test (the kit's in `lint.rs`,
+  Lookout's in `tests/design_system.rs`): `no-feathers` (apps only), `color-literal`, `palette`, `raw-color`,
+  `feathers-color`, `font-size`, `spacing`, `radius`, `stroke`, `position`. An app adds rules about its own domain
+  as more `Rule`s. A file that has to break a rule goes on the test's `Allowed` list with the reason (and the task
+  that will take it off, if one will); an entry that finds nothing fails, so take it off when the file is fixed.
+  Never widen a rule's exceptions inside the rule to get a line through. The rules read lines, not meaning: a number
+  hidden in a constant named for nothing gets past them, so name constants for what they're for.
 - With a display, run the app and look for panics and `bevy_feathers::theme: Theme color ... not found` in the log.
 - When layout or input misbehaves, measure rather than guess: log `ComputedNode` `size` and `content_size` (times
   `inverse_scale_factor` for logical pixels) of the nodes involved, and what an observer receives. A temporary
