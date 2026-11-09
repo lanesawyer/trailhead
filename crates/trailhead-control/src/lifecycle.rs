@@ -598,7 +598,7 @@ impl Factory {
 
     /// Holds a task back while its host lacks a resource: the backoff grows with the waits as well as the failures,
     /// but the stored count, the one that parks, stays at `failures`.
-    fn set_back_waiting(&self, key: &TaskKey, failures: u32) {
+    pub(crate) fn set_back_waiting(&self, key: &TaskKey, failures: u32) {
         let mut setbacks = self.setbacks.lock().unwrap();
         let waits = setbacks.get(key).map_or(0, |(_, w, _)| *w) + 1;
         let wait = backoff(failures.saturating_add(waits), FIRST_INFRA_BACKOFF, MAX_INFRA_BACKOFF);
@@ -791,7 +791,7 @@ const FIRST_INFRA_BACKOFF: Duration = Duration::from_secs(60);
 
 /// How many times in a row a task may wait for a host's resource (its disk) before it's parked for a person: about
 /// two and a half hours at the capped backoff.
-const MAX_RESOURCE_WAITS: u32 = 12;
+pub(crate) const MAX_RESOURCE_WAITS: u32 = 12;
 
 /// How many `setup` failures in a row on a fresh run park the task: the base branch is broken, not one sandbox.
 const SETUP_FAILURES_TO_PARK: u32 = 2;
