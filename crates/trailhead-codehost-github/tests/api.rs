@@ -332,8 +332,12 @@ fn parents(commit: &Value) -> Vec<Value> {
 }
 
 /// `behind_by` for `main...<sha>`: 1 unless the head's history includes main's tip.
-async fn compare(State(g): State<Shared>, Path((_, _, spec)): Path<(String, String, String)>) -> Response {
-    let g = g.lock().unwrap();
+async fn compare(
+    State(g): State<Shared>,
+    Path((_, _, spec)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let mut g = g.lock().unwrap();
     let (base, head) = spec.split_once("...").unwrap();
     let tip = g.refs.get(base).cloned().unwrap_or_else(|| base.to_string());
     if !g.commits.contains_key(&tip) || !g.commits.contains_key(head) {
@@ -348,13 +352,13 @@ async fn compare(State(g): State<Shared>, Path((_, _, spec)): Path<(String, Stri
         (false, true) => "behind",
         _ => "diverged",
     };
-    Json(json!({
+    let body = json!({
         "behind_by": g.behind_by(&tip, head),
         "status": status,
         "total_commits": commits.len(),
         "commits": commits,
-    }))
-    .into_response()
+    });
+    etagged(&mut g, &headers, body)
 }
 
 async fn update_branch(
@@ -794,6 +798,32 @@ async fn a_verdict_carries_over_merges_of_the_base_but_not_other_commits() {
     let more = Commit { message: "more".into(), changes: vec![change("c.txt", Some(b"c"))], merges: vec![] };
     gh.publish(&repo(), &tip, "factory/trail-1", &[more]).await.unwrap();
     assert!(!gh.carries_verdict(&pr, &reviewed).await.unwrap());
+}
+
+#[tokio::test]
+async fn asking_again_whether_a_verdict_carries_revalidates_instead_of_rereading() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let started = head(&git, "main");
+    let work = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))], merges: vec![] };
+    gh.publish(&repo(), &started, "factory/trail-1", &[work]).await.unwrap();
+    let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };
+    let pr = gh.open_pr(&repo(), new).await.unwrap();
+    let reviewed = head(&git, "factory/trail-1");
+    let main = head(&git, "main");
+    let landed = Commit { message: "meanwhile".into(), changes: vec![change("b.txt", Some(b"b"))], merges: vec![] };
+    gh.publish(&repo(), &main, "main", &[landed]).await.unwrap();
+    gh.update_branch(&pr).await.unwrap();
+
+    // The pull and both compares are read in full once, then only revalidated: a 304 isn't counted against the limit.
+    assert!(gh.carries_verdict(&pr, &reviewed).await.unwrap());
+    let (full, revalidated) = {
+        let g = git.lock().unwrap();
+        (g.full_reads, g.not_modified)
+    };
+    assert!(gh.carries_verdict(&pr, &reviewed).await.unwrap());
+    let g = git.lock().unwrap();
+    assert_eq!((g.full_reads, g.not_modified), (full, revalidated + 3));
 }
 
 #[tokio::test]

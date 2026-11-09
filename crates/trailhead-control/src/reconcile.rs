@@ -16,8 +16,9 @@ use crate::{Factory, Outcome, Reconciled};
 enum PrSettle {
     /// Merged or closed, and dealt with.
     Settled,
-    /// Still open (or no PR to ask about); whether it merges cleanly, if known.
-    Open { mergeable: Option<bool> },
+    /// Still open (or no PR to ask about); whether it merges cleanly, if known, and the head the host showed, so a
+    /// caller that needs it needn't ask again (TRAIL-351).
+    Open { mergeable: Option<bool>, head: Option<String> },
 }
 
 impl Factory {
@@ -356,7 +357,7 @@ impl Factory {
     /// with whether it merges cleanly.
     async fn pr_settled(&self, task: &Task, done: &mut Reconciled) -> Result<PrSettle> {
         let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) else {
-            return Ok(PrSettle::Open { mergeable: None });
+            return Ok(PrSettle::Open { mergeable: None, head: None });
         };
         match codehost.pr_state(pr).await? {
             PrState::Merged { commit } => {
@@ -378,16 +379,16 @@ impl Factory {
                 // reading is unknown. An answer for any other head (the rework's, or one pushed since) settles the
                 // mark, so a head that moves on can't leave it stuck (TRAIL-446).
                 let Some(stale) = task.run.stale_head.as_deref().filter(|h| !h.is_empty()) else {
-                    return Ok(PrSettle::Open { mergeable });
+                    return Ok(PrSettle::Open { mergeable, head });
                 };
                 if mergeable.is_none() || head.as_deref() == Some(stale) {
-                    return Ok(PrSettle::Open { mergeable: None });
+                    return Ok(PrSettle::Open { mergeable: None, head });
                 }
                 let settled = RunUpdate { stale_head: Some(String::new()), ..RunUpdate::default() };
                 if let Err(e) = self.tracker.report(&task.key, settled).await {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the stale head; reading it again");
                 }
-                Ok(PrSettle::Open { mergeable })
+                Ok(PrSettle::Open { mergeable, head })
             }
         }
     }
@@ -448,7 +449,7 @@ impl Factory {
                 }
             }
             Status::Approved => {
-                let PrSettle::Open { mergeable } = self.pr_settled(task, done).await? else { return Ok(false) };
+                let PrSettle::Open { mergeable, .. } = self.pr_settled(task, done).await? else { return Ok(false) };
                 // Main may have moved since the approval: a PR that now conflicts goes back for a rework, which
                 // would otherwise wait for a merge attempt (and never come, in shadow mode or at a grade that
                 // doesn't auto-merge).
@@ -464,7 +465,7 @@ impl Factory {
                 self.evaluate_gates(&task.key).await?;
             }
             Status::InReview => {
-                let PrSettle::Open { mergeable } = self.pr_settled(task, done).await? else { return Ok(false) };
+                let PrSettle::Open { mergeable, head } = self.pr_settled(task, done).await? else { return Ok(false) };
                 let attempt = task.run.attempt.unwrap_or(1);
                 // Changes were requested on this attempt but never recorded as a review (the request was cut short):
                 // finish it.
@@ -481,9 +482,14 @@ impl Factory {
                 let mut applicable = task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c));
                 if let (Some(c), Some(pr), Some(codehost)) = (applicable, &task.run.pr, &self.codehost)
                     && let Some(recorded) = &c.head
-                    && codehost.head(pr).await? != *recorded
                 {
-                    applicable = None;
+                    let current = match &head {
+                        Some(head) => head.clone(),
+                        None => codehost.head(pr).await?,
+                    };
+                    if current != *recorded {
+                        applicable = None;
+                    }
                 }
                 if task.changes_requested {
                     // Waiting for a worker: the task is listed as ready, and the worker's handoff answers the request.
@@ -518,6 +524,8 @@ impl Factory {
                 if let (Some(pr), Some(codehost), Some(reviewed)) =
                     (&task.run.pr, &self.codehost, &task.run.reviewed_head)
                     && !stale
+                    // The head the host showed above is the one reviewed: nothing to ask.
+                    && head.as_ref() != Some(reviewed)
                 {
                     stale = !codehost.carries_verdict(pr, reviewed).await?;
                 }
