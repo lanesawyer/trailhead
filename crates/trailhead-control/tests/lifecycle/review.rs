@@ -939,3 +939,40 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_r
     assert_eq!(task.run.review_rounds, Some(2), "the first review and this one, not a third");
     assert!(task.run.pending_changes().is_some_and(|c| !c.conflict), "the review's changes are now pending");
 }
+
+#[tokio::test]
+async fn reconciling_a_reviewed_task_at_its_reviewed_head_looks_up_the_head_once() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    r.tracker.set_status(&key, Status::InReview);
+
+    let (lookups, verdict_checks) = (r.codehost.head_lookups(), r.codehost.calls("carries_verdict"));
+    r.factory.reconcile().await.unwrap();
+    // The head the PR's state showed is the reviewed one, so the staleness check asks nothing more; the one lookup
+    // left is inside `ci`, as on GitHub.
+    assert_eq!(r.codehost.calls("carries_verdict"), verdict_checks);
+    assert_eq!(r.codehost.head_lookups(), lookups + 1);
+}
+
+#[tokio::test]
+async fn a_request_for_changes_still_pending_is_checked_against_the_head_the_pr_state_showed() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    let pending = task.run.pending_changes().expect("the request is recorded");
+    assert!(pending.attempt == task.run.attempt.unwrap_or(1) && pending.head.is_some(), "{:?}", task.run);
+    r.tracker.set_status(&key, Status::InReview);
+
+    let before = r.codehost.head_lookups();
+    r.factory.reconcile().await.unwrap();
+    // The pending-change check reuses the head from the PR's state, so nothing is looked up for it.
+    assert_eq!(r.codehost.head_lookups(), before);
+}
