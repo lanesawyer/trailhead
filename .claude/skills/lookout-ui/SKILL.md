@@ -15,7 +15,8 @@ updates, plugins. This file is only what is Lookout's own. The design is in `doc
 - Lookout's `src/widgets/mod.rs` re-exports the kit, so views import `crate::widgets`, and adds the widgets only
   Lookout has: the task card, the board column, the status and priority tokens. A widget that isn't about tasks or the
   board goes in the kit (`clients/trailhead-ui/src/`), not here.
-- **Lookout's colors** (a background and a text tone per status, priorities, grades) are categorical tokens painted
+- **Lookout's colors** (a background and a text tone per status, priorities, grades, the trail map's sandbox states
+  and agents) are categorical tokens painted
   onto the kit's theme with `Theme::paint`, defined once where Lookout's theme is built (`widgets/theme.rs`).
   Everything else (panels, cards, borders, hovers, warnings) names the kit's semantic tokens; the card is a
   `Surface::Raised`. A Lookout color that means what a kit token means is an alias (`PRIORITY_1` is `STATUS_DANGER`);
@@ -25,7 +26,7 @@ updates, plugins. This file is only what is Lookout's own. The design is in `doc
   any `feathers::` or `bevy_feathers` in its code, tests or `Cargo.toml`.
 - **`tests/design_system.rs`** runs the kit's lint (`trailhead_ui::lint::APP`, see the `trailhead-ui` skill, section
   6) over Lookout's sources, plus Lookout's own `status-label` rule (a status is shown through `status_label`). Its
-  `ALLOWED` list says which file may break which rule and why; `src/map.rs` is there until TRAIL-1153.
+  `ALLOWED` list says which file may break which rule and why.
 - **Cards and columns:** a card shows key, title (clamped to two lines), small badges and icon-button actions; never a
   handoff or question body in full, which belongs to the inspector. A column that can hold hundreds of cards builds
   only what's on screen.
