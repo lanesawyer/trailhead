@@ -770,6 +770,21 @@ async fn a_breach_park_finished_from_open_claims_the_task_first() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_breach_park_is_finished_while_the_code_host_is_paused() {
+    let (r, key, _) = breaching_rig().await;
+    r.tracker.fail_next("factory", "claim", 1);
+    let _ = r.factory.reconcile().await;
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+
+    // The park needs only the tracker, so a nearly spent rate limit doesn't hold it back.
+    let resets_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 + 3600;
+    r.codehost.set_rate_limit(Some(trailhead_factory::RateLimit { limit: 5000, remaining: 400, resets_at }));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_breach_whose_reopen_failed_is_settled_by_the_next_review() {
     let (r, key, _) = breaching_rig().await;
     r.tracker.fail_next("factory", "reopen", 1);
