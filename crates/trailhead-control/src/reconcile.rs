@@ -552,6 +552,10 @@ impl Factory {
                 if !owed {
                     // CI may have finished, or Lane approved, since the gates were last looked at.
                     self.evaluate_gates(&task.key).await?;
+                } else if self.rework_if_ci_failed(&task.key).await? {
+                    // A failed CI is reworked without waiting for the review, which would only look at a head that
+                    // is about to change.
+                    return Ok(false);
                 } else if task.run.pending_changes().is_some_and(|c| !c.conflict) {
                     // The rework has pushed and its head awaits review: say so, without approving.
                     self.say_gates(&task.key, false).await?;

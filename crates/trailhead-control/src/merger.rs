@@ -26,6 +26,22 @@ impl Factory {
         self.evaluate(key, false, parks).await
     }
 
+    /// Sends a PR whose CI failed on its current head back for a rework, and does nothing else: no approving, no
+    /// merging, no word on the PR. For a task whose review is owed (backed off after an infrastructure failure,
+    /// TRAIL-263), where the gates aren't evaluated but a failed CI needn't wait for the review. True when CI failed.
+    pub(crate) async fn rework_if_ci_failed(&self, key: &TaskKey) -> Result<bool> {
+        let Some(codehost) = &self.codehost else { return Ok(false) };
+        let task = self.tracker.show(key).await?;
+        let Some(pr) = &task.run.pr else { return Ok(false) };
+        if !matches!(task.status, Status::InReview | Status::Approved) {
+            return Ok(false);
+        }
+        let ci = codehost.ci(pr).await?;
+        let CiState::Failed { checks } = &ci.state else { return Ok(false) };
+        self.rework_ci_failure(&task, pr, &ci.head, checks).await?;
+        Ok(true)
+    }
+
     async fn evaluate(&self, key: &TaskKey, act: bool, parks: bool) -> Result<()> {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let task = self.tracker.show(key).await?;

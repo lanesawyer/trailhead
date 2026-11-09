@@ -693,6 +693,25 @@ async fn a_review_backed_off_after_an_infrastructure_failure_is_not_skipped_by_a
     assert_eq!(r.tracker.task(&key).run.reviewed, Some(1), "the review ran once the backoff was over");
 }
 
+#[tokio::test(start_paused = true)]
+async fn failed_ci_is_reworked_while_a_review_is_backed_off() {
+    let (r, queue) = queued_rig_with(NO_REVIEW_GATE);
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 1);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.factory.tick().await.unwrap();
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+
+    // Still inside the backoff: the failure is sent back for rework, and nothing is approved.
+    r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true));
+    assert!(task.run.changes_requested.expect("told why").body.contains("test"));
+    assert!(task.run.merge.is_none_or(|d| d.approved_head.is_none()), "nothing was approved");
+}
+
 #[tokio::test]
 async fn a_reviewer_is_shown_the_open_follow_ups_earlier_reviews_filed() {
     let r = rig();
@@ -878,8 +897,8 @@ async fn a_request_from_an_earlier_attempt_costs_no_host_call() {
     r.tracker.set_status(&key, Status::InReview);
     let before = r.codehost.head_lookups();
     r.factory.reconcile().await.unwrap();
-    // Asked only for the review's staleness check, not for the old request's recorded head.
-    assert!(r.codehost.head_lookups() <= before + 1, "{} lookups", r.codehost.head_lookups() - before);
+    // Asked only for the review's staleness check and the CI state, not for the old request's recorded head.
+    assert!(r.codehost.head_lookups() <= before + 2, "{} lookups", r.codehost.head_lookups() - before);
 }
 
 #[tokio::test(start_paused = true)]
