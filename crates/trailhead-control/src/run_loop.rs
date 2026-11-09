@@ -228,12 +228,15 @@ impl Factory {
 
     /// The sandboxes in the cap held for tasks this process isn't running: parked tasks', mostly.
     async fn held_by_others(&self, busy: &HashSet<TaskKey>) -> Result<Others> {
+        let mut seen = HashSet::new();
         let others = self
             .occupied_after_release(busy)
             .await?
             .iter()
             .map(|s| s.labels.get(label::TASK).map(|t| TaskKey(t.clone())))
             .filter(|t| t.as_ref().is_none_or(|t| !busy.contains(t)))
+            // A task holds one place however many sandboxes still carry its label (TRAIL-1185).
+            .filter(|t| t.as_ref().is_none_or(|t| seen.insert(t.clone())))
             .collect();
         Ok(Others(others))
     }

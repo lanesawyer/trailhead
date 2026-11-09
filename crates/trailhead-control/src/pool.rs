@@ -117,6 +117,10 @@ impl Factory {
         let pick = self.pool_pick.lock().await;
         // The task's own sandbox first, when it holds one (a parked rework resumes in it, TRAIL-1121); then idle ones.
         let mut idle = p.list(&self.pooled(None, label::BUSY, None, Some(task))).await?;
+        // The one the tracker says it ran on comes first; any other labelled for it is left over from an earlier attempt.
+        let recorded = task.run.host.as_deref().or(task.run.sandbox.as_deref());
+        idle.sort_by_key(|s| Some(s.name.as_str()) != recorded);
+        let held = idle.clone();
         idle.extend(p.list(&self.pooled(None, label::IDLE, None, None)).await?);
         let stack = self.config.stack.tag();
         let mut current = Vec::new();
@@ -150,6 +154,12 @@ impl Factory {
         if let Err(e) = p.compute.set_labels(&sandbox.id, &busy).await {
             self.give_back(&sandbox, &busy).await;
             return Err(e);
+        }
+        // A task holds one pooled sandbox: another still labelled for it would fill the cap for nothing (TRAIL-1185).
+        for stale in held.iter().filter(|s| s.name != sandbox.name) {
+            if let Err(e) = self.release_worker(stale).await {
+                tracing::warn!(sandbox = %stale.name, task = %task.key.0, error = %e, "couldn't release a stale sandbox held for the task; reconcile will");
+            }
         }
         self.status.phase(&task.key, RunPhase::Preparing { cold: warm.is_none() }, Some(&sandbox.name));
         self.status.sandbox(&Sandbox { labels: busy.clone(), ..sandbox.clone() });

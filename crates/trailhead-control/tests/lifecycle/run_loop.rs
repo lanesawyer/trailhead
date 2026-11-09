@@ -738,3 +738,26 @@ async fn reworks_that_hold_their_own_sandboxes_start_with_the_cap_full() {
     names.sort();
     assert_eq!(names, ["trailhead-w1", "trailhead-w2"], "the reworks ran in the sandboxes they held");
 }
+
+#[tokio::test]
+async fn a_task_holds_one_pooled_sandbox_so_a_stale_label_doesnt_fill_the_cap() {
+    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 2");
+    let r = rig_with(&config);
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    // An earlier attempt's sandbox kept the label after the task moved on.
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.remove(label::WARM);
+    let spec = SandboxSpec { name: "trailhead-w2".into(), labels, egress: Default::default() };
+    r.compute.create(&spec).await.unwrap();
+    assert_eq!(r.compute.sandboxes().len(), 2);
+
+    // Both count as one place, so the other task still has room.
+    let next = r.tracker.add_task("TRAIL", "Next", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == next), "the other task started");
+}
