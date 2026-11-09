@@ -151,7 +151,8 @@ pub(crate) async fn edit(cx: &Ctx, a: EditArgs) -> Result<()> {
     Ok(())
 }
 
-/// Builds a JSON merge patch from `a.b=value` pairs; a value that isn't JSON is a string.
+/// Builds a JSON merge patch from `a.b=value` pairs; a value that isn't JSON is a string,
+/// and so is any value for a string `factory.*` field (`factory.sandbox=123`) except `null`, which removes it.
 fn meta_patch(pairs: &[String]) -> Result<Value> {
     let mut patch = json!({});
     for pair in pairs {
@@ -159,7 +160,10 @@ fn meta_patch(pairs: &[String]) -> Result<Value> {
             .split_once('=')
             .filter(|(p, _)| !p.is_empty() && p.split('.').all(|k| !k.is_empty()))
             .ok_or_else(|| anyhow::anyhow!("--meta takes key=value (dots nest), not {pair:?}"))?;
-        let value = serde_json::from_str(raw).unwrap_or_else(|_| json!(raw));
+        let mut value = serde_json::from_str(raw).unwrap_or_else(|_| json!(raw));
+        if !value.is_null() && !value.is_string() && factory_kind(path).is_some_and(|k| matches!(k, Kind::String)) {
+            value = json!(raw);
+        }
         check_factory_field(path, &value)?;
         let mut at = &mut patch;
         for key in path.split('.') {
@@ -229,6 +233,12 @@ impl Kind {
             Kind::Object => "an object",
         }
     }
+}
+
+/// The kind of a known `factory.<field>` key (or nested path, like `factory.pr.url`), if `path` is one.
+fn factory_kind(path: &str) -> Option<Kind> {
+    let (_, field) = path.split_once('.').filter(|(ns, _)| *ns == "factory")?;
+    FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == field).map(|(_, k)| *k)
 }
 
 /// `pr`, the one structured field whose leaves have a fixed kind, and those leaves, by dotted path.
@@ -371,6 +381,15 @@ mod tests {
             let back = serde_json::to_value(&run).unwrap();
             assert_eq!(back, json!({ *field: sample }), "{field} isn't a {} on RunUpdate", kind.name());
         }
+    }
+
+    #[test]
+    fn string_factory_fields_keep_raw_text() {
+        let p = meta_patch(&["factory.sandbox=123".into(), "factory.failure=true".into(), "factory.host=null".into()])
+            .unwrap();
+        assert_eq!(p, json!({ "factory": { "sandbox": "123", "failure": "true", "host": null } }));
+        assert!(meta_patch(&["factory.attempt=true".into()]).is_err());
+        assert_eq!(meta_patch(&["other.x=123".into()]).unwrap(), json!({ "other": { "x": 123 } }));
     }
 
     /// Fields of `RunUpdate` that hold objects, which `FACTORY_FIELDS` leaves to the factory to read.

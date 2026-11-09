@@ -201,6 +201,7 @@ pub struct LocalDaemon {
     /// Runs that are going in a sandbox from before this control plane: their events so far, and how they end.
     ongoing: Mutex<HashMap<String, Ongoing>>,
     attached: Mutex<Vec<String>>,
+    forgotten: Mutex<Vec<SandboxId>>,
 }
 
 /// A run from before this control plane: its events so far, and its report, or `None` if it never ends by itself.
@@ -237,7 +238,13 @@ impl LocalDaemon {
             late_run_errors: Mutex::default(),
             ongoing: Mutex::default(),
             attached: Mutex::default(),
+            forgotten: Mutex::default(),
         }
+    }
+
+    /// The sandboxes the control plane has told the daemon to forget, in order.
+    pub fn forgotten(&self) -> Vec<SandboxId> {
+        self.forgotten.lock().unwrap().clone()
     }
 
     /// Has the daemon send a heartbeat this often instead of every 30 seconds.
@@ -438,6 +445,10 @@ impl Daemon for LocalDaemon {
 
     async fn unpublished(&self, _sandbox: &SandboxId, remote_branch: &str) -> Result<bool> {
         self.runner.unpublished(remote_branch).await
+    }
+
+    async fn forget(&self, sandbox: &SandboxId) {
+        self.forgotten.lock().unwrap().push(sandbox.clone());
     }
 
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
