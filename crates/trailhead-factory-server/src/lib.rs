@@ -214,6 +214,21 @@ fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>,
     Ok((config_path, remote, config))
 }
 
+/// Whether `now` differs from the `started` config (whose `[merge]` is blanked, as it is re-read live) in a way that
+/// needs a restart and wasn't already `warned` about, so an edit is reported once, not on every merge decision.
+fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: &mut Option<FactoryConfig>) -> bool {
+    let now = FactoryConfig { merge: Default::default(), ..now };
+    if now == *started {
+        *warned = None;
+        return false;
+    }
+    if warned.as_ref() == Some(&now) {
+        return false;
+    }
+    *warned = Some(now);
+    true
+}
+
 /// One repo's factory, ready to run.
 struct Entry {
     factory: Arc<Factory>,
@@ -369,6 +384,8 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
                 provider: provider(target.model_endpoint(&opts.model_endpoint).to_string()),
             })
             .collect();
+        let started = FactoryConfig { merge: Default::default(), ..config.clone() };
+        let warned = std::sync::Mutex::new(None::<FactoryConfig>);
         let mut factory = Factory::with_targets(config, placed, tracker.clone(), host.clone())
             .with_spend_file(paths.data_dir.join("factory").join(format!("spend-{}.json", slug.replace('/', "-"))));
         factory = factory.with_merge_mode_source(Box::new(move || {
@@ -377,7 +394,14 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
                 let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
                 let config =
                     FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
-                Ok(config.merge.mode)
+                let mode = config.merge.mode;
+                if changed_without_restart(&started, config, &mut warned.lock().unwrap()) {
+                    tracing::warn!(
+                        path = %config_path.display(),
+                        "the factory settings changed in the file, but only [merge] mode is re-read live; restart the server to apply them"
+                    );
+                }
+                Ok(mode)
             };
             read().map_err(|e| e.to_string())
         }));
@@ -916,6 +940,22 @@ impl trailhead_wire::ui::LogFeed for LogsFeed {
 #[cfg(test)]
 mod tests {
     use super::check_result;
+
+    #[test]
+    fn a_changed_setting_other_than_merge_mode_warns_once() {
+        use trailhead_factory::FactoryConfig;
+        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+        let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
+        let base = parse("");
+        let started = FactoryConfig { merge: Default::default(), ..base.clone() };
+        let mut warned = None;
+        // A mode change is applied live, so it isn't a reason to restart.
+        assert!(!super::changed_without_restart(&started, parse("[merge]\nmode = \"on\""), &mut warned));
+        let edited = parse("[checks]\nfmt = \"cargo fmt\"");
+        assert!(super::changed_without_restart(&started, edited.clone(), &mut warned));
+        assert!(!super::changed_without_restart(&started, edited, &mut warned));
+        assert!(!super::changed_without_restart(&started, base, &mut warned));
+    }
 
     /// Paths under `dir`, and a store in it.
     async fn instance(
