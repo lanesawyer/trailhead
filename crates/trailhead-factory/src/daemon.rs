@@ -259,7 +259,7 @@ impl From<RawSecrets> for DaemonSecrets {
     }
 }
 
-/// The Sprites connector list URL, the one place it is spelled out. The Sprites compute reports it as its
+/// Compatibility only: secrets files written before `harness` existed were all Claude Code's, whose token key is
 /// the one its harness reads.
 const LEGACY_HARNESS: &str = "claude-code";
 const LEGACY_TOKEN_KEY: &str = "oauth_token";
