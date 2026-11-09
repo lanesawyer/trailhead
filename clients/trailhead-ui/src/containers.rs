@@ -1,9 +1,9 @@
 //! The surfaces controls sit in: a panel over the board, a section within it, and a field (a label over an input).
 
-use crate::theme::Surface;
+use crate::theme::{BorderTone, Surface};
 use bevy::prelude::*;
 
-use super::{radius, size, space, text_dim};
+use super::{layer, radius, size, space, stroke, text_dim, token};
 
 /// A panel over the board (the inspector, a form, the connect panel): a column on the panel background, rounded and
 /// padded. Position it with a `Node` of the caller's, and give it a [`super::layer`].
@@ -56,5 +56,26 @@ pub fn field(label: impl Into<String>, control: impl SceneList) -> impl Scene {
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: { px(space::STACKED) } }
         Children [ @text_dim(label, size::SECONDARY) -- {control} ]
+    }
+}
+
+/// A list hanging under what holds it (a search field's suggestions), floating over what comes after, so showing and
+/// hiding it moves nothing. Put it last in a node holding just the field, which it takes its width from.
+pub fn dropdown_list() -> impl Scene {
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            top: percent(100),
+            left: px(0),
+            right: px(0),
+            margin: { UiRect::top(px(space::STACKED)) },
+            flex_direction: FlexDirection::Column,
+            padding: { UiRect::all(px(space::BADGE_INSET)) },
+            border: { UiRect::all(px(stroke::HAIRLINE)) },
+            border_radius: { BorderRadius::all(px(radius::CONTROL)) },
+        }
+        Surface::Floating
+        BorderTone({ token::BORDER })
+        GlobalZIndex({ layer::MENU })
     }
 }

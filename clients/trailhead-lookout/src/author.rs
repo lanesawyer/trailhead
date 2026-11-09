@@ -28,8 +28,8 @@ use crate::mirror::Mirrored;
 use crate::project::ProjectPage;
 use crate::widgets::{
     ButtonKind, Icon, InitialText, Keyed, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, SelectEdit,
-    Token, button, field, grade_tone, matches_search, open_modal, priority_tone, row, select_toned, set_text, size,
-    space, status_tone, text, text_dim, text_input, toggle_switch, token, tool_button,
+    Token, button, dropdown_list, field, grade_tone, matches_search, open_modal, priority_tone, row, select_toned,
+    set_text, size, space, status_tone, text, text_dim, text_input, toggle_switch, token, tool_button,
 };
 
 /// The priority the form starts a new task at.
@@ -341,9 +341,11 @@ enum FormPart {
     QueuePick,
     /// The parent search and its suggestions: while not queued.
     Parent,
+    /// The search box: while no parent is picked. The pick takes its place, so the form below doesn't move.
+    Search,
     /// The parent picked, with the X that clears it: while there is one.
     Chosen,
-    /// The suggestions under the search: while nothing is picked.
+    /// The suggestions floating under the search: while nothing is picked and something matches.
     Suggestions,
     /// The grade: while queued.
     Grade,
@@ -734,22 +736,31 @@ fn fill_form(
         let queue = choice_field(c, body, "Queue task", FormChoice::Queue, (queues.clone(), plain), at, queues);
         c.entity(queue).insert(FormPart::QueuePick);
 
-        // The parent: a search over the project's open tasks, what it found, and the one picked.
+        // The parent: a search over the project's open tasks with what it found floating under it, or in its place
+        // the one picked.
         let parent = c
             .spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(space::STACKED), ..default() },))
             .insert((FormPart::Parent, ChildOf(body)))
             .id();
-        let search = input(FieldKind::ParentQuery, generation, d.parent_query.clone(), 1.0);
-        text_field(c, parent, "Parent (optional): search by key or title", search);
+        c.spawn_scene(text_dim("Parent (optional): search by key or title", size::SECONDARY)).insert(ChildOf(parent));
+        let anchor = c.spawn((Node { flex_direction: FlexDirection::Column, ..default() }, ChildOf(parent))).id();
+        let search = c
+            .spawn((Node { flex_direction: FlexDirection::Column, ..default() }, FormPart::Search, ChildOf(anchor)))
+            .id();
+        let query = d.parent_query.clone();
+        c.spawn_scene(bsn! {
+            @text_input(1.0, bsn! { Field(FieldKind::ParentQuery, generation) InitialText(query) })
+        })
+        .insert(ChildOf(search));
         let chosen = c
             .spawn((Node { align_items: AlignItems::Center, column_gap: px(space::CONTROLS), ..default() },))
-            .insert((FormPart::Chosen, ChildOf(parent)))
+            .insert((FormPart::Chosen, ChildOf(anchor)))
             .id();
-        c.spawn_scene(text(d.parent.clone(), size::BODY)).insert((ChosenParent, ChildOf(chosen)));
+        c.spawn_scene(bsn! { @text(d.parent.clone(), size::BODY) Node { flex_grow: 1.0 } })
+            .insert((ChosenParent, ChildOf(chosen)));
         c.spawn_scene(bsn! { @tool_button(Icon::X, "No parent", ButtonKind::Plain) Act::ClearParent })
             .insert(ChildOf(chosen));
-        c.spawn((Node { flex_direction: FlexDirection::Column, ..default() },))
-            .insert((FormPart::Suggestions, ChildOf(parent)));
+        c.queue_spawn_scene(dropdown_list()).insert((FormPart::Suggestions, ChildOf(anchor)));
 
         text_field(c, body, "Title", input(FieldKind::Title, generation, d.title.clone(), 1.0));
         let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(body)).id();
@@ -795,16 +806,18 @@ fn dress_form(
         let title = tasks.iter().find(|t| t.0.key == d.parent.as_str()).map(|t| t.0.title.clone());
         title.map_or_else(|| d.parent.clone(), |title| format!("{} · {title}", d.parent))
     });
+    let found = parent_suggestions(tasks.iter().map(|t| &t.0), &d.project, &d.parent_query, PARENT_SUGGESTIONS);
     let mut list = None;
     for (entity, part, mut node) in &mut parts {
         let shown = match part {
             FormPart::Queueing => !queues.is_empty(),
             FormPart::QueuePick => d.queued && queues.len() > 1,
             FormPart::Parent => !d.queued,
+            FormPart::Search => picked.is_none(),
             FormPart::Chosen => picked.is_some(),
             FormPart::Suggestions => {
                 list = Some(entity);
-                picked.is_none()
+                picked.is_none() && !found.is_empty()
             }
             FormPart::Grade => d.queued,
         };
@@ -827,7 +840,6 @@ fn dress_form(
         }
     }
     let Some(list) = list else { return };
-    let found = parent_suggestions(tasks.iter().map(|t| &t.0), &d.project, &d.parent_query, PARENT_SUGGESTIONS);
     let wanted = [(list, found.into_iter().map(|(k, title)| (k.clone(), (k, title))).collect::<Vec<_>>())];
     suggestions.0.sync(
         &mut commands,
@@ -837,7 +849,7 @@ fn dress_form(
             commands
                 .spawn_scene(bsn! {
                     @button(words, None, ButtonKind::Plain)
-                    Node { justify_content: JustifyContent::Start }
+                    Node { justify_content: JustifyContent::Start, width: percent(100) }
                 })
                 .insert(Act::PickParent(key.to_string()))
                 .id()
@@ -1327,6 +1339,7 @@ mod tests {
         assert!(shown(&mut app, FormPart::Queueing), "TRAIL has a queue, so the switch shows");
         assert!(shown(&mut app, FormPart::Parent) && !shown(&mut app, FormPart::Grade));
         assert!(!shown(&mut app, FormPart::QueuePick), "one queue needs no dropdown");
+        assert!(!shown(&mut app, FormPart::Suggestions), "nothing typed, no dropdown");
 
         let search = {
             let world = app.world_mut();
@@ -1340,9 +1353,17 @@ mod tests {
             world.query::<&Act>().iter(world).filter(|a| matches!(a, Act::PickParent(_))).cloned().collect::<Vec<_>>()
         };
         assert_eq!(offered(&mut app), [Act::PickParent("TRAIL-7".into())], "TRAIL-7 is titled \"old\"");
+        assert!(shown(&mut app, FormPart::Suggestions));
+        let floats = {
+            let world = app.world_mut();
+            let mut parts = world.query::<(&FormPart, &Node)>();
+            parts.iter(world).find(|(p, _)| **p == FormPart::Suggestions).unwrap().1.position_type
+        };
+        assert_eq!(floats, PositionType::Absolute, "the suggestions float over the form rather than push it down");
         press(&mut app, Act::PickParent("TRAIL-7".into()));
         settle(&mut app);
         assert!(shown(&mut app, FormPart::Chosen) && !shown(&mut app, FormPart::Suggestions));
+        assert!(!shown(&mut app, FormPart::Search), "the pick takes the search box's place");
 
         app.world_mut().resource_mut::<Form>().open.as_mut().unwrap().draft.queued = true;
         settle(&mut app);
