@@ -45,6 +45,17 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                 if let Some(db) = &info.db {
                     println!("db {}", db.display());
                 }
+                if local
+                    && client::is_ours(&paths, &info)
+                    && let Some(unit) = info.pid.and_then(client::server_unit)
+                {
+                    println!("scope {unit}");
+                    if client::is_app_scope(&unit) {
+                        println!(
+                            "warning: the server shares an app's scope; killing that app would stop it (`trailhead server restart` starts it in its own)"
+                        );
+                    }
+                }
                 if let Some(runs) = info.runs_in_flight {
                     println!("factory runs in flight: {runs}");
                 }
