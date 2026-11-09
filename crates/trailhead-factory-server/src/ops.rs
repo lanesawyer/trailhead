@@ -195,22 +195,22 @@ fn find_sandbox<'a>(task: &Task, sandboxes: &'a [Sandbox]) -> Option<&'a Sandbox
         .or_else(|| sandboxes.iter().find(|s| s.labels.get(label::TASK) == Some(&task.key.0)))
 }
 
-/// What `log` adds to `printed`. The log is a window of its last lines, so the start of what was printed may have
-/// scrolled off. If the new log still begins with everything printed, the window hasn't scrolled and the rest is new,
-/// however repetitive the lines. Otherwise take the smallest scroll that makes the rest of the printed log the start of
-/// the new one, so repeated lines never make a whole copy of them look already printed.
+/// What `log` adds to `printed`. The log is a window of its last events, so the start of what was printed may have
+/// scrolled off, and the window can start partway through a line (an event is whatever one pipe read returned). If the
+/// new log still begins with everything printed, the window hasn't scrolled and the rest is new, however repetitive the
+/// lines. Otherwise take the smallest scroll that makes the rest of the printed log the start of the new one, so
+/// repeated lines never make a whole copy of them look already printed. In a full window of identical lines the
+/// smallest scroll reads as "nothing new": that can't be told from a real "nothing new" without a cursor, and
+/// under-printing heartbeats beats duplicating them.
 fn new_output<'a>(printed: &str, log: &'a str) -> &'a str {
     if let Some(rest) = log.strip_prefix(printed) {
         return rest;
     }
-    let mut at = 0;
-    for line in printed.split_inclusive('\n') {
-        at += line.len();
-        let rest = &printed[at..];
-        if rest.is_empty() {
-            break;
+    for at in 1..printed.len() {
+        if !printed.is_char_boundary(at) {
+            continue;
         }
-        if let Some(new) = log.strip_prefix(rest) {
+        if let Some(new) = log.strip_prefix(&printed[at..]) {
             return new;
         }
     }
@@ -415,6 +415,8 @@ mod tests {
         assert_eq!(new_output("x\nhb\nhb\n", "x\nhb\nhb\n"), "");
         // A scrolled window ending in repeats still finds the smallest scroll.
         assert_eq!(new_output("a\nb\nhb\n", "b\nhb\nhb\n"), "hb\n");
+        // The window starts partway through a line.
+        assert_eq!(new_output("abc\nd\n", "c\nd\ne\n"), "e\n");
     }
 
     #[test]
