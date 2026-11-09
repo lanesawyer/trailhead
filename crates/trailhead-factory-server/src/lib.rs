@@ -229,6 +229,12 @@ fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: 
     true
 }
 
+/// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[merge]` blanked
+/// as it is re-read live. Take it before `wire` adds anything at runtime, which a re-read of the file never has.
+fn started_baseline(config: &FactoryConfig) -> FactoryConfig {
+    FactoryConfig { merge: Default::default(), ..config.clone() }
+}
+
 /// One repo's factory, ready to run.
 struct Entry {
     factory: Arc<Factory>,
@@ -297,6 +303,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
     if let (Some(token), CLAUDE_CODE) = (&opts.claude_oauth_token, adapter.as_str()) {
         harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
     }
+    let baselines: Vec<_> = specs.iter().map(|spec| started_baseline(&spec.config)).collect();
     for spec in &mut specs {
         if !harness_secrets.is_empty() {
             tracing::warn!(repo = %spec.slug(), harness = %adapter, "subscription mode: sandboxes hold the harness's credential and can reach its API");
@@ -370,7 +377,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
 
     let host = Host::new(&host_config);
     let mut repos = Vec::new();
-    for spec in specs {
+    for (spec, started) in specs.into_iter().zip(baselines) {
         let slug = spec.slug();
         let repos::RepoSpec { config_path, remote, config, .. } = spec;
         let (_, provider_name) = config.plugins().ok_or(Error::NoWorkerProfile)?;
@@ -384,7 +391,6 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
                 provider: provider(target.model_endpoint(&opts.model_endpoint).to_string()),
             })
             .collect();
-        let started = FactoryConfig { merge: Default::default(), ..config.clone() };
         let warned = std::sync::Mutex::new(None::<FactoryConfig>);
         let mut factory = Factory::with_targets(config, placed, tracker.clone(), host.clone())
             .with_spend_file(paths.data_dir.join("factory").join(format!("spend-{}.json", slug.replace('/', "-"))));
@@ -947,7 +953,7 @@ mod tests {
         let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
         let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
         let base = parse("");
-        let started = FactoryConfig { merge: Default::default(), ..base.clone() };
+        let started = super::started_baseline(&base);
         let mut warned = None;
         // A mode change is applied live, so it isn't a reason to restart.
         assert!(!super::changed_without_restart(&started, parse("[merge]\nmode = \"on\""), &mut warned));
@@ -955,6 +961,19 @@ mod tests {
         assert!(super::changed_without_restart(&started, edited.clone(), &mut warned));
         assert!(!super::changed_without_restart(&started, edited, &mut warned));
         assert!(!super::changed_without_restart(&started, base, &mut warned));
+    }
+
+    #[test]
+    fn egress_added_at_runtime_is_not_a_change_to_the_file() {
+        use trailhead_factory::FactoryConfig;
+        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+        let mut config = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
+        let started = super::started_baseline(&config);
+        // What `wire` does in subscription mode, after the baseline is taken.
+        config.egress.always.push("api.anthropic.com".into());
+        let reread = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
+        assert!(!super::changed_without_restart(&started, reread, &mut None));
+        assert_ne!(started.egress, config.egress);
     }
 
     /// Paths under `dir`, and a store in it.
