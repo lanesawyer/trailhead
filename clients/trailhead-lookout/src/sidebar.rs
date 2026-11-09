@@ -32,10 +32,13 @@ use crate::widgets::{
 };
 
 /// Where a sidebar entry goes.
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
 pub enum NavTo {
+    #[default]
     Board,
     Map,
+    /// The page listing every project.
+    Projects,
     Project(String),
 }
 
@@ -119,7 +122,13 @@ fn spawn_sidebar(mut commands: Commands) {
         commands.queue_spawn_scene(nav_item(caption, Some(icon))).insert((to, ChildOf(places)));
     }
     commands
-        .queue_spawn_scene(nav_heading_action("Projects", Icon::Plus, "New project", bsn! { NewProject }))
+        .queue_spawn_scene(nav_heading_action(
+            "Projects",
+            bsn! { NavTo::Projects },
+            Icon::Plus,
+            "New project",
+            bsn! { NewProject },
+        ))
         .insert(ChildOf(places));
     commands.spawn((
         Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0, ..default() },
@@ -139,6 +148,7 @@ fn on_nav(activate: On<Activate>, to: Query<&NavTo>, mut next: ResMut<NextState<
     match to.get(activate.entity) {
         Ok(NavTo::Board) => next.set_if_different(View::Board),
         Ok(NavTo::Map) => next.set_if_different(View::Map),
+        Ok(NavTo::Projects) => next.set_if_different(View::Projects),
         Ok(NavTo::Project(key)) => commands.trigger(OpenProject(key.clone())),
         Err(_) => {}
     }
@@ -254,7 +264,7 @@ fn mark_current(view: Res<State<View>>, page: Res<ProjectPage>, mut items: Query
             continue;
         }
         let current = match (to, view.get()) {
-            (NavTo::Board, View::Board) | (NavTo::Map, View::Map) => true,
+            (NavTo::Board, View::Board) | (NavTo::Map, View::Map) | (NavTo::Projects, View::Projects) => true,
             (NavTo::Project(key), View::Project) => page.0.as_ref() == Some(key),
             _ => false,
         };
@@ -439,6 +449,7 @@ mod tests {
             [
                 (NavTo::Board, true),
                 (NavTo::Map, false),
+                (NavTo::Projects, false),
                 (NavTo::Project("OPS".into()), false),
                 (NavTo::Project("TRAIL".into()), false),
             ]
@@ -462,7 +473,7 @@ mod tests {
         assert_eq!(top[4], frame);
         let mut entries = world.query_filtered::<Entity, With<NavTo>>();
         let entries: Vec<Entity> = entries.iter(world).collect();
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 5, "the places, the Projects heading and the projects");
         for entry in entries {
             let mut at = entry;
             while let Some(parent) = world.get::<ChildOf>(at) {
@@ -518,6 +529,14 @@ mod tests {
 
     #[derive(Resource, Default)]
     struct Entered(usize);
+
+    #[test]
+    fn the_projects_heading_opens_the_projects_page_and_is_marked_while_it_shows() {
+        let mut app = app();
+        press(&mut app, NavTo::Projects);
+        assert_eq!(*app.world().resource::<State<View>>().get(), View::Projects);
+        assert!(entries(&mut app).contains(&(NavTo::Projects, true)));
+    }
 
     #[test]
     fn going_to_the_page_shown_leaves_it_as_it_was() {
