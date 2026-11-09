@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use bevy::text::EditableText;
-use bevy::ui_widgets::{Activate, ControlOrientation};
+use bevy::ui_widgets::{Activate, ControlOrientation, ValueChange};
 use trailhead_model::{Project, ProjectStatus, Status, Task};
 use uuid::Uuid;
 
@@ -21,6 +21,7 @@ use crate::project_form::NewProject;
 use crate::widgets::{
     self, BesideSidebar, ButtonKind, CellAlign, ColumnWidth, Icon, Keyed, Progress, ScrollDown, TableColumn, button,
     matches_search, progress_bar, set_text, size, space, spawn_search_field, table_head, table_row, text, text_dim,
+    toggle_switch,
 };
 
 /// How wide the key column is: room for a ten-letter key.
@@ -117,8 +118,8 @@ struct ProjectsBody;
 #[derive(Component)]
 struct ProjectsSearch;
 
-/// The button that shows or hides archived projects.
-#[derive(Component)]
+/// The switch that shows or hides archived projects.
+#[derive(Component, Clone, Copy, Default)]
 struct ArchivedToggle;
 
 /// "No projects" or "No projects match", while the table is empty.
@@ -146,10 +147,6 @@ enum RowText {
 #[derive(Resource, Default)]
 struct Rows(Keyed<ProjectRow>);
 
-fn archived_caption(filter: &ProjectsFilter) -> String {
-    format!("Archived: {}", if filter.archived { "shown" } else { "hidden" })
-}
-
 /// The page's logic, without drawing.
 pub struct ProjectsPagePlugin;
 
@@ -168,17 +165,17 @@ impl Plugin for ProjectsPageUiPlugin {
             .init_resource::<Rows>()
             .add_systems(OnEnter(View::Projects), spawn_page)
             .add_systems(OnExit(View::Projects), despawn_page)
-            .add_systems(Update, (read_search, sync_rows, update_header).chain().run_if(in_state(View::Projects)));
+            .add_systems(Update, (read_search, sync_rows).chain().run_if(in_state(View::Projects)));
     }
 }
 
 fn on_toggle_archived(
-    activate: On<Activate>,
+    change: On<ValueChange<bool>>,
     toggles: Query<(), With<ArchivedToggle>>,
     mut filter: ResMut<ProjectsFilter>,
 ) {
-    if toggles.contains(activate.entity) {
-        filter.archived = !filter.archived;
+    if toggles.contains(change.source) && filter.archived != change.value {
+        filter.archived = change.value;
     }
 }
 
@@ -216,8 +213,8 @@ fn spawn_page(mut commands: Commands, filter: Res<ProjectsFilter>, mut rows: Res
     commands.entity(search.field).insert(ProjectsSearch);
     commands.entity(search.entry).insert(ChildOf(head));
     commands
-        .queue_spawn_scene(button(archived_caption(&filter), None, ButtonKind::Normal))
-        .insert((ArchivedToggle, ChildOf(head)));
+        .queue_spawn_scene(toggle_switch("Show archived", filter.archived, bsn! { ArchivedToggle }))
+        .insert(ChildOf(head));
     commands
         .queue_spawn_scene(button("New project", Some(Icon::Plus), ButtonKind::Primary))
         .insert((NewProject, ChildOf(head)));
@@ -363,23 +360,6 @@ fn sync_rows(
     );
 }
 
-/// The archived toggle's caption, in place.
-fn update_header(
-    filter: Res<ProjectsFilter>,
-    toggles: Query<Entity, With<ArchivedToggle>>,
-    children: Query<&Children>,
-    mut texts: Query<&mut Text>,
-) {
-    let caption = archived_caption(&filter);
-    for toggle in &toggles {
-        for e in children.iter_descendants(toggle) {
-            if let Ok(text) = texts.get_mut(e) {
-                set_text(text, &caption);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -472,7 +452,7 @@ mod tests {
             let world = app.world_mut();
             world.query_filtered::<Entity, With<ArchivedToggle>>().single(world).unwrap()
         };
-        app.world_mut().trigger(Activate { entity: toggle });
+        app.world_mut().trigger(ValueChange { source: toggle, value: true, is_final: true });
         settle(&mut app);
         let mut keys = shown(&mut app);
         keys.sort();
