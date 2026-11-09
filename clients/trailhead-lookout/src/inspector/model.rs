@@ -239,7 +239,7 @@ pub fn build(
                 .filter(|t| t.id.to_string() == *id)
                 .or_else(|| input.tasks.iter().find(|t| t.id.to_string() == *id))?;
             let status = task.status;
-            let is_factory = task.metadata.get(METADATA_KEY).is_some_and(Value::is_object);
+            let is_factory = crate::factory::factory_ran(task);
             let run = RunUpdate::of(task).ok();
             let holder = input.claims.iter().find(|c| c.task_id == task.id).map(|c| c.holder_id);
             let holder_agent = holder.and_then(agent_name);
@@ -649,6 +649,18 @@ mod tests {
             assert!(v.actions.contains(&want), "{want:?}");
         }
         assert!(!v.actions.contains(&Action::Status(Status::InReview)));
+    }
+
+    #[test]
+    fn a_task_the_factory_only_skipped_for_its_grade_can_be_approved_and_finished_by_hand() {
+        // Interactive work filed under a queue task, ungraded so the factory skips it (TRAIL-1159).
+        let mut f = fixture();
+        let t8 = f.tasks.iter_mut().find(|t| t.key.0 == "TRAIL-8").unwrap();
+        t8.status = Status::InReview;
+        t8.metadata = json!({"factory": {"ungraded": true}});
+        let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t8")), Fetched::default()).unwrap();
+        assert!(v.merge_note.is_none());
+        assert!(v.actions.contains(&Action::Status(Status::Approved)), "{:?}", v.actions);
     }
 
     #[test]
