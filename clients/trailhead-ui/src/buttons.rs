@@ -1,12 +1,11 @@
 //! Buttons, built on feathers' `FeathersButton` and `FeathersToolButton`.
 //!
-//! - [`danger_button`]: a normal button in the danger color, for cancel and revert.
 //! - [`button`]: a caption, optionally after an icon, in a [`ButtonKind`]. One `Primary` per surface (New task,
-//!   Save); the rest `Normal`.
+//!   Save); `Danger` for something destructive (cancel, revert); the rest `Normal`.
 //! - [`tool_button`]: an icon alone, with a [`Hint`] saying what it does. `Plain` on cards and lists, where a row
 //!   of backgrounds would be noise; `Normal` in a toolbar.
 //!
-//! A button that opens a menu is [`super::icon_menu`], with its chevron. One that acts never has a chevron.
+//! A button that opens a menu is [`super::spawn_icon_menu`], with its chevron. One that acts never has a chevron.
 //!
 //! What a press does is the caller's: put a component on the button and an observer of `Activate` for it, or `on(..)`
 //! after the scene.
@@ -31,12 +30,24 @@ pub enum ButtonKind {
     Primary,
     /// No background until hovered or pressed: on cards, lists and links.
     Plain,
+    /// A normal button with its caption in the danger color: something destructive (cancel, revert).
+    Danger,
+}
+
+impl ButtonKind {
+    /// The caption's color.
+    pub(crate) fn caption(self) -> Token {
+        match self {
+            ButtonKind::Danger => token::STATUS_DANGER,
+            _ => BUTTON_TEXT,
+        }
+    }
 }
 
 impl From<ButtonKind> for ButtonVariant {
     fn from(kind: ButtonKind) -> Self {
         match kind {
-            ButtonKind::Normal => ButtonVariant::Normal,
+            ButtonKind::Normal | ButtonKind::Danger => ButtonVariant::Normal,
             ButtonKind::Primary => ButtonVariant::Primary,
             ButtonKind::Plain => ButtonVariant::Plain,
         }
@@ -62,16 +73,8 @@ pub(crate) fn toned_text(text: impl Into<String>, tone: Token) -> impl Scene {
 
 /// A button with `caption`, after `icon` when there is one.
 pub fn button(caption: impl Into<String>, icon: Option<Icon>, kind: ButtonKind) -> impl Scene {
-    toned_button(caption, icon, kind, BUTTON_TEXT)
-}
-
-/// A normal button for something destructive (cancel, revert): its caption and icon in the danger color.
-pub fn danger_button(caption: impl Into<String>, icon: Option<Icon>) -> impl Scene {
-    toned_button(caption, icon, ButtonKind::Normal, token::STATUS_DANGER)
-}
-
-fn toned_button(caption: impl Into<String>, icon: Option<Icon>, kind: ButtonKind, tone: Token) -> impl Scene {
     let caption = caption.into();
+    let tone = kind.caption();
     let inside: Box<dyn SceneList> = match icon {
         Some(icon) => Box::new(bsn_list! {
             @icon_text(icon) TextTone({ tone.clone() }) -- @toned_text(caption, tone)

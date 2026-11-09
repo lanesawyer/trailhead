@@ -21,6 +21,10 @@ Before you write a `Node` with a background, a button, a dropdown or a text styl
 - **It doesn't exist:** add a widget file to the kit, built on feathers, with a doc comment saying what it's for. Then
   use it in the view. A widget never imports a view module. A widget that is about one app's domain (Lookout's task
   card and board column) lives in that app, not the kit.
+- **Pick the widget's shape by what the caller does with it** (`lib.rs` lists them): a scene (`fn x(..) -> impl
+  Scene`) for most; `spawn_x(commands, ..) -> XParts`, unparented, when the caller fills or keeps hold of parts
+  inside it; a `Node` or bundle when the caller extends it. Name a choice instead of passing a bare `bool` (`Fold`,
+  `ButtonKind::Danger`). Keep the systems `UiPlugin` runs `pub(crate)`.
 - **Layouts that repeat are widgets too.** A panel header, a section with a heading, a label-and-value row, a form's
   button bar: if more than one surface has or will have it, it's a widget in the kit, even while only one uses it.
   Composing kit pieces inline the same way in two views drifts just like two hand-made buttons (TRAIL-861). Before
