@@ -877,8 +877,8 @@ fn server_subscriber(
 pub enum Command {
     /// Report what the factory can see (queued tasks via the server, the compute, its endpoint), without running anything.
     Check(RunOpts),
-    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; asks the server.
-    Status(Opts),
+    /// Show the sandbox pool, what is running and how queued tasks have gone (the latest finished ones; `--all` for every one). Read-only; asks the server.
+    Status(ops::StatusOpts),
     /// Print the daemon's service log from a task's sandbox.
     Logs(ops::LogsOpts),
     /// Let a UI (Lookout) connect: add its endpoint id to the allowlist. Takes effect on a running control plane at once.
