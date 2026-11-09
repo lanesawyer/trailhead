@@ -177,13 +177,17 @@ impl Workspace for GitWorkspace {
         // Before setup, so the repo's own build runs with the pinned tools.
         self.mise.bootstrap(&req.tools).await?;
         if let Some(setup) = &req.setup {
+            tracing::info!(command = %setup.command, "running the setup step");
+            let began = std::time::Instant::now();
             let result = self.check(setup).await;
+            tracing::info!(passed = result.passed, elapsed = ?began.elapsed(), "the setup step finished");
             if !result.passed {
                 return Err(Error::SetupFailed(result.output.trim().to_string()));
             }
         }
         if let Some(trim) = &req.trim {
             // The sandbox works whatever the trim does, so a failure is logged, not returned.
+            tracing::info!(command = %trim.command, "running the trim step");
             let result = self.check(trim).await;
             if !result.passed {
                 tracing::warn!(output = %result.output.trim(), "the trim check failed; carrying on untrimmed");

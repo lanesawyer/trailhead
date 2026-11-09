@@ -288,7 +288,7 @@ impl FactoryMirror {
     fn run_phase(&mut self, commands: &mut Commands, repo: &str, task: TaskKey, phase: RunPhase) {
         let have = self.runs.get(&(repo.to_string(), task.clone())).map(|(_, r)| r.clone());
         let status = match have {
-            Some(run) => RunStatus { phase, ..run },
+            Some(run) => RunStatus { phase, phase_started: unix_now(), ..run },
             None => RunStatus {
                 task,
                 phase,
@@ -298,6 +298,7 @@ impl FactoryMirror {
                 spend: Usd::ZERO,
                 last_tool: None,
                 started: unix_now(),
+                phase_started: unix_now(),
             },
         };
         self.set_run(commands, repo, status);
