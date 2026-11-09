@@ -242,6 +242,9 @@ impl StatusBoard {
             match i.runs.iter_mut().find(|r| r.task == *task) {
                 Some(r) if r.phase == phase && (sandbox.is_none() || r.sandbox.as_deref() == sandbox) => return None,
                 Some(r) => {
+                    if r.phase != phase {
+                        r.phase_started = unix_now();
+                    }
                     r.phase = phase;
                     if sandbox.is_some() {
                         r.sandbox = sandbox.map(String::from);
@@ -256,6 +259,7 @@ impl StatusBoard {
                     spend: Usd::ZERO,
                     last_tool: None,
                     started: unix_now(),
+                    phase_started: unix_now(),
                 }),
             }
             Some(FactoryEvent::RunPhase { task: task.clone(), phase })
