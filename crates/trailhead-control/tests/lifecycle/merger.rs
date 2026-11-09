@@ -319,6 +319,31 @@ async fn failed_ci_parks_the_task_at_the_conflict_rework_cap() {
 }
 
 #[tokio::test]
+async fn an_answered_ci_park_is_reworked_with_the_base_merged_in() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.tracker
+        .report(&key, trailhead_factory::RunUpdate { conflict_reworks: Some(4), ..Default::default() })
+        .await
+        .unwrap();
+    r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    assert_eq!(r.tracker.task(&key).run.pending_changes(), None, "a person's answer settles the request");
+
+    // They answer without pushing, and the task goes back to a worker, which still needs to know what it was for.
+    r.tracker.set_status(&key, Status::Open);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let prepared = r.daemon.prepared();
+    let rework: Vec<_> =
+        prepared.iter().filter(|(id, p)| p.branch.is_some() && id.0.starts_with("trailhead-w")).collect();
+    assert_eq!(rework.len(), 1, "{prepared:?}");
+    assert!(rework[0].1.merge_base, "{:?}", rework[0].1);
+}
+
+#[tokio::test]
 async fn without_delegated_reviewer_rights_the_factory_says_so_and_only_records() {
     let (r, queue) = queued_rig_with(SHADOW);
     r.tracker.set_delegated("factory", false);
@@ -380,6 +405,7 @@ async fn merge_mode_on_merges_an_approved_grade_one_pr_and_closes_the_task() {
     assert_eq!(task.status, Status::Done);
     let merged = task.run.merged.expect("recorded");
     assert_eq!((merged.by, merged.pr), (MergedBy::Merger, pr.clone()));
+    assert_eq!(task.run.merge.expect("decision").message, "Grade 1: checks, CI and review passed; merged.");
     let handoff = r.tracker.comments(&key).into_iter().rev().find(|c| c.kind == "handoff").expect("a handoff").body;
     assert!(handoff.contains(&pr.url) && handoff.contains("gates passed: checks, ci, agent_review"), "{handoff}");
 }

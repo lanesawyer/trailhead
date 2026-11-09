@@ -167,6 +167,19 @@ async fn a_task_that_fails_its_last_attempt_is_parked_even_when_the_sandbox_wont
 }
 
 #[tokio::test]
+async fn a_failed_park_after_giving_up_does_not_leave_the_gave_up_marker() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 1"));
+    let key = r.tracker.add_task("TRAIL", "Fails", "");
+    r.tracker.fail_next("factory/trail-1-a1", "ask", 1);
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "no luck".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    assert!(ran.is_err(), "{ran:?}");
+    let task = r.tracker.task(&key);
+    assert_ne!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.gave_up.unwrap_or(0), 0, "a task that wasn't parked doesn't get a fresh count");
+}
+
+#[tokio::test]
 async fn too_many_steps_is_a_breach() {
     let r = rig();
     r.tracker.add_task("TRAIL", "Chatty", "");
