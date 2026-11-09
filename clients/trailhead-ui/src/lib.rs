@@ -184,6 +184,7 @@ impl Plugin for UiPlugin {
                     nav::paint_nav_items,
                     button_group::paint_groups,
                     hover::paint_hover_tones,
+                    buttons::dim_disabled_captions,
                     select::style_select_captions,
                     select::show_chosen_icons,
                 )

@@ -237,7 +237,7 @@ impl Plugin for InspectorUiPlugin {
             // After the view is rebuilt: a modal closed from inside must not be reopened from the view it just left.
             .add_systems(
                 Update,
-                (follow_compose, sync_modal, sync_panel, sync_tools, dress, focus_composer, clear_sent)
+                (follow_compose, sync_modal, sync_panel, sync_tools, dress, gate_send, focus_composer, clear_sent)
                     .chain()
                     .after(rebuild),
             );

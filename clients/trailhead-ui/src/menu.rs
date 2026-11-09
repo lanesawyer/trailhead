@@ -11,8 +11,8 @@ use bevy::prelude::*;
 use bevy::ui_widgets::popover::{Popover, PopoverAlign, PopoverPlacement, PopoverSide};
 use bevy::ui_widgets::{MenuAction, MenuEvent};
 
-use super::buttons::toned_text;
-use super::{ButtonKind, Hint, Icon, TextTone, button_icon, icon_text, layer, space};
+use super::buttons::{toned_icon, toned_text};
+use super::{ButtonKind, Hint, Icon, button_icon, layer, space};
 
 /// Width of a menu popup.
 pub const MENU_WIDTH: f32 = 280.0;
@@ -48,7 +48,7 @@ pub fn menu_item(caption: impl Into<String>, icon: Option<Icon>, kind: ButtonKin
     let tone = kind.caption();
     let inside: Box<dyn SceneList> = match icon {
         Some(icon) => Box::new(bsn_list! {
-            @icon_text(icon) TextTone({ tone.clone() }) -- @toned_text(caption, tone)
+            @toned_icon(icon, tone.clone()) -- @toned_text(caption, tone)
         }),
         None => Box::new(bsn_list! { @toned_text(caption, tone) }),
     };

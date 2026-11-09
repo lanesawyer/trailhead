@@ -723,17 +723,15 @@ mod tests {
     }
 
     #[test]
-    fn comments_and_answers_need_a_body() {
+    fn comments_and_answers_post_their_body() {
         use crate::inspector::compose_request;
         use trailhead_model::CommentKind;
-        assert!(compose_request("TRAIL-7", CommentKind::Note, None, "  ").is_err());
-        let r = compose_request("TRAIL-7", CommentKind::Handoff, None, "hello\nthere").unwrap();
+        let r = compose_request("TRAIL-7", CommentKind::Handoff, None, "hello\nthere");
         assert_eq!(r.path, "/v1/tasks/TRAIL-7/comments");
         assert_eq!(body(&r), &json!({"kind": "handoff", "body": "hello\nthere"}));
 
         let question = ("c9".to_string(), "which db?".to_string());
-        assert!(compose_request("TRAIL-7", CommentKind::Note, Some(&question), "").is_err());
-        let r = compose_request("TRAIL-7", CommentKind::Note, Some(&question), "sqlite").unwrap();
+        let r = compose_request("TRAIL-7", CommentKind::Note, Some(&question), "sqlite");
         assert_eq!((r.method.clone(), r.path.as_str()), (Method::POST, "/v1/comments/c9/resolve"));
         assert_eq!(body(&r), &json!({"answer": "sqlite"}));
     }
