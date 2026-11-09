@@ -934,6 +934,26 @@ async fn a_fresh_run_whose_setup_fails_is_retried_once_then_parked_with_the_outp
     assert!(r.compute.get("trailhead-w1").is_none(), "a new sandbox has no warm checkpoint, so release destroys it");
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_setup_failure_after_an_unrelated_infra_failure_is_retried_not_parked() {
+    let r = with_setup();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000).hang());
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("stalled"), "{err}");
+
+    r.daemon.fail_setups(1, "error[E0063]: broken base");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("setup failed"), "{err}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Open, "one setup failure after a stall isn't a broken base");
+    assert_eq!(task.run.infra_failures, Some(2));
+
+    r.daemon.fail_setups(1, "error[E0063]: broken base");
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "the second setup failure in a row parks it");
+}
+
 #[tokio::test]
 async fn a_fresh_run_whose_setup_fails_returns_a_warm_idle_sandbox_to_the_pool() {
     let r = with_setup();
