@@ -680,3 +680,49 @@ async fn polling_never_looks_up_a_parked_task_but_still_releases_one_that_was_ca
     assert!(r.tracker.shows(&parked) > before, "a task out of the listing is looked up");
     assert!(busy(&r.compute).is_empty(), "its sandbox was released");
 }
+
+#[tokio::test]
+async fn reworks_that_hold_their_own_sandboxes_start_with_the_cap_full() {
+    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nqueue = \"TRAIL-1\"\nmax_sandboxes = 2");
+    let mut r = rig_with(&format!(
+        "{config}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n[merge]\nmode = \"on\"\n"
+    ));
+    let queue = r.tracker.add_task("TRAIL", "Factory queue", "");
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let mut keys = Vec::new();
+    for i in 0..2 {
+        let key = r.tracker.add_subtask(&queue, "Do it", "");
+        r.tracker.set_grade(&key, 1);
+        r.harness.push(Role::Worker, Script::new(changes_to(&format!("docs/{i}.md"))));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+        r.factory.tick().await.unwrap();
+        keys.push(key);
+    }
+    r.codehost.set_conflicts(true);
+    for key in &keys {
+        let pr = r.tracker.task(key).run.pr.expect("a PR");
+        r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    }
+    r.factory.reconcile().await.unwrap();
+    for key in &keys {
+        assert!(r.tracker.task(key).run.pending_changes().is_some_and(|c| c.conflict));
+    }
+    // The run before the restart left each task's pooled sandbox held for it, as a parked task's is.
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.insert(label::STATE.into(), label::BUSY.into());
+    labels.insert(label::TASK.into(), keys[0].0.clone());
+    r.compute.set_labels(&trailhead_factory::SandboxId("trailhead-w1".into()), &labels).await.unwrap();
+    labels.insert(label::TASK.into(), keys[1].0.clone());
+    let spec = SandboxSpec { name: "trailhead-w2".into(), labels, egress: Default::default() };
+    r.compute.create(&spec).await.unwrap();
+    assert_eq!(r.compute.sandboxes().len(), 2, "each holds its own sandbox, filling the cap");
+
+    r.codehost.set_conflicts(false);
+    for i in 0..2 {
+        r.harness.push(Role::Worker, Script::new(changes_to(&format!("docs/{i}.md"))));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+    }
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.len(), 2, "both reworks resume in their own sandboxes");
+    assert_eq!(r.compute.sandboxes().len(), 2, "no third sandbox");
+}
