@@ -369,6 +369,26 @@ impl Claim {
     }
 }
 
+/// A claim the caller holds, with enough of the task to act on it, as `GET /v1/claims` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct HeldClaim {
+    pub key: String,
+    pub title: String,
+    pub status: Status,
+    pub claim: Claim,
+}
+
+/// What `POST /v1/tasks/{task}/claim` returns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ClaimResult {
+    pub task: Task,
+    pub claim: Claim,
+    /// The last handoff left on this task, so the next worker picks up where it stopped.
+    pub handoff: Option<Comment>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Comment {
