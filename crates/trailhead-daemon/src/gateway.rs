@@ -298,10 +298,9 @@ impl Gateway {
             if line.trim().is_empty() {
                 continue;
             }
-            let resp = match serde_json::from_str::<GatewayRequest>(&line) {
+            let resp = match parse_request(&line) {
                 Ok(req) => self.handle(req).await,
-                // Not the serde error: it can quote input, and the input may hold a credential.
-                Err(_) => GatewayResponse::Error { message: "bad request".into() },
+                Err(message) => GatewayResponse::Error { message: message.into() },
             };
             let mut out = serde_json::to_vec(&resp).map_err(std::io::Error::other)?;
             out.push(b'\n');
@@ -674,6 +673,12 @@ pub async fn run(listen: SocketAddr, socket: &Path) -> std::io::Result<()> {
 }
 
 /// `gateway-ctl`: sends one request to the control socket and returns the response.
+/// Parses a control-socket request. The error is generic on purpose: serde's can quote the
+/// input, and the input may hold a credential.
+pub fn parse_request(line: &str) -> Result<GatewayRequest, &'static str> {
+    serde_json::from_str(line).map_err(|_| "bad request")
+}
+
 pub async fn ctl(socket: &Path, req: &GatewayRequest) -> std::io::Result<GatewayResponse> {
     let stream = UnixStream::connect(socket).await?;
     let (read, mut write) = stream.into_split();
@@ -1007,6 +1012,21 @@ mod tests {
         assert_eq!(ctl(&socket, &GatewayRequest::Unregister { name: "sb".into() }).await.unwrap(), GatewayResponse::Ok);
         let GatewayResponse::State(state) = ctl(&socket, &GatewayRequest::State).await.unwrap() else { panic!() };
         assert!(state.sandboxes.is_empty());
+    }
+
+    #[test]
+    fn parse_request_errors_do_not_echo_input() {
+        let secret = "sk-ant-hunter2-credential";
+        let lines = [
+            format!(r#"{{"type":"{secret}"}}"#),
+            format!(r#"{{"type":"register","name":{{"{secret}":1}}}}"#),
+            format!(
+                r#"{{"type":"set_connection","provider":"github","id":"a","upstream":"u","auth":"{secret}","credential":["{secret}"]}}"#
+            ),
+        ];
+        for line in lines {
+            assert_eq!(parse_request(&line), Err("bad request"), "{line}");
+        }
     }
 
     #[tokio::test]
