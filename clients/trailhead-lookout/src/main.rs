@@ -19,8 +19,8 @@ use trailhead_lookout::sidebar::SidebarUiPlugin;
 use trailhead_lookout::widgets::{ThemePlugin, theme};
 
 /// `lookout [<control plane endpoint id>]`, with `LOOKOUT_TOKEN` to sign in with a pasted user token and
-/// `LOOKOUT_QUEUE` for the task new tasks go under (default: the factory's own
-/// queue, else `TRAIL-102`). Without an id it dials the one used last time.
+/// `LOOKOUT_QUEUE` for the queue task a task queued for the factory goes under in its project, ahead of the
+/// factory's own queues. Without an id it dials the one used last time.
 fn main() {
     let Some(config) = NetConfig::from_env() else {
         eprintln!("lookout: no home directory to keep its endpoint key in");
