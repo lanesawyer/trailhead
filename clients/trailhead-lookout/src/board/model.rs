@@ -45,7 +45,7 @@ impl Filter {
         }
     }
 
-    fn get_mut(&mut self, key: FilterKey) -> &mut Option<String> {
+    pub(super) fn get_mut(&mut self, key: FilterKey) -> &mut Option<String> {
         match key {
             FilterKey::Project => &mut self.project,
             FilterKey::Parent => &mut self.parent,
@@ -399,8 +399,14 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         keys.sort_by_key(|(k, _)| (key_number(k), k.to_string()));
         keys.into_iter().map(|(k, t)| choice(k, parent_label(k, t))).collect()
     };
+    // Likewise only the holders of its tasks.
     let holders = {
-        let ids: BTreeMap<Uuid, Uuid> = holder_of.iter().map(|(t, h)| (*h, *t)).collect();
+        let ids: BTreeMap<Uuid, Uuid> = input
+            .tasks
+            .iter()
+            .filter(|t| in_project(t))
+            .filter_map(|t| holder_of.get(&t.id).map(|h| (*h, t.id)))
+            .collect();
         let mut v: Vec<Choice> = ids.into_iter().map(|(id, t)| choice(&id.to_string(), holder_label(t, id))).collect();
         v.sort_by(|a, b| a.label.cmp(&b.label));
         v
@@ -851,6 +857,16 @@ mod tests {
         assert!(ops.options.parents.is_empty());
         let trail = run(&Filter { project: Some("TRAIL".into()), ..Default::default() });
         assert_eq!(trail.options.parents, run(&Filter::default()).options.parents);
+    }
+
+    #[test]
+    fn a_picked_project_offers_only_the_holders_of_its_tasks() {
+        let labels = |project: &str| {
+            let view = run(&Filter { project: Some(project.into()), ..Default::default() });
+            view.options.holders.into_iter().map(|c| c.label).collect::<Vec<_>>()
+        };
+        assert_eq!(labels("TRAIL"), ["factory/trail-103-a1"]);
+        assert_eq!(labels("OPS"), [&sid("u1")[..8]]);
     }
 
     #[test]
