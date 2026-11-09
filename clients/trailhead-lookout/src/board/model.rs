@@ -264,7 +264,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     }
 
     let in_queue = |t: &Task| parent_key(t).is_some_and(|k| input.queues.iter().any(|q| q == k));
-    let is_factory = |t: &Task| in_queue(t) || has_run(t);
+    let is_factory = |t: &Task| in_queue(t) || crate::factory::factory_ran(t);
 
     let in_project = |t: &Task| filter.project.as_deref().is_none_or(|k| project_key.get(&t.project_id) == Some(&k));
     let passes = |t: &Task| {
@@ -412,11 +412,6 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         v
     };
     BoardView { columns, options: Options { projects, parents, holders } }
-}
-
-/// Whether a run left `factory` metadata on the task (in progress, in review, parked or waiting for a rework).
-pub(super) fn has_run(t: &Task) -> bool {
-    t.metadata.get("factory").is_some_and(|v| !v.is_null())
 }
 
 /// Whether every word of `query` matches the task's key or title, ignoring case. A word matches the key when it starts
@@ -676,7 +671,8 @@ mod tests {
         };
         let all = run(&Filter::default());
         let only = run(&Filter { factory: true, ..Default::default() });
-        // 103 and 105 are under the queue task, 104 has a run's metadata; 102 and OPS-1 are neither.
+        // 103 and 105 are under the queue task, 104 has a run's metadata; 102 and OPS-1 (only skipped as ungraded) are
+        // neither.
         assert_eq!(keys(&only), ["TRAIL-105", "TRAIL-103", "TRAIL-104"].map(String::from));
         assert!(keys(&all).len() > keys(&only).len());
         // They stay in their usual columns.

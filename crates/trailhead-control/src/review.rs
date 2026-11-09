@@ -162,9 +162,6 @@ impl Factory {
                         head: reviewed_head_at_request,
                     };
                     let round = before + 1;
-                    self.tracker
-                        .report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() })
-                        .await?;
                     // While the task is still in review, so the PR says the review asked for changes at any grade.
                     // Message only: a verdict that asks for changes mustn't approve, or merge on Lane's earlier approval.
                     let parks = round >= self.config.repo.max_review_rounds;
@@ -321,7 +318,9 @@ impl Factory {
             if requested.conflict { self.config.repo.max_conflict_reworks } else { self.config.repo.max_review_rounds };
         let (reviewer, body, conflict) = (requested.reviewer.clone(), requested.body.clone(), requested.conflict);
         // Recorded before the request is made visible, so the run that picks it up can't miss the review.
+        // A review's round goes in the same write, so a stop between the two can't count it twice (TRAIL-322).
         let update = RunUpdate {
+            review_rounds: (!conflict).then_some(round),
             reviewed: Some(requested.attempt),
             attempt_base: Some(requested.attempt),
             changes_requested: Some(requested),

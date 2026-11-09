@@ -43,7 +43,7 @@ pub fn card_title(title: impl Into<String>) -> impl Scene {
     let title = title.into();
     bsn! {
         Node {
-            max_height: { px(size::CARD_TITLE * LINE_HEIGHT * TITLE_LINES) },
+            max_height: { px(size::CARD_TITLE.px() * LINE_HEIGHT * TITLE_LINES) },
             overflow: { Overflow::clip() },
         }
         Children [ @text(title, size::CARD_TITLE) ]

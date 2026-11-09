@@ -95,28 +95,20 @@ pub mod stroke {
 
 #[cfg(test)]
 mod tests {
-    use super::{space, step};
+    use super::step;
 
     const STEPS: [f32; 4] = [step::XXS, step::XS, step::S, step::M];
 
     #[test]
     fn every_space_is_a_step() {
-        for named in [
-            space::STACKED,
-            space::ICON_LABEL,
-            space::CONTROLS,
-            space::LIST_ITEMS,
-            space::CARDS,
-            space::ROWS,
-            space::GROUPS,
-            space::INDENT,
-            space::BADGE_INSET,
-            space::INPUT_INSET,
-            space::CONTROL_INSET,
-            space::PANEL_INSET,
-            space::DOT,
-        ] {
-            assert!(STEPS.contains(&named), "{named} is off the scale");
+        // Read from this file, so a new space is checked without being listed. SEAM is a join, off the scale.
+        let source = include_str!("spacing.rs");
+        let body = source.split("pub mod space {").nth(1).unwrap().split("\n}").next().unwrap();
+        let spaces: Vec<&str> = body.lines().filter_map(|l| l.trim().strip_prefix("pub const ")).collect();
+        assert!(spaces.len() >= 10, "found only {spaces:?}");
+        for space in spaces {
+            let (name, value) = space.split_once(": f32 = ").unwrap();
+            assert!(name == "SEAM" || value.starts_with("step::"), "{name} is off the scale: {value}");
         }
     }
 

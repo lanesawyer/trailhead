@@ -38,10 +38,6 @@ fn formats_a_status(line: &Line) -> bool {
 const ALLOWED: &[Allowed] = &[
     Allowed { path: "src/widgets/theme.rs", rule: "color-literal", why: "builds Lookout's theme" },
     Allowed { path: "src/icon.rs", rule: "palette", why: "draws the window icon's pixels, which no theme repaints" },
-    Allowed { path: "src/map.rs", rule: "color-literal", why: "the map isn't on tokens yet (TRAIL-1153)" },
-    Allowed { path: "src/map.rs", rule: "raw-color", why: "the map isn't on tokens yet (TRAIL-1153)" },
-    Allowed { path: "src/map.rs", rule: "font-size", why: "the map isn't on the kit's text yet (TRAIL-1153)" },
-    Allowed { path: "src/map.rs", rule: "position", why: "the map isn't on the kit's spacing yet (TRAIL-1153)" },
     Allowed { path: "tests/design_system.rs", rule: "*", why: "names what the rules find" },
 ];
 

@@ -616,6 +616,13 @@ fn log_since(log: &std::path::Path, from: u64) -> String {
     lines[lines.len().saturating_sub(40)..].join("\n")
 }
 
+/// True when a scoped child's early exit was `systemd-run` itself failing (no usable user manager),
+/// not the server it exec'd stopping on its own. systemd-run exits 1 and prints "Failed to ..."
+/// before it execs; the server's own exits (port taken, bad database) don't.
+fn systemd_run_failed(status: std::process::ExitStatus, log: &str) -> bool {
+    status.code() == Some(1) && log.lines().any(|l| l.starts_with("Failed to "))
+}
+
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
 /// after this command exits.
 pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()> {
@@ -663,14 +670,15 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
         if health(http, base, None).await.is_some() {
             return remember_tunnel(&paths, base, false);
         }
-        if scoped && child.try_wait()?.is_some() {
+        let exited = child.try_wait()?;
+        if scoped && exited.is_some_and(|s| systemd_run_failed(s, &log_since(&paths.server_log(), started_at))) {
             // No usable user manager (a container, a bare ssh session): run it unscoped.
             scoped = false;
             note_unscoped(&log, "systemd-run --user failed");
             let from = log.metadata().map(|m| m.len()).unwrap_or(0);
             child = spawn(false).context("couldn't start the local server")?;
             started_at = from;
-        } else if let Some(status) = child.try_wait()? {
+        } else if let Some(status) = exited {
             // Another CLI's server may have taken the port first.
             if health(http, base, None).await.is_some() {
                 return remember_tunnel(&paths, base, false);
@@ -729,6 +737,17 @@ mod scope_env_tests {
     #[test]
     fn no_run_user_dir_of_ours_means_unscoped() {
         assert_eq!(scope_env(None, None, 1000, |_| false), None);
+    }
+
+    #[test]
+    fn only_systemd_runs_own_failure_triggers_the_fallback() {
+        use std::os::unix::process::ExitStatusExt;
+        let one = std::process::ExitStatus::from_raw(1 << 8);
+        let signal = std::process::ExitStatus::from_raw(9);
+        assert!(systemd_run_failed(one, "Failed to connect to bus: No medium found\n"));
+        assert!(!systemd_run_failed(one, "Error: address already in use\n"));
+        assert!(!systemd_run_failed(one, ""));
+        assert!(!systemd_run_failed(signal, "Failed to connect to bus\n"));
     }
 }
 
