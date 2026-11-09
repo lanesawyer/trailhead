@@ -87,6 +87,12 @@ pub async fn status(status: &StatusOpts) -> Result<()> {
     if !queue.is_empty() {
         waiting.retain(|t| t.grade.is_some());
     }
+    if let Some(why) = runs.and_then(|live| live.stopped.as_ref()) {
+        println!(
+            "WARNING: this repo's loop has stopped and takes no new runs: {}\nRestart the server to start it again.\n",
+            why.lines().next().unwrap_or_default()
+        );
+    }
     if let Some(live) = runs {
         print!("{}", render_live(&live.snapshot));
     }
