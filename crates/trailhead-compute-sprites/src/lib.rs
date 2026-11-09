@@ -16,7 +16,8 @@ use reqwest::{Method, RequestBuilder, Response, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use trailhead_factory::{
-    CheckpointId, Compute, Egress, Error, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec, Target,
+    CheckpointId, Compute, Egress, Error, Labels, Program, Result, SPRITES_GATEWAY_LIST, Sandbox, SandboxId,
+    SandboxSpec, Target,
 };
 
 pub const API_URL: &str = "https://api.sprites.dev";
@@ -24,9 +25,9 @@ pub const API_URL: &str = "https://api.sprites.dev";
 /// Where connectors are reached from inside a Sprite (`/v1/gateway/...`).
 pub const GATEWAY_DOMAIN: &str = "api.sprites.dev";
 
-/// Where a Sprite lists its connectors, built from `GATEWAY_DOMAIN` so the two can't drift apart.
+/// Where a Sprite lists its connectors: the factory's one copy of the URL, which a test ties to `GATEWAY_DOMAIN`.
 pub fn gateway_list() -> String {
-    format!("https://{GATEWAY_DOMAIN}/v1/gateway/list")
+    SPRITES_GATEWAY_LIST.into()
 }
 
 /// Where the daemon lives in a Sprite, whose user is `sprite`.

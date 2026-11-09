@@ -33,7 +33,8 @@ pub use config::{
 };
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, InstallHost, MISE_INSTALLER_HOSTS,
-    MISE_VERSION_HOSTS, PrepareRequest, RunReport, RunRequest, RunResult, ToDaemon, hosts_for, install_host_allowed,
+    MISE_VERSION_HOSTS, PrepareRequest, RunReport, RunRequest, RunResult, SPRITES_GATEWAY_LIST, ToDaemon, hosts_for,
+    install_host_allowed,
 };
 pub use gateway::{
     AuthScheme, GatewayConnection, GatewayConnectionInfo, GatewayRequest, GatewayResponse, GatewaySandbox,
