@@ -308,6 +308,27 @@ async fn red_ci_after_a_branch_update_unapproves_and_reworks_saying_the_merge_br
 }
 
 #[tokio::test]
+async fn red_ci_after_a_branch_update_says_so_definitely_only_when_ci_passed_on_the_reviewed_head() {
+    for (passed, definite) in [(true, true), (false, false)] {
+        let (r, queue) = queued_rig_with(SHADOW);
+        let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+        r.codehost.set_ci(&pr, CiState::Passed);
+        r.factory.reconcile().await.unwrap();
+        let reviewed_head = r.tracker.task(&key).run.reviewed_head.expect("reviewed");
+        if passed {
+            r.codehost.set_ci_at(&pr, &reviewed_head, CiState::Passed);
+        }
+        r.codehost.set_behind(&pr, true);
+        r.codehost.update_branch(&pr).await.unwrap();
+        r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+        r.factory.reconcile().await.unwrap();
+        let wanted = r.tracker.task(&key).run.changes_requested.expect("the rework is told why");
+        assert_eq!(wanted.body.contains("CI passed on the PR before"), definite, "{wanted:?}");
+        assert_eq!(wanted.body.contains("may have come in"), !definite, "{wanted:?}");
+    }
+}
+
+#[tokio::test]
 async fn pending_ci_is_not_reworked() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, _) = reviewed(&r, &queue, 1, "docs/a.md").await;
