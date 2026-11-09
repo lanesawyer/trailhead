@@ -128,7 +128,7 @@ pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
     inline_text_sized,
 };
-pub use input::{text_input, text_input_sized};
+pub use input::{InitialText, text_input, text_input_sized};
 pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, menu_item, spawn_icon_menu};
@@ -186,6 +186,7 @@ impl Plugin for UiPlugin {
                     search::sync_search_hints,
                     slider::repaint_sliders.run_if(resource_exists_and_changed::<UiTheme>),
                     input::color_new_cursors.run_if(resource_exists::<UiTheme>),
+                    input::fill_initial_text,
                     notice::sync_notices,
                     skeleton::pulse_skeletons.run_if(resource_exists::<UiTheme>),
                     tabs::fit_tabs,

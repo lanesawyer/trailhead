@@ -33,6 +33,18 @@ pub fn text_input_sized(lines: f32, font_size: Size, own: impl Scene) -> impl Sc
     }
 }
 
+/// Text an input holds when it appears, with the cursor at its end: what a form opened on something that exists starts
+/// with. Put it in the `own` scene of a [`text_input`].
+#[derive(Component, Clone, Default, Debug)]
+pub struct InitialText(pub String);
+
+pub(crate) fn fill_initial_text(mut inputs: Query<(&InitialText, &mut EditableText), Added<InitialText>>) {
+    for (InitialText(initial), mut text) in &mut inputs {
+        text.editor_mut().set_text(initial);
+        text.queue_edit(bevy::text::TextEdit::TextEnd(false));
+    }
+}
+
 /// Colors the cursor and selection of each text input spawned after the theme was set, and of one moved onto another
 /// surface. Feathers colors them only when the theme changes (bevy_feathers 0.20's `update_text_cursor_color`), so
 /// any input but the ones there at startup kept bevy's dark default cursor, unseen on the field.
