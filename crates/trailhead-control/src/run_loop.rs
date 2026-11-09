@@ -197,10 +197,12 @@ impl Factory {
             .filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key))
             .collect();
         if room == 0 && !startable.iter().any(|t| others.contains(&t.key)) {
-            if keys.len() > reviewing {
-                *self.starved.lock().unwrap() = None;
-            } else if parked_fill_repo_cap(others.len(), self.config.repo.max_sandboxes) {
+            if keys.len() <= reviewing && parked_fill_repo_cap(others.len(), self.config.repo.max_sandboxes) {
                 self.warn_if_starved(&others).await;
+            } else {
+                // Workers running, or only the host's cap full with other repos' work: forget the last warning, so
+                // the same holders starving the queue again are said so again (TRAIL-629).
+                *self.starved.lock().unwrap() = None;
             }
             return Ok(());
         }

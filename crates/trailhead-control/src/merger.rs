@@ -251,14 +251,22 @@ impl Factory {
         if codehost.behind(pr).await? {
             // An update asked for on this head is still queued: the head moves when it lands.
             let queued = self.updating.lock().unwrap().get(&task.key).cloned();
-            if let Some((head, since)) = queued
+            let mut asked = 0;
+            if let Some((head, since, times)) = queued
                 && head == decision.head
             {
                 if since.elapsed() < crate::UPDATE_PATIENCE {
                     tracing::debug!(task = %task.key.0, pr = %pr.url, "the branch update is still queued; waiting");
                     return Ok(());
                 }
+                // A host that keeps dropping the update has likely found a conflict it only reports by dropping it.
+                if times >= crate::UPDATE_ASKS {
+                    tracing::warn!(task = %task.key.0, pr = %pr.url, times, "the branch update never landed; reworking");
+                    self.updating.lock().unwrap().remove(&task.key);
+                    return self.rework_conflict(task, pr, attempt).await;
+                }
                 tracing::warn!(task = %task.key.0, pr = %pr.url, "the branch update never landed; asking again");
+                asked = times;
             }
             match codehost.update_branch(pr).await? {
                 BranchUpdate::Conflict => {
@@ -267,7 +275,10 @@ impl Factory {
                 }
                 // CI starts over on the new head; the next pass looks at it again.
                 BranchUpdate::Updated => {
-                    self.updating.lock().unwrap().insert(task.key.clone(), (decision.head.clone(), Instant::now()));
+                    self.updating
+                        .lock()
+                        .unwrap()
+                        .insert(task.key.clone(), (decision.head.clone(), Instant::now(), asked + 1));
                 }
                 BranchUpdate::UpToDate => {}
             }
