@@ -5,8 +5,10 @@
 //! [`text_input_sized`] types at another of [`super::size`]'s sizes, so an input can stand in for a text of that size.
 
 use bevy::feathers::controls::{FeathersTextInput, FeathersTextInputContainer};
+use bevy::feathers::theme::{SurfaceLevel, ThemeContext, UiTheme};
+use bevy::feathers::tokens;
 use bevy::prelude::*;
-use bevy::text::{EditableText, FontSize, LineBreak, TextFont, TextLayout};
+use bevy::text::{EditableText, FontSize, LineBreak, TextCursorStyle, TextFont, TextLayout};
 
 use crate::text::{Size, size};
 
@@ -28,5 +30,43 @@ pub fn text_input_sized(lines: f32, font_size: Size, own: impl Scene) -> impl Sc
             TextLayout { linebreak: LineBreak::WordBoundary }
             TextFont { font_size: { FontSize::from(font_size) } }
         ]
+    }
+}
+
+/// Colors the cursor and selection of each text input spawned after the theme was set, and of one moved onto another
+/// surface. Feathers colors them only when the theme changes (bevy_feathers 0.20's `update_text_cursor_color`), so
+/// any input but the ones there at startup kept bevy's dark default cursor, unseen on the field.
+#[allow(clippy::type_complexity)]
+pub(crate) fn color_new_cursors(
+    theme: Res<UiTheme>,
+    mut inputs: Query<
+        (&mut TextCursorStyle, Option<&ThemeContext>),
+        (With<FeathersTextInput>, Or<(Added<TextCursorStyle>, Changed<ThemeContext>)>),
+    >,
+) {
+    for (mut style, context) in &mut inputs {
+        let context = context.map_or(SurfaceLevel::Base, |c| c.0);
+        style.color = theme.context_color(&tokens::TEXT_INPUT_CURSOR, context);
+        style.selection_color = theme.context_color(&tokens::TEXT_INPUT_SELECTION, context);
+        style.unfocused_selection_color = theme.context_color(&tokens::TEXT_INPUT_SELECTION_UNFOCUSED, context);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Theme;
+
+    #[test]
+    fn an_input_spawned_after_the_theme_gets_the_themes_cursor() {
+        let mut app = App::new();
+        app.insert_resource(Theme::new().resource()).add_systems(Update, color_new_cursors);
+        app.update();
+        let input = app.world_mut().spawn((FeathersTextInput, TextCursorStyle::default())).id();
+        app.update();
+        let theme = app.world().resource::<UiTheme>();
+        let cursor = theme.context_color(&tokens::TEXT_INPUT_CURSOR, SurfaceLevel::Base);
+        assert_ne!(cursor, TextCursorStyle::default().color, "the theme's cursor isn't bevy's default");
+        assert_eq!(app.world().get::<TextCursorStyle>(input).unwrap().color, cursor);
     }
 }

@@ -397,6 +397,7 @@ mod tests {
         Allowed { path: "src/lint.rs", rule: "*", why: "names what the rules find" },
         Allowed { path: "src/buttons.rs", rule: "feathers-color", why: "wraps feathers' button: its caption token" },
         Allowed { path: "src/slider.rs", rule: "feathers-color", why: "wraps feathers' slider: its bar and track" },
+        Allowed { path: "src/input.rs", rule: "feathers-color", why: "wraps feathers' text input: its cursor" },
         Allowed { path: "src/accordion.rs", rule: "feathers-color", why: "wraps feathers' panes: their borders" },
         Allowed { path: "src/scrollbar.rs", rule: "raw-color", why: "fades the scrollbar's own color in and out" },
         Allowed { path: "src/skeleton.rs", rule: "raw-color", why: "pulses a token's color" },
