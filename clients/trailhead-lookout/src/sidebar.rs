@@ -1,4 +1,4 @@
-//! The sidebar down the left of the window, the same in every view: Lookout's name, the search box, the places to go
+//! The sidebar down the left of the window, the same in every view: Lookout's name, New task, the search box, the places to go
 //! (Switchbacks, which is the board, the trail map, then each project's page), and a footer with the connection chip
 //! and settings. The places scroll between the search box and the footer, which stay put.
 //!
@@ -9,10 +9,12 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::text::EditableText;
+use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::FactoryState;
 use trailhead_model::Project;
 
+use crate::author::Act;
 use crate::board::{Filter, View};
 use crate::connection::{Connection, ConnectionStatus};
 use crate::factory::{FactoryLink, FactoryStatus};
@@ -20,9 +22,9 @@ use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
 use crate::settings::SettingsButton;
 use crate::widgets::{
-    ButtonKind, ChipEdit, Icon, Keyed, NavItem, Token, chip, nav_heading, nav_item, nav_item_noted, scroll_body,
-    scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size, spawn_search_field_filling, text, token,
-    tool_button,
+    ButtonKind, ChipEdit, Icon, Keyed, NavItem, Token, button, chip, nav_heading, nav_item, nav_item_noted,
+    scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size, spawn_search_field_filling, text,
+    token, tool_button,
 };
 
 /// Where a sidebar entry goes.
@@ -48,6 +50,10 @@ struct Places;
 /// The node the projects' entries are kept under.
 #[derive(Component)]
 struct ProjectList;
+
+/// The New task button under the title, off while the connection isn't live.
+#[derive(Component)]
+pub struct NewTask;
 
 /// The connection chip in the footer.
 #[derive(Component)]
@@ -79,13 +85,19 @@ impl Plugin for SidebarUiPlugin {
             .add_systems(Startup, spawn_sidebar)
             .add_observer(on_nav)
             .add_observer(clear_search_on_escape)
-            .add_systems(Update, (read_search_box, sync_projects, mark_current, update_chip).chain());
+            .add_systems(Update, (read_search_box, sync_projects, mark_current, update_chip, gate_new_task).chain());
     }
 }
 
 fn spawn_sidebar(mut commands: Commands) {
     let root = commands.spawn_scene(sidebar()).insert((Name::new("sidebar"), Sidebar)).id();
     commands.queue_spawn_scene(text("Lookout", size::APP_TITLE)).insert(ChildOf(root));
+    commands
+        .queue_spawn_scene(bsn! {
+            @button("New task", Some(Icon::Plus), ButtonKind::Primary)
+            Node { flex_shrink: { 0.0_f32 } }
+        })
+        .insert((Act::New, NewTask, InteractionDisabled, ChildOf(root)));
     let search = spawn_search_field_filling(&mut commands, "Search tasks");
     commands.entity(search.field).insert(SearchBox);
     commands.entity(search.entry).insert(ChildOf(root));
@@ -207,6 +219,22 @@ fn mark_current(view: Res<State<View>>, page: Res<ProjectPage>, mut items: Query
             _ => false,
         };
         item.set_if_neq(NavItem { current });
+    }
+}
+
+/// New task is on only while the connection is live.
+fn gate_new_task(
+    connection: Res<State<Connection>>,
+    new: Query<(Entity, Has<InteractionDisabled>), With<NewTask>>,
+    mut commands: Commands,
+) {
+    let live = *connection.get() == Connection::Live;
+    for (entity, disabled) in &new {
+        if live && disabled {
+            commands.entity(entity).remove::<InteractionDisabled>();
+        } else if !live && !disabled {
+            commands.entity(entity).insert(InteractionDisabled);
+        }
     }
 }
 
@@ -380,8 +408,8 @@ mod tests {
         assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0), "the frame may shrink so the places scroll");
         // The title and the search box above it, the footer below.
         let top: Vec<Entity> = world.get::<Children>(root).unwrap().iter().collect();
-        assert_eq!(top.len(), 4, "title, search, places, footer");
-        assert_eq!(top[2], frame);
+        assert_eq!(top.len(), 5, "title, New task, search, places, footer");
+        assert_eq!(top[3], frame);
         let mut entries = world.query_filtered::<Entity, With<NavTo>>();
         let entries: Vec<Entity> = entries.iter(world).collect();
         assert_eq!(entries.len(), 4);
@@ -398,7 +426,28 @@ mod tests {
         // In a short window the places scroll rather than squash, and the footer keeps its height.
         let mut shrinks = world.query_filtered::<&Node, With<NavItem>>();
         assert!(shrinks.iter(world).all(|n| n.flex_shrink == 0.0));
-        assert_eq!(world.get::<Node>(top[3]).unwrap().flex_shrink, 0.0);
+        assert_eq!(world.get::<Node>(top[4]).unwrap().flex_shrink, 0.0);
+    }
+
+    #[test]
+    fn new_task_sits_under_the_title_and_is_on_only_while_live() {
+        let mut app = app();
+        let new = one::<NewTask>(&mut app);
+        let root = one::<Sidebar>(&mut app);
+        assert_eq!(app.world().get::<Children>(root).unwrap()[1], new);
+        assert_eq!(app.world().get::<Act>(new), Some(&Act::New));
+        let disabled = |app: &App| app.world().get::<InteractionDisabled>(new).is_some();
+        let set = |app: &mut App, to| {
+            app.world_mut().resource_mut::<NextState<Connection>>().set(to);
+            settle(app);
+        };
+        set(&mut app, Connection::Offline);
+        assert!(disabled(&app));
+        set(&mut app, Connection::Live);
+        assert!(!disabled(&app));
+        set(&mut app, Connection::Syncing);
+        assert!(disabled(&app));
+        assert_eq!(one::<NewTask>(&mut app), new, "changed in place");
     }
 
     #[test]
