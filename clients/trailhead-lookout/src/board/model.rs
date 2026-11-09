@@ -266,8 +266,9 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     let in_queue = |t: &Task| parent_key(t).is_some_and(|k| input.queues.iter().any(|q| q == k));
     let is_factory = |t: &Task| in_queue(t) || has_run(t);
 
+    let in_project = |t: &Task| filter.project.as_deref().is_none_or(|k| project_key.get(&t.project_id) == Some(&k));
     let passes = |t: &Task| {
-        filter.project.as_deref().is_none_or(|k| project_key.get(&t.project_id) == Some(&k))
+        in_project(t)
             && filter.parent.as_deref().is_none_or(|k| parent_key(t) == Some(k))
             && filter.holder.as_deref().is_none_or(|h| holder_of.get(&t.id).is_some_and(|id| id.to_string() == h))
             && (!filter.factory || is_factory(t))
@@ -387,8 +388,9 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         keys.sort();
         keys.into_iter().map(|k| choice(k, k.to_string())).collect()
     };
+    // With a project picked, only the parents of its tasks.
     let parents = {
-        let ids: BTreeSet<Uuid> = input.tasks.iter().filter_map(|t| t.parent_id).collect();
+        let ids: BTreeSet<Uuid> = input.tasks.iter().filter(|t| in_project(t)).filter_map(|t| t.parent_id).collect();
         let title: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.title.as_str())).collect();
         let mut keys: Vec<(&str, &str)> = ids
             .iter()
@@ -841,6 +843,14 @@ mod tests {
         assert_eq!(view.options.parents[0].value, "TRAIL-102", "the filter still takes the key");
         // A holder that isn't an agent is its short id, which sorts first here.
         assert_eq!(labels(&view.options.holders), [&sid("u1")[..8], "factory/trail-103-a1"]);
+    }
+
+    #[test]
+    fn a_picked_project_offers_only_its_own_parents() {
+        let ops = run(&Filter { project: Some("OPS".into()), ..Default::default() });
+        assert!(ops.options.parents.is_empty());
+        let trail = run(&Filter { project: Some("TRAIL".into()), ..Default::default() });
+        assert_eq!(trail.options.parents, run(&Filter::default()).options.parents);
     }
 
     #[test]
