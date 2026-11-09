@@ -262,6 +262,28 @@ impl GitHub {
         }
     }
 
+    /// Whether `head` is exactly `commits` on top of `start`: walking back one commit per entry meets their messages
+    /// in order and ends at `start`.
+    async fn is_published(&self, repo: &Repo, head: &str, start: &str, commits: &[Commit]) -> Result<bool> {
+        if commits.is_empty() {
+            return Ok(false);
+        }
+        let r = Self::repo_path(repo);
+        let mut sha = head.to_string();
+        for commit in commits.iter().rev() {
+            let found = self.call(self.request(Method::GET, &format!("{r}/git/commits/{sha}"))).await?;
+            if found["message"].as_str() != Some(commit.message.as_str()) {
+                return Ok(false);
+            }
+            let first = &found["parents"][0];
+            match first["sha"].as_str().or_else(|| first.as_str()) {
+                Some(parent) => sha = parent.to_string(),
+                None => return Ok(false),
+            }
+        }
+        Ok(sha == start)
+    }
+
     /// Writes one commit on top of `parent` and returns its sha.
     async fn write_commit(&self, repo: &Repo, parent: &str, commit: &Commit) -> Result<String> {
         let r = Self::repo_path(repo);
@@ -440,6 +462,11 @@ impl CodeHost for GitHub {
     async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let existing = self.head(repo, branch).await?;
         if let Some(head) = existing.as_deref().filter(|head| *head != start) {
+            // An earlier attempt may have moved the ref and still answered 5xx or timed out; its work is on the
+            // branch already, so the retry has nothing left to do.
+            if self.is_published(repo, head, start, commits).await? {
+                return Ok(());
+            }
             return Err(Error::Conflict(format!(
                 "branch {branch} is at {head}, not at {start} where this work started; publishing would overwrite it"
             )));

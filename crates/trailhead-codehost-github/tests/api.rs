@@ -506,9 +506,15 @@ async fn publish_builds_commits_on_a_new_branch_then_on_top_of_it() {
         "stacked on the branch"
     );
 
+    let published_head = head(&git, "factory/trail-1");
+
     // Work that started from an older commit than the branch is at would overwrite it, so it's refused.
-    let moved = gh.publish(&repo(), &main, "factory/trail-1", &[second]).await.unwrap_err();
+    let moved = gh.publish(&repo(), &main, "factory/trail-1", std::slice::from_ref(&second)).await.unwrap_err();
     assert!(matches!(&moved, Error::Conflict(m) if m.contains("would overwrite")), "{moved:?}");
+
+    // A retry after a ref write that landed behind a 5xx finds its own commits on the branch: done, not a conflict.
+    gh.publish(&repo(), &branch, "factory/trail-1", std::slice::from_ref(&second)).await.unwrap();
+    assert_eq!(head(&git, "factory/trail-1"), published_head, "the retry changed nothing");
 
     let missing = gh.publish(&repo(), "nope", "factory/trail-2", &[first]).await.unwrap_err();
     assert!(matches!(missing, Error::NotFound(_)), "{missing:?}");
