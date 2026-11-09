@@ -491,7 +491,7 @@ async fn the_reviewers_infrastructure_failures_are_persisted_and_reset_by_a_fini
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
     assert_eq!(r.tracker.task(&key).run.infra_failures, Some(1), "kept in the metadata, not only in memory");
 
-    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
     r.daemon.fail_runs(1, "connection lost");
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).run.infra_failures, Some(2));
@@ -655,7 +655,7 @@ async fn a_review_backed_off_after_an_infrastructure_failure_is_not_skipped_by_a
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
 
-    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
     r.harness.push(Role::Reviewer, Script::new(approve()));
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).run.reviewed, Some(1), "the review ran once the backoff was over");
@@ -686,7 +686,7 @@ async fn a_breach_park_cut_short_is_finished_by_reconcile_without_a_rerun() {
     r.harness.push(Role::Worker, Script::new(changes()));
     let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
-    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
 
     // The tracker fails to ask after the task was reopened and claimed.
     r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
@@ -716,7 +716,7 @@ async fn breaching_rig() -> (Rig, TaskKey, PrRef) {
     let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
     let pr = r.tracker.task(&key).run.pr.expect("a PR");
-    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
     r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
     (r, key, pr)
 }
@@ -730,7 +730,7 @@ async fn a_reviewer_breach_park_a_person_fixed_gets_a_fresh_review_under_a_new_n
     let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
     assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
     let pr = r.tracker.task(&key).run.pr.expect("a PR");
-    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
 
     r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
     r.factory.reconcile().await.unwrap();
@@ -862,7 +862,7 @@ async fn a_reviewer_lost_after_spending_records_the_spend_and_counts_an_infrastr
     let rounds = r.tracker.task(&key).run.review_rounds;
     assert_eq!(r.tracker.task(&key).run.infra_failures, Some(1));
 
-    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
     r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 100_000).hang());
     r.daemon.fail_runs_midway(1, "connection lost");
     let done = r.factory.reconcile().await.unwrap();
@@ -878,8 +878,9 @@ async fn a_reviewer_lost_after_spending_records_the_spend_and_counts_an_infrastr
     assert_eq!(task.run.infra_failures, Some(2));
 }
 
-/// A review in review whose conflict rework has run and whose reviewer asked for changes, with the one write that
-/// counts that round (`request_rework`'s report, the factory's third in the tick) failing (TRAIL-322).
+/// A task in review whose conflict rework has run and whose reviewer asked for changes, with the one write that
+/// counts that round (`request_rework`'s report) failing (TRAIL-322). It is the factory's third report in the tick
+/// (`fail_after` skips the first two); when that order changes, change the count.
 async fn interrupted_request_for_changes(r: &Rig, key: &TaskKey) {
     r.harness.push(Role::Worker, Script::new(changes_to("docs/b.md")));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
@@ -910,21 +911,30 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_leaves_the_r
 }
 
 /// The resumed review reuses the interrupted reviewer's name (the round and retries are the same), but `request_rework`
-/// runs after that sub-agent was revoked for good, so the review can't start and the round is never counted.
+/// runs after that sub-agent was revoked for good, so creating it fails: one spurious infrastructure failure and a
+/// backoff, after which the review runs under the next retry's name and counts the round once. The wasted failure is a
+/// bug (with `max_infra_failures = 1` it would park the task), pinned here so it isn't mistaken for intended.
 #[tokio::test(start_paused = true)]
-#[ignore = "the interrupted reviewer's sub-agent is already revoked, so the resumed review can't create it again"]
 async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_round_once_when_resumed() {
     let r = conflicted_in_review().await;
     let key = TaskKey("TRAIL-2".into());
     interrupted_request_for_changes(&r, &key).await;
+    assert!(r.tracker.is_revoked("factory/trail-2-a2-r2"), "the interrupted reviewer's sub-agent");
 
-    // The tick settles the conflict rework the worker already did, then reconcile owes the review.
+    // The tick settles the conflict rework the worker already did, then reconcile owes the review, which can't take
+    // the revoked sub-agent's name again.
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
-    tokio::time::advance(std::time::Duration::from_secs(600)).await;
     r.factory.tick().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.infra_failures, Some(1), "the revoked name cost an infrastructure failure");
+    assert_eq!(task.run.review_rounds, Some(1), "the round was given back");
+    assert!(task.run.pending_changes().is_some_and(|c| c.conflict), "still the conflict's changes");
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the first infrastructure backoff
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
-    assert!(r.tracker.is_revoked("factory/trail-2-a2-r2"), "the interrupted reviewer's sub-agent");
+    assert!(r.tracker.is_revoked("factory/trail-2-a2-r2-1"), "the retry's reviewer, under the next name");
     let task = r.tracker.task(&key);
     assert_eq!(task.run.review_rounds, Some(2), "the first review and this one, not a third");
     assert!(task.run.pending_changes().is_some_and(|c| !c.conflict), "the review's changes are now pending");
