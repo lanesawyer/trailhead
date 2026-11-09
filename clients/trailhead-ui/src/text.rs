@@ -1,7 +1,9 @@
 //! How text is sized, in one place.
 //!
-//! Sizes are named for where the text sits, not how big it is, so the scale is one edit. Sizing goes on the text
-//! itself: feathers' `label` carries `PropagateOver<TextFont>`, so a font set on a container above it is dropped.
+//! Sizes are named for where the text sits, not how big it is, so the scale is one edit. A [`Size`] is made only here,
+//! so a size typed as a number doesn't compile: a size with a new meaning gets a new name in [`size`]. Sizing goes on
+//! the text itself: feathers' `label` carries `PropagateOver<TextFont>`, so a font set on a container above it is
+//! dropped.
 
 use bevy::app::PropagateOver;
 use bevy::feathers::display::{label, label_dim};
@@ -10,48 +12,67 @@ use bevy::text::FontSource;
 
 use crate::theme::{TextTone, Token};
 
+/// A text size from the kit's scale, one of [`size`]'s.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Size(f32);
+
+impl Size {
+    /// The size in logical pixels, for measuring: how tall a line is, how wide a glyph comes out.
+    pub const fn px(self) -> f32 {
+        self.0
+    }
+}
+
+impl From<Size> for FontSize {
+    fn from(size: Size) -> Self {
+        FontSize::Px(size.0)
+    }
+}
+
 /// The scale text is sized from.
 pub mod size {
+    use super::Size;
+
     /// Badges, a card's key, counts beside a column's name.
-    pub const SMALL: f32 = 11.0;
+    pub const SMALL: Size = Size(11.0);
     /// A card's secondary line, a field's label.
-    pub const SECONDARY: f32 = 12.0;
+    pub const SECONDARY: Size = Size(12.0);
     /// Feathers' own size: body text, button captions.
-    pub const BODY: f32 = 13.0;
+    pub const BODY: Size = Size(13.0);
     /// A card's title.
-    pub const CARD_TITLE: f32 = 14.0;
-    /// A column's name, a panel's heading.
-    pub const HEADING: f32 = 15.0;
+    pub const CARD_TITLE: Size = Size(14.0);
+    /// A column's name, a panel's heading, an icon.
+    pub const HEADING: Size = Size(15.0);
     /// The app's name in the header bar.
-    pub const APP_TITLE: f32 = 18.0;
+    pub const APP_TITLE: Size = Size(18.0);
     /// The title of the one thing a detail modal shows.
-    pub const DETAIL_TITLE: f32 = 18.0;
+    pub const DETAIL_TITLE: Size = Size(18.0);
 }
 
 /// A label at `size`.
-pub fn text(content: impl Into<String>, size: f32) -> impl Scene {
+pub fn text(content: impl Into<String>, size: Size) -> impl Scene {
     let content = content.into();
     bsn! {
         @label(content)
-        TextFont { font_size: { FontSize::Px(size) } }
+        TextFont { font_size: { FontSize::from(size) } }
     }
 }
 
 /// A dimmed label at `size`, for anything secondary to what's beside it.
-pub fn text_dim(content: impl Into<String>, size: f32) -> impl Scene {
+pub fn text_dim(content: impl Into<String>, size: Size) -> impl Scene {
     let content = content.into();
     bsn! {
         @label_dim(content)
-        TextFont { font_size: { FontSize::Px(size) } }
+        TextFont { font_size: { FontSize::from(size) } }
     }
 }
 
 /// A label at `size` in a theme color, such as [`super::token::STATUS_WARN`].
-pub fn text_toned(content: impl Into<String>, size: f32, tone: Token) -> impl Scene {
+pub fn text_toned(content: impl Into<String>, size: Size, tone: Token) -> impl Scene {
     let content = content.into();
     bsn! {
         @label(content)
-        TextFont { font_size: { FontSize::Px(size) } }
+        TextFont { font_size: { FontSize::from(size) } }
         TextTone({ tone })
     }
 }
@@ -61,10 +82,10 @@ pub fn text_toned(content: impl Into<String>, size: f32, tone: Token) -> impl Sc
 /// the `default_font` feature), not the system's monospace: finding that needs `system_font_discovery`, which links
 /// fontconfig, and without it the text has no font and lays out 0 tall (TRAIL-1144). The font is set on the text
 /// itself, as the others are.
-pub fn text_mono(content: impl Into<String>, size: f32, tone: Token) -> impl Bundle {
+pub fn text_mono(content: impl Into<String>, size: Size, tone: Token) -> impl Bundle {
     (
         Text::new(content),
-        TextFont { font: FontSource::default(), font_size: FontSize::Px(size), ..default() },
+        TextFont { font: FontSource::default(), font_size: FontSize::from(size), ..default() },
         TextTone(tone),
         PropagateOver::<TextFont>::default(),
     )

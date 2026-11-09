@@ -142,7 +142,7 @@ pub use skeleton::{SkeletonBar, spawn_skeleton};
 pub use slider::spawn_slider;
 pub use spacing::{extent, radius, space, stroke};
 pub use tabs::{TabCaption, fit_tabs, style_tabs, tab, tab_strip};
-pub use text::{size, text, text_dim, text_mono, text_toned};
+pub use text::{Size, size, text, text_dim, text_mono, text_toned};
 pub use theme::{BackgroundTone, BorderTone, Surface, TextTone, Theme, Token, palette, token};
 pub use truncate::{truncate_to_width, width_of};
 
