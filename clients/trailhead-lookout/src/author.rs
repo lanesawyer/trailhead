@@ -1,5 +1,6 @@
 //! Authoring on the task board (`docs/factory/ui.md#views`): create a task (under the factory's queue task by
-//! default), edit its title, priority, status and description, comment, and answer an open question.
+//! default), and send comments and answers to the task modal's comment box. An existing task is edited in place, in
+//! the task modal.
 //!
 //! The form is a [`Form`] resource: what is open, the [`Draft`] being typed and the message from the last
 //! attempt. [`request`] turns it into the one REST request that saves it; it is pure, so it is tested without a
@@ -14,7 +15,7 @@ use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
 use reqwest::Method;
-use serde_json::{Value, json};
+use serde_json::json;
 use trailhead_model::{Grade, Priority, Status, Task};
 
 use crate::commands::{CommandDone, Outcome, Request, Submit};
@@ -24,8 +25,7 @@ use crate::inspector::{OpenComposer, Selection, Subject};
 use crate::mirror::Mirrored;
 use crate::widgets::{
     ButtonKind, InitialText, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, Token, button, field,
-    grade_tone, open_modal, priority_tone, row, select_toned, size, status_label, status_tone, text_dim, text_input,
-    token,
+    grade_tone, open_modal, priority_tone, row, select_toned, size, status_tone, text_dim, text_input, token,
 };
 
 /// The priority the form starts a new task at.
@@ -91,24 +91,12 @@ impl Default for Authoring {
     }
 }
 
-/// What the form is for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    Create,
-    /// The task as it was when the form opened: `version` goes out as `If-Match`.
-    Edit {
-        key: String,
-        version: i64,
-    },
-}
-
-/// The fields of the form. Which ones show depends on the [`Target`].
+/// The fields of the form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
     pub title: String,
     pub description: String,
     pub priority: Priority,
-    pub status: Status,
     /// None for a task the factory won't pick up.
     pub grade: Option<Grade>,
     /// The parent's key when creating; empty for none.
@@ -121,51 +109,22 @@ impl Default for Draft {
             title: String::new(),
             description: String::new(),
             priority: NEW_PRIORITY,
-            status: Status::Open,
             grade: None,
             parent: String::new(),
         }
     }
 }
 
+/// The form as it is open: a new task, being typed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Open {
-    pub target: Target,
-    /// What the form started with, so an edit sends only what changed.
-    pub original: Draft,
     pub draft: Draft,
 }
 
 impl Open {
-    fn new(target: Target, draft: Draft) -> Open {
-        Open { target, original: draft.clone(), draft }
-    }
-
-    /// A new task under `queue`.
-    pub fn create(queue: &str) -> Open {
-        Open::new(Target::Create, Draft { parent: queue.to_string(), ..Draft::default() })
-    }
-
-    /// An edit of `task`, a task as the mirror holds it.
-    pub fn edit(task: &Task) -> Open {
-        let target = Target::Edit { key: task.key.0.clone(), version: task.version };
-        let draft = Draft {
-            title: task.title.clone(),
-            description: task.description.clone(),
-            priority: task.priority,
-            status: task.status,
-            grade: task.grade,
-            ..Draft::default()
-        };
-        Open::new(target, draft)
-    }
-
-    /// What the modal's heading says.
-    pub fn title(&self) -> String {
-        match &self.target {
-            Target::Create => "New task".to_string(),
-            Target::Edit { key, .. } => format!("Edit {key}"),
-        }
+    /// A new task under `parent`.
+    pub fn create(parent: &str) -> Open {
+        Open { draft: Draft { parent: parent.to_string(), ..Draft::default() } }
     }
 }
 
@@ -174,60 +133,29 @@ fn project_of(key: &str) -> Option<&str> {
     key.rsplit_once('-').map(|(project, _)| project).filter(|p| !p.is_empty())
 }
 
-/// The request that saves `open`, or why it can't be sent yet.
+/// The request that creates the task in `open`, or why it can't be sent yet.
 pub fn request(open: &Open) -> Result<Request, String> {
     let d = &open.draft;
-    match &open.target {
-        Target::Create => {
-            let title = d.title.trim();
-            if title.is_empty() {
-                return Err("a task needs a title".into());
-            }
-            let parent = d.parent.trim();
-            // A task's project is its parent's, so a new one needs a parent to know where it goes.
-            let Some(project) = project_of(parent) else {
-                return Err("give the parent task's key, e.g. TRAIL-102".into());
-            };
-            let mut body = json!({
-                "project": project,
-                "title": title,
-                "description": d.description,
-                "priority": d.priority,
-                "parent": parent,
-            });
-            if let Some(grade) = d.grade {
-                body["grade"] = json!(grade);
-            }
-            Ok(Request::new(Method::POST, "/v1/tasks", Some(body), None))
-        }
-        Target::Edit { key, version } => {
-            let o = &open.original;
-            let mut patch = serde_json::Map::new();
-            if d.title.trim().is_empty() {
-                return Err("a task needs a title".into());
-            }
-            if d.title.trim() != o.title {
-                patch.insert("title".into(), json!(d.title.trim()));
-            }
-            if d.description != o.description {
-                patch.insert("description".into(), json!(d.description));
-            }
-            if d.priority != o.priority {
-                patch.insert("priority".into(), json!(d.priority));
-            }
-            if d.status != o.status {
-                patch.insert("status".into(), json!(d.status));
-            }
-            if d.grade != o.grade {
-                // `null` clears it.
-                patch.insert("grade".into(), json!(d.grade));
-            }
-            if patch.is_empty() {
-                return Err("nothing changed".into());
-            }
-            Ok(Request::new(Method::PATCH, format!("/v1/tasks/{key}"), Some(Value::Object(patch)), Some(*version)))
-        }
+    let title = d.title.trim();
+    if title.is_empty() {
+        return Err("a task needs a title".into());
     }
+    let parent = d.parent.trim();
+    // A task's project is its parent's, so a new one needs a parent to know where it goes.
+    let Some(project) = project_of(parent) else {
+        return Err("give the parent task's key, e.g. TRAIL-102".into());
+    };
+    let mut body = json!({
+        "project": project,
+        "title": title,
+        "description": d.description,
+        "priority": d.priority,
+        "parent": parent,
+    });
+    if let Some(grade) = d.grade {
+        body["grade"] = json!(grade);
+    }
+    Ok(Request::new(Method::POST, "/v1/tasks", Some(body), None))
 }
 
 /// What to tell the person about an answer that wasn't `Ok`.
@@ -313,7 +241,6 @@ pub struct Field(pub FieldKind, pub u64);
 pub enum FormChoice {
     #[default]
     Priority,
-    Status,
     Grade,
     /// The queue a new task goes under.
     Parent,
@@ -338,15 +265,13 @@ pub struct FormMessage;
 /// Lines tall the spec's box is, and a comment's or answer's.
 const SPEC_LINES: f32 = 12.0;
 
-/// The form's modal, and the source of its commands. `title` is what the modal's heading says.
+/// The form's modal, and the source of its commands.
 #[derive(Component, Default)]
-pub struct FormPanel {
-    pub title: String,
-}
+pub struct FormPanel;
 
 impl Modal for FormPanel {
     fn title(&self) -> String {
-        self.title.clone()
+        "New task".into()
     }
 }
 
@@ -514,9 +439,6 @@ fn choice_field(
         FormChoice::Priority => {
             Box::new(bsn_list! { @select_toned(options, tones, selected, max_visible) FormChoice::Priority })
         }
-        FormChoice::Status => {
-            Box::new(bsn_list! { @select_toned(options, tones, selected, max_visible) FormChoice::Status })
-        }
         FormChoice::Grade => {
             Box::new(bsn_list! { @select_toned(options, tones, selected, max_visible) FormChoice::Grade })
         }
@@ -527,7 +449,7 @@ fn choice_field(
     commands.queue_spawn_scene(field(label.to_string(), control)).insert(ChildOf(parent));
 }
 
-/// Sets the draft's priority or status from the dropdown that was used.
+/// Sets the draft's priority, grade or parent from the dropdown that was used.
 fn on_pick(picked: On<Picked>, choices: Query<&FormChoice>, mut form: ResMut<Form>, factory: Res<FactoryStatus>) {
     let Ok(choice) = choices.get(picked.entity) else { return };
     let queues = factory.queues();
@@ -536,11 +458,6 @@ fn on_pick(picked: On<Picked>, choices: Query<&FormChoice>, mut form: ResMut<For
         FormChoice::Priority => {
             if let Some(priority) = Priority::ALL.get(picked.index) {
                 open.draft.priority = *priority;
-            }
-        }
-        FormChoice::Status => {
-            if let Some(status) = Status::ALL.get(picked.index) {
-                open.draft.status = *status;
             }
         }
         FormChoice::Grade => {
@@ -571,8 +488,9 @@ fn redraw_form(
     for e in &forms {
         commands.entity(e).despawn();
     }
-    let Some(open) = &form.open else { return };
-    open_modal(&mut commands, FormPanel { title: open.title() });
+    if form.open.is_some() {
+        open_modal(&mut commands, FormPanel);
+    }
 }
 
 /// Fills a new form's modal: the fields in its body, the buttons and message in its footer.
@@ -588,38 +506,24 @@ fn fill_form(
     let c = &mut commands;
     for slots in &new {
         let body = slots.body;
-        match &open.target {
-            Target::Create | Target::Edit { .. } => {
-                let creating = open.target == Target::Create;
-                if creating {
-                    let queues = factory.queues();
-                    // A new task under one of the factory's queues picks among them; any other parent is typed.
-                    match queues.iter().position(|q| *q == d.parent) {
-                        Some(at) => {
-                            let plain = vec![None; queues.len()];
-                            choice_field(c, body, "Queue", FormChoice::Parent, (queues, plain), Some(at))
-                        }
-                        None => {
-                            text_field(c, body, "Parent", input(FieldKind::Parent, generation, d.parent.clone(), 1.0))
-                        }
-                    }
-                }
-                text_field(c, body, "Title", input(FieldKind::Title, generation, d.title.clone(), 1.0));
-                let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(body)).id();
-                let priority = Priority::ALL.iter().position(|p| *p == d.priority);
-                let priorities = (priority_options(), priority_tones());
-                choice_field(c, line, "Priority", FormChoice::Priority, priorities, priority);
-                if !creating {
-                    let labels = Status::ALL.iter().map(|s| status_label(*s).to_string()).collect();
-                    let status = Status::ALL.iter().position(|s| *s == d.status);
-                    choice_field(c, line, "Status", FormChoice::Status, (labels, status_tones(&Status::ALL)), status);
-                }
-                let grades = (grade_options(&factory.human_grades()), grade_tones());
-                choice_field(c, line, "Grade", FormChoice::Grade, grades, grade_index(d.grade));
-                let spec = input(FieldKind::Description, generation, d.description.clone(), SPEC_LINES);
-                text_field(c, body, "Spec", spec);
+        let queues = factory.queues();
+        // A new task under one of the factory's queues picks among them; any other parent is typed.
+        match queues.iter().position(|q| *q == d.parent) {
+            Some(at) => {
+                let plain = vec![None; queues.len()];
+                choice_field(c, body, "Queue", FormChoice::Parent, (queues, plain), Some(at))
             }
+            None => text_field(c, body, "Parent", input(FieldKind::Parent, generation, d.parent.clone(), 1.0)),
         }
+        text_field(c, body, "Title", input(FieldKind::Title, generation, d.title.clone(), 1.0));
+        let line = c.spawn_scene(bsn! { @row() }).insert(ChildOf(body)).id();
+        let priority = Priority::ALL.iter().position(|p| *p == d.priority);
+        let priorities = (priority_options(), priority_tones());
+        choice_field(c, line, "Priority", FormChoice::Priority, priorities, priority);
+        let grades = (grade_options(&factory.human_grades()), grade_tones());
+        choice_field(c, line, "Grade", FormChoice::Grade, grades, grade_index(d.grade));
+        let spec = input(FieldKind::Description, generation, d.description.clone(), SPEC_LINES);
+        text_field(c, body, "Spec", spec);
         let footer = slots.footer;
         c.spawn_scene(bsn! { @button("Save", None, ButtonKind::Primary) Act::Save }).insert(ChildOf(footer));
         c.spawn_scene(bsn! { @button("Cancel", None, ButtonKind::Normal) Act::Cancel }).insert(ChildOf(footer));
@@ -665,6 +569,8 @@ mod tests {
 
     use bevy::state::app::StatesPlugin;
 
+    use serde_json::Value;
+
     use super::*;
     use crate::commands::{CommandId, CommandsPlugin, Outbox};
     use crate::fixture::{sid, task_json};
@@ -674,10 +580,6 @@ mod tests {
     fn task() -> Value {
         task_json(json!({"id": "t1", "key": "TRAIL-7", "title": "old", "description": "a\nb", "priority": 2,
                "status": "open", "version": 4}))
-    }
-
-    fn edit(task: &Value) -> Open {
-        Open::edit(&serde_json::from_value(task.clone()).unwrap())
     }
 
     fn body(r: &Request) -> &Value {
@@ -700,19 +602,6 @@ mod tests {
         );
         open.draft.parent = "nope".into();
         assert!(request(&open).unwrap_err().contains("parent"));
-    }
-
-    #[test]
-    fn edit_sends_only_what_changed_with_the_version_it_saw() {
-        let mut open = edit(&task());
-        assert_eq!(request(&open).unwrap_err(), "nothing changed");
-        open.draft.description = "a\nb\nc".into();
-        open.draft.status = Status::Cancelled;
-        let r = request(&open).unwrap();
-        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4)));
-        assert_eq!(body(&r), &json!({"description": "a\nb\nc", "status": "cancelled"}));
-        open.draft.title = "  ".into();
-        assert_eq!(request(&open).unwrap_err(), "a task needs a title");
     }
 
     #[test]
@@ -745,10 +634,8 @@ mod tests {
         assert_eq!(opened[1].answer, Some(("c1".to_string(), "which db?".to_string())));
     }
 
-    /// The edit form, which nothing in Lookout opens any more (existing tasks are edited in the task modal), until it
-    /// is removed.
-    fn open_edit_form(app: &mut App) {
-        app.world_mut().resource_mut::<Form>().open(edit(&task()));
+    fn open_new_form(app: &mut App) {
+        app.world_mut().resource_mut::<Form>().open(Open::create("TRAIL-102"));
         app.update();
     }
 
@@ -761,7 +648,7 @@ mod tests {
         assert!(matches!(selected, Some(Subject::Task(_))), "{selected:?}");
         press(&mut app, Act::NewSubtask("TRAIL-7".into()));
         let open = app.world().resource::<Form>().open.clone().unwrap();
-        assert_eq!((open.target, open.draft.parent.as_str()), (Target::Create, "TRAIL-7"));
+        assert_eq!(open.draft.parent, "TRAIL-7");
     }
 
     /// Picks `index` in the form's dropdown for `choice`, as a click on its row does.
@@ -772,42 +659,29 @@ mod tests {
     }
 
     #[test]
-    fn the_dropdowns_set_the_priority_and_the_status() {
+    fn the_priority_dropdown_sets_the_priority() {
         let mut app = app();
-        open_edit_form(&mut app);
+        open_new_form(&mut app);
         pick(&mut app, FormChoice::Priority, 0);
-        pick(&mut app, FormChoice::Status, 1);
-        let draft = app.world().resource::<Form>().open.as_ref().unwrap().draft.clone();
-        assert_eq!((draft.priority, draft.status), (Priority::ALL[0], Status::InProgress));
+        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.priority, Priority::ALL[0]);
         // A row past the end of the options changes nothing.
         pick(&mut app, FormChoice::Priority, 99);
         assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.priority, Priority::ALL[0]);
     }
 
     #[test]
-    fn the_grade_is_sent_on_create_and_edit_and_null_clears_it() {
+    fn the_grade_is_sent_only_when_one_is_picked() {
         let mut open = Open::create("TRAIL-102");
         open.draft.title = "Do it".into();
         assert!(body(&request(&open).unwrap()).get("grade").is_none());
         open.draft.grade = Grade::new(2);
         assert_eq!(body(&request(&open).unwrap())["grade"], json!(2));
-
-        let mut graded = task();
-        graded["grade"] = json!(3);
-        let mut open = edit(&graded);
-        assert_eq!(request(&open).unwrap_err(), "nothing changed");
-        open.draft.grade = Grade::new(4);
-        let r = request(&open).unwrap();
-        assert_eq!((r.path.as_str(), r.if_match), ("/v1/tasks/TRAIL-7", Some(4)));
-        assert_eq!(body(&r), &json!({"grade": 4}));
-        open.draft.grade = None;
-        assert_eq!(body(&request(&open).unwrap()), &json!({"grade": null}));
     }
 
     #[test]
     fn the_grade_dropdown_sets_the_draft() {
         let mut app = app();
-        open_edit_form(&mut app);
+        open_new_form(&mut app);
         pick(&mut app, FormChoice::Grade, 3);
         assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.grade, Grade::new(3));
         pick(&mut app, FormChoice::Grade, 0);
@@ -861,19 +735,17 @@ mod tests {
     #[test]
     fn a_form_opens_saves_and_closes_on_ok_but_stays_on_a_refusal() {
         let mut app = app();
-        let panel = app.world_mut().spawn(FormPanel::default()).id();
+        let panel = app.world_mut().spawn(FormPanel).id();
         go_live(&mut app);
 
-        open_edit_form(&mut app);
-        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.title, "old");
+        open_new_form(&mut app);
 
-        // Nothing changed: refused on the form, nothing sent.
+        // No title: refused on the form, nothing sent.
         press(&mut app, Act::Save);
-        assert_eq!(app.world().resource::<Form>().message, "nothing changed");
+        assert_eq!(app.world().resource::<Form>().message, "a task needs a title");
         assert!(app.world().resource::<Outbox>().is_empty());
 
-        pick(&mut app, FormChoice::Status, 1);
-        assert_eq!(app.world().resource::<Form>().open.as_ref().unwrap().draft.status, Status::InProgress);
+        app.world_mut().resource_mut::<Form>().open.as_mut().unwrap().draft.title = "Do it".into();
         press(&mut app, Act::Save);
         assert!(app.world().resource::<Form>().saving);
         assert_eq!(app.world().resource::<Outbox>().len(), 1);
@@ -901,8 +773,8 @@ mod tests {
     #[test]
     fn saving_while_offline_says_so_and_sends_nothing() {
         let mut app = app();
-        app.world_mut().spawn(FormPanel::default());
-        open_edit_form(&mut app);
+        app.world_mut().spawn(FormPanel);
+        open_new_form(&mut app);
         app.world_mut().resource_mut::<Form>().open.as_mut().unwrap().draft.title = "hi".into();
         press(&mut app, Act::Save);
         let form = app.world().resource::<Form>();
@@ -916,7 +788,7 @@ mod tests {
         app.world_mut().resource_mut::<Authoring>().queue = "TRAIL-685".into();
         press(&mut app, Act::New);
         let open = app.world().resource::<Form>().open.clone().unwrap();
-        assert_eq!((open.target, open.draft.parent.as_str()), (Target::Create, "TRAIL-685"));
+        assert_eq!(open.draft.parent, "TRAIL-685");
         press(&mut app, Act::Cancel);
         assert!(app.world().resource::<Form>().open.is_none());
     }
@@ -952,7 +824,7 @@ mod tests {
     #[test]
     fn typed_text_reaches_the_draft() {
         let mut app = app();
-        open_edit_form(&mut app);
+        open_new_form(&mut app);
         let generation = app.world().resource::<Form>().generation;
         let mut text = EditableText::new("one\ntwo");
         text.allow_newlines = true;
@@ -964,7 +836,7 @@ mod tests {
     #[test]
     fn fields_of_a_replaced_form_do_not_feed_the_new_draft() {
         let mut app = app();
-        open_edit_form(&mut app);
+        open_new_form(&mut app);
         let old = app.world().resource::<Form>().generation;
         let mut text = EditableText::new("old form text");
         text.allow_newlines = true;
@@ -972,7 +844,6 @@ mod tests {
         // Switch forms while the old panel's inputs still exist.
         press(&mut app, Act::New);
         let open = app.world().resource::<Form>().open.clone().unwrap();
-        assert_eq!(open.target, Target::Create);
         assert_eq!(open.draft.description, "");
     }
 
@@ -998,54 +869,34 @@ mod tests {
     }
 
     #[test]
-    fn the_forms_status_dropdown_lists_every_status_in_words() {
-        let mut app = ui_app();
-        open_edit_form(&mut app);
-        settle(&mut app);
-        let world = app.world_mut();
-        let shown: Vec<String> = world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect();
-        for status in Status::ALL {
-            let word = status_label(status).to_string();
-            assert!(shown.contains(&word), "{word} in {shown:?}");
-        }
-        assert!(!shown.iter().any(|s| Status::ALL.iter().any(|st| st.as_str() == s) && s.contains('_')), "{shown:?}");
-    }
-
-    #[test]
-    fn every_form_opens_one_modal_and_closing_it_closes_the_form() {
-        for edit in [false, true] {
-            // Cancel, then the modal's own ways out: Escape and a click outside both send `RequestClose` for the
-            // backdrop, and the X sends it from inside.
-            for from_backdrop in [None, Some(true), Some(false)] {
-                let mut app = ui_app();
-                settle(&mut app);
-                if edit {
-                    open_edit_form(&mut app);
-                } else {
-                    press(&mut app, Act::New);
+    fn the_form_opens_one_modal_and_closing_it_closes_the_form() {
+        // Cancel, then the modal's own ways out: Escape and a click outside both send `RequestClose` for the
+        // backdrop, and the X sends it from inside.
+        for from_backdrop in [None, Some(true), Some(false)] {
+            let mut app = ui_app();
+            settle(&mut app);
+            press(&mut app, Act::New);
+            settle(&mut app);
+            assert_eq!(modals(&mut app), 1);
+            let root = app.world_mut().query_filtered::<Entity, With<FormPanel>>().single(app.world()).unwrap();
+            match from_backdrop {
+                None => press(&mut app, Act::Cancel),
+                Some(backdrop) => {
+                    let slots = *app.world().get::<ModalSlots>(root).unwrap();
+                    let source = if backdrop { root } else { slots.footer };
+                    app.world_mut().trigger(bevy::ui_widgets::RequestClose { source });
                 }
-                settle(&mut app);
-                assert_eq!(modals(&mut app), 1, "edit: {edit}");
-                let root = app.world_mut().query_filtered::<Entity, With<FormPanel>>().single(app.world()).unwrap();
-                match from_backdrop {
-                    None => press(&mut app, Act::Cancel),
-                    Some(backdrop) => {
-                        let slots = *app.world().get::<ModalSlots>(root).unwrap();
-                        let source = if backdrop { root } else { slots.footer };
-                        app.world_mut().trigger(bevy::ui_widgets::RequestClose { source });
-                    }
-                }
-                settle(&mut app);
-                assert_eq!(modals(&mut app), 0, "edit: {edit}, {from_backdrop:?}");
-                assert!(app.world().resource::<Form>().open.is_none());
             }
+            settle(&mut app);
+            assert_eq!(modals(&mut app), 0, "{from_backdrop:?}");
+            assert!(app.world().resource::<Form>().open.is_none());
         }
     }
 
     #[test]
     fn a_form_with_a_save_in_flight_ignores_a_click_outside() {
         let mut app = ui_app();
-        open_edit_form(&mut app);
+        open_new_form(&mut app);
         settle(&mut app);
         app.world_mut().resource_mut::<Form>().saving = true;
         settle(&mut app);
@@ -1059,7 +910,7 @@ mod tests {
     #[test]
     fn cancel_is_ignored_while_saving() {
         let mut app = app();
-        open_edit_form(&mut app);
+        open_new_form(&mut app);
         app.world_mut().resource_mut::<Form>().saving = true;
         press(&mut app, Act::Cancel);
         assert!(app.world().resource::<Form>().open.is_some());
