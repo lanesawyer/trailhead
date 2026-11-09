@@ -1,4 +1,4 @@
-//! A progress bar: a track, filled from the left as far as something has come.
+//! A progress bar: a track, filled from the left in the accent as far as something has come.
 //!
 //! Set its [`Progress`] to move it; the fill follows in place.
 
@@ -28,7 +28,7 @@ pub fn progress_bar(fraction: f32) -> impl Scene {
         Progress({ fraction })
         Children [
             Node { width: { percent(fraction * 100.0) }, height: percent(100) }
-            BackgroundTone({ token::STATUS_OK })
+            BackgroundTone({ token::FILL_ACCENT })
             ProgressFill
         ]
     }
