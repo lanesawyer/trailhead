@@ -234,7 +234,7 @@ impl Factory {
         let attempt = task.run.attempt.unwrap_or(1);
         let pr = task.run.pr.as_ref().ok_or_else(|| Error::Other(format!("{} has no PR to review", task.key.0)))?;
         // The round the interrupted review was named for: one past the rounds counted before it, whether or not it counted.
-        let after_conflict = task.run.pending_changes().is_some_and(|c| c.conflict);
+        let after_conflict = task.run.last_changes().is_some_and(|c| c.conflict);
         let rounds = task.run.review_rounds.unwrap_or(0);
         if let Some(round) = Some(rounds + u32::from(after_conflict)).filter(|r| *r > 0) {
             let retries = task.run.retries.unwrap_or(0);
@@ -315,7 +315,8 @@ impl Factory {
             Some(codehost) => codehost.head(pr).await.ok(),
             None => None,
         };
-        let requested = ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true, head };
+        let requested =
+            ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true, head, settled: false };
         self.request_rework(task, requested, round).await
     }
 
@@ -347,7 +348,8 @@ impl Factory {
         self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
         tracing::warn!(task = %task.key.0, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
         let head = Some(head.to_string());
-        let requested = ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head };
+        let requested =
+            ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head, settled: false };
         self.request_rework(task, requested, round).await
     }
 
@@ -447,6 +449,19 @@ impl Factory {
                     self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
                     done.merged.push(task.key.0.clone());
                 }
+                // A park whose settling write was lost: the request still stands at the limit it parked on. Finished
+                // here, before a person can answer, so that answering without a push doesn't have it reworked again.
+                if let Some(c) = task.run.changes_requested.as_ref().filter(|c| !c.settled) {
+                    let (count, max) = if c.conflict {
+                        (task.run.conflict_reworks, self.config.repo.max_conflict_reworks)
+                    } else {
+                        (task.run.review_rounds, self.config.repo.max_review_rounds)
+                    };
+                    if count.is_some_and(|n| n >= max) {
+                        tracing::warn!(task = %task.key.0, "finishing the park's settling of its changes request");
+                        self.settle_parked_request(task, c).await;
+                    }
+                }
             }
             Status::Approved => {
                 let PrSettle::Open { mergeable, .. } = self.pr_settled(task, done).await? else { return Ok(false) };
@@ -495,8 +510,9 @@ impl Factory {
                     // Waiting for a worker: the task is listed as ready, and the worker's handoff answers the request.
                     // One that no longer applies (the PR was pushed to, or a person settled the park) is answered
                     // here, and the PR is looked at as it stands.
-                    let stale =
-                        task.run.pending_changes().is_some_and(|c| c.attempt == attempt) && applicable.is_none();
+                    let recorded = task.run.changes_requested.as_ref().filter(|c| c.attempt == attempt);
+                    let stale = recorded.is_some_and(|c| c.settled || task.run.pending_changes().is_some())
+                        && applicable.is_none();
                     let (Some(pr), true) = (&task.run.pr, stale) else { return Ok(false) };
                     self.tracker.handoff(&task.key, &messages::stale_request_handoff(&pr.url)).await?;
                 }

@@ -330,6 +330,7 @@ async fn a_rework_request_cut_short_is_finished_by_reconcile() {
             attempt: 1,
             conflict: true,
             head: None,
+            settled: false,
         }),
         ..Default::default()
     };
