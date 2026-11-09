@@ -76,6 +76,8 @@ pub mod extent {
     pub const SIDEBAR_MIN_WIDTH: f32 = 200.0;
     /// The widest a sidebar is dragged to, so it never crowds out the page beside it.
     pub const SIDEBAR_MAX_WIDTH: f32 = 500.0;
+    /// How tall a progress bar is.
+    pub const PROGRESS_HEIGHT: f32 = 6.0;
     /// How wide the strip along a sidebar's edge that drags it is, half over the sidebar and half over the page.
     pub const DRAG_EDGE: f32 = 6.0;
     /// A panel down the right of the window, beside the page: an inspector.

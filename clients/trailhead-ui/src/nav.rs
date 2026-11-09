@@ -215,13 +215,16 @@ pub fn nav_heading(words: impl Into<String>) -> impl Scene {
     }
 }
 
-/// A [`nav_heading`] with a plain tool button at its end, for something done to the group (adding to it): `icon`,
-/// with `hint` under the pointer. `own` goes on the button, where the caller puts what its press does.
+/// A [`nav_heading`] whose words are a place to go (the page listing the group's items), with a plain tool button at
+/// its end for something done to the group (adding to it): `icon`, with `hint` under the pointer. `heading` goes on the
+/// words' button and `action` on the tool button, where the caller puts what each press does. Like a [`nav_item`], the
+/// words show a background while their page is shown: set that on their [`NavItem`].
 pub fn nav_heading_action(
     words: impl Into<String>,
+    heading: impl Scene,
     icon: Icon,
     hint: impl Into<String>,
-    own: impl Scene,
+    action: impl Scene,
 ) -> impl Scene {
     let (words, hint) = (words.into(), hint.into());
     bsn! {
@@ -230,12 +233,19 @@ pub fn nav_heading_action(
             flex_shrink: { 0.0_f32 },
             align_items: AlignItems::Center,
             justify_content: JustifyContent::SpaceBetween,
+            column_gap: { px(space::CONTROLS) },
         }
         Children [
-            @text_dim(words, size::SECONDARY)
+            @FeathersButton {
+                @caption: { bsn_list! { @text_dim(words, size::SECONDARY) } },
+                @variant: { ButtonVariant::Plain },
+            }
+            Node { flex_grow: 1.0, flex_shrink: 0.0, justify_content: JustifyContent::Start }
+            NavItem
+            @{heading}
             --
             @tool_button(icon, hint, ButtonKind::Plain)
-            @{own}
+            @{action}
         ]
     }
 }

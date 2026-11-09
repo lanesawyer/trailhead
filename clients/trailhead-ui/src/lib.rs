@@ -58,6 +58,9 @@
 //! - A line saying how something went, with an icon for its [`Tone`]: [`notice`], then write a [`Notice`] onto it;
 //!   an empty message hides it.
 //! - Placeholder bars where content is on its way: [`skeleton`].
+//! - Rows of items under column headings, a row pressable as a whole: [`table_head`] and [`table_row`]s, by
+//!   [`TableColumn`].
+//! - How far along something is: [`progress_bar`]; set its [`Progress`].
 //! - Writing a `Node` or `Text` only when it changes: [`patch_node`], [`set_display`], [`set_text`].
 //!
 //! The kit's per-frame systems run in [`UiPlace`] in `Update`; order an app's own systems around it.
@@ -96,6 +99,7 @@ mod nav;
 mod notice;
 mod panel_header;
 mod patch;
+mod progress;
 mod scroll;
 mod scrollbar;
 mod search;
@@ -103,6 +107,7 @@ mod select;
 mod skeleton;
 mod slider;
 mod spacing;
+mod table;
 mod tabs;
 mod text;
 mod theme;
@@ -143,6 +148,7 @@ pub use nav::{
 pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
+pub use progress::{Progress, progress_bar};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
 pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
 pub use search::{
@@ -152,6 +158,7 @@ pub use select::{Picked, SelectEdit, SelectIcons, SelectOptions, SelectTones, se
 pub use skeleton::{SkeletonBar, skeleton};
 pub use slider::slider;
 pub use spacing::{extent, radius, space, stroke};
+pub use table::{CellAlign, ColumnWidth, TableColumn, table_head, table_row};
 pub use tabs::{TabCaption, tab, tab_strip};
 pub use text::{Size, size, text, text_dim, text_mono, text_toned};
 pub use theme::{BackgroundTone, BorderTone, Surface, TextTone, Theme, Token, palette, token};
@@ -176,6 +183,7 @@ impl Plugin for UiPlugin {
             .add_observer(scroll::on_scroll)
             .add_observer(button_group::on_option)
             .add_observer(bevy::ui_widgets::slider_self_update)
+            .add_systems(Update, progress::fill_progress.in_set(UiPlace))
             .add_systems(PostUpdate, scrollbar::show_scrollbars.after(bevy::ui::UiSystems::Layout))
             .add_systems(
                 Update,

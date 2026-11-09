@@ -19,6 +19,7 @@ pub mod mirror;
 pub mod net;
 pub mod project;
 pub mod project_form;
+pub mod projects_page;
 pub mod search;
 pub mod settings;
 pub mod sidebar;
