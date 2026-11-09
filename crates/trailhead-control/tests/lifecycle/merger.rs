@@ -142,7 +142,7 @@ async fn a_push_by_a_person_is_not_credited_to_the_rework() {
     Tracker::handoff(&r.tracker, &key, "Pushed the rework.").await.unwrap();
     r.factory.reconcile().await.unwrap();
     let said = said(&r);
-    assert!(said.iter().all(|m| !m.contains("the rework has pushed")), "{said:?}");
+    assert_eq!(said, ["Grade 4: waiting for CI and a person."], "the push moved the PR, so no rework is mentioned");
 }
 
 #[tokio::test]
