@@ -135,19 +135,19 @@ impl Factory {
                     Ok((id, Ok(outcome))) => {
                         reviews.remove(&id);
                         let key = keys.remove(&id);
-                        tracing::info!(task = ?key, ?outcome, "run finished");
+                        tracing::info!(task = key.as_ref().map(|k| k.0.as_str()), ?outcome, "run finished");
                     }
                     Ok((id, Err(e))) => {
                         reviews.remove(&id);
                         let key = keys.remove(&id);
-                        tracing::warn!(task = ?key, error = %e, "run failed; reconciling");
+                        tracing::warn!(task = key.as_ref().map(|k| k.0.as_str()), error = %e, "run failed; reconciling");
                         self.status.error(format!("{} failed: {e}", key.as_ref().map_or("a run", |k| k.0.as_str())));
                         dirty = true;
                     }
                     Err(e) => {
                         reviews.remove(&e.id());
                         let key = keys.remove(&e.id());
-                        tracing::error!(task = ?key, error = %e, "run panicked; reconciling");
+                        tracing::error!(task = key.as_ref().map(|k| k.0.as_str()), error = %e, "run panicked; reconciling");
                         dirty = true;
                     }
                 },
