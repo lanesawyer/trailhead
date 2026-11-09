@@ -382,6 +382,56 @@ async fn the_gateway_gets_its_state_back() {
     env.finish().await;
 }
 
+/// A control plane with another daemon binary replaces the gateway's container, labelled with the new digest, and the
+/// sandbox is registered with it again and reaches the network.
+#[tokio::test]
+#[ignore = "needs a Docker engine, trailhead-sandbox:latest and the internet"]
+async fn a_changed_daemon_binary_replaces_the_gateway() {
+    let mut env = live("binary");
+    let name = format!("th-live-binary-{}", std::process::id());
+    let spec = spec(&name, worker(), &[ALLOWED]);
+    env.compute.create(&spec).await.unwrap();
+
+    let result = {
+        let name = name.clone();
+        async move {
+            let label = r#"{{index .Config.Labels "dev.trailhead.gateway.daemon"}}"#;
+            gateway_recovers(&env, &name).await;
+            let before = docker(&["inspect", "-f", label, &env.gateway]).await;
+            let id_before = docker(&["inspect", "-f", "{{.Id}}", &env.gateway]).await;
+
+            // The same binary with a byte after it still runs, and has another digest.
+            let mut changed = daemon().as_ref().clone();
+            changed.push(b'\n');
+            let mut config = reborn(&env);
+            config.daemon = Arc::new(changed.clone());
+            let again = DockerCompute::new(config).unwrap();
+            // Replacing the first control plane's compute stops its check, which would put its gateway back.
+            env.compute = again.clone();
+            // Idempotent, and takes the gateway lock on the way.
+            assert_eq!(again.create(&spec).await.unwrap().id, SandboxId(name.clone()));
+
+            let after = docker(&["inspect", "-f", label, &env.gateway]).await;
+            let id_after = docker(&["inspect", "-f", "{{.Id}}", &env.gateway]).await;
+            assert_ne!(id_before, id_after, "the container was replaced");
+            assert_ne!(before, after);
+            assert_eq!(after, sha256_hex(&changed));
+            gateway_recovers(&env, &name).await;
+            env
+        }
+    };
+    let outcome = tokio::spawn(result).await;
+    // On failure `env` is gone with the task; its gateway and network are left for `docker rm`.
+    let env = outcome.unwrap();
+    env.compute.destroy(&SandboxId(name)).await.unwrap();
+    env.finish().await;
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn reborn(env: &Live) -> DockerConfig {
     let mut config = DockerConfig::new(env._state.path(), daemon());
     config.gateway = env.gateway.clone();

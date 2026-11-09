@@ -195,6 +195,9 @@ pub enum ComputeConfig {
         /// [`MIN_MEMORY_MIB`].
         #[serde(default, deserialize_with = "memory_mib_at_least_min")]
         memory_mib: Option<u64>,
+        /// The least free disk, in bytes, the engine may have when a run starts; a floor, since a big sandbox needs
+        /// more. Defaults to 10 GiB.
+        min_free_bytes: Option<u64>,
     },
 }
 
@@ -244,6 +247,7 @@ struct RawTarget {
     network: Option<String>,
     runtime: Option<String>,
     memory_mib: Option<u64>,
+    min_free_bytes: Option<u64>,
 }
 
 impl TryFrom<RawTarget> for TargetConfig {
@@ -258,6 +262,7 @@ impl TryFrom<RawTarget> for TargetConfig {
                     ("network", raw.network.is_some()),
                     ("runtime", raw.runtime.is_some()),
                     ("memory_mib", raw.memory_mib.is_some()),
+                    ("min_free_bytes", raw.min_free_bytes.is_some()),
                 ];
                 if let Some((key, _)) = docker_only.iter().find(|(_, set)| *set) {
                     return Err(format!("`{key}` is a setting of kind = \"docker\", not \"sprites\""));
@@ -269,6 +274,7 @@ impl TryFrom<RawTarget> for TargetConfig {
                 network: raw.network,
                 runtime: raw.runtime,
                 memory_mib: check_memory_mib(raw.memory_mib)?,
+                min_free_bytes: raw.min_free_bytes,
             },
             other => return Err(format!("unknown kind `{other}`; the kinds are sprites and docker")),
         };
@@ -1298,7 +1304,13 @@ require = ["checks", "agent_review", "human"]
         assert_eq!(specs[1].max_sandboxes, Some(2));
         assert_eq!(
             specs[1].compute,
-            ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: Some(4096) }
+            ComputeConfig::Docker {
+                image: None,
+                network: None,
+                runtime: None,
+                memory_mib: Some(4096),
+                min_free_bytes: None
+            }
         );
         assert_eq!((specs[2].compute.clone(), specs[2].max_sandboxes), (ComputeConfig::Sprites, Some(4)));
     }
@@ -1355,12 +1367,24 @@ require = ["checks", "agent_review", "human"]
         let docker = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nruntime = \"runsc\"\n");
         assert_eq!(
             parse(&docker).unwrap().compute,
-            ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()), memory_mib: None }
+            ComputeConfig::Docker {
+                image: None,
+                network: None,
+                runtime: Some("runsc".into()),
+                memory_mib: None,
+                min_free_bytes: None
+            }
         );
         let sized = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 1536\n");
         assert_eq!(
             parse(&sized).unwrap().compute,
-            ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: Some(1536) }
+            ComputeConfig::Docker {
+                image: None,
+                network: None,
+                runtime: None,
+                memory_mib: Some(1536),
+                min_free_bytes: None
+            }
         );
         for mib in [0, 511] {
             let small = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = {mib}\n");
@@ -1370,6 +1394,11 @@ require = ["checks", "agent_review", "human"]
             let Err(Error::Config(m)) = parse(&target) else { panic!("{mib}: expected a config error") };
             assert!(m.contains("memory_mib") && m.contains("512"), "{m}");
         }
+        let floor = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmin_free_bytes = 21474836480\n");
+        let ComputeConfig::Docker { min_free_bytes, .. } = parse(&floor).unwrap().compute else { panic!("not docker") };
+        assert_eq!(min_free_bytes, Some(20 << 30));
+        let sprites = format!("{SAMPLE}\n[targets.t]\nkind = \"sprites\"\nmin_free_bytes = 1\n");
+        assert!(matches!(parse(&sprites), Err(Error::Config(_))));
         let least = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 512\n");
         assert!(parse(&least).is_ok());
         let bad = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nimgae = \"x\"\n");
