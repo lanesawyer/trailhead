@@ -14,7 +14,7 @@ use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::FactoryState;
-use trailhead_model::{Project, Task};
+use trailhead_model::{Project, ProjectStatus, Task};
 use uuid::Uuid;
 
 use crate::author::Act;
@@ -197,8 +197,10 @@ fn sync_projects(
     for task in tasks.iter().filter(|t| !t.0.status.is_closed()) {
         *open.entry(task.0.project_id).or_default() += 1;
     }
+    // Archived projects are on the projects page, not here.
     let mut wanted: Vec<Entry> = projects
         .iter()
+        .filter(|p| p.0.status != ProjectStatus::Archived)
         .map(|p| Entry {
             key: p.0.key.clone(),
             name: p.0.name.clone(),
@@ -593,6 +595,24 @@ mod tests {
         settle(&mut app);
         assert_eq!(entry_words(&mut app, "TRAIL"), ["Trailhead", "TRAIL", "1"]);
         assert_eq!(tree(&mut app), before);
+    }
+
+    #[test]
+    fn an_archived_project_leaves_the_sidebar_and_comes_back_unarchived() {
+        let mut app = app();
+        let archive = |app: &mut App, id: i64, status: &str| {
+            app.world_mut().write_message(SyncItem::Event(json!({
+                "id": id, "entity": "project", "entity_id": sid("p2"), "kind": "project.updated",
+                "after": project_json(json!({"id": "p2", "key": "OPS", "name": "Operations", "status": status,
+                                             "version": id})),
+            })));
+            settle(app);
+        };
+        let ops = NavTo::Project("OPS".into());
+        archive(&mut app, 2, "archived");
+        assert!(!entries(&mut app).iter().any(|(to, _)| *to == ops));
+        archive(&mut app, 3, "active");
+        assert!(entries(&mut app).iter().any(|(to, _)| *to == ops));
     }
 
     #[test]

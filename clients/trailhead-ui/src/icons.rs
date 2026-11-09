@@ -27,6 +27,9 @@ impl Plugin for IconsPlugin {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Icon {
+    /// Putting something away that can come back: archiving a project.
+    Archive,
+    ArchiveRestore,
     /// A row of rows: the board.
     Board,
     Bot,
@@ -78,7 +81,9 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    const ALL: [Icon; 45] = [
+    const ALL: [Icon; 47] = [
+        Icon::Archive,
+        Icon::ArchiveRestore,
         Icon::Board,
         Icon::Bot,
         Icon::Check,
@@ -129,51 +134,53 @@ impl Icon {
     /// The icon's character in the Lucide font.
     pub fn glyph(self) -> &'static str {
         match self {
-            Icon::Board => "\u{e4dc}",         // kanban
-            Icon::Bot => "\u{e1bb}",           // bot
-            Icon::Check => "\u{e06c}",         // check
-            Icon::ChevronDown => "\u{e06d}",   // chevron-down
-            Icon::ChevronRight => "\u{e06f}",  // chevron-right
-            Icon::ChevronUp => "\u{e070}",     // chevron-up
-            Icon::Circle => "\u{e076}",        // circle
-            Icon::CircleAlert => "\u{e077}",   // circle-alert
-            Icon::CircleCheck => "\u{e226}",   // circle-check
-            Icon::CircleX => "\u{e084}",       // circle-x
-            Icon::Comment => "\u{e117}",       // message-square
-            Icon::Copy => "\u{e09e}",          // copy
-            Icon::Ellipsis => "\u{e0b6}",      // ellipsis
-            Icon::Eye => "\u{e0ba}",           // eye
-            Icon::ExternalLink => "\u{e0b9}",  // external-link
-            Icon::Filter => "\u{e0dc}",        // filter
-            Icon::Flag => "\u{e0d1}",          // flag
-            Icon::Footprints => "\u{e3b9}",    // footprints
-            Icon::Help => "\u{e082}",          // circle-help
-            Icon::Handshake => "\u{e5c0}",     // handshake
-            Icon::History => "\u{e1f5}",       // history
-            Icon::Info => "\u{e0f9}",          // info
-            Icon::Inspect => "\u{e434}",       // panel-right-open
-            Icon::LogIn => "\u{e10d}",         // log-in
-            Icon::Map => "\u{e110}",           // map
-            Icon::Monitor => "\u{e11d}",       // monitor
-            Icon::Moon => "\u{e11e}",          // moon
-            Icon::Pencil => "\u{e1f9}",        // pencil
-            Icon::Plus => "\u{e13d}",          // plus
-            Icon::PullRequest => "\u{e0e5}",   // git-pull-request
-            Icon::Refresh => "\u{e145}",       // refresh-cw
-            Icon::Release => "\u{e10c}",       // lock-open
-            Icon::Search => "\u{e151}",        // search
-            Icon::Send => "\u{e152}",          // send
-            Icon::Settings => "\u{e154}",      // settings
-            Icon::Shield => "\u{e158}",        // shield
-            Icon::Signpost => "\u{e540}",      // signpost
-            Icon::Stop => "\u{e051}",          // ban
-            Icon::Sun => "\u{e178}",           // sun
-            Icon::TriangleAlert => "\u{e193}", // triangle-alert
-            Icon::Undo => "\u{e2a1}",          // undo-2
-            Icon::User => "\u{e19f}",          // user
-            Icon::Wifi => "\u{e1ae}",          // wifi
-            Icon::WifiOff => "\u{e1af}",       // wifi-off
-            Icon::X => "\u{e1b2}",             // x
+            Icon::Archive => "\u{e041}",        // archive
+            Icon::ArchiveRestore => "\u{e2cd}", // archive-restore
+            Icon::Board => "\u{e4dc}",          // kanban
+            Icon::Bot => "\u{e1bb}",            // bot
+            Icon::Check => "\u{e06c}",          // check
+            Icon::ChevronDown => "\u{e06d}",    // chevron-down
+            Icon::ChevronRight => "\u{e06f}",   // chevron-right
+            Icon::ChevronUp => "\u{e070}",      // chevron-up
+            Icon::Circle => "\u{e076}",         // circle
+            Icon::CircleAlert => "\u{e077}",    // circle-alert
+            Icon::CircleCheck => "\u{e226}",    // circle-check
+            Icon::CircleX => "\u{e084}",        // circle-x
+            Icon::Comment => "\u{e117}",        // message-square
+            Icon::Copy => "\u{e09e}",           // copy
+            Icon::Ellipsis => "\u{e0b6}",       // ellipsis
+            Icon::Eye => "\u{e0ba}",            // eye
+            Icon::ExternalLink => "\u{e0b9}",   // external-link
+            Icon::Filter => "\u{e0dc}",         // filter
+            Icon::Flag => "\u{e0d1}",           // flag
+            Icon::Footprints => "\u{e3b9}",     // footprints
+            Icon::Help => "\u{e082}",           // circle-help
+            Icon::Handshake => "\u{e5c0}",      // handshake
+            Icon::History => "\u{e1f5}",        // history
+            Icon::Info => "\u{e0f9}",           // info
+            Icon::Inspect => "\u{e434}",        // panel-right-open
+            Icon::LogIn => "\u{e10d}",          // log-in
+            Icon::Map => "\u{e110}",            // map
+            Icon::Monitor => "\u{e11d}",        // monitor
+            Icon::Moon => "\u{e11e}",           // moon
+            Icon::Pencil => "\u{e1f9}",         // pencil
+            Icon::Plus => "\u{e13d}",           // plus
+            Icon::PullRequest => "\u{e0e5}",    // git-pull-request
+            Icon::Refresh => "\u{e145}",        // refresh-cw
+            Icon::Release => "\u{e10c}",        // lock-open
+            Icon::Search => "\u{e151}",         // search
+            Icon::Send => "\u{e152}",           // send
+            Icon::Settings => "\u{e154}",       // settings
+            Icon::Shield => "\u{e158}",         // shield
+            Icon::Signpost => "\u{e540}",       // signpost
+            Icon::Stop => "\u{e051}",           // ban
+            Icon::Sun => "\u{e178}",            // sun
+            Icon::TriangleAlert => "\u{e193}",  // triangle-alert
+            Icon::Undo => "\u{e2a1}",           // undo-2
+            Icon::User => "\u{e19f}",           // user
+            Icon::Wifi => "\u{e1ae}",           // wifi
+            Icon::WifiOff => "\u{e1af}",        // wifi-off
+            Icon::X => "\u{e1b2}",              // x
         }
     }
 }
