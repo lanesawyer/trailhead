@@ -437,7 +437,17 @@ impl Factory {
                     // Recorded before the question, so a task that is parked has the marker; reopening it is all a
                     // human has to do.
                     sub.report(&task.key, RunUpdate { gave_up: Some(attempt), ..RunUpdate::default() }).await?;
-                    sub.ask(&task.key, &question).await?;
+                    if let Err(e) = sub.ask(&task.key, &question).await {
+                        // Not parked, so the marker mustn't stand: when the claim lapses and the task runs again,
+                        // its count would restart from it. Put back what was there before (0 counts from nothing,
+                        // as `attempt_floor` takes the later of the two).
+                        let restore =
+                            RunUpdate { gave_up: Some(task.run.gave_up.unwrap_or(0)), ..RunUpdate::default() };
+                        if let Err(re) = sub.report(&task.key, restore).await {
+                            tracing::warn!(task = %task.key.0, error = %re, "couldn't undo the gave-up marker after the park failed");
+                        }
+                        return Err(e);
+                    }
                     if let Err(e) = self.tracker.revoke_sub_agent(name).await {
                         tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
                     }
