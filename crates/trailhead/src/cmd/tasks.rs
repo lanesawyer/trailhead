@@ -354,7 +354,12 @@ mod tests {
                 reason: "x".into(),
                 parked: false,
             }),
-            worker_breach: Some(trailhead_factory::WorkerBreach { run: "x".into(), reason: "x".into(), parked: false }),
+            worker_breach: Some(trailhead_factory::WorkerBreach {
+                run: "x".into(),
+                reason: "x".into(),
+                parked: false,
+                stuck: false,
+            }),
             conflict_reworks: Some(1),
             attempt_base: Some(1),
             gave_up: Some(1),

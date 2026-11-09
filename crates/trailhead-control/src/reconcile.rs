@@ -101,17 +101,26 @@ impl Factory {
             if live_runs.iter().any(|(_, s)| s.name == sandbox.name) {
                 continue;
             }
-            // A run parked for its breach, or one whose park is yet to land, keeps its suspended sandbox.
-            let parked = tasks.iter().any(|t| {
+            // A run parked for its breach, or one whose park is yet to land, keeps its suspended sandbox, unless the
+            // breach left it live (stuck): that one is destroyed, not released for reuse, until it is gone.
+            let (mut parked, mut stuck) = (false, false);
+            for t in tasks.iter().filter(|t| {
                 (t.status == Status::NeedsInput || self.unparked_breach(t).is_some())
                     && t.run.released.is_none_or(|at| at <= 0)
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
-            });
+            }) {
+                // An earlier run's stuck flag outlives it in the run record, so only the current run's breach counts.
+                if t.run.worker_breach.as_ref().is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) {
+                    stuck = true;
+                } else {
+                    parked = true;
+                }
+            }
             if parked {
                 continue;
             }
             // One sandbox's failure is logged and skipped rather than stopping the control plane from starting.
-            if sandbox.labels.contains_key(label::POOL) {
+            if sandbox.labels.contains_key(label::POOL) && !stuck {
                 self.reconcile_pooled(sandbox, &mut done).await;
                 continue;
             }
@@ -181,7 +190,7 @@ impl Factory {
             None => BreachedSandbox::Destroyed,
         };
         let question = messages::budget_breach_question(reason, host, state);
-        match self.park_worker_breach(&task.key, &self.tracker.sub_agent(name), breach, &question).await {
+        match self.park_worker_breach(&task.key, &self.tracker.sub_agent(name), breach, state, &question).await {
             Ok(()) => done.breached.push(task.key.0.clone()),
             Err(e) => {
                 tracing::warn!(task = %task.key.0, error = %e, "couldn't park the breached task; the next reconcile retries")
