@@ -195,6 +195,12 @@ pub enum ComputeConfig {
         /// [`MIN_MEMORY_MIB`].
         #[serde(default, deserialize_with = "memory_mib_at_least_min")]
         memory_mib: Option<u64>,
+        /// The least free disk, in bytes, the engine may have when a run starts; a floor, since a big sandbox needs
+        /// more. Defaults to 10 GiB.
+        min_free_bytes: Option<u64>,
+        /// How many sandboxes may checkpoint at once, which the free-disk check reserves room for. Defaults to 2; set it
+        /// to the pool size (`max_sandboxes`) for a pool that is not two.
+        concurrent_checkpoints: Option<u64>,
     },
 }
 
@@ -244,6 +250,8 @@ struct RawTarget {
     network: Option<String>,
     runtime: Option<String>,
     memory_mib: Option<u64>,
+    min_free_bytes: Option<u64>,
+    concurrent_checkpoints: Option<u64>,
 }
 
 impl TryFrom<RawTarget> for TargetConfig {
@@ -258,6 +266,8 @@ impl TryFrom<RawTarget> for TargetConfig {
                     ("network", raw.network.is_some()),
                     ("runtime", raw.runtime.is_some()),
                     ("memory_mib", raw.memory_mib.is_some()),
+                    ("min_free_bytes", raw.min_free_bytes.is_some()),
+                    ("concurrent_checkpoints", raw.concurrent_checkpoints.is_some()),
                 ];
                 if let Some((key, _)) = docker_only.iter().find(|(_, set)| *set) {
                     return Err(format!("`{key}` is a setting of kind = \"docker\", not \"sprites\""));
@@ -269,6 +279,8 @@ impl TryFrom<RawTarget> for TargetConfig {
                 network: raw.network,
                 runtime: raw.runtime,
                 memory_mib: check_memory_mib(raw.memory_mib)?,
+                min_free_bytes: raw.min_free_bytes,
+                concurrent_checkpoints: raw.concurrent_checkpoints,
             },
             other => return Err(format!("unknown kind `{other}`; the kinds are sprites and docker")),
         };
@@ -832,12 +844,17 @@ impl FactoryConfig {
         }
         for (want, role) in [(&self.repo.worker, Role::Worker), (&self.repo.reviewer, Role::Reviewer)] {
             match self.profiles.get(want) {
-                None => return Err(Error::Config(format!("no profile named {want}"))),
+                None => {
+                    return Err(Error::Config(format!(
+                        "[factory.repo] {}: no profile named {want}; define [factory.profiles.{want}]",
+                        role.as_str()
+                    )));
+                }
                 Some(p) if p.role != role => {
                     return Err(Error::Config(format!(
-                        "profile {want} has role {}, not {}",
+                        "[factory.repo] {key} is `{want}`, but [factory.profiles.{want}] has role {}, not {key}",
                         p.role.as_str(),
-                        role.as_str()
+                        key = role.as_str()
                     )));
                 }
                 Some(_) => {}
@@ -852,7 +869,9 @@ impl FactoryConfig {
             if let Some(next) = &profile.escalate_to
                 && !self.profiles.contains_key(next)
             {
-                return Err(Error::Config(format!("profile {name} escalates to unknown profile {next}")));
+                return Err(Error::Config(format!(
+                    "[factory.profiles.{name}] escalate_to is `{next}`, but there is no [factory.profiles.{next}]"
+                )));
             }
         }
         for grade in self.grades.rules.keys() {
@@ -879,11 +898,13 @@ impl FactoryConfig {
                 if let GateKind::Named(name) = r
                     && !checks.contains(&name.as_str())
                 {
-                    return Err(Error::Config(format!("gate {grade} requires unknown {r}")));
+                    return Err(Error::Config(format!(
+                        "[factory.gates.{grade}] requires unknown {r}; it must name a check in [factory.checks]"
+                    )));
                 }
             }
             if gate.require.contains(&GateKind::Quorum) && gate.quorum.is_none() {
-                return Err(Error::Config(format!("gate {grade} requires a quorum but doesn't define one")));
+                return Err(Error::Config(format!("[factory.gates.{grade}] requires a quorum but doesn't define one")));
             }
         }
         Ok(())
@@ -1275,6 +1296,30 @@ require = ["checks", "agent_review", "human"]
     }
 
     #[test]
+    fn profile_and_gate_errors_name_the_table_to_edit() {
+        let cases = [
+            (SAMPLE.replace("[repo]\n", "[repo]\nworker = \"nope\"\n"), "[factory.repo] worker: no profile named nope"),
+            (
+                SAMPLE.replace("[repo]\n", "[repo]\nreviewer = \"worker\"\n"),
+                "[factory.repo] reviewer is `worker`, but [factory.profiles.worker] has role worker, not reviewer",
+            ),
+            (
+                SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"ghost\""),
+                "[factory.profiles.worker] escalate_to is `ghost`, but there is no [factory.profiles.ghost]",
+            ),
+            (format!("{SAMPLE}\n[gates.2]\nrequire = [\"lintt\"]\n"), "[factory.gates.2] requires unknown lintt"),
+            (
+                format!("{SAMPLE}\n[gates.2]\nrequire = [\"quorum\"]\n"),
+                "[factory.gates.2] requires a quorum but doesn't define one",
+            ),
+        ];
+        for (src, want) in cases {
+            let err = parse(&src).unwrap_err().to_string();
+            assert!(err.contains(want), "want {want:?}, got {err}");
+        }
+    }
+
+    #[test]
     fn a_compute_table_is_one_default_target() {
         let c = parse(SAMPLE).unwrap();
         assert!(c.targets.is_empty());
@@ -1298,7 +1343,14 @@ require = ["checks", "agent_review", "human"]
         assert_eq!(specs[1].max_sandboxes, Some(2));
         assert_eq!(
             specs[1].compute,
-            ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: Some(4096) }
+            ComputeConfig::Docker {
+                image: None,
+                network: None,
+                runtime: None,
+                memory_mib: Some(4096),
+                min_free_bytes: None,
+                concurrent_checkpoints: None
+            }
         );
         assert_eq!((specs[2].compute.clone(), specs[2].max_sandboxes), (ComputeConfig::Sprites, Some(4)));
     }
@@ -1355,12 +1407,26 @@ require = ["checks", "agent_review", "human"]
         let docker = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nruntime = \"runsc\"\n");
         assert_eq!(
             parse(&docker).unwrap().compute,
-            ComputeConfig::Docker { image: None, network: None, runtime: Some("runsc".into()), memory_mib: None }
+            ComputeConfig::Docker {
+                image: None,
+                network: None,
+                runtime: Some("runsc".into()),
+                memory_mib: None,
+                min_free_bytes: None,
+                concurrent_checkpoints: None
+            }
         );
         let sized = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 1536\n");
         assert_eq!(
             parse(&sized).unwrap().compute,
-            ComputeConfig::Docker { image: None, network: None, runtime: None, memory_mib: Some(1536) }
+            ComputeConfig::Docker {
+                image: None,
+                network: None,
+                runtime: None,
+                memory_mib: Some(1536),
+                min_free_bytes: None,
+                concurrent_checkpoints: None
+            }
         );
         for mib in [0, 511] {
             let small = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = {mib}\n");
@@ -1370,6 +1436,16 @@ require = ["checks", "agent_review", "human"]
             let Err(Error::Config(m)) = parse(&target) else { panic!("{mib}: expected a config error") };
             assert!(m.contains("memory_mib") && m.contains("512"), "{m}");
         }
+        let floor = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmin_free_bytes = 21474836480\n");
+        let ComputeConfig::Docker { min_free_bytes, .. } = parse(&floor).unwrap().compute else { panic!("not docker") };
+        assert_eq!(min_free_bytes, Some(20 << 30));
+        let pool = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nconcurrent_checkpoints = 4\n");
+        let ComputeConfig::Docker { concurrent_checkpoints, .. } = parse(&pool).unwrap().compute else {
+            panic!("not docker")
+        };
+        assert_eq!(concurrent_checkpoints, Some(4));
+        let sprites = format!("{SAMPLE}\n[targets.t]\nkind = \"sprites\"\nmin_free_bytes = 1\n");
+        assert!(matches!(parse(&sprites), Err(Error::Config(_))));
         let least = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 512\n");
         assert!(parse(&least).is_ok());
         let bad = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nimgae = \"x\"\n");

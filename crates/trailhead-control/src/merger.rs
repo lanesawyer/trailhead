@@ -1,6 +1,6 @@
 use trailhead_factory::{
-    BranchUpdate, CiState, Error, MergeDecision, MergeMode, MergeOutcome, Merged, MergedBy, PrGrade, PrRef, PrState,
-    Result, RunUpdate, Status, Task, TaskKey, VerdictKind,
+    BranchUpdate, CiState, Error, HISTORY_LIMIT, MergeDecision, MergeMode, MergeOutcome, Merged, MergedBy, PrGrade,
+    PrRef, PrState, Result, RunUpdate, Said, Status, Task, TaskKey, VerdictKind,
 };
 
 use tokio::time::Instant;
@@ -26,6 +26,22 @@ impl Factory {
         self.evaluate(key, false, parks).await
     }
 
+    /// Sends a PR whose CI failed on its current head back for a rework, and does nothing else: no approving, no
+    /// merging, no word on the PR. For a task whose review is owed, whether backed off after an infrastructure failure
+    /// (TRAIL-263) or due now, where the gates aren't evaluated but a failed CI needn't wait for the review. True only
+    /// when a rework was requested; one already asked for on this attempt leaves the owed review to its usual handling.
+    pub(crate) async fn rework_if_ci_failed(&self, key: &TaskKey) -> Result<bool> {
+        let Some(codehost) = &self.codehost else { return Ok(false) };
+        let task = self.tracker.show(key).await?;
+        let Some(pr) = &task.run.pr else { return Ok(false) };
+        if !matches!(task.status, Status::InReview | Status::Approved) {
+            return Ok(false);
+        }
+        let ci = codehost.ci(pr).await?;
+        let CiState::Failed { checks } = &ci.state else { return Ok(false) };
+        self.rework_ci_failure(&task, pr, &ci.head, checks).await
+    }
+
     async fn evaluate(&self, key: &TaskKey, act: bool, parks: bool) -> Result<()> {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let task = self.tracker.show(key).await?;
@@ -41,7 +57,7 @@ impl Factory {
         let Some(grade) = self.grade_pr(&task, pr, Some(&head)).await? else { return Ok(()) };
         self.record_grade(&task, &grade).await?;
         if let CiState::Failed { checks } = &ci.state {
-            return self.rework_ci_failure(&task, pr, &head, checks).await;
+            return self.rework_ci_failure(&task, pr, &head, checks).await.map(|_| ());
         }
         let prev = task.run.merge.clone();
         let mut status = task.status;
@@ -49,6 +65,7 @@ impl Factory {
         // approval without a mark is Lane's.
         let mut approved_head = prev.as_ref().and_then(|d| d.approved_head.clone());
         let mut human_head = prev.as_ref().and_then(|d| d.human_head.clone());
+        let mut unapproved = false;
         if status == Status::InReview {
             // However it got back to review (a push, Lane, a rework), no earlier approval applies.
             (approved_head, human_head) = (None, None);
@@ -70,6 +87,7 @@ impl Factory {
             } else if given_on.as_ref() != Some(&head) {
                 tracing::info!(task = %key.0, %head, "the PR has a new head; sending the task back to review");
                 self.tracker.unapprove(key).await?;
+                unapproved = true;
                 (status, approved_head, human_head) = (Status::InReview, None, None);
             }
         }
@@ -105,7 +123,13 @@ impl Factory {
         if verdict.withdraw {
             tracing::info!(task = %key.0, %head, "the gates no longer pass; withdrawing the approval");
             self.tracker.unapprove(key).await?;
+            unapproved = true;
             (approved_head, human_head) = (None, None);
+        }
+        // An intent to merge another head is stale (`merged_by` ignores it), and so is any once the approval is gone;
+        // clearing it keeps the record from passing for a live merge.
+        if task.run.merging.as_deref().is_some_and(|m| !m.is_empty() && (unapproved || m != head)) {
+            self.tracker.report(key, RunUpdate { merging: Some(String::new()), ..RunUpdate::default() }).await?;
         }
         let mut decision = MergeDecision {
             grade: grade.grade,
@@ -119,6 +143,7 @@ impl Factory {
             refused: None,
             comment: prev.as_ref().and_then(|d| d.comment),
             message: String::new(),
+            history: prev.as_ref().map(|d| d.history.clone()).unwrap_or_default(),
         };
         // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
         if verdict.approve {
@@ -163,7 +188,9 @@ impl Factory {
         });
         if prev.as_ref() != Some(&decision) {
             if !merging && merge_mode != MergeMode::Off && prev.as_ref().is_none_or(|d| d.message != decision.message) {
-                decision.comment = Some(self.say(pr, decision.comment, &decision.message).await?);
+                push_said(&mut decision.history, &decision.message);
+                let body = messages::status_comment(&decision.message, &decision.history);
+                decision.comment = Some(self.say(pr, decision.comment, &body).await?);
             }
             if decision.problem.is_some() && prev.as_ref().is_none_or(|d| d.problem != decision.problem) {
                 self.tracker.note(key, decision.problem.as_deref().unwrap_or_default()).await?;
@@ -232,14 +259,22 @@ impl Factory {
         if codehost.behind(pr).await? {
             // An update asked for on this head is still queued: the head moves when it lands.
             let queued = self.updating.lock().unwrap().get(&task.key).cloned();
-            if let Some((head, since)) = queued
+            let mut asked = 0;
+            if let Some((head, since, times)) = queued
                 && head == decision.head
             {
                 if since.elapsed() < crate::UPDATE_PATIENCE {
                     tracing::debug!(task = %task.key.0, pr = %pr.url, "the branch update is still queued; waiting");
                     return Ok(());
                 }
+                // A host that keeps dropping the update has likely found a conflict it only reports by dropping it.
+                if times >= crate::UPDATE_ASKS {
+                    tracing::warn!(task = %task.key.0, pr = %pr.url, times, "the branch update never landed; reworking");
+                    self.updating.lock().unwrap().remove(&task.key);
+                    return self.rework_conflict(task, pr, attempt).await;
+                }
                 tracing::warn!(task = %task.key.0, pr = %pr.url, "the branch update never landed; asking again");
+                asked = times;
             }
             match codehost.update_branch(pr).await? {
                 BranchUpdate::Conflict => {
@@ -248,7 +283,10 @@ impl Factory {
                 }
                 // CI starts over on the new head; the next pass looks at it again.
                 BranchUpdate::Updated => {
-                    self.updating.lock().unwrap().insert(task.key.clone(), (decision.head.clone(), Instant::now()));
+                    self.updating
+                        .lock()
+                        .unwrap()
+                        .insert(task.key.clone(), (decision.head.clone(), Instant::now(), asked + 1));
                 }
                 BranchUpdate::UpToDate => {}
             }
@@ -267,13 +305,15 @@ impl Factory {
         match outcome? {
             MergeOutcome::Merged => {
                 // The task's record says what the PR says; the decision was recorded with the earlier message.
-                let merged = MergeDecision { message: merged_message.to_string(), ..decision.clone() };
+                let mut merged = MergeDecision { message: merged_message.to_string(), ..decision.clone() };
+                push_said(&mut merged.history, merged_message);
+                let body = messages::status_comment(&merged.message, &merged.history);
                 if let Err(e) =
                     self.tracker.report(&task.key, RunUpdate { merge: Some(merged), ..RunUpdate::default() }).await
                 {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't record the merged message");
                 }
-                if let Err(e) = self.say(pr, decision.comment, merged_message).await {
+                if let Err(e) = self.say(pr, decision.comment, &body).await {
                     tracing::warn!(task = %task.key.0, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
                 }
                 let commit = match codehost.pr_state(pr).await? {
@@ -356,4 +396,12 @@ impl Factory {
         }
         Ok(())
     }
+}
+
+/// Adds `message`, said now, to a status comment's `history`, which keeps only the latest `HISTORY_LIMIT`.
+fn push_said(history: &mut Vec<Said>, message: &str) {
+    let at = jiff::Timestamp::now().strftime("%Y-%m-%d %H:%M UTC").to_string();
+    history.push(Said { at, message: message.to_string() });
+    let extra = history.len().saturating_sub(HISTORY_LIMIT);
+    history.drain(..extra);
 }

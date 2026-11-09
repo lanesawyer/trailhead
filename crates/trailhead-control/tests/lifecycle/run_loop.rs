@@ -772,3 +772,91 @@ async fn a_parked_task_still_claimed_is_left_alone_without_waking_its_daemon() {
     assert_eq!(r.tracker.task(&waiting).status, Status::Open);
     assert_eq!(r.tracker.task(&parked).run.released, None);
 }
+
+#[derive(Clone, Default)]
+struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+    type Writer = Logs;
+    fn make_writer(&'a self) -> Logs {
+        self.clone()
+    }
+}
+
+impl Logs {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+/// A worker sandbox another repo's factory holds, taking a place under the host's cap.
+async fn held_by_beta(compute: &trailhead_testkit::FakeCompute, name: &str) {
+    let labels = trailhead_factory::Labels::from([
+        (label::FACTORY.into(), "trailhead".into()),
+        (label::REPO.into(), "lanesawyer/beta".into()),
+        (label::TASK.into(), "TRAIL-99".into()),
+        (label::ROLE.into(), "worker".into()),
+    ]);
+    compute.create(&SandboxSpec { name: name.into(), labels, egress: Default::default() }).await.unwrap();
+}
+
+/// Runs the loop for a few polls, then stops it.
+async fn poll_a_while(factory: &Arc<trailhead_control::Factory>) {
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(factory.clone().run(
+        Arc::new(tokio::sync::Notify::new()),
+        std::time::Duration::from_millis(5),
+        async {
+            let _ = stopped.await;
+        },
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_host_cap_filled_by_another_repo_isnt_blamed_on_parked_tasks_but_the_repos_own_cap_is() {
+    let host = Host::new(&trailhead_factory::HostConfig { max_sandboxes: Some(3), ..Default::default() });
+    let r = rig_on(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 2"), host);
+    let park = || r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.tracker.add_task("TRAIL", "Parks", "");
+    park();
+    r.factory.tick().await.unwrap();
+    assert_eq!(busy(&r.compute).len(), 1, "one parked sandbox");
+
+    // Beta's two workers fill the host's cap; this repo is under its own, with a ready task waiting.
+    held_by_beta(&r.compute, "beta-1").await;
+    held_by_beta(&r.compute, "beta-2").await;
+    let waiting = r.tracker.add_task("TRAIL", "Waits", "");
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    let factory = Arc::new(r.factory);
+    poll_a_while(&factory).await;
+    assert_eq!(r.tracker.task(&waiting).status, Status::Open, "no place under the host's cap");
+    assert_eq!(r.compute.sandboxes().len(), 3, "nothing started");
+    assert!(!logs.text().contains("held by parked tasks"), "beta's runs will free the place: {}", logs.text());
+
+    // Beta gives a place back and this repo's own cap fills with parked sandboxes.
+    let beta = r.compute.sandboxes().into_iter().find(|s| s.name == "beta-1").unwrap();
+    r.compute.destroy(&beta.id).await.unwrap();
+    park();
+    assert_eq!(factory.tick().await.unwrap().len(), 1);
+    assert_eq!(r.tracker.task(&waiting).status, Status::NeedsInput, "the waiting task took the place and parked");
+    let next = r.tracker.add_task("TRAIL", "Still waits", "");
+    poll_a_while(&factory).await;
+    assert_eq!(r.tracker.task(&next).status, Status::Open, "both of the repo's places are parked");
+    assert!(logs.text().contains("held by parked tasks"), "{}", logs.text());
+}

@@ -61,7 +61,7 @@ pub(crate) async fn revert(cx: &Ctx, actor_id: &str, since: &str) -> Result<()> 
     }
     println!("reverted {} change(s)", v["reverted"].as_array().map_or(0, Vec::len));
     for sk in v["skipped"].as_array().into_iter().flatten() {
-        println!("skipped {} {}: changed later by event #{}", s(sk, "entity"), s(sk, "entity_id"), sk["later_event"]);
+        println!("skipped {} {}: {}", s(sk, "entity"), s(sk, "entity_id"), s(sk, "reason"));
     }
     Ok(())
 }

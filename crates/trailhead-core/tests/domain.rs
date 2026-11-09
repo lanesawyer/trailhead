@@ -583,6 +583,10 @@ async fn metadata_merges_and_filters() {
     let found = env.store.list_tasks(&env.human, filter).await.unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].key, t.key);
+    let exists = |p: &str| TaskFilter { metadata_exists: vec![p.into()], ..Default::default() };
+    assert_eq!(env.store.list_tasks(&env.human, exists("area.x")).await.unwrap().len(), 1);
+    assert_eq!(env.store.list_tasks(&env.human, exists("team")).await.unwrap().len(), 1);
+    assert!(env.store.list_tasks(&env.human, exists("size")).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1472,6 +1476,39 @@ async fn changes_requested_is_computed_from_the_latest_verdict_and_handoff() {
     assert_eq!(s.task_detail(&env.human, &t.key).await.unwrap().changes_requested, None);
     s.claim(&a, &t.key, None).await.unwrap();
     assert_eq!(s.release(&a, &t.key).await.unwrap().status, Status::Open);
+}
+
+#[tokio::test]
+async fn revert_actor_skips_a_parent_cycle_and_still_reverts_the_rest() {
+    let env = Env::new().await;
+    let a = env.task("a").await;
+    let b = env.task("b").await;
+    let other = env.task("other").await;
+    let under = |p: Option<&str>| TaskPatch { parent: Some(p.map(str::to_string)), ..Default::default() };
+    env.store.update_task(&env.human, &a.key, under(Some(&b.key)), None).await.unwrap();
+    let agent = env.agent("rogue").await;
+    let since = env.now();
+    env.advance(1);
+    env.store.update_task(&agent.next_batch(), &a.key, under(None), None).await.unwrap();
+    env.store
+        .update_task(
+            &agent.next_batch(),
+            &other.key,
+            TaskPatch { title: Some("vandalised".into()), ..Default::default() },
+            None,
+        )
+        .await
+        .unwrap();
+    env.store.update_task(&env.human, &b.key, under(Some(&a.key)), None).await.unwrap();
+
+    // Restoring a under b would form a cycle with the human's move, so it's skipped, not fatal.
+    let report = env.store.revert_actor(&env.human.next_batch(), agent.actor_id(), since).await.unwrap();
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].entity_id, a.id.to_string());
+    assert_eq!(report.skipped[0].later_event, None);
+    assert!(report.skipped[0].reason.contains("can't become its parent"), "{}", report.skipped[0].reason);
+    assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().title, "other");
+    assert_eq!(env.store.get_task(&env.human, &a.key).await.unwrap().parent_id, None);
 }
 
 #[tokio::test]

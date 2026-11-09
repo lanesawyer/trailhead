@@ -130,6 +130,9 @@ pub struct RunStatus {
     pub last_tool: Option<String>,
     /// Unix seconds.
     pub started: i64,
+    /// Unix seconds when it entered its current phase, so a stuck one shows. Zero from a server that didn't say.
+    #[serde(default)]
+    pub phase_started: i64,
 }
 
 /// A paid target's spend against its daily cap (`docs/factory/targets.md#spend`).

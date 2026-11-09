@@ -30,7 +30,6 @@ use tracing::Instrument;
 use trailhead_client::creds::{Cred, CredStore};
 use trailhead_client::paths::{DEFAULT_BIND, Paths};
 use trailhead_codehost_github::GitHub;
-use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_factory::{
@@ -300,8 +299,12 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
     let opts = &opts;
     let (harnesses, providers) = (harnesses(), providers());
     let mut harness_secrets = HarnessSecrets::new();
-    if let (Some(token), CLAUDE_CODE) = (&opts.claude_oauth_token, adapter.as_str()) {
-        harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+    if let Some(token) = &opts.claude_oauth_token {
+        if adapter == CLAUDE_CODE {
+            harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+        } else {
+            tracing::warn!(harness = %adapter, "a Claude subscription token is set but this harness can't use it; ignoring it");
+        }
     }
     let baselines: Vec<_> = specs.iter().map(|spec| started_baseline(&spec.config)).collect();
     for spec in &mut specs {
@@ -499,20 +502,12 @@ fn compute(
     match config {
         ComputeConfig::Sprites => {
             let token = opts.sprites_token.clone().ok_or(Error::NoSpritesToken)?;
-            Ok((Arc::new(SpritesCompute::new(token).map_err(Error::backend)?), trailhead_compute_sprites::target()))
+            trailhead_compute_sprites::build(token).map_err(Error::backend)
         }
         #[cfg(feature = "docker")]
-        ComputeConfig::Docker { image, network, runtime, memory_mib } => {
-            use trailhead_compute_docker::{DockerCompute, DockerConfig};
+        ComputeConfig::Docker { .. } => {
+            use trailhead_compute_docker::DockerConfig;
             let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), binary);
-            if let Some(image) = image {
-                docker.image = image.clone();
-            }
-            if let Some(network) = network {
-                docker.network = network.clone();
-            }
-            docker.runtime = runtime.clone();
-            docker.memory_bytes = memory_mib.map(|m| m * 1024 * 1024);
             docker.connections = gateway_connections(login::github_writer_token(fnox, &paths.creds())?);
             if docker.connections.is_empty() {
                 tracing::warn!(
@@ -524,9 +519,7 @@ fn compute(
                     "no Claude subscription token: Docker sandboxes have no model access until the gateway holds a credential for it"
                 );
             }
-            let compute = if read_only { DockerCompute::read_only(docker) } else { DockerCompute::new(docker) }
-                .map_err(Error::backend)?;
-            Ok((Arc::new(compute), trailhead_compute_docker::target()))
+            trailhead_compute_docker::build(config, docker, read_only).map_err(Error::backend)
         }
         #[cfg(not(feature = "docker"))]
         ComputeConfig::Docker { .. } => Err(Error::DockerNotBuilt),

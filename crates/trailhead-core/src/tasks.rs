@@ -323,6 +323,8 @@ pub struct TaskFilter {
     pub changes_requested: Option<bool>,
     /// `(path, value)` pairs matched against `metadata` as text, e.g. `("team", "web")`.
     pub metadata: Vec<(String, String)>,
+    /// Paths that must be present in `metadata` with a non-null value, e.g. `"factory"`.
+    pub metadata_exists: Vec<String>,
     pub sort: TaskSort,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -783,6 +785,10 @@ impl Store {
         for (path, value) in &filter.metadata {
             validate_path(path)?;
             push(&mut sql, &format!(" AND CAST(json_extract(metadata, '$.{path}') AS TEXT) = ?"), value.clone().into());
+        }
+        for path in &filter.metadata_exists {
+            validate_path(path)?;
+            sql.push_str(&format!(" AND json_extract(metadata, '$.{path}') IS NOT NULL"));
         }
         sql.push_str(&format!(" AND {}", ctx.scope_sql("project_id")));
         if filter.statuses.is_empty() {

@@ -282,9 +282,10 @@ fn render_live(snapshot: &FactorySnapshot) -> String {
         let last = r.last_tool.as_ref().map_or(String::new(), |t| format!(", last tool {t}"));
         let _ = writeln!(
             out,
-            "  {} {:<16} on {}, step {}, {} tool calls, spend {}{last}",
+            "  {} {:<16} for {} on {}, step {}, {} tool calls, spend {}{last}",
             r.task.0,
             r.phase.label(),
+            since(r.phase_started),
             r.sandbox.as_deref().unwrap_or("-"),
             r.steps,
             r.tool_calls,
@@ -293,6 +294,20 @@ fn render_live(snapshot: &FactorySnapshot) -> String {
     }
     out.push('\n');
     out
+}
+
+/// How long ago `unix` was, as `42s`, `7m` or `1h05m`; `?` when the server didn't say (zero).
+fn since(unix: i64) -> String {
+    if unix <= 0 {
+        return "?".into();
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let secs = (now - unix).max(0);
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        _ => format!("{}h{:02}m", secs / 3600, secs % 3600 / 60),
+    }
 }
 
 /// `waiting` is the ready tasks the factory could start; `max_sandboxes` the repo's cap.
@@ -325,8 +340,9 @@ fn render_status(
     if !waiting.is_empty() && parked > 0 && parked >= max_sandboxes {
         let _ = writeln!(
             out,
-            "\n{} ready tasks waiting; all {max_sandboxes} sandboxes held by parked tasks (answer or cancel them)",
-            waiting.len()
+            "\n{} ready {} waiting; all {max_sandboxes} sandboxes held by parked tasks (answer or cancel them)",
+            waiting.len(),
+            if waiting.len() == 1 { "task" } else { "tasks" }
         );
     }
 
@@ -561,7 +577,7 @@ mod tests {
         ];
         let waiting = [task("TRAIL-3", Status::Open, Default::default())];
         let out = render_status(&rows(&boxes), &parked, &waiting, 2, false);
-        assert!(out.contains("1 ready tasks waiting; all 2 sandboxes held by parked tasks"), "{out}");
+        assert!(out.contains("1 ready task waiting; all 2 sandboxes held by parked tasks"), "{out}");
         assert!(!render_status(&rows(&boxes), &parked, &[], 2, false).contains("waiting;"));
         assert!(!render_status(&rows(&boxes), &parked, &waiting, 3, false).contains("waiting;"));
     }
@@ -590,6 +606,7 @@ mod tests {
                 spend: Usd::dollars(1.5),
                 last_tool: Some("Bash".into()),
                 started: 0,
+                phase_started: 0,
             }],
             holding: Some("#306 has auto-merge on".into()),
             targets: vec![TargetSpend {
@@ -609,9 +626,19 @@ mod tests {
         assert!(out.contains("last error ("), "{out}");
         assert!(out.contains(": reconcile failed: boom\n"), "{out}");
         assert!(out.contains("TRAIL-7 preparing (cold)"), "{out}");
+        assert!(out.contains("for ? on trailhead-w1"), "{out}");
         assert!(out.contains("step 3, 9 tool calls, spend $1.5000, last tool Bash"), "{out}");
         let row = Row::from_status(&snapshot.sandboxes[0]);
         assert_eq!((row.state.as_str(), row.warm.as_str(), row.task.as_str()), ("paused", "yes", "TRAIL-7"));
+    }
+
+    #[test]
+    fn since_reads_as_a_short_age() {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        assert_eq!(since(0), "?");
+        assert_eq!(since(now + 5), "0s");
+        assert_eq!(since(now - 7 * 60 - 3), "7m");
+        assert_eq!(since(now - 3600 - 5 * 60), "1h05m");
     }
 
     #[test]

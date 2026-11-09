@@ -629,6 +629,7 @@ async fn worker_infrastructure_failures_keep_counting_across_a_control_plane_res
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::NeedsInput, "parked at max_infra_failures");
     assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+    assert_eq!(task.run.infra_failures.unwrap_or(0), 0, "parking resets the count, so a reopened task starts again");
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task"), "{}", questions[0].body);
@@ -888,7 +889,25 @@ async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_convent
 }
 
 #[tokio::test]
-async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a_fresh_one() {
+async fn a_warm_sandbox_that_fails_prepare_once_is_released_and_keeps_its_cache() {
+    let r = rig();
+    let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&first)).await.unwrap();
+
+    let second = r.tracker.add_task("TRAIL", "Hits a transient failure", "");
+    r.daemon.fail_prepares(1, "git fetch failed");
+    let err = r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
+    assert!(err.to_string().contains("git fetch failed"), "{err}");
+    let kept = r.compute.get("trailhead-w1").expect("the sandbox survives one failed prepare");
+    assert_eq!(kept.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert!(kept.labels.contains_key(label::WARM));
+    assert_eq!(r.tracker.task(&second).run.infra_failures, Some(1), "an infrastructure failure");
+}
+
+#[tokio::test]
+async fn a_warm_sandbox_that_fails_prepare_repeatedly_is_destroyed_and_the_next_task_gets_a_fresh_one() {
     let r = rig();
     let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
     r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
@@ -899,11 +918,13 @@ async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a
     assert!(idle.labels.contains_key(label::WARM));
 
     let second = r.tracker.add_task("TRAIL", "Hits the broken checkout", "");
-    r.daemon.fail_prepares(1, "git clone failed");
+    r.daemon.fail_prepares(2, "git clone failed");
+    r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
+    assert!(r.compute.get("trailhead-w1").is_some(), "kept after the first failure");
     let err = r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
     assert!(err.to_string().contains("git clone failed"), "{err}");
-    assert!(r.compute.get("trailhead-w1").is_none(), "the sandbox is destroyed, not relabelled idle");
-    assert_eq!(r.tracker.task(&second).run.infra_failures, Some(1), "an infrastructure failure");
+    assert!(r.compute.get("trailhead-w1").is_none(), "destroyed after the second, not relabelled idle");
+    assert_eq!(r.tracker.task(&second).run.infra_failures, Some(2), "an infrastructure failure");
     assert_eq!(r.tracker.task(&second).run.attempt.unwrap_or(0), 0, "no attempt was used");
 
     let third = r.tracker.add_task("TRAIL", "Gets a fresh sandbox", "");
@@ -914,6 +935,30 @@ async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a
     // Release restores the warm checkpoint of the sandbox it returns to the pool; a restore at acquire would be a second.
     assert_eq!(r.compute.restores("trailhead-w1").len(), 1, "only release restored it, acquire did not: {fresh:?}");
     assert_eq!(r.compute.checkpoints("trailhead-w1").len(), 1, "built from scratch, not restored: {fresh:?}");
+}
+
+#[tokio::test]
+async fn a_reviewer_sandbox_that_fails_prepare_is_destroyed_and_its_daemon_forgotten() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    let forgotten_before = r.daemon.forgotten().len();
+
+    // The worker's prepare worked; the next review's sandbox is the one that fails.
+    r.daemon.fail_prepares(1, "git clone failed");
+    let shown = r.tracker.task(&key);
+    let pr = shown.run.pr.clone().expect("a PR");
+    let reviewer = trailhead_factory::review_name(&key, shown.run.attempt.unwrap_or(1), 2);
+    let err = r.factory.review(&shown, &pr, 1, &[]).await.unwrap_err();
+    assert!(err.to_string().contains("git clone failed"), "{err}");
+    assert!(r.compute.get(&reviewer).is_none(), "the reviewer's sandbox is destroyed");
+    let forgotten = r.daemon.forgotten();
+    assert!(
+        forgotten[forgotten_before..].iter().any(|id| id.0 == reviewer),
+        "the reviewer's daemon connection is forgotten with its sandbox: {forgotten:?}"
+    );
 }
 
 fn with_setup() -> Rig {

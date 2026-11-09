@@ -54,6 +54,10 @@ pub const RELEASE_PATIENCE: Duration = Duration::from_secs(10 * 60);
 /// or found a conflict after answering.
 pub const UPDATE_PATIENCE: Duration = Duration::from_secs(10 * 60);
 
+/// How many times the merger asks for a branch update on one head before it gives up waiting and sends the PR to a
+/// rework: a host that keeps dropping the update has probably found a conflict.
+pub const UPDATE_ASKS: u32 = 3;
+
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
@@ -135,8 +139,9 @@ pub struct Factory {
     listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
     /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
     /// (a 202), so until the head moves the PR is still behind and asking again would only queue another, unless the
-    /// update never lands: after `UPDATE_PATIENCE` the merger asks again (TRAIL-490).
-    updating: Mutex<HashMap<TaskKey, (String, Instant)>>,
+    /// update never lands: after `UPDATE_PATIENCE` the merger asks again, up to `UPDATE_ASKS` times on one head, then
+    /// reworks (TRAIL-490, TRAIL-621). Each entry also counts the asks.
+    updating: Mutex<HashMap<TaskKey, (String, Instant, u32)>>,
     /// The person's PR with auto-merge on that the merger is holding its merges for (TRAIL-804).
     held: Mutex<Option<person::Held>>,
     /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
@@ -157,6 +162,8 @@ pub struct Factory {
     install_opened: Mutex<HashMap<SandboxId, Vec<String>>>,
     /// How long each pooled sandbox's last warm checkpoint took, to weigh against its next prepare (TRAIL-707).
     warm_cost: Mutex<HashMap<SandboxId, Duration>>,
+    /// Consecutive failed prepares of each pooled sandbox, cleared by a good one (TRAIL-561).
+    prepare_failures: Mutex<HashMap<SandboxId, u32>>,
     /// The target each worker or review being started has been placed on, until it ends. Its sandbox may not exist yet, so
     /// without this a target's limit would be passed by runs starting together.
     placed: Arc<Mutex<HashMap<(TaskKey, trailhead_factory::Role), String>>>,
@@ -267,6 +274,7 @@ impl Factory {
             pool_pick: tokio::sync::Mutex::default(),
             install_opened: Mutex::default(),
             warm_cost: Mutex::default(),
+            prepare_failures: Mutex::default(),
             placed: Arc::default(),
             ledger: Arc::default(),
             capped: Mutex::default(),

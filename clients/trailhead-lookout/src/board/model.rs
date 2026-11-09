@@ -581,6 +581,7 @@ mod tests {
                 spend: Usd::dollars(0.0),
                 last_tool: None,
                 started: 0,
+                phase_started: 0,
             },
         }];
         let view = run_with(&Filter::default(), &runs);

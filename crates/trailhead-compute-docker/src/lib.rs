@@ -29,14 +29,14 @@ use bollard::models::{
     ContainerConfig, ContainerCreateBody, ExecConfig, HostConfig, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, InspectContainerOptions, ListContainersOptions, ListImagesOptions,
-    RemoveContainerOptions, RemoveImageOptions, UploadToContainerOptions,
+    CreateContainerOptions, CreateImageOptions, DownloadFromContainerOptions, InspectContainerOptions,
+    ListContainersOptions, ListImagesOptions, RemoveContainerOptions, RemoveImageOptions, UploadToContainerOptions,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use trailhead_factory::{
-    CheckpointId, Compute, Egress, Error, GATEWAY_ANTHROPIC_ID, GATEWAY_HOST, GATEWAY_PORT, GatewayConnection,
-    GatewayRequest, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec, Target,
+    CheckpointId, Compute, ComputeConfig, Egress, Error, GATEWAY_ANTHROPIC_ID, GATEWAY_HOST, GATEWAY_PORT,
+    GatewayConnection, GatewayRequest, Labels, Program, Result, Sandbox, SandboxId, SandboxSpec, Target,
 };
 
 mod gateway;
@@ -49,6 +49,9 @@ pub const MARKER: &str = "dev.trailhead.sandbox";
 pub const CHECKPOINT_OF: &str = "dev.trailhead.checkpoint-of";
 /// The label on checkpoint images holding the note they were taken with.
 pub const CHECKPOINT_NOTE: &str = "dev.trailhead.checkpoint-note";
+/// The label on checkpoint images holding, as a JSON array of `NAME=value`, the environment variables whose values
+/// have a line break: a Dockerfile `ENV` can't carry one, so a restore sets them on the container instead.
+const CHECKPOINT_ENV: &str = "dev.trailhead.checkpoint-env";
 /// The note of a pool's warm checkpoints, the only ones a later checkpoint may remove: the rest (a parked
 /// sandbox's) stay until the sandbox is destroyed.
 const WARM_NOTE: &str = "warm";
@@ -65,6 +68,31 @@ pub const DEFAULT_NETWORK: &str = "trailhead-gateway-out";
 /// Where the daemon lives in [`DEFAULT_IMAGE`], whose user is `trailhead`.
 pub const HOME: &str = "/home/trailhead";
 
+/// How many trailing lines of a program's log `logs` returns.
+const LOG_LINES: usize = 3000;
+
+/// The last `lines` lines of the file in a `docker cp` archive of one file.
+fn log_from_archive(raw: &[u8], lines: usize) -> Result<String> {
+    let bad = |e: std::io::Error| Error::Other(format!("log archive: {e}"));
+    let mut archive = tar::Archive::new(raw);
+    for entry in archive.entries().map_err(bad)? {
+        let mut entry = entry.map_err(bad)?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut text).map_err(bad)?;
+        let skip = text.lines().count().saturating_sub(lines);
+        return Ok(text.split_inclusive('\n').skip(skip).collect());
+    }
+    Err(Error::NotFound("log archive holds no file".into()))
+}
+
+/// A program's log under the target's `dir`, quoted for the shell.
+fn program_log(dir: &str, program: &str) -> String {
+    shell_quote(&format!("{dir}/programs/{program}/log"))
+}
+
 /// A Docker sandbox's launch facts: connectors and model calls both go through the gateway container.
 pub fn target() -> Target {
     let gateway = format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway");
@@ -78,6 +106,36 @@ pub fn target() -> Target {
     }
 }
 
+/// A Docker compute from its `[compute]` settings (unset ones keep `docker`'s defaults), with its launch facts.
+/// `read_only` is as for [`DockerCompute::read_only`]. Settings of another kind are an error.
+pub fn build(
+    settings: &ComputeConfig,
+    mut docker: DockerConfig,
+    read_only: bool,
+) -> Result<(Arc<dyn Compute>, Target)> {
+    let ComputeConfig::Docker { image, network, runtime, memory_mib, min_free_bytes, concurrent_checkpoints } =
+        settings
+    else {
+        return Err(Error::Other("not a Docker compute's settings".into()));
+    };
+    if let Some(image) = image {
+        docker.image = image.clone();
+    }
+    if let Some(network) = network {
+        docker.network = network.clone();
+    }
+    docker.runtime = runtime.clone();
+    docker.memory_bytes = memory_mib.map(|m| m * 1024 * 1024);
+    if let Some(min_free) = min_free_bytes {
+        docker.min_free_bytes = *min_free;
+    }
+    if let Some(n) = concurrent_checkpoints {
+        docker.concurrent_checkpoints = *n;
+    }
+    let compute = if read_only { DockerCompute::read_only(docker) } else { DockerCompute::new(docker) }?;
+    Ok((Arc::new(compute), target()))
+}
+
 const SUPERVISE: &str = include_str!("supervise.sh");
 const SUPERVISE_PATH: &str = "/opt/trailhead/supervise";
 
@@ -88,8 +146,8 @@ pub const DEFAULT_MIN_FREE_BYTES: u64 = 10 << 30;
 /// How many times its size a checkpoint takes while it is imported: the containerd snapshotter keeps an import as a
 /// content blob and again as an unpacked snapshot (`docker system df` showed twice the sizes' sum).
 const IMPORT_COPIES: u64 = 2;
-/// How many sandboxes may be checkpointing at once, which the free disk has to cover.
-const CONCURRENT_CHECKPOINTS: u64 = 2;
+/// How many sandboxes may be checkpointing at once by default (`DockerConfig::concurrent_checkpoints`).
+pub const DEFAULT_CONCURRENT_CHECKPOINTS: u64 = 2;
 
 /// How long `start` watches a new program for an early exit.
 const START_WATCH: Duration = Duration::from_secs(3);
@@ -112,6 +170,8 @@ pub struct DockerConfig {
     pub connections: Vec<GatewayConnection>,
     /// The least free space the Docker engine's disk may have when a run is about to start.
     pub min_free_bytes: u64,
+    /// How many sandboxes may checkpoint at once, which the free-disk check reserves room for: set it to the pool size.
+    pub concurrent_checkpoints: u64,
     /// Each sandbox's memory limit, swap included. None leaves sandboxes unlimited, so concurrent builds can take each
     /// other's memory and the engine's OOM killer picks among them. Also sets `CARGO_BUILD_JOBS` ([`build_jobs`]).
     pub memory_bytes: Option<u64>,
@@ -128,6 +188,7 @@ impl DockerConfig {
             daemon,
             connections: Vec::new(),
             min_free_bytes: DEFAULT_MIN_FREE_BYTES,
+            concurrent_checkpoints: DEFAULT_CONCURRENT_CHECKPOINTS,
             memory_bytes: None,
         }
     }
@@ -246,12 +307,12 @@ impl DockerCompute {
 
     /// Creates and starts the sandbox's container from `image`. A fresh image gets the supervisor first; a checkpoint
     /// already has it.
-    async fn run_container(&self, name: &str, image: &str, fresh: bool) -> Result<()> {
+    async fn run_container(&self, name: &str, image: &str, fresh: bool, extra_env: Vec<String>) -> Result<()> {
         let body = ContainerCreateBody {
             image: Some(image.into()),
             cmd: Some(vec![SUPERVISE_PATH.into()]),
             entrypoint: Some(vec![]),
-            env: Some(self.sandbox_env()),
+            env: Some([self.sandbox_env(), extra_env].concat()),
             labels: Some(HashMap::from([(MARKER.to_string(), name.to_string())])),
             host_config: Some(HostConfig {
                 init: Some(true),
@@ -435,7 +496,7 @@ impl Compute for DockerCompute {
         let state = State { labels: spec.labels.clone(), egress: spec.egress.clone() };
         self.write_state(&spec.name, &state).await?;
         self.attach(&spec.name, &state).await?;
-        match self.run_container(&spec.name, &self.config.image, true).await {
+        match self.run_container(&spec.name, &self.config.image, true, Vec::new()).await {
             // Lost a race with another create of the same name.
             Err(Error::Conflict(_)) => {}
             other => other?,
@@ -517,7 +578,8 @@ impl Compute for DockerCompute {
     /// Recreates the container from the checkpoint's image, keeping its name, labels and egress. Its programs start
     /// again from the image.
     async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()> {
-        self.docker.inspect_image(&cp.0).await.map_err(docker_err)?;
+        let image = self.docker.inspect_image(&cp.0).await.map_err(docker_err)?;
+        let multi_line = multi_line_env(image.config.as_ref().and_then(|c| c.labels.as_ref()));
         let _link = self.gateway().await?;
         let state = self.read_state(&id.0).await?;
         let opts = RemoveContainerOptions { force: true, ..Default::default() };
@@ -526,7 +588,7 @@ impl Compute for DockerCompute {
             _ => {}
         }
         self.attach(&id.0, &state).await?;
-        self.run_container(&id.0, &cp.0, false).await?;
+        self.run_container(&id.0, &cp.0, false, multi_line).await?;
         // The container no longer runs from the previous checkpoint, which checkpoint() couldn't remove while it did.
         if let Err(e) = self.prune_checkpoints(id, Some(cp)).await {
             tracing::warn!(sandbox = %id.0, error = %e, "couldn't remove old checkpoints after the restore");
@@ -615,10 +677,22 @@ impl Compute for DockerCompute {
         self.attach(&id.0, &state).await
     }
 
+    /// Reads the log by `tail` in a running container, or by copying it out of a stopped one, which can't exec.
     async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
-        let log = format!("$HOME/.trailhead/programs/{}/log", shell_quote(program));
-        let (_, out) = self.exec(&id.0, None, &format!("tail -n 3000 {log}")).await?;
-        Ok(out)
+        let info = self.docker.inspect_container(&id.0, None::<InspectContainerOptions>).await.map_err(docker_err)?;
+        if info.state.and_then(|s| s.running).unwrap_or(false) {
+            let log = program_log(&target().dir, program);
+            let (_, out) = self.exec(&id.0, None, &format!("tail -n {LOG_LINES} {log}")).await?;
+            return Ok(out);
+        }
+        let path = format!("{}/programs/{program}/log", target().dir);
+        let opts = DownloadFromContainerOptions { path };
+        let mut stream = self.docker.download_from_container(&id.0, Some(opts));
+        let mut raw = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            raw.extend_from_slice(&chunk.map_err(docker_err)?);
+        }
+        log_from_archive(&raw, LOG_LINES)
     }
 
     /// Fails with [`Error::Unavailable`], for the control plane to wait out, when the sandbox's disk (the Docker
@@ -640,7 +714,7 @@ impl Compute for DockerCompute {
         // largest checkpoint image, or the host's largest while it has none.
         let checkpoint = self.largest_checkpoint(id).await;
         let size = checkpoint.as_ref().map_or(fs, |(big, _)| fs.max(*big));
-        let need = disk_needed(self.config.min_free_bytes, size);
+        let need = disk_needed(self.config.min_free_bytes, self.config.concurrent_checkpoints, size);
         if free < need {
             return Err(Error::Unavailable(disk_short(&id.0, free, need, fs, checkpoint.as_ref())));
         }
@@ -688,13 +762,15 @@ pub fn shell_quote(s: &str) -> String {
 /// user, working directory and environment. (Its command and entrypoint are set again when it is restored.)
 fn image_changes(sandbox: &str, note: &str, config: Option<&ContainerConfig>) -> Vec<String> {
     // Docker joins the changes with newlines and parses them as a Dockerfile, so a line break would end the
-    // instruction early; turn each into a space.
+    // instruction early, and no escape keeps one (`\n` stays a backslash and an n); turn each into a space. An
+    // environment variable's value keeps its own through `CHECKPOINT_ENV`, whose JSON has none.
     let quote = |s: &str| {
         let s = s.replace(['\r', '\n'], " ");
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('$', "\\$"))
     };
     let mut out =
         vec![format!("LABEL {CHECKPOINT_OF}={}", quote(sandbox)), format!("LABEL {CHECKPOINT_NOTE}={}", quote(note))];
+    let mut multi_line = Vec::new();
     if let Some(config) = config {
         if let Some(user) = config.user.as_deref().filter(|u| !u.is_empty()) {
             out.push(format!("USER {user}"));
@@ -705,11 +781,23 @@ fn image_changes(sandbox: &str, note: &str, config: Option<&ContainerConfig>) ->
         for var in config.env.iter().flatten() {
             // Left out so a restore sets it afresh from the current `memory_mib`, and drops it once that is unset.
             if let Some((k, v)) = var.split_once('=').filter(|(k, _)| *k != BUILD_JOBS_VAR) {
-                out.push(format!("ENV {k}={}", quote(v)));
+                if v.contains(['\r', '\n']) {
+                    multi_line.push(var.clone());
+                } else {
+                    out.push(format!("ENV {k}={}", quote(v)));
+                }
             }
         }
     }
+    if !multi_line.is_empty() {
+        out.push(format!("LABEL {CHECKPOINT_ENV}={}", quote(&serde_json::to_string(&multi_line).unwrap_or_default())));
+    }
     out
+}
+
+/// The variables a checkpoint image's [`CHECKPOINT_ENV`] label carries, for the restored container to set.
+fn multi_line_env(labels: Option<&HashMap<String, String>>) -> Vec<String> {
+    labels.and_then(|l| l.get(CHECKPOINT_ENV)).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default()
 }
 
 /// The largest of `images` (the sandbox each is a checkpoint of, its size and its name) made by `sandbox`, or else the
@@ -726,9 +814,9 @@ fn pick_checkpoint(sandbox: &str, images: Vec<(Option<&str>, u64, String)>) -> O
 }
 
 /// The free disk a sandbox whose filesystem is `size` bytes needs before a run: its checkpoint is imported as
-/// [`IMPORT_COPIES`] copies of it, for as many sandboxes as may checkpoint together, and never less than `floor`.
-fn disk_needed(floor: u64, size: u64) -> u64 {
-    floor.max(size.saturating_mul(IMPORT_COPIES * CONCURRENT_CHECKPOINTS))
+/// [`IMPORT_COPIES`] copies of it, for `concurrent` sandboxes checkpointing together, and never less than `floor`.
+fn disk_needed(floor: u64, concurrent: u64, size: u64) -> u64 {
+    floor.max(size.saturating_mul(IMPORT_COPIES.saturating_mul(concurrent)))
 }
 
 /// How many parallel build jobs fit in `memory_bytes`: one per GiB (a rust-lld link or rustc codegen unit can take that
@@ -825,6 +913,12 @@ fn io_err(path: &Path, e: std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_refuses_another_kinds_settings() {
+        let docker = DockerConfig::new("/tmp/unused", Default::default());
+        assert!(build(&ComputeConfig::Sprites, docker, true).is_err());
+    }
 
     /// A Docker API on a unix socket that answers every request with an empty list and records the paths asked for.
     async fn recording_docker(dir: &Path) -> (Docker, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -965,6 +1059,22 @@ mod tests {
     }
 
     #[test]
+    fn a_multi_line_env_value_rides_in_a_label_and_comes_back_whole() {
+        let value = "-----BEGIN-----\nabc \"q\" \\n $x\r\n-----END-----";
+        let config = ContainerConfig { env: Some(vec![format!("KEY={value}"), "A=b".into()]), ..Default::default() };
+        let changes = image_changes("t-w1", "warm", Some(&config));
+        assert!(changes.iter().all(|c| !c.contains(['\n', '\r'])));
+        assert!(!changes.iter().any(|c| c.starts_with("ENV KEY")));
+        assert!(changes.contains(&"ENV A=\"b\"".to_string()));
+        let label = changes.iter().find_map(|c| c.strip_prefix(&format!("LABEL {CHECKPOINT_ENV}="))).unwrap();
+        // Undo the Dockerfile quoting the way its parser does.
+        let unquoted = label[1..label.len() - 1].replace("\\\"", "\"").replace("\\$", "$").replace("\\\\", "\\");
+        let labels = HashMap::from([(CHECKPOINT_ENV.to_string(), unquoted)]);
+        assert_eq!(multi_line_env(Some(&labels)), [format!("KEY={value}")]);
+        assert!(multi_line_env(None).is_empty());
+    }
+
+    #[test]
     fn a_multi_line_note_stays_on_one_line() {
         let changes = image_changes("t-w1", "parked: first\nsecond\r\nthird", None);
         assert_eq!(changes[1], "LABEL dev.trailhead.checkpoint-note=\"parked: first second  third\"");
@@ -995,9 +1105,11 @@ mod tests {
     #[test]
     fn the_disk_a_checkpoint_needs_follows_the_filesystem() {
         let gib = 1u64 << 30;
-        assert_eq!(disk_needed(10 * gib, gib), 10 * gib, "the floor holds for a small filesystem");
-        assert_eq!(disk_needed(10 * gib, 14 * gib), 56 * gib, "twice over, for two sandboxes");
-        assert_eq!(disk_needed(10 * gib, u64::MAX), u64::MAX);
+        assert_eq!(disk_needed(10 * gib, 2, gib), 10 * gib, "the floor holds for a small filesystem");
+        assert_eq!(disk_needed(10 * gib, 2, 14 * gib), 56 * gib, "twice over, for two sandboxes");
+        assert_eq!(disk_needed(10 * gib, 1, 14 * gib), 28 * gib, "one sandbox needs half that");
+        assert_eq!(disk_needed(10 * gib, 4, 14 * gib), 112 * gib, "and four twice that");
+        assert_eq!(disk_needed(10 * gib, 2, u64::MAX), u64::MAX);
     }
 
     #[test]
@@ -1019,6 +1131,14 @@ mod tests {
         let df = "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 60000000 50000000 1000 99% /\n";
         assert_eq!(free_bytes(df), Some(1000 * 1024));
         assert_eq!(free_bytes("garbage"), None);
+    }
+
+    #[test]
+    fn log_archive_keeps_the_last_lines() {
+        let raw = tar_of(&[("log", b"a\nb\nc\n", 0o644, 0, 0)], &[]).unwrap();
+        assert_eq!(log_from_archive(&raw, 2).unwrap(), "b\nc\n");
+        assert_eq!(log_from_archive(&raw, 10).unwrap(), "a\nb\nc\n");
+        assert!(matches!(log_from_archive(&tar_of(&[], &["d"]).unwrap(), 2), Err(Error::NotFound(_))));
     }
 
     #[test]
@@ -1057,11 +1177,11 @@ mod tests {
         compute.write_state("trail-1-a1", &state).await.unwrap();
         assert_eq!(compute.read_state("trail-1-a1").await.unwrap(), state);
     }
-}
 
-#[cfg(test)]
-mod target_tests {
-    use super::*;
+    #[test]
+    fn a_program_log_is_under_the_target_dir() {
+        assert_eq!(program_log(&target().dir, "it's"), r"'/home/trailhead/.trailhead/programs/it'\''s/log'");
+    }
 
     #[test]
     fn a_docker_target_uses_the_gateway_for_models_and_connectors() {
