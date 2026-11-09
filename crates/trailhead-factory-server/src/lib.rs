@@ -30,7 +30,6 @@ use tracing::Instrument;
 use trailhead_client::creds::{Cred, CredStore};
 use trailhead_client::paths::{DEFAULT_BIND, Paths};
 use trailhead_codehost_github::GitHub;
-use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_factory::{
@@ -499,26 +498,12 @@ fn compute(
     match config {
         ComputeConfig::Sprites => {
             let token = opts.sprites_token.clone().ok_or(Error::NoSpritesToken)?;
-            Ok((Arc::new(SpritesCompute::new(token).map_err(Error::backend)?), trailhead_compute_sprites::target()))
+            trailhead_compute_sprites::build(token).map_err(Error::backend)
         }
         #[cfg(feature = "docker")]
-        ComputeConfig::Docker { image, network, runtime, memory_mib, min_free_bytes, concurrent_checkpoints } => {
-            use trailhead_compute_docker::{DockerCompute, DockerConfig};
+        ComputeConfig::Docker { .. } => {
+            use trailhead_compute_docker::DockerConfig;
             let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), binary);
-            if let Some(image) = image {
-                docker.image = image.clone();
-            }
-            if let Some(network) = network {
-                docker.network = network.clone();
-            }
-            docker.runtime = runtime.clone();
-            docker.memory_bytes = memory_mib.map(|m| m * 1024 * 1024);
-            if let Some(min_free) = min_free_bytes {
-                docker.min_free_bytes = *min_free;
-            }
-            if let Some(n) = concurrent_checkpoints {
-                docker.concurrent_checkpoints = *n;
-            }
             docker.connections = gateway_connections(login::github_writer_token(fnox, &paths.creds())?);
             if docker.connections.is_empty() {
                 tracing::warn!(
@@ -530,9 +515,7 @@ fn compute(
                     "no Claude subscription token: Docker sandboxes have no model access until the gateway holds a credential for it"
                 );
             }
-            let compute = if read_only { DockerCompute::read_only(docker) } else { DockerCompute::new(docker) }
-                .map_err(Error::backend)?;
-            Ok((Arc::new(compute), trailhead_compute_docker::target()))
+            trailhead_compute_docker::build(config, docker, read_only).map_err(Error::backend)
         }
         #[cfg(not(feature = "docker"))]
         ComputeConfig::Docker { .. } => Err(Error::DockerNotBuilt),
