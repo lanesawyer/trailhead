@@ -563,23 +563,39 @@ pub fn conflict_feedback(pr_url: &str, base: &str) -> String {
     )
 }
 
+/// Whether the base branch was merged into a PR after its review, and what is known of CI before that merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterUpdate {
+    /// The head is the one reviewed, or changed by more than a merge of the base.
+    No,
+    /// CI passed on the reviewed head, so the merge brought the failure in.
+    CiPassedBefore,
+    /// CI didn't pass on the reviewed head, or the host couldn't say.
+    CiUnconfirmed,
+}
+
 /// What a worker is told when CI failed on its PR: the checks, the end of their logs, and `after_update` when the
-/// base branch was merged in after the review (CI is not known to have passed before).
+/// base branch was merged in after the review.
 pub fn ci_failure_feedback(
     pr_url: &str,
     head: &str,
     checks: &[String],
-    after_update: bool,
+    after_update: AfterUpdate,
     logs: &[(String, String)],
     base: &str,
 ) -> String {
     let mut body = format!("CI failed on {pr_url} at {head}: {}.", checks.join(", "));
-    if after_update {
-        body.push_str(
+    match after_update {
+        AfterUpdate::No => {}
+        AfterUpdate::CiPassedBefore => body.push_str(
+            " CI passed on the PR before the base branch was merged into it, so the failure came in with that \
+             merge: something that landed on the base branch clashes with this change. Fix the clash.",
+        ),
+        AfterUpdate::CiUnconfirmed => body.push_str(
             " The base branch was merged into the PR after it was reviewed, so the failure may have come in with \
              that merge: something that landed on the base branch may clash with this change. CI wasn't seen to \
              pass before the merge, so check whether the failure is your change's own too.",
-        );
+        ),
     }
     for (check, log) in logs {
         body.push_str(&format!("\n\nEnd of the log of {check}:\n\n```\n{}\n```", log.trim_end()));
@@ -610,12 +626,15 @@ mod tests {
 
     #[test]
     fn ci_failure_feedback_does_not_claim_ci_passed_before_an_update() {
-        let plain = ci_failure_feedback("url", "abc", &["test".to_string()], false, &[], "main");
+        let plain = ci_failure_feedback("url", "abc", &["test".to_string()], AfterUpdate::No, &[], "main");
         assert!(!plain.contains("merged into the PR after"), "{plain}");
-        let updated = ci_failure_feedback("url", "abc", &["test".to_string()], true, &[], "main");
+        let updated = ci_failure_feedback("url", "abc", &["test".to_string()], AfterUpdate::CiUnconfirmed, &[], "main");
         assert!(updated.contains("merged into the PR after it was reviewed"), "{updated}");
         assert!(!updated.contains("It passed"), "{updated}");
         assert!(updated.contains("conflict markers"), "{updated}");
+        let passed = ci_failure_feedback("url", "abc", &["test".to_string()], AfterUpdate::CiPassedBefore, &[], "main");
+        assert!(passed.contains("CI passed on the PR before"), "{passed}");
+        assert!(!passed.contains("may have come in"), "{passed}");
     }
 
     #[test]

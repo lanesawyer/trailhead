@@ -678,6 +678,11 @@ impl CodeHost for GitHub {
 
     async fn ci(&self, pr: &PrRef) -> Result<Ci> {
         let head = CodeHost::head(self, pr).await?;
+        let state = self.ci_at(pr, &head).await?;
+        Ok(Ci { state, head })
+    }
+
+    async fn ci_at(&self, pr: &PrRef, head: &str) -> Result<CiState> {
         let r = Self::repo_path(&pr.repo);
         let mut runs = Vec::new();
         for page in 1..=MAX_CHECK_PAGES {
@@ -693,7 +698,7 @@ impl CodeHost for GitHub {
         }
         let combined = self.call_cached(self.request(Method::GET, &format!("{r}/commits/{head}/status"))).await?;
         let statuses = combined["statuses"].as_array().map(Vec::as_slice).unwrap_or_default();
-        Ok(Ci { state: summarize_ci(&runs, statuses), head })
+        Ok(summarize_ci(&runs, statuses))
     }
 
     async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {
