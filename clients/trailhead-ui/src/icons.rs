@@ -12,8 +12,9 @@ use bevy::app::PropagateOver;
 use bevy::prelude::*;
 use bevy::text::{FontSourceTemplate, FontWeight};
 
+use crate::text::size;
+
 const FONT: &str = "embedded://trailhead_ui/assets/lucide.ttf";
-const SIZE: f32 = 15.0;
 
 /// Embeds the icon font, at the path [`icon_text`] loads it from.
 pub struct IconsPlugin;
@@ -186,7 +187,7 @@ pub fn icon_text(icon: Icon) -> impl Scene {
         Text({ icon.glyph().to_string() })
         TextFont {
             font: FontSourceTemplate::Handle(FONT),
-            font_size: FontSize::Px(SIZE),
+            font_size: FontSize::from(size::HEADING),
             weight: FontWeight::NORMAL,
         }
         PropagateOver<TextFont>

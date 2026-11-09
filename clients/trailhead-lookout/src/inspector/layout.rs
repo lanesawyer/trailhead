@@ -1,4 +1,5 @@
 use super::*;
+use crate::widgets::Size;
 
 /// How a [`Block::Text`] is colored; fixed for the item that holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +14,7 @@ pub(super) enum Tone {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Block {
     /// A line of text; only the words change while the key stays.
-    Text { text: String, size: f32, tone: Tone },
+    Text { text: String, size: Size, tone: Tone },
     /// The `P1` badge. Its key holds the priority, so a new priority is a new badge.
     Priority(Priority),
     /// The `G2` badge, toned by grade. Its key holds the grade, so a new grade is a new badge.
@@ -83,7 +84,7 @@ pub(super) struct Parts {
 
 pub(super) type Plan = Vec<(String, Vec<(String, Block)>)>;
 
-pub(super) fn text_block(text: impl Into<String>, size: f32, tone: Tone) -> Block {
+pub(super) fn text_block(text: impl Into<String>, size: Size, tone: Tone) -> Block {
     Block::Text { text: text.into(), size, tone }
 }
 
