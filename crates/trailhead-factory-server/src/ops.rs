@@ -186,11 +186,14 @@ async fn log_source(
 }
 
 /// The sandbox a task is on: the one its run recorded (a pooled sandbox's name, else the run's own), else one labelled
-/// with the task.
+/// with the task. A recorded name is ignored once the run released its sandbox, or when the sandbox is labelled for
+/// another task: the pool has reused it since.
 fn find_sandbox<'a>(task: &Task, sandboxes: &'a [Sandbox]) -> Option<&'a Sandbox> {
-    let recorded = task.run.host.as_ref().or(task.run.sandbox.as_ref());
+    let released = task.run.released.is_some_and(|at| at > 0);
+    let recorded = task.run.host.as_ref().or(task.run.sandbox.as_ref()).filter(|_| !released);
     recorded
         .and_then(|name| sandboxes.iter().find(|s| &s.name == name))
+        .filter(|s| s.labels.get(label::TASK).is_none_or(|t| t == &task.key.0))
         .or_else(|| sandboxes.iter().find(|s| s.labels.get(label::TASK) == Some(&task.key.0)))
 }
 
@@ -412,8 +415,18 @@ mod tests {
             sandbox("trail-3-a1", &[]),
         ];
         let on_host =
-            task("TRAIL-2", Status::InProgress, RunUpdate { host: Some("trailhead-w1".into()), ..Default::default() });
+            task("TRAIL-1", Status::InProgress, RunUpdate { host: Some("trailhead-w1".into()), ..Default::default() });
         assert_eq!(find_sandbox(&on_host, &boxes).unwrap().name, "trailhead-w1");
+        // The pool reused it for another task, or the run released it: don't show that task's log.
+        let reused =
+            task("TRAIL-5", Status::InReview, RunUpdate { host: Some("trailhead-w1".into()), ..Default::default() });
+        assert!(find_sandbox(&reused, &boxes).is_none());
+        let released = task(
+            "TRAIL-2",
+            Status::InProgress,
+            RunUpdate { host: Some("trailhead-w1".into()), released: Some(1), ..Default::default() },
+        );
+        assert_eq!(find_sandbox(&released, &boxes).unwrap().name, "trailhead-w2");
         let own =
             task("TRAIL-3", Status::InProgress, RunUpdate { sandbox: Some("trail-3-a1".into()), ..Default::default() });
         assert_eq!(find_sandbox(&own, &boxes).unwrap().name, "trail-3-a1");
