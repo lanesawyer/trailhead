@@ -1,9 +1,11 @@
 //! The surfaces controls sit in: a panel over the board, a section within it, and a field (a label over an input).
 
 use crate::theme::{BorderTone, Surface};
+use bevy::feathers::controls::{ButtonVariant, FeathersButton};
 use bevy::prelude::*;
+use bevy::text::LineBreak;
 
-use super::{layer, radius, size, space, stroke, text_dim, token};
+use super::{Truncated, button_text, layer, radius, size, space, stroke, text_dim, token};
 
 /// A panel over the board (the inspector, a form, the connect panel): a column on the panel background, rounded and
 /// padded. Position it with a `Node` of the caller's, and give it a [`super::layer`].
@@ -77,5 +79,28 @@ pub fn dropdown_list() -> impl Scene {
         Surface::Floating
         BorderTone({ token::BORDER })
         GlobalZIndex({ layer::MENU })
+    }
+}
+
+/// A row of a [`dropdown_list`]: a plain button the list's width, its words on one line and cut with an ellipsis when
+/// too long for it. What a press does is the caller's, as for any button.
+pub fn dropdown_item(caption: impl Into<String>) -> impl Scene {
+    let caption = caption.into();
+    let full = caption.clone();
+    bsn! {
+        @FeathersButton {
+            @caption: { bsn_list! {
+                @button_text(caption)
+                Truncated { full: { full }, size: { size::BODY } }
+                TextLayout { linebreak: LineBreak::NoWrap }
+            } },
+            @variant: { ButtonVariant::Plain },
+        }
+        Node {
+            width: percent(100),
+            min_width: px(0),
+            justify_content: JustifyContent::Start,
+            overflow: Overflow::clip_x(),
+        }
     }
 }

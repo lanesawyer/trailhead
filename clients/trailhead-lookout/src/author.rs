@@ -13,7 +13,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy::text::EditableText;
+use bevy::text::{EditableText, LineBreak};
 use bevy::ui_widgets::{Activate, ValueChange};
 use reqwest::Method;
 use serde_json::json;
@@ -28,8 +28,9 @@ use crate::mirror::Mirrored;
 use crate::project::ProjectPage;
 use crate::widgets::{
     ButtonKind, Icon, InitialText, Keyed, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, SelectEdit,
-    Token, button, dropdown_list, field, grade_tone, matches_search, open_modal, priority_tone, row, select_toned,
-    set_text, size, space, status_tone, text, text_dim, text_input, toggle_switch, token, tool_button,
+    Token, Truncated, button, dropdown_item, dropdown_list, field, grade_tone, matches_search, open_modal,
+    priority_tone, row, select_toned, size, space, status_tone, text, text_dim, text_input, toggle_switch, token,
+    tool_button,
 };
 
 /// The priority the form starts a new task at.
@@ -753,11 +754,23 @@ fn fill_form(
         })
         .insert(ChildOf(search));
         let chosen = c
-            .spawn((Node { align_items: AlignItems::Center, column_gap: px(space::CONTROLS), ..default() },))
+            .spawn((Node {
+                align_items: AlignItems::Center,
+                column_gap: px(space::CONTROLS),
+                min_width: px(0),
+                ..default()
+            },))
             .insert((FormPart::Chosen, ChildOf(anchor)))
             .id();
-        c.spawn_scene(bsn! { @text(d.parent.clone(), size::BODY) Node { flex_grow: 1.0 } })
-            .insert((ChosenParent, ChildOf(chosen)));
+        // Cut to the room the X leaves it, so a long title stays on the search box's one line.
+        let (picked, full) = (d.parent.clone(), d.parent.clone());
+        c.spawn_scene(bsn! {
+            @text(picked, size::BODY)
+            Truncated { full: { full }, size: { size::BODY } }
+            TextLayout { linebreak: LineBreak::NoWrap }
+            Node { flex_grow: 1.0, min_width: px(0) }
+        })
+        .insert((ChosenParent, ChildOf(chosen)));
         c.spawn_scene(bsn! { @tool_button(Icon::X, "No parent", ButtonKind::Plain) Act::ClearParent })
             .insert(ChildOf(chosen));
         c.queue_spawn_scene(dropdown_list()).insert((FormPart::Suggestions, ChildOf(anchor)));
@@ -788,7 +801,7 @@ fn dress_form(
     factory: Res<FactoryStatus>,
     tasks: Query<&Mirrored<Task>>,
     mut parts: Query<(Entity, &FormPart, &mut Node)>,
-    mut chosen: Query<&mut Text, With<ChosenParent>>,
+    mut chosen: Query<&mut Truncated, With<ChosenParent>>,
     mut queue_keys: Query<(Entity, &mut ChoiceKeys, &FormChoice)>,
     mut edit: SelectEdit,
     mut suggestions: ResMut<Suggestions>,
@@ -826,8 +839,11 @@ fn dress_form(
             node.display = display;
         }
     }
-    for text in &mut chosen {
-        set_text(text, picked.as_deref().unwrap_or_default());
+    for mut shown in &mut chosen {
+        let words = picked.clone().unwrap_or_default();
+        if shown.full != words {
+            shown.full = words;
+        }
     }
     // The queue dropdown lists the project's queues; it is rebuilt in place when the project changes.
     for (select, mut keys, _) in queue_keys.iter_mut().filter(|(_, _, c)| **c == FormChoice::Queue) {
@@ -846,13 +862,7 @@ fn dress_form(
         &wanted,
         |commands, key, (_, title)| {
             let words = format!("{key} · {title}");
-            commands
-                .spawn_scene(bsn! {
-                    @button(words, None, ButtonKind::Plain)
-                    Node { justify_content: JustifyContent::Start, width: percent(100) }
-                })
-                .insert(Act::PickParent(key.to_string()))
-                .id()
+            commands.spawn_scene(dropdown_item(words)).insert(Act::PickParent(key.to_string())).id()
         },
         |_, _, _| {},
     );

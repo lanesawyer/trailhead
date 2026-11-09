@@ -22,7 +22,7 @@
 //! - A text edited where it is read (a title, a description): [`inline_text`]; a sidebar label and choice:
 //!   [`inline_field`]. Observe [`InlineEdited`] / [`InlineChosen`]; the caller answers `confirm` or `fail`.
 //! - A choice from a fixed set: [`select`], and observe [`Picked`]. A list floating under a field without moving what
-//!   comes after (a search's suggestions): [`dropdown_list`].
+//!   comes after (a search's suggestions): [`dropdown_list`], of [`dropdown_item`]s.
 //! - Text: [`text`], [`text_dim`], [`text_toned`] at a [`size`]. A button's caption: [`button_text`].
 //! - An icon in text: [`icon_text`]; as a button's caption: [`button_icon`].
 //! - A panel over the content: [`panel`], with a [`layer`]. Inside it: [`section`], [`row`], [`field`].
@@ -126,7 +126,7 @@ pub use bubble::{Side, bubble, bubble_head};
 pub use button_group::{ButtonGroup, button_group};
 pub use buttons::{ButtonKind, button, button_text, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
-pub use containers::{dropdown_list, field, panel, row, section, section_frame};
+pub use containers::{dropdown_item, dropdown_list, field, panel, row, section, section_frame};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
 pub use hint::{Hint, HintBounds};
