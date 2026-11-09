@@ -557,11 +557,6 @@ mod tests {
             ]
         );
     }
-}
-
-#[cfg(test)]
-mod target_tests {
-    use super::*;
 
     #[test]
     fn a_sprites_target_has_flys_paths_and_connector_list() {

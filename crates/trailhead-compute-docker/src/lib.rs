@@ -29,8 +29,8 @@ use bollard::models::{
     ContainerConfig, ContainerCreateBody, ExecConfig, HostConfig, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, InspectContainerOptions, ListContainersOptions, ListImagesOptions,
-    RemoveContainerOptions, RemoveImageOptions, UploadToContainerOptions,
+    CreateContainerOptions, CreateImageOptions, DownloadFromContainerOptions, InspectContainerOptions,
+    ListContainersOptions, ListImagesOptions, RemoveContainerOptions, RemoveImageOptions, UploadToContainerOptions,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -64,6 +64,26 @@ pub const DEFAULT_IMAGE: &str = "trailhead-sandbox:latest";
 pub const DEFAULT_NETWORK: &str = "trailhead-gateway-out";
 /// Where the daemon lives in [`DEFAULT_IMAGE`], whose user is `trailhead`.
 pub const HOME: &str = "/home/trailhead";
+
+/// How many trailing lines of a program's log `logs` returns.
+const LOG_LINES: usize = 3000;
+
+/// The last `lines` lines of the file in a `docker cp` archive of one file.
+fn log_from_archive(raw: &[u8], lines: usize) -> Result<String> {
+    let bad = |e: std::io::Error| Error::Other(format!("log archive: {e}"));
+    let mut archive = tar::Archive::new(raw);
+    for entry in archive.entries().map_err(bad)? {
+        let mut entry = entry.map_err(bad)?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut text).map_err(bad)?;
+        let skip = text.lines().count().saturating_sub(lines);
+        return Ok(text.split_inclusive('\n').skip(skip).collect());
+    }
+    Err(Error::NotFound("log archive holds no file".into()))
+}
 
 /// A program's log under the target's `dir`, quoted for the shell.
 fn program_log(dir: &str, program: &str) -> String {
@@ -653,10 +673,22 @@ impl Compute for DockerCompute {
         self.attach(&id.0, &state).await
     }
 
+    /// Reads the log by `tail` in a running container, or by copying it out of a stopped one, which can't exec.
     async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
-        let log = program_log(&target().dir, program);
-        let (_, out) = self.exec(&id.0, None, &format!("tail -n 3000 {log}")).await?;
-        Ok(out)
+        let info = self.docker.inspect_container(&id.0, None::<InspectContainerOptions>).await.map_err(docker_err)?;
+        if info.state.and_then(|s| s.running).unwrap_or(false) {
+            let log = program_log(&target().dir, program);
+            let (_, out) = self.exec(&id.0, None, &format!("tail -n {LOG_LINES} {log}")).await?;
+            return Ok(out);
+        }
+        let path = format!("{}/programs/{program}/log", target().dir);
+        let opts = DownloadFromContainerOptions { path };
+        let mut stream = self.docker.download_from_container(&id.0, Some(opts));
+        let mut raw = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            raw.extend_from_slice(&chunk.map_err(docker_err)?);
+        }
+        log_from_archive(&raw, LOG_LINES)
     }
 
     /// Fails with [`Error::Unavailable`], for the control plane to wait out, when the sandbox's disk (the Docker
@@ -1068,6 +1100,14 @@ mod tests {
     }
 
     #[test]
+    fn log_archive_keeps_the_last_lines() {
+        let raw = tar_of(&[("log", b"a\nb\nc\n", 0o644, 0, 0)], &[]).unwrap();
+        assert_eq!(log_from_archive(&raw, 2).unwrap(), "b\nc\n");
+        assert_eq!(log_from_archive(&raw, 10).unwrap(), "a\nb\nc\n");
+        assert!(matches!(log_from_archive(&tar_of(&[], &["d"]).unwrap(), 2), Err(Error::NotFound(_))));
+    }
+
+    #[test]
     fn parents() {
         assert_eq!(parent("/home/trailhead/.trailhead/secrets.json"), "/home/trailhead/.trailhead");
         assert_eq!(parent("/x"), "/");
@@ -1103,11 +1143,6 @@ mod tests {
         compute.write_state("trail-1-a1", &state).await.unwrap();
         assert_eq!(compute.read_state("trail-1-a1").await.unwrap(), state);
     }
-}
-
-#[cfg(test)]
-mod target_tests {
-    use super::*;
 
     #[test]
     fn a_program_log_is_under_the_target_dir() {

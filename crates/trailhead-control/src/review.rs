@@ -6,7 +6,7 @@ use trailhead_factory::{
     RunResult, RunUpdate, Status, Task, TaskKey, Usd, Verdict, VerdictKind, review_name,
 };
 
-use crate::lifecycle::{Begin, Run, spec, token_ttl};
+use crate::lifecycle::{Begin, MAX_RESOURCE_WAITS, Run, spec, token_ttl};
 use crate::{Factory, Outcome};
 
 /// A review run that ended on the reviewer's own account; a lost one is handled before this exists.
@@ -225,18 +225,34 @@ impl Factory {
         let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
         let failures = prior.unwrap_or(0).max(held) + 1;
         let max = self.config.repo.max_infra_failures.max(1);
-        let park = !cancelled && failures >= max;
+        // A host short of a resource is waited out, as for a worker: the backoff grows, but the count that parks isn't
+        // raised, and only `MAX_RESOURCE_WAITS` waits in a row park the task.
+        let waiting = matches!(error, Error::Unavailable(_));
+        let waits = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(_, w, _)| *w) + 1;
+        let park = !cancelled && if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
         if cancelled {
             tracing::info!(task = %task.key.0, "review cancelled; the round doesn't count");
         } else {
-            tracing::warn!(task = %task.key.0, %error, failures, max, "reviewer failed on the infrastructure; the round doesn't count");
-            self.set_back(&task.key, failures);
+            tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "reviewer failed on the infrastructure; the round doesn't count");
+            if park {
+                // Parked below; the count starts again when Lane reopens it.
+            } else if waiting {
+                self.set_back_waiting(&task.key, failures - 1);
+            } else {
+                self.set_back(&task.key, failures);
+            }
         }
         // The retry's sub-agent and sandbox names carry the retry count: this one's sub-agent is revoked for good.
         let give_back = RunUpdate {
             review_rounds: Some(rounds_before),
             retries: Some(retries + 1),
-            infra_failures: (!cancelled).then_some(if park { 0 } else { failures }),
+            infra_failures: (!cancelled).then_some(if park {
+                0
+            } else if waiting {
+                prior.unwrap_or(0)
+            } else {
+                failures
+            }),
             ..RunUpdate::default()
         };
         if let Err(e) = self.tracker.report(&task.key, give_back).await {
@@ -246,7 +262,9 @@ impl Factory {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the reviewer's sub-agent; reconcile will");
         }
         if park {
-            let question = if no_verdict {
+            let question = if waiting {
+                messages::resource_wait_question(waits, &error.to_string())
+            } else if no_verdict {
                 messages::review_no_verdict_question(failures, max, &error.to_string())
             } else {
                 messages::review_infra_question(failures, max, &error.to_string())
@@ -263,7 +281,11 @@ impl Factory {
                 Err(e) => {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; the next reconcile tries again");
                     // Not parked, so the count mustn't start again: the next failure tries to park once more.
-                    let keep = RunUpdate { infra_failures: Some(failures), ..RunUpdate::default() };
+                    if waiting {
+                        self.set_back_waiting(&task.key, failures - 1);
+                    }
+                    let kept = if waiting { prior.unwrap_or(0) } else { failures };
+                    let keep = RunUpdate { infra_failures: Some(kept), ..RunUpdate::default() };
                     if let Err(e) = self.tracker.report(&task.key, keep).await {
                         tracing::warn!(task = %task.key.0, error = %e, "couldn't keep the infrastructure failure count");
                     }
