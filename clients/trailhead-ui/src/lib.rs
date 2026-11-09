@@ -158,7 +158,7 @@ impl Plugin for UiPlugin {
             .add_observer(scroll::on_scroll)
             .add_observer(button_group::on_option)
             .add_observer(bevy::ui_widgets::slider_self_update)
-            .add_systems(PostUpdate, scrollbar::hide_when_fits.after(bevy::ui::UiSystems::Layout))
+            .add_systems(PostUpdate, scrollbar::show_scrollbars.after(bevy::ui::UiSystems::Layout))
             .add_systems(
                 Update,
                 (
