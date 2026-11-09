@@ -317,7 +317,7 @@ impl Factory {
         };
         let requested =
             ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true, head, settled: false };
-        self.request_rework(task, requested, round).await
+        self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await
     }
 
     /// CI finished and failed on the PR's current head, whether the worker's own commit or a merge of the base branch
@@ -368,7 +368,7 @@ impl Factory {
         let head = Some(head.to_string());
         let requested =
             ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head, settled: false };
-        self.request_rework(task, requested, round).await?;
+        self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await?;
         Ok(true)
     }
 
@@ -478,7 +478,7 @@ impl Factory {
                     };
                     if count.is_some_and(|n| n >= max) {
                         tracing::warn!(task = %task.key.0, "finishing the park's settling of its changes request");
-                        self.settle_parked_request(task, c).await;
+                        self.settle_parked_request(task, c, task.run.retries.unwrap_or(0)).await;
                     }
                 }
             }
@@ -541,7 +541,7 @@ impl Factory {
                     } else {
                         task.run.review_rounds.unwrap_or(1)
                     };
-                    self.request_rework(task, requested.clone(), round).await?;
+                    self.request_rework(task, requested.clone(), round, task.run.retries.unwrap_or(0)).await?;
                     done.reworked.push(task.key.0.clone());
                     return Ok(false);
                 }

@@ -559,6 +559,7 @@ async fn the_reviewers_infrastructure_failures_keep_counting_across_a_control_pl
     r.factory.reconcile().await.unwrap();
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::NeedsInput, "parked at max_infra_failures");
+    assert_eq!(task.run.infra_failures.unwrap_or(0), 0, "parking resets the count, so a reopened task starts again");
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task"), "{}", questions[0].body);
@@ -1069,4 +1070,18 @@ async fn a_reviewer_sandbox_short_of_room_is_waited_out_not_counted() {
         tokio::time::advance(secs(3600)).await;
     }
     assert!(r.tracker.comments(&key).iter().all(|c| c.kind != "question"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_breach_park_bumps_the_retries_the_reviewer_was_named_from_not_the_callers_snapshot() {
+    let (r, key, pr) = breaching_rig().await;
+    // The caller's snapshot is older than the tracker's: the reviewer is named from the tracker's count.
+    let stale = r.tracker.task(&key);
+    let update = trailhead_factory::RunUpdate { retries: Some(2), ..Default::default() };
+    r.tracker.report(&key, update).await.unwrap();
+
+    let attempt = stale.run.attempt.unwrap_or(1);
+    let outcome = r.factory.review(&stale, &pr, attempt, &[]).await.unwrap();
+    assert!(matches!(outcome, Outcome::Parked { .. }), "{outcome:?}");
+    assert_eq!(r.tracker.task(&key).run.retries, Some(3), "the bump lands on the count the reviewer's name used");
 }
