@@ -15,25 +15,24 @@ use bevy::feathers::controls::{ButtonVariant, FeathersButton, FeathersToolButton
 use bevy::feathers::display::label;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::rounded_corners::RoundedCorners;
-use bevy::feathers::theme::{SurfaceLevel, ThemeBorderColor, ThemeContext, ThemeTextColor};
+use bevy::feathers::theme::{SurfaceLevel, ThemeBorderColor, ThemeContext};
 use bevy::feathers::tokens;
 use bevy::prelude::*;
+
+use crate::theme::{TextTone, token};
 use bevy::ui_widgets::Activate;
 
 use crate::icons::{Icon, button_icon, icon_text};
 use crate::patch::{display, patch_node, set_text};
-use crate::spacing::{radius, space};
-use crate::text::size;
+use crate::spacing::{radius, space, stroke};
+use crate::text::{Size, size};
 use crate::truncate::truncate_to_width;
 
 /// Space between a body's sides and what is in it, the same on both so its contents sit centered in the box rather
 /// than against its right edge.
 pub const ACCORDION_INDENT: f32 = space::CONTROL_INSET;
 /// Size the accordion titles are drawn at, which sets how many characters fit.
-const TITLE_FONT: f32 = size::BODY;
-/// How thick a section's outline is.
-const OUTLINE: f32 = 1.0;
-
+const TITLE_FONT: Size = size::BODY;
 /// How deep a section sits, which decides what it is drawn as.
 ///
 /// Both are feathers containers, and the difference is only which set of tokens they take: a pane reads as one of a
@@ -114,7 +113,7 @@ pub fn spawn_accordion(commands: &mut Commands, title: &str, open: bool, level: 
                 border_radius: { header_corners(open).to_border_radius(radius::CONTROL) },
                 overflow: { Overflow::clip() },
             }
-            InheritableFont { font_size: { FontSize::Px(TITLE_FONT) } }
+            InheritableFont { font_size: { FontSize::from(TITLE_FONT) } }
         })
         .id();
 
@@ -149,7 +148,7 @@ pub fn spawn_accordion(commands: &mut Commands, title: &str, open: bool, level: 
             Children [
                 AccordionCaret
                 @icon_text(caret(open))
-                ThemeTextColor({ tokens::TEXT_MAIN })
+                TextTone({ token::TEXT })
                 --
                 AccordionTitle { full: { title.to_string() } }
                 Node {
@@ -179,7 +178,7 @@ pub fn spawn_accordion(commands: &mut Commands, title: &str, open: bool, level: 
                 right: { px(0) },
                 top: { px(0) },
                 bottom: { px(0) },
-                border: { UiRect::all(px(OUTLINE)) },
+                border: { UiRect::all(px(stroke::HAIRLINE)) },
                 border_radius: { header_corners(open).to_border_radius(radius::CONTROL) },
             }
             ThemeBorderColor({ border })
@@ -246,7 +245,7 @@ fn body_patch(open: bool) -> impl Scene {
             display: { display(open) },
             width: { percent(100) },
             row_gap: { px(space::ROWS) },
-            border: { UiRect::new(px(OUTLINE), px(OUTLINE), px(0), px(OUTLINE)) },
+            border: { UiRect::new(px(stroke::HAIRLINE), px(stroke::HAIRLINE), px(0), px(stroke::HAIRLINE)) },
             padding: { UiRect::new(
                 px(ACCORDION_INDENT),
                 px(ACCORDION_INDENT),

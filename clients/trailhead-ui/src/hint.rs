@@ -8,13 +8,13 @@
 //! it describes (a modal) when it fits there: it is centred under its target, else lined up with the target's end or
 //! start edge, else put above it. Its size is known only after its first layout, so it is hidden until then.
 
-use crate::theme::BackgroundTone;
+use crate::theme::Surface;
 use bevy::picking::events::{PointerEnter, PointerLeave};
 use bevy::prelude::*;
 use bevy::ui::{ComputedUiRenderTargetInfo, OverrideClip};
 use bevy::ui_widgets::popover::{Popover, PopoverAlign, PopoverPlacement, PopoverSide};
 
-use super::{layer, radius, size, space, text, token};
+use super::{layer, radius, size, space, text};
 
 /// What the hint says over this entity.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
@@ -77,7 +77,7 @@ fn show_hint(
                 border_radius: BorderRadius::all(px(radius::SMALL)),
                 ..default()
             },
-            BackgroundTone(token::HINT_BG),
+            Surface::Floating,
             GlobalZIndex(layer::HINT),
             Popover { positions: PLACEMENTS.map(placement).to_vec(), window_margin: space::HINT_MARGIN },
             // Not clipped by a scrolling list or card the target sits in.

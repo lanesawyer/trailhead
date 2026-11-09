@@ -45,7 +45,7 @@ impl Filter {
         }
     }
 
-    fn get_mut(&mut self, key: FilterKey) -> &mut Option<String> {
+    pub(super) fn get_mut(&mut self, key: FilterKey) -> &mut Option<String> {
         match key {
             FilterKey::Project => &mut self.project,
             FilterKey::Parent => &mut self.parent,
@@ -264,10 +264,11 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     }
 
     let in_queue = |t: &Task| parent_key(t).is_some_and(|k| input.queues.iter().any(|q| q == k));
-    let is_factory = |t: &Task| in_queue(t) || has_run(t);
+    let is_factory = |t: &Task| in_queue(t) || crate::factory::factory_ran(t);
 
+    let in_project = |t: &Task| filter.project.as_deref().is_none_or(|k| project_key.get(&t.project_id) == Some(&k));
     let passes = |t: &Task| {
-        filter.project.as_deref().is_none_or(|k| project_key.get(&t.project_id) == Some(&k))
+        in_project(t)
             && filter.parent.as_deref().is_none_or(|k| parent_key(t) == Some(k))
             && filter.holder.as_deref().is_none_or(|h| holder_of.get(&t.id).is_some_and(|id| id.to_string() == h))
             && (!filter.factory || is_factory(t))
@@ -289,7 +290,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::Factory,
                 label: "factory".into(),
-                tone: Some(token::INFO),
+                tone: Some(token::STATUS_INFO),
                 hint: None,
             });
         }
@@ -304,7 +305,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::NeedsGrade,
                 label: "needs grade".into(),
-                tone: Some(token::WARN),
+                tone: Some(token::STATUS_WARN),
                 hint: None,
             });
         }
@@ -320,7 +321,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::ChangesRequested,
                 label: "changes requested".into(),
-                tone: Some(token::WARN),
+                tone: Some(token::STATUS_WARN),
                 hint: None,
             });
         }
@@ -332,7 +333,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::Blocked,
                 label: format!("blocked · {}", keys.len()),
-                tone: Some(token::WARN),
+                tone: Some(token::STATUS_WARN),
                 hint: Some(format!("Blocked by {}", keys.join(", "))),
             });
         }
@@ -340,7 +341,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::Questions,
                 label: format!("? {}", open.len()),
-                tone: Some(token::WARN),
+                tone: Some(token::STATUS_WARN),
                 hint: None,
             });
         }
@@ -387,8 +388,9 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         keys.sort();
         keys.into_iter().map(|k| choice(k, k.to_string())).collect()
     };
+    // With a project picked, only the parents of its tasks.
     let parents = {
-        let ids: BTreeSet<Uuid> = input.tasks.iter().filter_map(|t| t.parent_id).collect();
+        let ids: BTreeSet<Uuid> = input.tasks.iter().filter(|t| in_project(t)).filter_map(|t| t.parent_id).collect();
         let title: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.title.as_str())).collect();
         let mut keys: Vec<(&str, &str)> = ids
             .iter()
@@ -397,18 +399,19 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         keys.sort_by_key(|(k, _)| (key_number(k), k.to_string()));
         keys.into_iter().map(|(k, t)| choice(k, parent_label(k, t))).collect()
     };
+    // Likewise only the holders of its tasks.
     let holders = {
-        let ids: BTreeMap<Uuid, Uuid> = holder_of.iter().map(|(t, h)| (*h, *t)).collect();
+        let ids: BTreeMap<Uuid, Uuid> = input
+            .tasks
+            .iter()
+            .filter(|t| in_project(t))
+            .filter_map(|t| holder_of.get(&t.id).map(|h| (*h, t.id)))
+            .collect();
         let mut v: Vec<Choice> = ids.into_iter().map(|(id, t)| choice(&id.to_string(), holder_label(t, id))).collect();
         v.sort_by(|a, b| a.label.cmp(&b.label));
         v
     };
     BoardView { columns, options: Options { projects, parents, holders } }
-}
-
-/// Whether a run left `factory` metadata on the task (in progress, in review, parked or waiting for a rework).
-pub(super) fn has_run(t: &Task) -> bool {
-    t.metadata.get("factory").is_some_and(|v| !v.is_null())
 }
 
 /// Whether every word of `query` matches the task's key or title, ignoring case. A word matches the key when it starts
@@ -530,7 +533,7 @@ mod tests {
         let badge = blocked("TRAIL-105").unwrap();
         assert_eq!(badge.label, "blocked · 2");
         assert_eq!(badge.hint.as_deref(), Some("Blocked by TRAIL-103, TRAIL-104"));
-        assert_eq!(badge.tone, Some(token::WARN));
+        assert_eq!(badge.tone, Some(token::STATUS_WARN));
         // Done, or blocked only by a task the mirror doesn't have: nothing to say.
         assert_eq!(blocked("OPS-1"), None);
         assert_eq!(blocked("TRAIL-102"), None);
@@ -612,7 +615,7 @@ mod tests {
         let flagged = badges(card(&view, "TRAIL-105"));
         assert_eq!(flagged.last(), Some(&(BadgeKind::NeedsGrade, "needs grade")));
         let tone = card(&view, "TRAIL-105").badges.last().unwrap().tone.clone();
-        assert_eq!(tone, Some(token::WARN));
+        assert_eq!(tone, Some(token::STATUS_WARN));
         // TRAIL-103 is under it too but graded; TRAIL-104 and OPS-1 are not under a queue; the queue itself isn't.
         for key in ["TRAIL-103", "TRAIL-104", "OPS-1", "TRAIL-102"] {
             assert!(card(&view, key).badges.iter().all(|b| b.kind != BadgeKind::NeedsGrade), "{key}");
@@ -625,7 +628,7 @@ mod tests {
             |key: &str, kind: BadgeKind| card(&view, key).badges.iter().find(|b| b.kind == kind).unwrap().tone.clone();
         assert_eq!(badge("TRAIL-103", BadgeKind::Priority), Some(token::PRIORITY_2));
         assert_eq!(badge("TRAIL-103", BadgeKind::Grade), Some(token::GRADE_3));
-        assert_eq!(badge("TRAIL-103", BadgeKind::Questions), Some(token::WARN));
+        assert_eq!(badge("TRAIL-103", BadgeKind::Questions), Some(token::STATUS_WARN));
         let tones = Priority::ALL.map(priority_tone);
         assert_eq!(tones, [token::PRIORITY_1, token::PRIORITY_2, token::PRIORITY_3, token::PRIORITY_4]);
     }
@@ -668,7 +671,8 @@ mod tests {
         };
         let all = run(&Filter::default());
         let only = run(&Filter { factory: true, ..Default::default() });
-        // 103 and 105 are under the queue task, 104 has a run's metadata; 102 and OPS-1 are neither.
+        // 103 and 105 are under the queue task, 104 has a run's metadata; 102 and OPS-1 (only skipped as ungraded) are
+        // neither.
         assert_eq!(keys(&only), ["TRAIL-105", "TRAIL-103", "TRAIL-104"].map(String::from));
         assert!(keys(&all).len() > keys(&only).len());
         // They stay in their usual columns.
@@ -841,6 +845,24 @@ mod tests {
         assert_eq!(view.options.parents[0].value, "TRAIL-102", "the filter still takes the key");
         // A holder that isn't an agent is its short id, which sorts first here.
         assert_eq!(labels(&view.options.holders), [&sid("u1")[..8], "factory/trail-103-a1"]);
+    }
+
+    #[test]
+    fn a_picked_project_offers_only_its_own_parents() {
+        let ops = run(&Filter { project: Some("OPS".into()), ..Default::default() });
+        assert!(ops.options.parents.is_empty());
+        let trail = run(&Filter { project: Some("TRAIL".into()), ..Default::default() });
+        assert_eq!(trail.options.parents, run(&Filter::default()).options.parents);
+    }
+
+    #[test]
+    fn a_picked_project_offers_only_the_holders_of_its_tasks() {
+        let labels = |project: &str| {
+            let view = run(&Filter { project: Some(project.into()), ..Default::default() });
+            view.options.holders.into_iter().map(|c| c.label).collect::<Vec<_>>()
+        };
+        assert_eq!(labels("TRAIL"), ["factory/trail-103-a1"]);
+        assert_eq!(labels("OPS"), [&sid("u1")[..8]]);
     }
 
     #[test]

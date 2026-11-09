@@ -1,9 +1,9 @@
 //! The surfaces controls sit in: a panel over the board, a section within it, and a field (a label over an input).
 
-use crate::theme::BackgroundTone;
+use crate::theme::Surface;
 use bevy::prelude::*;
 
-use super::{radius, size, space, text_dim, token};
+use super::{radius, size, space, text_dim};
 
 /// A panel over the board (the inspector, a form, the connect panel): a column on the panel background, rounded and
 /// padded. Position it with a `Node` of the caller's, and give it a [`super::layer`].
@@ -15,7 +15,7 @@ pub fn panel() -> impl Scene {
             padding: { UiRect::all(px(space::PANEL_INSET)) },
             border_radius: { BorderRadius::all(px(radius::PANEL)) },
         }
-        BackgroundTone({ token::PANEL_BG })
+        Surface::Panel
     }
 }
 

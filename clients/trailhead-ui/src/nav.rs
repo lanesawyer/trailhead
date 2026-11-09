@@ -10,7 +10,7 @@
 use bevy::feathers::controls::{ButtonVariant, FeathersButton};
 use bevy::prelude::*;
 
-use super::{BackgroundTone, BorderTone, ButtonKind, Icon, button, button_text, extent, size, space, text_dim, token};
+use super::{BorderTone, ButtonKind, Icon, Surface, button, button_text, extent, size, space, stroke, text_dim, token};
 
 /// The sidebar down the left of the window, [`extent::SIDEBAR_WIDTH`] wide.
 pub fn sidebar() -> impl Scene {
@@ -24,19 +24,21 @@ pub fn sidebar() -> impl Scene {
             flex_direction: FlexDirection::Column,
             row_gap: { px(space::ROWS) },
             padding: { UiRect::all(px(space::PANEL_INSET)) },
-            border: { UiRect::right(px(1)) },
+            border: { UiRect::right(px(stroke::HAIRLINE)) },
             min_height: px(0),
         }
-        BackgroundTone({ token::PANEL_BG })
-        BorderTone({ token::DIVIDER })
+        Surface::Panel
+        BorderTone({ token::BORDER })
     }
 }
 
-/// The bottom of a [`sidebar`]: pushed down to the sidebar's foot, its children in a row.
+/// The bottom of a [`sidebar`]: pushed down to the sidebar's foot, its children in a row. Like the sidebar's places, it
+/// keeps its height in a short window, so the part that scrolls gives way instead.
 pub fn sidebar_footer() -> impl Scene {
     bsn! {
         Node {
             margin: { UiRect::top(Val::Auto) },
+            flex_shrink: { 0.0_f32 },
             align_items: AlignItems::Center,
             justify_content: JustifyContent::SpaceBetween,
             column_gap: { px(space::CONTROLS) },
@@ -49,17 +51,18 @@ pub fn nav_heading(words: impl Into<String>) -> impl Scene {
     let words = words.into();
     bsn! {
         @text_dim(words, size::SECONDARY)
-        Node { margin: { UiRect::top(px(space::GROUPS)) } }
+        Node { margin: { UiRect::top(px(space::GROUPS)) }, flex_shrink: { 0.0_f32 } }
     }
 }
 
 /// A place to go in a [`sidebar`]: `caption` after `icon`, the width of the sidebar. Plain until it is the page shown
-/// ([`NavItem::current`]), and like every button it shows a background under the pointer.
+/// ([`NavItem::current`]), and like every button it shows a background under the pointer. It keeps its height in a
+/// sidebar too short for its places, which scroll instead.
 pub fn nav_item(caption: impl Into<String>, icon: Option<Icon>) -> impl Scene {
     let caption = caption.into();
     bsn! {
         @button(caption, icon, ButtonKind::Plain)
-        Node { justify_content: JustifyContent::Start }
+        Node { justify_content: JustifyContent::Start, flex_shrink: { 0.0_f32 } }
         NavItem
     }
 }
@@ -77,7 +80,7 @@ pub fn nav_item_noted(caption: impl Into<String>, note: impl Into<String>) -> im
             } },
             @variant: { ButtonVariant::Plain },
         }
-        Node { justify_content: JustifyContent::Start, column_gap: { px(space::ICON_LABEL) } }
+        Node { justify_content: JustifyContent::Start, column_gap: { px(space::ICON_LABEL) }, flex_shrink: { 0.0_f32 } }
         NavItem
     }
 }

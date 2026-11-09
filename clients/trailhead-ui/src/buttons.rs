@@ -13,9 +13,13 @@
 
 use bevy::feathers::controls::{ButtonVariant, FeathersButton, FeathersToolButton};
 use bevy::feathers::display::label;
+use bevy::feathers::tokens;
 use bevy::prelude::*;
 
 use super::{Hint, Icon, TextTone, Token, button_icon, icon_text, space, token};
+
+/// A button's caption: feathers' own, pale over a button's gray and on the accent alike.
+pub(crate) const BUTTON_TEXT: Token = Token(tokens::BUTTON_TEXT);
 
 /// How much a button stands out.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -44,7 +48,7 @@ impl From<ButtonKind> for ButtonVariant {
 /// Feathers' `label` names `TEXT_MAIN` on the text itself, which beats the color a button gives its children, so a
 /// caption made with `label` stays the window's text color on a primary or disabled button.
 pub fn button_text(text: impl Into<String>) -> impl Scene {
-    toned_text(text, token::BUTTON_TEXT)
+    toned_text(text, BUTTON_TEXT)
 }
 
 /// A caption in `tone`, which a button's own color would otherwise replace.
@@ -58,12 +62,12 @@ pub(crate) fn toned_text(text: impl Into<String>, tone: Token) -> impl Scene {
 
 /// A button with `caption`, after `icon` when there is one.
 pub fn button(caption: impl Into<String>, icon: Option<Icon>, kind: ButtonKind) -> impl Scene {
-    toned_button(caption, icon, kind, token::BUTTON_TEXT)
+    toned_button(caption, icon, kind, BUTTON_TEXT)
 }
 
 /// A normal button for something destructive (cancel, revert): its caption and icon in the danger color.
 pub fn danger_button(caption: impl Into<String>, icon: Option<Icon>) -> impl Scene {
-    toned_button(caption, icon, ButtonKind::Normal, token::DANGER)
+    toned_button(caption, icon, ButtonKind::Normal, token::STATUS_DANGER)
 }
 
 fn toned_button(caption: impl Into<String>, icon: Option<Icon>, kind: ButtonKind, tone: Token) -> impl Scene {
