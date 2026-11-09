@@ -243,7 +243,7 @@ async fn gateway_command(command: Command) -> std::process::ExitCode {
             Command::GatewayCtl { socket } => {
                 let mut input = String::new();
                 std::io::stdin().read_to_string(&mut input).map_err(|e| e.to_string())?;
-                let req: GatewayRequest = gateway::parse_request(&input).map_err(|e| format!("bad message: {e}"))?;
+                let req: GatewayRequest = gateway::parse_request(&input).map_err(str::to_string)?;
                 let resp = gateway::ctl(&socket, &req).await.map_err(|e| format!("{}: {e}", socket.display()))?;
                 println!("{}", serde_json::to_string(&resp).map_err(|e| e.to_string())?);
                 match resp {

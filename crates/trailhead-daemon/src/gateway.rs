@@ -672,13 +672,13 @@ pub async fn run(listen: SocketAddr, socket: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// `gateway-ctl`: sends one request to the control socket and returns the response.
 /// Parses a control-socket request. The error is generic on purpose: serde's can quote the
 /// input, and the input may hold a credential.
 pub fn parse_request(line: &str) -> Result<GatewayRequest, &'static str> {
     serde_json::from_str(line).map_err(|_| "bad request")
 }
 
+/// `gateway-ctl`: sends one request to the control socket and returns the response.
 pub async fn ctl(socket: &Path, req: &GatewayRequest) -> std::io::Result<GatewayResponse> {
     let stream = UnixStream::connect(socket).await?;
     let (read, mut write) = stream.into_split();
