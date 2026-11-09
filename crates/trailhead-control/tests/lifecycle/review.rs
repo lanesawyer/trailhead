@@ -941,7 +941,7 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_r
 }
 
 #[tokio::test]
-async fn reconciling_a_reviewed_task_at_its_reviewed_head_looks_up_no_head() {
+async fn reconciling_a_reviewed_task_at_its_reviewed_head_looks_up_the_head_once() {
     let mut r = rig();
     r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
@@ -952,6 +952,6 @@ async fn reconciling_a_reviewed_task_at_its_reviewed_head_looks_up_no_head() {
 
     let before = r.codehost.head_lookups();
     r.factory.reconcile().await.unwrap();
-    // The head comes from the PR's state and from the checks; neither needs a lookup of its own.
-    assert_eq!(r.codehost.head_lookups(), before);
+    // The pending-change check reuses the head from the PR's state; the one lookup left is inside `ci`, as on GitHub.
+    assert_eq!(r.codehost.head_lookups(), before + 1);
 }
