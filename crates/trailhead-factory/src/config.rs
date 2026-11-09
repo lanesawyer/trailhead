@@ -53,7 +53,7 @@ pub struct FactoryConfig {
     pub merge: MergeConfig,
 }
 
-/// `[merge]`: what the merger does with a PR whose gates passed (`docs/factory/review.md#the-merger`).
+/// `[factory.merge]`: what the merger does with a PR whose gates passed (`docs/factory/review.md#the-merger`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeConfig {
@@ -75,7 +75,7 @@ pub enum MergeMode {
     On,
 }
 
-/// `[grades]`: path globs that raise a PR to at least grade 2, 3 or 4 (keyed by the grade), and the diff size over
+/// `[factory.grades]`: path globs that raise a PR to at least grade 2, 3 or 4 (keyed by the grade), and the diff size over
 /// which it is at least grade 3 (`docs/factory/review.md#grades`). Without the section, the defaults of the example
 /// there; with it, the rules it lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
