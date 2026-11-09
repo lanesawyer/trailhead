@@ -109,6 +109,8 @@ impl Factory {
     /// are each logged once.
     pub(crate) fn capped(&self) -> HashSet<String> {
         let (now, today) = (Instant::now(), spend::today());
+        // Saved even when no target has a cap, so long runs at full capacity aren't forgotten by a restart (TRAIL-655).
+        self.ledger.checkpoint(now, &today);
         let mut capped = HashSet::new();
         let mut board = Vec::new();
         let mut logged = self.capped.lock().unwrap();
