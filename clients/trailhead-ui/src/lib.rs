@@ -34,7 +34,7 @@
 //!   inside it: [`ScrollDown`].
 //! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
 //! - Children that follow a list of keyed view models without respawning: [`Keyed`].
-//! - Gaps, padding, margins: [`space`]. Corners: [`radius`]. Panel widths and offsets: [`extent`].
+//! - Gaps, padding, margins: [`space`]. Corners: [`radius`]. Borders: [`stroke`]. Panel widths and offsets: [`extent`].
 //! - Pages picked from a row (or column) of tabs: a [`tab_strip`] holding [`tab`]s; observe
 //!   `ValueChange<Option<Entity>>` on the strip and set its `SelectedTab`.
 //! - A section that opens and closes: [`spawn_accordion`], a pane or a group by [`SectionLevel`]; fill its body, add
@@ -55,7 +55,9 @@
 //! The kit's per-frame systems run in [`UiPlace`] in `Update`; order an app's own systems around it.
 //!
 //! Feathers, which the controls are built on, stays inside the kit: an app names only what the kit exports, so a
-//! change in feathers is a change here and nowhere else. Lookout's CI checks it never imports feathers.
+//! change in feathers is a change here and nowhere else.
+//!
+//! [`lint`] keeps an app on all this: one test runs its rules over the app's sources.
 
 use bevy::feathers::theme::UiTheme;
 use bevy::prelude::*;
@@ -79,6 +81,7 @@ mod input;
 mod keyed;
 pub mod layer;
 mod link;
+pub mod lint;
 mod menu;
 mod modal;
 mod nav;
@@ -137,7 +140,7 @@ pub use search::{
 pub use select::{Picked, SelectEdit, SelectIcons, SelectOptions, SelectTones, select, select_iconed, select_toned};
 pub use skeleton::{SkeletonBar, spawn_skeleton};
 pub use slider::spawn_slider;
-pub use spacing::{check as spacing_check, extent, radius, space};
+pub use spacing::{extent, radius, space, stroke};
 pub use tabs::{TabCaption, fit_tabs, style_tabs, tab, tab_strip};
 pub use text::{size, text, text_dim, text_mono, text_toned};
 pub use theme::{BackgroundTone, BorderTone, Surface, TextTone, Theme, Token, palette, token};

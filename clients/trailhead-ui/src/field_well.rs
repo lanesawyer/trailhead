@@ -4,11 +4,8 @@
 
 use bevy::prelude::*;
 
-use crate::spacing::{radius, space};
+use crate::spacing::{radius, space, stroke};
 use crate::theme::{BorderTone, Surface, token};
-
-/// How thick the well's border is.
-const OUTLINE: f32 = 1.0;
 
 /// A box to set text fields in.
 ///
@@ -22,7 +19,7 @@ pub fn field_well() -> impl Scene {
             width: { percent(100) },
             row_gap: { px(space::ROWS) },
             padding: { UiRect::all(px(space::CONTROL_INSET)) },
-            border: { UiRect::all(px(OUTLINE)) },
+            border: { UiRect::all(px(stroke::HAIRLINE)) },
             border_radius: { BorderRadius::all(px(radius::CONTROL)) },
         }
         Surface::Raised

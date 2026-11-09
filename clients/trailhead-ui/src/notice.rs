@@ -11,7 +11,7 @@ use bevy::text::LineHeight;
 
 use crate::icons::{Icon, icon_text};
 use crate::patch::{display, patch_node, set_text};
-use crate::spacing::{radius, space};
+use crate::spacing::{radius, space, stroke};
 use crate::text::{size, text};
 use crate::theme::{BackgroundTone, BorderTone, TextTone, Token, token};
 
@@ -86,9 +86,6 @@ const LINE_HEIGHT: f32 = 18.0;
 /// measured on screen, their middle sat 1.5px above the icon's. An offset rather than padding, so the box keeps its
 /// height and the icon its place.
 const TEXT_DROP: f32 = 1.5;
-/// How thick the box's border is.
-const OUTLINE: f32 = 1.0;
-
 /// A notice, hidden until something is written to it.
 pub fn notice() -> impl Scene {
     bsn! {
@@ -99,7 +96,7 @@ pub fn notice() -> impl Scene {
             align_items: { AlignItems::FlexStart },
             column_gap: { px(space::ROWS) },
             padding: { UiRect::all(px(space::CONTROL_INSET)) },
-            border: { UiRect::all(px(OUTLINE)) },
+            border: { UiRect::all(px(stroke::HAIRLINE)) },
             border_radius: { BorderRadius::all(px(radius::CONTROL)) },
         }
         BackgroundTone({ Tone::Info.subtle() })
