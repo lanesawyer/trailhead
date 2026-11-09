@@ -174,8 +174,8 @@ pub fn line_text(line: &LogLine) -> String {
 /// The theme color a level is drawn in.
 pub fn level_tone(level: LogLevel) -> Token {
     match level {
-        LogLevel::Error => token::DANGER,
-        LogLevel::Warn => token::WARN,
+        LogLevel::Error => token::STATUS_DANGER,
+        LogLevel::Warn => token::STATUS_WARN,
         LogLevel::Info => token::TEXT,
         LogLevel::Debug | LogLevel::Trace => token::TEXT_DIM,
     }
@@ -264,7 +264,7 @@ pub fn logs_page(commands: &mut Commands, page: Entity) {
     commands
         .spawn_scene(button("Jump to latest", Some(Icon::ChevronDown), ButtonKind::Normal))
         .insert((JumpToLatest, ChildOf(filters)));
-    commands.spawn_scene(text_toned("", size::BODY, token::WARN)).insert((
+    commands.spawn_scene(text_toned("", size::BODY, token::STATUS_WARN)).insert((
         LogNote,
         Node { display: Display::None, ..default() },
         ChildOf(page),
@@ -667,7 +667,7 @@ mod tests {
                 .iter(world)
                 .map(|t| t.0.clone())
                 .collect();
-            assert_eq!(tones, [token::DANGER, token::TEXT]);
+            assert_eq!(tones, [token::STATUS_DANGER, token::TEXT]);
         }
     }
 }

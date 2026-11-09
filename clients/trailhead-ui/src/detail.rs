@@ -1,11 +1,10 @@
 //! A detail modal's body: a wide main column for the thing itself beside a narrower sidebar of its facts, the way a
 //! task tracker lays out one task. Put it in a [`super::Modal`] whose width is [`extent::DETAIL_WIDTH`].
 
-use bevy::feathers::theme::ThemeBorderColor;
-use bevy::feathers::tokens;
 use bevy::prelude::*;
 
 use crate::spacing::{extent, space};
+use crate::theme::{BorderTone, token};
 
 /// How thick the line between the columns is.
 const DIVIDER: f32 = 1.0;
@@ -59,7 +58,7 @@ pub fn spawn_detail_panes(commands: &mut Commands, parent: Entity) -> DetailPane
                 border: UiRect::left(px(DIVIDER)),
                 ..default()
             },
-            ThemeBorderColor(tokens::GROUP_BORDER),
+            BorderTone(token::BORDER),
             DetailSide,
             ChildOf(row),
         ))

@@ -67,7 +67,7 @@ pub(crate) fn pulse_skeletons(
     theme: Res<UiTheme>,
     mut bars: Query<&mut BackgroundColor, With<SkeletonBar>>,
 ) {
-    let color = theme.color(&token::SKELETON.0).with_alpha(pulse(time.elapsed_secs()));
+    let color = theme.color(&token::FILL_SOLID.0).with_alpha(pulse(time.elapsed_secs()));
     for mut background in &mut bars {
         background.set_if_neq(BackgroundColor(color));
     }

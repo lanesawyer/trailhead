@@ -46,7 +46,7 @@ pub fn text_dim(content: impl Into<String>, size: f32) -> impl Scene {
     }
 }
 
-/// A label at `size` in a theme color, such as [`super::token::WARN`].
+/// A label at `size` in a theme color, such as [`super::token::STATUS_WARN`].
 pub fn text_toned(content: impl Into<String>, size: f32, tone: Token) -> impl Scene {
     let content = content.into();
     bsn! {

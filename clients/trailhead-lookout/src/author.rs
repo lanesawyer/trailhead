@@ -505,7 +505,7 @@ fn choice_field(
     let max_visible = options.len();
     let control: Box<dyn SceneList> = match choice {
         FormChoice::Priority => {
-            let tone = selected.and_then(|i| Priority::ALL.get(i)).map_or(token::BADGE_BG, |p| priority_tone(*p));
+            let tone = selected.and_then(|i| Priority::ALL.get(i)).map_or(token::FILL_SOLID, |p| priority_tone(*p));
             Box::new(bsn_list! {
                 Node { align_items: AlignItems::Center, column_gap: { px(space::ICON_LABEL) } }
                 Children [
@@ -836,7 +836,7 @@ mod tests {
     fn the_priority_dot_follows_the_picked_priority() {
         let mut app = app();
         open_edit_form(&mut app);
-        let dot = app.world_mut().spawn((PriorityDot, BackgroundTone(token::BADGE_BG))).id();
+        let dot = app.world_mut().spawn((PriorityDot, BackgroundTone(token::FILL_SOLID))).id();
         pick(&mut app, FormChoice::Priority, 0);
         assert_eq!(app.world().get::<BackgroundTone>(dot).unwrap().0, token::PRIORITY_1);
         pick(&mut app, FormChoice::Priority, 3);
