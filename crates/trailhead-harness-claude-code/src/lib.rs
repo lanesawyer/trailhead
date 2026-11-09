@@ -731,6 +731,20 @@ mod tests {
 
     use super::*;
 
+    /// The windows the parser passes through must be ones `pause_at` accepts, or a limit on them could never be set.
+    #[test]
+    fn quota_windows_are_ones_the_host_config_accepts() {
+        let info = json!({"unifiedWindows": {
+            "five_hour": {"utilization": 0.22, "resetsAt": 1793182800},
+            "seven_day": {"utilization": 0.05, "resetsAt": 1793372400}}});
+        let events = quota(&info);
+        assert_eq!(events.len(), 2, "{events:?}");
+        for event in events {
+            let RunEvent::Quota { window, .. } = event else { panic!("not a quota event: {event:?}") };
+            assert!(trailhead_factory::host::USAGE_WINDOWS.contains(&window.as_str()), "{window}");
+        }
+    }
+
     #[test]
     fn a_tool_result_ends_the_tool_call() {
         let mut stream = Stream::new(ModelId("sonnet".into()), 0);
