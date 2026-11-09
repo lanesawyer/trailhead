@@ -87,6 +87,11 @@ impl FakeTracker {
         key
     }
 
+    /// Takes a task off its queue, as `edit --parent none` does.
+    pub fn detach(&self, task: &TaskKey) {
+        self.state.lock().unwrap().parents.remove(task);
+    }
+
     pub fn add_task(&self, project: &str, title: &str, description: &str) -> TaskKey {
         let mut s = self.state.lock().unwrap();
         let n = s.next.entry(project.to_string()).or_insert(0);
