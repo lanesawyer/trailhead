@@ -576,6 +576,24 @@ fn would_start_unscoped_under_systemd() -> bool {
     systemd_run_on_path() && current_scope_env().is_none()
 }
 
+/// The systemd unit (the last cgroup path component, e.g. `trailhead-server-123.scope`) a `/proc/<pid>/cgroup`
+/// says its process runs in. Only the unified (v2) hierarchy line is read.
+pub fn cgroup_unit(proc_cgroup: &str) -> Option<String> {
+    let path = proc_cgroup.lines().find_map(|l| l.strip_prefix("0::"))?;
+    path.trim().rsplit('/').find(|c| !c.is_empty()).map(str::to_string)
+}
+
+/// True for a scope that belongs to a desktop app (`app-gnome-code-1234.scope`), whose death (systemd-oomd killing
+/// the app) would take the server with it: the TRAIL-178 regression.
+pub fn is_app_scope(unit: &str) -> bool {
+    unit.starts_with("app-") && unit.ends_with(".scope")
+}
+
+/// The cgroup unit the server with this pid runs in, when this machine can say.
+pub fn server_unit(pid: u32) -> Option<String> {
+    cgroup_unit(&std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?)
+}
+
 /// Says in server.log that the server is running outside its own scope, so a death with its launcher can be traced.
 fn note_unscoped(mut log: &std::fs::File, why: &str) {
     use std::io::Write;
@@ -674,6 +692,26 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Err(anyhow!("started a local server but it isn't answering; see {}", paths.server_log().display()))
+}
+
+#[cfg(test)]
+mod cgroup_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_unit_from_the_v2_line() {
+        let own = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/trailhead-server-42.scope\n";
+        assert_eq!(cgroup_unit(own).as_deref(), Some("trailhead-server-42.scope"));
+        assert_eq!(cgroup_unit("1:name=systemd:/x\n0::/\n"), None);
+        assert_eq!(cgroup_unit(""), None);
+    }
+
+    #[test]
+    fn app_scopes_are_flagged_but_the_servers_own_is_not() {
+        assert!(is_app_scope("app-gnome-code-1234.scope"));
+        assert!(!is_app_scope("trailhead-server-42.scope"));
+        assert!(!is_app_scope("app-dbus.service"));
+    }
 }
 
 #[cfg(test)]
