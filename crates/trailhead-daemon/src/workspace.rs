@@ -37,6 +37,11 @@ impl GitWorkspace {
         GitWorkspace::with_remote(dir, "https://github.com")
     }
 
+    /// Where repos are cloned from.
+    pub fn remote_base(&self) -> &str {
+        &self.remote_base
+    }
+
     pub fn with_remote(dir: impl Into<PathBuf>, remote_base: impl Into<String>) -> GitWorkspace {
         GitWorkspace {
             dir: dir.into(),
