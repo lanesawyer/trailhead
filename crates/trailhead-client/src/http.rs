@@ -4,13 +4,16 @@
 //! It covers the endpoints the daemon's `RestTracker` uses; the rest follow as the CLI and Lookout move over.
 //! Every endpoint is a [`Route`] in [`routes`], so a test can check them against the server's OpenAPI document.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use trailhead_model::{CommentKind, Grade, Priority, Status, Task, TaskDetail, TaskKey, Verdict};
+use trailhead_model::{Claim, Comment, CommentKind, Grade, Priority, Status, Task, TaskDetail, TaskKey, Verdict};
 use uuid::Uuid;
 
 use crate::ApiError;
@@ -27,7 +30,7 @@ impl Route {
         Route { method, path }
     }
 
-    /// The path with its one parameter (`{task}` or `{id}`) filled in.
+    /// The path with its `{task}` or `{id}` parameter filled in.
     fn url(&self, param: Option<&str>) -> String {
         match param {
             Some(p) => self.path.replace("{task}", p).replace("{id}", p),
@@ -50,12 +53,13 @@ pub mod routes {
     pub const CLAIM: Route = Route::new(Method::POST, "/v1/tasks/{task}/claim");
     pub const RENEW: Route = Route::new(Method::POST, "/v1/tasks/{task}/renew");
     pub const RELEASE: Route = Route::new(Method::POST, "/v1/tasks/{task}/release");
+    pub const MY_CLAIMS: Route = Route::new(Method::GET, "/v1/claims");
     pub const RESOLVE_COMMENT: Route = Route::new(Method::POST, "/v1/comments/{id}/resolve");
     pub const UNDO: Route = Route::new(Method::POST, "/v1/undo");
     pub const REVERT: Route = Route::new(Method::POST, "/v1/revert");
 
     /// All of them.
-    pub fn all() -> [Route; 12] {
+    pub fn all() -> [Route; 13] {
         [
             READY,
             LIST_TASKS,
@@ -66,9 +70,10 @@ pub mod routes {
             CLAIM,
             RENEW,
             RELEASE,
-            RESOLVE_COMMENT,
             UNDO,
             REVERT,
+            MY_CLAIMS,
+            RESOLVE_COMMENT,
         ]
     }
 }
@@ -156,11 +161,14 @@ pub struct NewComment {
     pub verdict: Option<Verdict>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The user or agent the comment is for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addressed_to: Option<Uuid>,
 }
 
 impl NewComment {
     pub fn new(kind: CommentKind, body: impl Into<String>) -> NewComment {
-        NewComment { kind, body: body.into(), verdict: None, model: None }
+        NewComment { kind, body: body.into(), verdict: None, model: None, addressed_to: None }
     }
 }
 
@@ -242,6 +250,27 @@ impl Call {
     }
 }
 
+/// A claim the caller holds, as `GET /v1/claims` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldClaim {
+    pub key: String,
+    pub title: String,
+    pub status: Status,
+    pub claim: Claim,
+}
+
+/// What `POST /v1/tasks/{task}/claim` returns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaimResult {
+    pub task: Task,
+    pub claim: Claim,
+    /// The last handoff left on the task.
+    pub handoff: Option<Comment>,
+}
+
+/// Starts the server again after a request couldn't connect; true if it did, and the request should be retried.
+pub type Reconnect = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+
 /// `GET /v1/tasks` filters. Unset ones aren't sent.
 #[derive(Debug, Default, Clone)]
 pub struct TaskQuery {
@@ -279,30 +308,35 @@ pub struct Client {
     http: reqwest::Client,
     base: String,
     token: String,
+    reconnect: Option<Reconnect>,
 }
 
 impl Client {
     /// `base` is the server's root URL, e.g. `http://127.0.0.1:7241`.
     pub fn new(base: impl Into<String>, token: impl Into<String>) -> Client {
         let http = reqwest::Client::builder().timeout(Duration::from_secs(60)).build().expect("http client");
-        Client { http, base: base.into().trim_end_matches('/').to_string(), token: token.into() }
+        Client { http, base: base.into().trim_end_matches('/').to_string(), token: token.into(), reconnect: None }
     }
 
     /// A client that sends over `http`, which the caller has set up (timeouts, TLS) its own way.
     pub fn with_http(http: reqwest::Client, base: impl Into<String>, token: impl Into<String>) -> Client {
-        Client { http, base: base.into().trim_end_matches('/').to_string(), token: token.into() }
+        Client { http, base: base.into().trim_end_matches('/').to_string(), token: token.into(), reconnect: None }
     }
 
-    fn request(&self, route: Route, task: Option<&TaskKey>) -> RequestBuilder {
-        let url = format!("{}{}", self.base, route.url(task.map(|t| t.0.as_str())));
-        self.http.request(route.method.clone(), url).bearer_auth(&self.token)
+    /// Calls `reconnect` when a request can't connect, and retries the request once if it returns true.
+    pub fn with_reconnect(mut self, reconnect: Reconnect) -> Client {
+        self.reconnect = Some(reconnect);
+        self
+    }
+
+    fn request(&self, route: Route, param: Option<&str>) -> RequestBuilder {
+        self.http.request(route.method.clone(), format!("{}{}", self.base, route.url(param))).bearer_auth(&self.token)
     }
 
     /// The request for a [`Call`], with its body, ready for the caller to add headers to and send.
     pub fn request_for(&self, call: &Call) -> RequestBuilder {
         let (route, param) = call.route();
-        let req = self.http.request(route.method.clone(), format!("{}{}", self.base, route.url(param)));
-        let req = req.bearer_auth(&self.token);
+        let req = self.request(route, param);
         match call.body() {
             Some(body) => req.json(&body),
             None => req,
@@ -310,7 +344,16 @@ impl Client {
     }
 
     async fn send<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<T> {
-        let res = req.send().await.map_err(Error::Transport)?;
+        let retry = req.try_clone();
+        let res = match req.send().await {
+            Ok(res) => res,
+            Err(e) => match (&self.reconnect, retry) {
+                (Some(reconnect), Some(retry)) if e.is_connect() && reconnect().await => {
+                    retry.send().await.map_err(Error::Transport)?
+                }
+                _ => return Err(Error::Transport(e)),
+            },
+        };
         let status = res.status();
         if status.is_success() {
             return res.json().await.map_err(Error::Transport);
@@ -350,7 +393,7 @@ impl Client {
 
     /// `GET /v1/tasks/{task}`.
     pub async fn show_task(&self, key: &TaskKey) -> Result<TaskDetail> {
-        self.send(self.request(routes::SHOW_TASK, Some(key))).await
+        self.send(self.request(routes::SHOW_TASK, Some(key.as_str()))).await
     }
 
     /// `POST /v1/tasks`; the new task's key.
@@ -361,27 +404,38 @@ impl Client {
 
     /// `PATCH /v1/tasks/{task}`.
     pub async fn update_task(&self, key: &TaskKey, update: &TaskUpdate) -> Result<()> {
-        self.send::<Value>(self.request(routes::UPDATE_TASK, Some(key)).json(update)).await.map(drop)
+        self.send::<Value>(self.request(routes::UPDATE_TASK, Some(key.as_str())).json(update)).await.map(drop)
     }
 
     /// `POST /v1/tasks/{task}/comments`.
-    pub async fn add_comment(&self, key: &TaskKey, comment: &NewComment) -> Result<()> {
-        self.send::<Value>(self.request(routes::ADD_COMMENT, Some(key)).json(comment)).await.map(drop)
+    pub async fn add_comment(&self, key: &TaskKey, comment: &NewComment) -> Result<Comment> {
+        self.send(self.request(routes::ADD_COMMENT, Some(key.as_str())).json(comment)).await
     }
 
-    /// `POST /v1/tasks/{task}/claim`.
-    pub async fn claim(&self, key: &TaskKey) -> Result<()> {
-        self.send::<Value>(self.request(routes::CLAIM, Some(key)).json(&serde_json::json!({}))).await.map(drop)
+    /// `POST /v1/comments/{id}/resolve`, optionally with an answer.
+    pub async fn resolve_comment(&self, id: Uuid, answer: Option<&str>) -> Result<Comment> {
+        let req = self.request(routes::RESOLVE_COMMENT, Some(&id.to_string()));
+        self.send(req.json(&serde_json::json!({ "answer": answer }))).await
+    }
+
+    /// `POST /v1/tasks/{task}/claim`, for `ttl` seconds or the default.
+    pub async fn claim(&self, key: &TaskKey, ttl: Option<i64>) -> Result<ClaimResult> {
+        self.send(self.request(routes::CLAIM, Some(key.as_str())).json(&serde_json::json!({ "ttl": ttl }))).await
     }
 
     /// `POST /v1/tasks/{task}/renew`.
-    pub async fn renew(&self, key: &TaskKey) -> Result<()> {
-        self.send::<Value>(self.request(routes::RENEW, Some(key)).json(&serde_json::json!({}))).await.map(drop)
+    pub async fn renew(&self, key: &TaskKey, ttl: Option<i64>) -> Result<Claim> {
+        self.send(self.request(routes::RENEW, Some(key.as_str())).json(&serde_json::json!({ "ttl": ttl }))).await
     }
 
-    /// `POST /v1/tasks/{task}/release`.
-    pub async fn release(&self, key: &TaskKey) -> Result<()> {
-        self.send::<Value>(self.request(routes::RELEASE, Some(key)).json(&serde_json::json!({}))).await.map(drop)
+    /// `POST /v1/tasks/{task}/release`: the task, open again.
+    pub async fn release(&self, key: &TaskKey) -> Result<Task> {
+        self.send(self.request(routes::RELEASE, Some(key.as_str())).json(&serde_json::json!({}))).await
+    }
+
+    /// `GET /v1/claims`: the live claims the token holds.
+    pub async fn my_claims(&self) -> Result<Vec<HeldClaim>> {
+        self.send(self.request(routes::MY_CLAIMS, None)).await
     }
 }
 

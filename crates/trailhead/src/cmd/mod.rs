@@ -35,6 +35,18 @@ impl Ctx {
     }
 }
 
+impl Ctx {
+    /// A typed result: the full JSON with `--json`, else one line made from it.
+    pub(crate) fn emit<T: serde::Serialize>(&self, v: &T, line: impl Fn(&T) -> String) {
+        if self.json { print_json(&to_json(v)) } else { println!("{}", line(v)) }
+    }
+}
+
+/// A typed value as the JSON the server sent it as.
+pub(crate) fn to_json<T: serde::Serialize>(v: &T) -> Value {
+    serde_json::to_value(v).expect("valid json")
+}
+
 pub(crate) fn print_json(v: &Value) {
     println!("{}", serde_json::to_string_pretty(v).expect("valid json"));
 }
