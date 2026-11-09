@@ -1027,3 +1027,23 @@ async fn a_request_for_changes_still_pending_is_checked_against_the_head_the_pr_
     // The pending-change check reuses the head from the PR's state, so nothing is looked up for it.
     assert_eq!(r.codehost.head_lookups(), before);
 }
+
+#[tokio::test]
+async fn failed_ci_does_not_hold_back_a_review_while_a_request_is_pending_on_this_attempt() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let _key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
+    let ran = r.factory.tick().await.unwrap();
+    let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+
+    // A person pushes before the worker answers, and CI fails on their head. The request for this attempt is still
+    // recorded, so no rework is asked for: the review is owed and runs.
+    r.codehost.push_to(pr);
+    r.codehost.set_ci(pr, CiState::Failed { checks: vec!["test".into()] });
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.reconcile().await.unwrap();
+    let reviews = r.harness.contexts().into_iter().filter(|c| c.role == Role::Reviewer).count();
+    assert_eq!(reviews, 2, "the review ran again on the person's head");
+}

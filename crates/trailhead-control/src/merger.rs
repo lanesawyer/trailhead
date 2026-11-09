@@ -27,8 +27,9 @@ impl Factory {
     }
 
     /// Sends a PR whose CI failed on its current head back for a rework, and does nothing else: no approving, no
-    /// merging, no word on the PR. For a task whose review is owed (backed off after an infrastructure failure,
-    /// TRAIL-263), where the gates aren't evaluated but a failed CI needn't wait for the review. True when CI failed.
+    /// merging, no word on the PR. For a task whose review is owed, whether backed off after an infrastructure failure
+    /// (TRAIL-263) or due now, where the gates aren't evaluated but a failed CI needn't wait for the review. True only
+    /// when a rework was requested; one already asked for on this attempt leaves the owed review to its usual handling.
     pub(crate) async fn rework_if_ci_failed(&self, key: &TaskKey) -> Result<bool> {
         let Some(codehost) = &self.codehost else { return Ok(false) };
         let task = self.tracker.show(key).await?;
@@ -38,8 +39,7 @@ impl Factory {
         }
         let ci = codehost.ci(pr).await?;
         let CiState::Failed { checks } = &ci.state else { return Ok(false) };
-        self.rework_ci_failure(&task, pr, &ci.head, checks).await?;
-        Ok(true)
+        self.rework_ci_failure(&task, pr, &ci.head, checks).await
     }
 
     async fn evaluate(&self, key: &TaskKey, act: bool, parks: bool) -> Result<()> {
@@ -57,7 +57,7 @@ impl Factory {
         let Some(grade) = self.grade_pr(&task, pr, Some(&head)).await? else { return Ok(()) };
         self.record_grade(&task, &grade).await?;
         if let CiState::Failed { checks } = &ci.state {
-            return self.rework_ci_failure(&task, pr, &head, checks).await;
+            return self.rework_ci_failure(&task, pr, &head, checks).await.map(|_| ());
         }
         let prev = task.run.merge.clone();
         let mut status = task.status;
