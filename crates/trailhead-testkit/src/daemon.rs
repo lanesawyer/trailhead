@@ -327,6 +327,14 @@ impl LocalDaemon {
         }
     }
 
+    /// Makes the next `times` runs fail as a host short of a resource (its disk) would.
+    pub fn unavailable_runs(&self, times: usize, error: &str) {
+        let mut errors = self.run_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push_back(trailhead_factory::Error::Unavailable(error.to_string()));
+        }
+    }
+
     /// Makes the next `times` runs fail with this error right after the agent's first usage is reported, as a daemon
     /// lost partway through a run that has already spent money would.
     pub fn fail_runs_midway(&self, times: usize, error: &str) {

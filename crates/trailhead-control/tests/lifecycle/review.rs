@@ -1047,3 +1047,26 @@ async fn failed_ci_does_not_hold_back_a_review_while_a_request_is_pending_on_thi
     let reviews = r.harness.contexts().into_iter().filter(|c| c.role == Role::Reviewer).count();
     assert_eq!(reviews, 2, "the review ran again on the person's head");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_sandbox_short_of_room_is_waited_out_not_counted() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
+    let key = r.tracker.add_task("TRAIL", "Waits for room", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let rounds = r.tracker.task(&key).run.review_rounds;
+
+    r.daemon.unavailable_runs(3, "out of disk");
+    let secs = std::time::Duration::from_secs;
+    for n in 1..=3 {
+        r.factory.reconcile().await.unwrap();
+        let task = r.tracker.task(&key);
+        assert_eq!(task.status, Status::InReview, "wait {n} doesn't park, though max_infra_failures is 2");
+        assert_eq!(task.run.infra_failures, Some(1), "a wait adds nothing to the count the first failure left");
+        assert_eq!(task.run.review_rounds, rounds, "the round is given back");
+        tokio::time::advance(secs(3600)).await;
+    }
+    assert!(r.tracker.comments(&key).iter().all(|c| c.kind != "question"));
+}
