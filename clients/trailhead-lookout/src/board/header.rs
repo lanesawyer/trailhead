@@ -66,13 +66,12 @@ pub(super) fn closed_caption(filter: &Filter) -> String {
     format!("{closed}: {}", if filter.closed { "shown" } else { "hidden" })
 }
 
-/// Spawns the header bar's widgets once, when the bar appears: a dropdown per filter, the toggles and New task.
+/// Spawns the header bar's widgets once, when the bar appears: a dropdown per filter and the toggles.
 /// [`update_header`] changes them in place afterwards.
 pub(super) fn dress_header(
     bar: Query<Entity, Added<HeaderBar>>,
     view: Res<BoardView>,
     filter: Res<Filter>,
-    connection: Res<State<Connection>>,
     mut commands: Commands,
 ) {
     for bar in &bar {
@@ -87,45 +86,31 @@ pub(super) fn dress_header(
         commands
             .queue_spawn_scene(button(factory_caption(&filter), None, ButtonKind::Normal))
             .insert((FactoryToggle, ChildOf(bar)));
-        let mut new = commands.queue_spawn_scene(button("New task", Some(Icon::Plus), ButtonKind::Primary));
-        new.insert((Act::New, NewTask, ChildOf(bar)));
-        if *connection.get() != Connection::Live {
-            new.insert(InteractionDisabled);
-        }
     }
 }
-
-/// Marks the header's New task button, which is disabled while the connection isn't live.
-#[derive(Component)]
-pub(super) struct NewTask;
 
 /// What the header was last updated from, so it is touched only when one of these changes.
 #[derive(Clone, PartialEq)]
 pub(super) struct HeaderDrawn {
     filter: Filter,
     options: Options,
-    connection: Connection,
 }
 
-/// Brings the header's widgets up to date in place: each select's rows and chosen row, the toggles' captions, and
-/// New task's disabled state. Nothing is despawned, so a dropdown just used stays the same entity. A
+/// Brings the header's widgets up to date in place: each select's rows and chosen row, and the toggles' captions. Nothing is despawned, so a dropdown just used stays the same entity. A
 /// select whose popup is open is left alone and tried again once it has closed.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_header(
     view: Res<BoardView>,
     filter: Res<Filter>,
-    connection: Res<State<Connection>>,
     selects: Query<(Entity, &FilterSelect)>,
     toggle: Single<Entity, With<ClosedToggle>>,
     factory_toggle: Single<Entity, With<FactoryToggle>>,
-    new: Single<Entity, With<NewTask>>,
     children: Query<&Children>,
     mut texts: Query<&mut Text>,
     mut edit: SelectEdit,
-    mut commands: Commands,
     mut drawn: Local<Option<HeaderDrawn>>,
 ) {
-    let now = HeaderDrawn { filter: filter.clone(), options: view.options.clone(), connection: *connection.get() };
+    let now = HeaderDrawn { filter: filter.clone(), options: view.options.clone() };
     if drawn.as_ref() == Some(&now) {
         return;
     }
@@ -142,11 +127,6 @@ pub(super) fn update_header(
                 text.0 = caption.clone();
             }
         }
-    }
-    if *connection.get() == Connection::Live {
-        commands.entity(*new).remove::<InteractionDisabled>();
-    } else {
-        commands.entity(*new).insert(InteractionDisabled);
     }
     // A select that was open is looked at again next frame.
     *drawn = settled.then_some(now);
@@ -200,7 +180,6 @@ mod header_tests {
         app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default(), bevy::scene::ScenePlugin))
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>()
-            .init_state::<Connection>()
             .init_resource::<Filter>()
             .insert_resource(run(&Filter::default()))
             .add_systems(Update, (dress_header, update_header).chain());
@@ -242,7 +221,6 @@ mod header_tests {
         assert_eq!(q.iter(app.world()).count(), FilterKey::ALL.len());
         one::<ClosedToggle>(&mut app);
         one::<FactoryToggle>(&mut app);
-        one::<NewTask>(&mut app);
     }
 
     #[test]
@@ -251,7 +229,7 @@ mod header_tests {
         let before = header(&mut app);
         app.world_mut().resource_mut::<Filter>().project = Some("OPS".into());
         settle(&mut app);
-        assert_eq!(header(&mut app), before, "the same entities, the selects, toggle, chip and New task among them");
+        assert_eq!(header(&mut app), before, "the same entities, the selects and toggles among them");
         // The select shows the pick: its row is marked selected.
         let mut q = app.world_mut().query::<(&FilterSelect, Entity)>();
         let project = q.iter(app.world()).find(|(s, _)| s.0 == FilterKey::Project).unwrap().1;
@@ -282,23 +260,12 @@ mod header_tests {
     }
 
     #[test]
-    fn toggling_closed_and_losing_the_connection_leave_the_header_as_it_was() {
+    fn toggling_closed_leaves_the_header_as_it_was() {
         let mut app = app();
         let before = header(&mut app);
         app.world_mut().resource_mut::<Filter>().closed = true;
         settle(&mut app);
         assert_eq!(header(&mut app), before);
-
-        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Offline);
-        settle(&mut app);
-        assert_eq!(header(&mut app), before);
-        let new = one::<NewTask>(&mut app);
-        assert!(app.world().get::<InteractionDisabled>(new).is_some(), "New task is off while offline");
-
-        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
-        settle(&mut app);
-        assert_eq!(header(&mut app), before);
-        assert!(app.world().get::<InteractionDisabled>(new).is_none());
     }
 
     #[test]
