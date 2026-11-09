@@ -267,7 +267,35 @@ impl Workspace for GitWorkspace {
         // Tracked files only, but a merge's result is all tracked once added; the agent's new files are added too.
         let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
         let diff = self.git_output(&self.dir, &["diff", "--unified=0", "--no-color", "--no-ext-diff", start]).await?;
-        Ok(marker_files(&diff))
+        let mut found = marker_lines(&diff);
+        if found.is_empty() {
+            return Ok(vec![]);
+        }
+        // Lines the merged-in side already has aren't the agent's: a fixture or a deep blockquote on the base branch.
+        let mut sides = Vec::new();
+        if let Some(head) = self.merge_head().await? {
+            sides.push(head);
+        }
+        let range = format!("{start}..HEAD");
+        let merges = self.git_output(&self.dir, &["rev-list", "--merges", "--parents", &range]).await?;
+        for line in merges.lines() {
+            sides.extend(line.split_whitespace().skip(2).map(str::to_string));
+        }
+        for side in sides {
+            let theirs = self
+                .git_output(&self.dir, &["diff", "--unified=0", "--no-color", "--no-ext-diff", start, &side])
+                .await?;
+            for line in marker_lines(&theirs) {
+                found.retain(|l| *l != line);
+            }
+        }
+        let mut files: Vec<String> = Vec::new();
+        for (file, _) in found {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+        Ok(files)
     }
 
     async fn changed_files(&self, base: &str) -> Result<Vec<String>> {
@@ -360,12 +388,12 @@ fn parse_df_used(out: &str) -> Option<u64> {
     out.lines().nth(1)?.split_whitespace().nth(2)?.parse().ok()
 }
 
-/// The files a unified diff adds a `<<<<<<<` or `>>>>>>>` line to.
+/// The `(file, line)` pairs of the `<<<<<<<` and `>>>>>>>` lines a unified diff adds.
 ///
 /// A file's name is read only from its header, between its `diff --git` line and its first hunk, so an added line
 /// that happens to read `+++ ...` is never taken for one.
-fn marker_files(diff: &str) -> Vec<String> {
-    let mut files: Vec<String> = Vec::new();
+fn marker_lines(diff: &str) -> Vec<(String, String)> {
+    let mut lines = Vec::new();
     let mut file = None;
     let mut in_header = false;
     for line in diff.lines() {
@@ -381,12 +409,11 @@ fn marker_files(diff: &str) -> Vec<String> {
         } else if let Some(added) = line.strip_prefix('+')
             && (added.starts_with("<<<<<<<") || added.starts_with(">>>>>>>"))
             && let Some(file) = &file
-            && !files.contains(file)
         {
-            files.push(file.clone());
+            lines.push((file.clone(), added.to_string()));
         }
     }
-    files
+    lines
 }
 
 /// The path on a `+++` header: git quotes unusual ones C-style, and prefixes the new side with `b/`.
@@ -444,10 +471,10 @@ fn tail(mut s: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{marker_files, oom_killed, parse_df_used};
+    use super::{marker_lines, oom_killed, parse_df_used};
 
     #[test]
-    fn marker_files_names_the_right_file() {
+    fn marker_lines_names_the_right_file() {
         let diff = [
             "diff --git a/a.txt b/a.txt",
             "--- a/a.txt",
@@ -466,7 +493,13 @@ mod tests {
             "+fine",
         ]
         .join("\n");
-        assert_eq!(marker_files(&diff), vec!["a.txt".to_string(), "q \"x.txt".to_string()]);
+        assert_eq!(
+            marker_lines(&diff),
+            vec![
+                ("a.txt".to_string(), "<<<<<<< HEAD".to_string()),
+                ("q \"x.txt".to_string(), ">>>>>>> main".to_string()),
+            ]
+        );
     }
 
     #[test]

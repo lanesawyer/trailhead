@@ -549,7 +549,7 @@ pub(super) fn spawn_block(
             }
             item
         }
-        Block::Composer { answering, live, note } => {
+        Block::Composer { answering, note, .. } => {
             let item = commands
                 .spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::ROWS), ..default() })
                 .id();
@@ -581,9 +581,8 @@ pub(super) fn spawn_block(
             let foot = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
             let send = commands
                 .spawn_scene(bsn! { @button("Send", Some(Icon::Send), ButtonKind::Primary) })
-                .insert((ComposePart::Send, ChildOf(foot)))
+                .insert((ComposePart::Send, ChildOf(foot), InteractionDisabled))
                 .id();
-            gate_button(commands, send, *live);
             // The box's answer goes to its own control, which outlives redraws like every other.
             control(controls, commands, subject, &Action::Comment);
             let note = spawn_note(commands, foot, note);
@@ -648,12 +647,10 @@ pub(super) fn spawn_block(
                     .spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonKind::Normal) @{press} }),
                 Action::Undo => commands
                     .spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonKind::Normal) @{press} }),
-                Action::Cancel => {
-                    commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::Stop)) @{press} })
-                }
-                Action::Revert(_) => {
-                    commands.spawn_scene(bsn! { @danger_button(action.label(), Some(Icon::History)) @{press} })
-                }
+                Action::Cancel => commands
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Stop), ButtonKind::Danger) @{press} }),
+                Action::Revert(_) => commands
+                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::History), ButtonKind::Danger) @{press} }),
                 // Not drawn as an action block: they have their own controls, or none.
                 Action::Status(_) | Action::Resolve(_) | Action::Grade(_) | Action::Comment | Action::Menu => {
                     commands.spawn_empty()
@@ -823,7 +820,7 @@ pub(super) fn dress(
                     dress_note(&mut commands, &mut texts, &mut nodes, n, note);
                 }
             }
-            Block::Composer { answering, live, note } => {
+            Block::Composer { answering, note, .. } => {
                 let words = answering.as_ref().map_or_else(String::new, |q| format!("Answering: {q}"));
                 if let Some(Ok(mut t)) = parts.text.map(|e| texts.get_mut(e))
                     && t.0 != words
@@ -841,9 +838,6 @@ pub(super) fn dress(
                     {
                         node.display = display(shown);
                     }
-                }
-                if let Some(send) = parts.resolve {
-                    gate_button(&mut commands, send, *live);
                 }
                 if let Some(n) = parts.note {
                     dress_note(&mut commands, &mut texts, &mut nodes, n, note);

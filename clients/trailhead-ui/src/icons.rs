@@ -196,10 +196,7 @@ pub fn icon_text(icon: Icon) -> impl Scene {
 
 /// An icon as a button's caption, in the button's text color.
 pub fn button_icon(icon: Icon) -> impl Scene {
-    bsn! {
-        @icon_text(icon)
-        crate::theme::TextTone({ crate::buttons::BUTTON_TEXT })
-    }
+    crate::buttons::toned_icon(icon, crate::buttons::BUTTON_TEXT)
 }
 
 #[cfg(test)]

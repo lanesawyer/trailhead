@@ -35,9 +35,9 @@ pub mod space {
     pub const CARDS: f32 = step::S;
     /// Rows of controls in a section or panel.
     pub const ROWS: f32 = step::S;
-    /// Groups of rows within one panel, and the board's columns side by side.
+    /// Groups of rows within one panel, and columns side by side.
     pub const GROUPS: f32 = step::M;
-    /// How far a subtask's card sits in from its parent's.
+    /// How far a nested item sits in from its parent: a child's card under its parent's.
     pub const INDENT: f32 = step::M;
     /// The least room a hint keeps from the edge of the window, or of the surface it stays inside.
     pub const HINT_MARGIN: f32 = step::XS;
@@ -47,7 +47,7 @@ pub mod space {
 
     /// Inside a badge.
     pub const BADGE_INSET: f32 = step::XXS;
-    /// Inside a map label, tight against its border.
+    /// Inside a small labelled box, tight against its edge.
     pub const LABEL_INSET: f32 = step::XS;
     /// Inside an inline text's input, before and after the text: the input reaches out by as much, so its text lines
     /// up with the text it stands in for.
@@ -72,8 +72,8 @@ pub mod radius {
 pub mod extent {
     /// An app's sidebar, down the left of the window.
     pub const SIDEBAR_WIDTH: f32 = 220.0;
-    /// The inspector's width, down the right of the window.
-    pub const INSPECTOR_WIDTH: f32 = 360.0;
+    /// A panel down the right of the window, beside the page: an inspector.
+    pub const SIDE_PANEL_WIDTH: f32 = 360.0;
     /// A modal's width, unless its kind says otherwise.
     pub const MODAL_WIDTH: f32 = 640.0;
     /// A search box's width. Its hint is laid over the field rather than in it, so without one the box shrinks to

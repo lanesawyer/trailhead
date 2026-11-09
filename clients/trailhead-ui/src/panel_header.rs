@@ -20,19 +20,15 @@ pub struct PanelTitle;
 #[derive(Component, Default, Clone)]
 pub struct PanelTools;
 
-/// A panel's title row; with `closable`, the close X at its right.
-pub fn panel_header(title: impl Into<String>, closable: bool) -> impl Scene {
+/// A panel's title row, with the close X at its right.
+pub fn panel_header(title: impl Into<String>) -> impl Scene {
     let title = title.into();
-    let close: Box<dyn SceneList> = if closable {
-        Box::new(bsn_list! {
-            @tool_button(Icon::X, "Close", ButtonKind::Plain)
-            Node { flex_shrink: 0.0 }
-            on(|activate: On<Activate>, mut commands: Commands| {
-                commands.trigger(RequestClose { source: activate.event_target() });
-            })
+    let close = bsn_list! {
+        @tool_button(Icon::X, "Close", ButtonKind::Plain)
+        Node { flex_shrink: 0.0 }
+        on(|activate: On<Activate>, mut commands: Commands| {
+            commands.trigger(RequestClose { source: activate.event_target() });
         })
-    } else {
-        Box::new(bsn_list! {})
     };
     bsn! {
         Node {

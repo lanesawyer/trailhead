@@ -23,9 +23,22 @@ The factory's own client for people: watch runs live, steer them, and author tas
 
 ## Views
 
-- **Trail map (watch).** The spatial view and the reason to use a game engine. Campsites are pooled Sprites, agents are run sub-agents (`factory/trail-42-a1`) moving between them, tasks are waypoints. Claims, handoffs, questions, review verdicts and spend show as movement and markers. Everything on it comes from the event stream.
+- **Trail map (watch).** The spatial view and the reason to use a game engine: the factory at a glance, read in two seconds from a second screen. Position is progress.
 
-  Built (TRAIL-702, `map.rs`): campsites on a grid at left (state colour, role, warm, task and phase held), waypoints at right for tasks in `in_progress`, `needs_input`, `in_review` or `approved` and any with a run. A claim holder is a token at its waypoint, which walks to the campsite once its run has a sandbox and back when the run ends. Markers on the waypoint: claim holder, open questions, last handoff, in review, approved, reviewing, spend. It is UI nodes, not sprites, until art exists; the board has a button to the map and back. Not done: pan and zoom, selecting a spot for the inspector, an animation for a verdict landing.
+  Decided 2026-11-08 (TRAIL-1158), replacing the flat map of TRAIL-702: **a 3D mountain range, one peak per repo, that each task climbs.** It is our own: a low-poly, flat-shaded range generated in code (a noise heightfield, a trail wound up each face), no image assets, so a sandbox builds it too; modelled art may replace it later. It takes the idea of a mountain you look around from games like it, not anyone's art or look.
+
+  - **The trailhead:** the next few ready tasks wait in line as hikers, in the order the factory takes them.
+  - **Basecamp:** the campground at the foot. Each sandbox is a tent, lit while busy, dark when idle, frosted while it is prepared; empty plots under `max_sandboxes` show the room left, which is where a full cap shows.
+  - **The climb:** a live run is a hiker on the trail, its height the run's phase (preparing, agent, checks, publishing), with a small label: key, steps, spend against budget.
+  - **The ridge:** agent review and CI. A verdict lands as a burst: on to the gate, or back down the trail to rework.
+  - **The gate:** a task waiting on the human gate waits just under the summit with a beacon. A question (`needs_input`) stops its hiker where it stands and lights a flare, visible from anywhere on the range.
+  - **The summit:** a merge raises a flag, then the task rides a gondola down to **the resort**, which holds the last handful of merges.
+  - **The camera** turns slowly round the range while untouched; drag orbits, the wheel zooms. Clicking a hiker, tent or lodge opens the task modal. Read-only otherwise to begin with; actions come later.
+  - **The theme:** the dark theme is night (lit tents, lanterns), the light theme is day; the desktop accent colors the trail and flags. Materials and lights take their colors from theme tokens, so the lint and the light theme still hold.
+
+  How it's built: where a task stands is a pure function from the mirrors (phase to a distance along the trail curve, curve to a point on the peak), tested without a window. Labels are kit text placed over the scene at each hiker's screen position; clicks use Bevy's mesh picking. Lookout takes Bevy's 3D rendering features for it, which the kit leaves out, so Lookout's builds grow; accepted. A spike first: one peak behind Lookout's UI, the orbit, one hiker placed by phase, one label, one click to the modal.
+
+  The flat map it replaces (TRAIL-702, `map.rs`): campsites in a grid, waypoints for tasks in flight, claim holders walking between them, all UI nodes.
 - **Task board (author).** Lists, filters and forms: create tasks under the queue task, write and edit specs, comment, answer questions. Leans on feathers' text input for multiline specs; no spike first, the editor is built with the forms and anything feathers lacks is filed then.
 
   Built (TRAIL-698, `author.rs`): feathers' `FeathersTextInput` does multiline with `EditableText { allow_newlines, visible_lines }` and word-boundary wrapping, so there is no custom box. It lacks a taller container (the frame is one row high; overridden to auto here), a scrollbar and placeholder text. New tasks go under `LOOKOUT_QUEUE` if set, else the first of the factory's `queue` tasks from its status (TRAIL-102 until it reports), and the form's Queue dropdown lists them all; the form sends one command at a time and closes only on `ok`.

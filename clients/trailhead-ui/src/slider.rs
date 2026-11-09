@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy::ui::{InteractionDisabled, Pressed};
 use bevy::ui_widgets::{Slider, SliderPrecision, SliderValue, TrackClick};
 
-/// Spawn a slider over `range`, showing its value to `decimals` places.
+/// A slider over `range`, showing its value to `decimals` places.
 ///
 /// The kit adds `bevy::ui_widgets::slider_self_update`, so a drag writes the value back; read `SliderValue`, or
 /// observe `ValueChange<f32>` on the slider.
@@ -22,19 +22,17 @@ use bevy::ui_widgets::{Slider, SliderPrecision, SliderValue, TrackClick};
 /// wherever the value already was: clicking halfway didn't set it to halfway, it just took hold. `TrackClick::Snap`
 /// puts it where it was clicked, which is what a track is for. Dragging from there still works: the drag records the
 /// value at the moment it starts, which is the snapped one.
-pub fn spawn_slider(commands: &mut Commands, value: f32, range: (f32, f32), decimals: i32) -> Entity {
-    commands
-        .spawn_scene(bsn! {
-            @FeathersSlider {
-                @min: { range.0 },
-                @max: { range.1 }
-            }
-            SliderValue({ value })
-            // After the scene, so this patches the track behavior it set.
-            Slider { track_click: { TrackClick::Snap } }
-            SliderPrecision({ decimals })
-        })
-        .id()
+pub fn slider(value: f32, range: (f32, f32), decimals: i32) -> impl Scene {
+    bsn! {
+        @FeathersSlider {
+            @min: { range.0 },
+            @max: { range.1 }
+        }
+        SliderValue({ value })
+        // After the scene, so this patches the track behavior it set.
+        Slider { track_click: { TrackClick::Snap } }
+        SliderPrecision({ decimals })
+    }
 }
 
 /// Paint every slider in the theme now in place.

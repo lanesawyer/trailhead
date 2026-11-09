@@ -126,15 +126,13 @@ pub(super) fn on_compose_press(
                 .find(|(p, _)| **p == ComposePart::Input)
                 .map(|(_, t)| t.value().to_string())
                 .unwrap_or_default();
-            let outcome = match compose_request(&key_of(view), compose.kind, compose.answering.as_ref(), &body) {
-                Ok(request) => {
-                    submit.write(Submit { source, request });
-                    Control::Busy
-                }
-                Err(why) => Control::Refused(why),
-            };
+            if body.trim().is_empty() {
+                return;
+            }
+            let request = compose_request(&key_of(view), compose.kind, compose.answering.as_ref(), &body);
+            submit.write(Submit { source, request });
             if let Ok(mut c) = sources.get_mut(source) {
-                *c = outcome;
+                *c = Control::Busy;
             }
         }
         _ => {}
@@ -142,17 +140,9 @@ pub(super) fn on_compose_press(
 }
 
 /// The request the comment box sends: a comment of `kind` on the task, or the answer to a question.
-pub fn compose_request(
-    key: &str,
-    kind: CommentKind,
-    answering: Option<&(String, String)>,
-    body: &str,
-) -> Result<Request, String> {
+pub fn compose_request(key: &str, kind: CommentKind, answering: Option<&(String, String)>, body: &str) -> Request {
     let body = body.trim();
-    if body.is_empty() {
-        return Err(if answering.is_some() { "write the answer first" } else { "write the comment first" }.into());
-    }
-    Ok(match answering {
+    match answering {
         Some((id, _)) => {
             Request::new(Method::POST, format!("/v1/comments/{id}/resolve"), Some(json!({"answer": body})), None)
         }
@@ -162,7 +152,29 @@ pub fn compose_request(
             Some(json!({"kind": kind, "body": body})),
             None,
         ),
-    })
+    }
+}
+
+/// Send is pressable only with something in the box and the connection live.
+pub(super) fn gate_send(
+    composers: Query<(Entity, &Shown, &Parts)>,
+    inputs: Query<(Entity, &ComposePart, &EditableText)>,
+    parents: Query<&ChildOf>,
+    disabled: Query<Has<InteractionDisabled>>,
+    mut commands: Commands,
+) {
+    for (composer, Shown(block), parts) in &composers {
+        let (Block::Composer { live, .. }, Some(send)) = (block, parts.resolve) else { continue };
+        let written = inputs
+            .iter()
+            .filter(|(_, part, _)| **part == ComposePart::Input)
+            .find(|(input, ..)| parents.iter_ancestors(*input).any(|a| a == composer))
+            .is_some_and(|(_, _, text)| !text.value().to_string().trim().is_empty());
+        let off = !(*live && written);
+        if disabled.get(send) != Ok(off) {
+            gate_button(&mut commands, send, !off);
+        }
+    }
 }
 
 /// A comment the box sent went through: empty the box and stop answering.
@@ -222,13 +234,21 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_comment_box_says_so_and_sends_nothing() {
+    fn send_is_disabled_until_the_comment_box_has_words() {
         let mut app = app();
         let send = compose_button(&mut app, ComposePart::Send);
-        app.world_mut().trigger(Activate { entity: send });
+        let disabled = |app: &App| app.world().get::<InteractionDisabled>(send).is_some();
+        assert!(disabled(&app), "an empty box can't send");
+        let input = composer_input(&mut app);
+        app.world_mut().get_mut::<EditableText>(input).unwrap().editor_mut().set_text("  ");
         settle(&mut app);
-        assert!(sent(&mut app).is_empty());
-        assert!(texts(&mut app).iter().any(|t| t == "write the comment first"));
+        assert!(disabled(&app), "blank isn't words");
+        app.world_mut().get_mut::<EditableText>(input).unwrap().editor_mut().set_text("looks good");
+        settle(&mut app);
+        assert!(!disabled(&app));
+        app.world_mut().get_mut::<EditableText>(input).unwrap().editor_mut().set_text("");
+        settle(&mut app);
+        assert!(disabled(&app), "emptied again");
     }
 
     #[test]

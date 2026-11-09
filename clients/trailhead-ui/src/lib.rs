@@ -5,10 +5,17 @@
 //! skill and `docs/factory/ui.md#look-and-components`. Much of this is ported from Lane's bevy-data-explorer. A
 //! widget never imports a view module.
 //!
+//! A widget comes in one of three shapes, by what the caller does with it:
+//! - A scene, `fn x(..) -> impl Scene`, spawned with `spawn_scene` or placed with `@x(..)`: most widgets.
+//! - `fn spawn_x(commands, ..) -> XParts`, when the caller fills or keeps hold of what's inside (an accordion's body, a
+//!   menu's popup, a detail modal's panes). It spawns unparented; put its root where it goes.
+//! - A `Node` or bundle, when the caller extends it: a node to finish (`..beside_sidebar()`), or components to spawn
+//!   beside its own marker ([`scroll_body`]).
+//!
 //! Which widget for what:
 //! - A button with words (and maybe an icon): [`button`]. Icon only, with a hint: [`tool_button`]. How much it
 //!   stands out: [`ButtonKind`].
-//! - A button that opens a menu: [`icon_menu`], then fill its popup with [`menu_item`]s; [`close_menu_holding`] when
+//! - A button that opens a menu: [`spawn_icon_menu`], then fill its popup with [`menu_item`]s; [`close_menu_holding`] when
 //!   something else in it is done.
 //! - A small chip with an icon and a word: [`badge`].
 //! - A text input, one line or several: [`text_input`], inside a [`field`].
@@ -40,7 +47,7 @@
 //! - A section that opens and closes: [`spawn_accordion`], a pane or a group by [`SectionLevel`]; fill its body, add
 //!   controls to its header with [`spawn_header_button`].
 //! - Text cut to a width with an ellipsis: [`truncate_to_width`], measured by the same estimate as [`width_of`].
-//! - A number picked on a track: [`spawn_slider`]. Its value is written back for you.
+//! - A number picked on a track: [`slider`]. Its value is written back for you.
 //! - A search box with a hint while empty and a clear button: [`spawn_search_field`], or
 //!   [`spawn_search_field_filling`] to fill a sidebar; match items with
 //!   [`matches_search`]. A text field straight on a pane or menu goes in a [`field_well`] to be seen.
@@ -49,7 +56,7 @@
 //! - A button that opens a URL in the browser: [`link_button`].
 //! - A line saying how something went, with an icon for its [`Tone`]: [`notice`], then write a [`Notice`] onto it;
 //!   an empty message hides it.
-//! - Placeholder bars where content is on its way: [`spawn_skeleton`].
+//! - Placeholder bars where content is on its way: [`skeleton`].
 //! - Writing a `Node` or `Text` only when it changes: [`patch_node`], [`set_display`], [`set_text`].
 //!
 //! The kit's per-frame systems run in [`UiPlace`] in `Update`; order an app's own systems around it.
@@ -101,14 +108,14 @@ mod theme;
 mod truncate;
 
 pub use accordion::{
-    ACCORDION_INDENT, Accordion, AccordionCaret, AccordionParts, AccordionTitle, SectionLevel, spawn_accordion,
+    ACCORDION_INDENT, Accordion, AccordionCaret, AccordionParts, AccordionTitle, Fold, SectionLevel, spawn_accordion,
     spawn_header_button,
 };
 pub use appearance::{Appearance, ThemeChoice, ThemePlugin};
 pub use badge::badge;
 pub use bubble::{Side, bubble, bubble_head};
 pub use button_group::{ButtonGroup, button_group};
-pub use buttons::{ButtonKind, button, button_text, danger_button, tool_button};
+pub use buttons::{ButtonKind, button, button_text, tool_button};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{field, panel, row, section, section_frame};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
@@ -123,7 +130,7 @@ pub use inline::{
 pub use input::{text_input, text_input_sized};
 pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button};
-pub use menu::{MENU_WIDTH, Menu, close_menu_holding, icon_menu, menu_item};
+pub use menu::{MENU_WIDTH, Menu, close_menu_holding, menu_item, spawn_icon_menu};
 pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,
     ModalSlots, open_modal,
@@ -138,10 +145,10 @@ pub use search::{
     ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
 };
 pub use select::{Picked, SelectEdit, SelectIcons, SelectOptions, SelectTones, select, select_iconed, select_toned};
-pub use skeleton::{SkeletonBar, spawn_skeleton};
-pub use slider::spawn_slider;
+pub use skeleton::{SkeletonBar, skeleton};
+pub use slider::slider;
 pub use spacing::{extent, radius, space, stroke};
-pub use tabs::{TabCaption, fit_tabs, style_tabs, tab, tab_strip};
+pub use tabs::{TabCaption, tab, tab_strip};
 pub use text::{Size, size, text, text_dim, text_mono, text_toned};
 pub use theme::{BackgroundTone, BorderTone, Surface, TextTone, Theme, Token, palette, token};
 pub use truncate::{truncate_to_width, width_of};
@@ -170,6 +177,7 @@ impl Plugin for UiPlugin {
                     accordion::truncate_accordion_titles,
                     search::sync_search_hints,
                     slider::repaint_sliders.run_if(resource_exists_and_changed::<UiTheme>),
+                    input::color_new_cursors.run_if(resource_exists::<UiTheme>),
                     notice::sync_notices,
                     skeleton::pulse_skeletons.run_if(resource_exists::<UiTheme>),
                     tabs::fit_tabs,
@@ -177,6 +185,7 @@ impl Plugin for UiPlugin {
                     nav::paint_nav_items,
                     button_group::paint_groups,
                     hover::paint_hover_tones,
+                    buttons::dim_disabled_captions,
                     select::style_select_captions,
                     select::show_chosen_icons,
                 )

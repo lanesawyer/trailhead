@@ -76,16 +76,24 @@ pub struct AccordionParts {
     pub section: Entity,
     /// Fill this with the section's contents.
     pub body: Entity,
-    /// Add controls beside the title here, with [`spawn_header_button`] or an [`icon_menu`](crate::icon_menu).
+    /// Add controls beside the title here, with [`spawn_header_button`] or a [`spawn_icon_menu`](crate::spawn_icon_menu).
     pub header: Entity,
 }
 
-/// Spawn an accordion, drawn as the feathers container `level` names.
+/// Whether a section starts open or closed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fold {
+    Open,
+    Closed,
+}
+
+/// Spawn an accordion, drawn as the feathers container `level` names, starting `fold`.
 ///
 /// The container supplies the look (a headed box with its own background, border and rounded corners) and this
 /// supplies the behavior feathers has none of: a header that collapses the body under it. What the header holds
 /// beyond its title is the caller's business, so the header is returned along with the body.
-pub fn spawn_accordion(commands: &mut Commands, title: &str, open: bool, level: SectionLevel) -> AccordionParts {
+pub fn spawn_accordion(commands: &mut Commands, title: &str, fold: Fold, level: SectionLevel) -> AccordionParts {
+    let open = fold == Fold::Open;
     let accordion = commands
         .spawn_scene(bsn! {
             Accordion { open: { open } }
@@ -222,7 +230,10 @@ pub struct AccordionTitle {
 }
 
 /// Cut each accordion title to whatever room its header leaves it.
-pub fn truncate_accordion_titles(titles: Query<(Entity, &AccordionTitle, &ComputedNode)>, mut texts: Query<&mut Text>) {
+pub(crate) fn truncate_accordion_titles(
+    titles: Query<(Entity, &AccordionTitle, &ComputedNode)>,
+    mut texts: Query<&mut Text>,
+) {
     for (entity, title, node) in &titles {
         let width = node.size().x * node.inverse_scale_factor();
         if width <= 0.0 {
@@ -383,7 +394,7 @@ mod tests {
     #[test]
     fn opening_a_section_shows_its_body_and_turns_its_caret_without_respawning_anything() {
         let mut app = app();
-        let parts = spawn_accordion(&mut app.world_mut().commands(), "Section", false, SectionLevel::Pane);
+        let parts = spawn_accordion(&mut app.world_mut().commands(), "Section", Fold::Closed, SectionLevel::Pane);
         app.world_mut().flush();
         app.update();
         let shown = |app: &App| app.world().get::<Node>(parts.body).unwrap().display;

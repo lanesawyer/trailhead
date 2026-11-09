@@ -3,7 +3,7 @@
 //!
 //! [`sidebar`] is the column, a root of its own; spawn its contents as its children, and a [`sidebar_footer`] last to
 //! hold the bottom. A place to go is a [`nav_item`], a plain button the width of the sidebar that shows a background
-//! while it is the page shown: set that on its [`NavItem`]; [`nav_item_noted`] adds a dim note after its caption. A group of them goes under a [`nav_heading`].
+//! while it is the page shown: set that on its [`NavItem`]; [`nav_item_noted`] adds a dim note just after its caption and a dim value at its end. A group of them goes under a [`nav_heading`].
 //!
 //! The pages an app shows beside the sidebar fill [`beside_sidebar`], so the two never overlap.
 
@@ -67,15 +67,18 @@ pub fn nav_item(caption: impl Into<String>, icon: Option<Icon>) -> impl Scene {
     }
 }
 
-/// A [`nav_item`] with `note` after `caption`, smaller and dimmer: a project's name with its key.
-pub fn nav_item_noted(caption: impl Into<String>, note: impl Into<String>) -> impl Scene {
-    let (caption, note) = (caption.into(), note.into());
+/// A [`nav_item`] with `note` just after `caption` and `end` at the far right, both smaller and dimmer: a project's
+/// name, its key, and how many of its tasks are open. Their texts come in that order, for updating in place.
+pub fn nav_item_noted(caption: impl Into<String>, note: impl Into<String>, end: impl Into<String>) -> impl Scene {
+    let (caption, note, end) = (caption.into(), note.into(), end.into());
     bsn! {
         @FeathersButton {
             @caption: { bsn_list! {
                 @button_text(caption)
                 --
                 @text_dim(note, size::SMALL)
+                --
+                @text_dim(end, size::SMALL)
                 Node { margin: { UiRect::left(Val::Auto) } }
             } },
             @variant: { ButtonVariant::Plain },

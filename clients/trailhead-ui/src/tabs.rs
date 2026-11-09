@@ -4,9 +4,9 @@
 //! The behavior is `bevy_ui_widgets`' headless `TabList`: a click or an arrow key raises `ValueChange<Option<Entity>>`
 //! on the strip, naming the tab. Nothing here writes `SelectedTab` back; whoever owns the pages does, from whatever it
 //! keeps as the page shown (or adds `bevy::ui_widgets::tablist_self_update` when the strip is all there is), and the
-//! derived `Selected` on each tab is what [`style_tabs`] paints from.
+//! derived `Selected` on each tab is what `style_tabs` paints from.
 //!
-//! A strip narrower than its captions cuts them rather than spilling past its edge: [`fit_tabs`] shares the room out,
+//! A strip narrower than its captions cuts them rather than spilling past its edge: `fit_tabs` shares the room out,
 //! leaving whole the captions short enough to fit and cutting the rest to an even share.
 //!
 //! A tab under the pointer takes a plain button's hover background, as every pressable thing does.
@@ -34,7 +34,7 @@ const SEAM: f32 = 1.0;
 /// How thick the line under the tab picked is.
 const INDICATOR: f32 = 2.0;
 
-/// A tab's caption, painted by [`style_tabs`] and cut to fit by [`fit_tabs`], holding the whole of it.
+/// A tab's caption, painted by `style_tabs` and cut to fit by `fit_tabs`, holding the whole of it.
 #[derive(Component, Clone, Default)]
 pub struct TabCaption(String);
 
@@ -97,7 +97,7 @@ pub fn tab(caption: impl Into<String>, orientation: ControlOrientation) -> impl 
 
 /// Cut each strip's captions to the room it has. Measured against the strip rather than each tab, whose width follows
 /// its caption and so would never grow back once cut.
-pub fn fit_tabs(
+pub(crate) fn fit_tabs(
     strips: Query<(&TabList, &ComputedNode, &Children)>,
     tabs: Query<(&Node, &Children), With<Tab>>,
     mut captions: Query<(&TabCaption, &mut Text)>,
@@ -155,7 +155,7 @@ fn share(wanted: &[f32], room: f32) -> Vec<f32> {
 /// Underline the tab picked and brighten its caption, and the caption of one hovered; the rest are dimmed. The theme
 /// components are immutable, so a change is an insert, which is what has feathers repaint them.
 #[allow(clippy::type_complexity)]
-pub fn style_tabs(
+pub(crate) fn style_tabs(
     tabs: Query<(Entity, &Hovered, Has<Selected>, Has<InteractionDisabled>, &BorderTone, &Children), With<Tab>>,
     captions: Query<Option<&TextTone>, With<TabCaption>>,
     mut commands: Commands,
