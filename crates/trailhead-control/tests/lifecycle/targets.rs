@@ -344,3 +344,29 @@ async fn a_task_whose_sandbox_is_gone_is_placed_by_priority_again() {
     t.factory.tick().await.unwrap();
     assert_eq!(ran(&t.local, Role::Worker), vec![key.0.clone()]);
 }
+
+#[tokio::test]
+async fn the_spend_board_shows_while_the_factory_is_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = two_with(CAPPED, Some(spend_file(&dir, 5_000_000, &today())));
+    // Three sandboxes held for no running task fill the repo's cap of 3, so `tick` has no room and returns before
+    // any pass reaches placement.
+    for n in 0..3 {
+        let labels = Labels::from([
+            (label::FACTORY.into(), "trailhead".into()),
+            (label::REPO.into(), "lanesawyer/trailhead".into()),
+            (label::POOL.into(), "worker".into()),
+            (label::STATE.into(), label::BUSY.into()),
+            (label::TARGET.into(), "local".into()),
+        ]);
+        let spec = SandboxSpec { name: format!("trailhead-held-{n}"), labels, egress: Default::default() };
+        t.local.compute.create(&spec).await.unwrap();
+    }
+    t.tracker.add_task("TRAIL", "Waiting", "");
+    t.factory.tick().await.unwrap();
+    assert!(ran(&t.local, Role::Worker).is_empty() && ran(&t.cloud, Role::Worker).is_empty());
+    let board = t.factory.status().snapshot().targets;
+    assert_eq!(board.len(), 1, "{board:?}");
+    assert_eq!((board[0].target.as_str(), board[0].capped), ("cloud", true));
+    assert_eq!((board[0].spent, board[0].cap), (Usd(5_000_000), Usd(5_000_000)));
+}
