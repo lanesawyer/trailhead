@@ -262,10 +262,10 @@ impl Factory {
         let pr_url = merged.pr.url.clone();
         let handoff = messages::merged_handoff(merged.by, &merged.pr.url, merged.commit.as_deref(), decision.as_ref());
         self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
-        // A parked task can't be finished from where it is: it goes back to open and is claimed first.
+        // A parked task can't be finished without a claim: it is claimed where it is, never reopened first, so no other
+        // agent can take it from open in between (TRAIL-402).
         let mut claimed = false;
         if task.status == Status::NeedsInput {
-            self.tracker.reopen(&task.key).await?;
             self.tracker.claim(&task.key).await?;
             claimed = true;
         }

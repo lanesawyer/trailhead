@@ -476,7 +476,12 @@ impl Tracker for FakeTracker {
             .get(task)
             .is_some_and(|t| t.status == Status::InReview && t.holder.is_none());
         let claimed = self.write(task, |t, me| match (&t.holder, t.status) {
-            (Some(h), _) if h == me => Ok(()),
+            (Some(h), Status::InProgress) if h == me => Ok(()),
+            // Holding a parked or in-review task and claiming it moves it to `in_progress`, as in core.
+            (Some(h), Status::NeedsInput | Status::InReview) if h == me => {
+                t.status = Status::InProgress;
+                Ok(())
+            }
             // As in core, parked and in-review work is claimable without passing through `open`.
             (None, Status::Open | Status::NeedsInput | Status::InReview) => {
                 t.holder = Some(me.to_string());
