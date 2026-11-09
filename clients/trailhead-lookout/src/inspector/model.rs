@@ -182,12 +182,13 @@ pub fn pr_panel(run: &RunUpdate) -> Option<PrPanel> {
 }
 
 /// The statuses a task can be moved to by hand from the panel: any the task can go to next, but not cancelled (its
-/// own action) and, on the factory's tasks, not approved or done (the factory finishes those).
+/// own action) and, on the factory's tasks, not done: the factory closes those once their PR merges. Approving one is
+/// the human gate, which the merger merges after (`docs/factory/review.md`).
 pub(super) fn status_moves(current: Status, factory: bool) -> Vec<Action> {
     Status::ALL
         .into_iter()
         .filter(|to| *to != current && *to != Status::Cancelled && current.can_transition_to(*to))
-        .filter(|to| !factory || !matches!(to, Status::Approved | Status::Done))
+        .filter(|to| !factory || *to != Status::Done)
         .map(Action::Status)
         .collect()
 }
@@ -270,6 +271,12 @@ pub fn build(
 
             let pr = run.as_ref().and_then(pr_panel);
             let merge_note = (is_factory && !status.is_closed()).then(|| match &pr {
+                Some(p) if p.state == "open" && status == Status::Approved => {
+                    "Approved: the merger merges the PR, and the factory closes the task once it has.".to_string()
+                }
+                Some(p) if p.state == "open" && p.waiting.iter().any(|g| g == "human") => {
+                    "Waiting for you: approve it here and the merger merges the PR (or merge it on GitHub).".to_string()
+                }
                 Some(p) if p.state == "open" => {
                     "Merge on GitHub (or let the merger): the factory approves it and closes the task once the PR merges.".to_string()
                 }
@@ -640,10 +647,9 @@ mod tests {
             (pr.passed, pr.waiting, pr.grade),
             (vec!["checks".into(), "ci".into()], vec!["agent_review".into()], Grade::new(2))
         );
+        // The fixture's PR waits on agent review, not on a person.
         assert!(v.merge_note.unwrap().contains("Merge on GitHub"));
-        for a in &v.actions {
-            assert!(!matches!(a, Action::Status(Status::Done | Status::Approved)), "{a:?}");
-        }
+        assert!(!v.actions.contains(&Action::Status(Status::Done)), "the factory closes its tasks");
         assert_eq!(v.questions.len(), 1);
         for want in [Action::Release, Action::Cancel, Action::Undo, Action::Revert(1), Action::Resolve(sid("c1"))] {
             assert!(v.actions.contains(&want), "{want:?}");
@@ -661,6 +667,24 @@ mod tests {
         let v = build(f.input(), &HashMap::new(), &Subject::Task(sid("t8")), Fetched::default()).unwrap();
         assert!(v.merge_note.is_none());
         assert!(v.actions.contains(&Action::Status(Status::Approved)), "{:?}", v.actions);
+    }
+
+    #[test]
+    fn a_factory_task_waiting_on_a_person_can_be_approved_here_for_the_merger_to_merge() {
+        // Grade 3 and up wait on Lane's approval, which the merger merges after (TRAIL-1160).
+        let mut f = fixture();
+        let t7 = f.tasks.iter_mut().find(|t| t.key.0 == "TRAIL-7").unwrap();
+        t7.metadata["factory"]["merge"]["waiting"] = json!(["human"]);
+        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
+        assert!(v.actions.contains(&Action::Status(Status::Approved)), "{:?}", v.actions);
+        assert!(!v.actions.contains(&Action::Status(Status::Done)));
+        assert!(v.merge_note.unwrap().starts_with("Waiting for you"));
+
+        let t7 = f.tasks.iter_mut().find(|t| t.key.0 == "TRAIL-7").unwrap();
+        t7.status = Status::Approved;
+        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
+        assert!(v.merge_note.unwrap().starts_with("Approved: the merger merges"));
+        assert!(!v.actions.contains(&Action::Status(Status::Done)));
     }
 
     #[test]
