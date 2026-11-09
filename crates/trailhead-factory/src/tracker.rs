@@ -251,6 +251,10 @@ pub struct WorkerBreach {
     pub reason: String,
     #[serde(default)]
     pub parked: bool,
+    /// The sandbox couldn't be cut off or destroyed and is still live, so the park doesn't keep it: reconcile
+    /// retries the destroy even though the task is parked.
+    #[serde(default)]
+    pub stuck: bool,
 }
 
 impl RunUpdate {
