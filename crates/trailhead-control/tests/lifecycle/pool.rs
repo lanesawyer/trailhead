@@ -578,3 +578,30 @@ async fn a_resource_wait_park_that_fails_adds_no_failure_and_keeps_the_backoff()
     r.tracker.set_status(&key, Status::Open); // what reconcile does with it
     assert!(r.factory.tick().await.unwrap().is_empty(), "still backing off");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_stale_stack_sandbox_that_wont_be_destroyed_is_labelled_broken_and_frees_its_place() {
+    let r = rig_with(&with_stack(r#"node = "26""#));
+    r.tracker.add_task("TRAIL", "First", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let id = r.compute.get("trailhead-w1").unwrap().id;
+    let mut stale = r.compute.get("trailhead-w1").unwrap().labels;
+    stale.insert(label::STACK.into(), "old".into());
+    r.compute.set_labels(&id, &stale).await.unwrap();
+    r.compute.fail("trailhead-w1", "destroy");
+
+    let key = r.tracker.add_task("TRAIL", "Second", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(r.tracker.task(&key).run.host.as_deref(), Some("trailhead-w2"));
+    let w1 = r.compute.get("trailhead-w1").expect("destroy failed, so it's still there");
+    assert_eq!(w1.labels.get(label::STATE).map(String::as_str), Some(label::BROKEN));
+
+    r.compute.heal("trailhead-w1");
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.destroyed, ["trailhead-w1"]);
+}

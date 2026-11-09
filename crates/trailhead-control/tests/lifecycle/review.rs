@@ -877,3 +877,65 @@ async fn a_reviewer_lost_after_spending_records_the_spend_and_counts_an_infrastr
     );
     assert_eq!(task.run.infra_failures, Some(2));
 }
+
+/// A task in review whose conflict rework has run and whose reviewer asked for changes, with the one write that
+/// counts that round (`request_rework`'s report) failing (TRAIL-322). It is the factory's third report in the tick
+/// (`fail_after` skips the first two); when that order changes, change the count.
+async fn interrupted_request_for_changes(r: &Rig, key: &TaskKey) {
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/b.md")));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.tracker.fail_after("factory", "report", 2, 1);
+    r.factory.tick().await.unwrap_err();
+    let task = r.tracker.task(key);
+    assert_eq!(task.run.review_rounds, Some(1), "the interrupted round isn't counted");
+    assert!(task.run.pending_changes().is_some_and(|c| c.conflict), "the conflict's changes are still pending");
+}
+
+async fn conflicted_in_review() -> Rig {
+    let (r, queue) = queued_rig();
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    assert_eq!(r.tracker.task(&key).run.review_rounds, Some(1));
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.task(&key).run.pending_changes().is_some_and(|c| c.conflict));
+    r
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_interrupted_request_for_changes_after_a_conflict_rework_leaves_the_round_uncounted() {
+    let r = conflicted_in_review().await;
+    let key = TaskKey("TRAIL-2".into());
+    interrupted_request_for_changes(&r, &key).await;
+    let reviewers = r.harness.contexts().iter().filter(|c| c.role == Role::Reviewer).count();
+    assert_eq!(reviewers, 2, "the round-2 reviewer ran");
+}
+
+/// The resumed review reuses the interrupted reviewer's name (the round and retries are the same), but `request_rework`
+/// runs after that sub-agent was revoked for good, so creating it fails: one spurious infrastructure failure and a
+/// backoff, after which the review runs under the next retry's name and counts the round once. The wasted failure is a
+/// bug (with `max_infra_failures = 1` it would park the task), pinned here so it isn't mistaken for intended.
+#[tokio::test(start_paused = true)]
+async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_round_once_when_resumed() {
+    let r = conflicted_in_review().await;
+    let key = TaskKey("TRAIL-2".into());
+    interrupted_request_for_changes(&r, &key).await;
+    assert!(r.tracker.is_revoked("factory/trail-2-a2-r2"), "the interrupted reviewer's sub-agent");
+
+    // The tick settles the conflict rework the worker already did, then reconcile owes the review, which can't take
+    // the revoked sub-agent's name again.
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.infra_failures, Some(1), "the revoked name cost an infrastructure failure");
+    assert_eq!(task.run.review_rounds, Some(1), "the round was given back");
+    assert!(task.run.pending_changes().is_some_and(|c| c.conflict), "still the conflict's changes");
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the first infrastructure backoff
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
+    assert!(r.tracker.is_revoked("factory/trail-2-a2-r2-1"), "the retry's reviewer, under the next name");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(2), "the first review and this one, not a third");
+    assert!(task.run.pending_changes().is_some_and(|c| !c.conflict), "the review's changes are now pending");
+}
