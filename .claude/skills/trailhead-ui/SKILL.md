@@ -37,11 +37,11 @@ control, a component to query in a test), grow the kit: wrap it in a kit type or
 re-export a feathers type as it is, and never reach past the kit from an app, even in a test. The kit's API is the
 seam that keeps a feathers upgrade to one crate.
 
-`bevy_feathers` 0.20 has buttons (`ButtonVariant`: normal, primary, plain; the kit's `ButtonKind`), tool buttons, menu buttons and popups,
-`FeathersSelect` for dropdowns, text inputs, checkboxes, toggles, sliders, scrollbars, list views, and panes. The kit
-wraps these; it doesn't draw its own where feathers has one. Where feathers lacks something or has a bug, work around
-it in one kit widget with a comment saying what upstream is missing, and prefer upstreaming the fix over growing a
-private copy.
+`bevy_feathers` 0.20 has buttons (`ButtonVariant`: normal, primary, plain; the kit's `ButtonKind`), tool buttons, menu
+buttons and popups, `FeathersSelect` for dropdowns, text inputs, checkboxes, toggles, sliders, scrollbars, list views,
+and panes. The kit wraps these; it doesn't draw its own where feathers has one. Where feathers lacks something or has
+a bug, work around it in one kit widget with a comment saying what upstream is missing, and prefer upstreaming the fix
+over growing a private copy.
 
 - **A fixed set of choices** (a filter, a priority, a status) is a dropdown (`FeathersSelect`), never a button that
   cycles through values.
@@ -57,8 +57,8 @@ private copy.
 - **Colors are theme tokens**, a kit `Token` on a node as `BackgroundTone`, `TextTone` or `BorderTone`, never
   `Color::srgb(..)` literals. The kit's base palette is in `clients/trailhead-ui/src/theme.rs`; an app's own colors
   are `Token`s it paints onto `Theme::new()` with `Theme::paint` (from the kit's `palette` or its own colors), defined
-  once where the theme is built. The tone components are immutable: insert a new one to change the token. A missing token renders fuchsia
-  (TRAIL-777): if you see magenta, a token isn't in the theme.
+  once where the theme is built. The tone components are immutable: insert a new one to change the token. A missing
+  token renders fuchsia (TRAIL-777): if you see magenta, a token isn't in the theme.
 - **Paint dark; the kit derives light and the accent.** `Theme::light` turns near-neutrals over and darkens colors
   that mean something; `Theme::with_accent` moves the accent's shades onto the desktop's. Paint a shade of
   `palette::ACCENT` with `Theme::paint_accent`, or it stays feathers' blue. A color written as a literal follows
@@ -99,8 +99,8 @@ private copy.
 - **Logic and drawing are separate plugins.** `XPlugin` holds the state and observers and runs under `MinimalPlugins`
   in tests; `XUiPlugin` spawns and draws, and only `main.rs` adds it.
 - **The app wires its own dependencies** in `main.rs` (`DefaultPlugins`, the kit's `ThemePlugin` with its `Theme`,
-  which brings feathers' plugins, the kit's `UiPlugin`, winit settings). A plugin never adds `StatesPlugin` or other app-level plugins for its tests' sake; the test app adds what
-  `MinimalPlugins` lacks (TRAIL-774).
+  which brings feathers' plugins, the kit's `UiPlugin`, winit settings). A plugin never adds `StatesPlugin` or other
+  app-level plugins for its tests' sake; the test app adds what `MinimalPlugins` lacks (TRAIL-774).
 - **Test the logic headless.** Pure functions that turn state into a view model carry most of the tests.
 
 ## 6. Check it
