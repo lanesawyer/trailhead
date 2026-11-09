@@ -10,7 +10,7 @@
 use bevy::feathers::controls::{ButtonVariant, FeathersButton};
 use bevy::prelude::*;
 
-use super::{BackgroundTone, BorderTone, ButtonKind, Icon, button, button_text, extent, size, space, text_dim, token};
+use super::{BorderTone, ButtonKind, Icon, Surface, button, button_text, extent, size, space, stroke, text_dim, token};
 
 /// The sidebar down the left of the window, [`extent::SIDEBAR_WIDTH`] wide.
 pub fn sidebar() -> impl Scene {
@@ -24,11 +24,11 @@ pub fn sidebar() -> impl Scene {
             flex_direction: FlexDirection::Column,
             row_gap: { px(space::ROWS) },
             padding: { UiRect::all(px(space::PANEL_INSET)) },
-            border: { UiRect::right(px(1)) },
+            border: { UiRect::right(px(stroke::HAIRLINE)) },
             min_height: px(0),
         }
-        BackgroundTone({ token::PANEL_BG })
-        BorderTone({ token::DIVIDER })
+        Surface::Panel
+        BorderTone({ token::BORDER })
     }
 }
 

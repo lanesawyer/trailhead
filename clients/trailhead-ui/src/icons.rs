@@ -9,8 +9,6 @@
 //! stable across Lucide releases, so take a new one from this same font file.
 
 use bevy::app::PropagateOver;
-use bevy::feathers::theme::ThemeTextColor;
-use bevy::feathers::tokens;
 use bevy::prelude::*;
 use bevy::text::{FontSourceTemplate, FontWeight};
 
@@ -199,7 +197,7 @@ pub fn icon_text(icon: Icon) -> impl Scene {
 pub fn button_icon(icon: Icon) -> impl Scene {
     bsn! {
         @icon_text(icon)
-        ThemeTextColor({ tokens::BUTTON_TEXT })
+        crate::theme::TextTone({ crate::buttons::BUTTON_TEXT })
     }
 }
 

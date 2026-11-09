@@ -15,8 +15,6 @@
 
 use bevy::feathers::display::label;
 use bevy::feathers::focus::FocusIndicator;
-use bevy::feathers::theme::{ThemeBorderColor, ThemeTextColor};
-use bevy::feathers::tokens;
 use bevy::picking::cursor::EntityCursor;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
@@ -28,7 +26,7 @@ use crate::hover::HoverTone;
 use crate::patch::set_text;
 use crate::spacing::space;
 use crate::text::size;
-use crate::theme::{BackgroundTone, BorderTone, token};
+use crate::theme::{BackgroundTone, BorderTone, TextTone, token};
 use crate::truncate::{truncate_to_width, width_of};
 
 /// How thick the strip's rule is.
@@ -57,7 +55,7 @@ pub fn tab_strip(orientation: ControlOrientation) -> impl Scene {
             orientation: { orientation },
             activation: { TabActivation::Automatic },
         }
-        BorderTone({ token::DIVIDER })
+        BorderTone({ token::BORDER })
     }
 }
 
@@ -84,11 +82,11 @@ pub fn tab(caption: impl Into<String>, orientation: ControlOrientation) -> impl 
         }
         Tab
         Hovered
-        BackgroundTone({ token::BUTTON_PLAIN_BG })
-        HoverTone { rest: { token::BUTTON_PLAIN_BG }, hover: { token::BUTTON_PLAIN_BG_HOVER } }
+        BackgroundTone({ token::FILL_ITEM })
+        HoverTone { rest: { token::FILL_ITEM }, hover: { token::FILL_ITEM_HOVER } }
         FocusIndicator
         EntityCursor::System(SystemCursorIcon::Pointer)
-        ThemeBorderColor({ tokens::BUTTON_PLAIN_BG })
+        BorderTone({ token::FILL_ITEM })
         Children [
             @label(caption)
             TextLayout { linebreak: { LineBreak::NoWrap } }
@@ -158,22 +156,22 @@ fn share(wanted: &[f32], room: f32) -> Vec<f32> {
 /// components are immutable, so a change is an insert, which is what has feathers repaint them.
 #[allow(clippy::type_complexity)]
 pub fn style_tabs(
-    tabs: Query<(Entity, &Hovered, Has<Selected>, Has<InteractionDisabled>, &ThemeBorderColor, &Children), With<Tab>>,
-    captions: Query<&ThemeTextColor, With<TabCaption>>,
+    tabs: Query<(Entity, &Hovered, Has<Selected>, Has<InteractionDisabled>, &BorderTone, &Children), With<Tab>>,
+    captions: Query<Option<&TextTone>, With<TabCaption>>,
     mut commands: Commands,
 ) {
     for (tab, hovered, selected, disabled, border, children) in &tabs {
         let (line, text) = match (selected, hovered.0 && !disabled) {
-            (true, _) => (tokens::BUTTON_PRIMARY_BG, tokens::TEXT_MAIN),
-            (false, true) => (tokens::BUTTON_PLAIN_BG, tokens::TEXT_MAIN),
-            (false, false) => (tokens::BUTTON_PLAIN_BG, tokens::TEXT_DIM),
+            (true, _) => (token::FILL_ACCENT, token::TEXT),
+            (false, true) => (token::FILL_ITEM, token::TEXT),
+            (false, false) => (token::FILL_ITEM, token::TEXT_DIM),
         };
         if border.0 != line {
-            commands.entity(tab).insert(ThemeBorderColor(line));
+            commands.entity(tab).insert(BorderTone(line));
         }
         for &child in children {
-            if captions.get(child).is_ok_and(|color| color.0 != text) {
-                commands.entity(child).insert(ThemeTextColor(text.clone()));
+            if captions.get(child).is_ok_and(|tone| tone.is_none_or(|tone| tone.0 != text)) {
+                commands.entity(child).insert(TextTone(text.clone()));
             }
         }
     }

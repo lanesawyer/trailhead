@@ -45,7 +45,7 @@ pub fn icon_menu(commands: &mut Commands, parent: Entity, icon: Icon, hint: impl
 /// Pressing it sends `Activate` from it and closes the menu.
 pub fn menu_item(caption: impl Into<String>, icon: Option<Icon>, danger: bool) -> impl Scene {
     let caption = caption.into();
-    let tone = if danger { token::DANGER } else { token::BUTTON_TEXT };
+    let tone = if danger { token::STATUS_DANGER } else { crate::buttons::BUTTON_TEXT };
     let inside: Box<dyn SceneList> = match icon {
         Some(icon) => Box::new(bsn_list! {
             @icon_text(icon) TextTone({ tone.clone() }) -- @toned_text(caption, tone)

@@ -266,18 +266,22 @@ pub fn connection_chip(
     let reason = status.reason.as_ref().map(|r| r.to_string());
     match connection {
         Connection::Syncing => {
-            (token::WARN, "Syncing", reason.unwrap_or_else(|| "Catching up with the Trailhead server".into()))
+            (token::STATUS_WARN, "Syncing", reason.unwrap_or_else(|| "Catching up with the Trailhead server".into()))
         }
         Connection::Offline => {
-            (token::DANGER, "Offline", reason.unwrap_or_else(|| "Not connected to the Trailhead server".into()))
+            (token::STATUS_DANGER, "Offline", reason.unwrap_or_else(|| "Not connected to the Trailhead server".into()))
         }
         Connection::Live => match factory {
-            FactoryLink::Running => (token::OK, "Live", "Connected to the Trailhead server and the factory".into()),
-            FactoryLink::Unknown => {
-                (token::WARN, "Factory connecting", "Server connected; the factory hasn't been heard from yet".into())
+            FactoryLink::Running => {
+                (token::STATUS_OK, "Live", "Connected to the Trailhead server and the factory".into())
             }
+            FactoryLink::Unknown => (
+                token::STATUS_WARN,
+                "Factory connecting",
+                "Server connected; the factory hasn't been heard from yet".into(),
+            ),
             FactoryLink::Control(state) => (
-                token::WARN,
+                token::STATUS_WARN,
                 match state {
                     FactoryState::Off => "Factory off",
                     FactoryState::Disabled => "Factory disabled",
@@ -288,15 +292,15 @@ pub fn connection_chip(
                 format!("Server connected; the factory is {}", state.label()),
             ),
             FactoryLink::Unreachable => (
-                token::WARN,
+                token::STATUS_WARN,
                 "Factory down",
                 "Server connected; the factory can't be reached, so the map shows its last known state".into(),
             ),
             FactoryLink::TooOld(why) => {
-                (token::WARN, "Factory too old", format!("Server connected; the factory is too old: {why}"))
+                (token::STATUS_WARN, "Factory too old", format!("Server connected; the factory is too old: {why}"))
             }
             FactoryLink::Refused(why) => {
-                (token::WARN, "Factory refused", format!("Server connected; the factory refused Lookout: {why}"))
+                (token::STATUS_WARN, "Factory refused", format!("Server connected; the factory refused Lookout: {why}"))
             }
         },
     }
