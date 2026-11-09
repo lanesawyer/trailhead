@@ -57,13 +57,27 @@ pub fn text_toned(content: impl Into<String>, size: f32, tone: Token) -> impl Sc
 }
 
 /// A label in the monospace face at `size`, in a theme color ([`super::token::TEXT`] for the default one), for text where
-/// columns should line up and every character counts: log lines, ids, code. The face is the system's monospace; the
-/// font is set on the text itself, as the others are.
+/// columns should line up and every character counts: log lines, ids, code. The face is Bevy's built-in one (Fira Mono,
+/// the `default_font` feature), not the system's monospace: finding that needs `system_font_discovery`, which links
+/// fontconfig, and without it the text has no font and lays out 0 tall (TRAIL-1144). The font is set on the text
+/// itself, as the others are.
 pub fn text_mono(content: impl Into<String>, size: f32, tone: Token) -> impl Bundle {
     (
         Text::new(content),
-        TextFont { font: FontSource::monospace(), font_size: FontSize::Px(size), ..default() },
+        TextFont { font: FontSource::default(), font_size: FontSize::Px(size), ..default() },
         TextTone(tone),
         PropagateOver::<TextFont>::default(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mono_text_is_in_the_built_in_face_which_needs_no_font_discovery() {
+        let mut world = World::new();
+        let line = world.spawn(text_mono("12:00:00 INFO  ready", size::SECONDARY, crate::token::TEXT)).id();
+        assert_eq!(world.get::<TextFont>(line).unwrap().font, FontSource::default());
+    }
 }
