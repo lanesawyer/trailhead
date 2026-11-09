@@ -425,7 +425,7 @@ mod tests {
             .unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).await.unwrap();
-        assert!(out.starts_with("HTTP/1.1 408"), "{out}");
+        assert!(out.starts_with("HTTP/1.1 408 Request Timeout\r\n"), "{out}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -435,7 +435,7 @@ mod tests {
         s.write_all(b"GET /v1/gateway/list HTTP/1.1\r\nHost: x\r\n").await.unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).await.unwrap();
-        assert!(out.starts_with("HTTP/1.1 408"), "{out}");
+        assert!(out.starts_with("HTTP/1.1 408 Request Timeout\r\n"), "{out}");
     }
 
     #[tokio::test]

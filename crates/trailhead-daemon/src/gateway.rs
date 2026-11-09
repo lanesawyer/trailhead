@@ -25,9 +25,10 @@ mod policy;
 /// The longest request head the proxy reads.
 const MAX_HEAD: usize = 64 * 1024;
 
-/// How long a client has to send a whole request head, and then how long a request body may sit idle between reads.
-/// Only the request side is bounded: responses stream with no total timeout.
+/// How long a client has to send a whole request head. Only the request side is bounded: responses stream with no
+/// total timeout.
 const HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a request body may sit idle between reads.
 const BODY_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Whether `domains` allow `host`: exact names and `*.` wildcards (subdomains only), trailing dots stripped from
@@ -441,6 +442,7 @@ async fn respond_with(client: &mut TcpStream, status: u16, content_type: &str, b
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         411 => "Length Required",
         413 => "Payload Too Large",
         _ => "Bad Gateway",
