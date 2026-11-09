@@ -2,7 +2,10 @@
 //!
 //! Ported from bevy-data-explorer's `widgets/truncate.rs`.
 
-use crate::text::Size;
+use bevy::prelude::*;
+
+use crate::patch::set_text;
+use crate::text::{Size, size};
 
 /// Rough width of a glyph as a fraction of the font size.
 ///
@@ -36,9 +39,80 @@ pub fn truncate_to_width(text: &str, width: f32, font_size: Size) -> String {
     text.chars().take(keep).collect::<String>() + "\u{2026}"
 }
 
+/// A text cut with an ellipsis to the room its parent leaves it beside its siblings. It holds the whole text: to
+/// change what it says, set `full`, not the `Text`, which is rewritten to fit.
+///
+/// The parent's width has to come from outside it (growing into its row, `min_width: 0`), not from hugging what it
+/// holds, or each cut would narrow the parent and the next frame would cut again.
+#[derive(Component, Clone, PartialEq, Debug)]
+pub struct Truncated {
+    pub full: String,
+    /// The size the text is set at, which the cut is measured by.
+    pub size: Size,
+}
+
+impl Default for Truncated {
+    fn default() -> Self {
+        Truncated { full: String::new(), size: size::BODY }
+    }
+}
+
+/// Cuts each [`Truncated`] text to the room its parent has left once its siblings and the gaps between them are
+/// laid out.
+pub(crate) fn fit_truncated(
+    truncated: Query<(Entity, &Truncated, &ChildOf)>,
+    parents: Query<(&ComputedNode, &Node, &Children)>,
+    nodes: Query<&ComputedNode>,
+    mut texts: Query<&mut Text>,
+) {
+    for (entity, text, parent) in &truncated {
+        let Ok((room, layout, children)) = parents.get(parent.parent()) else { continue };
+        let inset = room.content_inset();
+        let siblings: f32 =
+            children.iter().filter(|c| *c != entity).filter_map(|c| nodes.get(c).ok()).map(|n| n.size.x).sum();
+        let physical = room.size.x - inset.min_inset.x - inset.max_inset.x - siblings;
+        let gap = match layout.column_gap {
+            Val::Px(gap) => gap * children.len().saturating_sub(1) as f32,
+            _ => 0.0,
+        };
+        let width = physical * room.inverse_scale_factor - gap;
+        if room.size.x <= 0.0 {
+            continue;
+        }
+        if let Ok(shown) = texts.get_mut(entity) {
+            set_text(shown, &truncate_to_width(&text.full, width, text.size));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn computed(width: f32) -> ComputedNode {
+        ComputedNode { size: Vec2::new(width, 20.0), inverse_scale_factor: 1.0, ..default() }
+    }
+
+    #[test]
+    fn a_truncated_text_takes_the_room_its_siblings_and_gaps_leave() {
+        let mut app = App::new();
+        app.add_systems(Update, fit_truncated);
+        let row = app.world_mut().spawn((Node { column_gap: px(4), ..default() }, computed(100.0))).id();
+        let full = "Sawyer Suite Tasks and more";
+        let caption = app
+            .world_mut()
+            .spawn((Text::new(full), Truncated { full: full.into(), size: size::BODY }, computed(0.0), ChildOf(row)))
+            .id();
+        app.world_mut().spawn((computed(30.0), ChildOf(row)));
+        app.update();
+        let shown = app.world().get::<Text>(caption).unwrap().0.clone();
+        assert_eq!(shown, truncate_to_width(full, 100.0 - 30.0 - 4.0, size::BODY));
+        assert!(shown.ends_with('\u{2026}'), "{shown}");
+        // Wider, it fits whole again.
+        app.world_mut().entity_mut(row).insert(computed(400.0));
+        app.update();
+        assert_eq!(app.world().get::<Text>(caption).unwrap().0, full);
+    }
     use crate::text::size;
 
     #[test]

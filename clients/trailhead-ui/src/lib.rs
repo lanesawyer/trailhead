@@ -46,7 +46,8 @@
 //!   `ValueChange<Option<Entity>>` on the strip and set its `SelectedTab`.
 //! - A section that opens and closes: [`spawn_accordion`], a pane or a group by [`SectionLevel`]; fill its body, add
 //!   controls to its header with [`spawn_header_button`].
-//! - Text cut to a width with an ellipsis: [`truncate_to_width`], measured by the same estimate as [`width_of`].
+//! - Text cut to a width with an ellipsis: [`truncate_to_width`], measured by the same estimate as [`width_of`]; or
+//!   [`Truncated`] on a text, cut to whatever room its row leaves it.
 //! - A number picked on a track: [`slider`]. Its value is written back for you.
 //! - A search box with a hint while empty and a clear button: [`spawn_search_field`], or
 //!   [`spawn_search_field_filling`] to fill a sidebar; match items with
@@ -135,7 +136,10 @@ pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,
     ModalSlots, open_modal,
 };
-pub use nav::{NavItem, beside_sidebar, nav_heading, nav_item, nav_item_noted, sidebar, sidebar_footer};
+pub use nav::{
+    BesideSidebar, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_sidebar, nav_heading, nav_heading_action,
+    nav_item, nav_item_noted, sidebar, sidebar_footer,
+};
 pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
@@ -151,7 +155,7 @@ pub use spacing::{extent, radius, space, stroke};
 pub use tabs::{TabCaption, tab, tab_strip};
 pub use text::{Size, size, text, text_dim, text_mono, text_toned};
 pub use theme::{BackgroundTone, BorderTone, Surface, TextTone, Theme, Token, palette, token};
-pub use truncate::{truncate_to_width, width_of};
+pub use truncate::{Truncated, truncate_to_width, width_of};
 
 /// Where the kit's per-frame systems run in `Update`: opening and closing accordions, cutting titles and captions to
 /// fit, painting tabs. An app's systems that spawn or change widgets go before it.
@@ -165,6 +169,10 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin))
+            .init_resource::<nav::SidebarWidth>()
+            .add_observer(nav::start_edge_drag)
+            .add_observer(nav::drag_edge)
+            .add_observer(nav::end_edge_drag)
             .add_observer(scroll::on_scroll)
             .add_observer(button_group::on_option)
             .add_observer(bevy::ui_widgets::slider_self_update)
@@ -183,6 +191,9 @@ impl Plugin for UiPlugin {
                     tabs::fit_tabs,
                     tabs::style_tabs,
                     nav::paint_nav_items,
+                    nav::fit_to_sidebar,
+                    nav::show_edge_lines,
+                    truncate::fit_truncated,
                     button_group::paint_groups,
                     hover::paint_hover_tones,
                     buttons::dim_disabled_captions,

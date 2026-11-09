@@ -198,6 +198,7 @@ fn spawn_page(mut commands: Commands) {
         .spawn((
             Name::new("project"),
             ProjectPanel,
+            widgets::BesideSidebar,
             Node {
                 min_width: px(0),
                 min_height: px(0),

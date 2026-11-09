@@ -7,6 +7,8 @@
 pub const BOARD: i32 = 0;
 /// The connect panel along the bottom while not live.
 pub const CONNECT: i32 = 1;
+/// The sidebar's drag edge, half of it over the page beside the sidebar, which would otherwise take its pointer.
+pub const SIDEBAR_EDGE: i32 = 1;
 /// The inspector down the right.
 pub const INSPECTOR: i32 = 2;
 /// Modals: every form and dialog (new task, edit, comment, answer), over a backdrop covering the window.

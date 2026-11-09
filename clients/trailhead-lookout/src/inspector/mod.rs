@@ -33,7 +33,9 @@ use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunUpdate};
 use trailhead_model::{Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, User};
 use uuid::Uuid;
 
-use crate::author::{Act, grade_choices, grade_index, grade_options};
+use crate::author::{
+    Act, grade_choices, grade_index, grade_options, grade_tones, priority_options, priority_tones, status_tones,
+};
 use crate::board::Input;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::{Api, Connection, ConnectionStatus};
@@ -47,8 +49,8 @@ use crate::widgets::{
     ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, bubble, bubble_head, button,
     comment_icon, display, extent, grade_tone, inline_field, inline_text_sized, layer, menu_item, open_modal, panel,
     panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select, select_iconed, size,
-    space, spawn_detail_panes, spawn_icon_menu, status_label, status_tone, text, text_dim, text_input, text_toned,
-    token, tool_button,
+    space, spawn_detail_panes, spawn_icon_menu, status_label, text, text_dim, text_input, text_toned, token,
+    tool_button,
 };
 
 mod compose;
