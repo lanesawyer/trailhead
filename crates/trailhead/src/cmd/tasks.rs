@@ -244,10 +244,15 @@ const FACTORY_NESTED: &[(&str, Kind)] = &[
 /// Rejects a value for a known `factory.<field>` key (or nested path, like `factory.pr.number`) of the wrong kind,
 /// such as `factory.attempt_base=3x` or `factory.attempt_base={"a":1}`, which the factory couldn't read back. A
 /// whole-object `factory={...}` value is checked field by field, and anything but an object or `null` is rejected.
-/// `null` removes a field, so it always passes; other structured fields and unknown keys are left alone.
+/// `null` removes a field, so it always passes; other structured fields and unknown keys are left alone. The check
+/// is client-side and can't see the stored task, so `factory={"pr":{"number":7}}` passes even where there is no `pr`
+/// yet to merge into, and would store a partial one.
 fn check_factory_field(path: &str, value: &Value) -> Result<()> {
     match path.split_once('.') {
-        Some(("factory", field)) => check_factory_leaves(path, field, value),
+        Some(("factory", field)) => {
+            check_factory_prefixes(field)?;
+            check_factory_leaves(path, field, value)
+        }
         None if path == "factory" => match value {
             Value::Null => Ok(()),
             Value::Object(map) => map.iter().try_for_each(|(k, v)| check_factory_leaves(&format!("{path}.{k}"), k, v)),
@@ -255,6 +260,20 @@ fn check_factory_field(path: &str, value: &Value) -> Result<()> {
         },
         _ => Ok(()),
     }
+}
+
+/// Rejects a dotted `field` that goes under a known non-object field, like `attempt_base.a` or `pr.number.x`, which
+/// as a merge patch would replace the scalar with an object.
+fn check_factory_prefixes(field: &str) -> Result<()> {
+    for (i, _) in field.match_indices('.') {
+        let prefix = &field[..i];
+        if let Some((_, kind)) = FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == prefix)
+            && !matches!(kind, Kind::Object)
+        {
+            anyhow::bail!("--meta factory.{prefix} is {}, so factory.{field} can't be set", kind.name());
+        }
+    }
+    Ok(())
 }
 
 /// Checks `value` against the kind of `field` if it's a known path, then descends into an object, so an unknown
@@ -443,6 +462,9 @@ mod tests {
         assert!(bad(r#"factory.attempt_base={"a":1}"#).contains("factory.attempt_base"));
         assert!(bad(r#"factory={"attempt_base":{"a":1}}"#).contains("factory.attempt_base"));
         assert!(bad(r#"factory={"pr":{"number":{}}}"#).contains("factory.pr.number"));
+        assert!(bad("factory.attempt_base.a=1").contains("factory.attempt_base"));
+        assert!(bad("factory.pr.number.x=1").contains("factory.pr.number"));
+        assert!(bad("factory.pr.url.x=1").contains("factory.pr.url"));
         assert!(bad("factory.pr=5").contains("factory.pr"));
         assert!(bad(r#"factory.pr.repo="x""#).contains("factory.pr.repo"));
         assert!(bad(r#"factory={"pr":5}"#).contains("factory.pr"));
