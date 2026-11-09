@@ -629,6 +629,7 @@ async fn worker_infrastructure_failures_keep_counting_across_a_control_plane_res
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::NeedsInput, "parked at max_infra_failures");
     assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+    assert_eq!(task.run.infra_failures.unwrap_or(0), 0, "parking resets the count, so a reopened task starts again");
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task"), "{}", questions[0].body);
