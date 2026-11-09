@@ -127,6 +127,9 @@ pub struct Factory {
     troubled: Mutex<HashMap<String, Trouble>>,
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, u32, Instant)>>,
+    /// Tasks whose last runs all failed in `setup`: how many in a row. Any other outcome clears it, so a broken base
+    /// is only declared when `setup` itself failed twice running (TRAIL-876).
+    setup_failures: Mutex<HashMap<TaskKey, u32>>,
     /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
     /// unchanged grades from them instead of asking the host again (TRAIL-266).
     listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
@@ -252,6 +255,7 @@ impl Factory {
             merge_mode,
             troubled: Mutex::default(),
             setbacks: Mutex::default(),
+            setup_failures: Mutex::default(),
             listed: Mutex::default(),
             updating: Mutex::default(),
             held: Mutex::default(),

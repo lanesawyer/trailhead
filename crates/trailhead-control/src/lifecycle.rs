@@ -315,6 +315,7 @@ impl Factory {
         let api_trouble = matches!(&report.result, RunResult::Failed(reason) if is_transient_api_error(reason));
         if !api_trouble {
             self.setbacks.lock().unwrap().remove(&task.key);
+            self.setup_failures.lock().unwrap().remove(&task.key);
         }
         let infra_failures = if api_trouble { None } else { task.run.infra_failures.filter(|n| *n > 0).map(|_| 0) };
         let update =
@@ -473,7 +474,20 @@ impl Factory {
         let rejected = matches!(error, Error::Rejected(_));
         // A `setup` that fails on a fresh run fails on the base branch itself, so a second failure is proof enough:
         // more retries would only spend `max_infra_failures` on the same compile error (TRAIL-652).
-        let broken_base = matches!(error, Error::SetupFailed(_)) && failures >= SETUP_FAILURES_TO_PARK;
+        // Counted apart from the other infrastructure failures, so it takes two `setup` failures in a row, not one
+        // after some unrelated failure (TRAIL-876).
+        let setup_failures = {
+            let mut counts = self.setup_failures.lock().unwrap();
+            if matches!(error, Error::SetupFailed(_)) {
+                let n = counts.entry(task.key.clone()).or_insert(0);
+                *n += 1;
+                *n
+            } else {
+                counts.remove(&task.key);
+                0
+            }
+        };
+        let broken_base = setup_failures >= SETUP_FAILURES_TO_PARK;
         let park = rejected || broken_base || if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
         tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "infrastructure failure; the attempt doesn't count");
         if park {
@@ -505,7 +519,7 @@ impl Factory {
         }
         if park {
             let question = if broken_base {
-                messages::setup_failed_question(failures, &error.to_string())
+                messages::setup_failed_question(setup_failures, &error.to_string())
             } else if rejected {
                 messages::rejected_question(&error.to_string())
             } else if waiting {
@@ -517,6 +531,7 @@ impl Factory {
                 // Reopened by Lane, it starts again with no wait, as its count does.
                 Ok(()) => {
                     self.setbacks.lock().unwrap().remove(&task.key);
+                    self.setup_failures.lock().unwrap().remove(&task.key);
                 }
                 Err(e) => {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; reconcile will requeue it");
