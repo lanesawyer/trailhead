@@ -65,6 +65,11 @@ pub const DEFAULT_NETWORK: &str = "trailhead-gateway-out";
 /// Where the daemon lives in [`DEFAULT_IMAGE`], whose user is `trailhead`.
 pub const HOME: &str = "/home/trailhead";
 
+/// A program's log under the target's `dir`, quoted for the shell.
+fn program_log(dir: &str, program: &str) -> String {
+    shell_quote(&format!("{dir}/programs/{program}/log"))
+}
+
 /// A Docker sandbox's launch facts: connectors and model calls both go through the gateway container.
 pub fn target() -> Target {
     let gateway = format!("http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1/gateway");
@@ -616,7 +621,7 @@ impl Compute for DockerCompute {
     }
 
     async fn logs(&self, id: &SandboxId, program: &str) -> Result<String> {
-        let log = format!("$HOME/.trailhead/programs/{}/log", shell_quote(program));
+        let log = program_log(&target().dir, program);
         let (_, out) = self.exec(&id.0, None, &format!("tail -n 3000 {log}")).await?;
         Ok(out)
     }
@@ -1062,6 +1067,11 @@ mod tests {
 #[cfg(test)]
 mod target_tests {
     use super::*;
+
+    #[test]
+    fn a_program_log_is_under_the_target_dir() {
+        assert_eq!(program_log(&target().dir, "it's"), r"'/home/trailhead/.trailhead/programs/it'\''s/log'");
+    }
 
     #[test]
     fn a_docker_target_uses_the_gateway_for_models_and_connectors() {
