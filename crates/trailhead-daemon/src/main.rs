@@ -340,6 +340,73 @@ mod tests {
         assert_eq!(executable(&["--claude", "/bin/c"]), std::path::PathBuf::from("/bin/c"));
     }
 
+    fn conns(list: serde_json::Value) -> std::result::Result<Vec<serde_json::Value>, reqwest::Error> {
+        Ok(list.as_array().unwrap().clone())
+    }
+
+    /// A failed fetch of the gateway's list, from a port nothing listens on.
+    async fn failed_list() -> std::result::Result<Vec<serde_json::Value>, reqwest::Error> {
+        Err(reqwest::get("http://127.0.0.1:1").await.unwrap_err())
+    }
+
+    fn identity() -> trailhead_codehost_github::Identity {
+        trailhead_codehost_github::Identity { name: "n".into(), email: "e@example.com".into() }
+    }
+
+    /// What the code host says to a call: `Forbidden` with its reason from `NoCodeHost`, another error from a
+    /// GitHub that can't reach its (unlistened) gateway.
+    async fn title_error(host: std::sync::Arc<dyn trailhead_factory::CodeHost>) -> trailhead_factory::Error {
+        let pr = trailhead_factory::PrRef {
+            repo: trailhead_factory::Repo { owner: "o".into(), name: "r".into() },
+            number: 1,
+            url: String::new(),
+        };
+        host.title(&pr).await.unwrap_err()
+    }
+
+    #[test]
+    fn connection_url_picks_the_provider() {
+        let list = conns(serde_json::json!([
+            {"provider": "github", "gateway_base_url": "http://gw/github"},
+            {"provider": "git", "gateway_base_url": "http://gw/git"},
+            {"provider": "other"},
+        ]))
+        .unwrap();
+        assert_eq!(super::connection_url(&list, "git").as_deref(), Some("http://gw/git"));
+        assert_eq!(super::connection_url(&list, "github").as_deref(), Some("http://gw/github"));
+        assert_eq!(super::connection_url(&list, "other"), None);
+        assert_eq!(super::connection_url(&list, "missing"), None);
+        assert_eq!(super::connection_url(&[], "git"), None);
+    }
+
+    #[tokio::test]
+    async fn workspace_clones_through_the_git_connection_or_anonymously() {
+        let with_git = conns(serde_json::json!([{"provider": "git", "gateway_base_url": "http://gw/git"}]));
+        assert_eq!(super::workspace("w".into(), &with_git).remote_base(), "http://gw/git");
+
+        let github_only = conns(serde_json::json!([{"provider": "github", "gateway_base_url": "http://gw/github"}]));
+        assert_eq!(super::workspace("w".into(), &github_only).remote_base(), "https://github.com");
+        assert_eq!(super::workspace("w".into(), &conns(serde_json::json!([]))).remote_base(), "https://github.com");
+        assert_eq!(super::workspace("w".into(), &failed_list().await).remote_base(), "https://github.com");
+    }
+
+    #[tokio::test]
+    async fn codehost_is_github_only_with_a_github_connection() {
+        let with_github = conns(serde_json::json!([{"provider": "github", "gateway_base_url": "http://127.0.0.1:1"}]));
+        let err = title_error(super::codehost(identity(), &with_github)).await;
+        assert!(!matches!(err, trailhead_factory::Error::Forbidden(_)), "{err:?}");
+
+        let git_only = conns(serde_json::json!([{"provider": "git", "gateway_base_url": "http://gw/git"}]));
+        match title_error(super::codehost(identity(), &git_only)).await {
+            trailhead_factory::Error::Forbidden(why) => assert!(why.contains("no GitHub connector"), "{why}"),
+            e => panic!("{e:?}"),
+        }
+        match title_error(super::codehost(identity(), &failed_list().await)).await {
+            trailhead_factory::Error::Forbidden(why) => assert!(why.contains("couldn't list"), "{why}"),
+            e => panic!("{e:?}"),
+        }
+    }
+
     #[test]
     fn invalid_rust_log_falls_back_to_info() {
         assert_eq!(log_filter(None, Some("foo=notalevel")).to_string(), "info");
