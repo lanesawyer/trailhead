@@ -300,7 +300,8 @@ impl Gateway {
             }
             let resp = match serde_json::from_str::<GatewayRequest>(&line) {
                 Ok(req) => self.handle(req).await,
-                Err(e) => GatewayResponse::Error { message: format!("bad request: {e}") },
+                // Not the serde error: it can quote input, and the input may hold a credential.
+                Err(_) => GatewayResponse::Error { message: "bad request".into() },
             };
             let mut out = serde_json::to_vec(&resp).map_err(std::io::Error::other)?;
             out.push(b'\n');
@@ -1006,5 +1007,31 @@ mod tests {
         assert_eq!(ctl(&socket, &GatewayRequest::Unregister { name: "sb".into() }).await.unwrap(), GatewayResponse::Ok);
         let GatewayResponse::State(state) = ctl(&socket, &GatewayRequest::State).await.unwrap() else { panic!() };
         assert!(state.sandboxes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn control_parse_errors_do_not_echo_input() {
+        use tokio::io::AsyncReadExt;
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("gw.sock");
+        tokio::spawn(Gateway::new().serve_control(UnixListener::bind(&socket).unwrap()));
+        let secret = "sk-ant-hunter2-credential";
+        // An unknown variant, an unknown field, and a wrong-typed credential, each carrying the secret.
+        let lines = [
+            format!(r#"{{"type":"{secret}"}}"#),
+            format!(r#"{{"type":"set_connection","provider":"github","id":"a","upstream":"u","{secret}":1}}"#),
+            format!(
+                r#"{{"type":"set_connection","provider":"github","id":"a","upstream":"u","auth":"{secret}","credential":["{secret}"]}}"#
+            ),
+        ];
+        for line in lines {
+            let mut stream = UnixStream::connect(&socket).await.unwrap();
+            stream.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+            let mut out = String::new();
+            stream.read_to_string(&mut out).await.unwrap();
+            assert!(out.contains("bad request"), "{out}");
+            assert!(!out.contains(secret), "{out}");
+        }
     }
 }
