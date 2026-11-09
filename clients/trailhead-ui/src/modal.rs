@@ -13,6 +13,8 @@
 //!   its first thing to act on, and one with nothing to type into focuses its title.
 //! - **Never taller than the window.** The frame is capped to [`MAX_HEIGHT_VH`] of the window and only the body
 //!   scrolls, with the kit's scrollbar, so the footer (Save, Cancel) stays in view.
+//! - **Inset like a panel.** The dialog's padding is [`space::PANEL_INSET`], not feathers' narrower one, so the body's
+//!   scrollbar sits in it as it does in every panel instead of hanging over the edge (TRAIL-1143).
 //! - **Use.** A marker type implements [`Modal`] (title, width); [`open_modal`] spawns it. Once it has spawned,
 //!   [`ModalSlots`] on the root names the [`ModalBody`] to fill, the [`ModalFooter`] for its buttons and the header's
 //!   tools, for controls beside the X. Close it by
@@ -23,7 +25,7 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::prelude::*;
-use bevy::ui_widgets::{ControlOrientation, RequestClose};
+use bevy::ui_widgets::{ControlOrientation, ModalDialog, RequestClose};
 
 use super::{HintBounds, PanelTitle, PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
 
@@ -175,11 +177,12 @@ fn close_on_escape(
     }
 }
 
-/// Finds a new modal's body and footer, and gives the body its scrollbar.
+/// Finds a new modal's body and footer, gives the body its scrollbar and the dialog a panel's inset for it to sit in.
 #[allow(clippy::too_many_arguments)]
 fn link_slots(
     bodies: Query<Entity, Added<ModalBody>>,
     parents: Query<&ChildOf>,
+    mut dialogs: Query<&mut Node, With<ModalDialog>>,
     roots: Query<(), With<ModalRoot>>,
     footers: Query<Entity, With<ModalFooter>>,
     tools: Query<Entity, With<PanelTools>>,
@@ -192,6 +195,11 @@ fn link_slots(
         let inside = |e: &Entity| parents.iter_ancestors(*e).any(|a| a == root);
         let Some(footer) = footers.iter().find(inside) else { continue };
         let Some(tools) = tools.iter().find(inside) else { continue };
+        if let Some(dialog) = parents.iter_ancestors(body).find(|e| dialogs.contains(*e))
+            && let Ok(mut node) = dialogs.get_mut(dialog)
+        {
+            node.padding = UiRect::all(px(space::PANEL_INSET));
+        }
         if let Ok(holder) = parents.get(body) {
             commands.queue_spawn_scene(scrollbar(body, ControlOrientation::Vertical)).insert(ChildOf(holder.parent()));
         }
@@ -401,6 +409,14 @@ mod tests {
         fn tall(&self) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn the_dialog_is_inset_like_a_panel_so_the_scrollbar_fits_in_its_padding() {
+        let mut app = app();
+        open(&mut app);
+        let dialog = app.world_mut().query_filtered::<&Node, With<ModalDialog>>().single(app.world()).unwrap();
+        assert_eq!(dialog.padding, UiRect::all(px(space::PANEL_INSET)));
     }
 
     #[test]
