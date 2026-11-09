@@ -320,24 +320,28 @@ pub(super) fn layout_task(
         let moves = view.actions.iter().filter_map(|a| if let Action::Status(st) = a { Some(*st) } else { None });
         let statuses: Vec<Status> = std::iter::once(status).chain(moves).collect();
         let options = status_labels(&statuses);
-        let tones = statuses.iter().map(|s| Some(status_tone(*s))).collect();
+        let tones = status_tones(&statuses);
         fields.push((
             "s/fields/status".to_string(),
             Block::Choice { field: Field::Status, options, tones, selected: Some(0), statuses },
         ));
-        let priorities = Priority::ALL.iter().map(|p| format!("P{p}")).collect();
-        let tones = Priority::ALL.iter().map(|p| Some(priority_tone(*p))).collect();
         let selected = view.priority.and_then(|p| Priority::ALL.iter().position(|q| *q == p));
         fields.push((
             "s/fields/priority".to_string(),
-            Block::Choice { field: Field::Priority, options: priorities, tones, selected, statuses: Vec::new() },
+            Block::Choice {
+                field: Field::Priority,
+                options: priority_options(),
+                tones: priority_tones(),
+                selected,
+                statuses: Vec::new(),
+            },
         ));
         fields.push((
             "s/fields/grade".to_string(),
             Block::Choice {
                 field: Field::Grade,
                 options: grade_options(human),
-                tones: grade_choices().map(|g| Some(g.map_or(token::TEXT_DIM, grade_tone))).collect(),
+                tones: grade_tones(),
                 selected: grade_index(view.grade),
                 statuses: Vec::new(),
             },
