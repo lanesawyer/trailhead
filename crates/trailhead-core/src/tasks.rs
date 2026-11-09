@@ -988,12 +988,17 @@ impl Store {
 const STOP_WORDS: &[&str] =
     &["the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use"];
 
-/// The lowercase words of a title that say what it's about.
+/// The lowercase words of a title that say what it's about. Words under three characters are
+/// dropped, except two-letter acronyms written in capitals (CI, UI, DB).
 fn title_words(title: &str) -> std::collections::BTreeSet<String> {
     title
         .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| {
+            let len = w.chars().count();
+            len >= 3 || (len == 2 && w.chars().all(|c| c.is_alphabetic() && c.is_uppercase()))
+        })
         .map(str::to_lowercase)
-        .filter(|w| w.chars().count() >= 3 && !STOP_WORDS.contains(&w.as_str()))
+        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
         .collect()
 }
 
