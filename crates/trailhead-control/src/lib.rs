@@ -141,8 +141,9 @@ pub struct Factory {
     held: Mutex<Option<person::Held>>,
     /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
     host: Arc<Host>,
-    /// The ready tasks last reported as starved by parked sandboxes, so a poll says it once per change.
-    starved: Mutex<Option<Vec<TaskKey>>>,
+    /// The tasks holding the sandboxes last reported as starving ready ones, each with whether it is parked, so a
+    /// poll says it once per change.
+    starved: Mutex<Option<Vec<(TaskKey, bool)>>>,
     /// When each task holding a pooled sandbox was first seen parked, so `release_parked_after` counts from there. In
     /// memory: a restart starts the wait again (TRAIL-601).
     parked_since: Mutex<HashMap<TaskKey, Instant>>,

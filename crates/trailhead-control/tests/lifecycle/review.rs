@@ -363,8 +363,40 @@ async fn a_parked_request_a_person_settled_is_not_reworked_by_reconcile() {
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    let run = r.tracker.task(&key).run;
+    assert!(run.changes_requested.as_ref().is_some_and(|c| c.settled), "parking settles the request");
+    assert_eq!(run.pending_changes(), None);
 
     // A person fixes the PR by hand and moves the task back to review.
+    r.tracker.set_status(&key, Status::InReview);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reworked.is_empty(), "{done:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+}
+
+#[tokio::test]
+async fn a_park_whose_settling_write_was_lost_is_finished_before_a_person_answers() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 1"));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    // The factory's reports in this tick: the review's round and the park's own, which settles the request and resets
+    // the counts, is the third (`fail_after` skips the first two); when that order changes, change the count.
+    r.tracker.fail_after("factory", "report", 2, 1);
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.review_rounds, Some(1), "the reset was lost with the settling");
+    assert!(task.run.changes_requested.as_ref().is_some_and(|c| !c.settled));
+
+    // Reconcile finishes it while the task waits, so a person who answers without pushing isn't second-guessed.
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(0));
+    assert!(task.run.changes_requested.as_ref().is_some_and(|c| c.settled));
+    assert_eq!(task.run.pending_changes(), None);
+
+    // Reopened with nothing pushed: no rework.
     r.tracker.set_status(&key, Status::InReview);
     let done = r.factory.reconcile().await.unwrap();
     assert!(done.reworked.is_empty(), "{done:?}");
@@ -876,4 +908,103 @@ async fn a_reviewer_lost_after_spending_records_the_spend_and_counts_an_infrastr
         task.run.spend
     );
     assert_eq!(task.run.infra_failures, Some(2));
+}
+
+/// A task in review whose conflict rework has run and whose reviewer asked for changes, with the one write that
+/// counts that round (`request_rework`'s report) failing (TRAIL-322). It is the factory's third report in the tick
+/// (`fail_after` skips the first two); when that order changes, change the count.
+async fn interrupted_request_for_changes(r: &Rig, key: &TaskKey) {
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/b.md")));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.tracker.fail_after("factory", "report", 2, 1);
+    r.factory.tick().await.unwrap_err();
+    let task = r.tracker.task(key);
+    assert_eq!(task.run.review_rounds, Some(1), "the interrupted round isn't counted");
+    assert!(task.run.pending_changes().is_some_and(|c| c.conflict), "the conflict's changes are still pending");
+}
+
+async fn conflicted_in_review() -> Rig {
+    let (r, queue) = queued_rig();
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    assert_eq!(r.tracker.task(&key).run.review_rounds, Some(1));
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.task(&key).run.pending_changes().is_some_and(|c| c.conflict));
+    r
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_interrupted_request_for_changes_after_a_conflict_rework_leaves_the_round_uncounted() {
+    let r = conflicted_in_review().await;
+    let key = TaskKey("TRAIL-2".into());
+    interrupted_request_for_changes(&r, &key).await;
+    let reviewers = r.harness.contexts().iter().filter(|c| c.role == Role::Reviewer).count();
+    assert_eq!(reviewers, 2, "the round-2 reviewer ran");
+}
+
+/// The resumed review reuses the interrupted reviewer's name (the round and retries are the same), but `request_rework`
+/// runs after that sub-agent was revoked for good, so creating it fails: one spurious infrastructure failure and a
+/// backoff, after which the review runs under the next retry's name and counts the round once. The wasted failure is a
+/// bug (with `max_infra_failures = 1` it would park the task), pinned here so it isn't mistaken for intended.
+#[tokio::test(start_paused = true)]
+async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_round_once_when_resumed() {
+    let r = conflicted_in_review().await;
+    let key = TaskKey("TRAIL-2".into());
+    interrupted_request_for_changes(&r, &key).await;
+    assert!(r.tracker.is_revoked("factory/trail-2-a2-r2"), "the interrupted reviewer's sub-agent");
+
+    // The tick settles the conflict rework the worker already did, then reconcile owes the review, which can't take
+    // the revoked sub-agent's name again.
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.infra_failures, Some(1), "the revoked name cost an infrastructure failure");
+    assert_eq!(task.run.review_rounds, Some(1), "the round was given back");
+    assert!(task.run.pending_changes().is_some_and(|c| c.conflict), "still the conflict's changes");
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the first infrastructure backoff
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
+    assert!(r.tracker.is_revoked("factory/trail-2-a2-r2-1"), "the retry's reviewer, under the next name");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(2), "the first review and this one, not a third");
+    assert!(task.run.pending_changes().is_some_and(|c| !c.conflict), "the review's changes are now pending");
+}
+
+#[tokio::test]
+async fn reconciling_a_reviewed_task_at_its_reviewed_head_looks_up_the_head_once() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    r.tracker.set_status(&key, Status::InReview);
+
+    let (lookups, verdict_checks) = (r.codehost.head_lookups(), r.codehost.calls("carries_verdict"));
+    r.factory.reconcile().await.unwrap();
+    // The head the PR's state showed is the reviewed one, so the staleness check asks nothing more; the one lookup
+    // left is inside `ci`, as on GitHub.
+    assert_eq!(r.codehost.calls("carries_verdict"), verdict_checks);
+    assert_eq!(r.codehost.head_lookups(), lookups + 1);
+}
+
+#[tokio::test]
+async fn a_request_for_changes_still_pending_is_checked_against_the_head_the_pr_state_showed() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    let pending = task.run.pending_changes().expect("the request is recorded");
+    assert!(pending.attempt == task.run.attempt.unwrap_or(1) && pending.head.is_some(), "{:?}", task.run);
+    r.tracker.set_status(&key, Status::InReview);
+
+    let before = r.codehost.head_lookups();
+    r.factory.reconcile().await.unwrap();
+    // The pending-change check reuses the head from the PR's state, so nothing is looked up for it.
+    assert_eq!(r.codehost.head_lookups(), before);
 }

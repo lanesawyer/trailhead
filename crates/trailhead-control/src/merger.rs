@@ -203,7 +203,7 @@ impl Factory {
         let attempt = task.run.attempt.unwrap_or(0);
         let pushed = task
             .run
-            .pending_changes()
+            .last_changes()
             .is_some_and(|c| !c.conflict && attempt > c.attempt && c.head.as_deref().is_some_and(|h| h != head));
         Ok(pushed.then_some(Rework::Pushed))
     }
@@ -266,6 +266,13 @@ impl Factory {
         }
         match outcome? {
             MergeOutcome::Merged => {
+                // The task's record says what the PR says; the decision was recorded with the earlier message.
+                let merged = MergeDecision { message: merged_message.to_string(), ..decision.clone() };
+                if let Err(e) =
+                    self.tracker.report(&task.key, RunUpdate { merge: Some(merged), ..RunUpdate::default() }).await
+                {
+                    tracing::warn!(task = %task.key.0, error = %e, "couldn't record the merged message");
+                }
                 if let Err(e) = self.say(pr, decision.comment, merged_message).await {
                     tracing::warn!(task = %task.key.0, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
                 }

@@ -49,7 +49,7 @@ impl Factory {
         let _run = self.status.begin(&task.key, RunPhase::Preparing { cold: true });
         let before = shown.run.review_rounds.unwrap_or(0);
         // The re-review after a conflict rework doesn't use a round (TRAIL-221); it does if it asks for changes.
-        let after_conflict = shown.run.pending_changes().is_some_and(|c| c.conflict);
+        let after_conflict = shown.run.last_changes().is_some_and(|c| c.conflict);
         let round = if after_conflict { before } else { before + 1 };
         let retries = shown.run.retries.unwrap_or(0);
         let infra_prior = shown.run.infra_failures;
@@ -160,6 +160,7 @@ impl Factory {
                         attempt,
                         conflict: false,
                         head: reviewed_head_at_request,
+                        settled: false,
                     };
                     let round = before + 1;
                     // While the task is still in review, so the PR says the review asked for changes at any grade.
@@ -308,6 +309,24 @@ impl Factory {
         Ok(())
     }
 
+    /// Hands a parked task's request over to the person it waits for: a fresh count for when they reopen the task
+    /// after sorting it out, a fresh run name (with the counts back at zero the next review would be named for a round
+    /// whose reviewer is already revoked), and the request settled, so that whoever answers or reopens the task isn't
+    /// asked to have it reworked again, pushed or not. One write, and a failure is logged: reconcile repeats it
+    /// for a task still parked with its request unsettled at the limit, which is why it must be idempotent.
+    pub(crate) async fn settle_parked_request(&self, task: &Task, requested: &ChangesRequested) {
+        let fresh = RunUpdate {
+            changes_requested: Some(ChangesRequested { settled: true, ..requested.clone() }),
+            review_rounds: Some(0),
+            conflict_reworks: Some(0),
+            retries: Some(task.run.retries.unwrap_or(0) + 1),
+            ..RunUpdate::default()
+        };
+        if let Err(e) = self.tracker.report(&task.key, fresh).await {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't settle the parked request and reset the counts");
+        }
+    }
+
     /// A review asked for changes: the task stays in review, now with changes requested, and has the review in its
     /// metadata, so the next run starts a fresh sandbox from the PR branch and is told what to fix. The task is parked
     /// instead once `round` reviews have asked for changes, which is when a human should look. Reconcile finishes this
@@ -323,7 +342,7 @@ impl Factory {
             review_rounds: (!conflict).then_some(round),
             reviewed: Some(requested.attempt),
             attempt_base: Some(requested.attempt),
-            changes_requested: Some(requested),
+            changes_requested: Some(requested.clone()),
             ..RunUpdate::default()
         };
         self.tracker.report(&task.key, update).await?;
@@ -339,18 +358,9 @@ impl Factory {
                 messages::review_rework_limit_question(round, max, &reviewer, &body)
             };
             self.tracker.ask(&task.key, &question).await?;
-            // A fresh count for when a human reopens the task after sorting it out, and a fresh run name: with the
-            // counts back at zero the next review would be named for a round whose reviewer is already revoked. Last,
-            // so a reconcile that finishes a park cut short still sees the round that hit the limit.
-            let fresh = RunUpdate {
-                review_rounds: Some(0),
-                conflict_reworks: Some(0),
-                retries: Some(task.run.retries.unwrap_or(0) + 1),
-                ..RunUpdate::default()
-            };
-            if let Err(e) = self.tracker.report(&task.key, fresh).await {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't reset the review and conflict counts");
-            }
+            // Last, so a reconcile that finishes a park cut short still sees the round that hit the limit. If the
+            // write is lost, reconcile retries it while the task waits for a person (`settle_parked_request`).
+            self.settle_parked_request(task, &requested).await;
             return Ok(());
         }
         // The task stays in review: a reviewer's verdict is already its newest review comment, and a conflict or

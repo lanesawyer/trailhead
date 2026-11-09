@@ -342,30 +342,57 @@ impl Factory {
         released
     }
 
-    /// With no place left and nothing running, parked tasks are holding the cap. If ready tasks are waiting, say so
-    /// loudly, once per change in who waits: the queue stalls until a person answers (TRAIL-538).
+    /// With no place left and nothing running, the tasks the sandboxes are held for are what the queue waits on. If
+    /// they are parked and ready tasks are waiting, say so loudly, once per change in who holds: the queue stalls
+    /// until a person answers (TRAIL-538). Holders in setback or otherwise in flight free their place unaided, so
+    /// they're named at info instead (TRAIL-1184).
     async fn warn_if_starved(&self, others: &Others) {
-        let mut waiting: Vec<TaskKey> = match self.ready_graded().await {
-            Ok(ready) => ready.into_iter().map(|t| t.key).filter(|k| !others.contains(k)).collect(),
+        let waiting = match self.ready_graded().await {
+            Ok(ready) => ready.into_iter().filter(|t| !others.contains(&t.key)).count(),
             Err(e) => {
-                tracing::warn!(error = %e, "couldn't list the ready tasks to see whether parked ones starve them");
+                tracing::warn!(error = %e, "couldn't list the ready tasks to see whether held sandboxes starve them");
                 return;
             }
         };
-        waiting.sort();
-        let mut last = self.starved.lock().unwrap();
-        if waiting.is_empty() {
-            *last = None;
-        } else if last.as_ref() != Some(&waiting) {
-            let names: Vec<&str> = waiting.iter().map(|k| k.0.as_str()).collect();
-            tracing::warn!(
-                tasks = names.join(", "),
-                max_sandboxes = self.config.repo.max_sandboxes,
-                "{} ready tasks waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
-                waiting.len()
-            );
-            *last = Some(waiting);
+        let mut holders: Vec<(TaskKey, bool)> = Vec::new();
+        for key in others.0.iter().flatten() {
+            let parked = match self.tracker.show(key).await {
+                Ok(task) => task.status == Status::NeedsInput,
+                Err(e) => {
+                    tracing::warn!(task = %key.0, error = %e, "couldn't look up the task holding a sandbox");
+                    false
+                }
+            };
+            holders.push((key.clone(), parked));
         }
+        holders.sort();
+        let mut last = self.starved.lock().unwrap();
+        if waiting == 0 {
+            *last = None;
+            return;
+        }
+        if last.as_ref() == Some(&holders) {
+            return;
+        }
+        let parked: Vec<&str> = holders.iter().filter(|(_, p)| *p).map(|(k, _)| k.0.as_str()).collect();
+        let max_sandboxes = self.config.repo.max_sandboxes;
+        if parked_fill_repo_cap(parked.len(), max_sandboxes) {
+            tracing::warn!(
+                held_by = parked.join(", "),
+                max_sandboxes,
+                "{waiting} ready tasks waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
+            );
+        } else {
+            let held: Vec<String> = holders
+                .iter()
+                .map(|(k, parked)| {
+                    let retry = self.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
+                    describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
+                })
+                .collect();
+            tracing::info!(max_sandboxes, "{waiting} ready tasks waiting; sandboxes held by {}", held.join(", "));
+        }
+        *last = Some(holders);
     }
 
     /// The ready tasks that are the factory's work, in the tracker's order. Then reworks of open PRs go first within a priority (below). Under a queue that means graded ones: grading a task is
@@ -673,7 +700,7 @@ fn parked_fill_repo_cap(others: usize, max_sandboxes: usize) -> bool {
 /// open (changes requested for a conflict, CI or a review) before fresh tasks, since it is nearly done and goes stale
 /// while it waits (TRAIL-868). The sort is stable, so the tracker's order (due date, age) holds among equals.
 fn in_start_order(mut ready: Vec<Task>) -> Vec<Task> {
-    let rework = |t: &Task| t.changes_requested || (t.run.pr.is_some() && t.run.changes_requested.is_some());
+    let rework = |t: &Task| t.changes_requested || (t.run.pr.is_some() && t.run.pending_changes().is_some());
     ready.sort_by_key(|t| (t.priority, !rework(t)));
     ready
 }
@@ -687,5 +714,26 @@ mod starvation_tests {
         assert!(parked_fill_repo_cap(2, 2));
         assert!(!parked_fill_repo_cap(1, 2), "the host's cap is what's full, and other repos' runs will free it");
         assert!(!parked_fill_repo_cap(0, 2));
+    }
+}
+
+/// How a task holding a sandbox reads in the starvation log: parked, backing off from an infra failure, or running.
+fn describe_holder(key: &str, parked: bool, retry_in: Option<Duration>) -> String {
+    match (parked, retry_in) {
+        (true, _) => format!("{key} (parked)"),
+        (false, Some(wait)) => format!("{key} (retrying in {}s)", wait.as_secs()),
+        (false, None) => format!("{key} (in flight)"),
+    }
+}
+
+#[cfg(test)]
+mod holder_tests {
+    use super::*;
+
+    #[test]
+    fn a_holder_in_setback_is_not_called_parked() {
+        assert_eq!(describe_holder("TRAIL-1087", false, Some(Duration::from_secs(42))), "TRAIL-1087 (retrying in 42s)");
+        assert_eq!(describe_holder("TRAIL-1", false, None), "TRAIL-1 (in flight)");
+        assert_eq!(describe_holder("TRAIL-2", true, None), "TRAIL-2 (parked)");
     }
 }
