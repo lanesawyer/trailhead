@@ -190,7 +190,7 @@ impl GitHub {
     }
 
     async fn read(&self, res: reqwest::Response, call: String) -> Result<(StatusCode, Value, String, Option<String>)> {
-        if let Some(rate) = rate_limit(res.headers()) {
+        if let Some(rate) = rate_limit(res.headers()).filter(|_| is_core(res.headers())) {
             *self.rate.lock().unwrap() = Some(rate);
         }
         let status = res.status();
@@ -301,6 +301,13 @@ impl GitHub {
             self.call(self.request(Method::GET, &path).query(&[("head", head.as_str()), ("state", "open")])).await?;
         Ok(prs.as_array().and_then(|a| a.first()).map(|p| pr_ref(repo, p)))
     }
+}
+
+/// Whether a response counts against the core rate limit, the one that gates this client. GitHub names the pool in
+/// `x-ratelimit-resource`; a response that doesn't say is taken as core. Search (30 a minute) and graphql have
+/// pools of their own, and their readings must not stand in for core's.
+fn is_core(headers: &reqwest::header::HeaderMap) -> bool {
+    headers.get("x-ratelimit-resource").and_then(|v| v.to_str().ok()).is_none_or(|r| r.trim() == "core")
 }
 
 /// The rate limit a response's headers report, if they all do.
