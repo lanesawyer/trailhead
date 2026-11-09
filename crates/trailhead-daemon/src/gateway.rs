@@ -24,6 +24,9 @@ mod policy;
 
 /// The longest request head the proxy reads.
 const MAX_HEAD: usize = 64 * 1024;
+/// How long, and how much, to drain from a client after a plain response before closing.
+const LINGER: std::time::Duration = std::time::Duration::from_secs(1);
+const LINGER_BYTES: usize = 1024 * 1024;
 
 /// Whether `domains` allow `host`: exact names and `*.` wildcards (subdomains only), trailing dots stripped from
 /// both sides, case ignored. An empty list allows nothing.
@@ -415,10 +418,31 @@ async fn pipe_plain(
         tokio::io::copy(&mut upstream_r, &mut client_w).await?;
         client_w.shutdown().await
     };
-    tokio::select! {
+    let done = tokio::select! {
         r = async { tokio::try_join!(upload, download).map(|_| ()) } => r,
-        _ = &mut lease.kill => Ok(()),
+        _ = &mut lease.kill => return Ok(()),
+    };
+    if done.is_ok() {
+        linger(&mut client_r).await;
     }
+    done
+}
+
+/// Reads and discards what the client still sends (a pipelined request, say) for a moment, so
+/// closing the socket doesn't leave unread bytes behind and reset the connection before the
+/// client has read the response. Stops at EOF, after `LINGER_BYTES`, or at `LINGER`.
+async fn linger<R: AsyncRead + Unpin>(client: &mut R) {
+    let drain = async {
+        let mut chunk = [0u8; 8192];
+        let mut total = 0;
+        while total < LINGER_BYTES {
+            match client.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => total += n,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(LINGER, drain).await;
 }
 
 async fn respond(client: &mut TcpStream, status: u16, why: &str) -> std::io::Result<()> {
@@ -867,6 +891,12 @@ mod tests {
         assert!(
             parse_head(b"POST http://a/ HTTP/1.1\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n").is_err()
         );
+    }
+    #[tokio::test]
+    async fn linger_drains_what_the_client_still_sends() {
+        let mut client = std::io::Cursor::new(vec![7u8; 20_000]);
+        linger(&mut client).await;
+        assert_eq!(client.position(), 20_000);
     }
 
     #[tokio::test]
