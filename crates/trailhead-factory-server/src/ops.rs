@@ -21,6 +21,18 @@ const DAEMON_PROGRAM: &str = "trailhead-daemon";
 /// How often `logs --follow` asks for more.
 const FOLLOW_EVERY: Duration = Duration::from_secs(2);
 
+/// How many finished (done or cancelled) tasks `status` lists unless given `--all`.
+const FINISHED_SHOWN: usize = 10;
+
+#[derive(clap::Args, Clone)]
+pub struct StatusOpts {
+    /// List every finished task, not just the most recent few.
+    #[arg(long)]
+    all: bool,
+    #[command(flatten)]
+    opts: Opts,
+}
+
 #[derive(clap::Args, Clone)]
 pub struct LogsOpts {
     /// The task whose sandbox's log to print, e.g. TRAIL-42.
@@ -32,7 +44,8 @@ pub struct LogsOpts {
     opts: Opts,
 }
 
-pub async fn status(opts: &Opts) -> Result<()> {
+pub async fn status(status: &StatusOpts) -> Result<()> {
+    let opts = &status.opts;
     let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
     let (opts, fnox) = resolve_opts(opts, &paths, &std::env::current_dir().map_err(Error::backend)?)?;
     let (_, _, config) = load_config(&opts)?;
@@ -77,7 +90,7 @@ pub async fn status(opts: &Opts) -> Result<()> {
     if let Some(live) = runs {
         print!("{}", render_live(&live.snapshot));
     }
-    print!("{}", render_status(&rows, &tasks, &waiting, config.repo.max_sandboxes));
+    print!("{}", render_status(&rows, &tasks, &waiting, config.repo.max_sandboxes, status.all));
     println!("\nlog file: {} (written by the server's control plane)", crate::logfile::path(&paths.data_dir).display());
     match saved_endpoint_id(&paths.creds()) {
         Some(id) => println!("\nUI endpoint id: {id}  (allow a UI with `trailhead factory allow <its endpoint id>`)"),
@@ -283,7 +296,13 @@ fn render_live(snapshot: &FactorySnapshot) -> String {
 }
 
 /// `waiting` is the ready tasks the factory could start; `max_sandboxes` the repo's cap.
-fn render_status(sandboxes: &[Row], tasks: &[Task], waiting: &[Task], max_sandboxes: usize) -> String {
+fn render_status(
+    sandboxes: &[Row],
+    tasks: &[Task],
+    waiting: &[Task],
+    max_sandboxes: usize,
+    all_finished: bool,
+) -> String {
     use std::fmt::Write;
     let mut out = String::new();
 
@@ -317,13 +336,32 @@ fn render_status(sandboxes: &[Row], tasks: &[Task], waiting: &[Task], max_sandbo
         let _ = writeln!(out, "  {}", task_line(t));
     }
 
-    let mut others: Vec<&Task> = tasks.iter().filter(|t| t.status != Status::InProgress).collect();
+    let (mut finished, mut others): (Vec<&Task>, Vec<&Task>) =
+        tasks.iter().filter(|t| t.status != Status::InProgress).partition(|t| t.status.is_closed());
     others.sort_by(|a, b| a.key.cmp(&b.key));
     let _ = writeln!(out, "\nTasks ({})", others.len());
     for t in others {
         let _ = writeln!(out, "  {}", task_line(t));
     }
+
+    // Finished tasks pile up, so only the newest (highest numbered) are listed unless asked for all.
+    if !finished.is_empty() {
+        finished.sort_by_key(|t| std::cmp::Reverse(key_number(&t.key)));
+        let shown = if all_finished { finished.len() } else { finished.len().min(FINISHED_SHOWN) };
+        let _ = writeln!(out, "\nFinished ({})", finished.len());
+        for t in &finished[..shown] {
+            let _ = writeln!(out, "  {}", task_line(t));
+        }
+        if shown < finished.len() {
+            let _ = writeln!(out, "  ... and {} older (`--all` lists them)", finished.len() - shown);
+        }
+    }
     out
+}
+
+/// The number in a key like TRAIL-42, to order by age.
+fn key_number(key: &TaskKey) -> u64 {
+    key.0.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
 }
 
 fn task_line(t: &Task) -> String {
@@ -475,6 +513,7 @@ mod tests {
             &[task("TRAIL-7", Status::InProgress, running), task("TRAIL-5", Status::InReview, reviewed)],
             &[],
             2,
+            false,
         );
         let w1 = out.find("trailhead-w1 ").unwrap();
         assert!(w1 < out.find("trailhead-w2 ").unwrap(), "{out}");
@@ -484,6 +523,30 @@ mod tests {
         assert!(out.contains("TRAIL-7 [in progress] attempt 2, spend $1.5000, on trailhead-w1"), "{out}");
         assert!(out.contains("TRAIL-5 [in review] attempt 1, spend $0.2500, PR #12 https://x/12"), "{out}");
         assert!(out.contains("last note: checks failed\n"), "{out}");
+    }
+
+    #[test]
+    fn status_lists_only_the_latest_finished_tasks_unless_asked_for_all() {
+        let tasks: Vec<Task> = (1..=12)
+            .map(|n| {
+                task(
+                    &format!("TRAIL-{n}"),
+                    if n % 2 == 0 { Status::Done } else { Status::Cancelled },
+                    Default::default(),
+                )
+            })
+            .chain([task("TRAIL-20", Status::Open, Default::default())])
+            .collect();
+        let out = render_status(&[], &tasks, &[], 2, false);
+        assert!(out.contains("Tasks (1)"), "{out}");
+        assert!(out.contains("Finished (12)"), "{out}");
+        assert!(out.contains("TRAIL-12 ["), "{out}");
+        assert!(out.contains("TRAIL-3 ["), "{out}");
+        assert!(!out.contains("TRAIL-2 ["), "{out}");
+        assert!(out.contains("... and 2 older"), "{out}");
+        let all = render_status(&[], &tasks, &[], 2, true);
+        assert!(all.contains("TRAIL-1 ["), "{all}");
+        assert!(!all.contains("older"), "{all}");
     }
 
     #[test]
@@ -497,10 +560,10 @@ mod tests {
             task("TRAIL-2", Status::NeedsInput, Default::default()),
         ];
         let waiting = [task("TRAIL-3", Status::Open, Default::default())];
-        let out = render_status(&rows(&boxes), &parked, &waiting, 2);
+        let out = render_status(&rows(&boxes), &parked, &waiting, 2, false);
         assert!(out.contains("1 ready tasks waiting; all 2 sandboxes held by parked tasks"), "{out}");
-        assert!(!render_status(&rows(&boxes), &parked, &[], 2).contains("waiting;"));
-        assert!(!render_status(&rows(&boxes), &parked, &waiting, 3).contains("waiting;"));
+        assert!(!render_status(&rows(&boxes), &parked, &[], 2, false).contains("waiting;"));
+        assert!(!render_status(&rows(&boxes), &parked, &waiting, 3, false).contains("waiting;"));
     }
 
     #[test]
@@ -560,7 +623,7 @@ mod tests {
     }
     #[test]
     fn an_empty_factory_says_so() {
-        let out = render_status(&[], &[], &[], 2);
+        let out = render_status(&[], &[], &[], 2, false);
         assert!(out.contains("Sandboxes (0)\n  none"), "{out}");
     }
 }
