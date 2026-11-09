@@ -801,5 +801,8 @@ pub fn api_err(e: trailhead_client::http::Error) -> anyhow::Error {
     match e {
         Error::Api { error, .. } => error.into(),
         Error::Transport(e) => anyhow::Error::new(e).context("request to Trailhead failed"),
+        Error::Decode { status, source } => {
+            anyhow::Error::new(source).context(format!("Trailhead answered {status} but the response didn't decode"))
+        }
     }
 }

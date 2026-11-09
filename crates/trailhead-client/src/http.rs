@@ -79,6 +79,8 @@ pub mod routes {
 pub enum Error {
     /// The request didn't complete, or the body wasn't readable.
     Transport(reqwest::Error),
+    /// The server answered 2xx but the body didn't deserialize: a schema mismatch between client and server, not a network failure.
+    Decode { status: u16, source: reqwest::Error },
     /// The server answered with an error: its HTTP status and the stable code and message.
     Api { status: u16, error: ApiError },
 }
@@ -88,13 +90,13 @@ impl Error {
     pub fn code(&self) -> Option<&str> {
         match self {
             Error::Api { error, .. } => Some(&error.code),
-            Error::Transport(_) => None,
+            Error::Transport(_) | Error::Decode { .. } => None,
         }
     }
 
     pub fn status(&self) -> Option<u16> {
         match self {
-            Error::Api { status, .. } => Some(*status),
+            Error::Api { status, .. } | Error::Decode { status, .. } => Some(*status),
             Error::Transport(_) => None,
         }
     }
@@ -104,6 +106,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Transport(e) => write!(f, "{e}"),
+            Error::Decode { status, source } => write!(f, "{status} response body didn't decode: {source}"),
             Error::Api { status, error } => write!(f, "{status} {error}"),
         }
     }
@@ -246,7 +249,11 @@ impl Client {
         };
         let status = res.status();
         if status.is_success() {
-            return res.json().await.map_err(Error::Transport);
+            return match res.json().await {
+                Ok(v) => Ok(v),
+                Err(e) if e.is_decode() => Err(Error::Decode { status: status.as_u16(), source: e }),
+                Err(e) => Err(Error::Transport(e)),
+            };
         }
         let body: Value = res.json().await.unwrap_or(Value::Null);
         Err(Error::Api { status: status.as_u16(), error: ApiError::from_body(&body) })
@@ -326,5 +333,41 @@ impl Client {
     /// `GET /v1/claims`: the live claims the token holds.
     pub async fn my_claims(&self) -> Result<Vec<HeldClaim>> {
         self.send(self.request(routes::MY_CLAIMS, None)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// Serves one canned response on a local port and returns its base URL.
+    fn serve_once(response: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn an_undecodable_success_body_is_a_decode_error_not_transport() {
+        let base = serve_once(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 7\r\nconnection: close\r\n\r\n{\"x\":1}",
+        );
+        let err = Client::new(base, "t").ready("TRAIL", 1).await.unwrap_err();
+        assert!(matches!(err, Error::Decode { status: 200, .. }), "{err}");
+        assert_eq!(err.status(), Some(200));
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_stays_transport() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let err = Client::new(format!("http://127.0.0.1:{port}"), "t").ready("TRAIL", 1).await.unwrap_err();
+        assert!(matches!(err, Error::Transport(_)), "{err}");
     }
 }
