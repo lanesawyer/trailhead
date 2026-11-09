@@ -391,22 +391,27 @@ impl DockerCompute {
         Ok(())
     }
 
-    /// The size in bytes and the name of the largest `trailhead-checkpoint` image on the host, or `None` if there is
-    /// none or they can't be listed (the check then falls back to the container's own size).
-    async fn largest_checkpoint(&self) -> Option<(u64, String)> {
+    /// The size in bytes and the name of the checkpoint image that sets the sandbox's disk need: the largest of its own
+    /// (a stale image of another sandbox must not hold its runs back), or, while it has none, the largest
+    /// `trailhead-checkpoint` image on the host. `None` if there is none or they can't be listed (the check then falls
+    /// back to the container's own size).
+    async fn largest_checkpoint(&self, id: &SandboxId) -> Option<(u64, String)> {
         let filter = vec![CHECKPOINT_REPO.to_string()];
         let opts = ListImagesOptions {
             filters: Some(HashMap::from([("reference".to_string(), filter)])),
             ..Default::default()
         };
         match self.docker.list_images(Some(opts)).await {
-            Ok(images) => images
-                .iter()
-                .map(|i| {
-                    let name = i.repo_tags.iter().find(|t| t.starts_with(CHECKPOINT_REPO)).unwrap_or(&i.id);
-                    (i.size.max(0) as u64, name.clone())
-                })
-                .max_by_key(|(size, _)| *size),
+            Ok(images) => {
+                let sized: Vec<(Option<&str>, u64, String)> = images
+                    .iter()
+                    .map(|i| {
+                        let name = i.repo_tags.iter().find(|t| t.starts_with(CHECKPOINT_REPO)).unwrap_or(&i.id);
+                        (i.labels.get(CHECKPOINT_OF).map(String::as_str), i.size.max(0) as u64, name.clone())
+                    })
+                    .collect();
+                pick_checkpoint(&id.0, sized)
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "couldn't list checkpoint images to size the disk a run needs");
                 None
@@ -617,8 +622,8 @@ impl Compute for DockerCompute {
     }
 
     /// Fails with [`Error::Unavailable`], for the control plane to wait out, when the sandbox's disk (the Docker
-    /// engine's) has less free than [`disk_needed`] for the larger of its filesystem and the biggest checkpoint image
-    /// on the host, so a run doesn't start only to fail partway through a build or a checkpoint.
+    /// engine's) has less free than [`disk_needed`] for the larger of its filesystem and its own biggest checkpoint image
+    /// (the host's biggest while it has none), so a run doesn't start only to fail partway through a build or a checkpoint.
     async fn preflight(&self, id: &SandboxId) -> Result<()> {
         let (code, out) = self.exec(&id.0, None, "df -Pk /").await?;
         let Some(free) = (code == 0).then(|| free_bytes(&out)).flatten() else {
@@ -631,9 +636,9 @@ impl Compute for DockerCompute {
         let opts = InspectContainerOptions { size: true };
         let info = self.docker.inspect_container(&id.0, Some(opts)).await.map_err(docker_err)?;
         let fs = info.size_root_fs.unwrap_or(0).max(0) as u64;
-        // A new sandbox's filesystem is small, but its checkpoint after prepare is not: size the need by the largest
-        // checkpoint image the host holds too.
-        let checkpoint = self.largest_checkpoint().await;
+        // A new sandbox's filesystem is small, but its checkpoint after prepare is not: size the need by its own
+        // largest checkpoint image, or the host's largest while it has none.
+        let checkpoint = self.largest_checkpoint(id).await;
         let size = checkpoint.as_ref().map_or(fs, |(big, _)| fs.max(*big));
         let need = disk_needed(self.config.min_free_bytes, size);
         if free < need {
@@ -705,6 +710,19 @@ fn image_changes(sandbox: &str, note: &str, config: Option<&ContainerConfig>) ->
         }
     }
     out
+}
+
+/// The largest of `images` (the sandbox each is a checkpoint of, its size and its name) made by `sandbox`, or else the
+/// largest of all of them.
+fn pick_checkpoint(sandbox: &str, images: Vec<(Option<&str>, u64, String)>) -> Option<(u64, String)> {
+    let largest = |own: bool| {
+        images
+            .iter()
+            .filter(|(of, _, _)| !own || *of == Some(sandbox))
+            .max_by_key(|(_, size, _)| *size)
+            .map(|(_, size, name)| (*size, name.clone()))
+    };
+    largest(true).or_else(|| largest(false))
 }
 
 /// The free disk a sandbox whose filesystem is `size` bytes needs before a run: its checkpoint is imported as
@@ -960,6 +978,18 @@ mod tests {
         assert!(both.contains("filesystem 300 MiB, largest checkpoint 800 MiB, image cp:1"), "{both}");
         let none = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, None);
         assert!(none.contains("filesystem 300 MiB, no checkpoint image"), "{none}");
+    }
+
+    #[test]
+    fn the_disk_need_follows_the_sandboxs_own_checkpoint_before_the_hosts_largest() {
+        let images = vec![
+            (Some("old"), 900, "cp:old".to_string()),
+            (Some("sb"), 100, "cp:a".to_string()),
+            (Some("sb"), 200, "cp:b".to_string()),
+        ];
+        assert_eq!(pick_checkpoint("sb", images.clone()), Some((200, "cp:b".into())));
+        assert_eq!(pick_checkpoint("new", images), Some((900, "cp:old".into())), "falls back to the host's largest");
+        assert_eq!(pick_checkpoint("sb", vec![]), None);
     }
 
     #[test]
