@@ -468,27 +468,27 @@ pub fn plan(
     };
     let key = task.map(|t| t.key.as_str());
     let version = task.map(|t| t.version);
-    let path = |tail: &str| format!("/v1/tasks/{}{tail}", key.unwrap_or_default());
+    let key = TaskKey(key.unwrap_or_default().to_string());
+    let update = |update: TaskUpdate| Call::UpdateTask { key: key.clone(), update };
     Some(match action {
-        Action::Release => Request::new(Method::POST, path("/release"), None, None),
-        Action::Cancel => Request::new(Method::PATCH, path(""), Some(json!({"status": Status::Cancelled})), version),
-        Action::Status(st) => Request::new(Method::PATCH, path(""), Some(json!({"status": st})), version),
-        Action::Grade(g) => Request::new(Method::PATCH, path(""), Some(json!({"grade": g})), version),
-        Action::Resolve(comment) => Request::new(Method::POST, format!("/v1/comments/{comment}/resolve"), None, None),
+        Action::Release => Request::new(Call::Release(key), None),
+        Action::Cancel => {
+            Request::new(update(TaskUpdate { status: Some(Status::Cancelled), ..Default::default() }), version)
+        }
+        Action::Status(st) => Request::new(update(TaskUpdate { status: Some(*st), ..Default::default() }), version),
+        Action::Grade(g) => Request::new(update(TaskUpdate { grade: Some(*g), ..Default::default() }), version),
+        Action::Resolve(comment) => Request::new(Call::ResolveComment { id: comment.clone(), answer: None }, None),
         Action::Comment | Action::Menu => return None,
         Action::Undo => {
             let Subject::Task(id) = subject else { return None };
-            Request::new(Method::POST, "/v1/undo", Some(json!({"event_id": latest.get(id)?})), None)
+            Request::new(Call::Undo(Undo { event_id: *latest.get(id)? }), None)
         }
         Action::Revert(hours) => {
             let actor = match subject {
-                Subject::Agent(id) => id.clone(),
-                Subject::Task(id) => {
-                    input.claims.iter().find(|c| c.task_id.to_string() == *id).map(|c| c.holder_id.to_string())?
-                }
+                Subject::Agent(id) => id.parse().ok()?,
+                Subject::Task(id) => input.claims.iter().find(|c| c.task_id.to_string() == *id).map(|c| c.holder_id)?,
             };
-            let body = json!({"actor_id": actor, "since": rfc3339(now - hours * 3600)});
-            Request::new(Method::POST, "/v1/revert", Some(body), None)
+            Request::new(Call::Revert(Revert { actor_id: actor, since: rfc3339(now - hours * 3600) }), None)
         }
     })
 }
@@ -702,24 +702,30 @@ mod tests {
         let t = Subject::Task(sid("t7"));
         let p = |a: &Action| plan(a, f.input(), &latest(), &t, 1_700_000_000).unwrap();
         let r = p(&Action::Release);
-        assert_eq!((r.method, r.path.as_str(), r.if_match), (Method::POST, "/v1/tasks/TRAIL-7/release", None));
+        assert_eq!(
+            (r.call.method(), r.call.path().as_str(), r.if_match),
+            (Method::POST, "/v1/tasks/TRAIL-7/release", None)
+        );
         let r = p(&Action::Cancel);
-        assert_eq!((r.method, r.path.as_str(), r.if_match), (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4)));
-        assert_eq!(r.body, Some(json!({"status": "cancelled"})));
-        assert_eq!(p(&Action::Status(Status::Open)).body, Some(json!({"status": "open"})));
+        assert_eq!(
+            (r.call.method(), r.call.path().as_str(), r.if_match),
+            (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4))
+        );
+        assert_eq!(r.call.body(), Some(json!({"status": "cancelled"})));
+        assert_eq!(p(&Action::Status(Status::Open)).call.body(), Some(json!({"status": "open"})));
         let r = p(&Action::Resolve(sid("c1")));
-        assert_eq!((r.path, r.body), (format!("/v1/comments/{}/resolve", sid("c1")), None));
-        assert_eq!(p(&Action::Undo).body, Some(json!({"event_id": 41})));
+        assert_eq!((r.call.path(), r.call.body()), (format!("/v1/comments/{}/resolve", sid("c1")), None));
+        assert_eq!(p(&Action::Undo).call.body(), Some(json!({"event_id": 41})));
         // The window lives in the dropdown, so every revert captions the same.
         assert_eq!(Action::Revert(1).label(), Action::Revert(72).label());
         let r = p(&Action::Revert(1));
         assert_eq!(
-            (r.path.as_str(), r.body),
+            (r.call.path().as_str(), r.call.body()),
             ("/v1/revert", Some(json!({"actor_id": sid("a1"), "since": "2023-11-14T21:13:20Z"})))
         );
         // From the agent itself.
         let r = plan(&Action::Revert(24), f.input(), &latest(), &Subject::Agent(sid("a1")), 1_700_000_000).unwrap();
-        assert_eq!(r.body.unwrap()["since"], "2023-11-13T22:13:20Z");
+        assert_eq!(r.call.body().unwrap()["since"], "2023-11-13T22:13:20Z");
         // No event to undo.
         assert!(plan(&Action::Undo, f.input(), &HashMap::new(), &t, 0).is_none());
     }

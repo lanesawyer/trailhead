@@ -8,12 +8,14 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use reqwest::Method;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::net::TcpListener;
+use trailhead_client::http::{Call, Client, TaskUpdate};
 use trailhead_core::{Ctx, NewProject, NewTask, Principal, Store};
 use trailhead_lookout::commands::*;
 use trailhead_lookout::connection::{Connection, SendNet};
 use trailhead_lookout::net::NetCommand;
+use trailhead_model::TaskKey;
 
 // ---- the Bevy side ----
 
@@ -30,7 +32,7 @@ fn set(app: &mut App, state: Connection) {
 }
 
 fn submit(app: &mut App, source: Entity) {
-    let request = Request::new(Method::PATCH, "/v1/tasks/TRAIL-1", Some(json!({"title": "x"})), Some(3));
+    let request = Request::new(retitle_call("x"), Some(3));
     app.world_mut().write_message(Submit { source, request });
 }
 
@@ -78,7 +80,7 @@ fn the_answer_goes_back_to_the_control_that_sent_it() {
     let (sent, _) = step(&mut app);
     assert_eq!(sent.len(), 2);
     let request = &sent[0].2;
-    assert_eq!((request.if_match, request.method.clone()), (Some(3), Method::PATCH));
+    assert_eq!((request.if_match, request.call.method()), (Some(3), Method::PATCH));
     assert_ne!(sent[0].2.key, sent[1].2.key);
 
     reply(&mut app, sent[1].0, 1, Ok(Outcome::Conflict { current_version: Some(4), message: "stale".into() }));
@@ -188,8 +190,7 @@ impl Rig {
     }
 
     async fn run(&self, token: &str, request: &Request) -> Result<Outcome, String> {
-        let http = reqwest::Client::new();
-        execute(&http, &format!("http://{}", self.server), token, request).await
+        execute(&Client::new(format!("http://{}", self.server), token), request).await
     }
 
     async fn title(&self) -> Value {
@@ -199,8 +200,13 @@ impl Rig {
     }
 }
 
+fn retitle_call(title: &str) -> Call {
+    let update = TaskUpdate { title: Some(title.into()), ..Default::default() };
+    Call::UpdateTask { key: TaskKey("TRAIL-1".into()), update }
+}
+
 fn retitle(title: &str, if_match: Option<i64>) -> Request {
-    Request::new(Method::PATCH, "/v1/tasks/TRAIL-1", Some(json!({ "title": title })), if_match)
+    Request::new(retitle_call(title), if_match)
 }
 
 #[tokio::test]
@@ -242,9 +248,8 @@ async fn a_retry_the_server_already_applied_gets_the_same_answer_and_applies_not
 #[tokio::test]
 async fn a_connection_that_cannot_be_made_is_worth_retrying() {
     let rig = Rig::new().await;
-    let http = reqwest::Client::new();
     let gone = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
-    let out = execute(&http, &format!("http://{gone}"), &rig.token, &retitle("x", None)).await;
+    let out = execute(&Client::new(format!("http://{gone}"), &rig.token), &retitle("x", None)).await;
     assert!(out.is_err());
 }
 

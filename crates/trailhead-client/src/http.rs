@@ -27,10 +27,10 @@ impl Route {
         Route { method, path }
     }
 
-    /// The path with its `{task}` parameter filled in.
-    fn url(&self, task: Option<&TaskKey>) -> String {
-        match task {
-            Some(t) => self.path.replace("{task}", &t.0),
+    /// The path with its one parameter (`{task}` or `{id}`) filled in.
+    fn url(&self, param: Option<&str>) -> String {
+        match param {
+            Some(p) => self.path.replace("{task}", p).replace("{id}", p),
             None => self.path.to_string(),
         }
     }
@@ -50,10 +50,26 @@ pub mod routes {
     pub const CLAIM: Route = Route::new(Method::POST, "/v1/tasks/{task}/claim");
     pub const RENEW: Route = Route::new(Method::POST, "/v1/tasks/{task}/renew");
     pub const RELEASE: Route = Route::new(Method::POST, "/v1/tasks/{task}/release");
+    pub const RESOLVE_COMMENT: Route = Route::new(Method::POST, "/v1/comments/{id}/resolve");
+    pub const UNDO: Route = Route::new(Method::POST, "/v1/undo");
+    pub const REVERT: Route = Route::new(Method::POST, "/v1/revert");
 
     /// All of them.
-    pub fn all() -> [Route; 9] {
-        [READY, LIST_TASKS, CREATE_TASK, SHOW_TASK, UPDATE_TASK, ADD_COMMENT, CLAIM, RENEW, RELEASE]
+    pub fn all() -> [Route; 12] {
+        [
+            READY,
+            LIST_TASKS,
+            CREATE_TASK,
+            SHOW_TASK,
+            UPDATE_TASK,
+            ADD_COMMENT,
+            CLAIM,
+            RENEW,
+            RELEASE,
+            RESOLVE_COMMENT,
+            UNDO,
+            REVERT,
+        ]
     }
 }
 
@@ -97,29 +113,42 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// `POST /v1/tasks`.
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct NewTask {
     pub project: String,
     pub title: String,
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<Priority>,
+    /// The key of the task this one goes under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Only a human can create a task with a grade.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grade: Option<Grade>,
 }
 
 /// `PATCH /v1/tasks/{task}`: only the fields set are sent.
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct TaskUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub grade: Option<Grade>,
+    pub priority: Option<Priority>,
+    /// `Some(None)` sends `null`, which clears the grade.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grade: Option<Option<Grade>>,
     /// Merged into the task's metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
 
 /// `POST /v1/tasks/{task}/comments`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NewComment {
     pub kind: CommentKind,
     pub body: String,
@@ -132,6 +161,84 @@ pub struct NewComment {
 impl NewComment {
     pub fn new(kind: CommentKind, body: impl Into<String>) -> NewComment {
         NewComment { kind, body: body.into(), verdict: None, model: None }
+    }
+}
+
+/// `POST /v1/undo`: reverts one event.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Undo {
+    pub event_id: i64,
+}
+
+/// `POST /v1/revert`: reverts what one actor did since a time (humans only).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Revert {
+    pub actor_id: Uuid,
+    /// RFC 3339.
+    pub since: String,
+}
+
+/// A write as a value a caller can hold, compare and send later: Lookout queues these as commands. [`Client::request_for`]
+/// builds its request, for the caller to add headers to (`If-Match`, `Idempotency-Key`) and send.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Call {
+    CreateTask(NewTask),
+    UpdateTask {
+        key: TaskKey,
+        update: TaskUpdate,
+    },
+    AddComment {
+        key: TaskKey,
+        comment: NewComment,
+    },
+    /// Resolves the comment with this id, with the answer when it is a question.
+    ResolveComment {
+        id: String,
+        answer: Option<String>,
+    },
+    Release(TaskKey),
+    Undo(Undo),
+    Revert(Revert),
+}
+
+impl Call {
+    fn route(&self) -> (Route, Option<&str>) {
+        match self {
+            Call::CreateTask(_) => (routes::CREATE_TASK, None),
+            Call::UpdateTask { key, .. } => (routes::UPDATE_TASK, Some(&key.0)),
+            Call::AddComment { key, .. } => (routes::ADD_COMMENT, Some(&key.0)),
+            Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, Some(id)),
+            Call::Release(key) => (routes::RELEASE, Some(&key.0)),
+            Call::Undo(_) => (routes::UNDO, None),
+            Call::Revert(_) => (routes::REVERT, None),
+        }
+    }
+
+    /// The JSON body, if the endpoint takes one.
+    pub fn body(&self) -> Option<Value> {
+        fn json<T: Serialize>(v: &T) -> Value {
+            serde_json::to_value(v).expect("a request body serializes")
+        }
+        match self {
+            Call::CreateTask(b) => Some(json(b)),
+            Call::UpdateTask { update, .. } => Some(json(update)),
+            Call::AddComment { comment, .. } => Some(json(comment)),
+            Call::ResolveComment { answer: Some(a), .. } => Some(serde_json::json!({ "answer": a })),
+            Call::ResolveComment { answer: None, .. } | Call::Release(_) => None,
+            Call::Undo(b) => Some(json(b)),
+            Call::Revert(b) => Some(json(b)),
+        }
+    }
+
+    /// The path this call goes to, e.g. `/v1/tasks/TRAIL-1`.
+    pub fn path(&self) -> String {
+        let (route, param) = self.route();
+        route.url(param)
+    }
+
+    /// The method this call uses.
+    pub fn method(&self) -> Method {
+        self.route().0.method
     }
 }
 
@@ -181,8 +288,25 @@ impl Client {
         Client { http, base: base.into().trim_end_matches('/').to_string(), token: token.into() }
     }
 
+    /// A client that sends over `http`, which the caller has set up (timeouts, TLS) its own way.
+    pub fn with_http(http: reqwest::Client, base: impl Into<String>, token: impl Into<String>) -> Client {
+        Client { http, base: base.into().trim_end_matches('/').to_string(), token: token.into() }
+    }
+
     fn request(&self, route: Route, task: Option<&TaskKey>) -> RequestBuilder {
-        self.http.request(route.method.clone(), format!("{}{}", self.base, route.url(task))).bearer_auth(&self.token)
+        let url = format!("{}{}", self.base, route.url(task.map(|t| t.0.as_str())));
+        self.http.request(route.method.clone(), url).bearer_auth(&self.token)
+    }
+
+    /// The request for a [`Call`], with its body, ready for the caller to add headers to and send.
+    pub fn request_for(&self, call: &Call) -> RequestBuilder {
+        let (route, param) = call.route();
+        let req = self.http.request(route.method.clone(), format!("{}{}", self.base, route.url(param)));
+        let req = req.bearer_auth(&self.token);
+        match call.body() {
+            Some(body) => req.json(&body),
+            None => req,
+        }
     }
 
     async fn send<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<T> {
@@ -258,5 +382,23 @@ impl Client {
     /// `POST /v1/tasks/{task}/release`.
     pub async fn release(&self, key: &TaskKey) -> Result<()> {
         self.send::<Value>(self.request(routes::RELEASE, Some(key)).json(&serde_json::json!({}))).await.map(drop)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_call_names_its_endpoint_and_body() {
+        let key = TaskKey("TRAIL-1".into());
+        let clear = TaskUpdate { grade: Some(None), ..Default::default() };
+        let call = Call::UpdateTask { key: key.clone(), update: clear };
+        assert_eq!((call.method(), call.path()), (Method::PATCH, "/v1/tasks/TRAIL-1".to_string()));
+        assert_eq!(call.body(), Some(serde_json::json!({"grade": null})));
+        assert_eq!(Call::Release(key).body(), None);
+        let resolve = Call::ResolveComment { id: "c1".into(), answer: Some("yes".into()) };
+        assert_eq!(resolve.path(), "/v1/comments/c1/resolve");
+        assert_eq!(resolve.body(), Some(serde_json::json!({"answer": "yes"})));
     }
 }

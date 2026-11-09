@@ -13,9 +13,9 @@
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
-use reqwest::Method;
-use serde_json::{Value, json};
-use trailhead_model::{Grade, Priority, Status, Task};
+use trailhead_client::http::{Call, NewTask, TaskUpdate};
+
+use trailhead_model::{Grade, Priority, Status, Task, TaskKey};
 
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
@@ -167,44 +167,42 @@ pub fn request(open: &Open) -> Result<Request, String> {
             let Some(project) = project_of(parent) else {
                 return Err("give the parent task's key, e.g. TRAIL-102".into());
             };
-            let mut body = json!({
-                "project": project,
-                "title": title,
-                "description": d.description,
-                "priority": d.priority,
-                "parent": parent,
-            });
-            if let Some(grade) = d.grade {
-                body["grade"] = json!(grade);
-            }
-            Ok(Request::new(Method::POST, "/v1/tasks", Some(body), None))
+            let new = NewTask {
+                project: project.into(),
+                title: title.into(),
+                description: d.description.clone(),
+                priority: Some(d.priority),
+                parent: Some(parent.into()),
+                grade: d.grade,
+            };
+            Ok(Request::new(Call::CreateTask(new), None))
         }
         Target::Edit { key, version } => {
             let o = &open.original;
-            let mut patch = serde_json::Map::new();
+            let mut patch = TaskUpdate::default();
             if d.title.trim().is_empty() {
                 return Err("a task needs a title".into());
             }
             if d.title.trim() != o.title {
-                patch.insert("title".into(), json!(d.title.trim()));
+                patch.title = Some(d.title.trim().to_string());
             }
             if d.description != o.description {
-                patch.insert("description".into(), json!(d.description));
+                patch.description = Some(d.description.clone());
             }
             if d.priority != o.priority {
-                patch.insert("priority".into(), json!(d.priority));
+                patch.priority = Some(d.priority);
             }
             if d.status != o.status {
-                patch.insert("status".into(), json!(d.status));
+                patch.status = Some(d.status);
             }
             if d.grade != o.grade {
                 // `null` clears it.
-                patch.insert("grade".into(), json!(d.grade));
+                patch.grade = Some(d.grade);
             }
-            if patch.is_empty() {
+            if patch == TaskUpdate::default() {
                 return Err("nothing changed".into());
             }
-            Ok(Request::new(Method::PATCH, format!("/v1/tasks/{key}"), Some(Value::Object(patch)), Some(*version)))
+            Ok(Request::new(Call::UpdateTask { key: TaskKey(key.clone()), update: patch }, Some(*version)))
         }
     }
 }
@@ -677,6 +675,8 @@ mod tests {
     use crate::fixture::{sid, task_json};
     use crate::mirror::MirrorPlugin;
     use crate::sync::SyncItem;
+    use reqwest::Method;
+    use serde_json::{Value, json};
 
     fn task() -> Value {
         task_json(json!({"id": "t1", "key": "TRAIL-7", "title": "old", "description": "a\nb", "priority": 2,
@@ -687,8 +687,8 @@ mod tests {
         Open::edit(&serde_json::from_value(task.clone()).unwrap())
     }
 
-    fn body(r: &Request) -> &Value {
-        r.body.as_ref().unwrap()
+    fn body(r: &Request) -> Value {
+        r.call.body().unwrap()
     }
 
     #[test]
@@ -699,10 +699,10 @@ mod tests {
         open.draft.description = "line 1\nline 2".into();
         open.draft.priority = Priority::ALL[0];
         let r = request(&open).unwrap();
-        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::POST, "/v1/tasks", None));
+        assert_eq!((r.call.method(), r.call.path().as_str(), r.if_match), (Method::POST, "/v1/tasks", None));
         assert_eq!(
             body(&r),
-            &json!({"project": "TRAIL", "title": "Do it", "description": "line 1\nline 2", "priority": 1,
+            json!({"project": "TRAIL", "title": "Do it", "description": "line 1\nline 2", "priority": 1,
                     "parent": "TRAIL-102"})
         );
         open.draft.parent = "nope".into();
@@ -716,8 +716,11 @@ mod tests {
         open.draft.description = "a\nb\nc".into();
         open.draft.status = Status::Cancelled;
         let r = request(&open).unwrap();
-        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4)));
-        assert_eq!(body(&r), &json!({"description": "a\nb\nc", "status": "cancelled"}));
+        assert_eq!(
+            (r.call.method(), r.call.path().as_str(), r.if_match),
+            (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4))
+        );
+        assert_eq!(body(&r), json!({"description": "a\nb\nc", "status": "cancelled"}));
         open.draft.title = "  ".into();
         assert_eq!(request(&open).unwrap_err(), "a task needs a title");
     }
@@ -728,14 +731,14 @@ mod tests {
         use trailhead_model::CommentKind;
         assert!(compose_request("TRAIL-7", CommentKind::Note, None, "  ").is_err());
         let r = compose_request("TRAIL-7", CommentKind::Handoff, None, "hello\nthere").unwrap();
-        assert_eq!(r.path, "/v1/tasks/TRAIL-7/comments");
-        assert_eq!(body(&r), &json!({"kind": "handoff", "body": "hello\nthere"}));
+        assert_eq!(r.call.path(), "/v1/tasks/TRAIL-7/comments");
+        assert_eq!(body(&r), json!({"kind": "handoff", "body": "hello\nthere"}));
 
         let question = ("c9".to_string(), "which db?".to_string());
         assert!(compose_request("TRAIL-7", CommentKind::Note, Some(&question), "").is_err());
         let r = compose_request("TRAIL-7", CommentKind::Note, Some(&question), "sqlite").unwrap();
-        assert_eq!((r.method.clone(), r.path.as_str()), (Method::POST, "/v1/comments/c9/resolve"));
-        assert_eq!(body(&r), &json!({"answer": "sqlite"}));
+        assert_eq!((r.call.method(), r.call.path().as_str()), (Method::POST, "/v1/comments/c9/resolve"));
+        assert_eq!(body(&r), json!({"answer": "sqlite"}));
     }
 
     #[test]
@@ -807,10 +810,10 @@ mod tests {
         assert_eq!(request(&open).unwrap_err(), "nothing changed");
         open.draft.grade = Grade::new(4);
         let r = request(&open).unwrap();
-        assert_eq!((r.path.as_str(), r.if_match), ("/v1/tasks/TRAIL-7", Some(4)));
-        assert_eq!(body(&r), &json!({"grade": 4}));
+        assert_eq!((r.call.path().as_str(), r.if_match), ("/v1/tasks/TRAIL-7", Some(4)));
+        assert_eq!(body(&r), json!({"grade": 4}));
         open.draft.grade = None;
-        assert_eq!(body(&request(&open).unwrap()), &json!({"grade": null}));
+        assert_eq!(body(&request(&open).unwrap()), json!({"grade": null}));
     }
 
     #[test]

@@ -170,7 +170,7 @@ impl Tracker for RestTracker {
     }
 
     async fn raise_grade(&self, key: &TaskKey, grade: Grade) -> Result<()> {
-        self.patch(key, TaskUpdate { grade: Some(grade), ..TaskUpdate::default() }).await
+        self.patch(key, TaskUpdate { grade: Some(Some(grade)), ..TaskUpdate::default() }).await
     }
 
     async fn record_verdict(&self, key: &TaskKey, verdict: &Verdict) -> Result<()> {
@@ -211,6 +211,7 @@ impl Tracker for RestTracker {
             title: title.to_string(),
             description: description.to_string(),
             priority,
+            ..NewTask::default()
         };
         self.client.create_task(&new).await.map_err(error)
     }

@@ -12,8 +12,8 @@
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
-use reqwest::Method;
 use serde_json::Value;
+use trailhead_client::http::{Call, Client};
 
 use crate::connection::{Connection, SendNet};
 use crate::net::NetCommand;
@@ -25,12 +25,10 @@ pub const MAX_ATTEMPTS: u32 = 5;
 pub struct CommandId(pub u64);
 
 /// One request to the API. Its `key` is fixed for the life of the command, so every retry carries the same one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Request {
-    pub method: Method,
-    /// Under `/v1`, e.g. `/v1/tasks/TRAIL-1`.
-    pub path: String,
-    pub body: Option<Value>,
+    /// What to send: the endpoint and its typed body.
+    pub call: Call,
     /// The version the control saw, sent as `If-Match`.
     pub if_match: Option<i64>,
     pub key: String,
@@ -38,8 +36,8 @@ pub struct Request {
 
 impl Request {
     /// A request with a fresh idempotency key.
-    pub fn new(method: Method, path: impl Into<String>, body: Option<Value>, if_match: Option<i64>) -> Request {
-        Request { method, path: path.into(), body, if_match, key: new_key() }
+    pub fn new(call: Call, if_match: Option<i64>) -> Request {
+        Request { call, if_match, key: new_key() }
     }
 }
 
@@ -231,16 +229,10 @@ fn requeue_sent(mut outbox: ResMut<Outbox>) {
 
 /// Makes the request and reads the answer. `Err` is a failure to get one (connection, timeout, or the server still
 /// working on an earlier try with this key), which is worth sending again.
-pub async fn execute(http: &reqwest::Client, base: &str, token: &str, request: &Request) -> Result<Outcome, String> {
-    let mut req = http
-        .request(request.method.clone(), format!("{base}{}", request.path))
-        .bearer_auth(token)
-        .header("Idempotency-Key", &request.key);
+pub async fn execute(api: &Client, request: &Request) -> Result<Outcome, String> {
+    let mut req = api.request_for(&request.call).header("Idempotency-Key", &request.key);
     if let Some(version) = request.if_match {
         req = req.header("If-Match", format!("\"{version}\""));
-    }
-    if let Some(body) = &request.body {
-        req = req.json(body);
     }
     let res = req.send().await.map_err(|e| e.to_string())?;
     let status = res.status();

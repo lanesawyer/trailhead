@@ -384,8 +384,8 @@ mod tests {
         assert_eq!(app.world().get::<Control>(source), Some(&Control::Busy));
         let sent: Vec<_> = app.world_mut().resource_mut::<Messages<Submit>>().drain().collect();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].request.path, "/v1/tasks/TRAIL-8");
-        assert_eq!(sent[0].request.body, Some(json!({"status": "in_progress"})));
+        assert_eq!(sent[0].request.call.path(), "/v1/tasks/TRAIL-8");
+        assert_eq!(sent[0].request.call.body(), Some(json!({"status": "in_progress"})));
     }
 
     #[test]
@@ -540,15 +540,18 @@ mod tests {
         let sent: Vec<Submit> = app.world_mut().resource_mut::<Messages<Submit>>().drain().collect();
         assert_eq!(sent.len(), 1);
         let r = &sent[0].request;
-        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::PATCH, "/v1/tasks/TRAIL-8", Some(1)));
-        assert_eq!(r.body, Some(json!({"grade": 3})));
+        assert_eq!(
+            (r.call.method(), r.call.path().as_str(), r.if_match),
+            (Method::PATCH, "/v1/tasks/TRAIL-8", Some(1))
+        );
+        assert_eq!(r.call.body(), Some(json!({"grade": 3})));
         assert_eq!(app.world().get::<Control>(source), Some(&Control::Busy));
 
         // Clearing sends null.
         app.world_mut().trigger(Picked { entity: select, index: 0 });
         app.update();
         let sent: Vec<Submit> = app.world_mut().resource_mut::<Messages<Submit>>().drain().collect();
-        assert_eq!(sent[0].request.body, Some(json!({"grade": null})));
+        assert_eq!(sent[0].request.call.body(), Some(json!({"grade": null})));
 
         // The server's refusal is kept on the control; the task's grade, and so the dropdown, stays as it was.
         app.world_mut().write_message(CommandDone {

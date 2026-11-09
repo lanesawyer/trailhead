@@ -32,7 +32,7 @@ bevy = { version = "0.20", default-features = false, features = [
     "x11",
 ] }
 trailhead-ui.workspace = true
-trailhead-client.workspace = true
+trailhead-client = { workspace = true, features = ["http"] }
 trailhead-model.workspace = true
 trailhead-wire.workspace = true
 iroh.workspace = true

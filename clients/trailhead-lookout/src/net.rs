@@ -892,8 +892,8 @@ impl Net {
         let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
             return reply(Err("not connected".into()));
         };
-        let (http, token) = (self.http.clone(), token.clone());
-        tokio::spawn(async move { reply(commands::execute(&http, &base, &token, &request).await) });
+        let api = trailhead_client::http::Client::with_http(self.http.clone(), base, token.clone());
+        tokio::spawn(async move { reply(commands::execute(&api, &request).await) });
     }
 
     /// Searches on its own task, like [`Self::request`], and says so if it can't.

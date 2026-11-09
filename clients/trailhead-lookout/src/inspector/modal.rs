@@ -446,14 +446,14 @@ mod tests {
             sent(app).remove(0)
         };
         let release = press(&mut app, Action::Release);
-        assert_eq!(release.request.path, "/v1/tasks/TRAIL-7/release");
+        assert_eq!(release.request.call.path(), "/v1/tasks/TRAIL-7/release");
         assert_eq!(app.world().get::<Control>(release.source), Some(&Control::Busy));
         let cancel = press(&mut app, Action::Cancel);
-        assert_eq!(cancel.request.body, Some(json!({"status": "cancelled"})));
-        assert_eq!(press(&mut app, Action::Undo).request.path, "/v1/undo");
+        assert_eq!(cancel.request.call.body(), Some(json!({"status": "cancelled"})));
+        assert_eq!(press(&mut app, Action::Undo).request.call.path(), "/v1/undo");
         let revert = press(&mut app, Action::Revert(6));
-        assert_eq!(revert.request.path, "/v1/revert");
-        assert_eq!(revert.request.body.as_ref().unwrap()["actor_id"], json!(sid("a1")));
+        assert_eq!(revert.request.call.path(), "/v1/revert");
+        assert_eq!(revert.request.call.body().as_ref().unwrap()["actor_id"], json!(sid("a1")));
         assert_eq!(revert.source, release.source, "the menu's items share the one note beside it");
         *app.world_mut().get_mut::<Control>(revert.source).unwrap() = Control::Refused("not yours".into());
         settle(&mut app);
