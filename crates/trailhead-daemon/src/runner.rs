@@ -218,8 +218,10 @@ impl Runner {
                 }
             }
         };
+        // What the checks found, kept here so a failure after them doesn't lose it.
+        let mut ran = Vec::new();
         let finished = tokio::select! {
-            done = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge, &events) => done,
+            done = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge, &events, &mut ran) => done,
             () = beating => unreachable!("heartbeats don't end"),
             () = renewing => unreachable!("renewals don't end"),
         };
@@ -235,7 +237,7 @@ impl Runner {
                 {
                     tracing::warn!(task = %key, error = %e, "couldn't release the task");
                 }
-                (RunResult::Failed(messages::finishing_failed(&e)), vec![])
+                (RunResult::Failed(messages::finishing_failed(&e)), ran)
             }
         };
         Ok(RunReport { result, checks, usage })
@@ -441,6 +443,7 @@ impl Runner {
         start: &str,
         merge: Merge,
         events: &EventSink,
+        ran: &mut Vec<CheckResult>,
     ) -> Result<(RunResult, Vec<CheckResult>)> {
         let key = &req.task.key;
         match outcome {
@@ -478,6 +481,7 @@ impl Runner {
                     _ = cancel.notified() => return Err(Error::Cancelled),
                     done = self.checks(&req.base_branch, &req.required_checks) => done,
                 };
+                ran.clone_from(&checks);
                 if let Some(failed) = checks.iter().find(|c| !c.passed) {
                     let reason = messages::check_failed_reason(&failed.name);
                     let note = messages::checks_failed_note(&checks);
