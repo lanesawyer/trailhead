@@ -761,3 +761,25 @@ async fn a_task_holds_one_pooled_sandbox_so_a_stale_label_doesnt_fill_the_cap() 
     let ran = r.factory.tick().await.unwrap();
     assert!(ran.iter().any(|(t, _)| t.key == next), "the other task started");
 }
+
+#[tokio::test]
+async fn taking_a_parked_task_off_its_queue_frees_its_place() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Ambiguous", "");
+    r.tracker.set_grade(&key, 3);
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(busy(&r.compute), ["trailhead-w1"]);
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+
+    let next = r.tracker.add_subtask(&queue, "Next", "");
+    r.tracker.set_grade(&next, 3);
+    assert!(r.factory.tick().await.unwrap().is_empty(), "the parked task holds the one place");
+
+    r.tracker.detach(&key);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == next), "the next task started in the released place");
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "the detached task is left to its new owner");
+}
