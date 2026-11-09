@@ -20,8 +20,6 @@ use crate::{Opts, computes, load_config, resolve_opts, saved_endpoint_id, surfac
 const DAEMON_PROGRAM: &str = "trailhead-daemon";
 /// How often `logs --follow` asks for more.
 const FOLLOW_EVERY: Duration = Duration::from_secs(2);
-/// How many of a printed log's last lines `--follow` looks for again in the next fetch.
-const OVERLAP_LINES: usize = 5;
 
 #[derive(clap::Args, Clone)]
 pub struct LogsOpts {
@@ -197,21 +195,27 @@ fn find_sandbox<'a>(task: &Task, sandboxes: &'a [Sandbox]) -> Option<&'a Sandbox
         .or_else(|| sandboxes.iter().find(|s| s.labels.get(label::TASK) == Some(&task.key.0)))
 }
 
-/// What `log` adds to `printed`. The log is a window of its last lines, so the part already printed may have scrolled
-/// off its start: find the printed log's last few lines in the new one and take what follows them.
+/// What `log` adds to `printed`. The log is a window of its last events, so the start of what was printed may have
+/// scrolled off, and the window can start partway through a line (an event is whatever one pipe read returned). If the
+/// new log still begins with everything printed, the window hasn't scrolled and the rest is new, however repetitive the
+/// lines. Otherwise take the smallest scroll that makes the rest of the printed log the start of the new one, so
+/// repeated lines never make a whole copy of them look already printed. In a full window of identical lines the
+/// smallest scroll reads as "nothing new": that can't be told from a real "nothing new" without a cursor, and
+/// under-printing heartbeats beats duplicating them.
 fn new_output<'a>(printed: &str, log: &'a str) -> &'a str {
-    if printed.is_empty() {
-        return log;
+    if let Some(rest) = log.strip_prefix(printed) {
+        return rest;
     }
-    let lines: Vec<&str> = printed.split_inclusive('\n').collect();
-    // Fewer lines when the window has already scrolled past the older ones.
-    for n in (1..=OVERLAP_LINES.min(lines.len())).rev() {
-        let tail = lines[lines.len() - n..].concat();
-        if let Some(at) = log.rfind(&tail) {
-            return &log[at + tail.len()..];
+    for at in 1..printed.len() {
+        if !printed.is_char_boundary(at) {
+            continue;
+        }
+        if let Some(new) = log.strip_prefix(&printed[at..]) {
+            return new;
         }
     }
-    if log == printed { "" } else { log }
+    // Nothing in common (the log was restarted): print it all.
+    log
 }
 
 /// A sandbox as `status` lists it, whether read from compute labels or from the control plane.
@@ -405,6 +409,14 @@ mod tests {
         assert_eq!(new_output(printed, "3\n4\n5\n6\n7\n8\n"), "7\n8\n");
         // Nothing in common (the log was restarted): print it all.
         assert_eq!(new_output("old\n", "fresh\n"), "fresh\n");
+        // Repeated lines: a growing window's new copies are new, and an unchanged one prints nothing.
+        assert_eq!(new_output("hb\nhb\n", "hb\nhb\nhb\n"), "hb\n");
+        assert_eq!(new_output("x\nhb\nhb\n", "x\nhb\nhb\nhb\nhb\n"), "hb\nhb\n");
+        assert_eq!(new_output("x\nhb\nhb\n", "x\nhb\nhb\n"), "");
+        // A scrolled window ending in repeats still finds the smallest scroll.
+        assert_eq!(new_output("a\nb\nhb\n", "b\nhb\nhb\n"), "hb\n");
+        // The window starts partway through a line.
+        assert_eq!(new_output("abc\nd\n", "c\nd\ne\n"), "e\n");
     }
 
     #[test]
