@@ -1,6 +1,6 @@
 use trailhead_factory::{
-    BranchUpdate, CiState, Error, MergeDecision, MergeMode, MergeOutcome, Merged, MergedBy, PrGrade, PrRef, PrState,
-    Result, RunUpdate, Status, Task, TaskKey, VerdictKind,
+    BranchUpdate, CiState, Error, HISTORY_LIMIT, MergeDecision, MergeMode, MergeOutcome, Merged, MergedBy, PrGrade,
+    PrRef, PrState, Result, RunUpdate, Said, Status, Task, TaskKey, VerdictKind,
 };
 
 use tokio::time::Instant;
@@ -135,6 +135,7 @@ impl Factory {
             refused: None,
             comment: prev.as_ref().and_then(|d| d.comment),
             message: String::new(),
+            history: prev.as_ref().map(|d| d.history.clone()).unwrap_or_default(),
         };
         // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
         if verdict.approve {
@@ -179,7 +180,9 @@ impl Factory {
         });
         if prev.as_ref() != Some(&decision) {
             if !merging && merge_mode != MergeMode::Off && prev.as_ref().is_none_or(|d| d.message != decision.message) {
-                decision.comment = Some(self.say(pr, decision.comment, &decision.message).await?);
+                push_said(&mut decision.history, &decision.message);
+                let body = messages::status_comment(&decision.message, &decision.history);
+                decision.comment = Some(self.say(pr, decision.comment, &body).await?);
             }
             if decision.problem.is_some() && prev.as_ref().is_none_or(|d| d.problem != decision.problem) {
                 self.tracker.note(key, decision.problem.as_deref().unwrap_or_default()).await?;
@@ -283,13 +286,15 @@ impl Factory {
         match outcome? {
             MergeOutcome::Merged => {
                 // The task's record says what the PR says; the decision was recorded with the earlier message.
-                let merged = MergeDecision { message: merged_message.to_string(), ..decision.clone() };
+                let mut merged = MergeDecision { message: merged_message.to_string(), ..decision.clone() };
+                push_said(&mut merged.history, merged_message);
+                let body = messages::status_comment(&merged.message, &merged.history);
                 if let Err(e) =
                     self.tracker.report(&task.key, RunUpdate { merge: Some(merged), ..RunUpdate::default() }).await
                 {
                     tracing::warn!(task = %task.key.0, error = %e, "couldn't record the merged message");
                 }
-                if let Err(e) = self.say(pr, decision.comment, merged_message).await {
+                if let Err(e) = self.say(pr, decision.comment, &body).await {
                     tracing::warn!(task = %task.key.0, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
                 }
                 let commit = match codehost.pr_state(pr).await? {
@@ -372,4 +377,12 @@ impl Factory {
         }
         Ok(())
     }
+}
+
+/// Adds `message`, said now, to a status comment's `history`, which keeps only the latest `HISTORY_LIMIT`.
+fn push_said(history: &mut Vec<Said>, message: &str) {
+    let at = jiff::Timestamp::now().strftime("%Y-%m-%d %H:%M UTC").to_string();
+    history.push(Said { at, message: message.to_string() });
+    let extra = history.len().saturating_sub(HISTORY_LIMIT);
+    history.drain(..extra);
 }

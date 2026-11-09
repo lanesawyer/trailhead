@@ -189,6 +189,20 @@ pub struct MergeDecision {
     pub comment: Option<u64>,
     /// What was last said on the PR about this, so it's said once per change.
     pub message: String,
+    /// What the status comment has said, oldest first and capped at `HISTORY_LIMIT`, so the comment can list when
+    /// the decision changed.
+    #[serde(default)]
+    pub history: Vec<Said>,
+}
+
+/// How many statuses the merger's status comment lists in its History.
+pub const HISTORY_LIMIT: usize = 8;
+
+/// One status the merger said on the PR, and when (UTC, to the minute).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Said {
+    pub at: String,
+    pub message: String,
 }
 
 /// A merged PR: who merged it, which PR, and the commit it became.
