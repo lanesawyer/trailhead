@@ -903,6 +903,17 @@ async fn a_warm_sandbox_that_fails_prepare_is_destroyed_and_the_next_task_gets_a
     assert_eq!(r.compute.checkpoints("trailhead-w1").len(), 1, "built from scratch, not restored: {fresh:?}");
 }
 
+#[tokio::test]
+async fn a_new_sandbox_that_fails_prepare_is_destroyed_and_its_daemon_forgotten() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Hits the broken checkout", "");
+    r.daemon.fail_prepares(1, "git clone failed");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("git clone failed"), "{err}");
+    assert!(r.compute.get("trailhead-w1").is_none(), "the sandbox is destroyed");
+    assert_eq!(r.daemon.forgotten().len(), 1, "the daemon connection is forgotten with the sandbox");
+}
+
 fn with_setup() -> Rig {
     rig_with(&CONFIG.replace("[checks]\n", "[checks]\nsetup = \"cargo build --all-targets\"\n"))
 }
