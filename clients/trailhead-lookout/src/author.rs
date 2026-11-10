@@ -968,7 +968,7 @@ mod tests {
             control: trailhead_factory::status::ControlState::Up,
             queue: vec!["TRAIL-102".into(), "TRAIL-685".into(), "OPS-3".into()],
             last_error: None,
-            human_grades: Vec::new(),
+            human_grades: None,
             seq: 1,
         };
         factory.repos.insert("o/r".into(), state);
@@ -1240,7 +1240,7 @@ mod tests {
             control: trailhead_factory::status::ControlState::Up,
             queue: queues.iter().map(|q| q.to_string()).collect(),
             last_error: None,
-            human_grades: Vec::new(),
+            human_grades: None,
             seq: 1,
         };
         app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), state);

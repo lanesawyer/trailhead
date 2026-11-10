@@ -641,7 +641,7 @@ mod tests {
             runs: vec![],
             holding: None,
             targets: Vec::new(),
-            human_grades: Vec::new(),
+            human_grades: None,
             queue: Vec::new(),
             seq: 4,
         };

@@ -90,8 +90,8 @@ pub struct RepoState {
     pub queue: Vec<String>,
     /// Unix seconds and the message.
     pub last_error: Option<(i64, String)>,
-    /// The grades whose gate wants a person.
-    pub human_grades: Vec<Grade>,
+    /// The grades whose gate wants a person; `None` when the factory didn't say.
+    pub human_grades: Option<Vec<Grade>>,
     /// The last event applied, or the snapshot's.
     pub seq: u64,
 }
@@ -127,12 +127,13 @@ impl FactoryStatus {
     }
 
     /// The grades whose gate wants a person, as the factory says: every repo's, or the default table's (3 and 4) until
-    /// a snapshot has said.
+    /// a repo has said. A repo that says none need a person is believed.
     pub fn human_grades(&self) -> Vec<Grade> {
-        if self.repos.is_empty() {
+        let said: Vec<&Vec<Grade>> = self.repos.values().filter_map(|r| r.human_grades.as_ref()).collect();
+        if said.is_empty() {
             return Grade::ALL.into_iter().filter(|g| g.get() >= 3).collect();
         }
-        Grade::ALL.into_iter().filter(|g| self.repos.values().any(|r| r.human_grades.contains(g))).collect()
+        Grade::ALL.into_iter().filter(|g| said.iter().any(|r| r.contains(g))).collect()
     }
 
     /// The queue tasks the factory works, as its repos report them, each once.
@@ -403,7 +404,7 @@ mod tests {
             runs: vec![],
             holding: None,
             targets: Vec::new(),
-            human_grades: Vec::new(),
+            human_grades: None,
             queue: Vec::new(),
             seq,
         };
@@ -496,9 +497,13 @@ mod tests {
         let g = |n| Grade::new(n).unwrap();
         assert_eq!(app.world().resource::<FactoryStatus>().human_grades(), [g(3), g(4)]);
         let FactoryUpdate::Snapshot(mut repos) = snapshot(1, vec![]) else { unreachable!() };
-        repos[0].snapshot.human_grades = vec![g(2), g(4)];
-        send(&mut app, [FactoryUpdate::Snapshot(repos)]);
+        assert_eq!(app.world().resource::<FactoryStatus>().human_grades(), [g(3), g(4)]);
+        repos[0].snapshot.human_grades = Some(vec![g(2), g(4)]);
+        send(&mut app, [FactoryUpdate::Snapshot(repos.clone())]);
         assert_eq!(app.world().resource::<FactoryStatus>().human_grades(), [g(2), g(4)]);
+        repos[0].snapshot.human_grades = Some(Vec::new());
+        send(&mut app, [FactoryUpdate::Snapshot(repos)]);
+        assert!(app.world().resource::<FactoryStatus>().human_grades().is_empty());
     }
 
     #[test]
