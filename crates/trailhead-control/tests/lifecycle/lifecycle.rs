@@ -1136,6 +1136,39 @@ async fn a_breach_park_finished_when_the_sandbox_cant_be_cut_off_destroys_it_and
 }
 
 #[tokio::test]
+async fn a_breach_park_finished_when_the_sandbox_cant_be_cut_off_or_destroyed_parks_and_a_later_reconcile_destroys_it()
+{
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.tracker.fail_next("factory/trail-1-a1", TrackerOp::Ask, 1);
+    assert!(r.factory.run_task(&r.tracker.task(&key)).await.is_err());
+    // Both the cut-off that reconcile repeats and the destroy that follows it fail.
+    r.compute.fail("trailhead-w1", "set_labels");
+    r.compute.fail("trailhead-w1", "destroy");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "still parked");
+    assert_eq!(task.run.spend, Some(Usd::dollars(6.0)), "counted once");
+    assert!(task.run.worker_breach.as_ref().is_some_and(|b| b.parked && b.stuck));
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("being torn down"), "{}", questions[0].body);
+    assert!(!questions[0].body.contains("was destroyed"), "{}", questions[0].body);
+    assert!(r.compute.get("trailhead-w1").is_some(), "the destroy failed, so the sandbox is still live");
+
+    // Once the sandbox answers again, the next reconcile destroys it and leaves the park alone.
+    r.compute.heal("trailhead-w1");
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.destroyed.contains(&"trailhead-w1".to_string()), "{done:?}");
+    assert!(done.breached.is_empty(), "{done:?}");
+    assert!(r.compute.get("trailhead-w1").is_none());
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "still parked");
+}
+
+#[tokio::test]
 async fn a_breached_sandbox_that_couldnt_be_destroyed_is_destroyed_by_a_later_reconcile_while_parked() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Expensive", "");
