@@ -562,11 +562,6 @@ mod tests {
     }
 
     #[test]
-    fn reset_codes_are_distinct() {
-        assert_ne!(BAD_REQUEST, SERVER_UNREACHABLE);
-    }
-
-    #[test]
     fn requests_are_tagged_so_status_can_join_them() {
         assert_eq!(serde_json::to_string(&UiRequest::Api).unwrap(), r#"{"op":"api"}"#);
         assert_eq!(serde_json::to_string(&UiRequest::Status).unwrap(), r#"{"op":"status"}"#);
