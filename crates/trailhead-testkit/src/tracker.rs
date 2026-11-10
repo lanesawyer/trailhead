@@ -41,6 +41,8 @@ struct State {
     finish_unapproved_forbidden: bool,
     /// Whether `create_sub_agent` fails with a plain error, not `Forbidden`.
     sub_agents_fail: bool,
+    /// The message `create_sub_agent` is refused with as `Rejected`, a permanent refusal.
+    sub_agents_rejected: Option<String>,
     /// How many times each task has been read with `show`.
     shows: HashMap<TaskKey, usize>,
     renews: HashMap<TaskKey, usize>,
@@ -172,6 +174,11 @@ impl FakeTracker {
     /// Makes `create_sub_agent` fail (or heal) with an error that isn't `Forbidden`, as a whole-tracker outage does.
     pub fn fail_sub_agents(&self, fails: bool) {
         self.state.lock().unwrap().sub_agents_fail = fails;
+    }
+
+    /// Makes `create_sub_agent` refuse for good with `Error::Rejected` carrying `message`.
+    pub fn reject_sub_agents(&self, message: &str) {
+        self.state.lock().unwrap().sub_agents_rejected = Some(message.to_string());
     }
 
     fn inject(&self, op: TrackerOp) -> Result<()> {
@@ -753,6 +760,9 @@ impl Tracker for FakeTracker {
         self.check_live()?;
         let full = format!("{}/{name}", self.agent);
         let mut s = self.state.lock().unwrap();
+        if let Some(message) = &s.sub_agents_rejected {
+            return Err(Error::Rejected(message.clone()));
+        }
         if s.sub_agents_fail {
             return Err(Error::Other("injected sub-agent failure".into()));
         }
