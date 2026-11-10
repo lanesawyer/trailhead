@@ -78,6 +78,8 @@ pub struct Host {
     pause_logged: Mutex<Option<i64>>,
     /// Every repo's queue task keys, so a factory can tell a run re-parented out of its own queue from another repo's.
     queues: Mutex<HashSet<String>>,
+    /// The projects some repo works without a queue, i.e. whole: nothing in them can sit outside a queue.
+    queueless_projects: Mutex<HashSet<String>>,
     /// The stray runs already warned about, so each is logged once.
     strays_logged: Mutex<HashSet<String>>,
 }
@@ -266,6 +268,9 @@ impl Factory {
         targets.sort_by(|a, b| (a.target.priority, &a.target.name).cmp(&(b.target.priority, &b.target.name)));
         assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
         host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
+        if config.repo.queue.is_empty() {
+            host.queueless_projects.lock().unwrap().insert(config.repo.project.clone());
+        }
         let merge_mode = Mutex::new(config.merge.mode);
         let status = StatusBoard::new();
         status.human_grades(human_grades(&config));

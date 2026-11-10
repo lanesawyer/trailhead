@@ -1367,3 +1367,29 @@ async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
     assert_eq!(task.status, Status::InReview);
     assert_eq!(task.run.merging.as_deref(), Some(""));
 }
+
+#[tokio::test]
+async fn no_stray_is_warned_about_when_a_sibling_repo_works_the_project_without_a_queue() {
+    let r = rig().await;
+    let q = r.task("Beta's queue").await;
+    let host = Host::new(&HostConfig::default());
+    let _queueless = Factory::new(
+        FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap(),
+        Arc::new(r.compute.clone()),
+        Arc::new(r.tracker.clone()),
+        Arc::new(FakeProvider::new(1)),
+        r.daemon.clone(),
+        host.clone(),
+    );
+    let beta = factory_for(&r, "beta", &q, host);
+
+    // The queueless repo's run sits under no queue, but it is that repo's own, not a stray.
+    let theirs = r.task("Alpha's task").await;
+    with_run(&r, &theirs).await;
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    beta.reconcile().await.unwrap();
+    assert!(!logs.text().contains(&theirs.0), "{}", logs.text());
+}
