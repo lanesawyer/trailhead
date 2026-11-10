@@ -874,6 +874,25 @@ async fn creating_an_agent_emits_an_event_that_undo_leaves_alone() {
 }
 
 #[tokio::test]
+async fn changes_only_skips_agent_creation_so_undo_last_reaches_the_real_change() {
+    let env = Env::new().await;
+    let t = env.task("before the agent").await;
+    env.store.create_agent(&env.human, "worker").await.unwrap();
+    let filter = EventFilter {
+        actor_id: Some(env.human.actor_id()),
+        newest_first: true,
+        changes_only: true,
+        limit: Some(1),
+        ..Default::default()
+    };
+    let last = env.store.list_events(&env.human, filter).await.unwrap().pop().unwrap();
+    assert_eq!((last.kind.as_str(), last.entity.as_str()), ("task.created", "task"));
+    assert_eq!(last.task_id.as_ref().map(|i| i.to_string()), Some(t.id.to_string()));
+    let report = env.store.undo_batch(&env.human, last.batch_id).await.unwrap();
+    assert!(!report.reverted.is_empty());
+}
+
+#[tokio::test]
 async fn delegated_reviewers_can_approve() {
     let env = Env::new().await;
     let worker = env.agent("worker").await;
