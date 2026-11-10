@@ -1,3 +1,5 @@
+//! Laying the inspector out: the blocks a view is made of, and spawning and dressing them.
+
 use super::*;
 use crate::widgets::Size;
 

@@ -1,3 +1,5 @@
+//! The inspector's data: what a view holds, the actions it offers, and building it from fetched facts.
+
 use super::*;
 
 /// One thing the inspector can do.
