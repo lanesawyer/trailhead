@@ -9,7 +9,7 @@ use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use trailhead_core::{Ctx, NewProject, Principal, Store};
 use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{
@@ -24,7 +24,7 @@ use trailhead_wire::ui::{LogFeed, RepoFeed, StatusFeed, StatusFrame, UI_ALPN, Ui
 use trailhead_wire::{read_frame, write_frame};
 
 /// One repo, "o/r", with an idle sandbox, whose later events the test sends.
-struct TestFeed(broadcast::Sender<Sequenced>, Arc<std::sync::Mutex<Option<FactoryState>>>);
+struct TestFeed(broadcast::Sender<Sequenced>, Arc<std::sync::Mutex<Option<FactoryState>>>, watch::Sender<()>);
 
 fn sandbox(name: &str, state: SandboxState) -> SandboxStatus {
     SandboxStatus { name: name.into(), target: None, state, task: None, role: None, warm: false, own: false }
@@ -52,6 +52,10 @@ impl StatusFeed for TestFeed {
 
     fn state(&self) -> Option<FactoryState> {
         self.1.lock().unwrap().clone()
+    }
+
+    fn changed(&self) -> Option<watch::Receiver<()>> {
+        Some(self.2.subscribe())
     }
 }
 
@@ -85,8 +89,11 @@ async fn control_plane(key: SecretKey, lookup: &Arc<MemoryLookup>, rig: &Rig) ->
         .unwrap();
     let addr = endpoint.addr();
     lookup.add_endpoint_info(addr.clone());
-    let mut ui = UiProtocol::new(rig.server, rig.allowed.clone())
-        .with_status(Arc::new(TestFeed(rig.events.clone(), rig.control.clone())));
+    let mut ui = UiProtocol::new(rig.server, rig.allowed.clone()).with_status(Arc::new(TestFeed(
+        rig.events.clone(),
+        rig.control.clone(),
+        rig.changed.clone(),
+    )));
     if let Some(logs) = &rig.logs {
         ui = ui.with_logs(Arc::new(TestLogs(logs.clone())));
     }
@@ -109,6 +116,8 @@ struct Rig {
     logs: Option<broadcast::Sender<LogLine>>,
     /// The control plane state the status frame carries.
     control: Arc<std::sync::Mutex<Option<FactoryState>>>,
+    /// Notified when `control` changes, as the real feed does.
+    changed: watch::Sender<()>,
 }
 
 impl Rig {
@@ -141,6 +150,7 @@ impl Rig {
             events: broadcast::channel(16).0,
             logs: Some(broadcast::channel(16).0),
             control: Arc::new(std::sync::Mutex::new(Some(FactoryState::Running))),
+            changed: watch::channel(()).0,
         }
     }
 
@@ -434,13 +444,14 @@ async fn a_control_plane_that_is_not_running_is_shown_over_the_board() {
     until(&mut app, "control", |a| matches!(link(a), FactoryLink::Control(_))).await;
     assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory starting: sprites down");
     assert_eq!(chip_words(&app), "Factory starting");
-    // The server ends the stream with no repos to feed; the link stays at the control state across retries.
+    // The server holds the stream open with no repos to feed; the link stays at the control state.
     for _ in 0..30 {
         app.update();
         assert!(matches!(link(&app), FactoryLink::Control(_)), "{:?}", link(&app));
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
     *rig.control.lock().unwrap() = Some(FactoryState::Running);
+    rig.changed.send_modify(|_| {});
     until(&mut app, "running", |a| link(a) == FactoryLink::Running).await;
 }
 
