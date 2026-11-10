@@ -689,10 +689,15 @@ async fn a_conflict_the_host_no_longer_reports_goes_back_to_review_without_a_wor
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
     assert_eq!(task.run.attempt, Some(1), "no attempt used up");
+    assert_eq!(task.run.conflict_reworks, Some(1), "the count of reworks that ran isn't reset");
+    assert!(task.run.changes_requested.is_some_and(|c| c.settled), "the request is marked settled instead");
 
     // Reconcile doesn't take the dropped request up again.
-    r.factory.reconcile().await.unwrap();
-    assert_ne!(r.show(&key).await.status, Status::Open);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reworked.is_empty() && done.conflicted.is_empty(), "{done:?}");
+    let task = r.show(&key).await;
+    assert_ne!(task.status, Status::Open);
+    assert_eq!(task.run.conflict_reworks, Some(1));
 }
 
 #[tokio::test(start_paused = true)]
