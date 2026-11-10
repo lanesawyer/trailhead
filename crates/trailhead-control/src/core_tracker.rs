@@ -466,7 +466,7 @@ impl Tracker for CoreTracker {
                 Err(Error::Forbidden(trailhead_factory::messages::not_a_reviewer(
                     &self.agent.to_string(),
                     &task.0,
-                    task.0.rsplit_once('-').map_or(task.0.as_str(), |(project, _)| project),
+                    task.project(),
                 )))
             }
             result => result,
