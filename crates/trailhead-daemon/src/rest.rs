@@ -104,7 +104,12 @@ impl RestTracker {
 
 /// The factory's error for a failed call.
 fn error(e: ApiError) -> Error {
-    let ApiError::Api { status, error } = e else { return Error::Other(format!("trailhead: {e}")) };
+    let ApiError::Api { status, error } = e else {
+        return match &e {
+            ApiError::Transport(t) if t.is_connect() => Error::Unreachable(format!("trailhead: {e}")),
+            _ => Error::Other(format!("trailhead: {e}")),
+        };
+    };
     let msg = format!("trailhead {status} {}: {}", error.code, error.message);
     match status {
         404 => Error::NotFound(msg),
@@ -305,5 +310,19 @@ impl Tracker for RestTracker {
 
     async fn revoke_sub_agent(&self, _: &str) -> Result<()> {
         Err(unsupported("revoke agents"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_refused_connection_is_unreachable() {
+        // Bind a port, then free it, so nothing is listening there.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let cred = Credential { agent: "x".into(), token: "t".into() };
+        let err = RestTracker::new(format!("http://127.0.0.1:{port}"), cred).show(&TaskKey("TRAIL-1".into())).await;
+        assert!(matches!(err, Err(Error::Unreachable(_))), "{err:?}");
     }
 }

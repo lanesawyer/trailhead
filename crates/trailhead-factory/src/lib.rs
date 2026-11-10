@@ -82,6 +82,9 @@ pub enum Error {
     /// this points at the repo's code, not the sandbox: a rework can go on from it with the output as context.
     #[error("setup failed: {0}")]
     SetupFailed(String),
+    /// The server couldn't be connected to at all (refused, no route), as opposed to a request that failed midway.
+    #[error("unreachable: {0}")]
+    Unreachable(String),
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]
