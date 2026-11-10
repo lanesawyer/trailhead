@@ -56,10 +56,12 @@ pub(super) fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<Bo
 }
 
 /// What the cards of one column build now: the first `limit` of them, and how many are left out. A page that ends
-/// partway through a parent's subtasks runs on to the last of them, so a parent is never split from its children.
+/// partway through a parent's subtasks runs on to the last of them, so a parent is not split from its children,
+/// unless that run is longer than [`PAGE`]: then it is cut there and the rest waits behind the column's "Show more".
 pub fn visible(cards: &[Card], limit: usize) -> (&[Card], usize) {
     let mut shown = limit.min(cards.len());
-    while shown > 0 && shown < cards.len() && cards[shown].depth > 0 {
+    let most = shown + PAGE;
+    while shown > 0 && shown < cards.len().min(most) && cards[shown].depth > 0 {
         shown += 1;
     }
     (&cards[..shown], cards.len() - shown)

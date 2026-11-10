@@ -826,6 +826,19 @@ mod tests {
         assert_eq!((shown.len(), hidden), (PAGE - 1, 6));
     }
     #[test]
+    fn a_very_long_run_of_subtasks_is_cut_at_a_page() {
+        let mut cards = many(4 * PAGE);
+        for card in &mut cards[PAGE..] {
+            card.depth = 1;
+        }
+        let (shown, hidden) = visible(&cards, PAGE);
+        assert_eq!((shown.len(), hidden), (2 * PAGE, 2 * PAGE));
+        // Asking for more carries on through the run.
+        let (shown, hidden) = visible(&cards, 2 * PAGE);
+        assert_eq!((shown.len(), hidden), (3 * PAGE, PAGE));
+    }
+
+    #[test]
     fn filters_narrow_the_board() {
         let by = |f: Filter| -> Vec<String> {
             run(&f).columns.iter().flat_map(|c| c.cards.iter().map(|c| c.key.clone())).collect()
