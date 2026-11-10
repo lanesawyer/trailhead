@@ -164,7 +164,7 @@ pub const SERVER_UNREACHABLE: u32 = 3;
 const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The endpoint ids allowed to use `trailhead/ui/0`, one per line in a file. It is read on every connection and
-/// stream, and an open connection is rechecked every second, so `trailhead factory allow` and `disallow` take
+/// stream (on the blocking pool), and an open connection is rechecked every second, so `trailhead factory allow` and `disallow` take
 /// effect without restarting the control plane.
 #[derive(Debug, Clone)]
 pub struct UiAllowlist {
@@ -189,8 +189,13 @@ impl UiAllowlist {
         }
     }
 
-    pub fn contains(&self, id: &EndpointId) -> bool {
-        match self.list() {
+    /// Whether `id` is listed. The file is read on the blocking pool so it never stalls an async worker; a list
+    /// that can't be read allows no one.
+    pub async fn contains(&self, id: &EndpointId) -> bool {
+        let this = self.clone();
+        let listed =
+            tokio::task::spawn_blocking(move || this.list()).await.unwrap_or_else(|e| Err(Error::Other(e.to_string())));
+        match listed {
             Ok(ids) => ids.contains(id),
             Err(e) => {
                 tracing::error!(error = %e, "can't read the UI allowlist; refusing");
@@ -373,7 +378,7 @@ async fn serve_logs(feed: &dyn LogFeed, mut send: iroh::endpoint::SendStream) {
 
 impl ProtocolHandler for UiProtocol {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
-        if !self.allowed.contains(&conn.remote_id()) {
+        if !self.allowed.contains(&conn.remote_id()).await {
             tracing::warn!(peer = %conn.remote_id(), "refusing a UI connection from an endpoint that isn't allowed");
             conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
             return Ok(());
@@ -386,7 +391,7 @@ impl ProtocolHandler for UiProtocol {
                     Err(_) => break,
                 },
                 _ = recheck.tick() => {
-                    if self.allowed.contains(&conn.remote_id()) {
+                    if self.allowed.contains(&conn.remote_id()).await {
                         continue;
                     }
                     tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
@@ -394,7 +399,7 @@ impl ProtocolHandler for UiProtocol {
                     return Ok(());
                 }
             };
-            if !self.allowed.contains(&conn.remote_id()) {
+            if !self.allowed.contains(&conn.remote_id()).await {
                 tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
                 conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
                 return Ok(());
@@ -564,8 +569,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn the_allowlist_persists_and_dedupes() {
+    #[tokio::test]
+    async fn the_allowlist_persists_and_dedupes() {
         let dir = tempfile::tempdir().unwrap();
         let list = UiAllowlist::new(dir.path().join("factory").join("ui-allowed"));
         let (a, b) = (SecretKey::generate().public(), SecretKey::generate().public());
@@ -577,7 +582,7 @@ mod tests {
         assert_eq!(reread.list().unwrap(), vec![a, b]);
         assert!(reread.remove(&a).unwrap());
         assert!(!reread.remove(&a).unwrap());
-        assert!(!reread.contains(&a) && reread.contains(&b));
+        assert!(!reread.contains(&a).await && reread.contains(&b).await);
     }
 
     #[test]
