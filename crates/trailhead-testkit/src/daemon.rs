@@ -500,7 +500,17 @@ impl Daemon for LocalDaemon {
                     }
                     None => return run.await,
                 },
-                report = &mut run => return report,
+                report = &mut run => {
+                    // The runner can send its events and finish within one poll; forward what it left behind.
+                    while let Ok(event) = rx.try_recv() {
+                        let spent = matches!(event, RunEvent::Usage { .. });
+                        let _ = events.send(event);
+                        if spent {
+                            return Err(Error::Other(error));
+                        }
+                    }
+                    return report;
+                }
             }
         }
     }
