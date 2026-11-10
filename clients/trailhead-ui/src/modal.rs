@@ -27,7 +27,10 @@ use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, ModalDialog, RequestClose};
 
-use super::{HintBounds, PanelTitle, PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
+use super::{
+    HintBounds, PanelTitle, PanelTools, ScrollDown, extent, layer, panel_header, scroll_body_node, scroll_frame_node,
+    scrollbar, space,
+};
 
 /// How much of the window's height the modal may take, with the barrier's margin around it.
 pub const MAX_HEIGHT_VH: f32 = 80.0;
@@ -126,16 +129,10 @@ fn frame(title: String, width: Val, tall: bool) -> Box<dyn SceneList> {
             --
             // The body's box may shrink below its content, so the body scrolls and the footer keeps its place, and grows
             // into a tall modal's height.
-            Node { flex_direction: FlexDirection::Column, min_height: px(0), flex_shrink: 1.0, flex_grow: 1.0 }
+            ~{ scroll_frame_node(1.0) }
             Children [
                 // Grows into a tall modal's height too, so content can fill it (the settings Logs page's list).
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    flex_grow: 1.0,
-                    min_height: px(0),
-                    row_gap: { px(space::ROWS) },
-                    overflow: { Overflow::scroll_y() },
-                }
+                ~{ scroll_body_node(space::ROWS, 1.0) }
                 ModalBody
                 ScrollDown
             ]
