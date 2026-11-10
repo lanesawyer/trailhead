@@ -29,6 +29,9 @@ pub mod token {
     pub const GRADE_3: Token = Token::new("lookout.grade.3");
     pub const GRADE_4: Token = Token::new("lookout.grade.4");
 
+    /// The factory, wherever it shows (the board's Factory badge): lime, a hue no priority, grade or status uses.
+    pub const FACTORY: Token = Token::new("lookout.factory");
+
     /// One background per status column, in lifecycle order.
     pub const STATUS_OPEN: Token = Token::new("lookout.status.open");
     pub const STATUS_IN_PROGRESS: Token = Token::new("lookout.status.in_progress");
@@ -159,6 +162,8 @@ pub fn theme() -> Theme {
     theme.paint(&token::GRADE_3, Color::oklch(0.68, 0.15, 295.0));
     theme.paint(&token::GRADE_4, Color::oklch(0.68, 0.19, 340.0));
 
+    theme.paint(&token::FACTORY, Color::oklch(0.76, 0.15, 115.0));
+
     // Columns tinted just enough to tell apart, each toward the hue of what the status means.
     let column = |hue: f32| Color::oklch(0.24, 0.025, hue);
     theme.paint(&token::STATUS_OPEN, column(250.0));
@@ -207,7 +212,8 @@ mod tests {
     #[test]
     fn every_lookout_token_resolves_rather_than_falling_back_to_fuchsia() {
         let theme = theme();
-        let lookouts = Priority::ALL.map(priority_tone).into_iter().chain(Grade::ALL.map(grade_tone));
+        let lookouts =
+            Priority::ALL.map(priority_tone).into_iter().chain(Grade::ALL.map(grade_tone)).chain([token::FACTORY]);
         let statuses = Status::ALL.into_iter().flat_map(|s| [status_token(s), status_tone(s)]);
         for t in lookouts.chain(statuses).chain(token::ALL) {
             assert!(theme.has(&t), "{t} isn't in the theme");
@@ -290,7 +296,11 @@ mod tests {
     /// Every tone written as text in one of Lookout's own colors: priorities, grades, statuses.
     fn written_tones() -> Vec<Token> {
         let priorities = Priority::ALL.map(priority_tone).into_iter();
-        priorities.chain(Grade::ALL.map(grade_tone)).chain(Status::ALL.map(status_tone)).collect()
+        priorities
+            .chain(Grade::ALL.map(grade_tone))
+            .chain(Status::ALL.map(status_tone))
+            .chain([token::FACTORY])
+            .collect()
     }
 
     /// The least lightness between text and the surface under it that reads easily.
