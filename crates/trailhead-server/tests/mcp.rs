@@ -389,3 +389,16 @@ async fn create_task_lists_possible_duplicates() {
     assert!(!err, "{out}");
     assert!(out.ends_with("\npossible duplicates: AUTH-3"), "{out}");
 }
+
+#[tokio::test]
+async fn agents_find_tasks_by_title_over_mcp() {
+    let s = start().await;
+    let client = connect(&s.url, &s.agent).await;
+    let (err, out) = call(&client, "create_task", json!({"project": "AUTH", "title": "Fix the login"})).await;
+    assert!(!err, "{out}");
+    let (_, out) = call(&client, "list_tasks", json!({"title": "  fix THE login "})).await;
+    assert!(out.contains("Fix the login") && out.lines().count() == 1, "{out}");
+    let (_, out) = call(&client, "list_tasks", json!({"title": "fix the"})).await;
+    assert_eq!(out, "no tasks");
+    client.cancel().await.unwrap();
+}
