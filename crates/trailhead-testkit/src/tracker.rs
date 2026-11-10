@@ -34,8 +34,8 @@ struct State {
     context_fails: bool,
     /// Agents refused when they approve, as ones a human hasn't listed as the project's reviewers would be.
     undelegated: HashSet<String>,
-    /// Agent and operation (one of `INJECTABLE_OPS`) to how many of that agent's calls to let through, then how many more fail.
-    failing: HashMap<(String, &'static str), (usize, usize)>,
+    /// Agent and operation to how many of that agent's calls to let through, then how many more fail.
+    failing: HashMap<(String, TrackerOp), (usize, usize)>,
     /// Whether every `report`, by any agent, fails.
     reports_fail: bool,
     finish_unapproved_forbidden: bool,
@@ -51,9 +51,35 @@ struct State {
     claimed_from_review: HashSet<TaskKey>,
 }
 
-/// The operations `inject` is called with, so `fail_next` refuses a typo that would never fire.
-const INJECTABLE_OPS: [&str; 9] =
-    ["claim", "release", "report", "request_review", "reopen", "ask", "note", "finish", "revoke_sub_agent"];
+/// The tracker calls `fail_next` and `fail_after` can make fail; each is checked by one `inject` call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TrackerOp {
+    Claim,
+    Release,
+    Report,
+    RequestReview,
+    Reopen,
+    Ask,
+    Note,
+    Finish,
+    RevokeSubAgent,
+}
+
+impl std::fmt::Display for TrackerOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Claim => "claim",
+            Self::Release => "release",
+            Self::Report => "report",
+            Self::RequestReview => "request_review",
+            Self::Reopen => "reopen",
+            Self::Ask => "ask",
+            Self::Note => "note",
+            Self::Finish => "finish",
+            Self::RevokeSubAgent => "revoke_sub_agent",
+        })
+    }
+}
 
 /// Trailhead's claim and status rules, in memory. Each handle acts as one
 /// agent; sub-agents are `<parent>/<name>` and revoking one revokes everything under it.
@@ -122,17 +148,13 @@ impl FakeTracker {
         self.state.lock().unwrap().context_fails = fails;
     }
 
-    /// Makes the next `times` calls `agent` makes to `op` (one of `INJECTABLE_OPS`) fail, as a tracker outage would.
-    pub fn fail_next(&self, agent: &str, op: &'static str, times: usize) {
+    /// Makes the next `times` calls `agent` makes to `op` fail, as a tracker outage would.
+    pub fn fail_next(&self, agent: &str, op: TrackerOp, times: usize) {
         self.fail_after(agent, op, 0, times);
     }
 
     /// Like `fail_next`, but lets the first `skip` calls through, for a failure that should hit a later caller of `op` acting as the same agent.
-    pub fn fail_after(&self, agent: &str, op: &'static str, skip: usize, times: usize) {
-        debug_assert!(
-            INJECTABLE_OPS.contains(&op),
-            "no tracker call checks for failures of {op:?}; use one of {INJECTABLE_OPS:?}"
-        );
+    pub fn fail_after(&self, agent: &str, op: TrackerOp, skip: usize, times: usize) {
         self.state.lock().unwrap().failing.insert((agent.to_string(), op), (skip, times));
     }
 
@@ -152,9 +174,9 @@ impl FakeTracker {
         self.state.lock().unwrap().sub_agents_fail = fails;
     }
 
-    fn inject(&self, op: &'static str) -> Result<()> {
+    fn inject(&self, op: TrackerOp) -> Result<()> {
         let mut s = self.state.lock().unwrap();
-        if op == "report" && s.reports_fail {
+        if op == TrackerOp::Report && s.reports_fail {
             return Err(Error::Other("injected report failure".into()));
         }
         match s.failing.get_mut(&(self.agent.clone(), op)) {
@@ -485,7 +507,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn claim(&self, task: &TaskKey) -> Result<()> {
-        self.inject("claim")?;
+        self.inject(TrackerOp::Claim)?;
         let from_review = self
             .state
             .lock()
@@ -520,7 +542,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn release(&self, task: &TaskKey) -> Result<()> {
-        self.inject("release")?;
+        self.inject(TrackerOp::Release)?;
         // As in core, a rework that is given back returns to review while the review still asks for changes.
         let back = {
             let s = self.state.lock().unwrap();
@@ -540,7 +562,7 @@ impl Tracker for FakeTracker {
 
     async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()> {
         *self.state.lock().unwrap().reports.entry(task.clone()).or_default() += 1;
-        self.inject("report")?;
+        self.inject(TrackerOp::Report)?;
         self.write(task, |t, me| {
             if t.holder.as_deref().is_some_and(|h| h != me) {
                 return Err(Error::Forbidden(format!("{} is held by another agent", t.key.0)));
@@ -551,7 +573,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn request_review(&self, task: &TaskKey, handoff: &str) -> Result<()> {
-        self.inject("request_review")?;
+        self.inject(TrackerOp::RequestReview)?;
         self.write(task, |t, me| {
             held_by_me(t, me)?;
             t.holder = None;
@@ -597,7 +619,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn reopen(&self, task: &TaskKey) -> Result<()> {
-        self.inject("reopen")?;
+        self.inject(TrackerOp::Reopen)?;
         self.write(task, |t, me| {
             // Like core's `check_claim_access`: not a task another agent holds.
             if t.holder.as_deref().is_some_and(|h| h != me) {
@@ -642,7 +664,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn ask(&self, task: &TaskKey, question: &str) -> Result<()> {
-        self.inject("ask")?;
+        self.inject(TrackerOp::Ask)?;
         self.write(task, |t, me| {
             held_by_me(t, me)?;
             t.status = Status::NeedsInput;
@@ -653,14 +675,14 @@ impl Tracker for FakeTracker {
     }
 
     async fn note(&self, task: &TaskKey, body: &str) -> Result<()> {
-        self.inject("note")?;
+        self.inject(TrackerOp::Note)?;
         self.check_live()?;
         self.comment(task, "note", body);
         Ok(())
     }
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
-        self.inject("finish")?;
+        self.inject(TrackerOp::Finish)?;
         if self.state.lock().unwrap().finish_unapproved_forbidden
             && self.state.lock().unwrap().tasks.get(task).is_some_and(|t| t.status == Status::InReview)
         {
@@ -745,7 +767,7 @@ impl Tracker for FakeTracker {
 
     async fn revoke_sub_agent(&self, name: &str) -> Result<()> {
         self.check_live()?;
-        self.inject("revoke_sub_agent")?;
+        self.inject(TrackerOp::RevokeSubAgent)?;
         let full = format!("{}/{name}", self.agent);
         let mut s = self.state.lock().unwrap();
         for (n, a) in s.agents.iter_mut() {
@@ -815,18 +837,5 @@ mod tests {
         let s = tracker.state.lock().unwrap();
         assert_eq!(s.tasks[&key].status, Status::Open);
         assert_eq!(s.tasks[&key].holder, None);
-    }
-
-    #[test]
-    fn injectable_ops_match_the_inject_call_sites() {
-        let mut called: Vec<&str> = include_str!("tracker.rs")
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("self.inject(\""))
-            .filter_map(|l| l.split('"').next())
-            .collect();
-        called.sort_unstable();
-        let mut listed = INJECTABLE_OPS.to_vec();
-        listed.sort_unstable();
-        assert_eq!(called, listed);
     }
 }

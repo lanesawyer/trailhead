@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use trailhead_factory::{Compute, Role, RunOutcome, Status, TaskKey, label};
-use trailhead_testkit::Script;
+use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
 
@@ -612,7 +612,7 @@ async fn a_resource_wait_park_that_fails_adds_no_failure_and_keeps_the_backoff()
         r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
     }
     assert_eq!(r.tracker.task(&key).status, Status::Open, "still waiting");
-    r.tracker.fail_next("factory/trail-1-a1-11", "ask", 1);
+    r.tracker.fail_next("factory/trail-1-a1-11", TrackerOp::Ask, 1);
     r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::InProgress, "the park failed");
