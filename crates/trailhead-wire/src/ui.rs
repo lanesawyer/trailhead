@@ -376,6 +376,18 @@ async fn serve_logs(feed: &dyn LogFeed, mut send: iroh::endpoint::SendStream) {
     let _ = send.finish();
 }
 
+impl UiProtocol {
+    /// Closes `conn` if its peer has left the allowlist since it connected; says whether it did.
+    async fn close_if_disallowed(&self, conn: &Connection) -> bool {
+        if self.allowed.contains(&conn.remote_id()).await {
+            return false;
+        }
+        tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
+        conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
+        true
+    }
+}
+
 impl ProtocolHandler for UiProtocol {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
         if !self.allowed.contains(&conn.remote_id()).await {
@@ -391,17 +403,13 @@ impl ProtocolHandler for UiProtocol {
                     Err(_) => break,
                 },
                 _ = recheck.tick() => {
-                    if self.allowed.contains(&conn.remote_id()).await {
-                        continue;
+                    if self.close_if_disallowed(&conn).await {
+                        return Ok(());
                     }
-                    tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
-                    conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
-                    return Ok(());
+                    continue;
                 }
             };
-            if !self.allowed.contains(&conn.remote_id()).await {
-                tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
-                conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
+            if self.close_if_disallowed(&conn).await {
                 return Ok(());
             }
             let (server, status, logs) = (self.server, self.status.clone(), self.logs.clone());

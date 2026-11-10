@@ -121,6 +121,11 @@ pub struct RunUpdate {
     /// reopened task counts from it (see `attempt_floor`), so a human only has to reopen it (TRAIL-308).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gave_up: Option<u32>,
+    /// The attempt that ended in a question. A give-up recorded in `failure` from before it isn't "the attempt
+    /// before" the next one for the backstop on repeated give-ups, though the next attempt is still told of it
+    /// (TRAIL-805).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked: Option<u32>,
     /// How the task's PR was merged, once it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
@@ -298,6 +303,7 @@ impl RunUpdate {
             worker_breach,
             attempt_base,
             gave_up,
+            asked,
             merged,
             grade,
             ungraded,
@@ -327,6 +333,7 @@ impl RunUpdate {
         self.worker_breach = worker_breach.or(self.worker_breach.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
         self.gave_up = gave_up.or(self.gave_up.take());
+        self.asked = asked.or(self.asked.take());
         self.merged = merged.or(self.merged.take());
         self.grade = grade.or(self.grade.take());
         self.ungraded = ungraded.or(self.ungraded.take());

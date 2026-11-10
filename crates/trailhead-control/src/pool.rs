@@ -276,6 +276,15 @@ impl Factory {
                 {
                     tracing::warn!(sandbox = %sandbox.name, checkpoint = %cp.0, error = %d, "couldn't delete the unused warm checkpoint");
                 }
+                // The cost recorded for the new checkpoint goes with it: release restores the old one, which that
+                // cost doesn't describe, and the next stale check would compare against the wrong figure.
+                if taken.is_some() {
+                    let mut costs = self.warm_cost.lock().unwrap();
+                    match cost {
+                        Some(cost) => costs.insert(sandbox.id.clone(), cost),
+                        None => costs.remove(&sandbox.id),
+                    };
+                }
                 // The old warm checkpoint (if any) is what release restores; a new sandbox has none and is destroyed.
                 self.give_back(&sandbox, &busy).await;
                 Err(e)
