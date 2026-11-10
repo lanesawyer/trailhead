@@ -1400,7 +1400,7 @@ async fn a_give_up_from_before_a_question_doesnt_count_toward_two_in_a_row() {
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which registry?".into() }));
     r.factory.tick().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
-    assert!(r.tracker.task(&key).run.failure.as_deref().unwrap_or("").is_empty(), "the question clears the give-up");
+    assert_eq!(r.tracker.task(&key).run.asked, Some(2), "the question is marked");
 
     r.tracker.answer(&key, "The mirror.");
     r.factory.reconcile().await.unwrap();
@@ -1408,6 +1408,9 @@ async fn a_give_up_from_before_a_question_doesnt_count_toward_two_in_a_row() {
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
     assert_eq!(r.tracker.task(&key).status, Status::Open, "one give-up since the question is retried");
+    let ctxs = r.harness.contexts();
+    let note = ctxs.last().unwrap().task.previous_failure.as_deref().expect("the earlier give-up is still passed on");
+    assert!(note.contains("crates.io unreachable"), "{note}");
 }
 
 #[tokio::test]
