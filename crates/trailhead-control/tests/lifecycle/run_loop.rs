@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use trailhead_control::{Host, Outcome};
 use trailhead_factory::{Compute, Role, RunOutcome, SandboxSpec, Status, TaskKey, Usd, label, run_name};
-use trailhead_testkit::Script;
+use trailhead_testkit::{Script, unix_now};
 
 use crate::common::*;
 
@@ -344,10 +344,6 @@ async fn run_loop_respects_the_sandbox_cap() {
     // Shutdown abandons the runs; the next boot's reconcile requeues them.
     stop.send(()).unwrap();
     handle.await.unwrap().unwrap();
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
 /// The test config on a host pausing at 80% of the five-hour window.
