@@ -151,7 +151,7 @@ pub(crate) fn api_tracker(opts: &Opts, paths: &trailhead_client::paths::Paths) -
 
 /// `e`, with a hint when the server didn't answer.
 pub(crate) fn reach(e: trailhead_factory::Error) -> Error {
-    if e.to_string().contains("error sending request") { Error::ServerDown(e.into()) } else { Error::backend(e) }
+    if matches!(e, trailhead_factory::Error::Unreachable(_)) { Error::ServerDown(e.into()) } else { Error::backend(e) }
 }
 
 /// The local server's `/v1/factory`, when there is a user token to ask it with.
@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn an_unanswered_server_gets_a_hint() {
-        let down = trailhead_factory::Error::Other("trailhead: error sending request for url (http://x)".into());
+        let down = trailhead_factory::Error::Unreachable("trailhead: connection refused".into());
         assert!(reach(down).to_string().contains("is the server running?"));
         let refused = trailhead_factory::Error::NotFound("trailhead 404 not_found: no such task".into());
         assert!(!reach(refused).to_string().contains("is the server running?"));
