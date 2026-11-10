@@ -137,6 +137,25 @@ async fn a_parked_tasks_pooled_sandbox_shows_paused_after_a_restart() {
 }
 
 #[tokio::test]
+async fn a_pooled_sandbox_of_a_task_this_process_is_running_doesnt_show_paused() {
+    use std::collections::HashSet;
+    use trailhead_factory::SandboxState;
+
+    let mut r = rig();
+    let key = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+
+    restart(&mut r, CONFIG);
+    // The task is parked in the tracker, but this process is running it, so its sandbox isn't paused.
+    r.factory.reconcile_except(&HashSet::from([key])).await.unwrap();
+
+    let snap = r.factory.status().snapshot();
+    assert_eq!(snap.sandboxes.len(), 1, "{snap:?}");
+    assert_ne!(snap.sandboxes[0].state, SandboxState::Paused);
+}
+
+#[tokio::test]
 async fn a_pooled_sandbox_that_cant_be_restored_is_destroyed_without_stopping_reconcile() {
     let r = rig();
     r.tracker.add_task("TRAIL", "First", "");
