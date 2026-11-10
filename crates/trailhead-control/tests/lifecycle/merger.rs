@@ -809,6 +809,36 @@ async fn a_push_on_top_of_a_host_made_update_unapproves_lanes_approval_of_a_grad
 }
 
 #[tokio::test]
+async fn a_push_after_lanes_approval_was_carried_to_a_host_made_update_unapproves_it() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.tracker.approve_as_human(&key);
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    let old_head = r.tracker.task(&key).run.merge.unwrap().head;
+    r.codehost.set_ci(&pr, CiState::Pending);
+
+    // CI is still pending on the update, so this pass only carries Lane's approval to the updated head.
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Approved, "Lane's approval carries over a host-made update");
+    let carried = task.run.merge.unwrap();
+    assert_ne!(carried.head, old_head, "the head moved with the update");
+    assert_eq!(carried.human_head.as_deref(), Some(carried.head.as_str()), "marked on the updated head");
+
+    r.codehost.push_to(&pr);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "Lane's approval was of the updated head, not the push");
+    assert_eq!(task.run.merge.unwrap().human_head, None);
+}
+
+#[tokio::test]
 async fn a_push_after_lanes_approval_of_a_grade_three_task_unapproves_it() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
