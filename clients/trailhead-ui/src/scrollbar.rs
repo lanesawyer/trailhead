@@ -156,6 +156,21 @@ mod tests {
     }
 
     #[test]
+    fn the_scene_spawns_a_scrollbar_for_its_target_and_orientation() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let target = app.world_mut().spawn_empty().id();
+        let bar = app.world_mut().commands().spawn_scene(scrollbar(target, ControlOrientation::Horizontal)).id();
+        app.world_mut().flush();
+        app.update();
+        let bar = app.world().get::<Scrollbar>(bar).expect("the scene is a scrollbar");
+        assert_eq!((bar.target, bar.orientation), (target, ControlOrientation::Horizontal));
+    }
+
+    #[test]
     fn it_starts_hidden_until_the_area_is_known_to_overflow() {
         for orientation in [ControlOrientation::Vertical, ControlOrientation::Horizontal] {
             assert_eq!(placement(orientation).display, Display::None);
