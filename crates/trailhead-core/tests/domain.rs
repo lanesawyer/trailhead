@@ -993,6 +993,20 @@ async fn reviewers_cannot_approve_their_own_work() {
 }
 
 #[tokio::test]
+async fn a_reviewer_finishes_its_own_work_when_review_is_not_required() {
+    let env = Env::new().await;
+    let lead = env.agent("lead").await;
+    let patch = ProjectPatch { reviewers: Some(vec!["lead".into()]), ..Default::default() };
+    env.store.update_project(&env.human, "AUTH", patch, None).await.unwrap();
+
+    // Without require_review, a reviewer's own in-progress work can go straight to done.
+    let t = env.task("mine").await;
+    env.store.claim(&lead, &t.key, None).await.unwrap();
+    let done = env.store.update_task(&lead, &t.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(done.status, Status::Done);
+}
+
+#[tokio::test]
 async fn a_reviewer_approves_work_it_only_parked_in_an_earlier_round() {
     let env = Env::new().await;
     let factory = env.agent("factory").await;
