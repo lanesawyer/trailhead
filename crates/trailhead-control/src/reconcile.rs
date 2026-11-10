@@ -46,9 +46,9 @@ impl Factory {
         Ok(done)
     }
 
-    /// Warns, once per task, about factory tasks sitting outside every repo's queue: re-parented while their run was
-    /// live, they're invisible to reconcile, so their claim lapses and the sandbox stays (TRAIL-531). Which repo owns
-    /// one is unknowable, so nothing is torn down.
+    /// Warns, once per stretch outside the queues, about factory tasks sitting outside every repo's queue:
+    /// re-parented while their run was live, they're invisible to reconcile, so their claim lapses and the sandbox
+    /// stays (TRAIL-531). Which repo owns one is unknowable, so nothing is torn down.
     async fn warn_strays(&self) {
         // A repo without a queue works the whole project, so nothing in it can sit outside a queue, whichever repo
         // asks: the other repo's in-flight runs are that repo's own.
@@ -58,7 +58,11 @@ impl Factory {
         let queues: Vec<TaskKey> = self.host.queues.lock().unwrap().iter().cloned().map(TaskKey).collect();
         match self.tracker.strays(self.project(), &queues).await {
             Ok(strays) => {
-                let mut logged = self.host.strays_logged.lock().unwrap();
+                let mut all = self.host.strays_logged.lock().unwrap();
+                // Repos on one host can be in different projects; each pass only tracks its own project's strays.
+                let logged = all.entry(self.project().to_string()).or_default();
+                // A task that stops being a stray is forgotten, so it's warned about again if it strays again.
+                logged.retain(|k| strays.iter().any(|t| &t.key.0 == k));
                 for t in strays.iter().filter(|t| logged.insert(t.key.0.clone())) {
                     tracing::warn!(
                         task = %t.key.0,
