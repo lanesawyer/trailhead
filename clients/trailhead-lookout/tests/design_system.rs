@@ -35,8 +35,9 @@ fn formats_a_status(line: &Line) -> bool {
 }
 
 /// A line about an HTTP response's status, a number and not a task's `Status`: a `{status}` there is fine.
+/// Lookout words every response as "the server answered {status}".
 fn is_http_status(code: &str) -> bool {
-    ["StatusCode", "HTTP", "http", "status code", ".as_u16()", "status.is_"].iter().any(|p| code.contains(p))
+    ["StatusCode", ".as_u16()", "answered {"].iter().any(|p| code.contains(p))
 }
 
 /// Where Lookout steps off, and why. Add to this only with a reason; an entry that finds nothing fails.
@@ -66,7 +67,12 @@ fn a_task_status_formatted_as_it_is_is_found() {
 
 #[test]
 fn an_http_status_is_not_a_task_status() {
-    assert!(!finds(r#"format!("the server answered HTTP {status}")"#));
-    assert!(!finds(r#"format!("status code {status}")"#));
+    assert!(!finds(r#"format!("the server answered {status}")"#));
     assert!(!finds(r#"if status == reqwest::StatusCode::NOT_FOUND { log("{status}") }"#));
+}
+
+#[test]
+fn a_task_status_beside_a_closed_check_or_a_url_is_still_found() {
+    assert!(finds(r#"if !task.status.is_closed() { format!("{status}") }"#));
+    assert!(finds(r#"let url = self.http.get(u); format!("{status}")"#));
 }
