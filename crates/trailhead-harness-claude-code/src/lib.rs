@@ -278,11 +278,11 @@ pub fn schema(role: Role) -> Value {
 
 /// The most the human-context section of a prompt may take, in bytes.
 const HUMAN_CONTEXT_CAP: usize = 6000;
-/// How many open follow-ups a reviewer is shown.
-const FOLLOW_UPS_CAP: usize = 40;
-
 /// The most the answers may take of the human-context section, so notes keep the rest.
 const ANSWERS_CAP: usize = 4000;
+
+/// How many open follow-ups a reviewer is shown.
+const FOLLOW_UPS_CAP: usize = 40;
 
 /// The follow-ups earlier reviews of the task filed, so a reviewer doesn't file a reworded copy of one, or leave one
 /// open that the change has since fixed.
