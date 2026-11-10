@@ -305,6 +305,12 @@ async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStrea
     if write_frame(&mut send, &StatusFrame::Snapshot { control: feed.state(), repos }).await.is_err() {
         return;
     }
+    // No repos (yet): nothing will ever forward, but an idle control plane is still running, so hold
+    // the stream open until the UI goes away rather than ending it and having the UI redial.
+    if feeds.is_empty() {
+        let _ = send.stopped().await;
+        return;
+    }
     let (tx, mut rx) = mpsc::channel(256);
     // Dropped with this function, which stops the forwarding.
     let mut forwards = tokio::task::JoinSet::new();

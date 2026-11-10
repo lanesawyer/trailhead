@@ -38,6 +38,15 @@ impl StatusFeed for TestFeed {
     }
 }
 
+/// A control plane serving no repos.
+struct EmptyFeed;
+
+impl StatusFeed for EmptyFeed {
+    fn subscribe(&self) -> Vec<RepoFeed> {
+        Vec::new()
+    }
+}
+
 /// A log with two lines kept, and the lines the test sends after.
 struct TestLogs(broadcast::Sender<LogLine>);
 
@@ -77,6 +86,11 @@ struct Rig {
 
 impl Rig {
     async fn new() -> Rig {
+        Rig::with_status(None).await
+    }
+
+    /// A rig whose status feed is `feed`, or the one-repo [`TestFeed`] on `events` when `None`.
+    async fn with_status(feed: Option<Arc<dyn StatusFeed>>) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("trailhead.db");
         let db = db.to_str().unwrap();
@@ -96,14 +110,13 @@ impl Rig {
         let peers = Peers::default();
         let events = broadcast::channel(16).0;
         let logs = broadcast::channel(16).0;
+        let feed = feed.unwrap_or_else(|| Arc::new(TestFeed(events.clone())));
         let control_ep = endpoint(SecretKey::generate(), Arc::new(MemoryLookup::new()), vec![]).await;
         let control = control_ep.addr();
         let router = Router::builder(control_ep)
             .accept(
                 UI_ALPN,
-                UiProtocol::new(server, allowed.clone())
-                    .with_status(Arc::new(TestFeed(events.clone())))
-                    .with_logs(Arc::new(TestLogs(logs.clone()))),
+                UiProtocol::new(server, allowed.clone()).with_status(feed).with_logs(Arc::new(TestLogs(logs.clone()))),
             )
             .accept(API_ALPN, ApiTunnel::new(server, peers.clone()))
             .spawn();
@@ -226,6 +239,22 @@ async fn status_is_a_snapshot_then_the_events_after_it() {
     let event = Sequenced { seq: 8, event: FactoryEvent::RunEnded { task: TaskKey("TRAIL-1".into()) } };
     r.events.send(event.clone()).unwrap();
     assert_eq!(next(&mut stream).await, Some(StatusFrame::Event { repo: "o/r".into(), event }));
+}
+
+#[tokio::test]
+async fn status_stays_open_when_the_control_plane_serves_no_repos() {
+    let r = Rig::with_status(Some(Arc::new(EmptyFeed))).await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let client = r.client(key).await;
+    let mut stream = StatusStream::open(dial_ui(&client, r.control.id).await.unwrap()).await.unwrap();
+
+    let Some(StatusFrame::Snapshot { repos, .. }) = next(&mut stream).await else {
+        panic!("the first frame is the snapshot");
+    };
+    assert!(repos.is_empty());
+    // An idle control plane is running: the stream is neither ended nor sending.
+    assert!(tokio::time::timeout(Duration::from_millis(500), stream.next()).await.is_err());
 }
 
 #[tokio::test]
