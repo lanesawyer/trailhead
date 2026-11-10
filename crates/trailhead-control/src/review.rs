@@ -21,7 +21,7 @@ impl Factory {
         // Placed first: a review with nowhere to run waits, and starts nothing. Reconcile finds it due again.
         let mut survey = self.survey().await;
         let Some(target) = self.place(&mut survey) else {
-            tracing::info!(task = %task.key.0, "{}", messages::no_target_has_room(&task.key.0));
+            tracing::info!(task = %task.key, "{}", messages::no_target_has_room(&task.key));
             return Ok(Outcome::AwaitingReview { pr: pr.clone() });
         };
         // Held from here, so a survey taken while this review has no sandbox yet still counts it.
@@ -38,7 +38,7 @@ impl Factory {
         match self.tracker.follow_ups(&task.key).await {
             Ok(follow_ups) => context.follow_ups = follow_ups,
             Err(e) => {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't list the task's follow-ups; reviewing without them")
+                tracing::warn!(task = %task.key, error = %e, "couldn't list the task's follow-ups; reviewing without them")
             }
         }
         // The commit the review is of, so a verdict isn't counted for a head pushed after it.
@@ -65,7 +65,7 @@ impl Factory {
             Ok(sandbox) => sandbox,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await),
         };
-        tracing::info!(task = %task.key.0, sandbox = %name, "starting reviewer");
+        tracing::info!(task = %task.key, sandbox = %name, "starting reviewer");
         let req = RunRequest {
             run: name.clone(),
             role: Role::Reviewer,
@@ -93,7 +93,7 @@ impl Factory {
         // A sandbox that won't go doesn't undo the review: the verdict and spend are still recorded, and reconcile
         // destroys the orphan.
         if let Err(e) = target.compute.destroy(&sandbox.id).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't destroy the reviewer's sandbox; reconcile will");
+            tracing::warn!(task = %task.key, error = %e, "couldn't destroy the reviewer's sandbox; reconcile will");
         } else {
             self.status.sandbox_gone(&sandbox.name);
         }
@@ -101,7 +101,7 @@ impl Factory {
             Ok(Run::Lost(e, spend)) => {
                 // What the run cost before it failed counts toward the budget across retries (TRAIL-447).
                 if let Err(re) = sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await {
-                    tracing::warn!(task = %task.key.0, error = %re, "couldn't record the failed review's spend");
+                    tracing::warn!(task = %task.key, error = %re, "couldn't record the failed review's spend");
                 }
                 return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await);
             }
@@ -143,7 +143,7 @@ impl Factory {
         )
         .await?;
         if let Err(e) = self.tracker.revoke_sub_agent(&name).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the reviewer's sub-agent; its token will expire");
+            tracing::warn!(task = %task.key, error = %e, "couldn't revoke the reviewer's sub-agent; its token will expire");
         }
         match run {
             Finished::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
@@ -167,16 +167,16 @@ impl Factory {
                     // Message only: a verdict that asks for changes mustn't approve, or merge on Lane's earlier approval.
                     let parks = round >= self.config.repo.max_review_rounds;
                     if let Err(e) = self.say_gates(&task.key, parks).await {
-                        tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
+                        tracing::warn!(task = %task.key, error = %e, "couldn't evaluate the gates; the next reconcile retries");
                     }
                     self.request_rework(task, requested, round, retries).await?;
                 } else if let Err(e) = self.evaluate_gates(&task.key).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't evaluate the gates; the next reconcile retries");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't evaluate the gates; the next reconcile retries");
                 }
                 Ok(Outcome::Reviewed { pr: pr.clone(), verdict })
             }
             Finished::Report(report, _) => {
-                tracing::warn!(task = %task.key.0, result = ?report.result, "review didn't produce a verdict");
+                tracing::warn!(task = %task.key, result = ?report.result, "review didn't produce a verdict");
                 // No verdict, no round: handled like an infrastructure failure, so it backs off and is capped
                 // rather than being reviewed again on every pass (TRAIL-267).
                 let error = Error::Other(messages::review_without_verdict(&report.result));
@@ -189,12 +189,12 @@ impl Factory {
                 // already had its destroy attempted (a failed destroy is left for reconcile), so there's nothing
                 // to suspend.
                 self.setbacks.lock().unwrap().remove(&task.key);
-                tracing::warn!(task = %task.key.0, %reason, "reviewer breached its budget; parking");
+                tracing::warn!(task = %task.key, %reason, "reviewer breached its budget; parking");
                 // Recorded before the task is reopened, so a park cut short is finished by reconcile.
                 let breach = ReviewBreach { round, attempt, reason: reason.clone(), parked: false };
                 let pending = RunUpdate { review_breach: Some(breach.clone()), ..RunUpdate::default() };
                 if let Err(e) = self.tracker.report(&task.key, pending).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't record the reviewer's breach before parking");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't record the reviewer's breach before parking");
                 }
                 self.tracker.reopen(&task.key).await?;
                 self.park_review_breach(&task.key, breach, true, retries).await?;
@@ -231,12 +231,12 @@ impl Factory {
         let waits = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(_, w, _)| *w) + 1;
         let park = !cancelled && if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
         if cancelled {
-            tracing::info!(task = %task.key.0, "review cancelled; the round doesn't count");
+            tracing::info!(task = %task.key, "review cancelled; the round doesn't count");
         } else {
             if no_verdict {
-                tracing::warn!(task = %task.key.0, %error, failures, max, "reviewer ended without a verdict; the round doesn't count");
+                tracing::warn!(task = %task.key, %error, failures, max, "reviewer ended without a verdict; the round doesn't count");
             } else {
-                tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "reviewer failed on the infrastructure; the round doesn't count");
+                tracing::warn!(task = %task.key, %error, failures, max, waiting, waits, "reviewer failed on the infrastructure; the round doesn't count");
             }
             if park {
                 // Parked below; the count starts again when Lane reopens it.
@@ -260,10 +260,10 @@ impl Factory {
             ..RunUpdate::default()
         };
         if let Err(e) = self.tracker.report(&task.key, give_back).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't give the review round back");
+            tracing::warn!(task = %task.key, error = %e, "couldn't give the review round back");
         }
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the reviewer's sub-agent; reconcile will");
+            tracing::warn!(task = %task.key, error = %e, "couldn't revoke the reviewer's sub-agent; reconcile will");
         }
         if park {
             let question = if waiting {
@@ -283,7 +283,7 @@ impl Factory {
                     self.setbacks.lock().unwrap().remove(&task.key);
                 }
                 Err(e) => {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; the next reconcile tries again");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't park the task; the next reconcile tries again");
                     // Not parked, so the count mustn't start again: the next failure tries to park once more.
                     if waiting {
                         self.set_back_waiting(&task.key, failures - 1);
@@ -291,7 +291,7 @@ impl Factory {
                     let kept = if waiting { prior.unwrap_or(0) } else { failures };
                     let keep = RunUpdate { infra_failures: Some(kept), ..RunUpdate::default() };
                     if let Err(e) = self.tracker.report(&task.key, keep).await {
-                        tracing::warn!(task = %task.key.0, error = %e, "couldn't keep the infrastructure failure count");
+                        tracing::warn!(task = %task.key, error = %e, "couldn't keep the infrastructure failure count");
                     }
                 }
             }
@@ -328,7 +328,7 @@ impl Factory {
                 ..RunUpdate::default()
             };
             if let Err(re) = self.tracker.report(key, undo).await {
-                tracing::warn!(task = %key.0, error = %re, "couldn't take back the breach's park mark");
+                tracing::warn!(task = %key, error = %re, "couldn't take back the breach's park mark");
             }
             return Err(e);
         }
@@ -350,7 +350,7 @@ impl Factory {
             ..RunUpdate::default()
         };
         if let Err(e) = self.tracker.report(&task.key, fresh).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't settle the parked request and reset the counts");
+            tracing::warn!(task = %task.key, error = %e, "couldn't settle the parked request and reset the counts");
         }
     }
 
@@ -380,7 +380,7 @@ impl Factory {
         };
         self.tracker.report(&task.key, update).await?;
         if round >= max {
-            tracing::warn!(task = %task.key.0, round, "the reviewer still wants changes; parking");
+            tracing::warn!(task = %task.key, round, "the reviewer still wants changes; parking");
             self.tracker.reopen(&task.key).await?;
             self.tracker.claim(&task.key).await?;
             let question = if conflict && reviewer == CI_REVIEWER {
@@ -408,7 +408,7 @@ impl Factory {
             let verdict = Verdict { kind: VerdictKind::RequestChanges, body, reviewer, model: None, raise_grade: None };
             self.tracker.record_verdict(&task.key, &verdict).await?;
         }
-        tracing::info!(task = %task.key.0, round, "changes requested; left in review for a rework");
+        tracing::info!(task = %task.key, round, "changes requested; left in review for a rework");
         Ok(())
     }
 }
