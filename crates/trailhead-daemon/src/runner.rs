@@ -502,7 +502,7 @@ impl Runner {
                 };
                 // The PR is open and the work checked, so a tracker that fails now doesn't fail the run: the
                 // control plane records the PR and the review request itself when it sees `PrOpened`.
-                // Each write is retried on its own, and only while the error looks transient (`Error::Other`): a
+                // Each write is retried on its own, and only while the error looks transient (`Error::is_transient`): a
                 // refusal (forbidden, conflict, rejected) would answer the same next time.
                 let mut reported = false;
                 let mut review_requested = false;
@@ -515,7 +515,7 @@ impl Runner {
                             Ok(()) => reported = true,
                             Err(e) => {
                                 tracing::warn!(task = %key, attempt, error = %e, "couldn't record the opened PR");
-                                if matches!(e, Error::Other(_)) {
+                                if e.is_transient() {
                                     continue;
                                 }
                                 break;
@@ -529,7 +529,7 @@ impl Runner {
                         }
                         Err(e) => {
                             tracing::warn!(task = %key, attempt, error = %e, "couldn't request review of the opened PR");
-                            if !matches!(e, Error::Other(_)) {
+                            if !e.is_transient() {
                                 break;
                             }
                         }

@@ -1191,6 +1191,46 @@ async fn a_host_error_while_looking_after_a_persons_pr_keeps_the_hold() {
 }
 
 #[tokio::test]
+async fn a_park_cut_short_after_a_merge_by_hand_is_finished_not_closed() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    r.tracker.forbid_finishing_unapproved(true);
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+
+    // The claim fails: the task stays in review (never reopened first) with the merge and the park marker recorded.
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+
+    // The next pass must park it, not let core close it as no longer in review.
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked for a person, not done");
+    let asked = r.tracker.comments(&key).iter().filter(|c| c.kind == "question").count();
+    assert_eq!(asked, 1);
+}
+
+#[tokio::test]
+async fn a_parked_task_whose_merge_close_failed_before_the_park_is_retried() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    // Parked for something else (a closed PR a person then reopened and merged), with the merge recorded but not closed.
+    r.codehost.close(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    r.codehost.merge(&pr, &head).await.unwrap();
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
+    let _ = r.factory.reconcile().await;
+    assert!(r.tracker.task(&key).run.merged.is_some());
+
+    let again = r.factory.reconcile().await.unwrap();
+    assert!(again.merged.contains(&key.0), "retried rather than skipped");
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
+}
+
+#[tokio::test]
 async fn a_queued_update_is_forgotten_when_the_task_is_cancelled() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
