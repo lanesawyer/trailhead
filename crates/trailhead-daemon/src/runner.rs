@@ -504,25 +504,40 @@ impl Runner {
                 };
                 // The PR is open and the work checked, so a tracker that fails now doesn't fail the run: the
                 // control plane records the PR and the review request itself when it sees `PrOpened`.
-                let mut written = false;
+                // Each write is retried on its own, and only while the error looks transient (`Error::Other`): a
+                // refusal (forbidden, conflict, rejected) would answer the same next time.
+                let mut reported = false;
+                let mut review_requested = false;
                 for attempt in 0..3u64 {
                     if attempt > 0 {
                         tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
                     }
-                    let result =
+                    if !reported {
                         match tracker.report(key, RunUpdate { pr: Some(pr.clone()), ..Default::default() }).await {
-                            Ok(()) => tracker.request_review(key, &messages::pushed_for_review_handoff(&pr.url)).await,
-                            Err(e) => Err(e),
-                        };
-                    match result {
+                            Ok(()) => reported = true,
+                            Err(e) => {
+                                tracing::warn!(task = %key.0, attempt, error = %e, "couldn't record the opened PR");
+                                if matches!(e, Error::Other(_)) {
+                                    continue;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    match tracker.request_review(key, &messages::pushed_for_review_handoff(&pr.url)).await {
                         Ok(()) => {
-                            written = true;
+                            review_requested = true;
                             break;
                         }
-                        Err(e) => tracing::warn!(task = %key.0, attempt, error = %e, "couldn't record the opened PR"),
+                        Err(e) => {
+                            tracing::warn!(task = %key.0, attempt, error = %e, "couldn't request review of the opened PR");
+                            if !matches!(e, Error::Other(_)) {
+                                break;
+                            }
+                        }
                     }
                 }
-                if !written {
+                if !(reported && review_requested) {
                     tracing::warn!(task = %key.0, "the PR is open but the tracker wouldn't take it; leaving it to the control plane");
                 }
                 Ok((RunResult::PrOpened(pr), checks))

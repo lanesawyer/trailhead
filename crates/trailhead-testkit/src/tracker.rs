@@ -44,6 +44,8 @@ struct State {
     /// How many times each task has been read with `show`.
     shows: HashMap<TaskKey, usize>,
     renews: HashMap<TaskKey, usize>,
+    /// How many times each task has been reported on, failed or not.
+    reports: HashMap<TaskKey, usize>,
     /// Tasks whose current claim was taken from review, which a release or lapse returns there while the review
     /// still asks for changes.
     claimed_from_review: HashSet<TaskKey>,
@@ -215,6 +217,11 @@ impl FakeTracker {
     /// How many times the task's claim has been renewed.
     pub fn renews(&self, key: &TaskKey) -> usize {
         self.state.lock().unwrap().renews.get(key).copied().unwrap_or(0)
+    }
+
+    /// How many times `report` has been called on the task, failed or not.
+    pub fn reports(&self, key: &TaskKey) -> usize {
+        self.state.lock().unwrap().reports.get(key).copied().unwrap_or(0)
     }
 
     pub fn task(&self, key: &TaskKey) -> Task {
@@ -521,6 +528,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()> {
+        *self.state.lock().unwrap().reports.entry(task.clone()).or_default() += 1;
         self.inject("report")?;
         self.write(task, |t, me| {
             if t.holder.as_deref().is_some_and(|h| h != me) {
