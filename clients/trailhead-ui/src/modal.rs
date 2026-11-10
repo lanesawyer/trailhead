@@ -426,6 +426,7 @@ mod tests {
         open(&mut app);
         let dialog = app.world_mut().query_filtered::<&Node, With<ModalDialog>>().single(app.world()).unwrap();
         assert_eq!(dialog.padding, UiRect::all(px(space::PANEL_INSET)));
+        assert!(crate::has_scrollbar_room(dialog));
     }
 
     #[derive(Component)]
