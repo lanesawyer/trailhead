@@ -695,6 +695,29 @@ async fn a_conflict_the_host_no_longer_reports_goes_back_to_review_without_a_wor
     assert_ne!(r.show(&key).await.status, Status::Open);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_conflict_the_host_has_not_worked_out_yet_is_asked_again_before_a_worker_runs() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+
+    // The base moved, and the host is still working `mergeable` out when the rework starts; it settles on clean.
+    r.codehost.set_mergeable(&pr, None);
+    let (codehost, later) = (r.codehost.clone(), pr.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        codehost.set_mergeable(&later, Some(true));
+    });
+    let sandboxes = r.daemon.prepared().len();
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.daemon.prepared().len(), sandboxes, "no sandbox for a conflict that went away");
+    let task = r.show(&key).await;
+    assert_eq!((task.status, task.run.attempt), (Status::InReview, Some(1)));
+}
+
 fn reviewers_started(r: &Rig) -> usize {
     r.daemon.requests().iter().filter(|req| req.role == Role::Reviewer).count()
 }

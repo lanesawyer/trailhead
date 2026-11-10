@@ -33,10 +33,21 @@ impl Factory {
         // A rework on a PR that has merged or closed since the task was queued would push to a branch nobody wants
         // (TRAIL-304). The sub-agent isn't made yet, so the factory's own identity holds the task while it's settled.
         if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) {
-            match codehost.pr_state(pr).await? {
-                PrState::Open { mergeable: Some(true), .. }
-                    if task.run.last_changes().is_some_and(|c| c.conflict && c.reviewer != CI_REVIEWER) =>
-                {
+            let conflict_rework = task.run.last_changes().is_some_and(|c| c.conflict && c.reviewer != CI_REVIEWER);
+            let mut state = codehost.pr_state(pr).await?;
+            // Right after the base moves the host may not have worked `mergeable` out yet. Ask again a few times
+            // before a worker is spent on a conflict that a clean local merge would leave nothing to fix (TRAIL-953).
+            if conflict_rework {
+                for wait in MERGEABLE_WAITS {
+                    if !matches!(state, PrState::Open { mergeable: None, .. }) {
+                        break;
+                    }
+                    tokio::time::sleep(wait).await;
+                    state = codehost.pr_state(pr).await?;
+                }
+            }
+            match state {
+                PrState::Open { mergeable: Some(true), .. } if conflict_rework => {
                     tracing::info!(task = %task.key.0, pr = %pr.url, "the host no longer reports a conflict; back to review");
                     self.settle_gone_conflict(task, pr).await?;
                     return Ok(Outcome::Settled { reason: messages::settled_conflict_gone(&pr.url) });
