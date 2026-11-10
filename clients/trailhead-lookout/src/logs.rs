@@ -94,9 +94,23 @@ impl LogState {
                 }
             }
             LogUpdate::Line(line) => self.push(line),
+            LogUpdate::Skipped(count) => self.push(gap(count)),
             LogUpdate::Dropped => {}
             LogUpdate::TooOld(why) => self.note = Some(why),
         }
+    }
+}
+
+/// The warning that marks where `count` lines were missed.
+fn gap(count: u64) -> LogLine {
+    let ts_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    LogLine {
+        ts_ms,
+        level: LogLevel::Warn,
+        target: "lookout".into(),
+        repo: None,
+        task: None,
+        message: format!("{count} log lines skipped: Lookout fell behind"),
     }
 }
 
@@ -489,6 +503,23 @@ mod tests {
         assert_eq!(state.tasks().collect::<Vec<_>>(), ["TRAIL-2", "TRAIL-3"]);
         state.apply(LogUpdate::TooOld("this factory is too old to send logs".into()));
         assert_eq!(state.note(), Some("this factory is too old to send logs"));
+    }
+
+    #[test]
+    fn a_skip_leaves_a_warning_where_the_lines_were_missed() {
+        let mut state = open();
+        state.apply(LogUpdate::Line(line(1, LogLevel::Info, None)));
+        state.apply(LogUpdate::Skipped(7));
+        state.apply(LogUpdate::Line(line(2, LogLevel::Info, None)));
+        let entries: Vec<_> = state.entries().map(|e| (e.line.level, e.line.message.as_str())).collect();
+        assert_eq!(
+            entries,
+            [
+                (LogLevel::Info, "line 1"),
+                (LogLevel::Warn, "7 log lines skipped: Lookout fell behind"),
+                (LogLevel::Info, "line 2"),
+            ]
+        );
     }
 
     #[test]

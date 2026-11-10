@@ -147,6 +147,8 @@ pub enum LogUpdate {
     /// The lines the control plane has kept, replacing what was shown; first on every connection.
     Backlog(Vec<LogLine>),
     Line(LogLine),
+    /// This many lines were missed because Lookout fell behind.
+    Skipped(u64),
     /// The stream dropped; it is being retried.
     Dropped,
     /// The control plane doesn't serve logs, so it is older than this Lookout. Carries the message to show.
@@ -551,6 +553,7 @@ async fn follow_logs(
         let update = match frame {
             LogFrame::Backlog { lines } => LogUpdate::Backlog(lines),
             LogFrame::Line(line) => LogUpdate::Line(line),
+            LogFrame::Skipped { count } => LogUpdate::Skipped(count),
             LogFrame::Unsupported(_) => return Ok(Some(NO_LOGS.into())),
         };
         if events.send(NetEvent::Logs(update)).is_err() {
