@@ -36,6 +36,7 @@ pub(crate) async fn ls(
     all: bool,
     today: bool,
     grade: Option<String>,
+    title: Option<String>,
     limit: Option<i64>,
 ) -> Result<()> {
     let status = status.or(all.then(|| "open,in_progress,needs_input,in_review,approved,done,cancelled".into()));
@@ -45,6 +46,7 @@ pub(crate) async fn ls(
         ("parent", parent),
         ("scheduled_through", today.then(|| local_today().to_string())),
         ("grade", grade),
+        ("title", title),
         ("sort", today.then(|| "scheduled".to_string())),
         ("limit", limit.map(|n| n.to_string())),
     ]);
