@@ -388,7 +388,7 @@ fn changed_file(f: &Value) -> ChangedFile {
     let path = f["filename"].as_str().unwrap_or_default().to_string();
     ChangedFile {
         // Only a lockfile's patch is kept: the grader reads it to tell a new package from an edited dependency list.
-        patch: f["patch"].as_str().filter(|_| path.ends_with("Cargo.lock")).map(str::to_string),
+        patch: f["patch"].as_str().filter(|_| trailhead_factory::grade::reads_patch(&path)).map(str::to_string),
         path,
         status,
         additions: count("additions"),
