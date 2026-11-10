@@ -373,7 +373,7 @@ async fn a_nearly_full_usage_window_pauses_new_runs() {
     assert!(r.factory.tick().await.unwrap().is_empty(), "paused until the window resets");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn runs_start_again_once_the_window_resets() {
     let r = pausing_rig();
     report_usage(&r, 95, 1).await;
@@ -381,11 +381,11 @@ async fn runs_start_again_once_the_window_resets() {
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     assert!(r.factory.tick().await.unwrap().is_empty());
-    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    tokio::time::advance(std::time::Duration::from_millis(2100)).await;
     assert_eq!(r.factory.tick().await.unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_run_loop_wakes_itself_when_the_window_resets() {
     let r = pausing_rig();
     report_usage(&r, 90, 1).await;
