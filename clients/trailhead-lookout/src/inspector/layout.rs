@@ -23,7 +23,7 @@ pub(super) enum Block {
     Gates,
     /// An open question, with its answer and resolve buttons and what became of the last resolve.
     Question { key: String, id: String, body: String, live: bool, note: Option<Control> },
-    /// The grade dropdown (live only); the offline grade is a [`Block::Text`].
+    /// The grade dropdown (live only); the offline grade is a [`Block::GradeBadge`].
     Grade { grade: Option<Grade>, note: Option<Control> },
     /// The status dropdown: the task's own status first.
     Move { statuses: Vec<Status>, note: Option<Control> },
@@ -354,8 +354,9 @@ pub(super) fn layout_task(
         if let Some(p) = view.priority {
             fields.push((format!("s/fields/priority/{p}"), Block::Priority(p)));
         }
-        let words = view.grade.map_or_else(|| "none".to_string(), |g| format!("G{g}"));
-        fields.push(("s/fields/grade/text".to_string(), text_block(format!("Grade: {words}"), size::BODY, Tone::Body)));
+        if let Some(g) = view.grade {
+            fields.push((format!("s/fields/grade/{g}"), Block::GradeBadge(g)));
+        }
     }
     if let Some(g) = view.grade {
         let words = if human.contains(&g) {
