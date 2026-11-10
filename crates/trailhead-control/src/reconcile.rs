@@ -281,8 +281,9 @@ impl Factory {
             // is recorded, so ask once for a person to mark it done rather than be refused again every pass (TRAIL-706).
             Err(Error::Forbidden(why)) if merged_by_human => {
                 tracing::warn!(task = %task.key.0, %why, "the PR was merged unapproved; parking for a person to finish it");
+                // Claimed as it stands, in review, never reopened first: a failed claim then leaves it as it was, not
+                // open and unheld (TRAIL-826).
                 if !claimed {
-                    self.tracker.reopen(&task.key).await?;
                     self.tracker.claim(&task.key).await?;
                 }
                 return self.tracker.ask(&task.key, &messages::merged_unapproved_question(&pr_url)).await;
