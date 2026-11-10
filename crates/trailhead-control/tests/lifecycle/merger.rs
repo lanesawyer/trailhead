@@ -1170,3 +1170,26 @@ async fn a_queued_update_is_forgotten_when_the_task_leaves_the_queue() {
     r.factory.reconcile().await.unwrap();
     assert!(!r.factory.awaiting_branch_update(&key));
 }
+
+#[tokio::test]
+async fn a_persons_pr_that_conflicts_is_warned_about_once_per_head() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (_key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_auto_merge(&mine, true);
+    r.codehost.set_behind(&mine, true);
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let logs = crate::run_loop::Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    let warned =
+        |logs: &crate::run_loop::Logs| logs.text().matches("conflicts with its base; auto-merge stays on").count();
+    assert_eq!(warned(&logs), 1, "{}", logs.text());
+    assert!(!r.codehost.prs()[0].merged, "still held");
+}
