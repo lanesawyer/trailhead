@@ -197,6 +197,7 @@ impl UiAllowlist {
 
     /// Whether `id` was newly added.
     pub fn add(&self, id: EndpointId) -> Result<bool> {
+        let _lock = self.lock()?;
         let mut ids = self.list()?;
         if ids.contains(&id) {
             return Ok(false);
@@ -208,6 +209,7 @@ impl UiAllowlist {
 
     /// Whether `id` was there to remove.
     pub fn remove(&self, id: &EndpointId) -> Result<bool> {
+        let _lock = self.lock()?;
         let mut ids = self.list()?;
         let before = ids.len();
         ids.retain(|i| i != id);
@@ -218,14 +220,31 @@ impl UiAllowlist {
         Ok(true)
     }
 
-    fn save(&self, ids: &[EndpointId]) -> Result<()> {
+    /// Hold an exclusive lock on a sibling file for a read-modify-write, so edits from concurrent processes
+    /// can't lose each other's entries. The lock is on a separate file because `save` replaces the list's inode.
+    /// It is released when the returned file is dropped.
+    fn lock(&self) -> Result<std::fs::File> {
         let fail = |e: std::io::Error| Error::Other(format!("{}: {e}", self.path.display()));
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(fail)?;
         }
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(PathBuf::from(name))
+            .map_err(fail)?;
+        file.lock().map_err(fail)?;
+        Ok(file)
+    }
+
+    fn save(&self, ids: &[EndpointId]) -> Result<()> {
+        let fail = |e: std::io::Error| Error::Other(format!("{}: {e}", self.path.display()));
         let text: String = ids.iter().map(|i| format!("{i}\n")).collect();
-        // Write beside, then rename, so a crash can't leave half a list.
-        let tmp = self.path.with_extension("tmp");
+        // Write beside, then rename, so a crash can't leave half a list. Callers hold the lock.
+        let tmp = self.path.with_extension(format!("{}.tmp", std::process::id()));
         std::fs::write(&tmp, text).map_err(fail)?;
         std::fs::rename(&tmp, &self.path).map_err(fail)
     }
@@ -555,6 +574,28 @@ mod tests {
         assert!(reread.remove(&a).unwrap());
         assert!(!reread.remove(&a).unwrap());
         assert!(!reread.contains(&a) && reread.contains(&b));
+    }
+
+    #[test]
+    fn concurrent_adds_keep_every_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("factory").join("ui-allowed");
+        let ids: Vec<_> = (0..16).map(|_| SecretKey::generate().public()).collect();
+        let threads: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let (list, id) = (UiAllowlist::new(path.clone()), *id);
+                std::thread::spawn(move || list.add(id).unwrap())
+            })
+            .collect();
+        for t in threads {
+            assert!(t.join().unwrap());
+        }
+        let mut got = UiAllowlist::new(path).list().unwrap();
+        let mut want = ids;
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
     }
 
     #[test]
