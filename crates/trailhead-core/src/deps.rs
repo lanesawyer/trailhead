@@ -165,26 +165,41 @@ impl Store {
     }
 
     /// Every blocker of these tasks, finished or not, keyed by the blocked task's id; tasks without one are absent.
-    /// Blockers outside the caller's scope, and deleted ones, are left out.
-    pub async fn blockers_of(&self, ctx: &Ctx, task_ids: &[Uuid]) -> Result<HashMap<Uuid, Vec<Uuid>>> {
+    /// Blockers outside the caller's scope are left out of the ids and the unfinished ones counted in `hidden`, as
+    /// `ready` counts them. Deleted blockers are left out of both.
+    pub async fn blockers_of(&self, ctx: &Ctx, task_ids: &[Uuid]) -> Result<BlockersOf> {
         let conn = self.reader()?;
         let rows = conn
             .query(
-                "SELECT d.blocked_id, d.blocker_id, b.project_id FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
+                "SELECT d.blocked_id, d.blocker_id, b.project_id, b.status NOT IN ('done', 'cancelled')
+                 FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
                  WHERE b.deleted_at IS NULL AND d.blocked_id IN (SELECT value FROM json_each(?1))
                  ORDER BY b.key",
                 [json_ids(task_ids)?],
             )
             .await?;
-        let edges = collect(rows, |row| Ok((get_uuid(row, 0)?, get_uuid(row, 1)?, get_uuid(row, 2)?))).await?;
-        let mut out: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-        for (blocked, blocker, project) in edges {
+        let edges =
+            collect(rows, |row| Ok((get_uuid(row, 0)?, get_uuid(row, 1)?, get_uuid(row, 2)?, row.get::<i64>(3)? != 0)))
+                .await?;
+        let mut out = BlockersOf::default();
+        for (blocked, blocker, project, unfinished) in edges {
             if ctx.in_scope(project) {
-                out.entry(blocked).or_default().push(blocker);
+                out.visible.entry(blocked).or_default().push(blocker);
+            } else if unfinished {
+                *out.hidden.entry(blocked).or_default() += 1;
             }
         }
         Ok(out)
     }
+}
+
+/// What [`Store::blockers_of`] finds.
+#[derive(Debug, Default)]
+pub struct BlockersOf {
+    /// The blockers in the caller's scope, by blocked task.
+    pub visible: HashMap<Uuid, Vec<Uuid>>,
+    /// How many unfinished blockers outside it each task has.
+    pub hidden: HashMap<Uuid, usize>,
 }
 
 pub(crate) async fn remove_dependency_row(tx: &Tx, dep: &Dependency) -> Result<()> {

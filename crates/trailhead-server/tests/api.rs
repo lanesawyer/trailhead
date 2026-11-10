@@ -596,6 +596,7 @@ async fn task_list_can_include_every_blocker() {
     let items = r.body.as_array().unwrap();
     assert_eq!(items[2]["blocked_by"], json!([items[0]["id"], items[1]["id"]]));
     assert_eq!(items[0]["blocked_by"], json!([]));
+    assert_eq!(items[2]["blocked_by_hidden"], json!(0));
     assert_eq!(items[3]["blocked_by"], json!([]));
     let r = api.as_human("GET", "/v1/tasks?fields=key", None).await;
     assert!(r.body[0].get("blocked_by").is_none());

@@ -237,10 +237,16 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         },
     };
     // The blockers of each task that haven't finished, by the statuses mirrored now (the rule of core's `ready`), so
-    // one finishing clears the badge with no fetch. A blocker the mirror lacks (deleted, out of scope) doesn't count.
+    // one finishing clears the badge with no fetch. A blocker the mirror lacks (deleted) doesn't count, but the nil id
+    // stands for one outside the token's scope, unfinished as far as anyone can tell.
     let status_of: HashMap<Uuid, Status> = input.tasks.iter().map(|t| (t.id, t.status)).collect();
     let mut unfinished: HashMap<Uuid, Vec<&str>> = HashMap::new();
+    let mut hidden: HashMap<Uuid, usize> = HashMap::new();
     for d in input.dependencies {
+        if d.blocker_id.is_nil() {
+            *hidden.entry(d.blocked_id).or_default() += 1;
+            continue;
+        }
         if let (Some(status), Some(key)) = (status_of.get(&d.blocker_id), task_key.get(&d.blocker_id))
             && !status.is_closed()
         {
@@ -325,16 +331,20 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
                 hint: None,
             });
         }
-        if !t.status.is_closed()
-            && let Some(keys) = unfinished.get(&t.id)
-        {
-            let mut keys = keys.clone();
+        let out_of_view = hidden.get(&t.id).copied().unwrap_or(0);
+        let mut keys = unfinished.get(&t.id).cloned().unwrap_or_default();
+        if !t.status.is_closed() && (!keys.is_empty() || out_of_view > 0) {
             keys.sort_unstable();
+            let mut named = keys.join(", ");
+            if out_of_view > 0 {
+                let more = format!("{out_of_view} outside this token's view");
+                named = if named.is_empty() { more } else { format!("{named} and {more}") };
+            }
             badges.push(Badge {
                 kind: BadgeKind::Blocked,
-                label: format!("blocked · {}", keys.len()),
+                label: format!("blocked · {}", keys.len() + out_of_view),
                 tone: Some(token::STATUS_WARN),
-                hint: Some(format!("Blocked by {}", keys.join(", "))),
+                hint: Some(format!("Blocked by {named}")),
             });
         }
         if !open.is_empty() {
@@ -502,12 +512,15 @@ mod tests {
         // OPS-1 is finished, so it blocks nothing any more, and being done it shows no badge of its own.
         tasks[4]["status"] = json!("done");
         let dep = |blocker: &str, blocked: &str| json!({"workspace_id": sid("w1"), "blocker_id": sid(blocker), "blocked_id": sid(blocked), "created_at": at(1)});
+        let dep_nil = |blocked: &str| json!({"workspace_id": sid("w1"), "blocker_id": "00000000-0000-0000-0000-000000000000", "blocked_id": sid(blocked), "created_at": at(1)});
         let dependencies = typed::<Dependency>(vec![
             dep("t104", "t105"),
             dep("t103", "t105"),
             dep("t200", "t105"),
             dep("t104", "t200"),
             dep("t999", "t102"),
+            dep_nil("t103"),
+            dep_nil("t105"),
         ]);
         let (projects, tasks, claims, comments, agents) = (
             typed::<Project>(projects),
@@ -531,13 +544,16 @@ mod tests {
         );
         let blocked = |key: &str| card(&view, key).badges.iter().find(|b| b.kind == BadgeKind::Blocked).cloned();
         let badge = blocked("TRAIL-105").unwrap();
-        assert_eq!(badge.label, "blocked · 2");
-        assert_eq!(badge.hint.as_deref(), Some("Blocked by TRAIL-103, TRAIL-104"));
+        assert_eq!(badge.label, "blocked · 3");
+        assert_eq!(badge.hint.as_deref(), Some("Blocked by TRAIL-103, TRAIL-104 and 1 outside this token's view"));
+        // A blocker outside the token's view is all the card can say about TRAIL-103.
+        let only_hidden = blocked("TRAIL-103").unwrap();
+        assert_eq!(only_hidden.label, "blocked · 1");
+        assert_eq!(only_hidden.hint.as_deref(), Some("Blocked by 1 outside this token's view"));
         assert_eq!(badge.tone, Some(token::STATUS_WARN));
         // Done, or blocked only by a task the mirror doesn't have: nothing to say.
         assert_eq!(blocked("OPS-1"), None);
         assert_eq!(blocked("TRAIL-102"), None);
-        assert_eq!(blocked("TRAIL-103"), None);
     }
 
     #[test]
