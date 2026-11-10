@@ -80,8 +80,8 @@ pub struct Host {
     queues: Mutex<HashSet<String>>,
     /// The projects some repo works without a queue, i.e. whole: nothing in them can sit outside a queue.
     queueless_projects: Mutex<HashSet<String>>,
-    /// The stray runs already warned about, so each is logged once.
-    strays_logged: Mutex<HashSet<String>>,
+    /// Per project, the stray runs already warned about, so each is logged once per stretch outside the queues.
+    strays_logged: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl Host {
