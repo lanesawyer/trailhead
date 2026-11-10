@@ -181,16 +181,28 @@ impl Grader<'_> {
         // (grade, reason) per finding.
         let mut found: Vec<(Grade, String)> = Vec::new();
         // Compiled once for all files, not per file and glob.
-        let rules: Vec<(Grade, globset::GlobSet)> = self
+        // Each rule twice: all its globs, and without the ones naming `Cargo.lock` itself, for a lock that only edits
+        // dependency lists. A broader glob that happens to cover it (`crates/**`) still counts.
+        let rules: Vec<(Grade, globset::GlobSet, globset::GlobSet)> = self
             .rules
             .iter()
-            .map(|(grade, globs)| (*grade, compile_glob_set(globs.iter().map(String::as_str))))
+            .map(|(grade, globs)| {
+                let all = compile_glob_set(globs.iter().map(String::as_str));
+                let rest = compile_glob_set(
+                    globs.iter().map(String::as_str).filter(|g| g.rsplit('/').next() != Some("Cargo.lock")),
+                );
+                (*grade, all, rest)
+            })
             .collect();
         for f in files {
-            let rule = rules.iter().filter(|(_, set)| set.is_match(&f.path)).map(|(grade, _)| *grade).max();
             let lock_edit = f.path.rsplit('/').next() == Some("Cargo.lock")
                 && f.patch.as_deref().is_some_and(is_dependency_list_only);
-            if let Some(grade) = rule.filter(|_| !lock_edit) {
+            let rule = rules
+                .iter()
+                .filter(|(_, all, rest)| if lock_edit { rest } else { all }.is_match(&f.path))
+                .map(|(grade, ..)| *grade)
+                .max();
+            if let Some(grade) = rule {
                 found.push((grade, format!("{} changed", f.path)));
             }
             let lost_test = |p: &str| is_test_path(p);
@@ -367,6 +379,10 @@ mod tests {
         ] {
             assert_eq!(grader(&r).grade(Some(gr(1)), &[lock(bad)]).grade, gr(3), "{bad}");
         }
+        // A broader glob covering the lock still applies to a dependency-list edit.
+        let broad = Rules { two: vec!["**".into()], three: vec!["Cargo.lock".into()], four: vec![] };
+        let g = grader(&broad).grade(Some(gr(1)), &[lock(dev)]);
+        assert_eq!(g.describe(), "Grade 2 (task was 1; Cargo.lock changed)");
         // No patch (too large for the host to show): treated as risky.
         assert_eq!(grader(&r).grade(Some(gr(1)), &[modified("Cargo.lock")]).grade, gr(3));
     }

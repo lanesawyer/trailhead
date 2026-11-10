@@ -40,7 +40,8 @@ Decided: gates per grade are configurable per repo, in `.trailhead.toml`. The ta
 max_lines = 600          # bigger diffs are at least grade 3
 
 # A Cargo.lock whose patch only edits dependency lists (a member gaining a dependency that is already locked) does not
-# match its rule; a new [[package]], or a changed version, source or checksum, or a patch the host omits, does.
+# match the globs that name Cargo.lock; a broader glob covering it (say `crates/**`) still applies. A new [[package]],
+# or a changed version, source or checksum, or a patch the host omits, matches as usual.
 
 [factory.gates.1]
 require = ["checks", "ci"]
