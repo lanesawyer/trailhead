@@ -87,6 +87,13 @@ impl Factory {
         self.status.sync_sandboxes(&live, &down, &parked);
         self.warn_strays().await;
         let in_flight = in_flight?;
+        // Only after a listing that succeeded: a tracker error must not wipe what the merger is tracking.
+        let in_review: HashSet<&TaskKey> = in_flight
+            .iter()
+            .filter(|t| matches!(t.status, Status::InReview | Status::Approved))
+            .map(|t| &t.key)
+            .collect();
+        self.retain_merge_path(&in_review);
         let factory_prs = in_flight.iter().filter_map(|t| t.run.pr.as_ref().map(|p| p.number)).collect();
         self.person_pass(&factory_prs).await;
         let tasks: Vec<Task> = in_flight.into_iter().filter(|t| !running.contains(&t.key)).collect();
@@ -417,9 +424,6 @@ impl Factory {
 
     /// Puts one in-flight task right; true when its PR is due a review.
     pub(crate) async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
-        if matches!(task.status, Status::Cancelled | Status::Done) {
-            self.forget_merge_path(&task.key);
-        }
         let Some(name) = &task.run.sandbox else { return Ok(false) };
         // A park for the reviewer's breach that was cut short: finish it rather than let a worker rerun the task.
         if let Some((breach, claim)) = self.unparked_review_breach(task) {

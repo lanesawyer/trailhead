@@ -227,6 +227,14 @@ impl Factory {
         self.listed.lock().unwrap().remove(task);
     }
 
+    /// Drops the merge path's entries for every task not in `keep`, the in-review tasks of a successful listing. A
+    /// task that left review any way at all (cancelled, deleted, re-parented out of the queue, done by hand) is no
+    /// longer listed, so its entries go without each way out needing its own check (TRAIL-680).
+    pub(crate) fn retain_merge_path(&self, keep: &HashSet<&TaskKey>) {
+        self.updating.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.listed.lock().unwrap().retain(|k, _| keep.contains(k));
+    }
+
     /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).
     #[doc(hidden)]
     pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {
