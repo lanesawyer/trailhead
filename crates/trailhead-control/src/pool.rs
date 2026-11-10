@@ -351,7 +351,7 @@ impl Factory {
             return;
         }
         if state == Some(label::BROKEN) || self.abandoned(name) {
-            match p.compute.destroy(&sandbox.id).await {
+            match self.destroy_pooled(p, sandbox).await {
                 Ok(()) => {
                     tracing::info!(sandbox = %name, "destroyed a broken pooled sandbox");
                     self.troubled.lock().unwrap().remove(name);
