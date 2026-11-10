@@ -193,6 +193,43 @@ async fn a_run_that_concluded_but_couldnt_release_its_sandbox_is_not_reattached_
     assert_eq!(r.tracker.task(&key).run.spend, spend, "not counted a second time");
 }
 
+/// Here `concluded` alone stops the reattach: the control plane stopped before the task left InProgress under the
+/// run's sub-agent, so `live_run` has no status to decline it on.
+#[tokio::test]
+async fn a_run_that_concluded_while_still_in_progress_is_not_reattached_to() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Opens a PR", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    // The daemon tries three times and the control plane's own record once more, so the task never reaches review.
+    // The control plane stops there, before it revokes the sub-agent, which still holds the claim.
+    r.tracker.fail_next("factory", "revoke_sub_agent", 1);
+    r.tracker.fail_next("factory/trail-1-a1", "request_review", 4);
+    r.compute.fail_after("trailhead-w1", "set_egress", 2);
+
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.concluded.as_deref(), Some("trail-1-a1"), "`conclude` marked the run: {ran:?}");
+    assert_eq!(task.status, Status::InProgress, "{ran:?}");
+    assert_eq!(task.holder.as_deref(), Some("factory/trail-1-a1"));
+
+    let spend = task.run.spend;
+    let report = trailhead_factory::RunReport {
+        result: trailhead_factory::RunResult::NeedsInput("Which greeting?".into()),
+        checks: vec![],
+        usage: Default::default(),
+    };
+    r.daemon.ongoing("trail-1-a1", vec![spent(400_000)], report);
+    r.compute.heal("trailhead-w1");
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reattached.is_empty(), "{done:?}");
+    assert!(r.daemon.attached().is_empty());
+    assert!(done.requeued.contains(&key.0), "{done:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.spend, spend, "not counted a second time");
+    assert_eq!(task.status, Status::Open);
+}
+
 #[tokio::test]
 async fn a_reattached_run_counts_its_wall_clock_from_when_it_started() {
     let r = rig();
