@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iroh::address_lookup::MemoryLookup;
-use iroh::endpoint::presets;
+use iroh::endpoint::{ReadError, ReadExactError, VarInt, presets};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tokio::sync::broadcast;
@@ -13,8 +13,8 @@ use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, Sequenced, TaskKey};
 use trailhead_wire::api::ApiTunnel;
 use trailhead_wire::ui::{
-    LogFeed, LogFrame, LogStream, RepoFeed, StatusFeed, StatusFrame, StatusStream, UI_ALPN, UiAllowlist, UiProtocol,
-    dial_ui, open_ui_tunnel,
+    LogFeed, LogFrame, LogStream, RepoFeed, SERVER_UNREACHABLE, StatusFeed, StatusFrame, StatusStream, UI_ALPN,
+    UiAllowlist, UiProtocol, dial_ui, open_ui_tunnel,
 };
 use trailhead_wire::{API_ALPN, Peers, read_frame, write_frame};
 
@@ -301,6 +301,34 @@ async fn an_unknown_request_is_answered_with_what_the_factory_knows() {
         assert_eq!(u.build, "unknown");
         // And then the stream ends.
         assert!(read_frame::<StatusFrame>(&mut recv).await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn an_api_request_resets_with_its_own_code_when_the_server_is_down() {
+    let dir = tempfile::tempdir().unwrap();
+    // An address nothing listens on: bind, note it, drop.
+    let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+    let allowed = UiAllowlist::new(dir.path().join("ui-allowed"));
+    let control_ep = endpoint(SecretKey::generate(), Arc::new(MemoryLookup::new()), vec![]).await;
+    let control = control_ep.addr();
+    let _router = Router::builder(control_ep).accept(UI_ALPN, UiProtocol::new(server, allowed.clone())).spawn();
+    let key = SecretKey::generate();
+    allowed.add(key.public()).unwrap();
+    let lookup = Arc::new(MemoryLookup::new());
+    lookup.add_endpoint_info(control.clone());
+    let client = endpoint(key, lookup, vec![]).await;
+    let conn = dial_ui(&client, control.id).await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    write_frame(&mut send, &serde_json::json!({"op": "api"})).await.unwrap();
+    send.finish().unwrap();
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(10), recv.read_exact(&mut buf)).await.unwrap();
+    match read {
+        Err(ReadExactError::ReadError(ReadError::Reset(code))) => {
+            assert_eq!(code, VarInt::from(SERVER_UNREACHABLE));
+        }
+        other => panic!("expected a reset with SERVER_UNREACHABLE, got {other:?}"),
     }
 }
 

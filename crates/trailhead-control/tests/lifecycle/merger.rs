@@ -1180,3 +1180,33 @@ async fn a_parked_task_whose_merge_close_failed_before_the_park_is_retried() {
     assert!(again.merged.contains(&key.0), "retried rather than skipped");
     assert_eq!(r.tracker.task(&key).status, Status::Done);
 }
+
+#[tokio::test]
+async fn a_queued_update_is_forgotten_when_the_task_is_cancelled() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.queue_updates(true);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.factory.awaiting_branch_update(&key));
+
+    r.tracker.set_status(&key, Status::Cancelled);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.factory.awaiting_branch_update(&key));
+}
+
+#[tokio::test]
+async fn a_queued_update_is_forgotten_when_the_task_leaves_the_queue() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.queue_updates(true);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.factory.awaiting_branch_update(&key));
+
+    r.tracker.detach(&key);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.factory.awaiting_branch_update(&key));
+}
