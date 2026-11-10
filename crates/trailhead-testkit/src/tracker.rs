@@ -561,10 +561,10 @@ impl Tracker for FakeTracker {
         let delegated = !self.state.lock().unwrap().undelegated.contains(&self.agent);
         self.write(task, |t, me| {
             if !delegated {
-                return Err(Error::Forbidden(format!(
-                    "{me} can't approve {}: it isn't a delegated reviewer, so a person has to list it as a reviewer of project {}",
-                    t.key.0,
-                    t.key.project()
+                return Err(Error::Forbidden(trailhead_factory::messages::not_a_reviewer(
+                    me,
+                    &t.key.0,
+                    t.key.project(),
                 )));
             }
             if t.status != Status::InReview {
