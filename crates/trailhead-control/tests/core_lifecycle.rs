@@ -1207,6 +1207,11 @@ async fn a_task_that_blocks_urgent_work_is_listed_as_urgent_too() {
     assert_eq!(priority(&blocker), pr(2), "through a chain, a p3 blocker of a p2 task runs as p2");
     assert_eq!(priority(&older), pr(3));
 
+    let first = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 1).await.unwrap();
+    assert_eq!(first.iter().map(|t| &t.key).collect::<Vec<_>>(), [&blocker], "the raise applies before the limit");
+    let first = r.tracker.ready("TRAIL", &[], 1).await.unwrap();
+    assert_eq!(first.iter().map(|t| &t.key).collect::<Vec<_>>(), [&blocker], "with no queue too");
+
     r.factory.config.repo.max_sandboxes = 1;
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
     let ran = r.factory.tick().await.unwrap();
