@@ -21,7 +21,7 @@ Named after the climbing classes of the Yosemite Decimal System: the higher the 
 
 How grades are set:
 
-- **On the task, by a human, when it's triaged.** The grade is a field on the task ([PLAN.md](../PLAN.md), engine change #6). Grading a task is what makes it the factory's work: the factory only picks up graded tasks that are direct subtasks of a task in its `queue` list (or any task in the project when the repo has no queue, where the grade filter is skipped), and skips an ungraded one, saying so. A task that should never be worked by the factory, like an item on a shopping list, simply has no grade.
+- **On the task, by a human, when it's triaged.** The grade is a field on the task ([PLAN.md](../PLAN.md), engine change #6). With a `queue`, grading a task is what makes it the factory's work: the factory only picks up graded tasks that are direct subtasks of a task in that list, and skips an ungraded one, saying so. A task that should never be worked by the factory, like an item on a shopping list, simply has no grade. A repo with no queue takes every ready task in its project, graded or not, so there leaving a task ungraded doesn't keep it out.
 - **Only raised after that.** Agents can raise a task's grade but never set the first one, lower it or clear it. The PR is graded the task's grade or higher:
   - **By the diff.** The control plane matches each changed file against the repo's path rules, and a diff over the repo's line limit is at least grade 3. If that comes out higher than the task's grade, the PR and the task are raised, with the file or rule that did it. Deleting a test or a check is never grade 1.
   - **By the reviewer.** Its verdict can name a higher grade with a reason.
