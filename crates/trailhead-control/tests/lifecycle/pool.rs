@@ -365,6 +365,29 @@ async fn a_new_warm_checkpoint_is_deleted_when_recording_it_fails() {
     assert_eq!(w1.labels.get(label::WARM), Some(&warm), "the old warm checkpoint is kept");
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_failed_rewarm_leaves_the_old_checkpoints_cost_in_place() {
+    let r = rig_with(&CONFIG.replace("[checks]\n", "[checks]\nsetup = \"cargo build\"\n"));
+    r.daemon.prepare_takes(Duration::from_secs(300));
+    r.compute.checkpoint_takes(Duration::from_secs(200));
+    warm_one_sandbox(&r).await;
+
+    // The prepare is slower than the checkpoint, so a new, much slower one is taken; the agent egress then fails.
+    r.compute.checkpoint_takes(Duration::from_secs(1000));
+    let key = r.tracker.add_task("TRAIL", "Egress fails", "");
+    r.compute.fail_once_after("trailhead-w1", "set_egress", 1);
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert_eq!(r.compute.checkpoints("trailhead-w1"), ["warm"], "the unused checkpoint is gone");
+
+    // The old checkpoint cost 200s, so a 300s prepare from it is stale. Had the 1000s stuck, it would be kept.
+    r.compute.checkpoint_takes(Duration::from_secs(200));
+    r.tracker.add_task("TRAIL", "Next", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.compute.checkpoints("trailhead-w1"), ["warm", "warm"], "judged against the old cost, so refreshed");
+}
+
 #[tokio::test]
 async fn a_warm_sandbox_that_fails_after_prepare_goes_back_idle_with_its_old_checkpoint() {
     let r = rig();
