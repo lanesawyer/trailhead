@@ -176,8 +176,13 @@ impl Workspace for GitWorkspace {
         if let Some(branch) = &req.branch {
             // A rework builds on the PR branch's head, so what it publishes lands on top of it; a
             // reviewer checks out the same head, so it reads the code the PR proposes.
-            self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await?;
-            self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")]).await?;
+            let fetched = self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await;
+            // A branch that was never pushed isn't an error when the request allows it: the work starts at the base.
+            if fetched.is_ok() || !req.branch_if_present {
+                fetched?;
+                self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")])
+                    .await?;
+            }
         }
         // Before setup, so the repo's own build runs with the pinned tools.
         self.mise.bootstrap(&req.tools).await?;
@@ -328,9 +333,17 @@ impl Workspace for GitWorkspace {
         if !self.git_output(&self.dir, &["status", "--porcelain"]).await?.trim().is_empty() {
             return Ok(true);
         }
+        // The factory publishes through the GitHub API, which makes new commits for the same content: the ref may not
+        // be here yet and the local commits may not be its ancestors. Fetch it, then compare content as well. A branch
+        // the remote lacks fails the fetch.
+        self.git(&self.dir, &["fetch", "--quiet", "origin", remote_branch]).await?;
         let remote = format!("origin/{remote_branch}");
         let ahead = self.git_output(&self.dir, &["rev-list", "-n1", "HEAD", "--not", &remote]).await?;
-        Ok(!ahead.trim().is_empty())
+        if ahead.is_empty() {
+            return Ok(false);
+        }
+        let differs = self.git_output(&self.dir, &["diff", "--name-only", "--no-ext-diff", &remote, "HEAD"]).await?;
+        Ok(!differs.is_empty())
     }
 
     async fn head(&self) -> Result<String> {

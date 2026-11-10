@@ -55,6 +55,7 @@ async fn prepare_clones_runs_setup_and_resets() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -107,6 +108,7 @@ async fn prepare_can_check_out_a_branchs_remote_head() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -220,6 +222,7 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -286,6 +289,7 @@ async fn branch_behind_main(root: &Path) -> (GitWorkspace, String) {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -382,6 +386,7 @@ async fn prepare_installs_the_stack_with_mise_and_checks_run_under_it() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         setup: Some(check("setup", "echo \"pinned=$PINNED\" > .setup-env")),
         tools: [("node".to_string(), "26".to_string())].into(),
         tool_hosts: Default::default(),
@@ -430,6 +435,7 @@ async fn the_stack_install_is_retried_while_egress_opens() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         setup: None,
         tools: [("node".to_string(), "26".to_string())].into(),
         tool_hosts: Default::default(),
@@ -517,6 +523,7 @@ async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -555,6 +562,7 @@ async fn prepare_runs_the_trim_check_after_setup_and_survives_its_failure() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         setup: Some(check("setup", "mkdir -p cache && touch cache/big")),
         trim: Some(check("trim", "rm -rf cache")),
         disk_warn_bytes: None,
@@ -581,6 +589,7 @@ async fn prepare_refuses_when_the_disk_is_over_the_limit() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         setup: None,
         trim: None,
         disk_warn_bytes: Some(1),
@@ -606,6 +615,7 @@ async fn changed_files_lists_committed_uncommitted_and_new_files_against_the_bas
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -643,6 +653,7 @@ async fn unpublished_sees_uncommitted_and_unpushed_work_but_not_a_clean_checkout
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -689,6 +700,7 @@ async fn changed_files_leaves_out_base_changes_merged_in_by_a_rework() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -701,4 +713,57 @@ async fn changed_files_leaves_out_base_changes_merged_in_by_a_rework() {
     assert!(ws.merge_head().await.unwrap().is_some());
     assert!(ws.dir().join("base.txt").exists(), "the merge brought the base change in");
     assert_eq!(ws.changed_files("main").await.unwrap(), ["pr.txt"]);
+}
+
+#[tokio::test]
+async fn a_branch_published_through_the_api_counts_as_published_and_a_resume_builds_on_it() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let bare = root.path().join("remote/acme/widget.git");
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: Some("factory/trail-1".into()),
+        branch_if_present: true,
+        merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        setup: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+        env: Default::default(),
+    };
+    ws.prepare(&req).await.unwrap();
+    let dir = ws.dir();
+    assert_eq!(ws.head().await.unwrap(), rev(&dir, "origin/main"), "a branch the remote lacks leaves it on the base");
+    assert!(ws.unpublished("factory/trail-1").await.is_err(), "and there is nothing to compare with");
+
+    git(&dir, &["config", "user.email", "t@example.com"]);
+    git(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "new"]);
+    assert!(ws.unpublished("main").await.unwrap());
+
+    // The API makes its own commit for the same content, so the local one is no ancestor of the branch.
+    let tmp = root.path().join("api");
+    git(root.path(), &["clone", "--quiet", bare.to_str().unwrap(), tmp.to_str().unwrap()]);
+    git(&tmp, &["config", "user.email", "api@example.com"]);
+    git(&tmp, &["config", "user.name", "api"]);
+    std::fs::write(tmp.join("new.txt"), "new\n").unwrap();
+    git(&tmp, &["add", "."]);
+    git(&tmp, &["commit", "--quiet", "-m", "published"]);
+    git(&tmp, &["push", "--quiet", "origin", "HEAD:refs/heads/factory/trail-1"]);
+    assert!(!ws.unpublished("factory/trail-1").await.unwrap(), "the same content is on the branch");
+
+    std::fs::write(dir.join("new.txt"), "newer\n").unwrap();
+    git(&dir, &["commit", "--quiet", "-am", "more"]);
+    assert!(ws.unpublished("factory/trail-1").await.unwrap(), "different content isn't");
+
+    // A resume now builds on the pushed branch.
+    ws.prepare(&req).await.unwrap();
+    assert_eq!(ws.head().await.unwrap(), rev(&tmp, "HEAD"));
 }

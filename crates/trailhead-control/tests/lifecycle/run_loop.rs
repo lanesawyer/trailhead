@@ -882,4 +882,17 @@ async fn a_parked_task_with_a_pushed_branch_and_no_pr_is_compared_with_its_branc
     assert!(ran.iter().any(|(t, _)| t.key == waiting), "the waiting task took the place");
     assert!(r.tracker.task(&parked).run.released.is_some_and(|at| at > 0));
     assert_eq!(r.daemon.unpublished_asked(), ["factory/trail-1"], "asked against its own branch only");
+
+    // Answered, it resumes from the branch it pushed, if the remote still has it.
+    r.tracker.answer(&parked, "Go on.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == parked), "the answered task started again");
+    let resumed = r
+        .daemon
+        .prepared()
+        .into_iter()
+        .any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1") && p.branch_if_present);
+    assert!(resumed, "a branch that was never pushed leaves it on the base");
 }
