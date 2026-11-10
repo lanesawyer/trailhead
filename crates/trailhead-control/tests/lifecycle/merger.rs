@@ -4,7 +4,7 @@ use trailhead_control::Outcome;
 use trailhead_factory::{
     CiState, CodeHost, Commit, MergedBy, NewPr, PrRef, RateLimit, Role, RunOutcome, Status, Tracker,
 };
-use trailhead_testkit::Script;
+use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
 
@@ -456,7 +456,7 @@ async fn a_merge_whose_close_failed_is_closed_by_the_next_pass_as_the_mergers() 
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.codehost.set_ci(&pr, CiState::Passed);
-    r.tracker.fail_next("factory", "finish", 1);
+    r.tracker.fail_next("factory", TrackerOp::Finish, 1);
     // The merger writes its intent and the host merges, but closing the task fails.
     let _ = r.factory.reconcile().await;
     assert!(r.codehost.prs()[0].merged);
@@ -809,6 +809,36 @@ async fn a_push_on_top_of_a_host_made_update_unapproves_lanes_approval_of_a_grad
 }
 
 #[tokio::test]
+async fn a_push_after_lanes_approval_was_carried_to_a_host_made_update_unapproves_it() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.tracker.approve_as_human(&key);
+    r.codehost.set_behind(&pr, true);
+    r.factory.reconcile().await.unwrap();
+    let old_head = r.tracker.task(&key).run.merge.unwrap().head;
+    r.codehost.set_ci(&pr, CiState::Pending);
+
+    // CI is still pending on the update, so this pass only carries Lane's approval to the updated head.
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Approved, "Lane's approval carries over a host-made update");
+    let carried = task.run.merge.unwrap();
+    assert_ne!(carried.head, old_head, "the head moved with the update");
+    assert_eq!(carried.human_head.as_deref(), Some(carried.head.as_str()), "marked on the updated head");
+
+    r.codehost.push_to(&pr);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+
+    assert!(!r.codehost.prs()[0].merged);
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "Lane's approval was of the updated head, not the push");
+    assert_eq!(task.run.merge.unwrap().human_head, None);
+}
+
+#[tokio::test]
 async fn a_push_after_lanes_approval_of_a_grade_three_task_unapproves_it() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
@@ -1018,7 +1048,7 @@ async fn a_failed_claim_leaves_a_pr_merged_before_approval_in_review_not_open() 
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
 
-    r.tracker.fail_next("factory", "claim", 1);
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
     let _ = r.factory.reconcile().await;
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::InReview, "never reopened, so not left open and unheld");
