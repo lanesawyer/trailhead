@@ -859,6 +859,21 @@ async fn agent_names_are_unique() {
 }
 
 #[tokio::test]
+async fn creating_an_agent_emits_an_event_that_undo_leaves_alone() {
+    let env = Env::new().await;
+    let bot = env.store.create_agent(&env.human, "bot").await.unwrap();
+    let filter = EventFilter { kinds: vec!["agent.".into()], ..Default::default() };
+    let events = env.store.list_events(&env.human, filter).await.unwrap();
+    assert_eq!(events.len(), 1);
+    let e = &events[0];
+    assert_eq!((e.kind.as_str(), e.entity_id.as_str()), ("agent.created", bot.id.to_string().as_str()));
+    assert_eq!(e.after.as_ref().unwrap()["name"], "bot");
+    let report = env.store.undo_event(&env.human, e.id).await.unwrap();
+    assert!(report.reverted.is_empty() && report.skipped.is_empty());
+    assert!(env.store.list_agents(&env.human).await.unwrap().iter().any(|a| a.id == bot.id));
+}
+
+#[tokio::test]
 async fn delegated_reviewers_can_approve() {
     let env = Env::new().await;
     let worker = env.agent("worker").await;

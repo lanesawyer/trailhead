@@ -483,6 +483,7 @@ string_enum!(Entity "entity" {
     Claim => "claim",
     Comment => "comment",
     Dependency => "dependency",
+    Agent => "agent",
 });
 
 #[cfg(test)]

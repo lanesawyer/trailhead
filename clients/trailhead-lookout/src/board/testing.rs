@@ -54,10 +54,6 @@ pub(super) fn at_now() -> Timestamp {
 }
 
 pub(super) fn run(filter: &Filter) -> BoardView {
-    run_with(filter, &[])
-}
-
-pub(super) fn run_with(filter: &Filter, runs: &[Run]) -> BoardView {
     let (projects, tasks, claims, comments, agents) = input_json();
     let (projects, tasks, claims, comments, agents) = (
         typed::<Project>(projects),
@@ -75,7 +71,6 @@ pub(super) fn run_with(filter: &Filter, runs: &[Run]) -> BoardView {
             comments: &comments,
             agents: &agents,
             users: &[],
-            runs,
             queues: &["TRAIL-102".to_string()],
             deep: &[],
             now: at_now(),

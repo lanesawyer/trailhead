@@ -163,14 +163,7 @@ pub fn build(input: Input) -> MapModel {
     let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
     let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
     let on_behalf_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.on_behalf_of)).collect();
-    // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
-    // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
-    let holder_name = |holder: Uuid, key: &str| -> Option<String> {
-        match agent_name.get(&holder) {
-            Some(n) => Some(n.to_string()),
-            None => run_of.contains_key(key).then(|| format!("factory/{}", key.to_lowercase())),
-        }
-    };
+    let holder_name = |holder: Uuid| agent_name.get(&holder).map(|n| n.to_string());
     let mut questions: HashMap<Uuid, usize> = HashMap::new();
     let mut handoffs: HashMap<Uuid, &Comment> = HashMap::new();
     for c in input.comments {
@@ -203,7 +196,7 @@ pub fn build(input: Input) -> MapModel {
                     format!("an agent ({id})")
                 }
             };
-            markers.push(Marker::Claim(holder_name(*holder, key).unwrap_or_else(label)));
+            markers.push(Marker::Claim(holder_name(*holder).unwrap_or_else(label)));
         }
         if let Some(n) = questions.get(&t.id) {
             markers.push(Marker::Questions(*n));
@@ -239,7 +232,7 @@ pub fn build(input: Input) -> MapModel {
         let Some(wp) = waypoints.iter().zip(&tasks).find(|(_, t)| t.id == task_id).map(|(w, _)| w) else {
             continue;
         };
-        let Some(name) = holder_name(holder, &wp.key) else { continue };
+        let Some(name) = holder_name(holder) else { continue };
         let camp = run_of
             .get(wp.key.as_str())
             .and_then(|r| r.status.sandbox.as_deref().map(|sb| (&r.repo, sb)))
@@ -679,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_made_after_the_snapshot_still_walks_to_its_camp() {
+    fn an_agent_made_after_the_snapshot_walks_to_its_camp_once_its_event_arrives() {
         use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate};
         use crate::mirror::MirrorPlugin;
         use crate::sync::{Snapshot, SyncItem};
@@ -722,6 +715,15 @@ mod tests {
         app.world_mut().write_message(SyncItem::Event(json!({
             "id": 2, "entity": "claim", "entity_id": sid("t42"), "kind": "claim.created",
             "after": claim_json(json!({"task_id": "t42", "holder_id": "a-new"})),
+        })));
+        for _ in 0..3 {
+            app.update();
+        }
+        // Until the agent.created event arrives it has no name, so no walker.
+        assert!(app.world().resource::<TrailMap>().0.walkers.is_empty());
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 3, "entity": "agent", "entity_id": sid("a-new"), "kind": "agent.created",
+            "after": crate::fixture::agent_json(json!({"id": "a-new", "name": "factory/trail-42"})),
         })));
         for _ in 0..3 {
             app.update();
