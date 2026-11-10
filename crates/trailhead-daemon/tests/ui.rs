@@ -7,10 +7,12 @@ use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::{ReadError, ReadExactError, VarInt, presets};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
-use tokio::sync::broadcast;
+use std::sync::Mutex;
+
+use tokio::sync::{broadcast, watch};
 use trailhead_core::{Ctx, NewProject, NewTask, Principal, Store};
 use trailhead_factory::logs::{LogLevel, LogLine};
-use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, Sequenced, TaskKey};
+use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, FactoryState, Sequenced, TaskKey};
 use trailhead_wire::api::ApiTunnel;
 use trailhead_wire::ui::{
     LogFeed, LogFrame, LogStream, RepoFeed, SERVER_UNREACHABLE, StatusFeed, StatusFrame, StatusStream, UI_ALPN,
@@ -44,6 +46,35 @@ struct EmptyFeed;
 impl StatusFeed for EmptyFeed {
     fn subscribe(&self) -> Vec<RepoFeed> {
         Vec::new()
+    }
+}
+
+/// A control plane that starts with no repos and `Starting`, then gains a repo and `Running`.
+struct GrowingFeed {
+    state: Mutex<FactoryState>,
+    repos: Mutex<bool>,
+    changed: watch::Sender<()>,
+}
+
+impl GrowingFeed {
+    fn run(&self) {
+        *self.repos.lock().unwrap() = true;
+        *self.state.lock().unwrap() = FactoryState::Running;
+        self.changed.send_modify(|_| {});
+    }
+}
+
+impl StatusFeed for GrowingFeed {
+    fn subscribe(&self) -> Vec<RepoFeed> {
+        if *self.repos.lock().unwrap() { TestFeed(broadcast::channel(16).0).subscribe() } else { Vec::new() }
+    }
+
+    fn state(&self) -> Option<FactoryState> {
+        Some(self.state.lock().unwrap().clone())
+    }
+
+    fn changed(&self) -> Option<watch::Receiver<()>> {
+        Some(self.changed.subscribe())
     }
 }
 
@@ -255,6 +286,34 @@ async fn status_stays_open_when_the_control_plane_serves_no_repos() {
     assert!(repos.is_empty());
     // An idle control plane is running: the stream is neither ended nor sending.
     assert!(tokio::time::timeout(Duration::from_millis(500), stream.next()).await.is_err());
+}
+
+#[tokio::test]
+async fn status_resyncs_when_an_empty_control_plane_gains_a_repo_and_runs() {
+    let feed = Arc::new(GrowingFeed {
+        state: Mutex::new(FactoryState::Starting { reason: None }),
+        repos: Mutex::new(false),
+        changed: watch::channel(()).0,
+    });
+    let r = Rig::with_status(Some(feed.clone())).await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let client = r.client(key).await;
+    let conn = dial_ui(&client, r.control.id).await.unwrap();
+    let mut stream = StatusStream::open(conn.clone()).await.unwrap();
+    let Some(StatusFrame::Snapshot { control, repos }) = next(&mut stream).await else {
+        panic!("the first frame is the snapshot");
+    };
+    assert_eq!((control, repos.len()), (Some(FactoryState::Starting { reason: None }), 0));
+
+    feed.run();
+    // The stream ends without the UI dropping it, and the redial shows the repo and Running.
+    assert_eq!(tokio::time::timeout(Duration::from_secs(10), stream.next()).await.unwrap().unwrap(), None);
+    let mut stream = StatusStream::open(conn).await.unwrap();
+    let Some(StatusFrame::Snapshot { control, repos }) = next(&mut stream).await else {
+        panic!("the first frame is the snapshot");
+    };
+    assert_eq!((control, repos.len()), (Some(FactoryState::Running), 1));
 }
 
 #[tokio::test]

@@ -20,7 +20,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointId};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use trailhead_factory::logs::LogLine;
 use trailhead_factory::{Error, FactorySnapshot, FactoryState, Result, Sequenced};
 
@@ -118,6 +118,12 @@ pub trait StatusFeed: Send + Sync + 'static {
 
     /// Whether the control plane is running at all, sent with the snapshot.
     fn state(&self) -> Option<FactoryState> {
+        None
+    }
+
+    /// Notified whenever the state or the set of repos changes. A stream with no repos to forward ends on it, so the
+    /// UI redials for a fresh snapshot; without one such a stream never learns of a change.
+    fn changed(&self) -> Option<watch::Receiver<()>> {
         None
     }
 }
@@ -300,15 +306,32 @@ impl UiProtocol {
 
 /// Sends the snapshot, then every event, until the UI goes away or the feed ends.
 async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStream) {
+    // Taken before the snapshot, so a change after it is never missed.
+    let mut changed = feed.changed();
     let feeds = feed.subscribe();
     let repos = feeds.iter().map(|f| RepoSnapshot { repo: f.repo.clone(), snapshot: f.snapshot.clone() }).collect();
     if write_frame(&mut send, &StatusFrame::Snapshot { control: feed.state(), repos }).await.is_err() {
         return;
     }
-    // No repos (yet): nothing will ever forward, but an idle control plane is still running, so hold
-    // the stream open until the UI goes away rather than ending it and having the UI redial.
+    // No repos (yet): there is nothing to forward from this subscription, but ending the stream would have the UI
+    // redial every couple of seconds and read the control plane as stopped. Hold it open until the UI goes away, or
+    // until the state or the repos change, when it ends so the UI redials for the snapshot that shows it.
     if feeds.is_empty() {
-        let _ = send.stopped().await;
+        match changed.as_mut() {
+            Some(changed) => {
+                tokio::select! {
+                    changed = changed.changed() => {
+                        if changed.is_ok() {
+                            let _ = send.finish();
+                        }
+                    }
+                    _ = send.stopped() => {}
+                }
+            }
+            None => {
+                let _ = send.stopped().await;
+            }
+        }
         return;
     }
     let (tx, mut rx) = mpsc::channel(256);
