@@ -6,8 +6,8 @@ use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages::{self, BreachedSandbox};
 use trailhead_factory::{
-    Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase, RunReport,
-    RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
+    ChangesRequested, Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase,
+    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
     WorkerBreach, run_name,
 };
 
@@ -745,9 +745,15 @@ impl Factory {
     /// back to review, where the gates look at the PR as it is. A CI failure's rework isn't one of these, since it
     /// wants the base merged in whether or not the PR conflicts.
     async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef) -> Result<()> {
-        // A fresh conflict count, which is how reconcile tells a request that was settled from one still to act on.
-        let settled = RunUpdate { conflict_reworks: Some(0), ..RunUpdate::default() };
-        self.tracker.report(&task.key, settled).await?;
+        // The request is marked settled, which is how reconcile tells it from one still to act on. The conflict count
+        // stays as it was, so reworks that really ran still count toward `max_conflict_reworks`.
+        if let Some(requested) = task.run.last_changes() {
+            let settled = RunUpdate {
+                changes_requested: Some(ChangesRequested { settled: true, ..requested.clone() }),
+                ..RunUpdate::default()
+            };
+            self.tracker.report(&task.key, settled).await?;
+        }
         self.tracker.claim(&task.key).await?;
         // The handoff answers the conflict request, so the task is no longer waiting on a rework.
         let handoff = messages::conflict_gone_note(&pr.url, &self.config.repo.base_branch);

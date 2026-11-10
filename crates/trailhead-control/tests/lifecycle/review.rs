@@ -983,7 +983,7 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_r
     let task = r.tracker.task(&key);
     assert_eq!(task.run.infra_failures, Some(1), "the revoked name cost an infrastructure failure");
     assert_eq!(task.run.review_rounds, Some(1), "the round was given back");
-    assert!(task.run.pending_changes().is_some_and(|c| c.conflict), "still the conflict's changes");
+    assert!(task.run.last_changes().is_some_and(|c| c.conflict && c.settled), "the conflict request, settled");
 
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the first infrastructure backoff
     let done = r.factory.reconcile().await.unwrap();
