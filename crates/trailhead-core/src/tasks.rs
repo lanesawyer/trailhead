@@ -1063,6 +1063,7 @@ pub(crate) async fn unclaimed_status(conn: &libsql::Connection, task: &Task) -> 
             &format!(
                 "SELECT COALESCE((SELECT json_extract(before, '$.status') FROM events
                                   WHERE task_id = ?1 AND undoes IS NULL AND entity = 'task'
+                                    AND NOT EXISTS (SELECT 1 FROM events u WHERE u.undoes = events.id)
                                     AND json_extract(after, '$.status') = 'in_progress'
                                     AND COALESCE(json_extract(before, '$.status'), '') != 'in_progress'
                                   ORDER BY id DESC LIMIT 1) = 'in_review', 0) AND {}",
