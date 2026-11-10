@@ -300,6 +300,9 @@ pub const STATUS_RETRY: Duration = Duration::from_secs(2);
 /// again until something changes, so asking at the probe rate only fills the factory's logs; a factory that is
 /// reinstalled is still found within the minute.
 pub const STATUS_BACKOFF_STEPS: u32 = 5;
+/// While `Live`, the token is checked with `/v1/me` on every this-many-th probe (30 s by default): a revoked token
+/// doesn't need noticing within one, and the health request is all the other probes send.
+const TOKEN_CHECK_EVERY: u32 = 15;
 
 /// Why the factory won't serve the status stream.
 enum Refusal {
@@ -365,6 +368,8 @@ struct Net {
     pasted: Option<String>,
     /// The token that signed in, kept while `Live` so a dropped link signs back in without asking again.
     token: Option<String>,
+    /// The `Live` probes since the token was last checked.
+    live_probes: u32,
     state: Option<(Link, Option<Reason>)>,
     /// The gaps between probes of a refusal that will be repeated until something changes.
     probe_backoff: Backoff,
@@ -407,6 +412,7 @@ async fn run(
         logs_wanted: false,
         pasted: None,
         token: None,
+        live_probes: 0,
         state: None,
         probe_hold: None,
         sync: None,
@@ -694,6 +700,7 @@ impl Net {
             _ => None,
         };
         if !live {
+            self.live_probes = 0;
             self.set(Link::Syncing, Some(Reason::Dialing));
         }
 
@@ -720,6 +727,11 @@ impl Net {
         let base = tunnel;
         if live {
             self.release_probe();
+            self.live_probes += 1;
+            if self.live_probes < TOKEN_CHECK_EVERY {
+                return;
+            }
+            self.live_probes = 0;
             // /v1/health is open to anyone, so a token revoked since sign-in shows only on an authenticated call.
             // Anything but a refusal is left to the sync, which has its own way of coping.
             if let Some(token) = &self.token
