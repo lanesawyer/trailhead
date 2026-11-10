@@ -39,7 +39,10 @@ fn srgb(color: Color) -> [f32; 4] {
 
 fn in_rounded_square(x: f32, y: f32) -> bool {
     let (dx, dy) = ((x - 0.5).abs() - (0.5 - RADIUS), (y - 0.5).abs() - (0.5 - RADIUS));
-    dx.max(0.0).hypot(dy.max(0.0)) <= RADIUS
+    // Squared distance, not `hypot`: only correctly rounded operations, so every
+    // platform draws the same pixels and the committed PNGs can be compared exactly.
+    let (dx, dy) = (dx.max(0.0), dy.max(0.0));
+    dx * dx + dy * dy <= RADIUS * RADIUS
 }
 
 /// The icon as `size` x `size` RGBA bytes (straight alpha, antialiased by supersampling).
@@ -131,9 +134,6 @@ fn warn_once(done: &mut bool, error: impl std::fmt::Display) {
 mod tests {
     use super::*;
 
-    /// Largest per-channel difference allowed between a committed PNG and a fresh render.
-    const TOLERANCE: u8 = 2;
-
     #[test]
     fn committed_pngs_decode_and_match_the_drawing() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon");
@@ -141,14 +141,10 @@ mod tests {
             let bytes = std::fs::read(dir.join(format!("{size}.png"))).expect("icon png");
             let (w, h, pixels) = decode(&bytes).expect("decodes");
             assert_eq!((w, h), (size, size));
-            // The renderer uses f32 maths, so another platform's libm can nudge an
-            // antialiased edge pixel by a level or two; a stale PNG differs far more.
-            let drawn = render(size);
-            assert_eq!(pixels.len(), drawn.len(), "{size}.png has the wrong size");
-            let worst = pixels.iter().zip(&drawn).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
-            assert!(
-                worst <= TOLERANCE,
-                "{size}.png is stale (off by {worst}): run `cargo run -p trailhead-lookout --example make_icon`"
+            assert_eq!(
+                pixels,
+                render(size),
+                "{size}.png is stale: run `cargo run -p trailhead-lookout --example make_icon`"
             );
         }
     }
