@@ -78,8 +78,8 @@ pub struct Host {
     pause_logged: Mutex<Option<i64>>,
     /// Every repo's queue task keys, so a factory can tell a run re-parented out of its own queue from another repo's.
     queues: Mutex<HashSet<String>>,
-    /// The stray runs already warned about, so each is logged once.
-    strays_logged: Mutex<HashSet<String>>,
+    /// Per project, the stray runs already warned about, so each is logged once per stretch outside the queues.
+    strays_logged: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl Host {
