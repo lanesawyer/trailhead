@@ -124,8 +124,12 @@ impl Factory {
                 None => None,
             };
             let merge_base = task.run.last_changes().is_some_and(|c| c.conflict);
-            let (sandbox, setup_failure) =
-                self.acquire_worker(target, task, rework.then(|| Self::branch(task)), merge_base).await?;
+            // A task whose sandbox was given up while parked, with no PR, may have pushed its branch before the PR failed
+            // to open: it resumes from it when the remote has it (TRAIL-751).
+            let resume = !rework && task.run.released.is_some_and(|at| at > 0);
+            let (sandbox, setup_failure) = self
+                .acquire_worker(target, task, (rework || resume).then(|| Self::branch(task)), resume, merge_base)
+                .await?;
             // The agent starts with the output so it can fix what broke, after whatever the review asked for.
             let feedback = match (feedback, setup_failure) {
                 (feedback, Some(output)) => {

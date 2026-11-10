@@ -39,6 +39,7 @@ async fn a_stack_asking_for_node_26_gets_node_26() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,

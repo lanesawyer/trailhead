@@ -116,6 +116,7 @@ impl Factory {
         p: &Placed,
         task: &Task,
         branch: Option<String>,
+        branch_if_present: bool,
         merge_base: bool,
     ) -> Result<(Sandbox, Option<String>)> {
         let pick = self.pool_pick.lock().await;
@@ -182,8 +183,9 @@ impl Factory {
             }
         };
         let preparing = Instant::now();
-        let rework = branch.is_some();
-        let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
+        let rework = branch.is_some() && !branch_if_present;
+        let prepare =
+            PrepareRequest { merge_base, branch_if_present, ..self.config.prepare_request(Role::Worker, branch) };
         let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone()).await;
         let mut setup_failure = None;
         // On a rework the failed `setup` is the code's doing, probably what the worker is there to fix, so the agent

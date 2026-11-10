@@ -321,9 +321,18 @@ impl Factory {
                 tracing::debug!(task = %key.0, holder = ?task.holder, "a parked task is still claimed; keeping its sandbox for now");
                 continue;
             }
-            // What the task resumes from: its PR branch on a rework, else the base branch.
-            let remote = if task.run.pr.is_some() { Self::branch(&task) } else { self.config.repo.base_branch.clone() };
-            match self.daemon_of(sandbox).unpublished(&sandbox.id, &remote).await {
+            // What the task resumes from: its own branch when the remote has it (a PR is open, or the branch was pushed
+            // and opening the PR failed), else the base branch. Asking about a branch the remote lacks is an error.
+            let branch = Self::branch(&task);
+            let daemon = self.daemon_of(sandbox);
+            let answer = match daemon.unpublished(&sandbox.id, &branch).await {
+                Err(e) if task.run.pr.is_none() => {
+                    tracing::debug!(task = %key.0, error = %e, "a parked task's branch isn't on the remote; comparing with the base");
+                    daemon.unpublished(&sandbox.id, &self.config.repo.base_branch).await
+                }
+                answer => answer,
+            };
+            match answer {
                 Ok(false) => {}
                 Ok(true) => {
                     tracing::debug!(task = %key.0, sandbox = %sandbox.name, "a parked task has unpublished work; keeping its sandbox");
