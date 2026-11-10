@@ -890,7 +890,7 @@ impl Net {
             let _ = events.send(NetEvent::Reply(Reply { id, attempt, result }));
         };
         let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
-            return reply(Err("not connected".into()));
+            return reply(Err(commands::NOT_CONNECTED.into()));
         };
         let (http, token) = (self.http.clone(), token.clone());
         tokio::spawn(async move { reply(commands::execute(&http, &base, &token, &request).await) });
