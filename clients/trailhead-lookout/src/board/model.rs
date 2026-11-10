@@ -826,6 +826,24 @@ mod tests {
         assert_eq!((shown.len(), hidden), (PAGE - 1, 6));
     }
     #[test]
+    fn show_more_counts_what_the_next_page_adds() {
+        let mut cards = many(3 * PAGE);
+        // A parent ends the first page, so it already shows its 3 subtasks.
+        for card in &mut cards[PAGE..PAGE + 3] {
+            card.depth = 1;
+        }
+        // The second page would cut inside a run of 4 subtasks, so it runs on to the last.
+        for card in &mut cards[2 * PAGE..2 * PAGE + 4] {
+            card.depth = 1;
+        }
+        assert_eq!(visible(&cards, PAGE).0.len(), PAGE + 3);
+        assert_eq!(next_page(&cards, PAGE), PAGE + 1);
+        assert_eq!(visible(&cards, 2 * PAGE).0.len(), 2 * PAGE + 4);
+        // Nothing past the end is promised.
+        assert_eq!(next_page(&many(PAGE + 5), PAGE), 5);
+    }
+
+    #[test]
     fn filters_narrow_the_board() {
         let by = |f: Filter| -> Vec<String> {
             run(&f).columns.iter().flat_map(|c| c.cards.iter().map(|c| c.key.clone())).collect()
