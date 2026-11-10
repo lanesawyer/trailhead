@@ -213,7 +213,7 @@ fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>,
     Ok((config_path, remote, config))
 }
 
-/// Whether `now` differs from the `started` config (whose `[merge]` is blanked, as it is re-read live) in a way that
+/// Whether `now` differs from the `started` config (whose `[factory.merge]` is blanked, as it is re-read live) in a way that
 /// needs a restart and wasn't already `warned` about, so an edit is reported once, not on every merge decision.
 fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: &mut Option<FactoryConfig>) -> bool {
     let now = FactoryConfig { merge: Default::default(), ..now };
@@ -228,7 +228,7 @@ fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: 
     true
 }
 
-/// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[merge]` blanked
+/// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[factory.merge]` blanked
 /// as it is re-read live. Take it before `wire` adds anything at runtime, which a re-read of the file never has.
 fn started_baseline(config: &FactoryConfig) -> FactoryConfig {
     FactoryConfig { merge: Default::default(), ..config.clone() }
@@ -407,7 +407,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
                 if changed_without_restart(&started, config, &mut warned.lock().unwrap()) {
                     tracing::warn!(
                         path = %config_path.display(),
-                        "the factory settings changed in the file, but only [merge] mode is re-read live; restart the server to apply them"
+                        "the factory settings changed in the file, but only [factory.merge] mode is re-read live; restart the server to apply them"
                     );
                 }
                 Ok(mode)
