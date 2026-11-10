@@ -6,7 +6,7 @@ Read `docs/PLAN.md` before making design decisions. It is the source of truth fo
 
 The software factory being built into Trailhead is designed in `docs/factory/`. Start at `docs/factory/README.md`, which says which file covers what, and open only the one your work needs.
 
-Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). First the rough edges live runs hit, starting with TRAIL-140. The task engine's core is in `crates/trailhead-core`, its domain types in `crates/trailhead-model` (re-exported by core; anything that needs them without the store, Lookout included, uses this crate); its server, MCP and CLI are in `crates/trailhead-server` and `crates/trailhead`. The factory's crates, none of them published yet:
+Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). First the rough edges live runs hit, starting with TRAIL-140. The task engine's core is in `crates/trailhead-core`, its domain types in `crates/trailhead-model` (re-exported by core; anything that needs them without the store, Lookout included, uses this crate); the log setup its binaries share (local-time stamps, env filter, optional file layer) is in `crates/trailhead-log`; its server, MCP and CLI are in `crates/trailhead-server` and `crates/trailhead`. The factory's crates, none of them published yet:
 
 - `trailhead-factory`: types, the five traits (compute, harness, provider, tracker, code host), the daemon protocol and the `[factory]` settings in `.trailhead.toml`.
 - `trailhead-control`: the control plane (run loop, budgets, reviews, reconcile, the sandbox pool).
