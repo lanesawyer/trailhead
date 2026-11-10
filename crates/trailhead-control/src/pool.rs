@@ -235,11 +235,13 @@ impl Factory {
         // takes no longer than taking a new one did; a slower prepare means it has gone stale.
         let cost = self.warm_cost.lock().unwrap().get(&sandbox.id).copied();
         let rewarm = warm.is_none() || cost.is_none_or(|cost| prepare_took > cost);
+        let mut taken = None;
         let warmed = async {
             let mut labels = busy.clone();
             let checkpointing = Instant::now();
             if rewarm {
                 let cp = p.compute.checkpoint(&sandbox.id, "warm").await?;
+                taken = Some(cp.clone());
                 self.warm_cost.lock().unwrap().insert(sandbox.id.clone(), checkpointing.elapsed());
                 labels = self.pooled(Some(p), label::BUSY, Some(&cp.0), Some(task));
                 p.compute.set_labels(&sandbox.id, &labels).await?;
@@ -265,6 +267,13 @@ impl Factory {
             Err(e) => {
                 self.forget_install_opened(&sandbox);
                 p.daemon.forget(&sandbox.id).await;
+                // A new checkpoint nothing points at would stay on providers that keep them. A new sandbox is destroyed
+                // with its checkpoints, so only one going back to the pool needs it deleted.
+                if let (Some(cp), Some(_)) = (&taken, &warm)
+                    && let Err(d) = p.compute.delete_checkpoint(&sandbox.id, cp).await
+                {
+                    tracing::warn!(sandbox = %sandbox.name, checkpoint = %cp.0, error = %d, "couldn't delete the unused warm checkpoint");
+                }
                 // The old warm checkpoint (if any) is what release restores; a new sandbox has none and is destroyed.
                 self.give_back(&sandbox, &busy).await;
                 Err(e)
