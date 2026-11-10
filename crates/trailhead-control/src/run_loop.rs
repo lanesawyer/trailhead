@@ -46,6 +46,8 @@ impl Factory {
         let mut reviews: HashSet<task::Id> = HashSet::new();
         // A failed boot reconcile (the compute API down, say) is retried in the loop rather than ending the process.
         let mut dirty = true;
+        // Whether the drain has said it is stuck on a failing reconcile, so a long outage says so once, not every poll.
+        let mut stall_logged = false;
         loop {
             // Shutdown is otherwise only noticed while idle; a stop during a long reconcile mustn't start new work.
             if (&mut shutdown).now_or_never().is_some() {
@@ -56,6 +58,7 @@ impl Factory {
                 self.status.control(ControlState::Reconciling);
                 match self.reconcile_deferring(&keys.values().cloned().collect()).await {
                     Ok((done, due)) => {
+                        stall_logged = false;
                         // Due reviews are new work, picked up again by the next start. Due runs are runs the daemon is
                         // still working on, so a drain keeps following them and waits for them too.
                         let due = if draining { Due { reviews: Vec::new(), ..due } } else { due };
@@ -91,6 +94,10 @@ impl Factory {
                         // A drain mustn't conclude on a reconcile that couldn't look: a daemon may still have a run.
                         // Retry at the next poll; a shutdown still ends it.
                         dirty = draining;
+                        if draining && !stall_logged {
+                            stall_logged = true;
+                            tracing::warn!("drain waiting on reconcile; Ctrl-C again to stop");
+                        }
                     }
                 }
                 self.status.control(ControlState::Up);
