@@ -112,6 +112,30 @@ async fn a_failed_sub_agent_revoke_still_resumes_an_interrupted_review() {
 }
 
 #[tokio::test]
+async fn a_failed_sub_agent_revoke_still_leaves_an_open_task_due_its_rework() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    // Review asked for changes and the task went back to the queue, unclaimed, its PR still open.
+    r.tracker.set_status(&key, Status::Open);
+    let before = r.tracker.task(&key);
+    assert!(before.run.pending_changes().is_some(), "a rework is owed");
+
+    r.tracker.fail_next("factory", TrackerOp::RevokeSubAgent, 1);
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done, Reconciled::default(), "carried on without settling or failing");
+    // The sub-agent was already revoked when its review finished, so the fake can't show the failure in its state:
+    // the injected one being used up shows the arm tried (and shrugged off) the revoke.
+    assert!(r.tracker.revoke_sub_agent("trail-1-a1").await.is_ok(), "the revoke was attempted and failed");
+    let after = r.tracker.task(&key);
+    assert_eq!(after.status, Status::Open, "still waiting for its rework");
+    assert_eq!(after.run.pending_changes(), before.run.pending_changes(), "the request still stands");
+}
+
+#[tokio::test]
 async fn reconcile_reattaches_to_a_run_still_going_and_counts_all_its_spend() {
     let r = rig();
     let key = going(&r, Usd::dollars(0.5), 120).await;
