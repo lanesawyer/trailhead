@@ -628,11 +628,11 @@ async fn a_pr_whose_head_hasnt_moved_is_not_listed_again_for_grading() {
     let (r, queue) = queued_rig_with(&merging());
     let (_key, _pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.factory.reconcile().await.unwrap();
-    let listed = r.codehost.file_listings();
+    let listed = r.codehost.calls("files");
     for _ in 0..3 {
         r.factory.reconcile().await.unwrap();
     }
-    assert_eq!(r.codehost.file_listings(), listed, "same head, same files");
+    assert_eq!(r.codehost.calls("files"), listed, "same head, same files");
 }
 
 #[tokio::test]
