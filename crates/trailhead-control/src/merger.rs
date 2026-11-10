@@ -49,6 +49,7 @@ impl Factory {
         // A task waiting on a rework is neither approved nor merged, whatever the gates say.
         let act = act && !task.changes_requested;
         if !matches!(task.status, Status::InReview | Status::Approved) {
+            self.forget_merge_path(key);
             return Ok(());
         }
         // The head comes first and is shared with grading, which lists the files again only when it has moved.

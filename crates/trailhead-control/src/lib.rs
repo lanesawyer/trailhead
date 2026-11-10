@@ -219,6 +219,14 @@ pub struct Reconciled {
 }
 
 impl Factory {
+    /// Drops everything the merge path keeps per task (the PR file cache and the queued branch update), for a task that
+    /// has left it: merged, closed, cancelled or otherwise out of review (TRAIL-680). A new per-task map there is
+    /// cleared here too.
+    pub(crate) fn forget_merge_path(&self, task: &TaskKey) {
+        self.updating.lock().unwrap().remove(task);
+        self.listed.lock().unwrap().remove(task);
+    }
+
     /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).
     #[doc(hidden)]
     pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {

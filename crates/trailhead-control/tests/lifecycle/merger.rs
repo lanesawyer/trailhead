@@ -1099,3 +1099,18 @@ async fn a_host_error_while_looking_after_a_persons_pr_keeps_the_hold() {
     assert_ne!(r.tracker.task(&key).status, Status::Done);
     assert!(r.factory.status().snapshot().holding.is_some());
 }
+
+#[tokio::test]
+async fn a_queued_update_is_forgotten_when_the_task_is_cancelled() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.queue_updates(true);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.factory.awaiting_branch_update(&key));
+
+    r.tracker.set_status(&key, Status::Cancelled);
+    r.factory.evaluate_gates(&key).await.unwrap();
+    assert!(!r.factory.awaiting_branch_update(&key));
+}
