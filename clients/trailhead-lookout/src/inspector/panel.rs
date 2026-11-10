@@ -413,7 +413,10 @@ mod tests {
         assert_eq!(app.world().get::<Control>(a), Some(&Control::Done), "nothing changed yet");
         assert!(app.world().get_entity(b).is_err(), "a subject not in the mirror loses its controls");
         assert!(!app.world().resource::<Controls>().0.contains_key(&(gone, Action::Undo)));
-        app.world_mut().resource_mut::<Latest>().0.insert(sid("t7"), 9);
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 9, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
+            "after": crate::fixture::task_json(json!({"id": "t7", "key": "TRAIL-7", "version": 9})),
+        })));
         app.update();
         assert_eq!(app.world().get::<Control>(a), Some(&Control::Idle), "the task changed");
     }

@@ -183,34 +183,46 @@ fn rebuild(
     }
 }
 
-fn settle(mut done: MessageReader<CommandDone>, mut controls: Query<&mut Control>) {
+/// The task version each finished control was answered at, so [`tidy_controls`] can tell the change the command made
+/// itself (its event may land before or after the reply) from a later one. `None` until a version is known.
+#[derive(Resource, Default)]
+struct Settled(HashMap<Entity, Option<i64>>);
+
+fn settle(mut done: MessageReader<CommandDone>, mut controls: Query<&mut Control>, mut settled: ResMut<Settled>) {
     for d in done.read() {
         if let Ok(mut c) = controls.get_mut(d.source) {
             *c = describe(&d.outcome).map_or(Control::Done, Control::Refused);
+            let version = if let Outcome::Ok { version } = d.outcome { version } else { None };
+            settled.0.insert(d.source, version);
         }
     }
 }
 
-/// Keeps [`Controls`] honest: a finished control goes back to idle when its task has changed since (a result is about
-/// the task as it was), and the controls of a subject that has left the mirror are despawned.
+/// Keeps [`Controls`] honest: a finished control goes back to idle when its task changes again (a result is about
+/// the task as it was; the change the command itself made doesn't count), and the controls of a subject that has left
+/// the mirror are despawned.
 fn tidy_controls(
     mut controls: ResMut<Controls>,
-    latest: Res<Latest>,
+    mut settled: ResMut<Settled>,
     tasks: Query<&Mirrored<Task>>,
     agents: Query<&Mirrored<Agent>>,
     mut states: Query<&mut Control>,
-    mut seen: Local<HashMap<String, Option<i64>>>,
     mut commands: Commands,
 ) {
+    let versions: HashMap<String, i64> = tasks.iter().map(|t| (t.0.id.to_string(), t.0.version)).collect();
     for ((subject, _), entity) in &controls.0 {
         let Subject::Task(id) = subject else { continue };
-        let now = latest.0.get(id).copied();
-        // A task first seen here is only noted: whatever it last did came before the control.
-        if seen.insert(id.clone(), now).is_some_and(|before| before != now)
-            && let Ok(mut c) = states.get_mut(*entity)
-            && matches!(*c, Control::Done | Control::Refused(_))
-        {
+        let Some(&now) = versions.get(id) else { continue };
+        let Ok(mut c) = states.get_mut(*entity) else { continue };
+        if !matches!(*c, Control::Done | Control::Refused(_)) {
+            settled.0.remove(entity);
+            continue;
+        }
+        // With no version from the reply, the task as the mirror has it now is the baseline.
+        let at = *settled.0.entry(*entity).or_default().get_or_insert(now);
+        if now > at {
             *c = Control::Idle;
+            settled.0.remove(entity);
         }
     }
     let live: HashSet<String> =
@@ -224,10 +236,10 @@ fn tidy_controls(
         let keep = live.contains(id);
         if !keep {
             commands.entity(*entity).try_despawn();
+            settled.0.remove(entity);
         }
         keep
     });
-    seen.retain(|id, _| live.contains(id));
 }
 
 /// Keeps the [`Selection`] and the panel's contents from the mirror.
@@ -239,6 +251,7 @@ impl Plugin for InspectorPlugin {
             .init_resource::<Neighbours>()
             .init_resource::<RevertWindow>()
             .init_resource::<Latest>()
+            .init_resource::<Settled>()
             .init_resource::<InspectorState>()
             // Registering a message twice is a no-op, so these are safe beside the mirror's and commands' own.
             .add_message::<SyncItem>()
