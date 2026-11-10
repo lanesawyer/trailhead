@@ -14,7 +14,7 @@ const STATUS_LABEL: Rule = Rule {
 /// The shapes that skip `status_label`: a status formatted or listed as it is, or its words spelled out by hand.
 fn formats_a_status(line: &Line) -> bool {
     let code = line.code.trim();
-    if code.contains("Name::new") {
+    if code.contains("Name::new") || is_http_status(code) {
         return false;
     }
     let skipping = [
@@ -34,6 +34,11 @@ fn formats_a_status(line: &Line) -> bool {
     skipping.iter().any(|p| code.contains(p)) || own_words.into_iter().any(|p| code.contains(&p))
 }
 
+/// A line about an HTTP response's status, a number and not a task's `Status`: a `{status}` there is fine.
+fn is_http_status(code: &str) -> bool {
+    ["StatusCode", "HTTP", "http", "status code", ".as_u16()", "status.is_"].iter().any(|p| code.contains(p))
+}
+
 /// Where Lookout steps off, and why. Add to this only with a reason; an entry that finds nothing fails.
 const ALLOWED: &[Allowed] = &[
     Allowed { path: "src/widgets/theme.rs", rule: "color-literal", why: "builds Lookout's theme" },
@@ -46,4 +51,22 @@ fn lookout_keeps_to_the_design_system() {
     let rules: Vec<Rule> = lint::APP.iter().copied().chain([STATUS_LABEL]).collect();
     let found = lint::check(env!("CARGO_MANIFEST_DIR"), &["src", "tests", "examples", "Cargo.toml"], &rules, ALLOWED);
     assert!(found.is_empty(), "\n{}", found.join("\n"));
+}
+
+fn finds(code: &str) -> bool {
+    formats_a_status(&Line { path: "src/x.rs", code, in_tests: false })
+}
+
+#[test]
+fn a_task_status_formatted_as_it_is_is_found() {
+    assert!(finds(r#"format!("now {status}")"#));
+    assert!(finds("text(status, size::BODY)"));
+    assert!(finds("select(statuses, None, 4)"));
+}
+
+#[test]
+fn an_http_status_is_not_a_task_status() {
+    assert!(!finds(r#"format!("the server answered HTTP {status}")"#));
+    assert!(!finds(r#"format!("status code {status}")"#));
+    assert!(!finds(r#"if status == reqwest::StatusCode::NOT_FOUND { log("{status}") }"#));
 }
