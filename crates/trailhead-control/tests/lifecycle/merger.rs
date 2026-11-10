@@ -614,6 +614,7 @@ async fn the_mergers_own_update_keeps_the_verdict_and_no_second_review_runs() {
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(r.codehost.update_requests(), 1, "the merger updated the branch");
     assert!(done.reviewed.is_empty(), "{done:?}");
+    assert!(!r.codehost.prs()[0].merged, "updated, not merged, while CI starts over");
 
     r.codehost.set_ci(&pr, CiState::Passed);
     let done = r.factory.reconcile().await.unwrap();
