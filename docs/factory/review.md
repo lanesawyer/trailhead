@@ -58,7 +58,7 @@ quorum = { reviewers = 3, agree = 3, distinct_models = true }
 mode = "shadow"          # off | shadow | on
 ```
 
-Gates are keyed by grade (`[gates.1]` to `[gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[merge] mode = "on"` (TRAIL-205).
+Gates are keyed by grade (`[factory.gates.1]` to `[factory.gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[factory.merge] mode = "on"` (TRAIL-205).
 
 `checks` in `require` gates the merge on the sandbox checks having passed; it doesn't choose which checks a worker runs. A worker runs every verifying check the repo defines (fmt, lint, typecheck, test, build, and any path-scoped ones whose paths its diff touches) before it opens a PR, whatever the grade's gates require (TRAIL-265). Leaving `checks` out of a grade's `require` doesn't skip them in the sandbox; it changes nothing else: the gate is already met when the PR opens (a PR exists only because the checks passed), so the merger never waits on it, and leaving it out only drops `checks` from the decision's `passed` list.
 
