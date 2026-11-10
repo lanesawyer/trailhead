@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::projects::find_project;
 use crate::store::{Ctx, Store};
 use crate::tasks::find_task;
-use trailhead_model::Event;
+use trailhead_model::{Event, TaskKey};
 
 /// Undo and revert reach back this far. Older events move to `events_archive`.
 pub const UNDO_WINDOW: SignedDuration = SignedDuration::from_hours(90 * 24);
@@ -63,7 +63,7 @@ pub struct EventFilter {
     pub after_id: Option<i64>,
     /// Only events with a smaller id, to page back through history with `newest_first`.
     pub before_id: Option<i64>,
-    pub task: Option<String>,
+    pub task: Option<TaskKey>,
     /// Events on this project's tasks and on the project itself.
     pub project: Option<String>,
     pub actor_id: Option<Uuid>,

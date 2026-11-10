@@ -350,7 +350,7 @@ async fn with_a_queue_only_its_subtasks_run() {
     let sub = NewTask {
         project: "TRAIL".into(),
         title: "Add a greeting".into(),
-        parent: Some(queue.0.clone()),
+        parent: Some(queue.clone()),
         grade: Some(gr(1)),
         ..Default::default()
     };
@@ -376,7 +376,7 @@ async fn a_queue_list_reads_each_parents_direct_children_ordered_by_priority_and
     let mk = |title: &str, parent: &TaskKey, priority: u8, grade: Option<u8>| NewTask {
         project: "TRAIL".into(),
         title: title.into(),
-        parent: Some(parent.0.clone()),
+        parent: Some(parent.clone()),
         priority: Some(pr(priority)),
         grade: grade.map(gr),
         ..Default::default()
@@ -1218,7 +1218,7 @@ async fn a_task_that_blocks_urgent_work_is_listed_as_urgent_too() {
     let mk = |title: &str, priority: u8| NewTask {
         project: "TRAIL".into(),
         title: title.into(),
-        parent: Some(queue.0.clone()),
+        parent: Some(queue.clone()),
         priority: Some(pr(priority)),
         grade: Some(gr(1)),
         ..Default::default()
@@ -1254,7 +1254,7 @@ async fn with_run(r: &Rig, key: &TaskKey) {
 
 async fn subtask(r: &Rig, queue: &TaskKey, title: &str) -> TaskKey {
     let new =
-        NewTask { project: "TRAIL".into(), title: title.into(), parent: Some(queue.0.clone()), ..Default::default() };
+        NewTask { project: "TRAIL".into(), title: title.into(), parent: Some(queue.clone()), ..Default::default() };
     r.store.create_task(&r.human, new).await.unwrap().key
 }
 
@@ -1372,13 +1372,13 @@ async fn a_stray_moved_back_under_its_queue_and_out_again_is_warned_about_again(
     let logs = Logs::default();
     let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
     let _guard = tracing::subscriber::set_default(sub);
-    let reparent = |parent: Option<String>| TaskPatch { parent: Some(parent), ..Default::default() };
+    let reparent = |parent: Option<TaskKey>| TaskPatch { parent: Some(parent), ..Default::default() };
 
     r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
     alpha.reconcile().await.unwrap();
     assert_eq!(logs.text().matches(&task.0).count(), 1, "{}", logs.text());
 
-    r.store.update_task(&r.human, &task.0, reparent(Some(queue.0.clone())), None).await.unwrap();
+    r.store.update_task(&r.human, &task.0, reparent(Some(queue.clone())), None).await.unwrap();
     alpha.reconcile().await.unwrap();
     r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
     alpha.reconcile().await.unwrap();

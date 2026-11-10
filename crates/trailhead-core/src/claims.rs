@@ -224,7 +224,7 @@ impl Store {
             }
             let blockers = unfinished_blockers(&tx.conn, task.id).await?;
             if !blockers.is_empty() {
-                return Err(Error::BlockedBy(blockers.iter().map(|t| visible_key(ctx, t).0).collect()));
+                return Err(Error::BlockedBy(blockers.iter().map(|t| visible_key(ctx, t)).collect()));
             }
             let expires_at = expiry(tx, &task, ttl).await?;
             // The WHERE guard makes the claim itself atomic: a live claim held by
