@@ -49,6 +49,7 @@ impl Factory {
         // A task waiting on a rework is neither approved nor merged, whatever the gates say.
         let act = act && !task.changes_requested;
         if !matches!(task.status, Status::InReview | Status::Approved) {
+            self.forget_merge_path(key);
             return Ok(());
         }
         // The head comes first and is shared with grading, which lists the files again only when it has moved.
@@ -65,6 +66,7 @@ impl Factory {
         // approval without a mark is Lane's.
         let mut approved_head = prev.as_ref().and_then(|d| d.approved_head.clone());
         let mut human_head = prev.as_ref().and_then(|d| d.human_head.clone());
+        let mut unapproved = false;
         if status == Status::InReview {
             // However it got back to review (a push, Lane, a rework), no earlier approval applies.
             (approved_head, human_head) = (None, None);
@@ -86,6 +88,7 @@ impl Factory {
             } else if given_on.as_ref() != Some(&head) {
                 tracing::info!(task = %key.0, %head, "the PR has a new head; sending the task back to review");
                 self.tracker.unapprove(key).await?;
+                unapproved = true;
                 (status, approved_head, human_head) = (Status::InReview, None, None);
             }
         }
@@ -121,7 +124,13 @@ impl Factory {
         if verdict.withdraw {
             tracing::info!(task = %key.0, %head, "the gates no longer pass; withdrawing the approval");
             self.tracker.unapprove(key).await?;
+            unapproved = true;
             (approved_head, human_head) = (None, None);
+        }
+        // An intent to merge another head is stale (`merged_by` ignores it), and so is any once the approval is gone;
+        // clearing it keeps the record from passing for a live merge.
+        if task.run.merging.as_deref().is_some_and(|m| !m.is_empty() && (unapproved || m != head)) {
+            self.tracker.report(key, RunUpdate { merging: Some(String::new()), ..RunUpdate::default() }).await?;
         }
         let mut decision = MergeDecision {
             grade: grade.grade,
@@ -219,6 +228,10 @@ impl Factory {
             return Ok(asked.then_some(Rework::Running));
         }
         // Only a later attempt than the reviewed one is the rework; a new head on the same attempt is a person's push.
+        // And until the rework hands off, the request is still open, so a new head then is a person's push too.
+        if task.changes_requested {
+            return Ok(None);
+        }
         let attempt = task.run.attempt.unwrap_or(0);
         let pushed = task
             .run

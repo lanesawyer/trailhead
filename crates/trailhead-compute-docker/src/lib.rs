@@ -575,6 +575,14 @@ impl Compute for DockerCompute {
         Ok(cp)
     }
 
+    async fn delete_checkpoint(&self, _id: &SandboxId, cp: &CheckpointId) -> Result<()> {
+        self.writable()?;
+        match self.docker.remove_image(&cp.0, None::<RemoveImageOptions>, None).await {
+            Err(e) if status(&e) != Some(404) => Err(docker_err(e)),
+            _ => Ok(()),
+        }
+    }
+
     /// Recreates the container from the checkpoint's image, keeping its name, labels and egress. Its programs start
     /// again from the image.
     async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()> {

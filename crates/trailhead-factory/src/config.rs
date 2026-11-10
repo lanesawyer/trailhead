@@ -844,12 +844,17 @@ impl FactoryConfig {
         }
         for (want, role) in [(&self.repo.worker, Role::Worker), (&self.repo.reviewer, Role::Reviewer)] {
             match self.profiles.get(want) {
-                None => return Err(Error::Config(format!("no profile named {want}"))),
+                None => {
+                    return Err(Error::Config(format!(
+                        "[factory.repo] {}: no profile named {want}; define [factory.profiles.{want}]",
+                        role.as_str()
+                    )));
+                }
                 Some(p) if p.role != role => {
                     return Err(Error::Config(format!(
-                        "profile {want} has role {}, not {}",
+                        "[factory.repo] {key} is `{want}`, but [factory.profiles.{want}] has role {}, not {key}",
                         p.role.as_str(),
-                        role.as_str()
+                        key = role.as_str()
                     )));
                 }
                 Some(_) => {}
@@ -864,7 +869,9 @@ impl FactoryConfig {
             if let Some(next) = &profile.escalate_to
                 && !self.profiles.contains_key(next)
             {
-                return Err(Error::Config(format!("profile {name} escalates to unknown profile {next}")));
+                return Err(Error::Config(format!(
+                    "[factory.profiles.{name}] escalate_to is `{next}`, but there is no [factory.profiles.{next}]"
+                )));
             }
         }
         for grade in self.grades.rules.keys() {
@@ -891,11 +898,13 @@ impl FactoryConfig {
                 if let GateKind::Named(name) = r
                     && !checks.contains(&name.as_str())
                 {
-                    return Err(Error::Config(format!("gate {grade} requires unknown {r}")));
+                    return Err(Error::Config(format!(
+                        "[factory.gates.{grade}] requires unknown {r}; it must name a check in [factory.checks]"
+                    )));
                 }
             }
             if gate.require.contains(&GateKind::Quorum) && gate.quorum.is_none() {
-                return Err(Error::Config(format!("gate {grade} requires a quorum but doesn't define one")));
+                return Err(Error::Config(format!("[factory.gates.{grade}] requires a quorum but doesn't define one")));
             }
         }
         Ok(())
@@ -948,6 +957,7 @@ impl FactoryConfig {
             base_branch: self.repo.base_branch.clone(),
             branch,
             merge_base: false,
+            branch_if_present: false,
             setup: named("setup", &self.checks.setup),
             trim: named("trim", &self.checks.trim),
             disk_warn_bytes: some(self.daemon.disk_warn_bytes),
@@ -1284,6 +1294,30 @@ require = ["checks", "agent_review", "human"]
         }
         let err = parse(&format!("{SAMPLE}\n[gates.5]\nrequire = []\n")).unwrap_err();
         assert!(err.to_string().contains("[factory.gates.5]: gates are per grade"), "{err}");
+    }
+
+    #[test]
+    fn profile_and_gate_errors_name_the_table_to_edit() {
+        let cases = [
+            (SAMPLE.replace("[repo]\n", "[repo]\nworker = \"nope\"\n"), "[factory.repo] worker: no profile named nope"),
+            (
+                SAMPLE.replace("[repo]\n", "[repo]\nreviewer = \"worker\"\n"),
+                "[factory.repo] reviewer is `worker`, but [factory.profiles.worker] has role worker, not reviewer",
+            ),
+            (
+                SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"ghost\""),
+                "[factory.profiles.worker] escalate_to is `ghost`, but there is no [factory.profiles.ghost]",
+            ),
+            (format!("{SAMPLE}\n[gates.2]\nrequire = [\"lintt\"]\n"), "[factory.gates.2] requires unknown lintt"),
+            (
+                format!("{SAMPLE}\n[gates.2]\nrequire = [\"quorum\"]\n"),
+                "[factory.gates.2] requires a quorum but doesn't define one",
+            ),
+        ];
+        for (src, want) in cases {
+            let err = parse(&src).unwrap_err().to_string();
+            assert!(err.contains(want), "want {want:?}, got {err}");
+        }
     }
 
     #[test]

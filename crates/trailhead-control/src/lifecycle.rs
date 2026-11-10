@@ -6,8 +6,8 @@ use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages::{self, BreachedSandbox};
 use trailhead_factory::{
-    ControlState, Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase,
-    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
+    Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase, RunReport,
+    RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
     WorkerBreach, run_name,
 };
 
@@ -124,8 +124,12 @@ impl Factory {
                 None => None,
             };
             let merge_base = task.run.last_changes().is_some_and(|c| c.conflict);
-            let (sandbox, setup_failure) =
-                self.acquire_worker(target, task, rework.then(|| Self::branch(task)), merge_base).await?;
+            // A task whose sandbox was given up while parked, with no PR, may have pushed its branch before the PR failed
+            // to open: it resumes from it when the remote has it (TRAIL-751).
+            let resume = !rework && task.run.released.is_some_and(|at| at > 0);
+            let (sandbox, setup_failure) = self
+                .acquire_worker(target, task, (rework || resume).then(|| Self::branch(task)), resume, merge_base)
+                .await?;
             // The agent starts with the output so it can fix what broke, after whatever the review asked for.
             let feedback = match (feedback, setup_failure) {
                 (feedback, Some(output)) => {
@@ -188,7 +192,7 @@ impl Factory {
         let sub = self.tracker.sub_agent(&name);
         let _run = self.status.begin(&task.key, RunPhase::Agent);
         self.status.phase(&task.key, RunPhase::Agent, Some(&sandbox.name));
-        self.status.control(ControlState::Reattaching { task: task.key.clone() });
+        self.status.reattaching(&task.key);
         // The attempt this run took was already counted; if it's given back, it goes back to the number before it.
         let mut before = task.clone();
         before.run.attempt = Some(attempt.saturating_sub(1));
@@ -370,11 +374,12 @@ impl Factory {
             }
             RunResult::NeedsInput(question) => {
                 // An attempt that asked a question didn't give up, so a give-up from before it isn't "the attempt
-                // before" the next one (TRAIL-727). An empty failure is how a recorded one is cleared.
+                // before" the next one (TRAIL-727). The failure stays, so the next attempt is still told of it;
+                // `asked` is what the backstop below goes by (TRAIL-805).
                 if task.run.failure.as_deref().is_some_and(|f| !f.is_empty()) {
-                    let clear = RunUpdate { failure: Some(String::new()), ..RunUpdate::default() };
-                    if let Err(e) = sub.report(&task.key, clear).await {
-                        tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the earlier failure");
+                    let mark = RunUpdate { asked: Some(attempt), ..RunUpdate::default() };
+                    if let Err(e) = sub.report(&task.key, mark).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't record the attempt that asked");
                     }
                 }
                 self.status.paused(&sandbox.name);
@@ -424,6 +429,8 @@ impl Factory {
                     .failure
                     .clone()
                     .filter(|before| messages::is_agent_gave_up(before))
+                    // The failure is from before a question when the attempt just before this one asked it.
+                    .filter(|_| task.run.asked != Some(attempt.saturating_sub(1)))
                     .filter(|_| failed >= 2 && last.as_deref().is_some_and(messages::is_agent_gave_up));
                 if failed >= max || repeated.is_some() {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
@@ -645,7 +652,7 @@ impl Factory {
         let mut grace_fired = false;
         let mut on_event = |ev: RunEvent, spent: &mut Usd| -> Option<String> {
             if std::mem::take(&mut reattaching) {
-                self.status.control(ControlState::Up);
+                self.status.reattached(task);
             }
             match ev {
                 RunEvent::Usage { model, usage } => {

@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use trailhead_factory::messages::{self, BreachedSandbox};
+use trailhead_factory::messages::{self, AfterUpdate, BreachedSandbox};
 use trailhead_factory::{
-    ChangesRequested, Error, Merged, MergedBy, PrRef, PrState, Result, ReviewBreach, RunUpdate, Sandbox, Status, Task,
-    TaskKey, WorkerBreach, label,
+    ChangesRequested, CiState, Error, Merged, MergedBy, PrRef, PrState, Result, ReviewBreach, RunUpdate, Sandbox,
+    Status, Task, TaskKey, WorkerBreach, label,
 };
 
 use crate::lifecycle::worker_name;
@@ -46,18 +46,23 @@ impl Factory {
         Ok(done)
     }
 
-    /// Warns, once per task, about factory tasks sitting outside every repo's queue: re-parented while their run was
-    /// live, they're invisible to reconcile, so their claim lapses and the sandbox stays (TRAIL-531). Which repo owns
-    /// one is unknowable, so nothing is torn down.
+    /// Warns, once per stretch outside the queues, about factory tasks sitting outside every repo's queue:
+    /// re-parented while their run was live, they're invisible to reconcile, so their claim lapses and the sandbox
+    /// stays (TRAIL-531). Which repo owns one is unknowable, so nothing is torn down.
     async fn warn_strays(&self) {
-        // Without a queue the factory works the whole project, so nothing can sit outside it.
-        if self.queue().is_empty() {
+        // A repo without a queue works the whole project, so nothing in it can sit outside a queue, whichever repo
+        // asks: the other repo's in-flight runs are that repo's own.
+        if self.queue().is_empty() || self.host.queueless_projects.lock().unwrap().contains(self.project()) {
             return;
         }
         let queues: Vec<TaskKey> = self.host.queues.lock().unwrap().iter().cloned().map(TaskKey).collect();
         match self.tracker.strays(self.project(), &queues).await {
             Ok(strays) => {
-                let mut logged = self.host.strays_logged.lock().unwrap();
+                let mut all = self.host.strays_logged.lock().unwrap();
+                // Repos on one host can be in different projects; each pass only tracks its own project's strays.
+                let logged = all.entry(self.project().to_string()).or_default();
+                // A task that stops being a stray is forgotten, so it's warned about again if it strays again.
+                logged.retain(|k| strays.iter().any(|t| &t.key.0 == k));
                 for t in strays.iter().filter(|t| logged.insert(t.key.0.clone())) {
                     tracing::warn!(
                         task = %t.key.0,
@@ -87,6 +92,13 @@ impl Factory {
         self.status.sync_sandboxes(&live, &down, &parked);
         self.warn_strays().await;
         let in_flight = in_flight?;
+        // Only after a listing that succeeded: a tracker error must not wipe what the merger is tracking.
+        let in_review: HashSet<&TaskKey> = in_flight
+            .iter()
+            .filter(|t| matches!(t.status, Status::InReview | Status::Approved))
+            .map(|t| &t.key)
+            .collect();
+        self.retain_merge_path(&in_review);
         let factory_prs = in_flight.iter().filter_map(|t| t.run.pr.as_ref().map(|p| p.number)).collect();
         self.person_pass(&factory_prs).await;
         let tasks: Vec<Task> = in_flight.into_iter().filter(|t| !running.contains(&t.key)).collect();
@@ -253,7 +265,7 @@ impl Factory {
     /// with the record already there.
     pub async fn close_merged(&self, task: &Task, merged: Merged) -> Result<()> {
         // The task has left the merge path, so a queued branch update is no longer waited on (TRAIL-491).
-        self.updating.lock().unwrap().remove(&task.key);
+        self.forget_merge_path(&task.key);
         let decision = match merged.by {
             MergedBy::Merger => self.tracker.show(&task.key).await?.run.merge,
             MergedBy::Human => None,
@@ -274,8 +286,9 @@ impl Factory {
             // is recorded, so ask once for a person to mark it done rather than be refused again every pass (TRAIL-706).
             Err(Error::Forbidden(why)) if merged_by_human => {
                 tracing::warn!(task = %task.key.0, %why, "the PR was merged unapproved; parking for a person to finish it");
+                // Claimed as it stands, in review, never reopened first: a failed claim then leaves it as it was, not
+                // open and unheld (TRAIL-826).
                 if !claimed {
-                    self.tracker.reopen(&task.key).await?;
                     self.tracker.claim(&task.key).await?;
                 }
                 return self.tracker.ask(&task.key, &messages::merged_unapproved_question(&pr_url)).await;
@@ -290,7 +303,7 @@ impl Factory {
     /// rework would push to a PR nobody is going to merge. Reopening it after reopening the PR resumes as a rework.
     pub(crate) async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
         tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
-        self.updating.lock().unwrap().remove(&task.key);
+        self.forget_merge_path(&task.key);
         // Claimed as it stands, whether open, in review or parked, never reopened first: if the claim then failed, an
         // open, unheld task could start a rework against this PR (TRAIL-216). An approved task can't be claimed, so it
         // is unapproved back to in review, still held, rather than passed through open.
@@ -317,7 +330,7 @@ impl Factory {
         };
         let requested =
             ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true, head, settled: false };
-        self.request_rework(task, requested, round).await
+        self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await
     }
 
     /// CI finished and failed on the PR's current head, whether the worker's own commit or a merge of the base branch
@@ -339,8 +352,19 @@ impl Factory {
             return Ok(false);
         }
         let after_update = match &task.run.reviewed_head {
-            Some(reviewed) => reviewed != head && codehost.carries_verdict(pr, reviewed).await?,
-            None => false,
+            Some(reviewed) if reviewed != head && codehost.carries_verdict(pr, reviewed).await? => {
+                // Only CI seen passing on the reviewed head says the merge brought the failure in. A host that
+                // can't be asked gets the softer wording.
+                match codehost.ci_at(pr, reviewed).await {
+                    Ok(CiState::Passed) => AfterUpdate::CiPassedBefore,
+                    Ok(_) => AfterUpdate::CiUnconfirmed,
+                    Err(e) => {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't read CI on the reviewed head");
+                        AfterUpdate::CiUnconfirmed
+                    }
+                }
+            }
+            _ => AfterUpdate::No,
         };
         let logs = codehost.ci_logs(pr, checks).await.unwrap_or_else(|e| {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't read the logs of the failed checks");
@@ -357,7 +381,7 @@ impl Factory {
         let head = Some(head.to_string());
         let requested =
             ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head, settled: false };
-        self.request_rework(task, requested, round).await?;
+        self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await?;
         Ok(true)
     }
 
@@ -467,7 +491,7 @@ impl Factory {
                     };
                     if count.is_some_and(|n| n >= max) {
                         tracing::warn!(task = %task.key.0, "finishing the park's settling of its changes request");
-                        self.settle_parked_request(task, c).await;
+                        self.settle_parked_request(task, c, task.run.retries.unwrap_or(0)).await;
                     }
                 }
             }
@@ -530,7 +554,7 @@ impl Factory {
                     } else {
                         task.run.review_rounds.unwrap_or(1)
                     };
-                    self.request_rework(task, requested.clone(), round).await?;
+                    self.request_rework(task, requested.clone(), round, task.run.retries.unwrap_or(0)).await?;
                     done.reworked.push(task.key.0.clone());
                     return Ok(false);
                 }

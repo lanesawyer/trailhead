@@ -142,6 +142,26 @@ async fn a_push_by_a_person_is_not_credited_to_the_rework() {
     Tracker::handoff(&r.tracker, &key, "Pushed the rework.").await.unwrap();
     r.factory.reconcile().await.unwrap();
     let said = said(&r);
+    assert_eq!(said, ["Grade 4: waiting for CI and a person."], "the push moved the PR, so no rework is mentioned");
+}
+
+#[tokio::test]
+async fn a_push_by_a_person_during_a_running_rework_is_not_credited_to_the_rework() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 4);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    let ran = r.factory.tick().await.unwrap();
+    let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+    // The rework's attempt has started, but it hasn't handed off when a person pushes.
+    Tracker::report(&r.tracker, &key, trailhead_factory::RunUpdate { attempt: Some(2), ..Default::default() })
+        .await
+        .unwrap();
+    r.codehost.push_to(pr);
+    r.tracker.set_status(&key, Status::InReview);
+    r.factory.reconcile().await.unwrap();
+    let said = said(&r);
     assert!(said.iter().all(|m| !m.contains("the rework has pushed")), "{said:?}");
 }
 
@@ -285,6 +305,27 @@ async fn red_ci_after_a_branch_update_unapproves_and_reworks_saying_the_merge_br
     assert_eq!(task.status, Status::InReview);
     let wanted = task.run.changes_requested.expect("the rework is told why");
     assert!(wanted.body.contains("test") && wanted.body.contains("base branch was merged"), "{wanted:?}");
+}
+
+#[tokio::test]
+async fn red_ci_after_a_branch_update_says_so_definitely_only_when_ci_passed_on_the_reviewed_head() {
+    for (passed, definite) in [(true, true), (false, false)] {
+        let (r, queue) = queued_rig_with(SHADOW);
+        let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+        r.codehost.set_ci(&pr, CiState::Passed);
+        r.factory.reconcile().await.unwrap();
+        let reviewed_head = r.tracker.task(&key).run.reviewed_head.expect("reviewed");
+        if passed {
+            r.codehost.set_ci_at(&pr, &reviewed_head, CiState::Passed);
+        }
+        r.codehost.set_behind(&pr, true);
+        r.codehost.update_branch(&pr).await.unwrap();
+        r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+        r.factory.reconcile().await.unwrap();
+        let wanted = r.tracker.task(&key).run.changes_requested.expect("the rework is told why");
+        assert_eq!(wanted.body.contains("CI passed on the PR before"), definite, "{wanted:?}");
+        assert_eq!(wanted.body.contains("may have come in"), !definite, "{wanted:?}");
+    }
 }
 
 #[tokio::test]
@@ -587,11 +628,11 @@ async fn a_pr_whose_head_hasnt_moved_is_not_listed_again_for_grading() {
     let (r, queue) = queued_rig_with(&merging());
     let (_key, _pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.factory.reconcile().await.unwrap();
-    let listed = r.codehost.file_listings();
+    let listed = r.codehost.calls("files");
     for _ in 0..3 {
         r.factory.reconcile().await.unwrap();
     }
-    assert_eq!(r.codehost.file_listings(), listed, "same head, same files");
+    assert_eq!(r.codehost.calls("files"), listed, "same head, same files");
 }
 
 #[tokio::test]
@@ -970,6 +1011,24 @@ async fn a_pr_merged_by_hand_before_approval_is_parked_once_not_retried() {
 }
 
 #[tokio::test]
+async fn a_failed_claim_leaves_a_pr_merged_before_approval_in_review_not_open() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    r.tracker.forbid_finishing_unapproved(true);
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+
+    r.tracker.fail_next("factory", "claim", 1);
+    let _ = r.factory.reconcile().await;
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "never reopened, so not left open and unheld");
+    assert!(task.holder.is_none());
+
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "the next pass parks it");
+}
+
+#[tokio::test]
 async fn a_nearly_spent_code_host_rate_limit_holds_the_merger_until_it_resets() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
@@ -1098,4 +1157,57 @@ async fn a_host_error_while_looking_after_a_persons_pr_keeps_the_hold() {
     assert!(!r.codehost.prs()[0].merged, "the factory's merge waits");
     assert_ne!(r.tracker.task(&key).status, Status::Done);
     assert!(r.factory.status().snapshot().holding.is_some());
+}
+
+#[tokio::test]
+async fn a_queued_update_is_forgotten_when_the_task_is_cancelled() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.queue_updates(true);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.factory.awaiting_branch_update(&key));
+
+    r.tracker.set_status(&key, Status::Cancelled);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.factory.awaiting_branch_update(&key));
+}
+
+#[tokio::test]
+async fn a_queued_update_is_forgotten_when_the_task_leaves_the_queue() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.queue_updates(true);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.factory.awaiting_branch_update(&key));
+
+    r.tracker.detach(&key);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.factory.awaiting_branch_update(&key));
+}
+
+#[tokio::test]
+async fn a_persons_pr_that_conflicts_is_warned_about_once_per_head() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (_key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_auto_merge(&mine, true);
+    r.codehost.set_behind(&mine, true);
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let logs = crate::run_loop::Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    let warned =
+        |logs: &crate::run_loop::Logs| logs.text().matches("conflicts with its base; auto-merge stays on").count();
+    assert_eq!(warned(&logs), 1, "{}", logs.text());
+    assert!(!r.codehost.prs()[0].merged, "still held");
 }
