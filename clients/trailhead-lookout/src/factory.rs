@@ -313,6 +313,16 @@ pub fn factory_ran(task: &trailhead_model::Task) -> bool {
         .is_ok_and(|run| run.attempt.is_some() || run.sandbox.is_some() || run.retries.is_some() || run.pr.is_some())
 }
 
+/// What to call the holder of a claim on the task keyed `task_key`: its name in the agent list if `known`, else, for a
+/// task that has a run, `factory/<key>`. The agent list only changes with a sync snapshot, so a sub-agent made for a run
+/// after it isn't known yet; a holder of a task that has a run is a factory agent all the same. Board and map share it.
+pub fn holder_name(known: Option<&str>, task_key: &str, has_run: bool) -> Option<String> {
+    match known {
+        Some(n) => Some(n.to_string()),
+        None => has_run.then(|| format!("factory/{}", task_key.to_lowercase())),
+    }
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -384,6 +394,12 @@ mod tests {
     use trailhead_factory::{FactorySnapshot, SandboxState};
 
     use super::*;
+    #[test]
+    fn a_holder_is_named_by_the_list_else_for_its_run() {
+        assert_eq!(super::holder_name(Some("claude"), "TRAIL-7", true).as_deref(), Some("claude"));
+        assert_eq!(super::holder_name(None, "TRAIL-7", true).as_deref(), Some("factory/trail-7"));
+        assert_eq!(super::holder_name(None, "TRAIL-7", false), None);
+    }
 
     fn app() -> App {
         let mut app = App::new();
