@@ -1011,6 +1011,24 @@ async fn a_pr_merged_by_hand_before_approval_is_parked_once_not_retried() {
 }
 
 #[tokio::test]
+async fn a_failed_claim_leaves_a_pr_merged_before_approval_in_review_not_open() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    r.tracker.forbid_finishing_unapproved(true);
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+
+    r.tracker.fail_next("factory", "claim", 1);
+    let _ = r.factory.reconcile().await;
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "never reopened, so not left open and unheld");
+    assert!(task.holder.is_none());
+
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "the next pass parks it");
+}
+
+#[tokio::test]
 async fn a_nearly_spent_code_host_rate_limit_holds_the_merger_until_it_resets() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
