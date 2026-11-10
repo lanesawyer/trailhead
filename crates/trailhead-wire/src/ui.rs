@@ -153,7 +153,11 @@ impl std::fmt::Debug for dyn LogFeed {
 }
 
 /// Why a stream was reset: the first frame wasn't a request this control plane knows.
-const BAD_REQUEST: u32 = 2;
+pub const BAD_REQUEST: u32 = 2;
+
+/// Why an API stream was reset: the request was fine, but the control plane couldn't reach the Trailhead server.
+/// Distinct from [`BAD_REQUEST`] so a UI can tell a server that's down from an op that's unknown.
+pub const SERVER_UNREACHABLE: u32 = 3;
 
 /// How often an open UI connection is checked against the allowlist, so a disallowed endpoint loses the streams it
 /// already has open (the event and status feeds), not just new ones.
@@ -396,7 +400,7 @@ impl ProtocolHandler for UiProtocol {
                         Ok(tcp) => pipe(send, recv, tcp).await,
                         Err(e) => {
                             tracing::warn!(%server, error = %e, "can't reach the Trailhead server");
-                            let _ = send.reset(BAD_REQUEST.into());
+                            let _ = send.reset(SERVER_UNREACHABLE.into());
                         }
                     },
                     Ok(Some(UiRequest::Status)) => match status {
@@ -555,6 +559,11 @@ mod tests {
         assert!(reread.remove(&a).unwrap());
         assert!(!reread.remove(&a).unwrap());
         assert!(!reread.contains(&a) && reread.contains(&b));
+    }
+
+    #[test]
+    fn reset_codes_are_distinct() {
+        assert_ne!(BAD_REQUEST, SERVER_UNREACHABLE);
     }
 
     #[test]
