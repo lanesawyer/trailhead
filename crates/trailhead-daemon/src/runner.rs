@@ -214,7 +214,7 @@ impl Runner {
             loop {
                 tick.tick().await;
                 if let Err(e) = tracker.renew(&req.task.key).await {
-                    tracing::warn!(task = %req.task.key.0, error = %e, "renewing the claim failed");
+                    tracing::warn!(task = %req.task.key, error = %e, "renewing the claim failed");
                 }
             }
         };
@@ -282,7 +282,7 @@ impl Runner {
                 }
                 _ = renew.tick(), if req.role == Role::Worker => {
                     if let Err(e) = tracker.renew(&req.task.key).await {
-                        tracing::warn!(task = %req.task.key.0, error = %e, "renewing the claim failed");
+                        tracing::warn!(task = %req.task.key, error = %e, "renewing the claim failed");
                     }
                 }
                 out = &mut run => break out?,
@@ -307,9 +307,7 @@ impl Runner {
         let title = commits
             .first()
             .and_then(|c| c.message.lines().next())
-            .filter(|t| {
-                t.strip_suffix(&format!(" [{}]", req.task.key.0)).is_some_and(trailhead_factory::is_conventional)
-            })
+            .filter(|t| t.strip_suffix(&format!(" [{}]", req.task.key)).is_some_and(trailhead_factory::is_conventional))
             .map(str::to_string);
         self.with_retries(req, "publishing", || self.codehost.publish(&req.repo, start, &req.branch, &commits)).await?;
         match &req.pr {
@@ -350,7 +348,7 @@ impl Runner {
         loop {
             match call().await {
                 Err(Error::Other(e)) if waited < PUBLISH_RETRY_FOR => {
-                    tracing::warn!(task = %req.task.key.0, error = %e, ?wait, "{what} failed; retrying");
+                    tracing::warn!(task = %req.task.key, error = %e, ?wait, "{what} failed; retrying");
                     tokio::time::sleep(wait).await;
                     waited += wait;
                     wait = (wait * 2).min(Duration::from_secs(120));
@@ -516,7 +514,7 @@ impl Runner {
                         match tracker.report(key, RunUpdate { pr: Some(pr.clone()), ..Default::default() }).await {
                             Ok(()) => reported = true,
                             Err(e) => {
-                                tracing::warn!(task = %key.0, attempt, error = %e, "couldn't record the opened PR");
+                                tracing::warn!(task = %key, attempt, error = %e, "couldn't record the opened PR");
                                 if e.is_transient() {
                                     continue;
                                 }
@@ -530,7 +528,7 @@ impl Runner {
                             break;
                         }
                         Err(e) => {
-                            tracing::warn!(task = %key.0, attempt, error = %e, "couldn't request review of the opened PR");
+                            tracing::warn!(task = %key, attempt, error = %e, "couldn't request review of the opened PR");
                             if !e.is_transient() {
                                 break;
                             }
@@ -538,7 +536,7 @@ impl Runner {
                     }
                 }
                 if !(reported && review_requested) {
-                    tracing::warn!(task = %key.0, "the PR is open but the tracker wouldn't take it; leaving it to the control plane");
+                    tracing::warn!(task = %key, "the PR is open but the tracker wouldn't take it; leaving it to the control plane");
                 }
                 Ok((RunResult::PrOpened(pr), checks))
             }
