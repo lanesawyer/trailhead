@@ -374,11 +374,12 @@ impl Factory {
             }
             RunResult::NeedsInput(question) => {
                 // An attempt that asked a question didn't give up, so a give-up from before it isn't "the attempt
-                // before" the next one (TRAIL-727). An empty failure is how a recorded one is cleared.
+                // before" the next one (TRAIL-727). The failure stays, so the next attempt is still told of it;
+                // `asked` is what the backstop below goes by (TRAIL-805).
                 if task.run.failure.as_deref().is_some_and(|f| !f.is_empty()) {
-                    let clear = RunUpdate { failure: Some(String::new()), ..RunUpdate::default() };
-                    if let Err(e) = sub.report(&task.key, clear).await {
-                        tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the earlier failure");
+                    let mark = RunUpdate { asked: Some(attempt), ..RunUpdate::default() };
+                    if let Err(e) = sub.report(&task.key, mark).await {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't record the attempt that asked");
                     }
                 }
                 self.status.paused(&sandbox.name);
@@ -428,6 +429,8 @@ impl Factory {
                     .failure
                     .clone()
                     .filter(|before| messages::is_agent_gave_up(before))
+                    // The failure is from before a question when the attempt just before this one asked it.
+                    .filter(|_| task.run.asked != Some(attempt.saturating_sub(1)))
                     .filter(|_| failed >= 2 && last.as_deref().is_some_and(messages::is_agent_gave_up));
                 if failed >= max || repeated.is_some() {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
