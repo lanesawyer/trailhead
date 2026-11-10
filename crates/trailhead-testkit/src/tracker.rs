@@ -298,6 +298,17 @@ impl FakeTracker {
         self.state.lock().unwrap().tasks.get_mut(key).unwrap().holder = None;
     }
 
+    /// The holder's lease on an in-progress task runs out, as in core: nobody holds it any more, and it goes back to
+    /// open, or to review when it was claimed from review and the review still asks for changes.
+    pub fn expire_claim(&self, key: &TaskKey) {
+        let mut s = self.state.lock().unwrap();
+        let back = s.claimed_from_review.remove(key) && review_asks_changes(&s, key);
+        let t = s.tasks.get_mut(key).unwrap();
+        assert_eq!(t.status, Status::InProgress, "{} isn't in progress", key.0);
+        t.holder = None;
+        t.status = if back { Status::InReview } else { Status::Open };
+    }
+
     /// A human answers while the asker's claim is still live: the task goes back to in progress under the same holder.
     pub fn answer_within_lease(&self, key: &TaskKey, body: &str) {
         let mut s = self.state.lock().unwrap();
