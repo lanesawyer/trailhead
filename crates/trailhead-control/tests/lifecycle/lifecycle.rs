@@ -1400,7 +1400,7 @@ async fn a_give_up_from_before_a_question_doesnt_count_toward_two_in_a_row() {
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which registry?".into() }));
     r.factory.tick().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
-    assert!(r.tracker.task(&key).run.failure.as_deref().unwrap_or("").is_empty(), "the question clears the give-up");
+    assert_eq!(r.tracker.task(&key).run.asked, Some(2), "the question is marked");
 
     r.tracker.answer(&key, "The mirror.");
     r.factory.reconcile().await.unwrap();
@@ -1408,6 +1408,9 @@ async fn a_give_up_from_before_a_question_doesnt_count_toward_two_in_a_row() {
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
     assert_eq!(r.tracker.task(&key).status, Status::Open, "one give-up since the question is retried");
+    let ctxs = r.harness.contexts();
+    let note = ctxs.last().unwrap().task.previous_failure.as_deref().expect("the earlier give-up is still passed on");
+    assert!(note.contains("crates.io unreachable"), "{note}");
 }
 
 #[tokio::test]
@@ -1457,4 +1460,17 @@ async fn a_park_that_fails_still_keeps_the_backoff() {
     assert_eq!(task.run.infra_failures, Some(1), "the count is kept so the next failure parks");
     r.tracker.set_status(&key, Status::Open); // what reconcile does with it
     assert!(r.factory.tick().await.unwrap().is_empty(), "nothing is started during the backoff");
+}
+
+#[tokio::test]
+async fn a_daemon_that_errors_after_a_run_that_finished_at_once_still_records_the_spend() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Finished before the drop", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.daemon.fail_runs_midway(1, "connection lost");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("connection lost"), "{err}");
+    let task = r.tracker.task(&key);
+    assert!(task.run.spend.is_some_and(|s| s > Usd::ZERO), "the spend is recorded: {:?}", task.run.spend);
+    assert_eq!(task.run.infra_failures, Some(1));
 }

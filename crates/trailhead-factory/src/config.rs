@@ -957,6 +957,7 @@ impl FactoryConfig {
             base_branch: self.repo.base_branch.clone(),
             branch,
             merge_base: false,
+            branch_if_present: false,
             setup: named("setup", &self.checks.setup),
             trim: named("trim", &self.checks.trim),
             disk_warn_bytes: some(self.daemon.disk_warn_bytes),

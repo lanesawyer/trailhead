@@ -45,6 +45,10 @@ pub struct PrepareRequest {
     /// A branch to check out at its remote head instead of staying on the base: a rework's PR branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// `branch` may not exist on the remote yet: stay on the base then, instead of failing. A task that pushed its
+    /// branch and parked before opening the PR resumes from it, one that never did starts fresh (TRAIL-751).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub branch_if_present: bool,
     /// Merge the base branch into `branch` after setup, leaving the merge uncommitted for the agent to finish: a
     /// rework of a PR that conflicts with it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -297,8 +301,8 @@ pub trait Daemon: Send + Sync {
     /// Starts the sandbox's daemon if needed and readies its checkout.
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()>;
     /// Whether the sandbox's checkout holds work that exists nowhere else: uncommitted changes, or commits that are not on
-    /// `origin/<remote_branch>` (the base branch, or a rework's PR branch). Defaults to true, so a daemon that can't
-    /// say is never taken to have nothing to lose (TRAIL-601).
+    /// `origin/<remote_branch>` (the task's own branch once published, else the base branch), by ancestry or by
+    /// content. Defaults to true, so a daemon that can't say is never taken to have nothing to lose (TRAIL-601).
     async fn unpublished(&self, _sandbox: &SandboxId, _remote_branch: &str) -> Result<bool> {
         Ok(true)
     }
@@ -387,6 +391,7 @@ mod tests {
             base_branch: "main".into(),
             branch: None,
             merge_base: false,
+            branch_if_present: false,
             setup: None,
             tools: tools.iter().map(|t| (t.to_string(), "1".to_string())).collect(),
             tool_hosts: hosts.iter().map(|(t, h)| (t.to_string(), h.iter().map(|h| h.to_string()).collect())).collect(),
