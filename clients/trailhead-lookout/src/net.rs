@@ -579,10 +579,16 @@ fn refusal_of(conn: &iroh::endpoint::Connection, error: &trailhead_factory::Erro
 
 /// What the map says of a factory that didn't know our request: what it was asked, what it serves, and its build.
 fn too_old_message(u: &trailhead_wire::ui::Unsupported) -> String {
+    // Only the op: a request that carries parameters would make the label long.
+    let asked = u
+        .got
+        .get("op")
+        .and_then(|op| op.as_str())
+        .map_or_else(|| "an unreadable request".to_string(), |op| format!("\"{op}\""));
     format!(
         "the factory is older than this Lookout: reinstall trailhead and restart its server (it was asked {}, and \
          serves {}; version {}, build {})",
-        u.got,
+        asked,
         u.known.join(", "),
         u.version,
         u.build
@@ -988,6 +994,19 @@ impl Net {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn too_old_message_names_only_the_op() {
+        let u = trailhead_wire::ui::Unsupported {
+            got: serde_json::json!({"op": "logs", "task": "x".repeat(500)}),
+            known: vec!["status".into()],
+            version: "1".into(),
+            build: "b".into(),
+        };
+        let message = too_old_message(&u);
+        assert!(message.contains("asked \"logs\","), "{message}");
+        assert!(message.len() < 300, "{message}");
+    }
 
     #[test]
     fn refusals_back_off_to_a_cap_and_reset() {
