@@ -823,7 +823,8 @@ async fn a_worker_whose_fallback_release_fails_too_leaves_the_task_for_reconcile
     assert_eq!((task.status, task.holder.as_deref()), (Status::InProgress, Some("factory/trail-1-a1")));
     assert!(r.factory.tick().await.unwrap().is_empty(), "a held task is not picked up");
 
-    r.tracker.set_status(&key, Status::Open);
+    r.tracker.expire_claim(&key);
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
     r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let ran = r.factory.tick().await.unwrap();
