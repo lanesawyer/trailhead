@@ -389,6 +389,36 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_control_resets_when_its_task_changes_and_goes_when_the_task_does() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.init_resource::<Controls>().add_systems(Update, tidy_controls.after(super::super::settle));
+        let f = fixture();
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 5,
+            projects: vec![],
+            tasks: as_json(&f.tasks),
+            agents: as_json(&f.agents),
+            ..Default::default()
+        }));
+        app.update();
+        let (kept, gone) = (Subject::Task(sid("t7")), Subject::Task(sid("nope")));
+        let spawn = |app: &mut App, subject: &Subject| {
+            let e = app.world_mut().spawn(Control::Done).id();
+            app.world_mut().resource_mut::<Controls>().0.insert((subject.clone(), Action::Undo), e);
+            e
+        };
+        let (a, b) = (spawn(&mut app, &kept), spawn(&mut app, &gone));
+        app.update();
+        assert_eq!(app.world().get::<Control>(a), Some(&Control::Done), "nothing changed yet");
+        assert!(app.world().get_entity(b).is_err(), "a subject not in the mirror loses its controls");
+        assert!(!app.world().resource::<Controls>().0.contains_key(&(gone, Action::Undo)));
+        app.world_mut().resource_mut::<Latest>().0.insert(sid("t7"), 9);
+        app.update();
+        assert_eq!(app.world().get::<Control>(a), Some(&Control::Idle), "the task changed");
+    }
+
+    #[test]
     fn the_status_dropdown_shows_words_for_the_api_values() {
         let statuses = vec![Status::NeedsInput, Status::InProgress];
         assert_eq!(status_labels(&statuses), ["Needs Input", "In Progress"]);

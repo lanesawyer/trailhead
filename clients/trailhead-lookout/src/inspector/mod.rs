@@ -18,7 +18,7 @@
 //! the [`Request`] it sends, so both are tested without a window. "answer" opens the answer form from
 //! [`crate::author`], as the board's does; "resolve" closes a question without one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
@@ -191,6 +191,45 @@ fn settle(mut done: MessageReader<CommandDone>, mut controls: Query<&mut Control
     }
 }
 
+/// Keeps [`Controls`] honest: a finished control goes back to idle when its task has changed since (a result is about
+/// the task as it was), and the controls of a subject that has left the mirror are despawned.
+fn tidy_controls(
+    mut controls: ResMut<Controls>,
+    latest: Res<Latest>,
+    tasks: Query<&Mirrored<Task>>,
+    agents: Query<&Mirrored<Agent>>,
+    mut states: Query<&mut Control>,
+    mut seen: Local<HashMap<String, Option<i64>>>,
+    mut commands: Commands,
+) {
+    for ((subject, _), entity) in &controls.0 {
+        let Subject::Task(id) = subject else { continue };
+        let now = latest.0.get(id).copied();
+        // A task first seen here is only noted: whatever it last did came before the control.
+        if seen.insert(id.clone(), now).is_some_and(|before| before != now)
+            && let Ok(mut c) = states.get_mut(*entity)
+            && matches!(*c, Control::Done | Control::Refused(_))
+        {
+            *c = Control::Idle;
+        }
+    }
+    let live: HashSet<String> =
+        tasks.iter().map(|t| t.0.id.to_string()).chain(agents.iter().map(|a| a.0.id.to_string())).collect();
+    // An empty mirror is one not yet loaded, not one with nothing in it.
+    if live.is_empty() {
+        return;
+    }
+    controls.0.retain(|(subject, _), entity| {
+        let (Subject::Task(id) | Subject::Agent(id)) = subject;
+        let keep = live.contains(id);
+        if !keep {
+            commands.entity(*entity).try_despawn();
+        }
+        keep
+    });
+    seen.retain(|id, _| live.contains(id));
+}
+
 /// Keeps the [`Selection`] and the panel's contents from the mirror.
 pub struct InspectorPlugin;
 
@@ -235,7 +274,7 @@ impl Plugin for InspectorUiPlugin {
             .add_observer(on_inline_edited)
             .add_observer(on_inline_chosen)
             .add_systems(Startup, spawn_panel)
-            .add_systems(Update, answer_edits)
+            .add_systems(Update, (answer_edits, tidy_controls.after(settle).before(sync_panel)))
             // After the view is rebuilt: a modal closed from inside must not be reopened from the view it just left.
             .add_systems(
                 Update,
