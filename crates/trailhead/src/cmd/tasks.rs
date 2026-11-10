@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use trailhead_core::{CommentKind, Status};
@@ -36,6 +38,7 @@ pub(crate) async fn ls(
     all: bool,
     today: bool,
     grade: Option<String>,
+    title: Option<String>,
     limit: Option<i64>,
 ) -> Result<()> {
     let status = status.or(all.then(|| "open,in_progress,needs_input,in_review,approved,done,cancelled".into()));
@@ -45,6 +48,7 @@ pub(crate) async fn ls(
         ("parent", parent),
         ("scheduled_through", today.then(|| local_today().to_string())),
         ("grade", grade),
+        ("title", title),
         ("sort", today.then(|| "scheduled".to_string())),
         ("limit", limit.map(|n| n.to_string())),
     ]);
@@ -57,8 +61,23 @@ pub(crate) async fn ls(
             q.retain(|(k, _)| ["project", "parent"].contains(k));
             q.push(("status", "in_review".into()));
             q.push(("changes_requested", "true".into()));
-            let asked = cx.c.get("tasks", &q).await?;
-            asked.as_array().into_iter().flatten().map(|t| s(t, "key").to_string()).collect()
+            // The server returns at most 100 a page by default, so page until a short one.
+            const PAGE: usize = 100;
+            q.push(("limit", PAGE.to_string()));
+            let mut keys = HashSet::new();
+            let mut offset = 0;
+            loop {
+                let mut page_q = q.clone();
+                page_q.push(("offset", offset.to_string()));
+                let page = cx.c.get("tasks", &page_q).await?;
+                let page = page.as_array().map(Vec::as_slice).unwrap_or_default();
+                keys.extend(page.iter().map(|t| s(t, "key").to_string()));
+                if page.len() < PAGE {
+                    break;
+                }
+                offset += PAGE;
+            }
+            keys
         } else {
             Default::default()
         };
