@@ -4,7 +4,7 @@ use trailhead_control::Outcome;
 use trailhead_factory::{
     CiState, CodeHost, Commit, MergedBy, NewPr, PrRef, RateLimit, Role, RunOutcome, Status, Tracker,
 };
-use trailhead_testkit::Script;
+use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
 
@@ -456,7 +456,7 @@ async fn a_merge_whose_close_failed_is_closed_by_the_next_pass_as_the_mergers() 
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.codehost.set_ci(&pr, CiState::Passed);
-    r.tracker.fail_next("factory", "finish", 1);
+    r.tracker.fail_next("factory", TrackerOp::Finish, 1);
     // The merger writes its intent and the host merges, but closing the task fails.
     let _ = r.factory.reconcile().await;
     assert!(r.codehost.prs()[0].merged);
@@ -1048,7 +1048,7 @@ async fn a_failed_claim_leaves_a_pr_merged_before_approval_in_review_not_open() 
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
 
-    r.tracker.fail_next("factory", "claim", 1);
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
     let _ = r.factory.reconcile().await;
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::InReview, "never reopened, so not left open and unheld");

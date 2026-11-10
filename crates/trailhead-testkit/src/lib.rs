@@ -15,4 +15,4 @@ pub use compute::FakeCompute;
 pub use daemon::{Connect, FAKE_BASE, FAKE_BASE_MERGE, FakeWorkspace, LocalDaemon};
 pub use harness::{Script, ScriptedHarness};
 pub use provider::FakeProvider;
-pub use tracker::{FakeComment, FakeTracker};
+pub use tracker::{FakeComment, FakeTracker, TrackerOp};
