@@ -33,6 +33,23 @@ pub struct GitWorkspace {
 }
 
 impl GitWorkspace {
+    async fn is_ancestor(&self, commit: &str, of: &str) -> Result<bool> {
+        let status = Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit, of])
+            .envs(self.git_env.clone())
+            .current_dir(&self.dir)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .map_err(|e| Error::Other(format!("git merge-base: {e}")))?
+            .status;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(Error::Other(format!("git merge-base --is-ancestor {commit} {of} failed"))),
+        }
+    }
+
     pub fn new(dir: impl Into<PathBuf>) -> GitWorkspace {
         GitWorkspace::with_remote(dir, "https://github.com")
     }
@@ -253,28 +270,18 @@ impl Workspace for GitWorkspace {
         let Ok(tip) = self.git_output(&self.dir, &["rev-parse", "--verify", "--quiet", &tip]).await else {
             return Ok(None);
         };
-        let range = format!("{start}..HEAD");
-        let merges = self.git_output(&self.dir, &["rev-list", "--merges", "--parents", &range]).await?;
-        // Each line is a commit followed by its parents.
-        let merged = merges.lines().any(|line| line.split_whitespace().skip(1).any(|parent| parent == tip));
-        Ok(merged.then_some(tip))
+        // The newest commit of the base that HEAD has. If `start` has it too, nothing of the base came in. Otherwise
+        // the agent merged the base, whether as a merge commit, a fast-forward, or before fetching again moved
+        // `origin/<base>` on.
+        let Ok(have) = self.git_output(&self.dir, &["merge-base", "HEAD", &tip]).await else {
+            return Ok(None);
+        };
+        let have = have.trim().to_string();
+        Ok((!self.is_ancestor(&have, start).await?).then_some(have))
     }
 
     async fn contains(&self, commit: &str) -> Result<bool> {
-        let status = Command::new("git")
-            .args(["merge-base", "--is-ancestor", commit, "HEAD"])
-            .envs(self.git_env.clone())
-            .current_dir(&self.dir)
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|e| Error::Other(format!("git merge-base: {e}")))?
-            .status;
-        match status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => Err(Error::Other(format!("git merge-base --is-ancestor {commit} HEAD failed"))),
-        }
+        self.is_ancestor(commit, "HEAD").await
     }
 
     async fn conflict_markers(&self, start: &str) -> Result<Vec<String>> {

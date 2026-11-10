@@ -40,8 +40,8 @@ pub trait Workspace: Send + Sync {
     async fn head(&self) -> Result<String>;
     /// The commit being merged into the checkout, while a merge is under way (`PrepareRequest::merge_base`).
     async fn merge_head(&self) -> Result<Option<String>>;
-    /// The tip of `origin/<base>`, when a merge commit in `start..HEAD` has it as a parent: a merge of the base branch
-    /// the agent started and committed itself, which leaves no `MERGE_HEAD` behind.
+    /// The newest commit of `origin/<base>` that HEAD has and `start` doesn't: a merge of the base branch
+    /// the agent started and committed itself (no `MERGE_HEAD` is left), or fast-forwarded to; the tip unless it fetched again.
     async fn merged_base(&self, start: &str, base: &str) -> Result<Option<String>>;
     /// Whether `commit` is an ancestor of (or is) the checkout's HEAD.
     async fn contains(&self, commit: &str) -> Result<bool>;
