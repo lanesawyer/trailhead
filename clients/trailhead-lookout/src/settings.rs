@@ -149,7 +149,17 @@ pub fn repos_text(status: &FactoryStatus) -> String {
     if lines.is_empty() { "none heard of yet".into() } else { lines.join("\n") }
 }
 
-/// The queue task new tasks go under, and how much is queued beneath it.
+/// Every queue task the factory works, one per line, or the one new tasks go under until a status has listed them.
+pub fn queues_text(authoring: &Authoring, status: &FactoryStatus, tasks: &[Task]) -> String {
+    let mut queues = status.queues();
+    if queues.is_empty() {
+        queues.push(authoring.queue.clone());
+    }
+    let lines: Vec<String> = queues.iter().map(|q| queue_text(q, tasks)).collect();
+    lines.join("\n")
+}
+
+/// One queue task, and how much is queued beneath it.
 pub fn queue_text(queue: &str, tasks: &[Task]) -> String {
     let Some(task) = tasks.iter().find(|t| t.key == *queue) else {
         return format!("{queue} (not loaded)");
@@ -357,7 +367,7 @@ fn refresh(
             Value::Endpoint => endpoint.0.clone().unwrap_or_else(|| "starting".into()),
             Value::Status => status.label(),
             Value::Repos => repos_text(&status),
-            Value::Queue => queue_text(&authoring.queue, &tasks),
+            Value::Queue => queues_text(&authoring, &status, &tasks),
         };
         set_text(text, &wanted);
     }
@@ -553,6 +563,24 @@ mod tests {
         ];
         assert_eq!(queue_text("TRAIL-102", &tasks), "TRAIL-102: 1 not closed, 2 in all");
         assert_eq!(queue_text("TRAIL-5", &tasks), "TRAIL-5 (not loaded)");
+
+        let authoring = Authoring::default();
+        let mut status = FactoryStatus::default();
+        assert_eq!(queues_text(&authoring, &status, &tasks), "TRAIL-102: 1 not closed, 2 in all");
+        status.repos.insert(
+            "r".into(),
+            crate::factory::RepoState {
+                control: trailhead_factory::status::ControlState::Up,
+                queue: vec!["TRAIL-102".into(), "TRAIL-9".into()],
+                last_error: None,
+                human_grades: vec![],
+                seq: 0,
+            },
+        );
+        assert_eq!(
+            queues_text(&authoring, &status, &tasks),
+            "TRAIL-102: 1 not closed, 2 in all\nTRAIL-9: 0 not closed, 0 in all"
+        );
     }
 
     #[test]
