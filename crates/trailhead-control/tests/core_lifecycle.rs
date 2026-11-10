@@ -1207,6 +1207,11 @@ async fn a_task_that_blocks_urgent_work_is_listed_as_urgent_too() {
     assert_eq!(priority(&blocker), pr(2), "through a chain, a p3 blocker of a p2 task runs as p2");
     assert_eq!(priority(&older), pr(3));
 
+    let first = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 1).await.unwrap();
+    assert_eq!(first.iter().map(|t| &t.key).collect::<Vec<_>>(), [&blocker], "the raise applies before the limit");
+    let first = r.tracker.ready("TRAIL", &[], 1).await.unwrap();
+    assert_eq!(first.iter().map(|t| &t.key).collect::<Vec<_>>(), [&blocker], "with no queue too");
+
     r.factory.config.repo.max_sandboxes = 1;
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which?".into() }));
     let ran = r.factory.tick().await.unwrap();
@@ -1321,6 +1326,67 @@ async fn a_stray_is_warned_about_once_across_reconciles_and_not_for_a_sibling_re
 }
 
 #[tokio::test]
+async fn a_stray_moved_back_under_its_queue_and_out_again_is_warned_about_again() {
+    let r = rig().await;
+    let queue = r.task("Queue").await;
+    let alpha = factory_for(&r, "alpha", &queue, Host::new(&HostConfig::default()));
+    let task = subtask(&r, &queue, "Moves around").await;
+    with_run(&r, &task).await;
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+    let reparent = |parent: Option<String>| TaskPatch { parent: Some(parent), ..Default::default() };
+
+    r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
+    alpha.reconcile().await.unwrap();
+    assert_eq!(logs.text().matches(&task.0).count(), 1, "{}", logs.text());
+
+    r.store.update_task(&r.human, &task.0, reparent(Some(queue.0.clone())), None).await.unwrap();
+    alpha.reconcile().await.unwrap();
+    r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
+    alpha.reconcile().await.unwrap();
+    assert_eq!(logs.text().matches(&task.0).count(), 2, "{}", logs.text());
+}
+
+#[tokio::test]
+async fn strays_in_different_projects_on_one_host_are_each_warned_about_once() {
+    let r = rig().await;
+    r.store
+        .create_project(&r.human, NewProject { key: "OTHER".into(), name: "Other".into(), ..Default::default() })
+        .await
+        .unwrap();
+    let q1 = r.task("Alpha's queue").await;
+    let in_other = |title: &str| NewTask { project: "OTHER".into(), title: title.into(), ..Default::default() };
+    let q2 = r.store.create_task(&r.human, in_other("Beta's queue")).await.unwrap().key;
+    let host = Host::new(&HostConfig::default());
+    let alpha = factory_for(&r, "alpha", &q1, host.clone());
+    let config = CONFIG.replace("name = \"trailhead\"", &format!("name = \"beta\"\nqueue = \"{}\"", q2.0));
+    let beta = Factory::new(
+        FactoryConfig::parse_table(&config, "OTHER", None).unwrap(),
+        Arc::new(r.compute.clone()),
+        Arc::new(r.tracker.clone()),
+        Arc::new(FakeProvider::new(1)),
+        r.daemon.clone(),
+        host,
+    );
+    let stray_a = r.task("Alpha's stray").await;
+    let stray_b = r.store.create_task(&r.human, in_other("Beta's stray")).await.unwrap().key;
+    with_run(&r, &stray_a).await;
+    with_run(&r, &stray_b).await;
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    for _ in 0..3 {
+        alpha.reconcile().await.unwrap();
+        beta.reconcile().await.unwrap();
+    }
+    let text = logs.text();
+    assert_eq!(text.matches(&stray_a.0).count(), 1, "{text}");
+    assert_eq!(text.matches(&stray_b.0).count(), 1, "{text}");
+}
+
+#[tokio::test]
 async fn ready_lists_reworks_ahead_of_new_work_only_within_a_priority() {
     let r = rig().await;
     let (rework, pull) = in_review(&r, "Add a greeting").await;
@@ -1366,4 +1432,30 @@ async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
     assert_eq!(task.run.merging.as_deref(), Some(""));
+}
+
+#[tokio::test]
+async fn no_stray_is_warned_about_when_a_sibling_repo_works_the_project_without_a_queue() {
+    let r = rig().await;
+    let q = r.task("Beta's queue").await;
+    let host = Host::new(&HostConfig::default());
+    let _queueless = Factory::new(
+        FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap(),
+        Arc::new(r.compute.clone()),
+        Arc::new(r.tracker.clone()),
+        Arc::new(FakeProvider::new(1)),
+        r.daemon.clone(),
+        host.clone(),
+    );
+    let beta = factory_for(&r, "beta", &q, host);
+
+    // The queueless repo's run sits under no queue, but it is that repo's own, not a stray.
+    let theirs = r.task("Alpha's task").await;
+    with_run(&r, &theirs).await;
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    beta.reconcile().await.unwrap();
+    assert!(!logs.text().contains(&theirs.0), "{}", logs.text());
 }

@@ -628,11 +628,11 @@ async fn a_pr_whose_head_hasnt_moved_is_not_listed_again_for_grading() {
     let (r, queue) = queued_rig_with(&merging());
     let (_key, _pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.factory.reconcile().await.unwrap();
-    let listed = r.codehost.file_listings();
+    let listed = r.codehost.calls("files");
     for _ in 0..3 {
         r.factory.reconcile().await.unwrap();
     }
-    assert_eq!(r.codehost.file_listings(), listed, "same head, same files");
+    assert_eq!(r.codehost.calls("files"), listed, "same head, same files");
 }
 
 #[tokio::test]
@@ -1011,6 +1011,24 @@ async fn a_pr_merged_by_hand_before_approval_is_parked_once_not_retried() {
 }
 
 #[tokio::test]
+async fn a_failed_claim_leaves_a_pr_merged_before_approval_in_review_not_open() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    r.tracker.forbid_finishing_unapproved(true);
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+
+    r.tracker.fail_next("factory", "claim", 1);
+    let _ = r.factory.reconcile().await;
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview, "never reopened, so not left open and unheld");
+    assert!(task.holder.is_none());
+
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "the next pass parks it");
+}
+
+#[tokio::test]
 async fn a_nearly_spent_code_host_rate_limit_holds_the_merger_until_it_resets() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
@@ -1169,4 +1187,27 @@ async fn a_queued_update_is_forgotten_when_the_task_leaves_the_queue() {
     r.tracker.detach(&key);
     r.factory.reconcile().await.unwrap();
     assert!(!r.factory.awaiting_branch_update(&key));
+}
+
+#[tokio::test]
+async fn a_persons_pr_that_conflicts_is_warned_about_once_per_head() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (_key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_auto_merge(&mine, true);
+    r.codehost.set_behind(&mine, true);
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let logs = crate::run_loop::Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    let warned =
+        |logs: &crate::run_loop::Logs| logs.text().matches("conflicts with its base; auto-merge stays on").count();
+    assert_eq!(warned(&logs), 1, "{}", logs.text());
+    assert!(!r.codehost.prs()[0].merged, "still held");
 }

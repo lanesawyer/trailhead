@@ -46,18 +46,23 @@ impl Factory {
         Ok(done)
     }
 
-    /// Warns, once per task, about factory tasks sitting outside every repo's queue: re-parented while their run was
-    /// live, they're invisible to reconcile, so their claim lapses and the sandbox stays (TRAIL-531). Which repo owns
-    /// one is unknowable, so nothing is torn down.
+    /// Warns, once per stretch outside the queues, about factory tasks sitting outside every repo's queue:
+    /// re-parented while their run was live, they're invisible to reconcile, so their claim lapses and the sandbox
+    /// stays (TRAIL-531). Which repo owns one is unknowable, so nothing is torn down.
     async fn warn_strays(&self) {
-        // Without a queue the factory works the whole project, so nothing can sit outside it.
-        if self.queue().is_empty() {
+        // A repo without a queue works the whole project, so nothing in it can sit outside a queue, whichever repo
+        // asks: the other repo's in-flight runs are that repo's own.
+        if self.queue().is_empty() || self.host.queueless_projects.lock().unwrap().contains(self.project()) {
             return;
         }
         let queues: Vec<TaskKey> = self.host.queues.lock().unwrap().iter().cloned().map(TaskKey).collect();
         match self.tracker.strays(self.project(), &queues).await {
             Ok(strays) => {
-                let mut logged = self.host.strays_logged.lock().unwrap();
+                let mut all = self.host.strays_logged.lock().unwrap();
+                // Repos on one host can be in different projects; each pass only tracks its own project's strays.
+                let logged = all.entry(self.project().to_string()).or_default();
+                // A task that stops being a stray is forgotten, so it's warned about again if it strays again.
+                logged.retain(|k| strays.iter().any(|t| &t.key.0 == k));
                 for t in strays.iter().filter(|t| logged.insert(t.key.0.clone())) {
                     tracing::warn!(
                         task = %t.key.0,
@@ -281,8 +286,9 @@ impl Factory {
             // is recorded, so ask once for a person to mark it done rather than be refused again every pass (TRAIL-706).
             Err(Error::Forbidden(why)) if merged_by_human => {
                 tracing::warn!(task = %task.key.0, %why, "the PR was merged unapproved; parking for a person to finish it");
+                // Claimed as it stands, in review, never reopened first: a failed claim then leaves it as it was, not
+                // open and unheld (TRAIL-826).
                 if !claimed {
-                    self.tracker.reopen(&task.key).await?;
                     self.tracker.claim(&task.key).await?;
                 }
                 return self.tracker.ask(&task.key, &messages::merged_unapproved_question(&pr_url)).await;

@@ -896,10 +896,12 @@ async fn a_request_from_an_earlier_attempt_costs_no_host_call() {
     assert!(task.run.pending_changes().is_some_and(|c| c.attempt == 1), "{:?}", task.run);
 
     r.tracker.set_status(&key, Status::InReview);
-    let before = r.codehost.head_lookups();
+    let (heads, cis) = (r.codehost.calls("head"), r.codehost.calls("ci"));
     r.factory.reconcile().await.unwrap();
-    // Asked only for the review's staleness check and the CI state, not for the old request's recorded head.
-    assert!(r.codehost.head_lookups() <= before + 2, "{} lookups", r.codehost.head_lookups() - before);
+    // Asked only for the review's staleness check (one `head`) and the CI state (`ci`, once to see a failed CI and
+    // once to evaluate), not for the old request's recorded head.
+    assert!(r.codehost.calls("head") <= heads + 1, "{} head lookups", r.codehost.calls("head") - heads);
+    assert!(r.codehost.calls("ci") <= cis + 2, "{} ci lookups", r.codehost.calls("ci") - cis);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1002,12 +1004,14 @@ async fn reconciling_a_reviewed_task_at_its_reviewed_head_looks_up_the_head_once
     r.factory.tick().await.unwrap();
     r.tracker.set_status(&key, Status::InReview);
 
-    let (lookups, verdict_checks) = (r.codehost.head_lookups(), r.codehost.calls("carries_verdict"));
+    let (heads, cis, verdict_checks) =
+        (r.codehost.calls("head"), r.codehost.calls("ci"), r.codehost.calls("carries_verdict"));
     r.factory.reconcile().await.unwrap();
     // The head the PR's state showed is the reviewed one, so the staleness check asks nothing more; the one lookup
-    // left is inside `ci`, as on GitHub.
+    // left is inside `ci`, as on GitHub (the fake counts it as a `ci` call, not a `head` call).
     assert_eq!(r.codehost.calls("carries_verdict"), verdict_checks);
-    assert_eq!(r.codehost.head_lookups(), lookups + 1);
+    assert_eq!(r.codehost.calls("head"), heads);
+    assert_eq!(r.codehost.calls("ci"), cis + 1);
 }
 
 #[tokio::test]
@@ -1023,10 +1027,10 @@ async fn a_request_for_changes_still_pending_is_checked_against_the_head_the_pr_
     assert!(pending.attempt == task.run.attempt.unwrap_or(1) && pending.head.is_some(), "{:?}", task.run);
     r.tracker.set_status(&key, Status::InReview);
 
-    let before = r.codehost.head_lookups();
+    let before = r.codehost.calls("head");
     r.factory.reconcile().await.unwrap();
     // The pending-change check reuses the head from the PR's state, so nothing is looked up for it.
-    assert_eq!(r.codehost.head_lookups(), before);
+    assert_eq!(r.codehost.calls("head"), before);
 }
 
 #[tokio::test]
