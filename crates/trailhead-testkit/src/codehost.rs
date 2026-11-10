@@ -168,7 +168,8 @@ impl FakeCodeHost {
         self.state.lock().unwrap().calls.get(method).copied().unwrap_or(0)
     }
 
-    /// How many calls the host got in all, whatever the method. A `ci` call counts once, as on GitHub: it reads the head without calling `head`.
+    /// How many calls the host got in all, whatever the method. A `ci` call counts once, as on GitHub: it reads
+    /// the head without calling `head`.
     pub fn total_calls(&self) -> usize {
         self.state.lock().unwrap().calls.values().sum()
     }

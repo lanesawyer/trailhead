@@ -896,10 +896,12 @@ async fn a_request_from_an_earlier_attempt_costs_no_host_call() {
     assert!(task.run.pending_changes().is_some_and(|c| c.attempt == 1), "{:?}", task.run);
 
     r.tracker.set_status(&key, Status::InReview);
-    let before = r.codehost.calls("head");
+    let (heads, cis) = (r.codehost.calls("head"), r.codehost.calls("ci"));
     r.factory.reconcile().await.unwrap();
-    // Asked only for the review's staleness check and the CI state, not for the old request's recorded head.
-    assert!(r.codehost.calls("head") <= before + 2, "{} lookups", r.codehost.calls("head") - before);
+    // Asked only for the review's staleness check (one `head`) and the CI state (`ci`, once to see a failed CI and
+    // once to evaluate), not for the old request's recorded head.
+    assert!(r.codehost.calls("head") <= heads + 1, "{} head lookups", r.codehost.calls("head") - heads);
+    assert!(r.codehost.calls("ci") <= cis + 2, "{} ci lookups", r.codehost.calls("ci") - cis);
 }
 
 #[tokio::test(start_paused = true)]
