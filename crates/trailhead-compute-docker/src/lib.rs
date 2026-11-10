@@ -106,7 +106,7 @@ pub fn target() -> Target {
     }
 }
 
-/// A Docker compute from its `[compute]` settings (unset ones keep `docker`'s defaults), with its launch facts.
+/// A Docker compute from its `[factory.compute]` settings (unset ones keep `docker`'s defaults), with its launch facts.
 /// `read_only` is as for [`DockerCompute::read_only`]. Settings of another kind are an error.
 pub fn build(
     settings: &ComputeConfig,
