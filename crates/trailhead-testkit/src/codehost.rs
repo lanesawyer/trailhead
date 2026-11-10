@@ -30,6 +30,8 @@ pub struct FakePr {
     pub files: Option<Vec<ChangedFile>>,
     /// CI on the PR's head: pending until a test says otherwise.
     pub ci: CiState,
+    /// CI on earlier heads, by sha, as a test sets it.
+    pub ci_at: BTreeMap<String, CiState>,
     /// The log tails of failed checks, by check name.
     pub ci_logs: Vec<(String, String)>,
     /// Whether the host's auto-merge is on, as a person turns it on.
@@ -230,6 +232,11 @@ impl FakeCodeHost {
         self.find(pr, |p, _| p.ci = ci).unwrap();
     }
 
+    /// Sets how CI stood on `sha`, a head the PR had earlier (the current head's is `set_ci`'s).
+    pub fn set_ci_at(&self, pr: &PrRef, sha: &str, ci: CiState) {
+        self.find(pr, |p, _| p.ci_at.insert(sha.to_string(), ci)).unwrap();
+    }
+
     /// Makes `behind` fail with a transient error until called with `false`.
     pub fn fail_behind(&self, on: bool) {
         self.state.lock().unwrap().fail_behind = on;
@@ -358,6 +365,7 @@ impl CodeHost for FakeCodeHost {
             behind: false,
             files: None,
             ci: CiState::Pending,
+            ci_at: BTreeMap::new(),
             ci_logs: Vec::new(),
             auto_merge: false,
         });
@@ -531,6 +539,18 @@ impl CodeHost for FakeCodeHost {
         self.count("ci");
         let head = CodeHost::head(self, pr).await?;
         self.find(pr, |p, _| Ci { head, state: p.ci.clone() })
+    }
+
+    async fn ci_at(&self, pr: &PrRef, sha: &str) -> Result<CiState> {
+        self.count("ci_at");
+        self.find(pr, |p, s| {
+            let current = s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).map(String::as_str);
+            match p.ci_at.get(sha) {
+                Some(state) => state.clone(),
+                None if current == Some(sha) => p.ci.clone(),
+                None => CiState::Pending,
+            }
+        })
     }
 
     async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {

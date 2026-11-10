@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use trailhead_factory::messages::{self, BreachedSandbox};
+use trailhead_factory::messages::{self, AfterUpdate, BreachedSandbox};
 use trailhead_factory::{
-    ChangesRequested, Error, Merged, MergedBy, PrRef, PrState, Result, ReviewBreach, RunUpdate, Sandbox, Status, Task,
-    TaskKey, WorkerBreach, label,
+    ChangesRequested, CiState, Error, Merged, MergedBy, PrRef, PrState, Result, ReviewBreach, RunUpdate, Sandbox,
+    Status, Task, TaskKey, WorkerBreach, label,
 };
 
 use crate::lifecycle::worker_name;
@@ -346,8 +346,19 @@ impl Factory {
             return Ok(false);
         }
         let after_update = match &task.run.reviewed_head {
-            Some(reviewed) => reviewed != head && codehost.carries_verdict(pr, reviewed).await?,
-            None => false,
+            Some(reviewed) if reviewed != head && codehost.carries_verdict(pr, reviewed).await? => {
+                // Only CI seen passing on the reviewed head says the merge brought the failure in. A host that
+                // can't be asked gets the softer wording.
+                match codehost.ci_at(pr, reviewed).await {
+                    Ok(CiState::Passed) => AfterUpdate::CiPassedBefore,
+                    Ok(_) => AfterUpdate::CiUnconfirmed,
+                    Err(e) => {
+                        tracing::warn!(task = %task.key.0, error = %e, "couldn't read CI on the reviewed head");
+                        AfterUpdate::CiUnconfirmed
+                    }
+                }
+            }
+            _ => AfterUpdate::No,
         };
         let logs = codehost.ci_logs(pr, checks).await.unwrap_or_else(|e| {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't read the logs of the failed checks");

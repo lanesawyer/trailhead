@@ -228,6 +228,10 @@ impl Factory {
             return Ok(asked.then_some(Rework::Running));
         }
         // Only a later attempt than the reviewed one is the rework; a new head on the same attempt is a person's push.
+        // And until the rework hands off, the request is still open, so a new head then is a person's push too.
+        if task.changes_requested {
+            return Ok(None);
+        }
         let attempt = task.run.attempt.unwrap_or(0);
         let pushed = task
             .run

@@ -311,7 +311,13 @@ impl Workspace for GitWorkspace {
         // New files count, as in conflict_markers.
         let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
         let remote = format!("origin/{base}");
-        let from = self.git_output(&self.dir, &["merge-base", &remote, "HEAD"]).await?;
+        // While the rework's merge of the base is in progress, diff against the base tip itself: against the
+        // merge-base, every base change since the branch point would count as the PR's and trigger scoped checks.
+        let from = if self.merge_head().await?.is_some() {
+            remote
+        } else {
+            self.git_output(&self.dir, &["merge-base", &remote, "HEAD"]).await?
+        };
         let names =
             self.git_output(&self.dir, &["diff", "--name-only", "--no-renames", "--no-ext-diff", "-z", &from]).await?;
         Ok(names.split('\0').filter(|f| !f.is_empty()).map(str::to_string).collect())

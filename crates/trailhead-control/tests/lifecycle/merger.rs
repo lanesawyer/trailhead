@@ -142,6 +142,26 @@ async fn a_push_by_a_person_is_not_credited_to_the_rework() {
     Tracker::handoff(&r.tracker, &key, "Pushed the rework.").await.unwrap();
     r.factory.reconcile().await.unwrap();
     let said = said(&r);
+    assert_eq!(said, ["Grade 4: waiting for CI and a person."], "the push moved the PR, so no rework is mentioned");
+}
+
+#[tokio::test]
+async fn a_push_by_a_person_during_a_running_rework_is_not_credited_to_the_rework() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 4);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    let ran = r.factory.tick().await.unwrap();
+    let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+    // The rework's attempt has started, but it hasn't handed off when a person pushes.
+    Tracker::report(&r.tracker, &key, trailhead_factory::RunUpdate { attempt: Some(2), ..Default::default() })
+        .await
+        .unwrap();
+    r.codehost.push_to(pr);
+    r.tracker.set_status(&key, Status::InReview);
+    r.factory.reconcile().await.unwrap();
+    let said = said(&r);
     assert!(said.iter().all(|m| !m.contains("the rework has pushed")), "{said:?}");
 }
 
@@ -285,6 +305,27 @@ async fn red_ci_after_a_branch_update_unapproves_and_reworks_saying_the_merge_br
     assert_eq!(task.status, Status::InReview);
     let wanted = task.run.changes_requested.expect("the rework is told why");
     assert!(wanted.body.contains("test") && wanted.body.contains("base branch was merged"), "{wanted:?}");
+}
+
+#[tokio::test]
+async fn red_ci_after_a_branch_update_says_so_definitely_only_when_ci_passed_on_the_reviewed_head() {
+    for (passed, definite) in [(true, true), (false, false)] {
+        let (r, queue) = queued_rig_with(SHADOW);
+        let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+        r.codehost.set_ci(&pr, CiState::Passed);
+        r.factory.reconcile().await.unwrap();
+        let reviewed_head = r.tracker.task(&key).run.reviewed_head.expect("reviewed");
+        if passed {
+            r.codehost.set_ci_at(&pr, &reviewed_head, CiState::Passed);
+        }
+        r.codehost.set_behind(&pr, true);
+        r.codehost.update_branch(&pr).await.unwrap();
+        r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+        r.factory.reconcile().await.unwrap();
+        let wanted = r.tracker.task(&key).run.changes_requested.expect("the rework is told why");
+        assert_eq!(wanted.body.contains("CI passed on the PR before"), definite, "{wanted:?}");
+        assert_eq!(wanted.body.contains("may have come in"), !definite, "{wanted:?}");
+    }
 }
 
 #[tokio::test]

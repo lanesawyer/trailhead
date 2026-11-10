@@ -665,3 +665,40 @@ async fn unpublished_sees_uncommitted_and_unpushed_work_but_not_a_clean_checkout
     assert!(ws.unpublished("main").await.unwrap(), "a commit nobody has");
     assert!(ws.unpublished("nonesuch").await.is_err(), "a remote branch it can't compare with is an error");
 }
+
+#[tokio::test]
+async fn changed_files_leaves_out_base_changes_merged_in_by_a_rework() {
+    let root = tempfile::tempdir().unwrap();
+    let src = upstream(root.path());
+    let bare = root.path().join("remote/acme/widget.git");
+    git(&src, &["checkout", "--quiet", "-b", "factory/w-1"]);
+    std::fs::write(src.join("pr.txt"), "pr\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "--quiet", "-m", "pr"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "factory/w-1"]);
+    git(&src, &["checkout", "--quiet", "main"]);
+    std::fs::write(src.join("base.txt"), "base\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "--quiet", "-m", "base"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "main"]);
+
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: Some("factory/w-1".into()),
+        merge_base: true,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        setup: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+        env: Default::default(),
+    };
+    ws.prepare(&req).await.unwrap();
+    assert!(ws.merge_head().await.unwrap().is_some());
+    assert!(ws.dir().join("base.txt").exists(), "the merge brought the base change in");
+    assert_eq!(ws.changed_files("main").await.unwrap(), ["pr.txt"]);
+}
