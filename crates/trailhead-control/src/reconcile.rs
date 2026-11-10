@@ -87,6 +87,13 @@ impl Factory {
         self.status.sync_sandboxes(&live, &down, &parked);
         self.warn_strays().await;
         let in_flight = in_flight?;
+        // Only after a listing that succeeded: a tracker error must not wipe what the merger is tracking.
+        let in_review: HashSet<&TaskKey> = in_flight
+            .iter()
+            .filter(|t| matches!(t.status, Status::InReview | Status::Approved))
+            .map(|t| &t.key)
+            .collect();
+        self.retain_merge_path(&in_review);
         let factory_prs = in_flight.iter().filter_map(|t| t.run.pr.as_ref().map(|p| p.number)).collect();
         self.person_pass(&factory_prs).await;
         let tasks: Vec<Task> = in_flight.into_iter().filter(|t| !running.contains(&t.key)).collect();
@@ -253,7 +260,7 @@ impl Factory {
     /// with the record already there.
     pub async fn close_merged(&self, task: &Task, merged: Merged) -> Result<()> {
         // The task has left the merge path, so a queued branch update is no longer waited on (TRAIL-491).
-        self.updating.lock().unwrap().remove(&task.key);
+        self.forget_merge_path(&task.key);
         let decision = match merged.by {
             MergedBy::Merger => self.tracker.show(&task.key).await?.run.merge,
             MergedBy::Human => None,
@@ -290,7 +297,7 @@ impl Factory {
     /// rework would push to a PR nobody is going to merge. Reopening it after reopening the PR resumes as a rework.
     pub(crate) async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
         tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
-        self.updating.lock().unwrap().remove(&task.key);
+        self.forget_merge_path(&task.key);
         // Claimed as it stands, whether open, in review or parked, never reopened first: if the claim then failed, an
         // open, unheld task could start a rework against this PR (TRAIL-216). An approved task can't be claimed, so it
         // is unapproved back to in review, still held, rather than passed through open.
