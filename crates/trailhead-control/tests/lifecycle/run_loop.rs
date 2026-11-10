@@ -429,6 +429,10 @@ async fn held_reviews_land_after_the_window_resets(poll: std::time::Duration) {
     r.harness.push(Role::Reviewer, Script::new(approve()));
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
 
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
     let factory = Arc::new(r.factory);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), poll, async {
@@ -437,6 +441,11 @@ async fn held_reviews_land_after_the_window_resets(poll: std::time::Duration) {
     let tracker = r.tracker.clone();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(tracker.task(&key).run.reviewed, None, "no reviewer starts while the window is paused");
+    let held = || logs.text().matches("holding due reviews back").count();
+    assert_eq!(held(), 1, "said once, naming the review: {}", logs.text());
+    assert!(logs.text().contains(&key.0), "{}", logs.text());
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(held(), 1, "not repeated on every poll");
     tokio::time::advance(std::time::Duration::from_secs(60)).await; // past the window's reset
     until("the review to land once the window resets", || tracker.task(&key).run.reviewed == Some(1)).await;
     stop.send(()).unwrap();

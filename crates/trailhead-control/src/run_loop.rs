@@ -48,6 +48,9 @@ impl Factory {
         let mut dirty = true;
         // Whether the drain has said it is stuck on a failing reconcile, so a long outage says so once, not every poll.
         let mut stall_logged = false;
+        // The reviews last said to be held back by a usage pause, so a pause says so when it starts or the set changes,
+        // not every poll.
+        let mut held_logged: Option<Vec<String>> = None;
         loop {
             // Shutdown is otherwise only noticed while idle; a stop during a long reconcile mustn't start new work.
             if (&mut shutdown).now_or_never().is_some() {
@@ -73,6 +76,16 @@ impl Factory {
                         // next reconcile finds them due again (the resume below triggers one, and so does the poll).
                         // Due runs aren't held: the daemon already has them.
                         let hold = !due.reviews.is_empty() && self.usage_paused();
+                        if hold {
+                            let mut held: Vec<String> = due.reviews.iter().map(|t| t.key.0.clone()).collect();
+                            held.sort();
+                            if held_logged.as_ref() != Some(&held) {
+                                tracing::info!(?held, reason = "usage pause", "holding due reviews back until it ends");
+                                held_logged = Some(held);
+                            }
+                        } else {
+                            held_logged = None;
+                        }
                         let reviews_due = if hold { Vec::new() } else { due.reviews };
                         // Logged after the hold, so a pause doesn't list reviews that never start on every poll.
                         if done != Reconciled::default() || !reviews_due.is_empty() {
