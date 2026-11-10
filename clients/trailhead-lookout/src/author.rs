@@ -780,7 +780,7 @@ fn fill_form(
         let priority = Priority::ALL.iter().position(|p| *p == d.priority);
         let priorities = (priority_options(), priority_tones());
         choice_field(c, line, "Priority", FormChoice::Priority, priorities, priority, Vec::new());
-        let grades = (grade_options(&factory.human_grades()), grade_tones());
+        let grades = (grade_options(&factory.human_grades_for(Some(&d.project))), grade_tones());
         let grade = choice_field(c, line, "Grade", FormChoice::Grade, grades, grade_index(d.grade), Vec::new());
         c.entity(grade).insert(FormPart::Grade);
         let spec = input(FieldKind::Description, generation, d.description.clone(), SPEC_LINES);
@@ -803,6 +803,7 @@ fn dress_form(
     mut parts: Query<(Entity, &FormPart, &mut Node)>,
     mut chosen: Query<&mut Truncated, With<ChosenParent>>,
     mut queue_keys: Query<(Entity, &mut ChoiceKeys, &FormChoice)>,
+    grade_picks: Query<(Entity, &FormChoice), Without<ChoiceKeys>>,
     mut edit: SelectEdit,
     mut suggestions: ResMut<Suggestions>,
     mut commands: Commands,
@@ -854,6 +855,11 @@ fn dress_form(
         if edit.set(select, &queues, at) {
             keys.0 = queues.clone();
         }
+    }
+    // The grade dropdown says where Treeline falls for the project's repo, so it follows the project.
+    let human = factory.human_grades_for(Some(&d.project));
+    for (select, _) in grade_picks.iter().filter(|(_, c)| **c == FormChoice::Grade) {
+        edit.set(select, &grade_options(&human), grade_index(d.grade));
     }
     let Some(list) = list else { return };
     let wanted = [(list, found.into_iter().map(|(k, title)| (k.clone(), (k, title))).collect::<Vec<_>>())];

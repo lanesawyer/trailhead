@@ -614,7 +614,7 @@ mod tests {
         let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
         let view = v;
         let texts = |live: bool| -> Vec<String> {
-            let plan = layout(&view, live, "offline", 0, &|_| None);
+            let plan = layout(&view, live, "offline", 0, &[], &|_| None);
             plan.iter()
                 .flat_map(|(_, items)| items)
                 .filter_map(|(_, b)| if let Block::Text { text, .. } = b { Some(text.clone()) } else { None })
