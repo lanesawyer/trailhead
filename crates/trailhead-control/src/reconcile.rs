@@ -50,8 +50,9 @@ impl Factory {
     /// re-parented while their run was live, they're invisible to reconcile, so their claim lapses and the sandbox
     /// stays (TRAIL-531). Which repo owns one is unknowable, so nothing is torn down.
     async fn warn_strays(&self) {
-        // Without a queue the factory works the whole project, so nothing can sit outside it.
-        if self.queue().is_empty() {
+        // A repo without a queue works the whole project, so nothing in it can sit outside a queue, whichever repo
+        // asks: the other repo's in-flight runs are that repo's own.
+        if self.queue().is_empty() || self.host.queueless_projects.lock().unwrap().contains(self.project()) {
             return;
         }
         let queues: Vec<TaskKey> = self.host.queues.lock().unwrap().iter().cloned().map(TaskKey).collect();
