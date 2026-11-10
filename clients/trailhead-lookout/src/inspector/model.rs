@@ -626,6 +626,32 @@ mod tests {
     }
 
     #[test]
+    fn the_prs_grade_is_a_toned_badge_and_not_part_of_its_state_text() {
+        let f = fixture();
+        let view = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
+        let g = Grade::new(2).unwrap();
+        assert_eq!(view.pr.as_ref().unwrap().grade, Some(g));
+        let facts = view.task.clone().unwrap();
+        let (main, side) = layout_task(&view, &facts, true, "offline", &[], None, &|_| None);
+        let plans = [layout(&view, true, "offline", 0, &|_| None), main, side];
+        let mut seen = 0;
+        for plan in &plans {
+            let items: Vec<&(String, Block)> =
+                plan.iter().flat_map(|(_, items)| items).filter(|(k, _)| k.starts_with("pr/")).collect();
+            if items.is_empty() {
+                continue;
+            }
+            seen += 1;
+            let badge = format!("pr/grade/{g}");
+            assert!(items.iter().any(|(k, b)| *k == badge && matches!(b, Block::GradeBadge(x) if *x == g)));
+            let state = items.iter().find(|(k, _)| k == "pr/state").expect("pr/state");
+            let Block::Text { text, .. } = &state.1 else { panic!("pr/state is text") };
+            assert_eq!(text, "open");
+        }
+        assert_eq!(seen, 2, "both layouts show the PR");
+    }
+
+    #[test]
     fn a_task_view_carries_its_priority_and_an_agent_has_none() {
         let f = fixture();
         let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
