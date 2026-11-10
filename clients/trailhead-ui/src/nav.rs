@@ -341,6 +341,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_sidebar_has_room_for_a_scrollbar_in_its_padding() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let id = app.world_mut().commands().spawn_scene(sidebar()).id();
+        app.world_mut().flush();
+        app.update();
+        assert!(crate::has_scrollbar_room(app.world().get::<Node>(id).unwrap()));
+    }
+
+    #[test]
     fn a_nav_item_is_plain_until_it_is_the_page_shown() {
         let mut app = App::new();
         app.add_systems(Update, paint_nav_items);
