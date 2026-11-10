@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trailhead_factory::{Compute, Role, RunOutcome, Status, TaskKey, label};
+use trailhead_factory::{Compute, Role, RunOutcome, SandboxState, Status, TaskKey, label};
 use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
@@ -118,8 +118,6 @@ async fn reconcile_returns_a_busy_pooled_sandbox_to_idle() {
 
 #[tokio::test]
 async fn a_parked_tasks_pooled_sandbox_shows_paused_after_a_restart() {
-    use trailhead_factory::SandboxState;
-
     let mut r = rig();
     r.tracker.add_task("TRAIL", "Ambiguous", "");
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
