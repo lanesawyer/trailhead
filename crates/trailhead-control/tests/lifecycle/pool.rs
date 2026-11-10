@@ -217,6 +217,7 @@ async fn a_pooled_sandbox_that_wont_release_is_abandoned_and_replaced() {
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.destroyed, ["trailhead-w1"]);
     assert!(r.compute.get("trailhead-w1").is_none());
+    assert!(r.factory.status().snapshot().sandboxes.iter().all(|s| s.name != "trailhead-w1"));
 }
 
 #[tokio::test(start_paused = true)]
