@@ -779,7 +779,7 @@ async fn a_parked_task_still_claimed_is_left_alone_without_waking_its_daemon() {
 }
 
 #[derive(Clone, Default)]
-struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+pub(crate) struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl std::io::Write for Logs {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -799,7 +799,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
 }
 
 impl Logs {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
     }
 }
