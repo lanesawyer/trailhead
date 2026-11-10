@@ -346,6 +346,24 @@ async fn a_cold_sandbox_that_fails_after_prepare_is_released_not_left_busy() {
     assert!(r.compute.sandboxes().iter().all(|s| s.labels.get(label::STATE) != Some(&label::BUSY.to_string())));
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_new_warm_checkpoint_is_deleted_when_recording_it_fails() {
+    let r = rig_with(&CONFIG.replace("[checks]\n", "[checks]\nsetup = \"cargo build\"\n"));
+    r.daemon.prepare_takes(Duration::from_secs(300));
+    r.compute.checkpoint_takes(Duration::from_secs(200));
+    warm_one_sandbox(&r).await;
+    let warm = r.compute.get("trailhead-w1").unwrap().labels.get(label::WARM).cloned().expect("warmed");
+
+    let key = r.tracker.add_task("TRAIL", "Relabel fails", "");
+    // The prepare is slower than the checkpoint, so a new one is taken; recording it is the second relabel.
+    r.compute.fail_once_after("trailhead-w1", "set_labels", 1);
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert_eq!(r.compute.checkpoints("trailhead-w1"), ["warm"], "the unused checkpoint is gone");
+    let w1 = r.compute.get("trailhead-w1").expect("kept");
+    assert_eq!(w1.labels.get(label::STATE), Some(&label::IDLE.to_string()));
+    assert_eq!(w1.labels.get(label::WARM), Some(&warm), "the old warm checkpoint is kept");
+}
+
 #[tokio::test]
 async fn a_warm_sandbox_that_fails_after_prepare_goes_back_idle_with_its_old_checkpoint() {
     let r = rig();
