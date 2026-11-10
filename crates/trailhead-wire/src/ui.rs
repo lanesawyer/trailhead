@@ -523,15 +523,44 @@ impl LogStream {
 }
 
 /// A UI's end of the API forwarding: a loopback port whose connections reach the Trailhead server through the control
-/// plane, each as a stream on one long-lived connection, redialed if it drops.
-pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Result<SocketAddr> {
+/// plane, each as a stream on one long-lived connection, redialed if it drops. Dropping the tunnel closes the port, the
+/// forwarded connections and the cached connection to the control plane.
+pub struct UiTunnel {
+    addr: SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl UiTunnel {
+    /// The loopback address the tunnel listens on.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl std::fmt::Display for UiTunnel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.addr.fmt(f)
+    }
+}
+
+impl Drop for UiTunnel {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Opens a [`UiTunnel`] to `control_plane`.
+pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Result<UiTunnel> {
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_err)?;
     let addr = listener.local_addr().map_err(io_err)?;
     let conn: Arc<tokio::sync::Mutex<Option<Connection>>> = Arc::default();
-    tokio::spawn(async move {
+    // The forwarders live in a JoinSet the accept task owns, so aborting that task ends them too.
+    let task = tokio::spawn(async move {
+        let mut forwards = tokio::task::JoinSet::new();
         while let Ok((tcp, _)) = listener.accept().await {
             let (endpoint, conn) = (endpoint.clone(), conn.clone());
-            tokio::spawn(async move {
+            while forwards.try_join_next().is_some() {}
+            forwards.spawn(async move {
                 let streams = async {
                     let mut guard = conn.lock().await;
                     let live = guard.as_ref().filter(|c| c.close_reason().is_none()).cloned();
@@ -563,7 +592,7 @@ pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Re
             });
         }
     });
-    Ok(addr)
+    Ok(UiTunnel { addr, task })
 }
 
 #[cfg(test)]

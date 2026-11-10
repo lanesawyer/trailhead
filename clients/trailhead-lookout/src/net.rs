@@ -2,7 +2,6 @@
 //! endpoint, dials the control plane's `trailhead/ui/0`, serves the forwarded API on a local port, signs in, and
 //! reports to Bevy over channels. Bevy sends [`NetCommand`]s and reads [`NetEvent`]s; neither side blocks the other.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -18,7 +17,7 @@ use trailhead_client::creds::{Cred, CredStore};
 use trailhead_factory::FactoryState;
 use trailhead_factory::logs::LogLine;
 use trailhead_wire::ui::{
-    CLOSE_NOT_ALLOWED, LogFrame, LogStream, StatusFrame, StatusStream, UI_ALPN, dial_ui, open_ui_tunnel,
+    CLOSE_NOT_ALLOWED, LogFrame, LogStream, StatusFrame, StatusStream, UI_ALPN, UiTunnel, dial_ui, open_ui_tunnel,
 };
 use trailhead_wire::{parse_endpoint_id, parse_secret_key};
 
@@ -291,7 +290,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Target {
     id: EndpointId,
-    api: SocketAddr,
+    /// Held so replacing or dropping the target closes its tunnel.
+    api: UiTunnel,
 }
 
 /// The default [`NetConfig::status_retry`].
@@ -680,7 +680,7 @@ impl Net {
             }
             return;
         };
-        let (id, tunnel) = (target.id, format!("http://{}", target.api));
+        let (id, tunnel) = (target.id, format!("http://{}", target.api.addr()));
         // Signed in: live, or still loading the board or reconnecting its feed.
         let live =
             matches!(self.state, Some((Link::Live, _) | (Link::Syncing, Some(Reason::Loading | Reason::Reconnecting))))
@@ -791,7 +791,7 @@ impl Net {
 
     /// Where the Trailhead API is reached right now.
     fn api_base(&self) -> Option<String> {
-        self.target.as_ref().map(|t| format!("http://{}", t.api))
+        self.target.as_ref().map(|t| format!("http://{}", t.api.addr()))
     }
 
     /// Follows the control plane's status stream on its own connection, and says when it can't be reached.
