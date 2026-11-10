@@ -59,6 +59,10 @@ pub struct Api(pub ApiAccess);
 #[derive(Message, Debug)]
 pub struct SendNet(pub NetCommand);
 
+/// Set while a typed `Connect` hasn't been answered by a state yet, so a failed dial can clear [`Dialed`].
+#[derive(Resource, Default)]
+struct Dialing(bool);
+
 #[derive(Resource)]
 struct Net(NetHandle);
 
@@ -81,6 +85,7 @@ impl Plugin for ConnectionPlugin {
         app.init_state::<Connection>()
             .init_resource::<ConnectionStatus>()
             .init_resource::<LocalEndpoint>()
+            .init_resource::<Dialing>()
             .insert_resource(Dialed(self.target.clone()))
             .add_plugins((MirrorPlugin, FactoryPlugin, CommandsPlugin, SearchPlugin, DetailPlugin, LogsPlugin))
             .add_message::<SendNet>()
@@ -93,12 +98,17 @@ fn forward_commands(
     net: Res<Net>,
     mut commands: MessageReader<SendNet>,
     mut dialed: ResMut<Dialed>,
+    mut dialing: ResMut<Dialing>,
     mut factory: MessageWriter<FactoryItem>,
 ) {
     for SendNet(command) in commands.read() {
         match command {
-            NetCommand::Connect(target) => dialed.0 = Some(target.trim().to_string()),
+            NetCommand::Connect(target) => {
+                dialed.0 = Some(target.trim().to_string());
+                dialing.0 = true;
+            }
             NetCommand::Disconnect => {
+                dialing.0 = false;
                 dialed.0 = None;
                 // The status stream goes with the control plane; the mirror keeps its last state, marked unreachable.
                 factory.write(FactoryItem(FactoryUpdate::Unreachable));
@@ -109,6 +119,11 @@ fn forward_commands(
     }
 }
 
+/// Whether a state is the answer to a typed dial and says it failed, so what was typed shouldn't stay as dialed.
+fn failed_dial(dialing: bool, reason: Option<&Reason>) -> bool {
+    dialing && matches!(reason, Some(Reason::BadTarget(_) | Reason::Unreachable(_)))
+}
+
 // A Bevy system takes what it reads and writes as parameters.
 #[allow(clippy::too_many_arguments)]
 fn apply_events(
@@ -116,6 +131,8 @@ fn apply_events(
     mut commands: Commands,
     mut next: ResMut<NextState<Connection>>,
     mut status: ResMut<ConnectionStatus>,
+    mut dialed: ResMut<Dialed>,
+    mut dialing: ResMut<Dialing>,
     mut endpoint: ResMut<LocalEndpoint>,
     mut sync: MessageWriter<SyncItem>,
     mut factory: MessageWriter<FactoryItem>,
@@ -128,6 +145,10 @@ fn apply_events(
         match event {
             NetEvent::Endpoint(id) => endpoint.0 = Some(id),
             NetEvent::State(link, reason) => {
+                if failed_dial(dialing.0, reason.as_ref()) {
+                    dialed.0 = None;
+                }
+                dialing.0 = false;
                 next.set(link.into());
                 status.reason = reason;
             }
@@ -151,5 +172,22 @@ fn apply_events(
                 factory.write(FactoryItem(update));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_dial_clears_what_was_typed() {
+        assert!(failed_dial(true, Some(&Reason::BadTarget("x".into()))));
+        assert!(failed_dial(true, Some(&Reason::Unreachable("x".into()))));
+    }
+
+    #[test]
+    fn a_drop_after_a_dial_was_answered_keeps_it() {
+        assert!(!failed_dial(false, Some(&Reason::Unreachable("x".into()))));
+        assert!(!failed_dial(true, None));
     }
 }
