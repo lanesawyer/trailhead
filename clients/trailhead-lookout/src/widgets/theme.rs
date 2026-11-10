@@ -56,6 +56,9 @@ pub mod token {
     pub const SANDBOX_PAUSED: Token = Token::new("lookout.sandbox.paused");
     pub const SANDBOX_BROKEN: Token = Token::new("lookout.sandbox.broken");
 
+    /// Something still waiting, such as a gate that hasn't passed or failed yet: the dim text tone.
+    pub const PENDING: Token = Token::new("lookout.pending");
+
     /// An agent walking the trail map, and the initial written on it.
     pub const AGENT: Token = Token::new("lookout.agent");
     pub const AGENT_TEXT: Token = Token::new("lookout.agent.text");
@@ -149,6 +152,7 @@ pub fn theme() -> Theme {
     let mut theme = Theme::new();
     // The most urgent priority is the kit's danger red.
     theme.alias(&token::PRIORITY_1, &token::STATUS_DANGER);
+    theme.alias(&token::PENDING, &token::TEXT_DIM);
     theme.paint(&token::PRIORITY_2, Color::oklch(0.76, 0.15, 60.0));
     theme.paint(&token::PRIORITY_3, Color::oklch(0.70, 0.13, 250.0));
     theme.paint(&token::PRIORITY_4, Color::oklch(0.65, 0.0, 0.0));
@@ -252,6 +256,12 @@ mod tests {
     fn the_top_priority_is_the_danger_color() {
         let theme = theme();
         assert_eq!(theme.color(&token::PRIORITY_1), theme.color(&token::STATUS_DANGER));
+    }
+
+    #[test]
+    fn pending_is_the_dim_text_color() {
+        let theme = theme();
+        assert_eq!(theme.color(&token::PENDING), theme.color(&token::TEXT_DIM));
     }
 
     #[test]
