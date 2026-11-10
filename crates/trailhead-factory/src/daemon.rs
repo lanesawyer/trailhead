@@ -297,7 +297,7 @@ pub trait Daemon: Send + Sync {
     /// Starts the sandbox's daemon if needed and readies its checkout.
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()>;
     /// Whether the sandbox's checkout holds work that exists nowhere else: uncommitted changes, or commits that are not on
-    /// `origin/<remote_branch>` (the base branch, or a rework's PR branch). Defaults to true, so a daemon that can't
+    /// `origin/<remote_branch>` (the task's own branch once pushed, else the base branch). Defaults to true, so a daemon that can't
     /// say is never taken to have nothing to lose (TRAIL-601).
     async fn unpublished(&self, _sandbox: &SandboxId, _remote_branch: &str) -> Result<bool> {
         Ok(true)
