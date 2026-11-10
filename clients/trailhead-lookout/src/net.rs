@@ -1024,4 +1024,134 @@ mod tests {
         assert!(waiting.to_string().ends_with("trying again in 8 s"));
         assert_eq!(waiting.cause().to_string(), "the server rejected the token: log in again");
     }
+
+    /// What `/v1/me` answers on the stub: `None` is a 401, `Some` the JSON of an identity.
+    type Me = Arc<Mutex<Option<serde_json::Value>>>;
+
+    /// A stub of the server behind the tunnel: `/v1/health` answers, `/v1/me` as `me` says.
+    async fn stub(me: Me) -> SocketAddr {
+        use axum::{Json, Router, http::StatusCode, routing::get};
+        let app = Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({})) })).route(
+            "/v1/me",
+            get(move || {
+                let answer = me.lock().unwrap().clone();
+                async move {
+                    match answer {
+                        Some(identity) => (StatusCode::OK, Json(identity)),
+                        None => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({}))),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        addr
+    }
+
+    async fn net_for(dir: &Path, api: SocketAddr) -> (Net, mpsc::Receiver<NetEvent>) {
+        let config = NetConfig {
+            config_dir: dir.join("lookout"),
+            trailhead_config_dir: dir.join("config"),
+            trailhead_data_dir: dir.join("data"),
+            keyring: false,
+            network: Network::Direct(Arc::new(MemoryLookup::new())),
+            status_retry: Duration::from_secs(10),
+        };
+        let endpoint = bind(&config).await.unwrap();
+        let (events, rx) = mpsc::channel();
+        let (reports, _) = tokio_mpsc::unbounded_channel();
+        let net = Net {
+            probe_backoff: Backoff::new(config.status_retry),
+            target: Some(Target { id: endpoint.id(), api }),
+            config,
+            endpoint,
+            http: reqwest::Client::new(),
+            events,
+            status: None,
+            logs: None,
+            logs_wanted: false,
+            pasted: None,
+            token: None,
+            live_probes: 0,
+            state: None,
+            probe_hold: None,
+            sync: None,
+            sync_run: 0,
+            resume: Resume::default(),
+            reports,
+            timings: SyncTimings::default(),
+        };
+        (net, rx)
+    }
+
+    fn states(rx: &mpsc::Receiver<NetEvent>) -> Vec<(Link, Option<Reason>)> {
+        rx.try_iter()
+            .filter_map(|e| match e {
+                NetEvent::State(link, reason) => Some((link, reason)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Runs the refusal sequence for a token the stub turns down in the way `refused` names.
+    async fn refusal_sequence(me: Option<serde_json::Value>, refused: Reason) {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = stub(Arc::new(Mutex::new(me))).await;
+        let (mut net, rx) = net_for(dir.path(), addr).await;
+        let offline = |reason: Reason| (Link::Offline, Some(reason));
+        let connecting = (Link::Syncing, Some(Reason::Dialing));
+        let signing_in = (Link::Syncing, Some(Reason::SigningIn));
+
+        // A token just pasted is a new answer to wait for: the bare cause, and no hold on the probe.
+        net.pasted = Some("pasted".into());
+        net.check().await;
+        assert_eq!(states(&rx), [connecting.clone(), signing_in.clone(), offline(refused.clone())]);
+        assert!(net.probe_hold.is_none());
+        assert!(net.probe_due());
+
+        // No token left to try: the refusal stays up through "connecting", and nothing is waited for.
+        net.check().await;
+        assert_eq!(states(&rx), [connecting.clone(), offline(refused.clone())]);
+        assert!(net.probe_hold.is_none());
+
+        // A token tried again is refused again, so the probe backs off from the base gap, doubling.
+        net.token = Some("saved".into());
+        net.check().await;
+        let waiting = |secs| offline(Reason::Waiting(Box::new(refused.clone()), secs));
+        assert_eq!(states(&rx), [connecting.clone(), signing_in.clone(), waiting(10)]);
+        assert!(!net.probe_due());
+        assert_eq!(net.probe_hold.as_ref().map(|(_, r)| r), Some(&refused));
+        net.token = Some("saved".into());
+        net.check().await;
+        assert_eq!(states(&rx), [connecting.clone(), signing_in, waiting(20)]);
+
+        // Without a token the wait is dropped from the display, and the refusal is not forgotten.
+        net.check().await;
+        assert_eq!(states(&rx), [connecting, offline(refused.clone())]);
+        assert_eq!(net.state.as_ref().and_then(|(_, r)| r.as_ref()), Some(&refused));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_shows_bare_then_waits_between_retries() {
+        refusal_sequence(None, Reason::TokenRejected).await;
+    }
+
+    #[tokio::test]
+    async fn an_agent_token_shows_bare_then_waits_between_retries() {
+        refusal_sequence(Some(serde_json::json!({"agent": {"name": "claude"}})), Reason::AgentToken).await;
+    }
+
+    #[tokio::test]
+    async fn releasing_the_probe_resets_the_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = stub(Arc::new(Mutex::new(None))).await;
+        let (mut net, _rx) = net_for(dir.path(), addr).await;
+        net.token = Some("saved".into());
+        net.check().await;
+        assert!(net.probe_hold.is_some());
+        net.release_probe();
+        assert!(net.probe_due());
+        assert_eq!(net.probe_backoff.refused(), Duration::from_secs(10), "back to the base gap");
+    }
 }
