@@ -6,8 +6,8 @@ use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages::{self, BreachedSandbox};
 use trailhead_factory::{
-    ControlState, Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase,
-    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
+    Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase, RunReport,
+    RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
     WorkerBreach, run_name,
 };
 
@@ -188,7 +188,7 @@ impl Factory {
         let sub = self.tracker.sub_agent(&name);
         let _run = self.status.begin(&task.key, RunPhase::Agent);
         self.status.phase(&task.key, RunPhase::Agent, Some(&sandbox.name));
-        self.status.control(ControlState::Reattaching { task: task.key.clone() });
+        self.status.reattaching(&task.key);
         // The attempt this run took was already counted; if it's given back, it goes back to the number before it.
         let mut before = task.clone();
         before.run.attempt = Some(attempt.saturating_sub(1));
@@ -645,7 +645,7 @@ impl Factory {
         let mut grace_fired = false;
         let mut on_event = |ev: RunEvent, spent: &mut Usd| -> Option<String> {
             if std::mem::take(&mut reattaching) {
-                self.status.control(ControlState::Up);
+                self.status.reattached(task);
             }
             match ev {
                 RunEvent::Usage { model, usage } => {
