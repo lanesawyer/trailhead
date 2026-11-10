@@ -164,7 +164,7 @@ pub const SERVER_UNREACHABLE: u32 = 3;
 const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The endpoint ids allowed to use `trailhead/ui/0`, one per line in a file. It is read on every connection and
-/// stream, and an open connection is rechecked every second, so `trailhead factory allow` and `disallow` take
+/// stream (on the blocking pool), and an open connection is rechecked every second, so `trailhead factory allow` and `disallow` take
 /// effect without restarting the control plane.
 #[derive(Debug, Clone)]
 pub struct UiAllowlist {
@@ -189,8 +189,13 @@ impl UiAllowlist {
         }
     }
 
-    pub fn contains(&self, id: &EndpointId) -> bool {
-        match self.list() {
+    /// Whether `id` is listed. The file is read on the blocking pool so it never stalls an async worker; a list
+    /// that can't be read allows no one.
+    pub async fn contains(&self, id: &EndpointId) -> bool {
+        let this = self.clone();
+        let listed =
+            tokio::task::spawn_blocking(move || this.list()).await.unwrap_or_else(|e| Err(Error::Other(e.to_string())));
+        match listed {
             Ok(ids) => ids.contains(id),
             Err(e) => {
                 tracing::error!(error = %e, "can't read the UI allowlist; refusing");
@@ -201,6 +206,7 @@ impl UiAllowlist {
 
     /// Whether `id` was newly added.
     pub fn add(&self, id: EndpointId) -> Result<bool> {
+        let _lock = self.lock()?;
         let mut ids = self.list()?;
         if ids.contains(&id) {
             return Ok(false);
@@ -212,6 +218,7 @@ impl UiAllowlist {
 
     /// Whether `id` was there to remove.
     pub fn remove(&self, id: &EndpointId) -> Result<bool> {
+        let _lock = self.lock()?;
         let mut ids = self.list()?;
         let before = ids.len();
         ids.retain(|i| i != id);
@@ -222,14 +229,31 @@ impl UiAllowlist {
         Ok(true)
     }
 
-    fn save(&self, ids: &[EndpointId]) -> Result<()> {
+    /// Hold an exclusive lock on a sibling file for a read-modify-write, so edits from concurrent processes
+    /// can't lose each other's entries. The lock is on a separate file because `save` replaces the list's inode.
+    /// It is released when the returned file is dropped.
+    fn lock(&self) -> Result<std::fs::File> {
         let fail = |e: std::io::Error| Error::Other(format!("{}: {e}", self.path.display()));
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(fail)?;
         }
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(PathBuf::from(name))
+            .map_err(fail)?;
+        file.lock().map_err(fail)?;
+        Ok(file)
+    }
+
+    fn save(&self, ids: &[EndpointId]) -> Result<()> {
+        let fail = |e: std::io::Error| Error::Other(format!("{}: {e}", self.path.display()));
         let text: String = ids.iter().map(|i| format!("{i}\n")).collect();
-        // Write beside, then rename, so a crash can't leave half a list.
-        let tmp = self.path.with_extension("tmp");
+        // Write beside, then rename, so a crash can't leave half a list. Callers hold the lock.
+        let tmp = self.path.with_extension(format!("{}.tmp", std::process::id()));
         std::fs::write(&tmp, text).map_err(fail)?;
         std::fs::rename(&tmp, &self.path).map_err(fail)
     }
@@ -352,9 +376,21 @@ async fn serve_logs(feed: &dyn LogFeed, mut send: iroh::endpoint::SendStream) {
     let _ = send.finish();
 }
 
+impl UiProtocol {
+    /// Closes `conn` if its peer has left the allowlist since it connected; says whether it did.
+    async fn close_if_disallowed(&self, conn: &Connection) -> bool {
+        if self.allowed.contains(&conn.remote_id()).await {
+            return false;
+        }
+        tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
+        conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
+        true
+    }
+}
+
 impl ProtocolHandler for UiProtocol {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
-        if !self.allowed.contains(&conn.remote_id()) {
+        if !self.allowed.contains(&conn.remote_id()).await {
             tracing::warn!(peer = %conn.remote_id(), "refusing a UI connection from an endpoint that isn't allowed");
             conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
             return Ok(());
@@ -367,17 +403,13 @@ impl ProtocolHandler for UiProtocol {
                     Err(_) => break,
                 },
                 _ = recheck.tick() => {
-                    if self.allowed.contains(&conn.remote_id()) {
-                        continue;
+                    if self.close_if_disallowed(&conn).await {
+                        return Ok(());
                     }
-                    tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
-                    conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
-                    return Ok(());
+                    continue;
                 }
             };
-            if !self.allowed.contains(&conn.remote_id()) {
-                tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
-                conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
+            if self.close_if_disallowed(&conn).await {
                 return Ok(());
             }
             let (server, status, logs) = (self.server, self.status.clone(), self.logs.clone());
@@ -545,8 +577,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn the_allowlist_persists_and_dedupes() {
+    #[tokio::test]
+    async fn the_allowlist_persists_and_dedupes() {
         let dir = tempfile::tempdir().unwrap();
         let list = UiAllowlist::new(dir.path().join("factory").join("ui-allowed"));
         let (a, b) = (SecretKey::generate().public(), SecretKey::generate().public());
@@ -558,7 +590,29 @@ mod tests {
         assert_eq!(reread.list().unwrap(), vec![a, b]);
         assert!(reread.remove(&a).unwrap());
         assert!(!reread.remove(&a).unwrap());
-        assert!(!reread.contains(&a) && reread.contains(&b));
+        assert!(!reread.contains(&a).await && reread.contains(&b).await);
+    }
+
+    #[test]
+    fn concurrent_adds_keep_every_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("factory").join("ui-allowed");
+        let ids: Vec<_> = (0..16).map(|_| SecretKey::generate().public()).collect();
+        let threads: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let (list, id) = (UiAllowlist::new(path.clone()), *id);
+                std::thread::spawn(move || list.add(id).unwrap())
+            })
+            .collect();
+        for t in threads {
+            assert!(t.join().unwrap());
+        }
+        let mut got = UiAllowlist::new(path).list().unwrap();
+        let mut want = ids;
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
     }
 
     #[test]

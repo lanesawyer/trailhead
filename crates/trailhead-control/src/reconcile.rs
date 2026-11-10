@@ -271,14 +271,12 @@ impl Factory {
         self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
         // A parked task can't be finished without a claim: it is claimed where it is, never reopened first, so no other
         // agent can take it from open in between (TRAIL-402).
-        let mut claimed = false;
         // A park cut short after the unapproved merge was found: finish it, don't try to finish the task (TRAIL-729).
         if merged_by_human && task.run.unapproved_merge == Some(true) && task.status != Status::NeedsInput {
             return self.park_unapproved_merge(task, &pr_url).await;
         }
         if task.status == Status::NeedsInput {
             self.tracker.claim(&task.key).await?;
-            claimed = true;
         }
         match self.tracker.finish(&task.key, &handoff).await {
             // A person merged work nobody approved, and core won't let the factory that did it call it done. The merge
@@ -288,9 +286,6 @@ impl Factory {
                 self.tracker
                     .report(&task.key, RunUpdate { unapproved_merge: Some(true), ..RunUpdate::default() })
                     .await?;
-                if claimed {
-                    return self.tracker.ask(&task.key, &messages::merged_unapproved_question(&pr_url)).await;
-                }
                 return self.park_unapproved_merge(task, &pr_url).await;
             }
             finished => finished?,
@@ -299,11 +294,12 @@ impl Factory {
         Ok(())
     }
 
-    /// Parks a task whose PR a person merged unapproved, from wherever a cut-short park left it: reopened if it is in
-    /// review or approved, claimed if it was open, then asked.
+    /// Parks a task whose PR a person merged unapproved, from wherever a cut-short park left it: an approved task is
+    /// unapproved, one in review or open is claimed as it stands (never reopened first: a failed claim then leaves it
+    /// as it was, not open and unheld; TRAIL-826), then asked. A parked one is already claimed.
     async fn park_unapproved_merge(&self, task: &Task, pr_url: &str) -> Result<()> {
-        if matches!(task.status, Status::InReview | Status::Approved) {
-            self.tracker.reopen(&task.key).await?;
+        if task.status == Status::Approved {
+            self.tracker.unapprove(&task.key).await?;
         }
         if matches!(task.status, Status::InReview | Status::Approved | Status::Open) {
             self.tracker.claim(&task.key).await?;

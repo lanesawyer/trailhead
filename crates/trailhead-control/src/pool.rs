@@ -116,6 +116,7 @@ impl Factory {
         p: &Placed,
         task: &Task,
         branch: Option<String>,
+        branch_if_present: bool,
         merge_base: bool,
     ) -> Result<(Sandbox, Option<String>)> {
         let pick = self.pool_pick.lock().await;
@@ -182,8 +183,9 @@ impl Factory {
             }
         };
         let preparing = Instant::now();
-        let rework = branch.is_some();
-        let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
+        let rework = branch.is_some() && !branch_if_present;
+        let prepare =
+            PrepareRequest { merge_base, branch_if_present, ..self.config.prepare_request(Role::Worker, branch) };
         let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone()).await;
         let mut setup_failure = None;
         // On a rework the failed `setup` is the code's doing, probably what the worker is there to fix, so the agent
@@ -273,6 +275,15 @@ impl Factory {
                     && let Err(d) = p.compute.delete_checkpoint(&sandbox.id, cp).await
                 {
                     tracing::warn!(sandbox = %sandbox.name, checkpoint = %cp.0, error = %d, "couldn't delete the unused warm checkpoint");
+                }
+                // The cost recorded for the new checkpoint goes with it: release restores the old one, which that
+                // cost doesn't describe, and the next stale check would compare against the wrong figure.
+                if taken.is_some() {
+                    let mut costs = self.warm_cost.lock().unwrap();
+                    match cost {
+                        Some(cost) => costs.insert(sandbox.id.clone(), cost),
+                        None => costs.remove(&sandbox.id),
+                    };
                 }
                 // The old warm checkpoint (if any) is what release restores; a new sandbox has none and is destroyed.
                 self.give_back(&sandbox, &busy).await;

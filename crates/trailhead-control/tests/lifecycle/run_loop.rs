@@ -538,6 +538,7 @@ async fn parked_with_one_waiting(r: &Rig) -> (TaskKey, TaskKey) {
 #[tokio::test(start_paused = true)]
 async fn a_parked_task_with_no_changes_gives_its_sandbox_to_a_waiting_task_after_the_delay() {
     let r = releasing_after(1);
+    r.daemon.set_remote_branches(&["main"]);
     let (parked, waiting) = parked_with_one_waiting(&r).await;
     r.tracker.lapse_lease(&parked);
 
@@ -553,7 +554,11 @@ async fn a_parked_task_with_no_changes_gives_its_sandbox_to_a_waiting_task_after
     assert_eq!(task.status, Status::NeedsInput, "the question still stands");
     assert!(task.run.released.is_some_and(|at| at > 0), "the release is recorded");
     assert_eq!(r.compute.sandboxes().len(), 1, "the pool's one sandbox was reused");
-    assert_eq!(r.daemon.unpublished_asked(), ["main"], "asked against the base branch");
+    assert_eq!(
+        r.daemon.unpublished_asked(),
+        ["factory/trail-1", "main"],
+        "its branch isn't pushed, so the base branch"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -774,7 +779,7 @@ async fn a_parked_task_still_claimed_is_left_alone_without_waking_its_daemon() {
 }
 
 #[derive(Clone, Default)]
-struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+pub(crate) struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl std::io::Write for Logs {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -794,7 +799,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
 }
 
 impl Logs {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
     }
 }
@@ -859,4 +864,35 @@ async fn a_host_cap_filled_by_another_repo_isnt_blamed_on_parked_tasks_but_the_r
     poll_a_while(&factory).await;
     assert_eq!(r.tracker.task(&next).status, Status::Open, "both of the repo's places are parked");
     assert!(logs.text().contains("held by parked tasks"), "{}", logs.text());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_parked_task_with_a_pushed_branch_and_no_pr_is_compared_with_its_branch() {
+    let r = releasing_after(1);
+    let (parked, waiting) = parked_with_one_waiting(&r).await;
+    r.tracker.lapse_lease(&parked);
+    // The branch was pushed; only the PR is missing.
+    r.daemon.set_remote_branches(&["main", "factory/trail-1"]);
+    assert!(r.factory.tick().await.unwrap().is_empty(), "not parked long enough yet");
+
+    tokio::time::advance(AFTER).await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == waiting), "the waiting task took the place");
+    assert!(r.tracker.task(&parked).run.released.is_some_and(|at| at > 0));
+    assert_eq!(r.daemon.unpublished_asked(), ["factory/trail-1"], "asked against its own branch only");
+
+    // Answered, it resumes from the branch it pushed, if the remote still has it.
+    r.tracker.answer(&parked, "Go on.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == parked), "the answered task started again");
+    let resumed = r
+        .daemon
+        .prepared()
+        .into_iter()
+        .any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1") && p.branch_if_present);
+    assert!(resumed, "a branch that was never pushed leaves it on the base");
 }
