@@ -26,6 +26,10 @@ pub const MAX_ATTEMPTS: u32 = 5;
 /// The longest the outbox waits on a `Retry-After` before sending again.
 pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
+/// The net thread's answer when a request reached it before it was `Live`. Nothing was sent, so it isn't a failed
+/// attempt and doesn't count toward [`MAX_ATTEMPTS`].
+pub const NOT_CONNECTED: &str = "not connected";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(pub u64);
 
@@ -114,7 +118,11 @@ struct Pending {
     source: Entity,
     request: Request,
     stage: Stage,
+    /// Sends so far; tags each one so a stale answer can be told from the latest.
     attempts: u32,
+    /// Attempts that really failed. A resend after the link dropped, or a send the net thread refused for want of a
+    /// connection, isn't one.
+    failures: u32,
     not_before: Option<Instant>,
 }
 
@@ -123,7 +131,7 @@ struct Pending {
 pub struct Outbox {
     pending: Vec<Pending>,
     next: u64,
-    /// Wait before sending again after a failed attempt, times the attempts so far.
+    /// Wait before sending again after a failed attempt, times the failures so far.
     pub backoff: Duration,
 }
 
@@ -183,6 +191,7 @@ fn accept(
             request: request.clone(),
             stage: Stage::Queued,
             attempts: 0,
+            failures: 0,
             not_before: None,
         });
     }
@@ -208,13 +217,16 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
             Err(_) if outbox.pending[at].attempts != reply.attempt => {}
             Err(why) => {
                 let p = &mut outbox.pending[at];
-                if p.attempts >= MAX_ATTEMPTS {
+                if why != NOT_CONNECTED {
+                    p.failures += 1;
+                }
+                if p.failures >= MAX_ATTEMPTS {
                     let p = outbox.pending.remove(at);
                     let message = format!("no answer after {MAX_ATTEMPTS} tries: {why}");
                     done.write(CommandDone { source: p.source, id: p.id, outcome: Outcome::Failed(message) });
                 } else {
                     p.stage = Stage::Queued;
-                    p.not_before = Some(Instant::now() + backoff * p.attempts);
+                    p.not_before = Some(Instant::now() + backoff * p.failures.max(1));
                 }
             }
         }
