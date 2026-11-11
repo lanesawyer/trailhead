@@ -263,12 +263,16 @@ impl FactoryMirror {
             return;
         }
         state.seq = event.seq;
+        // An event from a newer control plane says nothing worth logging; its number still counted above.
+        if matches!(event.event, FactoryEvent::Unknown) {
+            return;
+        }
         let line = event.event.line();
         match event.event {
             FactoryEvent::Control { control } => state.control = control,
             FactoryEvent::Error { message } => state.last_error = Some((unix_now(), message)),
             FactoryEvent::Holding { holding } => state.holding = holding,
-            FactoryEvent::Unknown => {}
+            FactoryEvent::Unknown => unreachable!("returned above"),
             FactoryEvent::SandboxChanged { sandbox } => self.set_campsite(commands, repo, sandbox),
             FactoryEvent::SandboxGone { name } => {
                 if let Some((entity, _)) = self.campsites.remove(&(repo.to_string(), name)) {
@@ -483,6 +487,16 @@ mod tests {
         send(&mut app, [event(3, stale)]);
         assert_eq!(campsites(&mut app), [("a".into(), SandboxState::Idle)]);
         assert!(app.world().resource::<FactoryStatus>().activity.is_empty());
+    }
+
+    #[test]
+    fn unknown_events_advance_the_sequence_but_stay_out_of_the_activity_log() {
+        let mut app = app();
+        send(&mut app, [snapshot(3, vec![])]);
+        send(&mut app, [event(4, FactoryEvent::Unknown)]);
+        let status = app.world().resource::<FactoryStatus>();
+        assert!(status.activity.is_empty());
+        assert_eq!(status.repos["o/r"].seq, 4);
     }
 
     #[test]
