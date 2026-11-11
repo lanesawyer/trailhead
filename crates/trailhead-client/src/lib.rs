@@ -21,6 +21,10 @@ use std::path::PathBuf;
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct Health {
+    /// False when the server is up but its store can't serve requests. `None` from a server older than that check.
+    pub ok: Option<bool>,
+    /// Why the store check failed.
+    pub store_error: Option<String>,
     pub version: Option<String>,
     pub instance: Option<String>,
     pub pid: Option<u32>,
