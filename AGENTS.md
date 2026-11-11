@@ -44,6 +44,7 @@ In an interactive session, tracking isn't optional, because this is how we dogfo
 - **While working,** renew the claim on long tasks, record decisions as `decision` comments, and use `ask` for anything only Lane can answer.
 - **When finished,** close the task with a handoff (`done -m`). If you stop partway, leave a `handoff` and `release` the task so the next agent can pick it up.
 - **Follow-ups and bugs** you notice become new tasks, not scope creep.
+- **Suggesting a grade** for a task Lane queues: grade the change, not its area (docs and tests 1, ordinary code 2, and 3 only for what a person must judge: public API, the wire protocol, schema, behaviour across crates). The path rules in `.trailhead.toml` raise the PR when they should; every grade 3 is a PR Lane has to review (`docs/factory/operating.md`).
 - **Friction with Trailhead itself** is the most valuable thing to report: file it as a task.
 
 In Claude Code, prefer the `trailhead` MCP tools (`mcp__trailhead__ready`, `claim`, `comment`, `update_task`, …), which act as the `claude` agent; `.mcp.json` runs them through `trailhead --as claude mcp`. Use the CLI for what MCP doesn't cover (undo, revert, agents, tokens, `watch`) and when acting as a different agent.

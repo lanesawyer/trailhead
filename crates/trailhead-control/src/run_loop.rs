@@ -229,8 +229,9 @@ impl Factory {
         *self.starved.lock().unwrap() = None;
         let mut survey = self.survey().await;
         for task in startable {
-            // A ready task that holds its own sandbox resumes in it, so it needs no room (TRAIL-1121).
-            if !others.contains(&task.key) {
+            // A ready task that holds its own sandbox resumes in it, so it needs no room (TRAIL-1121). One whose
+            // target is down or capped gets a new sandbox elsewhere while the old stays held, so it takes room.
+            if !others.contains(&task.key) || !self.stays_put(&survey, &task) {
                 if room == 0 {
                     continue;
                 }
