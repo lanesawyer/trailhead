@@ -171,6 +171,13 @@ pub(super) fn dress_cards(
                 tool.insert(InteractionDisabled);
             }
         }
+        // A page in the browser, so it opens offline too.
+        if let Some(pr) = &card.pr {
+            let hint = format!("Open pull request {}", pr.label);
+            commands
+                .queue_spawn_scene(link_tool_button(Icon::PullRequest, hint, pr.url.clone(), ButtonKind::Plain))
+                .insert(ChildOf(tools));
+        }
     }
 }
 
