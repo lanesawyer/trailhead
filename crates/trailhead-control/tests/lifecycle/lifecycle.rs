@@ -177,6 +177,20 @@ async fn a_failed_park_after_giving_up_does_not_leave_the_gave_up_marker() {
     let task = r.tracker.task(&key);
     assert_ne!(task.status, Status::NeedsInput);
     assert_eq!(task.run.gave_up.unwrap_or(0), 0, "a task that wasn't parked doesn't get a fresh count");
+    assert!(r.tracker.is_revoked("factory/trail-1-a1"), "the sub-agent is revoked, not left to expire");
+}
+
+#[tokio::test]
+async fn a_park_that_cannot_claim_after_giving_up_revokes_the_sub_agent() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 1"));
+    let key = r.tracker.add_task("TRAIL", "Fails", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "no luck".into() }));
+    // The run's own claim goes through; the park's claim is the next one.
+    r.tracker.fail_after("factory/trail-1-a1", TrackerOp::Claim, 1, 1);
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    assert!(ran.is_err(), "{ran:?}");
+    assert!(r.tracker.is_revoked("factory/trail-1-a1"), "the sub-agent is revoked, not left to expire");
+    assert_eq!(r.tracker.task(&key).run.gave_up.unwrap_or(0), 0);
 }
 
 #[tokio::test]
@@ -1478,6 +1492,25 @@ async fn a_rejected_sandbox_create_parks_the_task_at_once() {
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("400 Bad Request: bad size"), "{}", questions[0].body);
+    assert!(r.compute.sandboxes().is_empty(), "no sandbox was made");
+    assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
+}
+
+/// No sub-agent exists to park through, so the factory's own identity claims the task and asks.
+#[tokio::test]
+async fn a_rejected_sub_agent_create_parks_the_task_as_the_factory() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Refused sub-agent", "");
+    r.tracker.reject_sub_agents("tracker 400 Bad Request: bad agent name");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(matches!(err, trailhead_factory::Error::Rejected(_)), "{err:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked on the first rejection, not requeued");
+    assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0].author, "factory", "asked by the factory's own identity, not a sub-agent");
+    assert!(questions[0].body.contains("bad agent name"), "{}", questions[0].body);
     assert!(r.compute.sandboxes().is_empty(), "no sandbox was made");
     assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
 }

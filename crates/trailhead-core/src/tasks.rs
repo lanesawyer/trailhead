@@ -722,13 +722,15 @@ impl Store {
             .query(
                 &format!(
                     "SELECT {} FROM dependencies d JOIN tasks t ON t.id = d.blocked_id
-                     WHERE d.blocker_id = ?1 AND t.deleted_at IS NULL ORDER BY t.key",
+                     WHERE d.blocker_id = ?1 AND t.deleted_at IS NULL",
                     prefixed_cols("t")
                 ),
                 [task.id.to_string()],
             )
             .await?;
-        let blocks = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
+        let mut blocks = collect(rows, task_from_row).await?;
+        blocks.sort_by(|a, b| trailhead_model::cmp_keys(&a.key, &b.key));
+        let blocks = blocks.iter().map(|t| visible_key(ctx, t)).collect();
         let comments = list_comments_for(&conn, task.id).await?;
         let changes_requested = trailhead_model::changes_requested(task.status, &comments);
         let duplicate_of = match task.duplicate_of {
@@ -741,13 +743,15 @@ impl Store {
         let rows = conn
             .query(
                 &format!(
-                    "SELECT {} FROM tasks t WHERE t.duplicate_of = ?1 AND t.deleted_at IS NULL ORDER BY t.key",
+                    "SELECT {} FROM tasks t WHERE t.duplicate_of = ?1 AND t.deleted_at IS NULL",
                     prefixed_cols("t")
                 ),
                 [task.id.to_string()],
             )
             .await?;
-        let duplicates = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
+        let mut duplicates = collect(rows, task_from_row).await?;
+        duplicates.sort_by(|a, b| trailhead_model::cmp_keys(&a.key, &b.key));
+        let duplicates = duplicates.iter().map(|t| visible_key(ctx, t)).collect();
         Ok(TaskDetail { task, claim, blocked_by, changes_requested, blocks, comments, duplicate_of, duplicates })
     }
 
@@ -991,8 +995,11 @@ impl Store {
     }
 }
 
-const STOP_WORDS: &[&str] =
-    &["the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use"];
+const STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use",
+    // Two-letter function words, which pass the length check when a title is written in capitals.
+    "to", "in", "of", "on", "or", "an", "at", "by", "is", "it", "as", "be", "if", "so", "do", "no", "up",
+];
 
 /// The lowercase words of a title that say what it's about. Words under three characters are
 /// dropped, except two-letter acronyms written in capitals (CI, UI, DB).
