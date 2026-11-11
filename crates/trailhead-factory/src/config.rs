@@ -1060,10 +1060,11 @@ mod tests {
         assert!(config.prepare_request(Role::Reviewer, None).tool_hosts.is_empty());
         assert_eq!(config.prepare_request(Role::Worker, None).tools, config.stack.tools);
         let mut documented = GradesConfig::default();
-        documented.rules.get_mut("3").unwrap().push("clients/**".into());
+        documented.rules.get_mut("2").unwrap().push("clients/**".into());
+        documented.rules.get_mut("3").unwrap().push("clients/*/src/**".into());
         assert_eq!(
             config.grades, documented,
-            "this repo's rules are the documented example, plus clients/** (TRAIL-703)"
+            "this repo's rules are the documented example, plus clients/** at 2 and its src at 3 (TRAIL-1390)"
         );
         assert_eq!(config.merge.mode, MergeMode::On);
         assert!(config.gate(gr(1)).auto_merge);
