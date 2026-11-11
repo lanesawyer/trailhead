@@ -144,7 +144,13 @@ fn units_of(profile: &Path) -> io::Result<Vec<Unit>> {
             }
         }
     }
-    Ok(units.into_values().collect())
+    let mut units: Vec<Unit> = units.into_values().collect();
+    for unit in &mut units {
+        // Two `deps/` files of a unit can share one inode, so the same link may be listed twice.
+        unit.paths.sort();
+        unit.paths.dedup();
+    }
+    Ok(units)
 }
 
 /// The hard-linked files directly in the profile root and in `examples/`, by identity: where cargo links the artifacts
@@ -336,6 +342,28 @@ mod tests {
         assert!(!p.join("libold-1.rlib").exists());
         assert!(!p.join("examples/libold-1.rlib").exists());
         assert!(p.join("libnew-2.rlib").exists());
+        assert_eq!(present(&p, "new-2"), [true; 3]);
+    }
+
+    #[test]
+    fn a_unit_listing_the_same_profile_root_link_twice_is_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("debug");
+        unit(&p, "old-1", 300, 300);
+        unit(&p, "new-2", 300, 100);
+        // Two deps files of one unit and a root file, all one inode: `outside_links` finds the root file for each.
+        fs::hard_link(p.join("deps/libold-1.rlib"), p.join("deps/old-1.copy")).unwrap();
+        fs::hard_link(p.join("deps/libold-1.rlib"), p.join("libold-1.rlib")).unwrap();
+        let root = p.join("libold-1.rlib");
+        let units = units_of(&p).unwrap();
+        let old = units.iter().find(|u| u.paths.iter().any(|x| x.ends_with(".fingerprint/old-1"))).unwrap();
+        assert_eq!(old.paths.iter().filter(|x| **x == root).count(), 1);
+        let before = dir_size(dir.path()).unwrap();
+        let t = trim_target(dir.path(), before - 1).unwrap();
+        assert!(t.after < before);
+        assert!(!root.exists());
+        assert_eq!(present(&p, "old-1"), [false; 3]);
+        assert!(!p.join("deps/old-1.copy").exists());
         assert_eq!(present(&p, "new-2"), [true; 3]);
     }
 

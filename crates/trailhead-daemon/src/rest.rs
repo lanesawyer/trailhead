@@ -18,7 +18,6 @@ use trailhead_model::{self as model, CommentKind};
 #[derive(Clone)]
 pub struct RestTracker {
     client: Client,
-    base: String,
     cred: Credential,
 }
 
@@ -26,7 +25,7 @@ impl RestTracker {
     /// `base` is the server's root URL, e.g. `http://127.0.0.1:7241`.
     pub fn new(base: impl Into<String>, cred: Credential) -> RestTracker {
         let base = base.into();
-        RestTracker { client: Client::new(base.clone(), cred.token.clone()), base, cred }
+        RestTracker { client: Client::new(base, cred.token.clone()), cred }
     }
 
     async fn patch(&self, task: &TaskKey, update: TaskUpdate) -> Result<()> {
@@ -104,7 +103,12 @@ impl RestTracker {
 
 /// The factory's error for a failed call.
 fn error(e: ApiError) -> Error {
-    let ApiError::Api { status, error } = e else { return Error::Other(format!("trailhead: {e}")) };
+    let ApiError::Api { status, error } = e else {
+        return match &e {
+            ApiError::Transport(t) if t.is_connect() => Error::Unreachable(format!("trailhead: {e}")),
+            _ => Error::Other(format!("trailhead: {e}")),
+        };
+    };
     let msg = format!("trailhead {status} {}: {}", error.code, error.message);
     match status {
         404 => Error::NotFound(msg),
@@ -127,7 +131,7 @@ impl Tracker for RestTracker {
     /// Sandboxes don't act as other agents. The handle this returns refuses everything.
     fn sub_agent(&self, name: &str) -> Arc<dyn Tracker> {
         let mut refused = self.clone();
-        refused.client = Client::new(self.base.clone(), "");
+        refused.client = self.client.with_token("");
         refused.cred = Credential { agent: format!("{}/{name}", self.cred.agent), token: String::new() };
         Arc::new(refused)
     }
@@ -305,5 +309,19 @@ impl Tracker for RestTracker {
 
     async fn revoke_sub_agent(&self, _: &str) -> Result<()> {
         Err(unsupported("revoke agents"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_refused_connection_is_unreachable() {
+        // Bind a port, then free it, so nothing is listening there.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let cred = Credential { agent: "x".into(), token: "t".into() };
+        let err = RestTracker::new(format!("http://127.0.0.1:{port}"), cred).show(&TaskKey("TRAIL-1".into())).await;
+        assert!(matches!(err, Err(Error::Unreachable(_))), "{err:?}");
     }
 }
