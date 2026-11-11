@@ -258,7 +258,8 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         env: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
-    assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "still at the PR head, merge uncommitted");
+    let start = ws.head().await.unwrap();
+    assert_eq!(start, rev(&src, "factory/w-1"), "still at the PR head, merge uncommitted");
     assert_eq!(ws.merge_head().await.unwrap().unwrap(), rev(&src, "main"));
     let readme = std::fs::read_to_string(ws.dir().join("README.md")).unwrap();
     assert!(readme.contains("<<<<<<<") && readme.contains("main") && readme.contains("branch"), "{readme}");
@@ -285,6 +286,11 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
     assert_eq!(ws.merge_head().await.unwrap(), None);
     assert!(ws.contains(&base).await.unwrap());
     assert!(ws.contains(&ws.head().await.unwrap()).await.unwrap());
+    let head = ws.head().await.unwrap();
+    assert_ne!(head, start, "the merge made a new commit");
+    assert_eq!(rev(&ws.dir(), &format!("{head}^1")), start);
+    assert_eq!(rev(&ws.dir(), &format!("{head}^2")), base, "a merge commit: the old tip and the base");
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), Some(base.clone()));
 
     // A later prepare, as from a warm checkpoint taken mid-merge, drops the merge.
     ws.prepare(&PrepareRequest { branch: None, merge_base: false, ..req }).await.unwrap();

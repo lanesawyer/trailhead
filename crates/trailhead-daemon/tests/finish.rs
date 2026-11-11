@@ -9,7 +9,7 @@ use trailhead_factory::{
     Check, Commit, Credential, Endpoint, FileChange, ModelId, Repo, Role, RunOutcome, RunRequest, RunResult, TaskKey,
     TaskSpec, Tracker, VerdictKind,
 };
-use trailhead_testkit::{FakeCodeHost, FakeTracker, FakeWorkspace, LocalDaemon, Script, ScriptedHarness};
+use trailhead_testkit::{FakeCodeHost, FakeTracker, FakeWorkspace, LocalDaemon, Script, ScriptedHarness, TrackerOp};
 
 #[tokio::test]
 async fn an_error_finishing_a_run_is_reported_as_its_outcome() {
@@ -171,7 +171,7 @@ async fn the_check_results_survive_an_error_recording_a_failed_check() {
     let tracker = FakeTracker::new("factory");
     let key = tracker.add_task("TRAIL", "Add a greeting", "");
     // The checks ran and one failed, but the tracker won't take the note about it.
-    tracker.fail_next("factory", "note", 1);
+    tracker.fail_next("factory", TrackerOp::Note, 1);
     let harness = Arc::new(ScriptedHarness::new());
     harness.push(
         Role::Worker,
@@ -211,7 +211,7 @@ async fn the_check_results_survive_an_error_recording_a_failed_check() {
 async fn a_failed_review_request_is_retried_without_reporting_the_pr_again() {
     let tracker = FakeTracker::new("factory");
     let key = tracker.add_task("TRAIL", "Add a greeting", "");
-    tracker.fail_next("factory", "request_review", 1);
+    tracker.fail_next("factory", TrackerOp::RequestReview, 1);
     let harness = Arc::new(ScriptedHarness::new());
     harness.push(
         Role::Worker,

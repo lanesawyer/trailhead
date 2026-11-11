@@ -131,7 +131,8 @@ async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
 }
 
 /// `trailhead factory` doesn't talk to the server as this CLI's other commands do, so a global flag given before it
-/// would be dropped silently. Flags from the environment are fine: the factory reads those itself.
+/// would be dropped silently. clap also reads a global flag placed right after `factory` as the global one, so the
+/// message can't tell the user to move it. Flags from the environment are fine: the factory reads those itself.
 #[cfg(feature = "factory")]
 fn reject_global_flags(matches: &clap::ArgMatches) -> Result<()> {
     use clap::parser::ValueSource;
@@ -145,7 +146,7 @@ fn reject_global_flags(matches: &clap::ArgMatches) -> Result<()> {
         return Ok(());
     }
     anyhow::bail!(
-        "`trailhead factory` doesn't use {}; the factory takes its own flags, so put them after its command (see `trailhead factory --help`)",
+        "`trailhead factory` doesn't use {}, before or after `factory`; it takes its own flags after its command (see `trailhead factory --help`)",
         given.join(", ")
     )
 }
