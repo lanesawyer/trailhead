@@ -781,7 +781,7 @@ impl Net {
             Err(e) => return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string()))),
         };
         // The user token only: an agent's would let Lookout act as one.
-        if me["agent"]["name"].as_str().is_some() {
+        if !me["agent_id"].is_null() {
             self.token = None;
             self.resume.clear();
             return match pasted {
