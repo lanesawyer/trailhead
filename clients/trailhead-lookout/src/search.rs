@@ -90,9 +90,12 @@ struct Asking {
 }
 
 impl Deep {
-    /// The hits for `query`, if they are the answer to it.
+    /// The hits for `query`: the answer to it, or while it is being refined (one query a prefix of the other, as when
+    /// typing or deleting at the end) the last answer, so cards found only deeper down don't flicker away until the
+    /// new answer replaces them.
     pub fn for_query(&self, query: &str) -> &[DeepHit] {
-        if !query.is_empty() && self.query == query { &self.hits } else { &[] }
+        let refined = !self.query.is_empty() && (query.starts_with(&self.query) || self.query.starts_with(query));
+        if !query.is_empty() && refined { &self.hits } else { &[] }
     }
 }
 
@@ -250,7 +253,10 @@ mod tests {
         app.update();
         let deep = app.world().resource::<Deep>();
         assert_eq!(deep.for_query("migrat"), &[hit("t1", "description")]);
-        assert!(deep.for_query("migrate").is_empty());
+        assert_eq!(deep.for_query("migrate"), &[hit("t1", "description")], "kept while the query is refined");
+        assert_eq!(deep.for_query("migr"), &[hit("t1", "description")]);
+        assert!(deep.for_query("other").is_empty());
+        assert!(deep.for_query("").is_empty());
     }
 
     #[test]
@@ -262,8 +268,7 @@ mod tests {
         type_query(&mut app, "migration");
         app.world_mut().write_message(SearchReply { seq: old, result: Ok(vec![hit("t1", "description")]) });
         app.update();
-        assert!(app.world().resource::<Deep>().for_query("migrat").is_empty());
-        assert!(app.world().resource::<Deep>().for_query("migration").is_empty());
+        assert!(app.world().resource::<Deep>().hits.is_empty());
         let (new, query) = pass(&mut app, 6).remove(0);
         assert_eq!(query, "migration");
         // The old answer arriving late still changes nothing; the new one is kept.

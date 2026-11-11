@@ -614,6 +614,7 @@ async fn the_mergers_own_update_keeps_the_verdict_and_no_second_review_runs() {
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(r.codehost.update_requests(), 1, "the merger updated the branch");
     assert!(done.reviewed.is_empty(), "{done:?}");
+    assert!(!r.codehost.prs()[0].merged, "updated, not merged, while CI starts over");
 
     r.codehost.set_ci(&pr, CiState::Passed);
     let done = r.factory.reconcile().await.unwrap();
@@ -1187,6 +1188,46 @@ async fn a_host_error_while_looking_after_a_persons_pr_keeps_the_hold() {
     assert!(!r.codehost.prs()[0].merged, "the factory's merge waits");
     assert_ne!(r.tracker.task(&key).status, Status::Done);
     assert!(r.factory.status().snapshot().holding.is_some());
+}
+
+#[tokio::test]
+async fn a_park_cut_short_after_a_merge_by_hand_is_finished_not_closed() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    r.tracker.forbid_finishing_unapproved(true);
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+
+    // The claim fails: the task stays in review (never reopened first) with the merge and the park marker recorded.
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+
+    // The next pass must park it, not let core close it as no longer in review.
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked for a person, not done");
+    let asked = r.tracker.comments(&key).iter().filter(|c| c.kind == "question").count();
+    assert_eq!(asked, 1);
+}
+
+#[tokio::test]
+async fn a_parked_task_whose_merge_close_failed_before_the_park_is_retried() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    // Parked for something else (a closed PR a person then reopened and merged), with the merge recorded but not closed.
+    r.codehost.close(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    r.codehost.merge(&pr, &head).await.unwrap();
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
+    let _ = r.factory.reconcile().await;
+    assert!(r.tracker.task(&key).run.merged.is_some());
+
+    let again = r.factory.reconcile().await.unwrap();
+    assert!(again.merged.contains(&key.0), "retried rather than skipped");
+    assert_eq!(r.tracker.task(&key).status, Status::Done);
 }
 
 #[tokio::test]

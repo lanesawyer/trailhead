@@ -991,8 +991,11 @@ impl Store {
     }
 }
 
-const STOP_WORDS: &[&str] =
-    &["the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use"];
+const STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use",
+    // Two-letter function words, which pass the length check when a title is written in capitals.
+    "to", "in", "of", "on", "or", "an", "at", "by", "is", "it", "as", "be", "if", "so", "do", "no", "up",
+];
 
 /// The lowercase words of a title that say what it's about. Words under three characters are
 /// dropped, except two-letter acronyms written in capitals (CI, UI, DB).
