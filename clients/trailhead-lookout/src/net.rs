@@ -1142,7 +1142,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_agent_token_shows_bare_then_waits_between_retries() {
-        refusal_sequence(Some(serde_json::json!({"agent": {"name": "claude"}})), Reason::AgentToken).await;
+        refusal_sequence(Some(serde_json::json!({"agent_id": "claude"})), Reason::AgentToken).await;
     }
 
     #[tokio::test]
