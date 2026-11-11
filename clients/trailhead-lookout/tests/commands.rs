@@ -160,6 +160,44 @@ fn a_command_that_never_gets_an_answer_is_reported_failed() {
     assert!(app.world().resource::<Outbox>().is_empty());
 }
 
+#[test]
+fn resends_after_reconnects_and_not_connected_refusals_are_not_failed_attempts() {
+    let mut app = app();
+    let control = app.world_mut().spawn_empty().id();
+    set(&mut app, Connection::Live);
+    submit(&mut app, control);
+    let mut sent = step(&mut app).0;
+    // The link flaps more often than MAX_ATTEMPTS while the request is out.
+    for _ in 0..MAX_ATTEMPTS + 2 {
+        set(&mut app, Connection::Syncing);
+        set(&mut app, Connection::Live);
+        sent = step(&mut app).0;
+        assert_eq!(sent.len(), 1);
+    }
+    // The net thread isn't live yet either.
+    for _ in 0..MAX_ATTEMPTS + 2 {
+        let (id, n, _) = sent[0].clone();
+        reply(&mut app, id, n, Err(NOT_CONNECTED.into()));
+        let (again, done) = step(&mut app);
+        assert!(done.is_empty(), "not a failure");
+        sent = again;
+        assert_eq!(sent.len(), 1);
+    }
+    // Real failures still count from zero.
+    let mut finished = None;
+    for _ in 0..20 {
+        let (id, n, _) = sent[0].clone();
+        reply(&mut app, id, n, Err("timed out".into()));
+        let (again, done) = step(&mut app);
+        if let Some(d) = done.into_iter().next() {
+            finished = Some(d);
+            break;
+        }
+        sent = again;
+    }
+    assert!(matches!(finished.expect("reported").outcome, Outcome::Failed(_)));
+}
+
 // ---- the request ----
 
 struct Rig {
