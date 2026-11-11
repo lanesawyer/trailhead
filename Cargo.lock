@@ -8301,6 +8301,7 @@ dependencies = [
  "http 1.5.0",
  "http-body-util",
  "jiff",
+ "libsql",
  "reqwest",
  "rmcp",
  "serde",
