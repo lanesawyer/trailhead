@@ -50,9 +50,9 @@ pub enum Error {
         "the Claude token is only {len} characters, so it looks truncated (a pasted token may have wrapped); nothing was saved; if it is complete, rerun with `--force`"
     )]
     ClaudeTokenShort { len: usize },
-    /// The repos in one process can't run together; names both.
-    #[error("{0}")]
-    Conflict(String),
+    /// The repos in one process can't run together; names both and why.
+    #[error("{}", .0)]
+    Conflict(Box<RepoConflict>),
     #[error("{}", plural(*.0, "check", "checks", "failed"))]
     ChecksFailed(usize),
     #[error("{0} repo loop(s) stopped on an error")]
@@ -68,12 +68,60 @@ pub enum Error {
     StreamRefused(reqwest::StatusCode),
     #[error("the control plane stopped")]
     StreamEnded,
-    /// A task has no sandbox to show.
-    #[error("{0}")]
-    NoSandbox(String),
+    /// A task has no sandbox to show; `unreachable` lists the targets that couldn't be listed, where it may be.
+    #[error(
+        "{task} has no sandbox right now (it isn't running, or its sandbox was released or destroyed){}",
+        unreachable_note(unreachable)
+    )]
+    NoSandbox { task: String, unreachable: Vec<String> },
     /// A failure from the store, the wire, a compute or the like, shown as it is.
     #[error("{0}")]
     Backend(Source),
+}
+
+/// Two repos that can't share a process, and why.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{} ({}) and {} ({}) {kind}", first.dir.display(), first.slug, second.dir.display(), second.slug)]
+pub struct RepoConflict {
+    pub first: RepoRef,
+    pub second: RepoRef,
+    pub kind: ConflictKind,
+}
+
+/// A repo named in a [`Error::Conflict`]: where it is and which GitHub repo it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoRef {
+    pub dir: PathBuf,
+    pub slug: String,
+}
+
+/// Why two repos can't share a process. `Display` completes "<repo> and <repo> ...".
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConflictKind {
+    #[error(
+        "differ in [factory.compute], [factory.targets] or [factory.daemon]; repos in one process share the sandbox providers and daemon launch"
+    )]
+    SharedConfigDiffers,
+    #[error("use different profile adapters; repos in one process share the daemon launch, which builds one harness")]
+    DifferentAdapters,
+    #[error("have the same repo, {slug}; they would collide, so run only one of them")]
+    SameRepo { slug: String },
+    #[error(
+        "have the same repo name, {name} (pool sandboxes are named from it); they would collide, so run only one of them"
+    )]
+    SameName { name: String },
+    #[error("have the same project and queue, {project} under {task}; they would collide, so run only one of them")]
+    SameQueue { project: String, task: String },
+    #[error("share project {project} and one has no queue, so it would take the other's tasks; give each a queue")]
+    NoQueue { project: String },
+}
+
+fn unreachable_note(targets: &[String]) -> String {
+    if targets.is_empty() {
+        String::new()
+    } else {
+        format!("; target(s) {} couldn't be reached, so it may be there", targets.join(", "))
+    }
 }
 
 fn plural(n: usize, one: &str, many: &str, verb: &str) -> String {
@@ -97,6 +145,24 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_conflict_and_a_missing_sandbox_keep_their_fields() {
+        let repo = |dir: &str, slug: &str| RepoRef { dir: dir.into(), slug: slug.into() };
+        let err = Error::Conflict(Box::new(RepoConflict {
+            first: repo("/a", "o/app"),
+            second: repo("/b", "o/app"),
+            kind: ConflictKind::SameRepo { slug: "o/app".into() },
+        }));
+        assert_eq!(
+            err.to_string(),
+            "/a (o/app) and /b (o/app) have the same repo, o/app; they would collide, so run only one of them"
+        );
+        let err = Error::NoSandbox { task: "TRAIL-1".into(), unreachable: vec!["sprites".into(), "docker".into()] };
+        assert!(err.to_string().ends_with("; target(s) sprites, docker couldn't be reached, so it may be there"));
+        let err = Error::NoSandbox { task: "TRAIL-1".into(), unreachable: vec![] };
+        assert!(err.to_string().ends_with("destroyed)"));
+    }
 
     #[test]
     fn a_wrapped_cause_shows_once_in_the_chain() {

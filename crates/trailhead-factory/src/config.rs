@@ -53,7 +53,7 @@ pub struct FactoryConfig {
     pub merge: MergeConfig,
 }
 
-/// `[merge]`: what the merger does with a PR whose gates passed (`docs/factory/review.md#the-merger`).
+/// `[factory.merge]`: what the merger does with a PR whose gates passed (`docs/factory/review.md#the-merger`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeConfig {
@@ -75,7 +75,7 @@ pub enum MergeMode {
     On,
 }
 
-/// `[grades]`: path globs that raise a PR to at least grade 2, 3 or 4 (keyed by the grade), and the diff size over
+/// `[factory.grades]`: path globs that raise a PR to at least grade 2, 3 or 4 (keyed by the grade), and the diff size over
 /// which it is at least grade 3 (`docs/factory/review.md#grades`). Without the section, the defaults of the example
 /// there; with it, the rules it lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -844,12 +844,17 @@ impl FactoryConfig {
         }
         for (want, role) in [(&self.repo.worker, Role::Worker), (&self.repo.reviewer, Role::Reviewer)] {
             match self.profiles.get(want) {
-                None => return Err(Error::Config(format!("no profile named {want}"))),
+                None => {
+                    return Err(Error::Config(format!(
+                        "[factory.repo] {}: no profile named {want}; define [factory.profiles.{want}]",
+                        role.as_str()
+                    )));
+                }
                 Some(p) if p.role != role => {
                     return Err(Error::Config(format!(
-                        "profile {want} has role {}, not {}",
+                        "[factory.repo] {key} is `{want}`, but [factory.profiles.{want}] has role {}, not {key}",
                         p.role.as_str(),
-                        role.as_str()
+                        key = role.as_str()
                     )));
                 }
                 Some(_) => {}
@@ -864,7 +869,9 @@ impl FactoryConfig {
             if let Some(next) = &profile.escalate_to
                 && !self.profiles.contains_key(next)
             {
-                return Err(Error::Config(format!("profile {name} escalates to unknown profile {next}")));
+                return Err(Error::Config(format!(
+                    "[factory.profiles.{name}] escalate_to is `{next}`, but there is no [factory.profiles.{next}]"
+                )));
             }
         }
         for grade in self.grades.rules.keys() {
@@ -891,11 +898,13 @@ impl FactoryConfig {
                 if let GateKind::Named(name) = r
                     && !checks.contains(&name.as_str())
                 {
-                    return Err(Error::Config(format!("gate {grade} requires unknown {r}")));
+                    return Err(Error::Config(format!(
+                        "[factory.gates.{grade}] requires unknown {r}; it must name a check in [factory.checks]"
+                    )));
                 }
             }
             if gate.require.contains(&GateKind::Quorum) && gate.quorum.is_none() {
-                return Err(Error::Config(format!("gate {grade} requires a quorum but doesn't define one")));
+                return Err(Error::Config(format!("[factory.gates.{grade}] requires a quorum but doesn't define one")));
             }
         }
         Ok(())
@@ -948,6 +957,7 @@ impl FactoryConfig {
             base_branch: self.repo.base_branch.clone(),
             branch,
             merge_base: false,
+            branch_if_present: false,
             setup: named("setup", &self.checks.setup),
             trim: named("trim", &self.checks.trim),
             disk_warn_bytes: some(self.daemon.disk_warn_bytes),
@@ -1050,10 +1060,11 @@ mod tests {
         assert!(config.prepare_request(Role::Reviewer, None).tool_hosts.is_empty());
         assert_eq!(config.prepare_request(Role::Worker, None).tools, config.stack.tools);
         let mut documented = GradesConfig::default();
-        documented.rules.get_mut("3").unwrap().push("clients/**".into());
+        documented.rules.get_mut("2").unwrap().push("clients/**".into());
+        documented.rules.get_mut("3").unwrap().push("clients/*/src/**".into());
         assert_eq!(
             config.grades, documented,
-            "this repo's rules are the documented example, plus clients/** (TRAIL-703)"
+            "this repo's rules are the documented example, plus clients/** at 2 and its src at 3 (TRAIL-1390)"
         );
         assert_eq!(config.merge.mode, MergeMode::On);
         assert!(config.gate(gr(1)).auto_merge);
@@ -1284,6 +1295,30 @@ require = ["checks", "agent_review", "human"]
         }
         let err = parse(&format!("{SAMPLE}\n[gates.5]\nrequire = []\n")).unwrap_err();
         assert!(err.to_string().contains("[factory.gates.5]: gates are per grade"), "{err}");
+    }
+
+    #[test]
+    fn profile_and_gate_errors_name_the_table_to_edit() {
+        let cases = [
+            (SAMPLE.replace("[repo]\n", "[repo]\nworker = \"nope\"\n"), "[factory.repo] worker: no profile named nope"),
+            (
+                SAMPLE.replace("[repo]\n", "[repo]\nreviewer = \"worker\"\n"),
+                "[factory.repo] reviewer is `worker`, but [factory.profiles.worker] has role worker, not reviewer",
+            ),
+            (
+                SAMPLE.replace("escalate_to = \"worker-opus\"", "escalate_to = \"ghost\""),
+                "[factory.profiles.worker] escalate_to is `ghost`, but there is no [factory.profiles.ghost]",
+            ),
+            (format!("{SAMPLE}\n[gates.2]\nrequire = [\"lintt\"]\n"), "[factory.gates.2] requires unknown lintt"),
+            (
+                format!("{SAMPLE}\n[gates.2]\nrequire = [\"quorum\"]\n"),
+                "[factory.gates.2] requires a quorum but doesn't define one",
+            ),
+        ];
+        for (src, want) in cases {
+            let err = parse(&src).unwrap_err().to_string();
+            assert!(err.contains(want), "want {want:?}, got {err}");
+        }
     }
 
     #[test]

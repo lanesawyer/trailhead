@@ -387,8 +387,8 @@ fn changed_file(f: &Value) -> ChangedFile {
     let count = |k: &str| u32::try_from(f[k].as_u64().unwrap_or_default()).unwrap_or(u32::MAX);
     let path = f["filename"].as_str().unwrap_or_default().to_string();
     ChangedFile {
-        // Only a lockfile's patch is kept: the grader reads it to tell a new package from an edited dependency list.
-        patch: f["patch"].as_str().filter(|_| path.ends_with("Cargo.lock")).map(str::to_string),
+        // Only the patches the grader reads are kept (a lockfile's, a Rust source's).
+        patch: f["patch"].as_str().filter(|_| trailhead_factory::grade::reads_patch(&path)).map(str::to_string),
         path,
         status,
         additions: count("additions"),
@@ -570,6 +570,10 @@ impl CodeHost for GitHub {
             if found.len() < 100 {
                 break;
             }
+            if page == MAX_PR_PAGES {
+                // Whatever lies past the cap is silently absent from the answer, so say so.
+                tracing::warn!(repo = %repo.slug(), base, listed = out.len(), "open PRs run past the page cap; the rest are not listed");
+            }
         }
         Ok(out)
     }
@@ -678,6 +682,11 @@ impl CodeHost for GitHub {
 
     async fn ci(&self, pr: &PrRef) -> Result<Ci> {
         let head = CodeHost::head(self, pr).await?;
+        let state = self.ci_at(pr, &head).await?;
+        Ok(Ci { state, head })
+    }
+
+    async fn ci_at(&self, pr: &PrRef, head: &str) -> Result<CiState> {
         let r = Self::repo_path(&pr.repo);
         let mut runs = Vec::new();
         for page in 1..=MAX_CHECK_PAGES {
@@ -693,7 +702,7 @@ impl CodeHost for GitHub {
         }
         let combined = self.call_cached(self.request(Method::GET, &format!("{r}/commits/{head}/status"))).await?;
         let statuses = combined["statuses"].as_array().map(Vec::as_slice).unwrap_or_default();
-        Ok(Ci { state: summarize_ci(&runs, statuses), head })
+        Ok(summarize_ci(&runs, statuses))
     }
 
     async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {

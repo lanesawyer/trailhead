@@ -439,9 +439,10 @@ pub fn setup_failed_question(failures: u32, error: &str) -> String {
 /// Why a task is parked at once when a service refused a request for good, so retrying is no use.
 pub fn rejected_question(error: &str) -> String {
     format!(
-        "The infrastructure refused a request and won't answer differently on a retry, so the task is parked \
-         at once; it's not the task. The error: {error}\n\nFix the cause (the compute settings, the sandbox or \
-         the credentials), then reopen the task."
+        "A service refused a request and won't answer differently on a retry, so the task is parked at once; \
+         it's not the task. The service is named in the error (the compute API, the Trailhead server, or the \
+         code host): {error}\n\nFix the cause (that service's settings or credentials, or the sandbox), then \
+         reopen the task."
     )
 }
 
@@ -456,7 +457,8 @@ pub fn resource_wait_question(waits: u32, error: &str) -> String {
 /// Why a task is parked when the infrastructure kept failing under its reviewer.
 pub fn review_infra_question(failures: u32, max: u32, error: &str) -> String {
     format!(
-        "The infrastructure failed {failures} times in a row while reviewing the PR (the limit is {max}); \
+        "Reviewing the PR failed {failures} times in a row (the limit is {max}); infrastructure failures and \
+         reviews that ended without a verdict count together. The last one was the infrastructure failing; \
          it's not the task. The last error: {error}\n\nFix the cause, then reopen the task; raise \
          `max_infra_failures` to allow more tries."
     )
@@ -466,7 +468,8 @@ pub fn review_infra_question(failures: u32, max: u32, error: &str) -> String {
 /// didn't call for one, which points at the model, the review prompt or the PR.
 pub fn review_no_verdict_question(failures: u32, max: u32, error: &str) -> String {
     format!(
-        "The reviewer ended without a verdict {failures} times in a row (the limit is {max}). The last \
+        "Reviewing the PR failed {failures} times in a row (the limit is {max}); infrastructure failures and \
+         reviews that ended without a verdict count together. The last one ended without a verdict. The last \
          result: {error}\n\nLook at the reviewer's transcript and the review prompt: the model may not be \
          calling for a verdict, or the PR may be something the reviewer can't handle (too large, or \
          unreadable). Fix the cause, then reopen the task; raise `max_infra_failures` to allow more tries."
@@ -561,23 +564,39 @@ pub fn conflict_feedback(pr_url: &str, base: &str) -> String {
     )
 }
 
+/// Whether the base branch was merged into a PR after its review, and what is known of CI before that merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterUpdate {
+    /// The head is the one reviewed, or changed by more than a merge of the base.
+    No,
+    /// CI passed on the reviewed head, so the merge brought the failure in.
+    CiPassedBefore,
+    /// CI didn't pass on the reviewed head, or the host couldn't say.
+    CiUnconfirmed,
+}
+
 /// What a worker is told when CI failed on its PR: the checks, the end of their logs, and `after_update` when the
-/// base branch was merged in after the review (CI is not known to have passed before).
+/// base branch was merged in after the review.
 pub fn ci_failure_feedback(
     pr_url: &str,
     head: &str,
     checks: &[String],
-    after_update: bool,
+    after_update: AfterUpdate,
     logs: &[(String, String)],
     base: &str,
 ) -> String {
     let mut body = format!("CI failed on {pr_url} at {head}: {}.", checks.join(", "));
-    if after_update {
-        body.push_str(
+    match after_update {
+        AfterUpdate::No => {}
+        AfterUpdate::CiPassedBefore => body.push_str(
+            " CI passed on the PR before the base branch was merged into it, so the failure came in with that \
+             merge: something that landed on the base branch clashes with this change. Fix the clash.",
+        ),
+        AfterUpdate::CiUnconfirmed => body.push_str(
             " The base branch was merged into the PR after it was reviewed, so the failure may have come in with \
              that merge: something that landed on the base branch may clash with this change. CI wasn't seen to \
              pass before the merge, so check whether the failure is your change's own too.",
-        );
+        ),
     }
     for (check, log) in logs {
         body.push_str(&format!("\n\nEnd of the log of {check}:\n\n```\n{}\n```", log.trim_end()));
@@ -608,12 +627,15 @@ mod tests {
 
     #[test]
     fn ci_failure_feedback_does_not_claim_ci_passed_before_an_update() {
-        let plain = ci_failure_feedback("url", "abc", &["test".to_string()], false, &[], "main");
+        let plain = ci_failure_feedback("url", "abc", &["test".to_string()], AfterUpdate::No, &[], "main");
         assert!(!plain.contains("merged into the PR after"), "{plain}");
-        let updated = ci_failure_feedback("url", "abc", &["test".to_string()], true, &[], "main");
+        let updated = ci_failure_feedback("url", "abc", &["test".to_string()], AfterUpdate::CiUnconfirmed, &[], "main");
         assert!(updated.contains("merged into the PR after it was reviewed"), "{updated}");
         assert!(!updated.contains("It passed"), "{updated}");
         assert!(updated.contains("conflict markers"), "{updated}");
+        let passed = ci_failure_feedback("url", "abc", &["test".to_string()], AfterUpdate::CiPassedBefore, &[], "main");
+        assert!(passed.contains("CI passed on the PR before"), "{passed}");
+        assert!(!passed.contains("may have come in"), "{passed}");
     }
 
     #[test]
@@ -726,10 +748,16 @@ mod tests {
         assert!(budget_breach_question("r", "sb", BreachedSandbox::Destroyed).contains("was destroyed"));
         let stuck = budget_breach_question("r", "sb", BreachedSandbox::Stuck);
         assert!(stuck.contains("being torn down") && !stuck.contains("was destroyed"), "{stuck}");
+        let rejected = rejected_question("trailhead 400 bad_request: no");
+        assert!(rejected.contains("trailhead 400 bad_request: no") && rejected.contains("the code host"));
+        assert!(!rejected.contains("compute settings"));
         assert!(infra_question(3, 3, "boom").contains("`max_infra_failures`"));
-        assert!(review_infra_question(3, 3, "boom").contains("while reviewing the PR"));
+        assert!(review_infra_question(3, 3, "boom").contains("count together"));
         let q = review_no_verdict_question(3, 3, "boom");
         assert!(q.contains("ended without a verdict") && !q.contains("infrastructure failed"));
+        // Both count one run of failures, so neither claims the whole run was its own cause.
+        assert!(!q.contains("ended without a verdict 3 times"), "{q}");
+        assert!(!review_infra_question(3, 3, "boom").contains("infrastructure failed 3 times"));
         assert!(conflict_rework_limit_question(2, 2).contains("`max_conflict_reworks`"));
         assert!(ci_rework_limit_question(2, 2, "red").contains("CI keeps failing"));
         assert!(review_rework_limit_question(2, 2, "r", "b").contains("`max_review_rounds`"));

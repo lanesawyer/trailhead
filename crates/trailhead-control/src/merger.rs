@@ -49,6 +49,7 @@ impl Factory {
         // A task waiting on a rework is neither approved nor merged, whatever the gates say.
         let act = act && !task.changes_requested;
         if !matches!(task.status, Status::InReview | Status::Approved) {
+            self.forget_merge_path(key);
             return Ok(());
         }
         // The head comes first and is shared with grading, which lists the files again only when it has moved.
@@ -65,6 +66,7 @@ impl Factory {
         // approval without a mark is Lane's.
         let mut approved_head = prev.as_ref().and_then(|d| d.approved_head.clone());
         let mut human_head = prev.as_ref().and_then(|d| d.human_head.clone());
+        let mut unapproved = false;
         if status == Status::InReview {
             // However it got back to review (a push, Lane, a rework), no earlier approval applies.
             (approved_head, human_head) = (None, None);
@@ -80,12 +82,13 @@ impl Factory {
                 _ => false,
             };
             if carried {
-                tracing::info!(task = %key.0, %head, "the PR was only updated from its base; keeping the approval");
+                tracing::info!(task = %key, %head, "the PR was only updated from its base; keeping the approval");
                 approved_head = approved_head.map(|_| head.clone());
                 human_head = human_head.map(|_| head.clone());
             } else if given_on.as_ref() != Some(&head) {
-                tracing::info!(task = %key.0, %head, "the PR has a new head; sending the task back to review");
+                tracing::info!(task = %key, %head, "the PR has a new head; sending the task back to review");
                 self.tracker.unapprove(key).await?;
+                unapproved = true;
                 (status, approved_head, human_head) = (Status::InReview, None, None);
             }
         }
@@ -119,9 +122,15 @@ impl Factory {
         };
         let verdict = decide(&facts);
         if verdict.withdraw {
-            tracing::info!(task = %key.0, %head, "the gates no longer pass; withdrawing the approval");
+            tracing::info!(task = %key, %head, "the gates no longer pass; withdrawing the approval");
             self.tracker.unapprove(key).await?;
+            unapproved = true;
             (approved_head, human_head) = (None, None);
+        }
+        // An intent to merge another head is stale (`merged_by` ignores it), and so is any once the approval is gone;
+        // clearing it keeps the record from passing for a live merge.
+        if task.run.merging.as_deref().is_some_and(|m| !m.is_empty() && (unapproved || m != head)) {
+            self.tracker.report(key, RunUpdate { merging: Some(String::new()), ..RunUpdate::default() }).await?;
         }
         let mut decision = MergeDecision {
             grade: grade.grade,
@@ -147,11 +156,11 @@ impl Factory {
             }
             match self.tracker.approve(key).await {
                 Ok(()) => {
-                    tracing::info!(task = %key.0, %head, "gates passed; approved");
+                    tracing::info!(task = %key, %head, "gates passed; approved");
                 }
                 Err(Error::Forbidden(why)) => {
                     let problem = messages::cannot_approve(&why);
-                    tracing::warn!(task = %key.0, %problem, "gates passed");
+                    tracing::warn!(task = %key, %problem, "gates passed");
                     decision.approved_head = None;
                     decision.problem = Some(problem);
                 }
@@ -219,6 +228,10 @@ impl Factory {
             return Ok(asked.then_some(Rework::Running));
         }
         // Only a later attempt than the reviewed one is the rework; a new head on the same attempt is a person's push.
+        // And until the rework hands off, the request is still open, so a new head then is a person's push too.
+        if task.changes_requested {
+            return Ok(None);
+        }
         let attempt = task.run.attempt.unwrap_or(0);
         let pushed = task
             .run
@@ -241,7 +254,7 @@ impl Factory {
         let attempt = task.run.attempt.unwrap_or(1);
         // A person's PR with auto-merge on goes first; the hold is set by the pass over the open PRs (TRAIL-804).
         if self.merges_held() {
-            tracing::debug!(task = %task.key.0, pr = %pr.url, "merges are held for a person's PR; waiting");
+            tracing::debug!(task = %task.key, pr = %pr.url, "merges are held for a person's PR; waiting");
             return Ok(());
         }
         // Gates passed on this head; a push since then is looked at on the next pass.
@@ -251,14 +264,22 @@ impl Factory {
         if codehost.behind(pr).await? {
             // An update asked for on this head is still queued: the head moves when it lands.
             let queued = self.updating.lock().unwrap().get(&task.key).cloned();
-            if let Some((head, since)) = queued
+            let mut asked = 0;
+            if let Some((head, since, times)) = queued
                 && head == decision.head
             {
                 if since.elapsed() < crate::UPDATE_PATIENCE {
-                    tracing::debug!(task = %task.key.0, pr = %pr.url, "the branch update is still queued; waiting");
+                    tracing::debug!(task = %task.key, pr = %pr.url, "the branch update is still queued; waiting");
                     return Ok(());
                 }
-                tracing::warn!(task = %task.key.0, pr = %pr.url, "the branch update never landed; asking again");
+                // A host that keeps dropping the update has likely found a conflict it only reports by dropping it.
+                if times >= crate::UPDATE_ASKS {
+                    tracing::warn!(task = %task.key, pr = %pr.url, times, "the branch update never landed; reworking");
+                    self.updating.lock().unwrap().remove(&task.key);
+                    return self.rework_conflict(task, pr, attempt).await;
+                }
+                tracing::warn!(task = %task.key, pr = %pr.url, "the branch update never landed; asking again");
+                asked = times;
             }
             match codehost.update_branch(pr).await? {
                 BranchUpdate::Conflict => {
@@ -267,7 +288,10 @@ impl Factory {
                 }
                 // CI starts over on the new head; the next pass looks at it again.
                 BranchUpdate::Updated => {
-                    self.updating.lock().unwrap().insert(task.key.clone(), (decision.head.clone(), Instant::now()));
+                    self.updating
+                        .lock()
+                        .unwrap()
+                        .insert(task.key.clone(), (decision.head.clone(), Instant::now(), asked + 1));
                 }
                 BranchUpdate::UpToDate => {}
             }
@@ -292,10 +316,10 @@ impl Factory {
                 if let Err(e) =
                     self.tracker.report(&task.key, RunUpdate { merge: Some(merged), ..RunUpdate::default() }).await
                 {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't record the merged message");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't record the merged message");
                 }
                 if let Err(e) = self.say(pr, decision.comment, &body).await {
-                    tracing::warn!(task = %task.key.0, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
+                    tracing::warn!(task = %task.key, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
                 }
                 let commit = match codehost.pr_state(pr).await? {
                     PrState::Merged { commit } => commit,
@@ -306,17 +330,17 @@ impl Factory {
             MergeOutcome::Conflict => self.rework_conflict(task, pr, attempt).await,
             // Nothing to rework: the next pass looks at the new head, or tries again once the host allows it.
             MergeOutcome::HeadMoved => {
-                tracing::info!(task = %task.key.0, pr = %pr.url, "the PR moved before the merge; looking again next pass");
+                tracing::info!(task = %task.key, pr = %pr.url, "the PR moved before the merge; looking again next pass");
                 Ok(())
             }
             MergeOutcome::Refused(why) => {
                 // Said once per reason, on the PR and the task; the merge is still tried on each pass, quietly, since
                 // the host lifts a refusal (a check that passes) without anything else changing.
                 if decision.refused.as_ref() == Some(&why) {
-                    tracing::debug!(task = %task.key.0, pr = %pr.url, %why, "the code host still refuses the merge");
+                    tracing::debug!(task = %task.key, pr = %pr.url, %why, "the code host still refuses the merge");
                     return Ok(());
                 }
-                tracing::warn!(task = %task.key.0, pr = %pr.url, %why, "the code host refused the merge; trying again each pass");
+                tracing::warn!(task = %task.key, pr = %pr.url, %why, "the code host refused the merge; trying again each pass");
                 let note = messages::merge_refused(&why);
                 codehost.comment(pr, &note).await?;
                 self.tracker.note(&task.key, &note).await?;
@@ -369,7 +393,7 @@ impl Factory {
             self.tracker.raise_grade(&task.key, grade.grade).await?;
             let why = grade.reasons.join("; ");
             let note = messages::grade_raised_note(grade.grade, have, &why);
-            tracing::info!(task = %task.key.0, "{note}");
+            tracing::info!(task = %task.key, "{note}");
             self.tracker.note(&task.key, &note).await?;
         }
         if current.run.grade.as_ref() != Some(grade) {

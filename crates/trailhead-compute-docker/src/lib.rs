@@ -26,7 +26,7 @@ use bollard::Docker;
 use bollard::errors::Error as DockerError;
 use bollard::exec::{StartExecOptions, StartExecResults};
 use bollard::models::{
-    ContainerConfig, ContainerCreateBody, ExecConfig, HostConfig, RestartPolicy, RestartPolicyNameEnum,
+    ContainerConfig, ContainerCreateBody, ExecConfig, HostConfig, ImageSummary, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CreateContainerOptions, CreateImageOptions, DownloadFromContainerOptions, InspectContainerOptions,
@@ -106,7 +106,7 @@ pub fn target() -> Target {
     }
 }
 
-/// A Docker compute from its `[compute]` settings (unset ones keep `docker`'s defaults), with its launch facts.
+/// A Docker compute from its `[factory.compute]` settings (unset ones keep `docker`'s defaults), with its launch facts.
 /// `read_only` is as for [`DockerCompute::read_only`]. Settings of another kind are an error.
 pub fn build(
     settings: &ComputeConfig,
@@ -454,30 +454,15 @@ impl DockerCompute {
 
     /// The size in bytes and the name of the checkpoint image that sets the sandbox's disk need: the largest of its own
     /// (a stale image of another sandbox must not hold its runs back), or, while it has none, the largest
-    /// `trailhead-checkpoint` image on the host. `None` if there is none or they can't be listed (the check then falls
-    /// back to the container's own size).
-    async fn largest_checkpoint(&self, id: &SandboxId) -> Option<(u64, String)> {
+    /// `trailhead-checkpoint` image on the host. `Ok(None)` if there is none; `Err` if they can't be listed (the check
+    /// then falls back to the container's own size).
+    async fn largest_checkpoint(&self, id: &SandboxId) -> Result<Option<(u64, String)>, bollard::errors::Error> {
         let filter = vec![CHECKPOINT_REPO.to_string()];
         let opts = ListImagesOptions {
             filters: Some(HashMap::from([("reference".to_string(), filter)])),
             ..Default::default()
         };
-        match self.docker.list_images(Some(opts)).await {
-            Ok(images) => {
-                let sized: Vec<(Option<&str>, u64, String)> = images
-                    .iter()
-                    .map(|i| {
-                        let name = i.repo_tags.iter().find(|t| t.starts_with(CHECKPOINT_REPO)).unwrap_or(&i.id);
-                        (i.labels.get(CHECKPOINT_OF).map(String::as_str), i.size.max(0) as u64, name.clone())
-                    })
-                    .collect();
-                pick_checkpoint(&id.0, sized)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "couldn't list checkpoint images to size the disk a run needs");
-                None
-            }
-        }
+        Ok(checkpoint_of(&id.0, &self.docker.list_images(Some(opts)).await?))
     }
 
     async fn sandbox(&self, name: &str) -> Result<Sandbox> {
@@ -573,6 +558,14 @@ impl Compute for DockerCompute {
             tracing::warn!(sandbox = %id.0, error = %e, "couldn't remove old checkpoints");
         }
         Ok(cp)
+    }
+
+    async fn delete_checkpoint(&self, _id: &SandboxId, cp: &CheckpointId) -> Result<()> {
+        self.writable()?;
+        match self.docker.remove_image(&cp.0, None::<RemoveImageOptions>, None).await {
+            Err(e) if status(&e) != Some(404) => Err(docker_err(e)),
+            _ => Ok(()),
+        }
     }
 
     /// Recreates the container from the checkpoint's image, keeping its name, labels and egress. Its programs start
@@ -712,11 +705,14 @@ impl Compute for DockerCompute {
         let fs = info.size_root_fs.unwrap_or(0).max(0) as u64;
         // A new sandbox's filesystem is small, but its checkpoint after prepare is not: size the need by its own
         // largest checkpoint image, or the host's largest while it has none.
-        let checkpoint = self.largest_checkpoint(id).await;
-        let size = checkpoint.as_ref().map_or(fs, |(big, _)| fs.max(*big));
+        let listed = self.largest_checkpoint(id).await;
+        if let Err(e) = &listed {
+            tracing::warn!(error = %e, "couldn't list checkpoint images to size the disk a run needs");
+        }
+        let (size, checkpoint) = disk_size(fs, listed.as_ref().ok().and_then(Option::as_ref));
         let need = disk_needed(self.config.min_free_bytes, self.config.concurrent_checkpoints, size);
         if free < need {
-            return Err(Error::Unavailable(disk_short(&id.0, free, need, fs, checkpoint.as_ref())));
+            return Err(Error::Unavailable(disk_short(&id.0, free, need, fs, listed.is_ok(), checkpoint)));
         }
         Ok(())
     }
@@ -802,6 +798,26 @@ fn multi_line_env(labels: Option<&HashMap<String, String>>) -> Vec<String> {
 
 /// The largest of `images` (the sandbox each is a checkpoint of, its size and its name) made by `sandbox`, or else the
 /// largest of all of them.
+fn checkpoint_of(sandbox: &str, images: &[ImageSummary]) -> Option<(u64, String)> {
+    let sized = images
+        .iter()
+        .map(|i| {
+            let name = i.repo_tags.iter().find(|t| t.starts_with(CHECKPOINT_REPO)).unwrap_or(&i.id);
+            (i.labels.get(CHECKPOINT_OF).map(String::as_str), i.size.max(0) as u64, name.clone())
+        })
+        .collect();
+    pick_checkpoint(sandbox, sized)
+}
+
+/// The size the disk need follows, and the checkpoint image that sets it: `None` unless it is larger than the
+/// container's own `fs` size.
+fn disk_size(fs: u64, checkpoint: Option<&(u64, String)>) -> (u64, Option<&(u64, String)>) {
+    match checkpoint {
+        Some((big, _)) if *big > fs => (*big, checkpoint),
+        _ => (fs, None),
+    }
+}
+
 fn pick_checkpoint(sandbox: &str, images: Vec<(Option<&str>, u64, String)>) -> Option<(u64, String)> {
     let largest = |own: bool| {
         images
@@ -833,10 +849,22 @@ fn full_disk(msg: &str) -> bool {
 
 /// The message for a sandbox short of disk, naming both sizes the need could rest on so an operator knows what to
 /// free: the container's filesystem, or the largest checkpoint image (which `docker rmi` frees if it is stale).
-fn disk_short(sandbox: &str, free: u64, need: u64, fs: u64, checkpoint: Option<&(u64, String)>) -> String {
+///
+/// `listed` is whether the checkpoint images could be listed: if not, their size is unknown rather than absent.
+fn disk_short(
+    sandbox: &str,
+    free: u64,
+    need: u64,
+    fs: u64,
+    listed: bool,
+    checkpoint: Option<&(u64, String)>,
+) -> String {
     let checkpoint = match checkpoint {
-        Some((big, name)) => format!("largest checkpoint {} MiB, image {name}", big >> 20),
-        None => "no checkpoint image".to_string(),
+        Some((big, name)) => {
+            format!("largest checkpoint {} MiB, image {name}; `docker rmi {name}` frees it if it is stale", big >> 20)
+        }
+        None if listed => "no checkpoint image".to_string(),
+        None => "checkpoint size unknown, the images couldn't be listed".to_string(),
     };
     format!(
         "sandbox {sandbox}: only {} MiB of disk free, below the {} MiB a task and its checkpoint need (filesystem {} MiB, {checkpoint}); free up space on the Docker host (docker system df)",
@@ -1084,10 +1112,13 @@ mod tests {
     #[test]
     fn the_disk_short_message_names_the_filesystem_and_the_largest_checkpoint() {
         let mib = 1u64 << 20;
-        let both = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, Some(&(800 * mib, "cp:1".into())));
+        let both = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, true, Some(&(800 * mib, "cp:1".into())));
         assert!(both.contains("filesystem 300 MiB, largest checkpoint 800 MiB, image cp:1"), "{both}");
-        let none = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, None);
+        assert!(both.contains("`docker rmi cp:1`"), "{both}");
+        let none = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, true, None);
         assert!(none.contains("filesystem 300 MiB, no checkpoint image"), "{none}");
+        let unknown = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, false, None);
+        assert!(unknown.contains("filesystem 300 MiB, checkpoint size unknown"), "{unknown}");
     }
 
     #[test]
@@ -1100,6 +1131,49 @@ mod tests {
         assert_eq!(pick_checkpoint("sb", images.clone()), Some((200, "cp:b".into())));
         assert_eq!(pick_checkpoint("new", images), Some((900, "cp:old".into())), "falls back to the host's largest");
         assert_eq!(pick_checkpoint("sb", vec![]), None);
+    }
+
+    fn image(id: &str, tags: &[&str], size: i64, of: Option<&str>) -> ImageSummary {
+        ImageSummary {
+            id: id.into(),
+            repo_tags: tags.iter().map(|t| t.to_string()).collect(),
+            size,
+            labels: of.map(|o| HashMap::from([(CHECKPOINT_OF.to_string(), o.to_string())])).unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_image_is_named_by_its_first_checkpoint_tag() {
+        let tag = format!("{CHECKPOINT_REPO}:a");
+        let images = [image("sha:1", &["other:1", &tag, &format!("{CHECKPOINT_REPO}:b")], 10, Some("sb"))];
+        assert_eq!(checkpoint_of("sb", &images), Some((10, tag)));
+    }
+
+    #[test]
+    fn a_checkpoint_image_without_a_matching_tag_is_named_by_its_id() {
+        let images = [image("sha:1", &["other:1"], 10, Some("sb")), image("sha:2", &[], 5, Some("sb"))];
+        assert_eq!(checkpoint_of("sb", &images), Some((10, "sha:1".into())));
+    }
+
+    #[test]
+    fn a_negative_image_size_counts_as_zero() {
+        let images = [image("sha:1", &[], -5, Some("sb"))];
+        assert_eq!(checkpoint_of("sb", &images), Some((0, "sha:1".into())));
+    }
+
+    #[test]
+    fn no_images_means_no_checkpoint() {
+        assert_eq!(checkpoint_of("sb", &[]), None);
+    }
+
+    #[test]
+    fn the_preflight_names_the_checkpoint_only_when_it_is_larger_than_the_container() {
+        let cp = (800, "cp:1".to_string());
+        assert_eq!(disk_size(300, Some(&cp)), (800, Some(&cp)));
+        assert_eq!(disk_size(800, Some(&cp)), (800, None), "equal does not set the need");
+        assert_eq!(disk_size(900, Some(&cp)), (900, None));
+        assert_eq!(disk_size(300, None), (300, None));
     }
 
     #[test]

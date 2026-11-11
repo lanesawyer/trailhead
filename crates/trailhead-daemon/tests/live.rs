@@ -111,6 +111,7 @@ async fn daemon_in_a_sprite() {
                 repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
                 base_branch: "main".into(),
                 merge_base: false,
+                branch_if_present: false,
                 trim: None,
                 disk_warn_bytes: None,
                 disk_limit_bytes: None,
