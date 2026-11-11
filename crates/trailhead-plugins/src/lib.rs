@@ -23,7 +23,7 @@ mod tests {
 
     #[test]
     fn claude_code_asks_for_egress_only_in_subscription_mode() {
-        let kind = *harnesses().get(CLAUDE_CODE).unwrap();
+        let kind = harnesses().get(CLAUDE_CODE).unwrap().clone();
         assert!((kind.egress)(&Default::default()).is_empty());
         let secrets = [(CLAUDE_CODE_OAUTH_TOKEN.to_string(), "t".to_string())].into();
         assert_eq!((kind.egress)(&secrets), ["api.anthropic.com"]);
