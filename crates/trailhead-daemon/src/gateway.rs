@@ -63,7 +63,7 @@ struct Sandbox {
 #[derive(Default)]
 struct Inner {
     sandboxes: BTreeMap<String, Sandbox>,
-    unregistered: BTreeMap<String, u64>,
+    unregistered: BTreeMap<String, BTreeMap<String, u64>>,
     next_tunnel: u64,
     /// By provider and id. Held in memory only; `Debug` redacts the credentials.
     connections: BTreeMap<(String, String), GatewayConnection>,
@@ -125,10 +125,11 @@ impl Gateway {
     fn admit(self: &Arc<Self>, local: IpAddr, host: &str) -> Verdict {
         let mut inner = self.inner();
         let Some((name, sb)) = inner.sandboxes.iter_mut().find(|(_, s)| s.address == local) else {
-            let seen = inner.unregistered.entry(local.to_string()).or_insert(0);
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            let seen = inner.unregistered.entry(local.to_string()).or_default().entry(host.clone()).or_insert(0);
             *seen += 1;
             if *seen == 1 {
-                tracing::warn!(%local, host, "refused a request from a network with no registered sandbox");
+                tracing::warn!(%local, host, "refused a request from a network with no registered sandbox; further refusals of this host are counted, not logged");
             }
             return Verdict::Refused;
         };
@@ -684,13 +685,32 @@ pub async fn ctl(socket: &Path, req: &GatewayRequest) -> std::io::Result<Gateway
         .next_line()
         .await?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the gateway closed the socket"))?;
-    serde_json::from_str(&resp).map_err(std::io::Error::other)
+    // Not serde's error: it can quote the input, which could carry a secret if a response ever did.
+    serde_json::from_str(&resp)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad response from the gateway"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn ctl_does_not_echo_an_unparsable_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("gw.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            BufReader::new(read).lines().next_line().await.unwrap();
+            write.write_all(b"{\"secret\":\"hunter2\"}\n").await.unwrap();
+        });
+        let req = GatewayRequest::Unregister { name: "a".into() };
+        let err = ctl(&socket, &req).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!err.to_string().contains("hunter2"), "{err}");
+    }
 
     #[tokio::test]
     async fn control_socket_is_bound_private() {
@@ -933,7 +953,7 @@ mod tests {
         let (_s, status) = connect_via(proxy, "example.com:443").await;
         assert!(status.contains("403"), "{status}");
         let state = gw.state();
-        assert_eq!(state.unregistered_refusals["127.0.0.1"], 1);
+        assert_eq!(state.unregistered_refusals["127.0.0.1"]["example.com"], 1);
         assert_eq!(state.sandboxes[0].refused["127.0.0.1"], 2);
     }
 

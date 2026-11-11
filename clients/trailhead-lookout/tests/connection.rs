@@ -45,6 +45,7 @@ impl StatusFeed for TestFeed {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 1,
         };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
@@ -231,6 +232,55 @@ async fn a_token_revoked_while_live_is_noticed() {
     assert_eq!(state(&app), Connection::Offline);
 }
 
+/// While Live the probe asks `/v1/health` every time but `/v1/me` only on every 15th, so a token check isn't one
+/// more request per probe.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_probe_checks_the_token_only_every_few_probes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut rig = Rig::new().await;
+    let health = Arc::new(AtomicUsize::new(0));
+    let me = Arc::new(AtomicUsize::new(0));
+    let counted = {
+        let (health, me) = (health.clone(), me.clone());
+        trailhead_server::router(rig.state.clone()).layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let counter = match request.uri().path() {
+                    "/v1/health" => Some(health.clone()),
+                    "/v1/me" => Some(me.clone()),
+                    _ => None,
+                };
+                async move {
+                    if let Some(counter) = counter {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    next.run(request).await
+                }
+            },
+        ))
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    rig.server = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, counted).await.unwrap() });
+
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+
+    let (health_from, me_from) = (health.load(Ordering::SeqCst), me.load(Ordering::SeqCst));
+    // Probing every 100 ms, 5 s is about 50 probes while Live.
+    for _ in 0..100 {
+        app.update();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let probes = health.load(Ordering::SeqCst) - health_from;
+    let checks = me.load(Ordering::SeqCst) - me_from;
+    assert!(probes >= 30, "the probe ran only {probes} times in 5 s");
+    assert!(checks <= probes / 15 + 1, "{checks} token checks in {probes} probes, expected about one in 15");
+    assert_eq!(state(&app), Connection::Live);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_saved_login_and_target_are_used_on_the_next_start() {
     let rig = Rig::new().await;
@@ -363,12 +413,14 @@ async fn the_log_is_followed_only_while_asked_for() {
     }
     assert!(messages(&app).is_empty());
 
+    app.world_mut().resource_mut::<LogState>().set_streaming(true);
     send(&mut app, NetCommand::Logs(true));
     until(&mut app, "the backlog", |a| messages(a) == ["one", "two"]).await;
     rig.logs.as_ref().unwrap().send(log_line("three")).unwrap();
     until(&mut app, "a new line", |a| messages(a) == ["one", "two", "three"]).await;
 
     // Closed, nobody is following: a line sent now never arrives.
+    app.world_mut().resource_mut::<LogState>().set_streaming(false);
     send(&mut app, NetCommand::Logs(false));
     for _ in 0..20 {
         app.update();
@@ -391,6 +443,7 @@ async fn a_factory_without_logs_is_too_old_to_send_them() {
     let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
     let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
     allowed_and_live(&mut app, &rig).await;
+    app.world_mut().resource_mut::<LogState>().set_streaming(true);
     send(&mut app, NetCommand::Logs(true));
     until(&mut app, "the note", |a| a.world().resource::<LogState>().note().is_some()).await;
     assert_eq!(app.world().resource::<LogState>().note(), Some("this factory is too old to send logs"));

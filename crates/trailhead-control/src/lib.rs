@@ -89,6 +89,22 @@ impl Host {
     pub fn new(config: &HostConfig) -> Arc<Host> {
         Arc::new(Host { max_sandboxes: config.max_sandboxes, pause_at: config.pause_at.clone(), ..Host::default() })
     }
+
+    /// The latest reading of each usage window, by window name, with its `pause_at`, for the status board.
+    pub(crate) fn usage(&self) -> Vec<trailhead_factory::UsageWindow> {
+        let quota = self.quota.lock().unwrap();
+        let mut usage: Vec<_> = quota
+            .iter()
+            .map(|(window, &(used_percent, resets_at))| trailhead_factory::UsageWindow {
+                window: window.clone(),
+                used_percent,
+                resets_at,
+                pause_at: self.pause_at.get(window).copied(),
+            })
+            .collect();
+        usage.sort_by(|a, b| a.window.cmp(&b.window));
+        usage
+    }
 }
 
 /// One of the factory's targets (`docs/factory/targets.md`): the compute behind it, the daemon launched in its
@@ -399,6 +415,6 @@ impl Factory {
     }
 
     fn branch(task: &Task) -> String {
-        format!("factory/{}", task.key.0.to_ascii_lowercase())
+        format!("factory/{}", task.key.to_ascii_lowercase())
     }
 }

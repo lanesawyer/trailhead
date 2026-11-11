@@ -571,8 +571,8 @@ impl Tracker for FakeTracker {
         *self.state.lock().unwrap().reports.entry(task.clone()).or_default() += 1;
         self.inject(TrackerOp::Report)?;
         self.write(task, |t, me| {
-            if t.holder.as_deref().is_some_and(|h| h != me) {
-                return Err(Error::Forbidden(format!("{} is held by another agent", t.key.0)));
+            if let Some(h) = t.holder.as_deref().filter(|h| *h != me) {
+                return Err(Error::Conflict(format!("{} is held by {h}", t.key.0)));
             }
             t.run.merge(update);
             Ok(())
@@ -628,9 +628,9 @@ impl Tracker for FakeTracker {
     async fn reopen(&self, task: &TaskKey) -> Result<()> {
         self.inject(TrackerOp::Reopen)?;
         self.write(task, |t, me| {
-            // Like core's `check_claim_access`: not a task another agent holds.
-            if t.holder.as_deref().is_some_and(|h| h != me) {
-                return Err(Error::Forbidden(format!("{} is held by another agent", t.key.0)));
+            // Like core's `check_claim_access`, which the real trackers report as `Conflict`.
+            if let Some(h) = t.holder.as_deref().filter(|h| *h != me) {
+                return Err(Error::Conflict(format!("{} is held by {h}", t.key.0)));
             }
             if !can_transition(t.status, Status::Open) {
                 return Err(Error::Conflict(format!("{} can't be reopened from {:?}", t.key.0, t.status)));
@@ -827,10 +827,18 @@ mod tests {
             t.status = Status::NeedsInput;
             t.holder = Some("someone-else".into());
         }
-        assert!(matches!(tracker.reopen(&key).await, Err(Error::Forbidden(_))));
+        assert!(matches!(tracker.reopen(&key).await, Err(Error::Conflict(_))));
         let s = tracker.state.lock().unwrap();
         assert_eq!(s.tasks[&key].status, Status::NeedsInput);
         assert_eq!(s.tasks[&key].holder.as_deref(), Some("someone-else"));
+    }
+
+    #[tokio::test]
+    async fn report_refuses_a_task_another_agent_holds_like_core() {
+        let tracker = FakeTracker::new("factory");
+        let key = tracker.add_task("TRAIL", "t", "d");
+        tracker.state.lock().unwrap().tasks.get_mut(&key).unwrap().holder = Some("someone-else".into());
+        assert!(matches!(tracker.report(&key, RunUpdate::default()).await, Err(Error::Conflict(_))));
     }
 
     #[tokio::test]
