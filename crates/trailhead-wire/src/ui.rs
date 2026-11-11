@@ -136,6 +136,9 @@ pub enum LogFrame {
     Backlog { lines: Vec<LogLine> },
     /// One new line.
     Line(LogLine),
+    /// The reader fell behind and `count` lines were never sent: a gap between the line before this frame and
+    /// the one after it.
+    Skipped { count: u64 },
     /// What a control plane that doesn't know the request answers with (see [`StatusFrame::Unsupported`]).
     Unsupported(Unsupported),
 }
@@ -366,8 +369,12 @@ async fn serve_logs(feed: &dyn LogFeed, mut send: iroh::endpoint::SendStream) {
                         return;
                     }
                 }
-                // Too slow to keep up: it misses some lines.
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // Too slow to keep up: say how many lines it missed, so the page can mark the gap.
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    if write_frame(&mut send, &LogFrame::Skipped { count }).await.is_err() {
+                        return;
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             _ = send.stopped() => return,
@@ -643,6 +650,7 @@ mod tests {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 4,
         };
         let frames = [
