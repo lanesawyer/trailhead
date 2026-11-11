@@ -804,6 +804,7 @@ mod tests {
         let bad = [run("machete", "in_progress", Some("failure"))];
         assert_eq!(summarize_ci(&bad, &[]), CiState::Failed { checks: vec!["machete".into()] });
     }
+
     #[test]
     fn ci_fails_naming_what_failed_even_while_other_checks_run() {
         let runs = [

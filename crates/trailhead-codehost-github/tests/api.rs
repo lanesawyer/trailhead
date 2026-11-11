@@ -13,8 +13,8 @@ use base64::Engine;
 use serde_json::{Value, json};
 use trailhead_codehost_github::{GitHub, Identity};
 use trailhead_factory::{
-    BranchUpdate, ChangedFile, CodeHost, Commit, Error, FileChange, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
-    RateLimit, Repo,
+    BranchUpdate, ChangedFile, CiState, CodeHost, Commit, Error, FileChange, FileStatus, MergeOutcome, NewPr, PrRef,
+    PrState, RateLimit, Repo,
 };
 
 #[derive(Default)]
@@ -866,6 +866,7 @@ async fn unchanged_pr_reads_are_conditional_and_answered_from_the_cache() {
 
     // CI on the same head: the first pass reads everything, the second only revalidates.
     let ci = gh.ci(&pr).await.unwrap();
+    assert_eq!(ci.state, CiState::Passed);
     assert_eq!(gh.ci(&pr).await.unwrap(), ci);
     {
         let g = git.lock().unwrap();
