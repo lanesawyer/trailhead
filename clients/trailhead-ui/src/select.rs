@@ -13,7 +13,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::feathers::controls::{FeathersListRow, FeathersMenuButton, FeathersMenuPopup, FeathersSelect, OptionIndex};
 use bevy::feathers::display::caption;
 use bevy::prelude::*;
-use bevy::text::{LineBreak, TextLayout};
+use bevy::text::{LineBreak, TextLayout, TextLayoutInfo};
 use bevy::ui::{InteractionDisabled, Selected};
 use bevy::ui_widgets::{ScrollArea, ValueChange};
 
@@ -198,24 +198,45 @@ const CAPTION_SIZE: Size = size::CARD_TITLE;
 
 /// A select's caption, cut to the room its button leaves it. Feathers writes the chosen row's whole words into the
 /// caption's `Text` each time a row is selected, so this keeps what it last saw there (`full`) and what it left
-/// (`shown`): a `Text` that isn't `shown` was written by feathers and is the new `full`.
+/// (`shown`): a `Text` that isn't `shown` was written by feathers and is the new `full`. (Words feathers writes that
+/// equal `shown` exactly, as when one option's text is another's cut, are taken for our own and `full` stays.)
+///
+/// The cut is made only when the words, laid out whole, are wider than the room (`full_px`, measured the frame after
+/// feathers writes them, while they are still uncut). A select that hugs its caption always has the room for it, so
+/// it is never cut, and a cut never narrows the room it is measured against.
 #[derive(Component, Default, Debug)]
 pub(crate) struct CaptionFit {
     full: String,
     shown: String,
+    /// The width the whole words lay out at, in logical pixels, once measured.
+    full_px: Option<f32>,
+}
+
+/// The horizontal margins of a node, in logical pixels, which its computed size leaves out.
+fn margins(node: &Node) -> f32 {
+    [node.margin.left, node.margin.right].into_iter().map(|m| if let Val::Px(m) = m { m } else { 0.0 }).sum()
 }
 
 /// Ends each select's caption with an ellipsis where the select's width cuts it off.
+#[allow(clippy::type_complexity)]
 pub(crate) fn fit_select_captions(
-    mut captions: Query<(Entity, &mut CaptionFit, &mut Text)>,
+    mut captions: Query<(Entity, &mut CaptionFit, &mut Text, &TextLayoutInfo)>,
     parents: Query<&ChildOf>,
-    buttons: Query<(&ComputedNode, &Children), With<FeathersMenuButton>>,
-    nodes: Query<&ComputedNode>,
+    buttons: Query<(&ComputedNode, &Node, &Children), With<FeathersMenuButton>>,
+    nodes: Query<(&ComputedNode, &Node)>,
 ) {
-    for (entity, mut fit, mut text) in &mut captions {
+    for (entity, mut fit, mut text, info) in &mut captions {
         if text.0 != fit.shown {
-            fit.full = text.0.clone();
+            // Feathers wrote these words; they are laid out whole this frame, and measured on the next.
+            fit.full.clone_from(&text.0);
+            fit.shown.clone_from(&text.0);
+            fit.full_px = None;
+            continue;
         }
+        if fit.full_px.is_none() && info.size.x > 0.0 {
+            fit.full_px = Some(info.size.x / info.scale_factor.max(f32::EPSILON));
+        }
+        let Some(full_px) = fit.full_px else { continue };
         // The child of the button the caption sits in, which its siblings' widths are taken from.
         let mut within = entity;
         let mut button = None;
@@ -226,15 +247,26 @@ pub(crate) fn fit_select_captions(
             }
             within = ancestor;
         }
-        let Some((room, kids)) = button else { continue };
+        let Some((room, layout, kids)) = button else { continue };
         if room.size.x <= 0.0 {
             continue;
         }
         let inset = room.content_inset();
-        let siblings: f32 =
-            kids.iter().filter(|c| *c != within).filter_map(|c| nodes.get(c).ok()).map(|n| n.size.x).sum();
-        let width = (room.size.x - inset.min_inset.x - inset.max_inset.x - siblings) * room.inverse_scale_factor;
-        let wanted = truncate_to_width(&fit.full, width, CAPTION_SIZE);
+        let taken: f32 = kids
+            .iter()
+            .filter_map(|c| nodes.get(c).ok().map(|n| (c, n)))
+            .map(|(c, (computed, node))| {
+                let size = if c == within { 0.0 } else { computed.size.x * computed.inverse_scale_factor };
+                size + margins(node)
+            })
+            .sum();
+        let gap = match layout.column_gap {
+            Val::Px(gap) => gap * kids.len().saturating_sub(1) as f32,
+            _ => 0.0,
+        };
+        let width = (room.size.x - inset.min_inset.x - inset.max_inset.x) * room.inverse_scale_factor - taken - gap;
+        let wanted =
+            if full_px <= width { fit.full.clone() } else { truncate_to_width(&fit.full, width, CAPTION_SIZE) };
         if text.0 != wanted {
             text.0.clone_from(&wanted);
         }
@@ -502,6 +534,23 @@ mod tests {
         assert_eq!(button_texts(&mut app)[..2], [Icon::Help.glyph(), "Question"]);
     }
 
+    /// Stands in for layout, which these tests don't run: the button's width, and the width the caption's whole
+    /// words lay out at.
+    fn lay_out(app: &mut App, button_width: f32, words_width: f32) {
+        let world = app.world_mut();
+        let button = world.query_filtered::<Entity, With<FeathersMenuButton>>().single(world).unwrap();
+        world.entity_mut(button).insert(ComputedNode {
+            size: Vec2::new(button_width, 20.0),
+            inverse_scale_factor: 1.0,
+            ..default()
+        });
+        let mut captions = world.query_filtered::<&mut TextLayoutInfo, With<CaptionFit>>();
+        for mut info in captions.iter_mut(world) {
+            info.scale_factor = 1.0;
+            info.size = Vec2::new(words_width, 14.0);
+        }
+    }
+
     #[test]
     fn a_caption_cut_off_at_the_selects_width_ends_with_an_ellipsis() {
         let mut app = app();
@@ -509,22 +558,37 @@ mod tests {
         let options = vec![long.clone(), "all".to_string()];
         let select = app.world_mut().commands().spawn_scene(select(options.clone(), Some(0), 8)).id();
         settle(&mut app);
-        let set_width = |app: &mut App, width: f32| {
-            let world = app.world_mut();
-            let button = world.query_filtered::<Entity, With<FeathersMenuButton>>().single(world).unwrap();
-            world.entity_mut(button).insert(ComputedNode {
-                size: Vec2::new(width, 20.0),
-                inverse_scale_factor: 1.0,
-                ..default()
-            });
-        };
-        set_width(&mut app, 100.0);
+        lay_out(&mut app, 100.0, 300.0);
         settle(&mut app);
         let cut = button_texts(&mut app).pop().unwrap();
         assert!(cut.ends_with('\u{2026}') && cut.len() < long.len(), "{cut}");
         // Feathers rewriting the caption on a pick doesn't leave it cut from the cut.
         app.world_mut().run_system_once(move |mut edit: SelectEdit| edit.set(select, &options, Some(1))).unwrap();
+        lay_out(&mut app, 100.0, 20.0);
         settle(&mut app);
         assert_eq!(button_texts(&mut app).pop().unwrap(), "all");
+    }
+
+    #[test]
+    fn a_select_that_hugs_its_caption_never_cuts_it() {
+        let mut app = app();
+        let options = vec!["Debug".to_string(), "Info".to_string()];
+        app.world_mut().commands().spawn_scene(select(options, Some(0), 8));
+        settle(&mut app);
+        // The button is as wide as its words (35 px) and the insets around them, which the estimate would cut.
+        let inset = {
+            let world = app.world_mut();
+            let button = world.query_filtered::<Entity, With<FeathersMenuButton>>().single(world).unwrap();
+            let node = world.get::<Node>(button).unwrap();
+            [node.padding.left, node.padding.right]
+                .into_iter()
+                .map(|v| if let Val::Px(v) = v { v } else { 0.0 })
+                .sum::<f32>()
+        };
+        for _ in 0..4 {
+            lay_out(&mut app, 35.0 + inset, 35.0);
+            settle(&mut app);
+            assert_eq!(button_texts(&mut app).pop().unwrap(), "Debug");
+        }
     }
 }
