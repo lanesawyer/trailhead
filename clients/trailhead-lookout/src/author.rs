@@ -1336,6 +1336,24 @@ mod tests {
     }
 
     #[test]
+    fn a_form_opens_with_the_keyboard_on_its_title() {
+        // Edit opens the inspector, not a form, so the forms are a new task and a new sub-task.
+        for subtask in [false, true] {
+            let mut app = ui_app();
+            settle(&mut app);
+            if subtask {
+                press(&mut app, Act::NewSubtask("TRAIL-7".into()));
+            } else {
+                press(&mut app, Act::New);
+            }
+            settle(&mut app);
+            let focused = app.world().resource::<bevy::input_focus::InputFocus>().get().unwrap();
+            let field = app.world().get::<Field>(focused);
+            assert_eq!(field.map(|f| f.0), Some(FieldKind::Title), "subtask: {subtask}");
+        }
+    }
+
+    #[test]
     fn the_form_shows_what_the_draft_needs_and_offers_parents_as_you_type() {
         let mut app = ui_app();
         report_queues(&mut app, &["TRAIL-102"]);
