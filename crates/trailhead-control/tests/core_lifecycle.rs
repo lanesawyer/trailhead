@@ -689,10 +689,38 @@ async fn a_conflict_the_host_no_longer_reports_goes_back_to_review_without_a_wor
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
     assert_eq!(task.run.attempt, Some(1), "no attempt used up");
+    assert_eq!(task.run.conflict_reworks, Some(1), "the count of reworks that ran isn't reset");
+    assert!(task.run.changes_requested.is_some_and(|c| c.settled), "the request is marked settled instead");
 
     // Reconcile doesn't take the dropped request up again.
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reworked.is_empty() && done.conflicted.is_empty(), "{done:?}");
+    let task = r.show(&key).await;
+    assert_ne!(task.status, Status::Open);
+    assert_eq!(task.run.conflict_reworks, Some(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_the_host_has_not_worked_out_yet_is_asked_again_before_a_worker_runs() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+
+    r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
-    assert_ne!(r.show(&key).await.status, Status::Open);
+
+    // The base moved, and the host is still working `mergeable` out when the rework starts; it settles on clean.
+    r.codehost.set_mergeable(&pr, None);
+    let (codehost, later) = (r.codehost.clone(), pr.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        codehost.set_mergeable(&later, Some(true));
+    });
+    let sandboxes = r.daemon.prepared().len();
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.daemon.prepared().len(), sandboxes, "no sandbox for a conflict that went away");
+    let task = r.show(&key).await;
+    assert_eq!((task.status, task.run.attempt), (Status::InReview, Some(1)));
 }
 
 fn reviewers_started(r: &Rig) -> usize {
@@ -1267,6 +1295,15 @@ impl Logs {
     fn text(&self) -> String {
         String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
     }
+
+    /// How many log lines carry `task=<key>` as a whole key, so `TRAIL-4` doesn't count `TRAIL-40`.
+    fn warnings_for(&self, key: &TaskKey) -> usize {
+        let field = format!("task={}", key.0);
+        let text = self.text();
+        text.match_indices(&field)
+            .filter(|(i, _)| !text[i + field.len()..].starts_with(|c: char| c.is_ascii_digit()))
+            .count()
+    }
 }
 
 #[tokio::test]
@@ -1290,7 +1327,7 @@ async fn strays_are_open_factory_tasks_outside_every_queue() {
     let strays = r.tracker.strays("TRAIL", &queues).await.unwrap();
     assert_eq!(strays.iter().map(|t| &t.key).collect::<Vec<_>>(), [&outside]);
     assert!(!strays.iter().any(|t| t.key == plain));
-    // Without a queue named, the task that sat outside it is outside nothing: only the queues' own tasks count.
+    // With only `queue` named, `other` is no longer a queue, so its subtask is a stray too, and `outside` still is.
     let strays = r.tracker.strays("TRAIL", std::slice::from_ref(&queue)).await.unwrap();
     let mut keys: Vec<_> = strays.iter().map(|t| t.key.clone()).collect();
     keys.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1314,15 +1351,15 @@ async fn a_stray_is_warned_about_once_across_reconciles_and_not_for_a_sibling_re
     let _guard = tracing::subscriber::set_default(sub);
 
     alpha.reconcile().await.unwrap();
-    assert!(!logs.text().contains(&beta_task.0), "{}", logs.text());
+    assert_eq!(logs.warnings_for(&beta_task), 0, "{}", logs.text());
 
     let stray = r.task("Moved out of every queue").await;
     with_run(&r, &stray).await;
     alpha.reconcile().await.unwrap();
     alpha.reconcile().await.unwrap();
     let text = logs.text();
-    assert_eq!(text.matches(&stray.0).count(), 1, "{text}");
-    assert!(!text.contains(&beta_task.0), "{text}");
+    assert_eq!(logs.warnings_for(&stray), 1, "{text}");
+    assert_eq!(logs.warnings_for(&beta_task), 0, "{text}");
 }
 
 #[tokio::test]
@@ -1382,8 +1419,8 @@ async fn strays_in_different_projects_on_one_host_are_each_warned_about_once() {
         beta.reconcile().await.unwrap();
     }
     let text = logs.text();
-    assert_eq!(text.matches(&stray_a.0).count(), 1, "{text}");
-    assert_eq!(text.matches(&stray_b.0).count(), 1, "{text}");
+    assert_eq!(logs.warnings_for(&stray_a), 1, "{text}");
+    assert_eq!(logs.warnings_for(&stray_b), 1, "{text}");
 }
 
 #[tokio::test]
