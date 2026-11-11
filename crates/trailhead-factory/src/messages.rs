@@ -767,4 +767,17 @@ mod tests {
             "Budget breached: took more than 5 steps. The sandbox trail-1-a1 is suspended; raise the budget or cancel."
         );
     }
+
+    #[test]
+    fn status_comment_lists_a_history_only_once_the_status_has_changed() {
+        let said = |at: &str, message: &str| Said { at: at.into(), message: message.into() };
+        assert_eq!(status_comment("now", &[]), "now");
+        assert_eq!(status_comment("now", &[said("2026-01-01 10:00 UTC", "now")]), "now");
+        assert_eq!(
+            status_comment("now", &[said("2026-01-01 10:00 UTC", "first"), said("2026-01-01 10:05 UTC", "now")]),
+            "now\n\nHistory:\n- 2026-01-01 10:00 UTC: first\n- 2026-01-01 10:05 UTC: now"
+        );
+        let three: Vec<Said> = (1..=3).map(|n| said("t", &format!("m{n}"))).collect();
+        assert_eq!(status_comment("m3", &three), "m3\n\nHistory:\n- t: m1\n- t: m2\n- t: m3");
+    }
 }
