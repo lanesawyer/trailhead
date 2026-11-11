@@ -689,10 +689,38 @@ async fn a_conflict_the_host_no_longer_reports_goes_back_to_review_without_a_wor
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
     assert_eq!(task.run.attempt, Some(1), "no attempt used up");
+    assert_eq!(task.run.conflict_reworks, Some(1), "the count of reworks that ran isn't reset");
+    assert!(task.run.changes_requested.is_some_and(|c| c.settled), "the request is marked settled instead");
 
     // Reconcile doesn't take the dropped request up again.
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reworked.is_empty() && done.conflicted.is_empty(), "{done:?}");
+    let task = r.show(&key).await;
+    assert_ne!(task.status, Status::Open);
+    assert_eq!(task.run.conflict_reworks, Some(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_the_host_has_not_worked_out_yet_is_asked_again_before_a_worker_runs() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+
+    r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
-    assert_ne!(r.show(&key).await.status, Status::Open);
+
+    // The base moved, and the host is still working `mergeable` out when the rework starts; it settles on clean.
+    r.codehost.set_mergeable(&pr, None);
+    let (codehost, later) = (r.codehost.clone(), pr.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        codehost.set_mergeable(&later, Some(true));
+    });
+    let sandboxes = r.daemon.prepared().len();
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.daemon.prepared().len(), sandboxes, "no sandbox for a conflict that went away");
+    let task = r.show(&key).await;
+    assert_eq!((task.status, task.run.attempt), (Status::InReview, Some(1)));
 }
 
 fn reviewers_started(r: &Rig) -> usize {

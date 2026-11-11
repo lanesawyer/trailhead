@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use trailhead_control::Outcome;
 use trailhead_factory::{CiState, FollowUp, PrRef, Role, RunOutcome, Status, TaskKey, Tracker, VerdictKind, run_name};
-use trailhead_testkit::Script;
+use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
 
@@ -382,7 +382,7 @@ async fn a_park_whose_settling_write_was_lost_is_finished_before_a_person_answer
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     // The factory's reports in this tick: the review's round and the park's own, which settles the request and resets
     // the counts, is the third (`fail_after` skips the first two); when that order changes, change the count.
-    r.tracker.fail_after("factory", "report", 2, 1);
+    r.tracker.fail_after("factory", TrackerOp::Report, 2, 1);
     r.factory.tick().await.unwrap();
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::NeedsInput);
@@ -742,7 +742,7 @@ async fn a_breach_park_cut_short_is_finished_by_reconcile_without_a_rerun() {
 
     // The tracker fails to ask after the task was reopened and claimed.
     r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
-    r.tracker.fail_next("factory", "ask", 1);
+    r.tracker.fail_next("factory", TrackerOp::Ask, 1);
     let _ = r.factory.reconcile().await;
     let task = r.tracker.task(&key);
     assert_ne!(task.status, Status::NeedsInput);
@@ -808,7 +808,7 @@ async fn a_reviewer_breach_park_a_person_fixed_gets_a_fresh_review_under_a_new_n
 async fn a_breach_park_finished_from_open_claims_the_task_first() {
     let (r, key, _) = breaching_rig().await;
     // The claim fails after the reopen: the task is left Open.
-    r.tracker.fail_next("factory", "claim", 1);
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
     let _ = r.factory.reconcile().await;
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Open);
@@ -824,7 +824,7 @@ async fn a_breach_park_finished_from_open_claims_the_task_first() {
 #[tokio::test(start_paused = true)]
 async fn a_breach_park_is_finished_while_the_code_host_is_paused() {
     let (r, key, _) = breaching_rig().await;
-    r.tracker.fail_next("factory", "claim", 1);
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
     let _ = r.factory.reconcile().await;
     assert_eq!(r.tracker.task(&key).status, Status::Open);
 
@@ -839,7 +839,7 @@ async fn a_breach_park_is_finished_while_the_code_host_is_paused() {
 #[tokio::test(start_paused = true)]
 async fn a_breach_whose_reopen_failed_is_settled_by_the_next_review() {
     let (r, key, _) = breaching_rig().await;
-    r.tracker.fail_next("factory", "reopen", 1);
+    r.tracker.fail_next("factory", TrackerOp::Reopen, 1);
     let _ = r.factory.reconcile().await;
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::InReview);
@@ -861,7 +861,7 @@ async fn a_breach_whose_reopen_failed_is_settled_by_the_next_review() {
 async fn an_answered_breach_question_is_not_asked_again_after_a_failed_ask() {
     let (r, key, _) = breaching_rig().await;
     // The mark is written before the ask, so no later report is left to fail; the ask is what fails here.
-    r.tracker.fail_next("factory", "ask", 1);
+    r.tracker.fail_next("factory", TrackerOp::Ask, 1);
     let _ = r.factory.reconcile().await;
     let breach = r.tracker.task(&key).run.review_breach.unwrap();
     assert!(!breach.parked, "taken back when the ask failed");
@@ -938,7 +938,7 @@ async fn a_reviewer_lost_after_spending_records_the_spend_and_counts_an_infrastr
 async fn interrupted_request_for_changes(r: &Rig, key: &TaskKey) {
     r.harness.push(Role::Worker, Script::new(changes_to("docs/b.md")));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
-    r.tracker.fail_after("factory", "report", 2, 1);
+    r.tracker.fail_after("factory", TrackerOp::Report, 2, 1);
     r.factory.tick().await.unwrap_err();
     let task = r.tracker.task(key);
     assert_eq!(task.run.review_rounds, Some(1), "the interrupted round isn't counted");
@@ -983,7 +983,7 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_r
     let task = r.tracker.task(&key);
     assert_eq!(task.run.infra_failures, Some(1), "the revoked name cost an infrastructure failure");
     assert_eq!(task.run.review_rounds, Some(1), "the round was given back");
-    assert!(task.run.pending_changes().is_some_and(|c| c.conflict), "still the conflict's changes");
+    assert!(task.run.last_changes().is_some_and(|c| c.conflict && c.settled), "the conflict request, settled");
 
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the first infrastructure backoff
     let done = r.factory.reconcile().await.unwrap();

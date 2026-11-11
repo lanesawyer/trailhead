@@ -387,7 +387,7 @@ impl Factory {
                 done.released.push(name.clone());
             }
             Err(e) if self.failed(name) => {
-                self.abandon(sandbox, &e).await;
+                self.abandon(sandbox, &e, started.elapsed()).await;
                 done.abandoned.push(name.clone());
             }
             Err(e) => {
@@ -398,12 +398,13 @@ impl Factory {
 
     /// Takes a sandbox out of the pool for good: destroyed if the compute host allows it, otherwise labelled
     /// [`label::BROKEN`] without a role (so it loses connector access) and destroyed by a later reconcile.
-    async fn abandon(&self, sandbox: &Sandbox, error: &Error) {
+    async fn abandon(&self, sandbox: &Sandbox, error: &Error, took: Duration) {
         let p = self.target_of(sandbox);
         let name = &sandbox.name;
         tracing::error!(
             sandbox = %name,
             %error,
+            ?took,
             "giving up on a pooled sandbox that won't release; leaving it out of the pool and starting a new one"
         );
         if let Some(t) = self.troubled.lock().unwrap().get_mut(name) {

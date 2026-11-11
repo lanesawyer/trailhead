@@ -92,6 +92,8 @@ pub struct RepoState {
     pub last_error: Option<(i64, String)>,
     /// The grades whose gate wants a person; `None` when the factory didn't say.
     pub human_grades: Option<Vec<Grade>>,
+    /// Why the merger is holding the repo's merges, when it is (a person's PR goes first).
+    pub holding: Option<String>,
     /// The last event applied, or the snapshot's.
     pub seq: u64,
 }
@@ -145,6 +147,14 @@ impl FactoryStatus {
             }
         }
         keys
+    }
+
+    /// Why each repo's merger is holding merges, for the repos that are.
+    pub fn holds(&self) -> Vec<String> {
+        self.repos
+            .iter()
+            .filter_map(|(repo, s)| s.holding.as_ref().map(|why| format!("{repo}: holding merges: {why}")))
+            .collect()
     }
 
     /// The control plane's state for the map, repo by repo.
@@ -240,6 +250,7 @@ impl FactoryMirror {
                 control: snapshot.control,
                 last_error: snapshot.last_error,
                 human_grades: snapshot.human_grades,
+                holding: snapshot.holding,
                 queue: snapshot.queue.into_iter().map(|k| k.0).collect(),
                 seq: snapshot.seq,
             },
@@ -257,8 +268,8 @@ impl FactoryMirror {
         match event.event {
             FactoryEvent::Control { control } => state.control = control,
             FactoryEvent::Error { message } => state.last_error = Some((unix_now(), message)),
-            // Shown in the activity log only for now.
-            FactoryEvent::Holding { .. } | FactoryEvent::Unknown => {}
+            FactoryEvent::Holding { holding } => state.holding = holding,
+            FactoryEvent::Unknown => {}
             FactoryEvent::SandboxChanged { sandbox } => self.set_campsite(commands, repo, sandbox),
             FactoryEvent::SandboxGone { name } => {
                 if let Some((entity, _)) = self.campsites.remove(&(repo.to_string(), name)) {
@@ -486,8 +497,16 @@ mod tests {
         // The control plane restarted: the numbers start over, and the sandboxes are what its reconcile found.
         send(&mut app, [snapshot(1, vec![sandbox("b", SandboxState::Busy)])]);
         assert_eq!(campsites(&mut app), [("b".into(), SandboxState::Busy)]);
+        let hold = FactoryEvent::Holding { holding: Some("#306 has auto-merge on but CI failed".into()) };
+        send(&mut app, [event(2, hold)]);
+        assert_eq!(
+            app.world().resource::<FactoryStatus>().holds(),
+            ["o/r: holding merges: #306 has auto-merge on but CI failed"]
+        );
+        send(&mut app, [event(3, FactoryEvent::Holding { holding: None })]);
+        assert!(app.world().resource::<FactoryStatus>().holds().is_empty());
         let err = FactoryEvent::Error { message: "boom".into() };
-        send(&mut app, [event(2, err)]);
+        send(&mut app, [event(4, err)]);
         assert_eq!(app.world().resource::<FactoryStatus>().repos["o/r"].last_error.as_ref().unwrap().1, "boom");
     }
 

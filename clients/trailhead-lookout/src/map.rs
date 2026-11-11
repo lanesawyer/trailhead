@@ -400,13 +400,16 @@ fn redraw(
     mut commands: Commands,
     mut drawn: Local<Option<Entity>>,
     mut link: Local<Option<crate::factory::FactoryLink>>,
+    mut held: Local<Vec<String>>,
 ) {
     let (panel, _) = *panel;
     let fresh = *drawn != Some(panel);
-    // The factory's status changes with every tool call; only its link is drawn.
-    if !(fresh || map.is_changed() || *link != Some(factory.link.clone())) {
+    // The factory's status changes with every tool call; only its link and what the merger is holding are drawn.
+    let holds = factory.holds();
+    if !(fresh || map.is_changed() || *link != Some(factory.link.clone()) || *held != holds) {
         return;
     }
+    held.clone_from(&holds);
     *drawn = Some(panel);
     *link = Some(factory.link.clone());
     for e in &terrain {
@@ -420,7 +423,8 @@ fn redraw(
                 position_type: PositionType::Absolute,
                 left: px(ORIGIN.x),
                 top: px(space::PANEL_INSET),
-                column_gap: px(space::ROWS),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(space::ROWS),
                 ..default()
             },
             ChildOf(panel),
@@ -433,6 +437,9 @@ fn redraw(
     };
     let tone = if stopped { token::STATUS_WARN } else { token::TEXT_DIM };
     commands.spawn_scene(text_toned(note, size::BODY, tone)).insert(ChildOf(bar));
+    for hold in holds {
+        commands.spawn_scene(text_toned(hold, size::BODY, token::STATUS_WARN)).insert(ChildOf(bar));
+    }
 
     for c in &map.0.camps {
         // A stopped factory's camps are grayed out: their state is the last known, not live.
