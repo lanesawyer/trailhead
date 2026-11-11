@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use bevy::prelude::*;
 use trailhead_factory::{
     ControlState, FactoryEvent, FactoryState, Grade, RunPhase, RunStatus, RunUpdate, SandboxStatus, Sequenced, TaskKey,
-    Usd,
+    UsageWindow, Usd,
 };
 use trailhead_wire::ui::RepoSnapshot;
 
@@ -94,6 +94,8 @@ pub struct RepoState {
     pub human_grades: Vec<Grade>,
     /// Why the merger is holding the repo's merges, when it is (a person's PR goes first).
     pub holding: Option<String>,
+    /// The subscription's usage windows, as this repo's control plane last heard them.
+    pub usage: Vec<UsageWindow>,
     /// The last event applied, or the snapshot's.
     pub seq: u64,
 }
@@ -154,6 +156,19 @@ impl FactoryStatus {
             .iter()
             .filter_map(|(repo, s)| s.holding.as_ref().map(|why| format!("{repo}: holding merges: {why}")))
             .collect()
+    }
+
+    /// The subscription's usage windows by name. The readings are host-wide, so every repo should carry the same; where
+    /// one lags, the reading for the latest reset wins, then the fuller one.
+    pub fn usage(&self) -> Vec<UsageWindow> {
+        let mut by_window: BTreeMap<&str, &UsageWindow> = BTreeMap::new();
+        for w in self.repos.values().flat_map(|r| &r.usage) {
+            let newer = |had: &&UsageWindow| (w.resets_at, w.used_percent) > (had.resets_at, had.used_percent);
+            if by_window.get(w.window.as_str()).is_none_or(newer) {
+                by_window.insert(&w.window, w);
+            }
+        }
+        by_window.into_values().cloned().collect()
     }
 
     /// The control plane's state for the map, repo by repo.
@@ -250,6 +265,7 @@ impl FactoryMirror {
                 last_error: snapshot.last_error,
                 human_grades: snapshot.human_grades,
                 holding: snapshot.holding,
+                usage: snapshot.usage,
                 queue: snapshot.queue.into_iter().map(|k| k.0).collect(),
                 seq: snapshot.seq,
             },
@@ -272,6 +288,7 @@ impl FactoryMirror {
             FactoryEvent::Control { control } => state.control = control,
             FactoryEvent::Error { message } => state.last_error = Some((unix_now(), message)),
             FactoryEvent::Holding { holding } => state.holding = holding,
+            FactoryEvent::Usage { usage } => state.usage = usage,
             FactoryEvent::Unknown => unreachable!("returned above"),
             FactoryEvent::SandboxChanged { sandbox } => self.set_campsite(commands, repo, sandbox),
             FactoryEvent::SandboxGone { name } => {
@@ -464,6 +481,7 @@ mod tests {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq,
         };
         FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])

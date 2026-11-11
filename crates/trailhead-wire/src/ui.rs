@@ -650,6 +650,7 @@ mod tests {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 4,
         };
         let frames = [
