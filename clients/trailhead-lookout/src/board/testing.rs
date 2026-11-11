@@ -22,7 +22,8 @@ pub(super) fn input_json() -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, V
         task("t200", "OPS-1", "p2", "in_progress", None, 2),
     ];
     tasks[1]["grade"] = json!(3);
-    tasks[2]["metadata"] = json!({"factory": {"attempt": 1, "sandbox": "trail-104-a1"}});
+    tasks[2]["metadata"] = json!({"factory": {"attempt": 1, "sandbox": "trail-104-a1",
+        "pr": {"repo": {"owner": "o", "name": "r"}, "number": 9, "url": "https://host/o/r/pull/9"}}});
     // Skipped by the factory for having no grade, which isn't a run (TRAIL-1159).
     tasks[4]["metadata"] = json!({"factory": {"ungraded": true}});
     let claims = vec![

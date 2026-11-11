@@ -36,7 +36,7 @@ pub struct ColumnMore {
 /// What sits in a column's body besides the keys of its cards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Slot {
-    Card(Card),
+    Card(Box<Card>),
     Empty,
     More(ColumnMore),
 }
@@ -120,7 +120,7 @@ pub(super) fn sync_tree(
             if column.cards.is_empty() {
                 items.push((format!("empty/{}", column.status), Slot::Empty));
             }
-            items.extend(cards.iter().map(|c| (c.id.clone(), Slot::Card(c.clone()))));
+            items.extend(cards.iter().map(|c| (c.id.clone(), Slot::Card(Box::new(c.clone())))));
             if hidden > 0 {
                 let next = next_page(&column.cards, limit);
                 let more = ColumnMore { status: column.status, next };
@@ -133,13 +133,13 @@ pub(super) fn sync_tree(
         &mut commands,
         &wanted,
         |commands, _, slot| match slot {
-            Slot::Card(card) => commands.spawn(BoardCard(card.clone())).id(),
+            Slot::Card(card) => commands.spawn(BoardCard((**card).clone())).id(),
             Slot::Empty => commands.spawn(ColumnEmpty).id(),
             Slot::More(more) => commands.spawn(more.clone()).id(),
         },
         |commands, entity, slot| match slot {
             Slot::Card(card) => {
-                commands.entity(entity).insert(BoardCard(card.clone()));
+                commands.entity(entity).insert(BoardCard((**card).clone()));
             }
             Slot::More(more) => {
                 commands.entity(entity).insert(more.clone());
