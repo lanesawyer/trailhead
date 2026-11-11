@@ -68,7 +68,7 @@ A project can require review: agents then can't mark work `done`, only a person 
 
 ## The event log, undo and revert
 
-Every write is an event with before and after snapshots. `trailhead undo` undoes your last batch, and `trailhead revert` undoes what an agent did since a time. Anything changed afterwards by someone else is skipped and reported. Undo works for 90 days.
+Every write is an event with before and after snapshots. `trailhead undo` undoes your last batch, and `trailhead revert` undoes what an agent did since a time. Anything changed afterwards by someone else is skipped and reported. So is a restore that would put a task under itself (a parent cycle); each entry in `skipped` carries a `reason` saying why. Undo works for 90 days.
 
 ## Grades
 

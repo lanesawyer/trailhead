@@ -1,5 +1,5 @@
 use trailhead_factory::{RaiseGrade, Role, RunOutcome, Status, VerdictKind};
-use trailhead_testkit::Script;
+use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
 
@@ -164,7 +164,7 @@ async fn a_failed_reviewer_revoke_doesnt_drop_the_verdict() {
     };
     r.harness.push(Role::Reviewer, Script::new(verdict));
     // The worker's revoke and the reviewer's both fail.
-    r.tracker.fail_next("factory", "revoke_sub_agent", 2);
+    r.tracker.fail_next("factory", TrackerOp::RevokeSubAgent, 2);
     r.factory.tick().await.unwrap();
 
     assert_eq!(r.tracker.task(&key).grade, Grade::new(4), "the verdict was still acted on");

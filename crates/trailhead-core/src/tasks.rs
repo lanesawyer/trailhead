@@ -991,8 +991,11 @@ impl Store {
     }
 }
 
-const STOP_WORDS: &[&str] =
-    &["the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use"];
+const STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use",
+    // Two-letter function words, which pass the length check when a title is written in capitals.
+    "to", "in", "of", "on", "or", "an", "at", "by", "is", "it", "as", "be", "if", "so", "do", "no", "up",
+];
 
 /// The lowercase words of a title that say what it's about. Words under three characters are
 /// dropped, except two-letter acronyms written in capitals (CI, UI, DB).
@@ -1056,16 +1059,24 @@ fn review_asks_changes_sql(id: &str) -> String {
 
 /// Where a task whose claim ends while `in_progress` goes back to: `in_review` when it was claimed from there and
 /// its review still asks for changes, so a rework that failed or lapsed stays in the review loop instead of sinking
-/// into the backlog; otherwise `open`.
+/// into the backlog; otherwise `open`. A claim that was undone doesn't count unless the undo was itself undone: an
+/// event is live when its chain of undos has even length.
 pub(crate) async fn unclaimed_status(conn: &libsql::Connection, task: &Task) -> Result<Status> {
     let mut rows = conn
         .query(
             &format!(
-                "SELECT COALESCE((SELECT json_extract(before, '$.status') FROM events
-                                  WHERE task_id = ?1 AND undoes IS NULL AND entity = 'task'
-                                    AND json_extract(after, '$.status') = 'in_progress'
-                                    AND COALESCE(json_extract(before, '$.status'), '') != 'in_progress'
-                                  ORDER BY id DESC LIMIT 1) = 'in_review', 0) AND {}",
+                "WITH RECURSIVE chain(root, cur, depth) AS (
+                     SELECT id, id, 0 FROM events
+                     WHERE task_id = ?1 AND undoes IS NULL AND entity = 'task'
+                       AND json_extract(after, '$.status') = 'in_progress'
+                       AND COALESCE(json_extract(before, '$.status'), '') != 'in_progress'
+                     UNION ALL
+                     SELECT chain.root, u.id, chain.depth + 1 FROM events u JOIN chain ON u.undoes = chain.cur
+                 )
+                 SELECT COALESCE((SELECT json_extract(before, '$.status') FROM events
+                                  WHERE id = (SELECT root FROM chain GROUP BY root
+                                              HAVING MAX(depth) % 2 = 0 ORDER BY root DESC LIMIT 1)) = 'in_review', 0)
+                        AND {}",
                 review_asks_changes_sql("?1")
             ),
             [task.id.to_string()],

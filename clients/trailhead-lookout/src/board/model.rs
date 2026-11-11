@@ -290,7 +290,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::Factory,
                 label: "factory".into(),
-                tone: Some(token::STATUS_INFO),
+                tone: Some(token::FACTORY),
                 hint: None,
             });
         }

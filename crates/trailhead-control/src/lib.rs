@@ -61,7 +61,7 @@ pub const UPDATE_ASKS: u32 = 3;
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
-/// Reads the current `[merge] mode`, or says why it can't.
+/// Reads the current `[factory.merge] mode`, or says why it can't.
 pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String> + Send + Sync>;
 
 /// State shared by every [`Factory`] on one host (one per repo): a usage reading from any repo's run pauses them all,
@@ -399,6 +399,6 @@ impl Factory {
     }
 
     fn branch(task: &Task) -> String {
-        format!("factory/{}", task.key.0.to_ascii_lowercase())
+        format!("factory/{}", task.key.to_ascii_lowercase())
     }
 }
