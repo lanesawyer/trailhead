@@ -18,7 +18,6 @@ use trailhead_model::{self as model, CommentKind};
 #[derive(Clone)]
 pub struct RestTracker {
     client: Client,
-    base: String,
     cred: Credential,
 }
 
@@ -26,7 +25,7 @@ impl RestTracker {
     /// `base` is the server's root URL, e.g. `http://127.0.0.1:7241`.
     pub fn new(base: impl Into<String>, cred: Credential) -> RestTracker {
         let base = base.into();
-        RestTracker { client: Client::new(base.clone(), cred.token.clone()), base, cred }
+        RestTracker { client: Client::new(base, cred.token.clone()), cred }
     }
 
     async fn patch(&self, task: &TaskKey, update: TaskUpdate) -> Result<()> {
@@ -132,7 +131,7 @@ impl Tracker for RestTracker {
     /// Sandboxes don't act as other agents. The handle this returns refuses everything.
     fn sub_agent(&self, name: &str) -> Arc<dyn Tracker> {
         let mut refused = self.clone();
-        refused.client = Client::new(self.base.clone(), "");
+        refused.client = self.client.with_token("");
         refused.cred = Credential { agent: format!("{}/{name}", self.cred.agent), token: String::new() };
         Arc::new(refused)
     }

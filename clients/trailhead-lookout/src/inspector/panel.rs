@@ -649,4 +649,21 @@ mod tests {
         let panel = world.query_filtered::<&Node, With<InspectorPanel>>().single(world).unwrap();
         assert_eq!(panel.display, Display::Flex);
     }
+
+    #[test]
+    fn a_factory_event_that_leaves_the_human_grades_alone_dresses_nothing_again() {
+        use crate::factory::FactoryStatus;
+        let mut app = app();
+        settle(&mut app);
+        let stamps = |app: &mut App| {
+            let world = app.world_mut();
+            world.query::<(Entity, Ref<Act>)>().iter(world).map(|(e, a)| (e, a.last_changed())).collect::<Vec<_>>()
+        };
+        let before = stamps(&mut app);
+        assert!(!before.is_empty());
+        // Any factory event touches the resource; none of them changes the grades.
+        app.world_mut().resource_mut::<FactoryStatus>().set_changed();
+        settle(&mut app);
+        assert_eq!(stamps(&mut app), before);
+    }
 }
