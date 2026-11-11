@@ -162,6 +162,8 @@ pub struct Card {
     pub actions: Vec<CardAction>,
     /// Where a search matched this task when its key and title did not: "in description: …".
     pub found: Option<String>,
+    /// Its pull request, which a tool button opens in the browser.
+    pub pr: Option<PrLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,6 +356,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges,
             actions,
             found: found(t),
+            pr: pr_link(t),
         }
     };
 
@@ -639,6 +642,14 @@ mod tests {
     }
 
     #[test]
+    fn a_card_with_a_pr_links_to_it() {
+        let view = run(&Filter::default());
+        let pr = card(&view, "TRAIL-104").pr.clone().unwrap();
+        assert_eq!((pr.label.as_str(), pr.url.as_str()), ("o/r#9", "https://host/o/r/pull/9"));
+        assert!(card(&view, "TRAIL-102").pr.is_none());
+    }
+
+    #[test]
     fn every_card_can_be_edited_and_commented_and_only_one_with_a_question_can_be_answered() {
         let view = run(&Filter::default());
         assert_eq!(card(&view, "TRAIL-102").actions, [CardAction::Edit, CardAction::Comment]);
@@ -785,6 +796,7 @@ mod tests {
                 badges: vec![],
                 actions: vec![],
                 found: None,
+                pr: None,
             })
             .collect()
     }

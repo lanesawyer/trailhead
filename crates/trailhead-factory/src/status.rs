@@ -147,6 +147,19 @@ pub struct TargetSpend {
     pub capped: bool,
 }
 
+/// How full one of the subscription's usage windows is (Claude's `five_hour` session or `seven_day` week), as a run
+/// last heard (`RunEvent::Quota`). Host-wide: every repo's board carries the same readings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    pub window: String,
+    pub used_percent: u32,
+    /// Unix seconds. A reading past it is stale: the window has reset since.
+    pub resets_at: i64,
+    /// The percent at or past which the factory starts no new runs (`[factory] pause_at`), when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_at: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactorySnapshot {
     pub control: ControlState,
@@ -172,6 +185,9 @@ pub struct FactorySnapshot {
     /// uses them to tell the factory's tasks from the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queue: Vec<TaskKey>,
+    /// The subscription's usage windows, by window name. Empty until a run has reported one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage: Vec<UsageWindow>,
     /// The sequence number of the last event the snapshot includes, so a client can join the stream after it.
     pub seq: u64,
 }
@@ -214,6 +230,10 @@ pub enum FactoryEvent {
     Holding {
         holding: Option<String>,
     },
+    /// A usage window's reading changed: every window, as in the snapshot's `usage`.
+    Usage {
+        usage: Vec<UsageWindow>,
+    },
     /// An event a newer control plane sent that this build doesn't know. Clients ignore it, so a variant can be added
     /// without breaking older clients.
     #[serde(other)]
@@ -242,6 +262,10 @@ impl FactoryEvent {
             FactoryEvent::Unknown => "unknown event".to_string(),
             FactoryEvent::Holding { holding: Some(why) } => format!("holding merges: {why}"),
             FactoryEvent::Holding { holding: None } => "no longer holding merges".to_string(),
+            FactoryEvent::Usage { usage } => {
+                let windows: Vec<String> = usage.iter().map(|w| format!("{} {}%", w.window, w.used_percent)).collect();
+                format!("usage: {}", windows.join(", "))
+            }
             FactoryEvent::SandboxChanged { sandbox } => format!("sandbox {} {}", sandbox.name, sandbox.state.as_str()),
             FactoryEvent::SandboxGone { name } => format!("sandbox {name} gone"),
             FactoryEvent::RunPhase { task, phase } => format!("{} {}", task.0, phase.label()),

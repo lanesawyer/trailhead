@@ -608,6 +608,7 @@ mod tests {
             }],
             human_grades: None,
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 12,
         };
         let out = render_live(&snapshot);
