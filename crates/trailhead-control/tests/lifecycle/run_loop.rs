@@ -899,5 +899,5 @@ async fn a_parked_task_with_a_pushed_branch_and_no_pr_is_compared_with_its_branc
         .prepared()
         .into_iter()
         .any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1") && p.branch_if_present);
-    assert!(resumed, "a branch that was never pushed leaves it on the base");
+    assert!(resumed, "it resumes on the branch it pushed");
 }
