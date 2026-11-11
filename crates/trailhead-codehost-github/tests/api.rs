@@ -318,7 +318,11 @@ fn etagged(g: &mut Git, headers: &HeaderMap, body: Value) -> Response {
 
 async fn check_runs(State(g): State<Shared>, headers: HeaderMap) -> Response {
     let mut g = g.lock().unwrap();
-    let runs = json!({ "check_runs": [{ "name": "ci", "status": "completed", "conclusion": "success" }] });
+    // The second run is one GitHub left `in_progress` with a conclusion, which must not hold CI pending.
+    let runs = json!({ "check_runs": [
+        { "name": "ci", "status": "completed", "conclusion": "success" },
+        { "name": "machete", "status": "in_progress", "conclusion": "success" },
+    ] });
     etagged(&mut g, &headers, runs)
 }
 

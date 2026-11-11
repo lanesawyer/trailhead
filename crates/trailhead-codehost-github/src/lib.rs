@@ -405,7 +405,8 @@ fn summarize_ci(runs: &[Value], statuses: &[Value]) -> CiState {
     let mut pending = runs.is_empty() && statuses.is_empty();
     for run in runs {
         let name = run["name"].as_str().unwrap_or("check").to_string();
-        if run["status"].as_str() != Some("completed") {
+        // GitHub sometimes leaves a run `in_progress` after it has a conclusion, so the conclusion decides.
+        if run["status"].as_str() != Some("completed") && run["conclusion"].is_null() {
             pending = true;
             continue;
         }
@@ -796,6 +797,13 @@ mod tests {
         assert_eq!(summarize_ci(&done, &[status("deploy", "pending")]), CiState::Pending);
     }
 
+    #[test]
+    fn ci_treats_a_run_with_a_conclusion_as_finished_whatever_its_status() {
+        let runs = [run("test", "completed", Some("success")), run("machete", "in_progress", Some("success"))];
+        assert_eq!(summarize_ci(&runs, &[]), CiState::Passed);
+        let bad = [run("machete", "in_progress", Some("failure"))];
+        assert_eq!(summarize_ci(&bad, &[]), CiState::Failed { checks: vec!["machete".into()] });
+    }
     #[test]
     fn ci_fails_naming_what_failed_even_while_other_checks_run() {
         let runs = [
