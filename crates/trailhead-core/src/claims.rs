@@ -13,7 +13,7 @@ use crate::identity::load_workspace;
 use crate::projects::{load_project, validate_ttl};
 use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::{find_task, load_task, unclaimed_status, update_status};
-use trailhead_model::{Claim, Comment, Entity, Status, Task};
+use trailhead_model::{Claim, ClaimResult, Entity, HeldClaim, Status, Task};
 
 const CLAIM_COLS: &str = "task_id, workspace_id, holder_id, on_behalf_of, claimed_at, expires_at";
 
@@ -191,16 +191,6 @@ async fn lost_or_never_held(tx: &Tx, task: &Task) -> Result<Error> {
     })
 }
 
-/// A claim the caller holds, with enough of the task to act on it.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct HeldClaim {
-    pub key: String,
-    pub title: String,
-    pub status: Status,
-    pub claim: Claim,
-}
-
 /// A live claim with its holder's name, for labelling task lists.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -210,16 +200,6 @@ pub struct NamedClaim {
     /// The holder's user or agent name, e.g. `lane` or `claude/openapi`.
     pub holder: String,
 }
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ClaimResult {
-    pub task: Task,
-    pub claim: Claim,
-    /// The last handoff left on this task, so the next worker picks up where it stopped.
-    pub handoff: Option<Comment>,
-}
-
 impl Store {
     /// Takes a lease on a task and moves it to `in_progress`. Claiming a task you
     /// already hold extends the lease.

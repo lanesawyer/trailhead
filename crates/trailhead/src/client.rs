@@ -59,7 +59,7 @@ impl Client {
         if ours
             && let Some(info) = health(&http, &base, Some(&token)).await
             && is_stale(&info)
-            && !would_start_unscoped_under_systemd()
+            && !skip_restart_unscoped()
         {
             match info.runs_in_flight.unwrap_or(0) {
                 // A restart now would cancel the factory's runs: the server drains them and restarts itself, and keeps
@@ -576,6 +576,18 @@ fn would_start_unscoped_under_systemd() -> bool {
     systemd_run_on_path() && current_scope_env().is_none()
 }
 
+/// The note printed when a stale server is left running because restarting it would start it unscoped.
+const UNSCOPED_RESTART_NOTE: &str = "note: a newer trailhead is installed, but the local server isn't restarted onto it: systemd-run is on PATH but there is no user manager to scope it under (no /run/user/<uid>), so a restarted server would die with this process";
+
+/// True, after saying why on stderr, when a stale server must be left alone for lack of a user manager.
+fn skip_restart_unscoped() -> bool {
+    let skip = would_start_unscoped_under_systemd();
+    if skip {
+        eprintln!("{UNSCOPED_RESTART_NOTE}");
+    }
+    skip
+}
+
 /// The systemd unit (the last cgroup path component, e.g. `trailhead-server-123.scope`) a `/proc/<pid>/cgroup`
 /// says its process runs in. Only the unified (v2) hierarchy line is read.
 pub fn cgroup_unit(proc_cgroup: &str) -> Option<String> {
@@ -737,6 +749,13 @@ mod scope_env_tests {
     #[test]
     fn no_run_user_dir_of_ours_means_unscoped() {
         assert_eq!(scope_env(None, None, 1000, |_| false), None);
+    }
+
+    #[test]
+    fn skipped_restart_note_says_why() {
+        assert!(UNSCOPED_RESTART_NOTE.starts_with("note: "));
+        assert!(UNSCOPED_RESTART_NOTE.contains("/run/user/<uid>"));
+        assert!(!UNSCOPED_RESTART_NOTE.contains('\n'));
     }
 
     #[test]

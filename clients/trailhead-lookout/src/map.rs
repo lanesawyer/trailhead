@@ -519,6 +519,7 @@ mod tests {
                 spend: Usd::dollars(spend),
                 last_tool: None,
                 started: 0,
+                phase_started: 0,
             },
         }
     }
