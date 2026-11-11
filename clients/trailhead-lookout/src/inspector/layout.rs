@@ -707,7 +707,7 @@ pub(super) fn dress_note(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn dress(
     shown: Query<(&Shown, Option<&Parts>)>,
-    every: Query<Entity, With<Shown>>,
+    every: Query<(Entity, &Shown)>,
     factory: Res<FactoryStatus>,
     changed: Query<Entity, Changed<Shown>>,
     mut texts: Query<&mut Text>,
@@ -715,14 +715,20 @@ pub(super) fn dress(
     mut moves: Query<&mut StatusMove>,
     mut edit: SelectEdit,
     (mut inline, mut fields, mut edits): (Query<&mut InlineText>, Query<&mut InlineField>, Query<&mut Edits>),
-    mut again: Local<Vec<Entity>>,
+    (mut again, mut graded): (Local<Vec<Entity>>, Local<Option<Vec<Grade>>>),
     mut commands: Commands,
 ) {
     let mut todo: Vec<Entity> = std::mem::take(&mut *again);
     todo.extend(changed.iter());
+    // Only the grade pickers read the factory, and only the grades a human may give.
     if factory.is_changed() {
-        todo.extend(every.iter());
+        let grades = factory.human_grades();
+        if graded.as_ref() != Some(&grades) {
+            todo.extend(every.iter().filter(|(_, s)| matches!(s.0, Block::Grade { .. })).map(|(e, _)| e));
+            *graded = Some(grades);
+        }
     }
+    todo.sort();
     todo.dedup();
     for entity in todo {
         let Ok((Shown(block), parts)) = shown.get(entity) else { continue };
