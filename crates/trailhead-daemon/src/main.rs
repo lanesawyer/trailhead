@@ -413,7 +413,8 @@ mod tests {
         assert_eq!(super::workspace("w".into(), &failed_list().await).remote_base(), "https://github.com");
     }
 
-    #[tokio::test]
+    // Paused clock: the GitHub client's GET retries back off 0.5s, 1s and 2s, which would otherwise sleep for real.
+    #[tokio::test(start_paused = true)]
     async fn codehost_is_github_only_with_a_github_connection() {
         let with_github = conns(serde_json::json!([{"provider": "github", "gateway_base_url": "http://127.0.0.1:1"}]));
         let err = title_error(super::codehost(identity(), &with_github)).await;
