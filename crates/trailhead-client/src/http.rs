@@ -114,7 +114,14 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Transport(e) | Error::Decode { source: e, .. } => Some(e),
+            Error::Api { .. } => None,
+        }
+    }
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -356,6 +363,7 @@ mod tests {
         let err = Client::new(base, "t").ready("TRAIL", 1).await.unwrap_err();
         assert!(matches!(err, Error::Decode { status: 200, .. }), "{err}");
         assert_eq!(err.status(), Some(200));
+        assert!(std::error::Error::source(&err).is_some_and(|s| s.is::<reqwest::Error>()));
     }
 
     #[tokio::test]
@@ -363,6 +371,7 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let err = Client::new(format!("http://127.0.0.1:{port}"), "t").ready("TRAIL", 1).await.unwrap_err();
         assert!(matches!(err, Error::Transport(_)), "{err}");
+        assert!(std::error::Error::source(&err).is_some_and(|s| s.is::<reqwest::Error>()));
     }
 
     #[test]
