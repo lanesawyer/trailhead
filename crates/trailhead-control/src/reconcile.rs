@@ -276,27 +276,40 @@ impl Factory {
         self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
         // A parked task can't be finished without a claim: it is claimed where it is, never reopened first, so no other
         // agent can take it from open in between (TRAIL-402).
-        let mut claimed = false;
+        // A park cut short after the unapproved merge was found: finish it, don't try to finish the task (TRAIL-729).
+        if merged_by_human && task.run.unapproved_merge == Some(true) && task.status != Status::NeedsInput {
+            return self.park_unapproved_merge(task, &pr_url).await;
+        }
         if task.status == Status::NeedsInput {
             self.tracker.claim(&task.key).await?;
-            claimed = true;
         }
         match self.tracker.finish(&task.key, &handoff).await {
             // A person merged work nobody approved, and core won't let the factory that did it call it done. The merge
             // is recorded, so ask once for a person to mark it done rather than be refused again every pass (TRAIL-706).
             Err(Error::Forbidden(why)) if merged_by_human => {
                 tracing::warn!(task = %task.key, %why, "the PR was merged unapproved; parking for a person to finish it");
-                // Claimed as it stands, in review, never reopened first: a failed claim then leaves it as it was, not
-                // open and unheld (TRAIL-826).
-                if !claimed {
-                    self.tracker.claim(&task.key).await?;
-                }
-                return self.tracker.ask(&task.key, &messages::merged_unapproved_question(&pr_url)).await;
+                self.tracker
+                    .report(&task.key, RunUpdate { unapproved_merge: Some(true), ..RunUpdate::default() })
+                    .await?;
+                return self.park_unapproved_merge(task, &pr_url).await;
             }
             finished => finished?,
         }
         tracing::info!(task = %task.key, %handoff, "PR merged; task done");
         Ok(())
+    }
+
+    /// Parks a task whose PR a person merged unapproved, from wherever a cut-short park left it: an approved task is
+    /// unapproved, one in review or open is claimed as it stands (never reopened first: a failed claim then leaves it
+    /// as it was, not open and unheld; TRAIL-826), then asked. A parked one is already claimed.
+    async fn park_unapproved_merge(&self, task: &Task, pr_url: &str) -> Result<()> {
+        if task.status == Status::Approved {
+            self.tracker.unapprove(&task.key).await?;
+        }
+        if matches!(task.status, Status::InReview | Status::Approved | Status::Open) {
+            self.tracker.claim(&task.key).await?;
+        }
+        self.tracker.ask(&task.key, &messages::merged_unapproved_question(pr_url)).await
     }
 
     /// A PR closed without merging: the task is parked with a question for a human, rather than reopened, since a
@@ -473,8 +486,9 @@ impl Factory {
             // by anyone finishes the task all the same, unless it is already recorded (merged by hand before approval,
             // parked for a person to mark it done): that one is skipped below.
             Status::NeedsInput => {
-                // One already recorded as merged by hand was parked for a person to finish: don't ask again.
-                if task.run.merged.is_none()
+                // One already parked for a merge by hand waits for a person to finish it: don't ask again. A `merged`
+                // record without the park is a close that failed before it, so it is retried (TRAIL-729).
+                if task.run.unapproved_merge != Some(true)
                     && let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost)
                     && let PrState::Merged { commit } = codehost.pr_state(pr).await?
                 {

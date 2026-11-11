@@ -168,7 +168,9 @@ impl Runner {
         // Where the agent's work starts, which is what it's published on top of.
         let start = self.workspace.head().await?;
         let merging_before = self.workspace.merge_head().await?;
-        let (mut outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events).await?;
+        // One timer for both phases, so the drive-to-finish boundary doesn't restart it.
+        let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + self.renew_every, self.renew_every);
+        let (mut outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events, &mut renew).await?;
         // A merge of the base branch is published as one, or the PR would still conflict. It may be one prepare
         // started or one the agent did itself, so read it again now, preferring that.
         let now = self.workspace.merge_head().await?;
@@ -210,12 +212,9 @@ impl Runner {
             if req.role != Role::Worker {
                 return std::future::pending::<()>().await;
             }
-            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + self.renew_every, self.renew_every);
             loop {
-                tick.tick().await;
-                if let Err(e) = tracker.renew(&req.task.key).await {
-                    tracing::warn!(task = %req.task.key, error = %e, "renewing the claim failed");
-                }
+                renew.tick().await;
+                Self::renew(tracker.as_ref(), &req.task.key).await;
             }
         };
         // What the checks found, kept here so a failure after them doesn't lose it.
@@ -243,6 +242,13 @@ impl Runner {
         Ok(RunReport { result, checks, usage })
     }
 
+    /// Renews the claim, logging a failure.
+    async fn renew(tracker: &dyn Tracker, key: &TaskKey) {
+        if let Err(e) = tracker.renew(key).await {
+            tracing::warn!(task = %key, error = %e, "renewing the claim failed");
+        }
+    }
+
     /// Runs the harness, forwarding its events and totting up usage, renewing a worker's claim as it goes.
     async fn drive(
         &self,
@@ -251,6 +257,7 @@ impl Runner {
         tracker: &dyn Tracker,
         cancel: &Notify,
         events: &EventSink,
+        renew: &mut tokio::time::Interval,
     ) -> Result<(RunOutcome, Usage)> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let run = match (&req.feedback, req.role) {
@@ -258,7 +265,6 @@ impl Runner {
             _ => self.harness.run(ctx, tx),
         };
         tokio::pin!(run);
-        let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + self.renew_every, self.renew_every);
         let mut beat =
             tokio::time::interval_at(tokio::time::Instant::now() + self.heartbeat_every, self.heartbeat_every);
         let mut usage = Usage::default();
@@ -280,11 +286,7 @@ impl Runner {
                     let quiet_secs = quiet.secs();
                     let _ = events.send(RunEvent::Heartbeat { quiet_secs });
                 }
-                _ = renew.tick(), if req.role == Role::Worker => {
-                    if let Err(e) = tracker.renew(&req.task.key).await {
-                        tracing::warn!(task = %req.task.key, error = %e, "renewing the claim failed");
-                    }
-                }
+                _ = renew.tick(), if req.role == Role::Worker => Self::renew(tracker, &req.task.key).await,
                 out = &mut run => break out?,
             }
         };
@@ -502,7 +504,7 @@ impl Runner {
                 };
                 // The PR is open and the work checked, so a tracker that fails now doesn't fail the run: the
                 // control plane records the PR and the review request itself when it sees `PrOpened`.
-                // Each write is retried on its own, and only while the error looks transient (`Error::Other`): a
+                // Each write is retried on its own, and only while the error looks transient (`Error::is_transient`): a
                 // refusal (forbidden, conflict, rejected) would answer the same next time.
                 let mut reported = false;
                 let mut review_requested = false;
@@ -515,7 +517,7 @@ impl Runner {
                             Ok(()) => reported = true,
                             Err(e) => {
                                 tracing::warn!(task = %key, attempt, error = %e, "couldn't record the opened PR");
-                                if matches!(e, Error::Other(_)) {
+                                if e.is_transient() {
                                     continue;
                                 }
                                 break;
@@ -529,7 +531,7 @@ impl Runner {
                         }
                         Err(e) => {
                             tracing::warn!(task = %key, attempt, error = %e, "couldn't request review of the opened PR");
-                            if !matches!(e, Error::Other(_)) {
+                            if !e.is_transient() {
                                 break;
                             }
                         }
