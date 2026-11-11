@@ -71,7 +71,7 @@ pub enum Error {
     #[error("invalid config: {0}")]
     Config(String),
     /// The remote refused the request and repeating it won't change that (a 400 or 422, say), unlike
-    /// [`Error::Other`], which may be a blip worth retrying.
+    /// [`Error::Other`] and [`Error::Unreachable`], which may be a blip worth retrying (see [`Error::is_transient`]).
     #[error("rejected: {0}")]
     Rejected(String),
     /// A resource the run needs is short right now (a full disk, say) and will be again only when something is
@@ -82,6 +82,10 @@ pub enum Error {
     /// this points at the repo's code, not the sandbox: a rework can go on from it with the output as context.
     #[error("setup failed: {0}")]
     SetupFailed(String),
+    /// The server couldn't be connected to at all (refused, no route), as opposed to a request that failed midway.
+    /// Transient, like [`Error::Other`]: retry checks must treat the two alike (use [`Error::is_transient`]).
+    #[error("unreachable: {0}")]
+    Unreachable(String),
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]
@@ -89,6 +93,11 @@ pub enum Error {
 }
 
 impl Error {
+    /// Whether repeating the request might succeed: [`Error::Other`] and [`Error::Unreachable`], not a refusal.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Error::Other(_) | Error::Unreachable(_))
+    }
+
     /// [`Error::Rejected`] for a client error the remote won't answer differently next time (any 4xx but 408 and
     /// 429), otherwise [`Error::Other`].
     pub fn from_status(status: u16, msg: String) -> Error {
@@ -117,6 +126,14 @@ pub fn review_name(task: &TaskKey, attempt: u32, round: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreachable_and_other_are_transient() {
+        assert!(Error::Unreachable("x".into()).is_transient());
+        assert!(Error::Other("x".into()).is_transient());
+        assert!(!Error::Rejected("x".into()).is_transient());
+        assert!(!Error::Forbidden("x".into()).is_transient());
+    }
 
     #[test]
     fn from_status_rejects_only_client_errors_worth_not_repeating() {

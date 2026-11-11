@@ -107,7 +107,7 @@ over growing a private copy.
   header flashes, scroll positions go. The only despawns are opening and closing the surface itself (a panel, a
   modal). On a change, set what changed: a select's chosen row and, only when its options changed, its rows
   (`SelectEdit`; never while its popup is open), a button's caption, a chip's tone and words (`ChipEdit`), a
-  disabled state. Lists that gain, lose and reorder items go through `widgets::keyed`. Each app guards this with a
+  disabled state. Lists that gain, lose and reorder items go through `trailhead_ui::Keyed`. Each app guards this with a
   test (Lookout's is in the `lookout-ui` skill).
 - Presses arrive as `Activate` events (from `bevy::ui_widgets`, which feathers builds on), not `Interaction`.
 - `system_clipboard` must stay in the Bevy features, or no text field can paste.
