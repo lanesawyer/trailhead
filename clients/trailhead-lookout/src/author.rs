@@ -232,11 +232,11 @@ pub fn parent_suggestions<'a>(
 }
 
 /// What to tell the person about an answer that wasn't `Ok`.
-pub fn describe(outcome: &Outcome) -> String {
+pub fn describe(outcome: &Outcome, what: &str) -> String {
     match outcome {
         Outcome::Ok { .. } => String::new(),
         Outcome::Conflict { message, .. } => {
-            format!("The task changed since you opened it ({message}). Close this and open it again.")
+            format!("The {what} changed since you opened it ({message}). Close this and open it again.")
         }
         Outcome::Forbidden(m) => format!("Not allowed: {m}"),
         Outcome::RateLimited { retry_after, message } => match retry_after {
@@ -541,7 +541,7 @@ fn finish(
             form.close();
         } else {
             form.saving = false;
-            form.message = describe(&d.outcome);
+            form.message = describe(&d.outcome, "task");
         }
     }
 }
@@ -995,6 +995,7 @@ mod tests {
             control: trailhead_factory::status::ControlState::Up,
             queue: vec!["TRAIL-102".into(), "TRAIL-685".into(), "OPS-3".into()],
             last_error: None,
+            holding: None,
             human_grades: Vec::new(),
             seq: 1,
         };
@@ -1286,6 +1287,7 @@ mod tests {
             control: trailhead_factory::status::ControlState::Up,
             queue: queues.iter().map(|q| q.to_string()).collect(),
             last_error: None,
+            holding: None,
             human_grades: Vec::new(),
             seq: 1,
         };
@@ -1382,6 +1384,24 @@ mod tests {
     }
 
     #[test]
+    fn a_form_opens_with_the_keyboard_on_its_title() {
+        // Edit opens the inspector, not a form, so the forms are a new task and a new sub-task.
+        for subtask in [false, true] {
+            let mut app = ui_app();
+            settle(&mut app);
+            if subtask {
+                press(&mut app, Act::NewSubtask("TRAIL-7".into()));
+            } else {
+                press(&mut app, Act::New);
+            }
+            settle(&mut app);
+            let focused = app.world().resource::<bevy::input_focus::InputFocus>().get().unwrap();
+            let field = app.world().get::<Field>(focused);
+            assert_eq!(field.map(|f| f.0), Some(FieldKind::Title), "subtask: {subtask}");
+        }
+    }
+
+    #[test]
     fn the_form_shows_what_the_draft_needs_and_offers_parents_as_you_type() {
         let mut app = ui_app();
         report_queues(&mut app, &["TRAIL-102"]);
@@ -1447,5 +1467,12 @@ mod tests {
         app.world_mut().resource_mut::<Form>().saving = true;
         press(&mut app, Act::Cancel);
         assert!(app.world().resource::<Form>().open.is_some());
+    }
+
+    #[test]
+    fn a_conflict_names_what_changed() {
+        let conflict = Outcome::Conflict { current_version: Some(3), message: "stale".into() };
+        assert!(describe(&conflict, "task").starts_with("The task changed since you opened it"));
+        assert!(describe(&conflict, "project").starts_with("The project changed since you opened it"));
     }
 }
