@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use trailhead_factory::{RunPhase, SandboxState};
-use trailhead_model::{Agent, Claim, Comment, CommentKind, Status, Task};
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Status, Task, User};
 use uuid::Uuid;
 
 use crate::board::View;
@@ -119,6 +119,7 @@ pub struct Input<'a> {
     pub claims: &'a [Claim],
     pub comments: &'a [Comment],
     pub agents: &'a [Agent],
+    pub users: &'a [User],
     pub campsites: &'a [Campsite],
     pub runs: &'a [Run],
 }
@@ -161,6 +162,7 @@ pub fn build(input: Input) -> MapModel {
         .collect();
 
     let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
+    let user_name: HashMap<Uuid, &str> = input.users.iter().map(|u| (u.id, u.name.as_str())).collect();
     let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
     let on_behalf_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.on_behalf_of)).collect();
     let holder_name = |holder: Uuid, key: &str| {
@@ -188,8 +190,8 @@ pub fn build(input: Input) -> MapModel {
         let run = run_of.get(key);
         let mut markers = Vec::new();
         if let Some(holder) = holder_of.get(&t.id) {
-            // The snapshot carries no users, so a holder that isn't a known agent gets a label, not just part of an id.
-            // A person claims for themselves (holder == on_behalf_of); anyone else is an agent the stale list lacks.
+            // A holder that is neither a known agent nor a known user gets a label, not just part of an id. A person
+            // claims for themselves (holder == on_behalf_of); anyone else is an agent the stale list lacks.
             let label = || {
                 let id = holder.to_string().chars().take(8).collect::<String>();
                 if on_behalf_of.get(&t.id) == Some(holder) {
@@ -198,7 +200,8 @@ pub fn build(input: Input) -> MapModel {
                     format!("an agent ({id})")
                 }
             };
-            markers.push(Marker::Claim(holder_name(*holder, key).unwrap_or_else(label)));
+            let name = holder_name(*holder, key).or_else(|| user_name.get(holder).map(|n| n.to_string()));
+            markers.push(Marker::Claim(name.unwrap_or_else(label)));
         }
         if let Some(n) = questions.get(&t.id) {
             markers.push(Marker::Questions(*n));
@@ -287,6 +290,7 @@ fn rebuild_map(
     claims: Query<&Mirrored<Claim>>,
     comments: Query<&Mirrored<Comment>>,
     agents: Query<&Mirrored<Agent>>,
+    users: Query<&Mirrored<User>>,
     campsites: Query<&Campsite>,
     runs: Query<&Run>,
     mut map: ResMut<TrailMap>,
@@ -295,13 +299,15 @@ fn rebuild_map(
     if !(gone || !changed.is_empty() || map.is_added()) {
         return;
     }
-    let (tasks, claims, comments, agents) = (rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
+    let (tasks, claims, comments, agents, users) =
+        (rows(&tasks), rows(&claims), rows(&comments), rows(&agents), rows(&users));
     let (campsites, runs): (Vec<_>, Vec<_>) = (campsites.iter().cloned().collect(), runs.iter().cloned().collect());
     let next = build(Input {
         tasks: &tasks,
         claims: &claims,
         comments: &comments,
         agents: &agents,
+        users: &users,
         campsites: &campsites,
         runs: &runs,
     });
@@ -535,6 +541,7 @@ mod tests {
         claims: Vec<Claim>,
         comments: Vec<Comment>,
         agents: Vec<Agent>,
+        users: Vec<User>,
         campsites: Vec<Campsite>,
         runs: Vec<Run>,
     }
@@ -546,6 +553,7 @@ mod tests {
                 claims: &self.claims,
                 comments: &self.comments,
                 agents: &self.agents,
+                users: &self.users,
                 campsites: &self.campsites,
                 runs: &self.runs,
             })
@@ -582,6 +590,7 @@ mod tests {
                 fixture::agent(json!({"id": "a1", "name": "factory/trail-42-a1"})),
                 fixture::agent(json!({"id": "a2", "name": "factory/trail-43-a1"})),
             ],
+            users: vec![],
             campsites: vec![
                 camp("b", SandboxState::Idle, None),
                 camp("a", SandboxState::Busy, Some("TRAIL-42")),
@@ -612,6 +621,17 @@ mod tests {
         let markers = &model.waypoints.iter().find(|w| w.key == "TRAIL-44").unwrap().markers;
         let id = sid("u1");
         assert_eq!(markers[0], Marker::Claim(format!("a person ({})", &id[..8])));
+    }
+
+    #[test]
+    fn a_person_holding_a_claim_is_named_by_the_users_list_and_is_no_walker() {
+        let mut w = world();
+        w.tasks[2] = task("t44", "TRAIL-44", "in_progress");
+        w.users.push(fixture::user(json!({"id": "u1", "name": "Lane"})));
+        let model = w.model();
+        let markers = &model.waypoints.iter().find(|w| w.key == "TRAIL-44").unwrap().markers;
+        assert_eq!(markers[0], Marker::Claim("Lane".into()));
+        assert!(model.walkers.iter().all(|w| w.name != "Lane"));
     }
 
     #[test]
