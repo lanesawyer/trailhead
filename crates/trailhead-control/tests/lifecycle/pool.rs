@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trailhead_factory::{Compute, Role, RunOutcome, Status, TaskKey, label};
+use trailhead_factory::{Compute, Role, RunOutcome, SandboxState, Status, TaskKey, label};
 use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
@@ -118,8 +118,6 @@ async fn reconcile_returns_a_busy_pooled_sandbox_to_idle() {
 
 #[tokio::test]
 async fn a_parked_tasks_pooled_sandbox_shows_paused_after_a_restart() {
-    use trailhead_factory::SandboxState;
-
     let mut r = rig();
     r.tracker.add_task("TRAIL", "Ambiguous", "");
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
@@ -134,6 +132,25 @@ async fn a_parked_tasks_pooled_sandbox_shows_paused_after_a_restart() {
     assert_eq!(snap.sandboxes.len(), 1, "{snap:?}");
     assert_eq!(snap.sandboxes[0].name, "trailhead-w1");
     assert_eq!(snap.sandboxes[0].state, SandboxState::Paused);
+}
+
+#[tokio::test]
+async fn a_pooled_sandbox_of_a_task_this_process_is_running_doesnt_show_paused() {
+    use std::collections::HashSet;
+    use trailhead_factory::SandboxState;
+
+    let mut r = rig();
+    let key = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+
+    restart(&mut r, CONFIG);
+    // The task is parked in the tracker, but this process is running it, so its sandbox isn't paused.
+    r.factory.reconcile_except(&HashSet::from([key])).await.unwrap();
+
+    let snap = r.factory.status().snapshot();
+    assert_eq!(snap.sandboxes.len(), 1, "{snap:?}");
+    assert_ne!(snap.sandboxes[0].state, SandboxState::Paused);
 }
 
 #[tokio::test]
