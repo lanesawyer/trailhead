@@ -562,12 +562,33 @@ fn current_scope_env() -> Option<Vec<(&'static str, std::ffi::OsString)>> {
         return None;
     }
     let uid = std::fs::metadata("/proc/self").ok()?.uid();
-    scope_env(
-        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
-        std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
-        uid,
-        |dir| std::fs::metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == uid),
-    )
+    let xdg = std::env::var_os("XDG_RUNTIME_DIR");
+    let dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS");
+    let vars = scope_env(xdg.as_deref(), dbus.as_deref(), uid, |dir| {
+        std::fs::metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == uid)
+    })?;
+    // A runtime directory doesn't mean a manager: probe its bus before choosing the scoped mode.
+    let var = |name: &str, own: Option<std::ffi::OsString>| {
+        vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()).or(own)
+    };
+    let runtime = var("XDG_RUNTIME_DIR", xdg)?;
+    let address = var("DBUS_SESSION_BUS_ADDRESS", dbus);
+    match bus_socket(std::path::Path::new(&runtime), address.as_deref()) {
+        Some(socket) if std::os::unix::net::UnixStream::connect(&socket).is_err() => None,
+        _ => Some(vars),
+    }
+}
+
+/// The filesystem socket of the user's session bus, which the user manager serves: the first `unix:path=` entry
+/// of `DBUS_SESSION_BUS_ADDRESS`, or `<runtime dir>/bus` when that is unset. `None` for an address that can't be
+/// probed (abstract, tcp, ...), which is taken as usable and left to the failure backstop.
+fn bus_socket(runtime_dir: &std::path::Path, address: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    let Some(address) = address.and_then(|a| a.to_str()).filter(|a| !a.is_empty()) else {
+        return Some(runtime_dir.join("bus"));
+    };
+    let entry = address.split(';').next()?;
+    let params = entry.strip_prefix("unix:")?;
+    params.split(',').find_map(|kv| kv.strip_prefix("path=")).map(Into::into)
 }
 
 /// True when a server started from here would run unscoped, in this process's cgroup, although
@@ -577,7 +598,7 @@ fn would_start_unscoped_under_systemd() -> bool {
 }
 
 /// The note printed when a stale server is left running because restarting it would start it unscoped.
-const UNSCOPED_RESTART_NOTE: &str = "note: a newer trailhead is installed, but the local server isn't restarted onto it: systemd-run is on PATH but there is no user manager to scope it under (no /run/user/<uid>), so a restarted server would die with this process";
+const UNSCOPED_RESTART_NOTE: &str = "note: a newer trailhead is installed, but the local server isn't restarted onto it: systemd-run is on PATH but there is no reachable user manager to scope it under (no /run/user/<uid>, or nothing answering on its bus), so a restarted server would die with this process";
 
 /// True, after saying why on stderr, when a stale server must be left alone for lack of a user manager.
 fn skip_restart_unscoped() -> bool {
@@ -674,7 +695,7 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     let mut scoped = scope_env.is_some();
     let mut started_at = log.metadata().map(|m| m.len()).unwrap_or(0);
     if !scoped && systemd_run_on_path() {
-        note_unscoped(&log, "no user systemd runtime directory found");
+        note_unscoped(&log, "no reachable user systemd manager");
     }
     let mut child = spawn(scoped).context("couldn't start the local server")?;
     // Generous, since a busy machine (a full `cargo test` in a factory sandbox) can take well over 10 s to start it.
@@ -730,6 +751,18 @@ mod cgroup_tests {
 mod scope_env_tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn bus_socket_follows_the_address_or_the_runtime_dir() {
+        let run = std::path::Path::new("/run/user/7");
+        let sock = |a: Option<&str>| bus_socket(run, a.map(OsStr::new));
+        assert_eq!(sock(None), Some("/run/user/7/bus".into()));
+        assert_eq!(sock(Some("")), Some("/run/user/7/bus".into()));
+        assert_eq!(sock(Some("unix:path=/x/bus,guid=ab")), Some("/x/bus".into()));
+        assert_eq!(sock(Some("unix:guid=ab,path=/y")), Some("/y".into()));
+        assert_eq!(sock(Some("unix:abstract=/tmp/dbus-1")), None);
+        assert_eq!(sock(Some("tcp:host=localhost")), None);
+    }
 
     #[test]
     fn xdg_runtime_dir_set_needs_nothing_more() {
