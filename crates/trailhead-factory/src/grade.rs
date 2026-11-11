@@ -86,7 +86,12 @@ impl PrGrade {
 /// Compiles a path glob: `*` and `?` stay within a segment, `**` spans segments (none included, so `**/Cargo.toml`
 /// matches the root's too), and `{a,b}` and `[ab]` work as in a shell.
 pub fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, globset::Error> {
-    Ok(globset::GlobBuilder::new(pattern).literal_separator(true).build()?.compile_matcher())
+    Ok(glob(pattern)?.compile_matcher())
+}
+
+/// The one place the matching rules are set, so [`compile_glob`] and [`compile_glob_set`] can't drift apart.
+fn glob(pattern: &str) -> Result<globset::Glob, globset::Error> {
+    globset::GlobBuilder::new(pattern).literal_separator(true).build()
 }
 
 /// Matches a `/`-separated path against a glob (see [`compile_glob`]). A pattern that doesn't compile matches nothing;
@@ -126,11 +131,14 @@ const CHECK_DEFINITIONS: &[&str] = &[
 fn compile_glob_set<'g>(patterns: impl IntoIterator<Item = &'g str>) -> globset::GlobSet {
     let mut set = globset::GlobSet::builder();
     for p in patterns {
-        if let Ok(g) = globset::GlobBuilder::new(p).literal_separator(true).build() {
+        if let Ok(g) = glob(p) {
             set.add(g);
         }
     }
-    set.build().unwrap_or_else(|_| globset::GlobSet::empty())
+    set.build().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "building the glob set failed; none of its globs will match");
+        globset::GlobSet::empty()
+    })
 }
 
 static CHECK_DEFINITION_SET: LazyLock<globset::GlobSet> =

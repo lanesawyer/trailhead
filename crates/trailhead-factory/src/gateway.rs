@@ -90,9 +90,9 @@ pub enum GatewayResponse {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayState {
     pub sandboxes: Vec<GatewaySandbox>,
-    /// Requests refused because they arrived on a network with no sandbox, by the local address they arrived on.
+    /// Requests refused because they arrived on a network with no sandbox, by the local address they arrived on and then the host asked for.
     #[serde(default)]
-    pub unregistered_refusals: BTreeMap<String, u64>,
+    pub unregistered_refusals: BTreeMap<String, BTreeMap<String, u64>>,
     /// The connections held, without their credentials.
     #[serde(default)]
     pub connections: Vec<GatewayConnectionInfo>,
