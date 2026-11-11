@@ -573,13 +573,25 @@ fn current_scope_env() -> Option<Vec<(&'static str, std::ffi::OsString)>> {
     };
     let runtime = var("XDG_RUNTIME_DIR", xdg)?;
     let address = var("DBUS_SESSION_BUS_ADDRESS", dbus);
-    match bus_socket(std::path::Path::new(&runtime), address.as_deref()) {
-        Some(socket) if std::os::unix::net::UnixStream::connect(&socket).is_err() => None,
+    match manager_sockets(std::path::Path::new(&runtime), address.as_deref()) {
+        Some(sockets) if !sockets.iter().any(|s| std::os::unix::net::UnixStream::connect(s).is_ok()) => None,
         _ => Some(vars),
     }
 }
 
-/// The filesystem socket of the user's session bus, which the user manager serves: the first `unix:path=` entry
+/// The sockets `systemd-run --user` may reach the user manager through: its private socket, tried first, then the
+/// session bus. Any one accepting a connection means a manager is there (servers often have no bus daemon, only
+/// the private socket). `None` when the bus address can't be probed (abstract, tcp, ...), which is taken as usable
+/// and left to the failure backstop.
+fn manager_sockets(
+    runtime_dir: &std::path::Path,
+    address: Option<&std::ffi::OsStr>,
+) -> Option<Vec<std::path::PathBuf>> {
+    let bus = bus_socket(runtime_dir, address)?;
+    Some(vec![runtime_dir.join("systemd/private"), bus])
+}
+
+/// The filesystem socket of the user's session bus (served by dbus-daemon or dbus-broker, not by the manager): the first `unix:path=` entry
 /// of `DBUS_SESSION_BUS_ADDRESS`, or `<runtime dir>/bus` when that is unset. `None` for an address that can't be
 /// probed (abstract, tcp, ...), which is taken as usable and left to the failure backstop.
 fn bus_socket(runtime_dir: &std::path::Path, address: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
@@ -598,7 +610,7 @@ fn would_start_unscoped_under_systemd() -> bool {
 }
 
 /// The note printed when a stale server is left running because restarting it would start it unscoped.
-const UNSCOPED_RESTART_NOTE: &str = "note: a newer trailhead is installed, but the local server isn't restarted onto it: systemd-run is on PATH but there is no reachable user manager to scope it under (no /run/user/<uid>, or nothing answering on its bus), so a restarted server would die with this process";
+const UNSCOPED_RESTART_NOTE: &str = "note: a newer trailhead is installed, but the local server isn't restarted onto it: systemd-run is on PATH but there is no reachable user manager to scope it under (no /run/user/<uid>, or nothing answering on the manager's private socket or the session bus), so a restarted server would die with this process";
 
 /// True, after saying why on stderr, when a stale server must be left alone for lack of a user manager.
 fn skip_restart_unscoped() -> bool {
@@ -695,7 +707,7 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     let mut scoped = scope_env.is_some();
     let mut started_at = log.metadata().map(|m| m.len()).unwrap_or(0);
     if !scoped && systemd_run_on_path() {
-        note_unscoped(&log, "no reachable user systemd manager");
+        note_unscoped(&log, "no user systemd manager answering on its private socket or the session bus");
     }
     let mut child = spawn(scoped).context("couldn't start the local server")?;
     // Generous, since a busy machine (a full `cargo test` in a factory sandbox) can take well over 10 s to start it.
@@ -762,6 +774,16 @@ mod scope_env_tests {
         assert_eq!(sock(Some("unix:guid=ab,path=/y")), Some("/y".into()));
         assert_eq!(sock(Some("unix:abstract=/tmp/dbus-1")), None);
         assert_eq!(sock(Some("tcp:host=localhost")), None);
+    }
+
+    #[test]
+    fn manager_sockets_try_the_private_socket_then_the_bus() {
+        let run = std::path::Path::new("/run/user/7");
+        let socks = |a: Option<&str>| manager_sockets(run, a.map(OsStr::new));
+        let private = std::path::PathBuf::from("/run/user/7/systemd/private");
+        assert_eq!(socks(None), Some(vec![private.clone(), "/run/user/7/bus".into()]));
+        assert_eq!(socks(Some("unix:path=/x/bus")), Some(vec![private, "/x/bus".into()]));
+        assert_eq!(socks(Some("unix:abstract=/tmp/dbus-1")), None);
     }
 
     #[test]
