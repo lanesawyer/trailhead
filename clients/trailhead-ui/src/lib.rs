@@ -153,7 +153,7 @@ pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
 pub use progress::{Progress, progress_bar};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_body_node, scroll_frame, scroll_frame_node};
-pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
+pub use scrollbar::{SCROLLBAR_GAP, SCROLLBAR_INSET, SCROLLBAR_WIDTH, scrollbar};
 pub use search::{
     ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
 };
