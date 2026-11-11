@@ -46,6 +46,7 @@ pub(crate) fn decide(f: &Facts) -> Decision {
             GateKind::Human => (GateKind::Human, f.status == Status::Approved && f.human_head == Some(f.head)),
             GateKind::Quorum => (GateKind::Quorum, false),
             // The PR exists because the worker ran every verifying check, and they passed, before opening it.
+            // A `Named` gate is a check that config validation matched to `[factory.checks]`, so a typo never gets here.
             GateKind::Checks | GateKind::Named(_) => (GateKind::Checks, true),
         };
         let list = if ok { &mut passed } else { &mut waiting };
