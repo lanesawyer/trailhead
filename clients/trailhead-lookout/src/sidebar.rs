@@ -1,6 +1,7 @@
 //! The sidebar down the left of the window, the same in every view: Lookout's name, New task, the search box, the places to go
-//! (Switchbacks, which is the board, the trail map, then each project's page), and a footer with the connection chip
-//! and settings. The places scroll between the search box and the footer, which stay put.
+//! (Switchbacks, which is the board, the trail map, then each project's page), the subscription usage card
+//! ([`crate::usage`]), and a footer with the connection chip and settings. The places scroll between the search box
+//! and the usage card, which stays put with the footer.
 //!
 //! It is spawned once and updated in place: the projects follow the mirror through [`Keyed`], the page shown is marked
 //! on its [`NavItem`], and the chip is edited with [`ChipEdit`]. Searching shows the results on the board.
@@ -23,6 +24,7 @@ use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
 use crate::project_form::NewProject;
 use crate::settings::SettingsButton;
+use crate::usage::{UsageMeterEntities, spawn_usage_card, sync_usage};
 use crate::widgets::{
     ButtonKind, ChipEdit, Icon, Keyed, NavItem, NavPart, Token, Truncated, button, chip, nav_heading_action, nav_item,
     nav_item_noted, scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size,
@@ -94,9 +96,13 @@ pub struct SidebarUiPlugin;
 impl Plugin for SidebarUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Entries>()
+            .init_resource::<UsageMeterEntities>()
             .add_systems(Startup, spawn_sidebar)
             .add_observer(on_nav)
-            .add_systems(Update, (read_search_box, sync_projects, mark_current, update_chip, gate_new_task).chain());
+            .add_systems(
+                Update,
+                (read_search_box, sync_projects, mark_current, update_chip, gate_new_task, sync_usage).chain(),
+            );
     }
 }
 
@@ -132,6 +138,7 @@ fn spawn_sidebar(mut commands: Commands) {
         ProjectList,
         ChildOf(places),
     ));
+    spawn_usage_card(&mut commands, root);
     let footer = commands.queue_spawn_scene(sidebar_footer()).insert(ChildOf(root)).id();
     let (tone, words, hint) =
         connection_chip(Connection::default(), &ConnectionStatus::default(), &FactoryLink::Unknown);
@@ -347,6 +354,9 @@ mod tests {
     use bevy::state::app::StatesPlugin;
     use serde_json::json;
 
+    use bevy::input::keyboard::KeyboardInput;
+    use bevy::input_focus::FocusedInput;
+
     use super::*;
     use crate::board::BoardPlugin;
     use crate::fixture::{project_json, sid, task_json};
@@ -454,7 +464,8 @@ mod tests {
         assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0), "the frame may shrink so the places scroll");
         // The title and the search box above it, the footer below.
         let top: Vec<Entity> = world.get::<Children>(root).unwrap().iter().collect();
-        assert_eq!(top.len(), 6, "the drag edge, title, New task, search, places, footer");
+        assert_eq!(top.len(), 7, "the drag edge, title, New task, search, places, usage, footer");
+        assert!(world.get::<crate::usage::UsageCard>(top[5]).is_some(), "the usage card sits on the footer");
         assert!(world.get::<crate::widgets::SidebarEdge>(top[0]).is_some());
         assert_eq!(top[4], frame);
         let mut entries = world.query_filtered::<Entity, With<NavTo>>();
@@ -474,6 +485,7 @@ mod tests {
         let mut shrinks = world.query_filtered::<&Node, With<NavItem>>();
         assert!(shrinks.iter(world).all(|n| n.flex_shrink == 0.0));
         assert_eq!(world.get::<Node>(top[5]).unwrap().flex_shrink, 0.0);
+        assert_eq!(world.get::<Node>(top[6]).unwrap().flex_shrink, 0.0);
     }
 
     #[test]
@@ -685,6 +697,54 @@ mod tests {
         assert_eq!(words(Connection::Offline, FactoryLink::Running), "Offline");
         let tone = |f| connection_chip(Connection::Live, &status, &f).0;
         assert_ne!(tone(FactoryLink::Running), tone(FactoryLink::Unreachable));
+    }
+
+    #[test]
+    fn the_usage_card_follows_the_readings_in_place() {
+        use trailhead_factory::{ControlState, UsageWindow};
+        let mut app = app();
+        let empty = one::<crate::usage::UsageEmpty>(&mut app);
+        let shown = |app: &App, e| app.world().get::<Node>(e).unwrap().display != Display::None;
+        assert!(shown(&app, empty), "nothing heard yet says so");
+        let resets_at = i64::MAX / 2;
+        let report = |app: &mut App, used: u32| {
+            let usage = vec![
+                UsageWindow { window: "seven_day".into(), used_percent: 10, resets_at, pause_at: None },
+                UsageWindow { window: "five_hour".into(), used_percent: used, resets_at, pause_at: Some(80) },
+            ];
+            let state = crate::factory::RepoState {
+                control: ControlState::Up,
+                queue: Vec::new(),
+                last_error: None,
+                holding: None,
+                human_grades: Vec::new(),
+                usage,
+                seq: 1,
+            };
+            app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), state);
+            settle(app);
+        };
+        report(&mut app, 40);
+        assert!(!shown(&app, empty));
+        let words = |app: &mut App| {
+            let world = app.world_mut();
+            let mut q = world.query::<(&crate::widgets::MeterPart, &Text)>();
+            let mut found: Vec<String> = q
+                .iter(world)
+                .filter(|(p, _)| **p == crate::widgets::MeterPart::Value)
+                .map(|(_, t)| t.0.clone())
+                .collect();
+            found.sort();
+            found
+        };
+        assert_eq!(words(&mut app), ["10%", "40%"]);
+        let before = tree(&mut app);
+        report(&mut app, 85);
+        assert_eq!(words(&mut app), ["10%", "85%"]);
+        assert_eq!(tree(&mut app), before, "a new reading changes words, not entities");
+        let world = app.world_mut();
+        let mut tones = world.query::<&crate::widgets::ProgressTone>();
+        assert!(tones.iter(world).any(|t| t.0 == crate::widgets::token::STATUS_DANGER), "past pause_at");
     }
 
     #[test]
