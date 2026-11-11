@@ -278,11 +278,11 @@ pub fn schema(role: Role) -> Value {
 
 /// The most the human-context section of a prompt may take, in bytes.
 const HUMAN_CONTEXT_CAP: usize = 6000;
-/// How many open follow-ups a reviewer is shown.
-const FOLLOW_UPS_CAP: usize = 40;
-
 /// The most the answers may take of the human-context section, so notes keep the rest.
 const ANSWERS_CAP: usize = 4000;
+
+/// How many open follow-ups a reviewer is shown.
+const FOLLOW_UPS_CAP: usize = 40;
 
 /// The follow-ups earlier reviews of the task filed, so a reviewer doesn't file a reworded copy of one, or leave one
 /// open that the change has since fixed.
@@ -469,7 +469,9 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              Task:\n{desc}{human}\n\n\
              Work in this checkout and follow the repo's conventions (AGENTS.md). Make the change, add or update \
              tests, and run the repo's formatter, linter and tests. You don't need to commit or push; everything \
-             you change in the checkout is published as one commit and a PR. If only a human can answer something \
+             you change in the checkout is published as one commit and a PR. Don't create nested git repositories in \
+             the checkout (no `git init` or `git clone` inside it): the parent's `git add --all` warns about an \
+             embedded repository, or fails if it has no commit. If only a human can answer something \
              you need, stop and give needs_input with the question. A blocker in your environment (the network, a \
              missing tool, credentials) is needs_input, not failed: another attempt would meet the same blocker, \
              so say what is missing. If the task can't be done for another reason, give failed and say \

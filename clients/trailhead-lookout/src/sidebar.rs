@@ -648,6 +648,28 @@ mod tests {
     }
 
     #[test]
+    fn escape_in_the_search_box_empties_it_and_the_filter() {
+        let mut app = app();
+        let field = one::<SearchBox>(&mut app);
+        app.world_mut().entity_mut(field).insert(EditableText::new("trail-8"));
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Filter>().query, "trail-8");
+        let input = KeyboardInput {
+            key_code: KeyCode::Escape,
+            logical_key: bevy::input::keyboard::Key::Escape,
+            state: bevy::input::ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: field,
+        };
+        let window = app.world_mut().spawn_empty().id();
+        app.world_mut().trigger(FocusedInput::new(field, input, window));
+        settle(&mut app);
+        assert_eq!(app.world().get::<EditableText>(field).unwrap().value().to_string(), "");
+        assert_eq!(app.world().resource::<Filter>().query, "");
+    }
+
+    #[test]
     fn the_chip_is_green_only_while_both_links_are_up() {
         let status = ConnectionStatus::default();
         let words = |c, f: FactoryLink| connection_chip(c, &status, &f).1;
