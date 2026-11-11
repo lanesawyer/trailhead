@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use trailhead_control::{Host, Outcome};
 use trailhead_factory::{Compute, Role, RunOutcome, SandboxSpec, Status, TaskKey, Usd, label, run_name};
-use trailhead_testkit::Script;
+use trailhead_testkit::{Script, unix_now};
 
 use crate::common::*;
 
@@ -346,10 +346,6 @@ async fn run_loop_respects_the_sandbox_cap() {
     handle.await.unwrap().unwrap();
 }
 
-fn unix_now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
-}
-
 /// The test config on a host pausing at 80% of the five-hour window.
 fn pausing_rig() -> Rig {
     let pause_at = [("five_hour".to_string(), 80)].into();
@@ -373,7 +369,7 @@ async fn a_nearly_full_usage_window_pauses_new_runs() {
     assert!(r.factory.tick().await.unwrap().is_empty(), "paused until the window resets");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn runs_start_again_once_the_window_resets() {
     let r = pausing_rig();
     report_usage(&r, 95, 1).await;
@@ -381,11 +377,11 @@ async fn runs_start_again_once_the_window_resets() {
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     assert!(r.factory.tick().await.unwrap().is_empty());
-    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    tokio::time::advance(std::time::Duration::from_millis(2100)).await;
     assert_eq!(r.factory.tick().await.unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_run_loop_wakes_itself_when_the_window_resets() {
     let r = pausing_rig();
     report_usage(&r, 90, 1).await;
@@ -433,6 +429,10 @@ async fn held_reviews_land_after_the_window_resets(poll: std::time::Duration) {
     r.harness.push(Role::Reviewer, Script::new(approve()));
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
 
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
     let factory = Arc::new(r.factory);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), poll, async {
@@ -441,6 +441,11 @@ async fn held_reviews_land_after_the_window_resets(poll: std::time::Duration) {
     let tracker = r.tracker.clone();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(tracker.task(&key).run.reviewed, None, "no reviewer starts while the window is paused");
+    let held = || logs.text().matches("holding due reviews back").count();
+    assert_eq!(held(), 1, "said once, naming the review: {}", logs.text());
+    assert!(logs.text().contains(&key.0), "{}", logs.text());
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(held(), 1, "not repeated on every poll");
     tokio::time::advance(std::time::Duration::from_secs(60)).await; // past the window's reset
     until("the review to land once the window resets", || tracker.task(&key).run.reviewed == Some(1)).await;
     stop.send(()).unwrap();

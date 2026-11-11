@@ -151,7 +151,7 @@ pub(crate) fn api_tracker(opts: &Opts, paths: &trailhead_client::paths::Paths) -
 
 /// `e`, with a hint when the server didn't answer.
 pub(crate) fn reach(e: trailhead_factory::Error) -> Error {
-    if e.to_string().contains("error sending request") { Error::ServerDown(e.into()) } else { Error::backend(e) }
+    if matches!(e, trailhead_factory::Error::Unreachable(_)) { Error::ServerDown(e.into()) } else { Error::backend(e) }
 }
 
 /// The local server's `/v1/factory`, when there is a user token to ask it with.
@@ -181,17 +181,8 @@ async fn log_source(
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
     let (found, unreachable) = list_everywhere(&computes, &wanted).await?;
     let sandboxes: Vec<Sandbox> = found.iter().map(|(_, s)| s.clone()).collect();
-    let sandbox = find_sandbox(task, &sandboxes).ok_or_else(|| {
-        let unknown = if unreachable.is_empty() {
-            String::new()
-        } else {
-            format!("; target(s) {} couldn't be reached, so it may be there", unreachable.join(", "))
-        };
-        Error::NoSandbox(format!(
-            "{} has no sandbox right now (it isn't running, or its sandbox was released or destroyed){unknown}",
-            task.key.0
-        ))
-    })?;
+    let sandbox = find_sandbox(task, &sandboxes)
+        .ok_or_else(|| Error::NoSandbox { task: task.key.0.clone(), unreachable: unreachable.clone() })?;
     let compute = computes[found.iter().find(|(_, s)| s.name == sandbox.name).map_or(0, |(i, _)| *i)].0.clone();
     Ok((compute, sandbox.clone()))
 }
@@ -617,6 +608,7 @@ mod tests {
             }],
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 12,
         };
         let out = render_live(&snapshot);
@@ -643,7 +635,7 @@ mod tests {
 
     #[test]
     fn an_unanswered_server_gets_a_hint() {
-        let down = trailhead_factory::Error::Other("trailhead: error sending request for url (http://x)".into());
+        let down = trailhead_factory::Error::Unreachable("trailhead: connection refused".into());
         assert!(reach(down).to_string().contains("is the server running?"));
         let refused = trailhead_factory::Error::NotFound("trailhead 404 not_found: no such task".into());
         assert!(!reach(refused).to_string().contains("is the server running?"));

@@ -45,6 +45,7 @@ impl StatusFeed for TestFeed {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 1,
         };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
@@ -363,12 +364,14 @@ async fn the_log_is_followed_only_while_asked_for() {
     }
     assert!(messages(&app).is_empty());
 
+    app.world_mut().resource_mut::<LogState>().set_streaming(true);
     send(&mut app, NetCommand::Logs(true));
     until(&mut app, "the backlog", |a| messages(a) == ["one", "two"]).await;
     rig.logs.as_ref().unwrap().send(log_line("three")).unwrap();
     until(&mut app, "a new line", |a| messages(a) == ["one", "two", "three"]).await;
 
     // Closed, nobody is following: a line sent now never arrives.
+    app.world_mut().resource_mut::<LogState>().set_streaming(false);
     send(&mut app, NetCommand::Logs(false));
     for _ in 0..20 {
         app.update();
@@ -391,6 +394,7 @@ async fn a_factory_without_logs_is_too_old_to_send_them() {
     let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
     let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
     allowed_and_live(&mut app, &rig).await;
+    app.world_mut().resource_mut::<LogState>().set_streaming(true);
     send(&mut app, NetCommand::Logs(true));
     until(&mut app, "the note", |a| a.world().resource::<LogState>().note().is_some()).await;
     assert_eq!(app.world().resource::<LogState>().note(), Some("this factory is too old to send logs"));

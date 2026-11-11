@@ -114,10 +114,15 @@ depends = ["docs-mermaid"]
 run = "mdbook serve"
 
 [tasks.lookout-install]
-description = "Install Lookout with its desktop entry and icons (~/.cargo/bin, ~/.local/share), so the dock shows the TL icon (the desktop entry's name must match the window's app id, `lookout`)"
+description = "Install Lookout with its desktop entry and icons (~/.cargo/bin, ~/.local/share; the desktop entry's Exec is the binary's absolute path), so the dock shows the TL icon (the desktop entry's name must match the window's app id, `lookout`)"
 run = """
 cargo install --path clients/trailhead-lookout --locked
-install -Dm644 clients/trailhead-lookout/assets/lookout.desktop ~/.local/share/applications/lookout.desktop
+# Exec gets the absolute path: ~/.cargo/bin is often not on the graphical session's PATH
+bin="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/lookout"
+q='"'
+mkdir -p ~/.local/share/applications
+sed "s|^Exec=lookout$|Exec=$q$bin$q|" clients/trailhead-lookout/assets/lookout.desktop > ~/.local/share/applications/lookout.desktop
+chmod 644 ~/.local/share/applications/lookout.desktop
 for size in 32 64 128 256; do
   install -Dm644 clients/trailhead-lookout/assets/icon/$size.png ~/.local/share/icons/hicolor/${size}x${size}/apps/lookout.png
 done
