@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use trailhead_core::{CommentKind, Status};
@@ -59,8 +61,23 @@ pub(crate) async fn ls(
             q.retain(|(k, _)| ["project", "parent"].contains(k));
             q.push(("status", "in_review".into()));
             q.push(("changes_requested", "true".into()));
-            let asked = cx.c.get("tasks", &q).await?;
-            asked.as_array().into_iter().flatten().map(|t| s(t, "key").to_string()).collect()
+            // The server returns at most 100 a page by default, so page until a short one.
+            const PAGE: usize = 100;
+            q.push(("limit", PAGE.to_string()));
+            let mut keys = HashSet::new();
+            let mut offset = 0;
+            loop {
+                let mut page_q = q.clone();
+                page_q.push(("offset", offset.to_string()));
+                let page = cx.c.get("tasks", &page_q).await?;
+                let page = page.as_array().map(Vec::as_slice).unwrap_or_default();
+                keys.extend(page.iter().map(|t| s(t, "key").to_string()));
+                if page.len() < PAGE {
+                    break;
+                }
+                offset += PAGE;
+            }
+            keys
         } else {
             Default::default()
         };
@@ -193,6 +210,7 @@ const FACTORY_FIELDS: &[(&str, Kind)] = &[
     ("conflict_reworks", Kind::Unsigned),
     ("started", Kind::Integer),
     ("released", Kind::Integer),
+    ("unapproved_merge", Kind::Bool),
     ("sandbox", Kind::String),
     ("host", Kind::String),
     ("target", Kind::String),
@@ -452,6 +470,7 @@ mod tests {
             merging: Some("x".into()),
             stale_head: Some("x".into()),
             released: Some(1),
+            unapproved_merge: Some(true),
         };
         let Value::Object(map) = serde_json::to_value(&full).unwrap() else { panic!("RunUpdate isn't an object") };
         for key in map.keys() {
