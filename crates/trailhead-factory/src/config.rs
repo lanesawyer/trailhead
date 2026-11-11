@@ -53,7 +53,7 @@ pub struct FactoryConfig {
     pub merge: MergeConfig,
 }
 
-/// `[merge]`: what the merger does with a PR whose gates passed (`docs/factory/review.md#the-merger`).
+/// `[factory.merge]`: what the merger does with a PR whose gates passed (`docs/factory/review.md#the-merger`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeConfig {
@@ -75,7 +75,7 @@ pub enum MergeMode {
     On,
 }
 
-/// `[grades]`: path globs that raise a PR to at least grade 2, 3 or 4 (keyed by the grade), and the diff size over
+/// `[factory.grades]`: path globs that raise a PR to at least grade 2, 3 or 4 (keyed by the grade), and the diff size over
 /// which it is at least grade 3 (`docs/factory/review.md#grades`). Without the section, the defaults of the example
 /// there; with it, the rules it lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -957,6 +957,7 @@ impl FactoryConfig {
             base_branch: self.repo.base_branch.clone(),
             branch,
             merge_base: false,
+            branch_if_present: false,
             setup: named("setup", &self.checks.setup),
             trim: named("trim", &self.checks.trim),
             disk_warn_bytes: some(self.daemon.disk_warn_bytes),
@@ -1059,10 +1060,11 @@ mod tests {
         assert!(config.prepare_request(Role::Reviewer, None).tool_hosts.is_empty());
         assert_eq!(config.prepare_request(Role::Worker, None).tools, config.stack.tools);
         let mut documented = GradesConfig::default();
-        documented.rules.get_mut("3").unwrap().push("clients/**".into());
+        documented.rules.get_mut("2").unwrap().push("clients/**".into());
+        documented.rules.get_mut("3").unwrap().push("clients/*/src/**".into());
         assert_eq!(
             config.grades, documented,
-            "this repo's rules are the documented example, plus clients/** (TRAIL-703)"
+            "this repo's rules are the documented example, plus clients/** at 2 and its src at 3 (TRAIL-1390)"
         );
         assert_eq!(config.merge.mode, MergeMode::On);
         assert!(config.gate(gr(1)).auto_merge);

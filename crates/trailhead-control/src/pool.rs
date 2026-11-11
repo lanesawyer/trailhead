@@ -116,6 +116,7 @@ impl Factory {
         p: &Placed,
         task: &Task,
         branch: Option<String>,
+        branch_if_present: bool,
         merge_base: bool,
     ) -> Result<(Sandbox, Option<String>)> {
         let pick = self.pool_pick.lock().await;
@@ -182,8 +183,9 @@ impl Factory {
             }
         };
         let preparing = Instant::now();
-        let rework = branch.is_some();
-        let prepare = PrepareRequest { merge_base, ..self.config.prepare_request(Role::Worker, branch) };
+        let rework = branch.is_some() && !branch_if_present;
+        let prepare =
+            PrepareRequest { merge_base, branch_if_present, ..self.config.prepare_request(Role::Worker, branch) };
         let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone()).await;
         let mut setup_failure = None;
         // On a rework the failed `setup` is the code's doing, probably what the worker is there to fix, so the agent
@@ -273,6 +275,15 @@ impl Factory {
                     && let Err(d) = p.compute.delete_checkpoint(&sandbox.id, cp).await
                 {
                     tracing::warn!(sandbox = %sandbox.name, checkpoint = %cp.0, error = %d, "couldn't delete the unused warm checkpoint");
+                }
+                // The cost recorded for the new checkpoint goes with it: release restores the old one, which that
+                // cost doesn't describe, and the next stale check would compare against the wrong figure.
+                if taken.is_some() {
+                    let mut costs = self.warm_cost.lock().unwrap();
+                    match cost {
+                        Some(cost) => costs.insert(sandbox.id.clone(), cost),
+                        None => costs.remove(&sandbox.id),
+                    };
                 }
                 // The old warm checkpoint (if any) is what release restores; a new sandbox has none and is destroyed.
                 self.give_back(&sandbox, &busy).await;
@@ -376,7 +387,7 @@ impl Factory {
                 done.released.push(name.clone());
             }
             Err(e) if self.failed(name) => {
-                self.abandon(sandbox, &e).await;
+                self.abandon(sandbox, &e, started.elapsed()).await;
                 done.abandoned.push(name.clone());
             }
             Err(e) => {
@@ -387,12 +398,13 @@ impl Factory {
 
     /// Takes a sandbox out of the pool for good: destroyed if the compute host allows it, otherwise labelled
     /// [`label::BROKEN`] without a role (so it loses connector access) and destroyed by a later reconcile.
-    async fn abandon(&self, sandbox: &Sandbox, error: &Error) {
+    async fn abandon(&self, sandbox: &Sandbox, error: &Error, took: Duration) {
         let p = self.target_of(sandbox);
         let name = &sandbox.name;
         tracing::error!(
             sandbox = %name,
             %error,
+            ?took,
             "giving up on a pooled sandbox that won't release; leaving it out of the pool and starting a new one"
         );
         if let Some(t) = self.troubled.lock().unwrap().get_mut(name) {
