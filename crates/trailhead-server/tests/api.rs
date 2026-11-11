@@ -76,6 +76,7 @@ async fn health_is_open_and_everything_else_needs_a_token() {
     let health = api.call(None, "GET", "/v1/health", None, &[]).await;
     assert_eq!(health.status, StatusCode::OK);
     assert_eq!(health.body["ok"], true);
+    assert!(health.body.get("store_error").is_none(), "{}", health.body);
     assert!(health.body["version"].is_string());
     // The pid and paths name the local user, so they need a token.
     for k in ["pid", "exe", "exe_modified_ms", "db"] {
@@ -751,4 +752,23 @@ async fn task_list_can_include_the_last_review() {
     assert_eq!(items[0]["last_review"]["body"], "rebase");
     assert_eq!(items[0]["last_review"]["verdict"], "request_changes");
     assert!(items[1]["last_review"].is_null());
+}
+
+#[tokio::test]
+async fn health_reports_a_store_another_connection_has_locked() {
+    let api = Api::new().await;
+    let db = libsql::Builder::new_local(api._dir.path().join("t.db")).build().await.unwrap();
+    let other = db.connect().unwrap();
+    other.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let health = api.call(None, "GET", "/v1/health", None, &[]).await;
+    assert!(started.elapsed() < std::time::Duration::from_millis(1500), "{:?}", started.elapsed());
+    assert_eq!(health.status, StatusCode::OK);
+    assert_eq!(health.body["ok"], false);
+    assert!(health.body["store_error"].is_string(), "{}", health.body);
+
+    other.execute("ROLLBACK", ()).await.unwrap();
+    let health = api.call(None, "GET", "/v1/health", None, &[]).await;
+    assert_eq!(health.body["ok"], true);
 }
