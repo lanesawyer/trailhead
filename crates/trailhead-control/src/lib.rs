@@ -399,6 +399,6 @@ impl Factory {
     }
 
     fn branch(task: &Task) -> String {
-        format!("factory/{}", task.key.0.to_ascii_lowercase())
+        format!("factory/{}", task.key.to_ascii_lowercase())
     }
 }

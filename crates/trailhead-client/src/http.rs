@@ -209,6 +209,11 @@ impl Client {
         Client { http, base: base.into().trim_end_matches('/').to_string(), token: token.into(), reconnect: None }
     }
 
+    /// This client's connection pool and server, acting with `token` instead. Any reconnect hook is kept.
+    pub fn with_token(&self, token: impl Into<String>) -> Client {
+        Client { token: token.into(), ..self.clone() }
+    }
+
     /// Calls `reconnect` when a request can't connect, and retries the request once if it returns true.
     pub fn with_reconnect(mut self, reconnect: Reconnect) -> Client {
         self.reconnect = Some(reconnect);
@@ -315,5 +320,19 @@ impl Client {
     /// `GET /v1/claims`: the live claims the token holds.
     pub async fn my_claims(&self) -> Result<Vec<HeldClaim>> {
         self.send(self.request(routes::MY_CLAIMS, None)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_token_swaps_only_the_token() {
+        let client = Client::new("http://127.0.0.1:1/", "a").with_reconnect(Arc::new(|| Box::pin(async { false })));
+        let other = client.with_token("b");
+        assert_eq!((other.base.as_str(), other.token.as_str()), ("http://127.0.0.1:1", "b"));
+        assert_eq!(client.token, "a");
+        assert!(other.reconnect.is_some());
     }
 }
