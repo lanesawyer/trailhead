@@ -48,12 +48,14 @@ pub struct ListedTask {
     /// With `include=claim`: the live claim, or `null` if the task is unclaimed.
     claim: Option<trailhead_core::NamedClaim>,
     /// With `include=open_questions`: unresolved `question` comments, oldest first.
+    #[schema(nullable = false)]
     open_questions: Option<Vec<trailhead_core::Comment>>,
     /// With `include=last_handoff`: the newest `handoff` comment, or `null`.
     last_handoff: Option<trailhead_core::Comment>,
     /// With `include=last_review`: the newest `review` comment with a verdict, or `null`.
     last_review: Option<trailhead_core::Comment>,
     /// With `include=blocked_by`: the ids of every task blocking this one, finished or not (empty if none).
+    #[schema(nullable = false)]
     blocked_by: Option<Vec<uuid::Uuid>>,
 }
 
@@ -64,6 +66,7 @@ pub struct CreatedTask {
     #[serde(flatten)]
     task: trailhead_core::Task,
     /// Keys of open tasks with a close title; absent when there are none. A warning, not an error.
+    #[schema(nullable = false)]
     possible_duplicates: Option<Vec<String>>,
 }
 
