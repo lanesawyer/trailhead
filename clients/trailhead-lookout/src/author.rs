@@ -232,11 +232,11 @@ pub fn parent_suggestions<'a>(
 }
 
 /// What to tell the person about an answer that wasn't `Ok`.
-pub fn describe(outcome: &Outcome) -> String {
+pub fn describe(outcome: &Outcome, what: &str) -> String {
     match outcome {
         Outcome::Ok { .. } => String::new(),
         Outcome::Conflict { message, .. } => {
-            format!("The task changed since you opened it ({message}). Close this and open it again.")
+            format!("The {what} changed since you opened it ({message}). Close this and open it again.")
         }
         Outcome::Forbidden(m) => format!("Not allowed: {m}"),
         Outcome::RateLimited { retry_after, message } => match retry_after {
@@ -541,7 +541,7 @@ fn finish(
             form.close();
         } else {
             form.saving = false;
-            form.message = describe(&d.outcome);
+            form.message = describe(&d.outcome, "task");
         }
     }
 }
@@ -1401,5 +1401,12 @@ mod tests {
         app.world_mut().resource_mut::<Form>().saving = true;
         press(&mut app, Act::Cancel);
         assert!(app.world().resource::<Form>().open.is_some());
+    }
+
+    #[test]
+    fn a_conflict_names_what_changed() {
+        let conflict = Outcome::Conflict { current_version: Some(3), message: "stale".into() };
+        assert!(describe(&conflict, "task").starts_with("The task changed since you opened it"));
+        assert!(describe(&conflict, "project").starts_with("The project changed since you opened it"));
     }
 }
