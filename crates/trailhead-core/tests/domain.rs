@@ -1429,6 +1429,17 @@ async fn similar_tasks_counts_capitalized_two_letter_acronyms() {
 }
 
 #[tokio::test]
+async fn similar_tasks_ignores_two_letter_function_words_in_all_caps_titles() {
+    let env = Env::new().await;
+    env.task("MOVE DB TO PG").await;
+    // Shared function words (TO) are not enough to match.
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "SEND IT TO OR IN ON", None).await.unwrap().is_empty());
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "FIX BUG TO ON PG", None).await.unwrap().is_empty());
+    // Acronyms still count.
+    assert_eq!(env.store.similar_tasks(&env.human, "AUTH", "DB PG", None).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn listing_by_title_ignores_case_and_surrounding_space() {
     let env = Env::new().await;
     let wanted = env.task("Cover the edge").await;

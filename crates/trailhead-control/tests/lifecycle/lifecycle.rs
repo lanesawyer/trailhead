@@ -1482,6 +1482,25 @@ async fn a_rejected_sandbox_create_parks_the_task_at_once() {
     assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
 }
 
+/// No sub-agent exists to park through, so the factory's own identity claims the task and asks.
+#[tokio::test]
+async fn a_rejected_sub_agent_create_parks_the_task_as_the_factory() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Refused sub-agent", "");
+    r.tracker.reject_sub_agents("tracker 400 Bad Request: bad agent name");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(matches!(err, trailhead_factory::Error::Rejected(_)), "{err:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked on the first rejection, not requeued");
+    assert_eq!(task.run.attempt, Some(0), "no attempt was used");
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0].author, "factory", "asked by the factory's own identity, not a sub-agent");
+    assert!(questions[0].body.contains("bad agent name"), "{}", questions[0].body);
+    assert!(r.compute.sandboxes().is_empty(), "no sandbox was made");
+    assert!(r.factory.tick().await.unwrap().is_empty(), "a parked task isn't retried");
+}
+
 #[tokio::test]
 async fn a_park_that_fails_still_keeps_the_backoff() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 1"));
