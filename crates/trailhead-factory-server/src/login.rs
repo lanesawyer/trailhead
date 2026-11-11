@@ -24,7 +24,12 @@ pub enum Login {
     /// Save a Sprites API token (`SPRITES_TOKEN`) after checking it against the Sprites API.
     Sprites,
     /// Save a Claude subscription token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`).
-    Claude,
+    Claude {
+        /// Save the token even if it fails the shape check (the `sk-ant-oat` prefix and a plausible length), in case
+        /// Anthropic changed the format.
+        #[arg(long)]
+        force: bool,
+    },
     /// Save a GitHub token (`GITHUB_TOKEN`) after checking it can read the repo's pull requests.
     Github {
         /// The repo file whose `[factory]` names the repo to check. Default: the nearest `.trailhead.toml`.
@@ -112,7 +117,7 @@ pub async fn sprites(creds: &CredStore, input: &mut impl BufRead, interactive: b
     saved("Sprites token", creds, SPRITES, &token)
 }
 
-pub fn claude(creds: &CredStore, input: &mut impl BufRead, interactive: bool) -> Result<String> {
+pub fn claude(creds: &CredStore, input: &mut impl BufRead, interactive: bool, force: bool) -> Result<String> {
     // A wrapped token spans lines, so keep reading: to the end of input, or on a terminal (which has none until
     // Ctrl-D) until a blank line after the token's first line.
     if interactive {
@@ -136,7 +141,9 @@ pub fn claude(creds: &CredStore, input: &mut impl BufRead, interactive: bool) ->
     if token.is_empty() {
         return Err(Error::NoTokenOnStdin);
     }
-    check_claude_shape(&token)?;
+    if !force {
+        check_claude_shape(&token)?;
+    }
     saved("Claude token", creds, CLAUDE, &token)
 }
 
@@ -198,7 +205,7 @@ pub async fn run(cmd: Login, creds: &CredStore) -> Result<()> {
     let mut input = std::io::stdin().lock();
     let msg = match cmd {
         Login::Sprites => sprites(creds, &mut input, interactive, trailhead_compute_sprites::API_URL).await?,
-        Login::Claude => claude(creds, &mut input, interactive)?,
+        Login::Claude { force } => claude(creds, &mut input, interactive, force)?,
         Login::Github { config } => {
             let repo = crate::find::repo(config.as_deref())?;
             github(creds, &mut input, interactive, trailhead_codehost_github::API_URL, &repo).await?
@@ -378,10 +385,10 @@ esac
         let creds = store(&dir);
         let (a, b) = TOKEN.split_at(40);
         let wrapped = format!("{a}\n  {}\r\n{} \n", &b[..20], &b[20..]);
-        let msg = claude(&creds, &mut wrapped.as_bytes(), false).unwrap();
+        let msg = claude(&creds, &mut wrapped.as_bytes(), false, false).unwrap();
         assert!(!msg.contains("abc"), "{msg}");
         assert_eq!(creds.read(CLAUDE).unwrap().0, TOKEN);
-        assert!(claude(&creds, &mut "  \n".as_bytes(), false).is_err());
+        assert!(claude(&creds, &mut "  \n".as_bytes(), false, false).is_err());
     }
 
     #[test]
@@ -390,7 +397,7 @@ esac
         let creds = store(&dir);
         let (a, b) = TOKEN.split_at(40);
         let pasted = format!("{a}\n{b}\n\nignored\n");
-        claude(&creds, &mut pasted.as_bytes(), true).unwrap();
+        claude(&creds, &mut pasted.as_bytes(), true, false).unwrap();
         assert_eq!(creds.read(CLAUDE).unwrap().0, TOKEN);
     }
 
@@ -399,11 +406,19 @@ esac
         let dir = tempfile::tempdir().unwrap();
         let creds = store(&dir);
         let cut = format!("{}\n", &TOKEN[..40]);
-        let err = claude(&creds, &mut cut.as_bytes(), false).unwrap_err().to_string();
+        let err = claude(&creds, &mut cut.as_bytes(), false, false).unwrap_err().to_string();
         assert!(err.contains("truncated") && !err.contains(&TOKEN[..40]), "{err}");
-        let err = claude(&creds, &mut format!("nope{TOKEN}\n").as_bytes(), false).unwrap_err().to_string();
+        let err = claude(&creds, &mut format!("nope{TOKEN}\n").as_bytes(), false, false).unwrap_err().to_string();
         assert!(err.contains("doesn't look like"), "{err}");
         assert!(creds.read(CLAUDE).is_none());
+    }
+
+    #[test]
+    fn force_saves_a_misshapen_claude_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        claude(&creds, &mut "nope-new-format\n".as_bytes(), false, true).unwrap();
+        assert_eq!(creds.read(CLAUDE).unwrap().0, "nope-new-format");
     }
 
     #[tokio::test]

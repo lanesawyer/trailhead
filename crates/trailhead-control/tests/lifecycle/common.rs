@@ -264,6 +264,12 @@ pub async fn reviewed(r: &Rig, queue: &TaskKey, grade: u8, path: &str) -> (TaskK
     (key, pr)
 }
 
+/// What the PR's comments after the first say, without the History the merger's status comment ends with.
 pub fn said(r: &Rig) -> Vec<String> {
-    r.codehost.prs()[0].comments.iter().skip(1).cloned().collect()
+    r.codehost.prs()[0]
+        .comments
+        .iter()
+        .skip(1)
+        .map(|c| c.split("\n\nHistory:\n").next().unwrap_or(c).to_string())
+        .collect()
 }

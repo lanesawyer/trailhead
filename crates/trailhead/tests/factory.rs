@@ -39,7 +39,17 @@ fn factory_rejects_global_flags_given_before_it() {
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("--as") && err.contains("--url") && err.contains("after its command"), "{err}");
+    assert!(err.contains("--as") && err.contains("--url") && err.contains("before or after `factory`"), "{err}");
+}
+
+#[test]
+fn factory_rejects_global_flags_given_right_after_it() {
+    let th = Instance::new();
+    let out = common::output(th.command().args(["factory", "--url", "http://127.0.0.1:1", "allowed"]));
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--url") && err.contains("before or after `factory`"), "{err}");
 }
 
 #[test]

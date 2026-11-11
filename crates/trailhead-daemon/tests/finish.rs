@@ -9,7 +9,7 @@ use trailhead_factory::{
     Check, Commit, Credential, Endpoint, FileChange, ModelId, Repo, Role, RunOutcome, RunRequest, RunResult, TaskKey,
     TaskSpec, Tracker, VerdictKind,
 };
-use trailhead_testkit::{FakeCodeHost, FakeTracker, FakeWorkspace, LocalDaemon, Script, ScriptedHarness};
+use trailhead_testkit::{FakeCodeHost, FakeTracker, FakeWorkspace, LocalDaemon, Script, ScriptedHarness, TrackerOp};
 
 #[tokio::test]
 async fn an_error_finishing_a_run_is_reported_as_its_outcome() {
@@ -171,7 +171,7 @@ async fn the_check_results_survive_an_error_recording_a_failed_check() {
     let tracker = FakeTracker::new("factory");
     let key = tracker.add_task("TRAIL", "Add a greeting", "");
     // The checks ran and one failed, but the tracker won't take the note about it.
-    tracker.fail_next("factory", "note", 1);
+    tracker.fail_next("factory", TrackerOp::Note, 1);
     let harness = Arc::new(ScriptedHarness::new());
     harness.push(
         Role::Worker,
@@ -205,4 +205,46 @@ async fn the_check_results_survive_an_error_recording_a_failed_check() {
     assert_eq!(report.checks.len(), 1);
     assert_eq!(report.checks[0].name, "tests");
     assert!(!report.checks[0].passed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_review_request_is_retried_without_reporting_the_pr_again() {
+    let tracker = FakeTracker::new("factory");
+    let key = tracker.add_task("TRAIL", "Add a greeting", "");
+    tracker.fail_next("factory", TrackerOp::RequestReview, 1);
+    let harness = Arc::new(ScriptedHarness::new());
+    harness.push(
+        Role::Worker,
+        Script::new(RunOutcome::Changes {
+            commits: vec![Commit {
+                message: format!("feat: greet [{}]", key.0),
+                changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+                merges: vec![],
+            }],
+            summary: "Adds a greeting.".into(),
+        }),
+    );
+    let connect: Connect = {
+        let tracker = tracker.clone();
+        Arc::new(move |_| {
+            let tracker = tracker.clone();
+            Box::pin(async move { Ok(Arc::new(tracker) as Arc<dyn Tracker>) })
+        })
+    };
+    let runner = Runner {
+        harness,
+        codehost: Arc::new(FakeCodeHost::new()),
+        workspace: Arc::new(FakeWorkspace::default()),
+        connect,
+        renew_every: Duration::from_secs(10),
+        heartbeat_every: HEARTBEAT_EVERY,
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut req = request(key.clone());
+    req.role = Role::Worker;
+
+    let report = runner.run(req, tx, Arc::new(Notify::new())).await.unwrap();
+
+    assert!(matches!(report.result, RunResult::PrOpened(_)), "{:?}", report.result);
+    assert_eq!(tracker.reports(&key), 1);
 }
