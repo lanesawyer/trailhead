@@ -628,10 +628,12 @@ pub fn cgroup_unit(proc_cgroup: &str) -> Option<String> {
     path.trim().rsplit('/').find(|c| !c.is_empty()).map(str::to_string)
 }
 
-/// True for a scope that belongs to a desktop app (`app-gnome-code-1234.scope`), whose death (systemd-oomd killing
-/// the app) would take the server with it: the TRAIL-178 regression.
-pub fn is_app_scope(unit: &str) -> bool {
-    unit.starts_with("app-") && unit.ends_with(".scope")
+/// True for a scope the server shares with something else (`app-gnome-code-1234.scope`, `vte-spawn-<uuid>.scope`,
+/// `session-3.scope`): its death (systemd-oomd killing the app, the terminal closing, the ssh session ending) would
+/// take the server with it, the TRAIL-178 regression. Only the server's own `trailhead-server-*.scope` is safe, and a
+/// service is its own unit, so only scopes count.
+pub fn is_shared_scope(unit: &str) -> bool {
+    unit.ends_with(".scope") && !unit.starts_with("trailhead-server-")
 }
 
 /// The cgroup unit the server with this pid runs in, when this machine can say.
@@ -752,10 +754,13 @@ mod cgroup_tests {
     }
 
     #[test]
-    fn app_scopes_are_flagged_but_the_servers_own_is_not() {
-        assert!(is_app_scope("app-gnome-code-1234.scope"));
-        assert!(!is_app_scope("trailhead-server-42.scope"));
-        assert!(!is_app_scope("app-dbus.service"));
+    fn shared_scopes_are_flagged_but_the_servers_own_is_not() {
+        assert!(is_shared_scope("app-gnome-code-1234.scope"));
+        assert!(is_shared_scope("vte-spawn-0a1b2c3d.scope"));
+        assert!(is_shared_scope("session-3.scope"));
+        assert!(!is_shared_scope("trailhead-server-42.scope"));
+        assert!(!is_shared_scope("app-dbus.service"));
+        assert!(!is_shared_scope("trailhead.service"));
     }
 }
 
