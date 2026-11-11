@@ -155,3 +155,31 @@ async fn task_creation_schema_documents_possible_duplicates() {
     let schema = serde_json::to_string(&doc["components"]["schemas"]["CreatedTask"]).unwrap();
     assert!(schema.contains("#/components/schemas/Task") && schema.contains("possible_duplicates"), "{schema}");
 }
+
+#[tokio::test]
+async fn omitted_fields_are_optional_but_not_nullable() {
+    let doc = fetch_doc().await;
+    let schemas = &doc["components"]["schemas"];
+    let created = &schemas["CreatedTask"];
+    let listed = &schemas["ListedTask"];
+    for (schema, field) in [(created, "possible_duplicates"), (listed, "open_questions"), (listed, "blocked_by")] {
+        let text = serde_json::to_string(&flat_property(schema, field)).unwrap();
+        assert!(!text.contains("null"), "{field}: {text}");
+        let required = schema["allOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["required"].as_array())
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(!required.contains(&&json!(field)), "{field} is required");
+    }
+    // `claim` is `null` when included but the task is unclaimed.
+    let claim = serde_json::to_string(&flat_property(listed, "claim")).unwrap();
+    assert!(claim.contains("null"), "{claim}");
+}
+
+/// A property of a schema with a flattened `Task`, which utoipa emits under `allOf`.
+fn flat_property(schema: &Value, field: &str) -> Value {
+    schema["allOf"].as_array().unwrap().iter().find_map(|p| p["properties"].get(field)).cloned().unwrap_or(Value::Null)
+}
