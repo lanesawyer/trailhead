@@ -29,6 +29,9 @@ pub mod token {
     pub const GRADE_3: Token = Token::new("lookout.grade.3");
     pub const GRADE_4: Token = Token::new("lookout.grade.4");
 
+    /// The factory, wherever it shows (the board's Factory badge): lime, a hue no priority, grade or status uses.
+    pub const FACTORY: Token = Token::new("lookout.factory");
+
     /// One background per status column, in lifecycle order.
     pub const STATUS_OPEN: Token = Token::new("lookout.status.open");
     pub const STATUS_IN_PROGRESS: Token = Token::new("lookout.status.in_progress");
@@ -52,6 +55,9 @@ pub mod token {
     pub const SANDBOX_BUSY: Token = Token::new("lookout.sandbox.busy");
     pub const SANDBOX_PAUSED: Token = Token::new("lookout.sandbox.paused");
     pub const SANDBOX_BROKEN: Token = Token::new("lookout.sandbox.broken");
+
+    /// Something still waiting, such as a gate that hasn't passed or failed yet: the dim text tone.
+    pub const PENDING: Token = Token::new("lookout.pending");
 
     /// An agent walking the trail map, and the initial written on it.
     pub const AGENT: Token = Token::new("lookout.agent");
@@ -146,6 +152,7 @@ pub fn theme() -> Theme {
     let mut theme = Theme::new();
     // The most urgent priority is the kit's danger red.
     theme.alias(&token::PRIORITY_1, &token::STATUS_DANGER);
+    theme.alias(&token::PENDING, &token::TEXT_DIM);
     theme.paint(&token::PRIORITY_2, Color::oklch(0.76, 0.15, 60.0));
     theme.paint(&token::PRIORITY_3, Color::oklch(0.70, 0.13, 250.0));
     theme.paint(&token::PRIORITY_4, Color::oklch(0.65, 0.0, 0.0));
@@ -154,6 +161,8 @@ pub fn theme() -> Theme {
     theme.paint(&token::GRADE_2, Color::oklch(0.74, 0.11, 190.0));
     theme.paint(&token::GRADE_3, Color::oklch(0.68, 0.15, 295.0));
     theme.paint(&token::GRADE_4, Color::oklch(0.68, 0.19, 340.0));
+
+    theme.paint(&token::FACTORY, Color::oklch(0.76, 0.15, 115.0));
 
     // Columns tinted just enough to tell apart, each toward the hue of what the status means.
     let column = |hue: f32| Color::oklch(0.24, 0.025, hue);
@@ -203,7 +212,8 @@ mod tests {
     #[test]
     fn every_lookout_token_resolves_rather_than_falling_back_to_fuchsia() {
         let theme = theme();
-        let lookouts = Priority::ALL.map(priority_tone).into_iter().chain(Grade::ALL.map(grade_tone));
+        let lookouts =
+            Priority::ALL.map(priority_tone).into_iter().chain(Grade::ALL.map(grade_tone)).chain([token::FACTORY]);
         let statuses = Status::ALL.into_iter().flat_map(|s| [status_token(s), status_tone(s)]);
         for t in lookouts.chain(statuses).chain(token::ALL) {
             assert!(theme.has(&t), "{t} isn't in the theme");
@@ -249,6 +259,12 @@ mod tests {
     }
 
     #[test]
+    fn pending_is_the_dim_text_color() {
+        let theme = theme();
+        assert_eq!(theme.color(&token::PENDING), theme.color(&token::TEXT_DIM));
+    }
+
+    #[test]
     fn each_grade_has_its_own_color_apart_from_the_priorities() {
         let theme = theme();
         let color = |t: Token| format!("{:?}", theme.color(&t));
@@ -280,7 +296,11 @@ mod tests {
     /// Every tone written as text in one of Lookout's own colors: priorities, grades, statuses.
     fn written_tones() -> Vec<Token> {
         let priorities = Priority::ALL.map(priority_tone).into_iter();
-        priorities.chain(Grade::ALL.map(grade_tone)).chain(Status::ALL.map(status_tone)).collect()
+        priorities
+            .chain(Grade::ALL.map(grade_tone))
+            .chain(Status::ALL.map(status_tone))
+            .chain([token::FACTORY])
+            .collect()
     }
 
     /// The least lightness between text and the surface under it that reads easily.

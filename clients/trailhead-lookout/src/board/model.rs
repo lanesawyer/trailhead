@@ -279,7 +279,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::Factory,
                 label: "factory".into(),
-                tone: Some(token::STATUS_INFO),
+                tone: Some(token::FACTORY),
                 hint: None,
             });
         }
@@ -318,7 +318,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             && let Some(keys) = unfinished.get(&t.id)
         {
             let mut keys = keys.clone();
-            keys.sort_unstable();
+            keys.sort_unstable_by(|a, b| trailhead_model::cmp_keys(a, b));
             badges.push(Badge {
                 kind: BadgeKind::Blocked,
                 label: format!("blocked · {}", keys.len()),
@@ -787,6 +787,24 @@ mod tests {
         let (shown, hidden) = visible(&cards, PAGE - 1);
         assert_eq!((shown.len(), hidden), (PAGE - 1, 6));
     }
+    #[test]
+    fn show_more_counts_what_the_next_page_adds() {
+        let mut cards = many(3 * PAGE);
+        // A parent ends the first page, so it already shows its 3 subtasks.
+        for card in &mut cards[PAGE..PAGE + 3] {
+            card.depth = 1;
+        }
+        // The second page would cut inside a run of 4 subtasks, so it runs on to the last.
+        for card in &mut cards[2 * PAGE..2 * PAGE + 4] {
+            card.depth = 1;
+        }
+        assert_eq!(visible(&cards, PAGE).0.len(), PAGE + 3);
+        assert_eq!(next_page(&cards, PAGE), PAGE + 1);
+        assert_eq!(visible(&cards, 2 * PAGE).0.len(), 2 * PAGE + 4);
+        // Nothing past the end is promised.
+        assert_eq!(next_page(&many(PAGE + 5), PAGE), 5);
+    }
+
     #[test]
     fn filters_narrow_the_board() {
         let by = |f: Filter| -> Vec<String> {

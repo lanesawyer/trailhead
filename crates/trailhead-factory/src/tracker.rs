@@ -129,6 +129,12 @@ pub struct RunUpdate {
     /// How the task's PR was merged, once it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
+    /// A person merged the PR without the approval core requires to finish the task, so the task is being parked for a
+    /// person to mark it done. Written before the park's reopen, claim and ask, so a pass that finds a task with it
+    /// outside `needs_input` finishes the park rather than closing the task (TRAIL-729). `merged` alone can't say
+    /// this: it is also recorded by a close that failed before the park.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unapproved_merge: Option<bool>,
     /// The PR's grade and what raised it above the task's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade: Option<PrGrade>,
@@ -305,6 +311,7 @@ impl RunUpdate {
             gave_up,
             asked,
             merged,
+            unapproved_merge,
             grade,
             ungraded,
             reviewed_head,
@@ -335,6 +342,7 @@ impl RunUpdate {
         self.gave_up = gave_up.or(self.gave_up.take());
         self.asked = asked.or(self.asked.take());
         self.merged = merged.or(self.merged.take());
+        self.unapproved_merge = unapproved_merge.or(self.unapproved_merge.take());
         self.grade = grade.or(self.grade.take());
         self.ungraded = ungraded.or(self.ungraded.take());
         self.reviewed_head = reviewed_head.or(self.reviewed_head.take());

@@ -184,12 +184,24 @@ impl Factory {
     /// parked or reworked task, `docs/factory/targets.md`), else the first with room, as `place` chooses. The
     /// sandbox already counts in the target's load, so staying put takes no further room.
     pub(crate) fn place_task<'a>(&'a self, survey: &mut Survey, task: &Task) -> Option<&'a Placed> {
-        let stays = task.run.target.as_ref().filter(|t| survey.holders.get(&task.key) == Some(*t));
-        let kept = stays.and_then(|name| self.targets.iter().find(|p| p.target.name == *name));
-        match kept {
-            Some(p) if !survey.down.contains(&p.target.name) && !survey.capped.contains(&p.target.name) => Some(p),
-            _ => self.place(survey),
+        match self.kept_target(survey, task) {
+            Some(p) => Some(p),
+            None => self.place(survey),
         }
+    }
+
+    /// Whether `task` stays in the sandbox it holds, so starting it takes no room: its recorded target still holds
+    /// the sandbox and is neither down nor capped. A holder that doesn't stay gets a new sandbox like any other task.
+    pub(crate) fn stays_put(&self, survey: &Survey, task: &Task) -> bool {
+        self.kept_target(survey, task).is_some()
+    }
+
+    fn kept_target(&self, survey: &Survey, task: &Task) -> Option<&Placed> {
+        let stays = task.run.target.as_ref().filter(|t| survey.holders.get(&task.key) == Some(*t))?;
+        self.targets
+            .iter()
+            .find(|p| p.target.name == *stays)
+            .filter(|p| !survey.down.contains(&p.target.name) && !survey.capped.contains(&p.target.name))
     }
 
     /// Holds `task`'s place as `role` on `target` until the guard drops.
@@ -221,7 +233,7 @@ fn role_of(sandbox: &Sandbox) -> Role {
 
 #[cfg(test)]
 mod tests {
-    use trailhead_factory::{Compute, FactoryConfig, HostConfig, SandboxSpec, Target};
+    use trailhead_factory::{Compute, FactoryConfig, HostConfig, SandboxSpec, Target, Tracker};
     use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, ScriptedHarness};
 
     use super::*;
@@ -298,5 +310,44 @@ priority = 2
         let survey = factory.survey().await;
         assert_eq!(survey.loads.get("local"), Some(&1), "the old sandbox still fills a place on local");
         assert_eq!(survey.loads.get("cloud"), Some(&1), "and the placement fills one on the cloud");
+    }
+
+    #[tokio::test]
+    async fn a_holder_stays_put_only_while_its_target_is_up_and_uncapped() {
+        let config = FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap();
+        let tracker = FakeTracker::new("factory");
+        let codehost = FakeCodeHost::new();
+        let placed: Vec<Placed> = config
+            .target_specs()
+            .iter()
+            .map(|spec| Placed {
+                target: Target::default().listed(spec),
+                compute: Arc::new(FakeCompute::new()),
+                daemon: Arc::new(LocalDaemon::new(
+                    Arc::new(ScriptedHarness::new()),
+                    Arc::new(codehost.clone()),
+                    tracker.clone(),
+                )),
+                provider: Arc::new(FakeProvider::new(1)),
+            })
+            .collect();
+        let factory =
+            Factory::with_targets(config, placed, Arc::new(tracker.clone()), Host::new(&HostConfig::default()));
+
+        let key = tracker.add_task("TRAIL", "held", "");
+        tracker.set_run(&key, trailhead_factory::RunUpdate { target: Some("local".into()), ..Default::default() });
+        let task = tracker.show(&key).await.unwrap();
+        let mut survey = factory.survey().await;
+        survey.holders.insert(key.clone(), "local".into());
+        assert!(factory.stays_put(&survey, &task));
+
+        survey.down.insert("local".into());
+        assert!(!factory.stays_put(&survey, &task), "a down target can't take it back");
+        survey.down.clear();
+        survey.capped.insert("local".into());
+        assert!(!factory.stays_put(&survey, &task), "nor can a capped one");
+        survey.capped.clear();
+        survey.holders.insert(key, "cloud".into());
+        assert!(!factory.stays_put(&survey, &task), "nor one that isn't where its sandbox is");
     }
 }

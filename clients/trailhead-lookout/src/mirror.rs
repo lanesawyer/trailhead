@@ -283,7 +283,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::fixture::{comment_json, sid, task_json};
+    use crate::fixture::{claim_json, comment_json, sid, task_json};
 
     fn app() -> App {
         let mut app = App::new();
@@ -394,6 +394,40 @@ mod tests {
         send(&mut app, [task_event(14, 3, "back"), comment_event(15, false, false)]);
         assert_eq!(title(&mut app), "back");
         assert_eq!(data_of::<Comment>(&mut app).len(), 1);
+    }
+
+    fn claim_event(id: i64) -> SyncItem {
+        let after = claim_json(json!({"task_id": "t1"}));
+        SyncItem::Event(
+            json!({"id": id, "entity": "claim", "entity_id": sid("t1"), "kind": "claim.created", "after": after}),
+        )
+    }
+
+    fn deleted_task_event(id: i64, version: i64) -> SyncItem {
+        let after =
+            task_json(json!({"id": "t1", "title": "a", "version": version, "deleted_at": "2026-01-01T00:00:00Z"}));
+        SyncItem::Event(
+            json!({"id": id, "entity": "task", "entity_id": sid("t1"), "kind": "task.deleted", "after": after}),
+        )
+    }
+
+    #[test]
+    fn a_deleted_task_takes_its_claim_and_a_later_claim_or_snapshot_restores_it() {
+        let mut app = app();
+        let SyncItem::Snapshot(mut snap) = snapshot(10, 1, "a") else { unreachable!() };
+        snap.tasks[0]["claim"] = claim_json(json!({"task_id": "t1"}));
+        send(&mut app, [SyncItem::Snapshot(snap.clone())]);
+        assert_eq!(data_of::<Claim>(&mut app).len(), 1);
+        send(&mut app, [deleted_task_event(11, 2)]);
+        assert!(data_of::<Task>(&mut app).is_empty());
+        assert!(data_of::<Claim>(&mut app).is_empty(), "the task's claim goes with it");
+        send(&mut app, [task_event(12, 3, "back"), claim_event(13)]);
+        assert_eq!(data_of::<Claim>(&mut app).len(), 1);
+        send(&mut app, [deleted_task_event(14, 4)]);
+        assert!(data_of::<Claim>(&mut app).is_empty());
+        snap.at = 20;
+        send(&mut app, [SyncItem::Snapshot(snap)]);
+        assert_eq!(data_of::<Claim>(&mut app).len(), 1);
     }
 
     #[test]
