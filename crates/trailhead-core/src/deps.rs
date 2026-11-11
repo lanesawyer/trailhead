@@ -19,13 +19,14 @@ pub(crate) async fn unfinished_blockers(conn: &Connection, task_id: Uuid) -> Res
         .query(
             &format!(
                 "SELECT {cols} FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
-                 WHERE d.blocked_id = ?1 AND b.deleted_at IS NULL AND b.status NOT IN ('done', 'cancelled')
-                 ORDER BY b.key"
+                 WHERE d.blocked_id = ?1 AND b.deleted_at IS NULL AND b.status NOT IN ('done', 'cancelled')"
             ),
             [task_id.to_string()],
         )
         .await?;
-    collect(rows, task_from_row).await
+    let mut tasks = collect(rows, task_from_row).await?;
+    tasks.sort_by(|a, b| trailhead_model::cmp_keys(&a.key, &b.key));
+    Ok(tasks)
 }
 
 /// Placeholder for a related task outside the caller's scope, so a scoped agent
@@ -171,18 +172,25 @@ impl Store {
         let conn = self.reader()?;
         let rows = conn
             .query(
-                "SELECT d.blocked_id, d.blocker_id, b.project_id, b.status NOT IN ('done', 'cancelled')
+                "SELECT d.blocked_id, d.blocker_id, b.project_id, b.status NOT IN ('done', 'cancelled'), b.key
                  FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
-                 WHERE b.deleted_at IS NULL AND d.blocked_id IN (SELECT value FROM json_each(?1))
-                 ORDER BY b.key",
+                 WHERE b.deleted_at IS NULL AND d.blocked_id IN (SELECT value FROM json_each(?1))",
                 [json_ids(task_ids)?],
             )
             .await?;
-        let edges =
-            collect(rows, |row| Ok((get_uuid(row, 0)?, get_uuid(row, 1)?, get_uuid(row, 2)?, row.get::<i64>(3)? != 0)))
-                .await?;
+        let mut edges = collect(rows, |row| {
+            Ok((
+                get_uuid(row, 0)?,
+                get_uuid(row, 1)?,
+                get_uuid(row, 2)?,
+                row.get::<i64>(3)? != 0,
+                row.get::<String>(4)?,
+            ))
+        })
+        .await?;
+        edges.sort_by(|a, b| trailhead_model::cmp_keys(&a.4, &b.4));
         let mut out = BlockersOf::default();
-        for (blocked, blocker, project, unfinished) in edges {
+        for (blocked, blocker, project, unfinished, _) in edges {
             if ctx.in_scope(project) {
                 out.visible.entry(blocked).or_default().push(blocker);
             } else if unfinished {

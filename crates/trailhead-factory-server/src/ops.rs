@@ -181,17 +181,8 @@ async fn log_source(
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
     let (found, unreachable) = list_everywhere(&computes, &wanted).await?;
     let sandboxes: Vec<Sandbox> = found.iter().map(|(_, s)| s.clone()).collect();
-    let sandbox = find_sandbox(task, &sandboxes).ok_or_else(|| {
-        let unknown = if unreachable.is_empty() {
-            String::new()
-        } else {
-            format!("; target(s) {} couldn't be reached, so it may be there", unreachable.join(", "))
-        };
-        Error::NoSandbox(format!(
-            "{} has no sandbox right now (it isn't running, or its sandbox was released or destroyed){unknown}",
-            task.key.0
-        ))
-    })?;
+    let sandbox = find_sandbox(task, &sandboxes)
+        .ok_or_else(|| Error::NoSandbox { task: task.key.0.clone(), unreachable: unreachable.clone() })?;
     let compute = computes[found.iter().find(|(_, s)| s.name == sandbox.name).map_or(0, |(i, _)| *i)].0.clone();
     Ok((compute, sandbox.clone()))
 }
