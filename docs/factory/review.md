@@ -41,6 +41,8 @@ max_lines = 600          # bigger diffs are at least grade 3
 
 # A Cargo.lock whose patch only edits dependency lists (a member gaining a dependency that is already locked) does not
 # match its rule; a new [[package]], or a changed version, source or checksum, or a patch the host omits, does.
+# Nor does a Rust file edited in place whose patch only changes comments (every changed line blank or starting with
+# //): a doc fix in src/ goes at the task's grade. A renamed or added file, or a patch the host omits, still matches.
 
 [factory.gates.1]
 require = ["checks", "ci"]
