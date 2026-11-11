@@ -62,6 +62,12 @@ impl LogState {
         self.note.as_deref()
     }
 
+    /// Marks the stream as followed or not, as the Logs page does when it shows or hides: updates are dropped while it
+    /// isn't. For tests that drive the connection without the page.
+    pub fn set_streaming(&mut self, on: bool) {
+        self.streaming = on;
+    }
+
     /// The tasks seen in the lines, sorted.
     pub fn tasks(&self) -> impl Iterator<Item = &str> {
         self.tasks.iter().map(String::as_str)
@@ -224,6 +230,10 @@ impl Plugin for LogsPlugin {
 
 fn apply_items(mut items: MessageReader<LogItem>, mut state: ResMut<LogState>) {
     for LogItem(update) in items.read() {
+        // Updates still queued when the page closed would refill what `sync_stream` just cleared.
+        if !state.streaming {
+            continue;
+        }
         state.apply(update.clone());
     }
 }
@@ -616,6 +626,22 @@ mod tests {
             app.world_mut().despawn(page);
             app.update();
             assert_eq!(sent(&mut app), [true, false]);
+        }
+
+        #[test]
+        fn updates_queued_after_the_page_closed_are_dropped() {
+            let mut app = app();
+            let page = app.world_mut().spawn((LogsPage, Node::default())).id();
+            app.update();
+            feed(&mut app, LogUpdate::Line(line(1, LogLevel::Info, None)));
+            app.update();
+            assert_eq!(app.world().resource::<LogState>().entries().count(), 1);
+            app.world_mut().get_mut::<Node>(page).unwrap().display = Display::None;
+            app.update();
+            assert_eq!(app.world().resource::<LogState>().entries().count(), 0);
+            feed(&mut app, LogUpdate::Line(line(2, LogLevel::Info, None)));
+            app.update();
+            assert_eq!(app.world().resource::<LogState>().entries().count(), 0);
         }
 
         #[test]

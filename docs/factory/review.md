@@ -41,6 +41,8 @@ max_lines = 600          # bigger diffs are at least grade 3
 
 # A Cargo.lock whose patch only edits dependency lists (a member gaining a dependency that is already locked) does not
 # match its rule; a new [[package]], or a changed version, source or checksum, or a patch the host omits, does.
+# Nor does a Rust file edited in place whose patch only changes comments (every changed line blank or starting with
+# //): a doc fix in src/ goes at the task's grade. A renamed or added file, or a patch the host omits, still matches.
 
 [factory.gates.1]
 require = ["checks", "ci"]
@@ -59,6 +61,8 @@ mode = "shadow"          # off | shadow | on
 ```
 
 Gates are keyed by grade (`[factory.gates.1]` to `[factory.gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[factory.merge] mode = "on"` (TRAIL-205).
+
+A name in `require` that isn't one of those five must name a check in `[factory.checks]`; settings validation rejects anything else, so a typo fails at load instead of passing. A named check is treated like `checks`: the worker ran it before the PR opened, so the merger counts it as passed (and lists it once, as `checks`).
 
 `checks` in `require` gates the merge on the sandbox checks having passed; it doesn't choose which checks a worker runs. A worker runs every verifying check the repo defines (fmt, lint, typecheck, test, build, and any path-scoped ones whose paths its diff touches) before it opens a PR, whatever the grade's gates require (TRAIL-265). Leaving `checks` out of a grade's `require` doesn't skip them in the sandbox; it changes nothing else: the gate is already met when the PR opens (a PR exists only because the checks passed), so the merger never waits on it, and leaving it out only drops `checks` from the decision's `passed` list.
 
