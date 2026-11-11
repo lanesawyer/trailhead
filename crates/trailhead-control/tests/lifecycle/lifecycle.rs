@@ -11,6 +11,20 @@ use trailhead_testkit::{FAKE_BASE, Script, TrackerOp};
 use crate::common::*;
 
 #[tokio::test]
+async fn a_profile_selects_the_scripted_harness_by_adapter_name() {
+    let config = CONFIG.replace("claude-code", trailhead_testkit::SCRIPTED);
+    let r = rig_selecting(&config);
+    r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+
+    let ran = r.factory.tick().await.unwrap();
+    let Outcome::Reviewed { verdict, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+    assert_eq!(verdict.kind, VerdictKind::Approve);
+    assert_eq!(r.codehost.prs().len(), 1);
+}
+
+#[tokio::test]
 async fn spec_to_reviewed_pr_then_human_merge() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
