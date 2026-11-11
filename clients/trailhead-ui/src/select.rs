@@ -6,7 +6,8 @@
 //! its row and, once it is chosen, the select's caption show. [`select_iconed`] puts an icon before each option's
 //! words, and before the caption the icon of the option chosen.
 //!
-//! The caption stays on one line, cut off at the select's width, so a long option doesn't wrap the row it sits in.
+//! The caption stays on one line, cut off with an ellipsis at the select's width, so a long option doesn't wrap the
+//! row it sits in.
 
 use bevy::ecs::system::SystemParam;
 use bevy::feathers::controls::{FeathersListRow, FeathersMenuButton, FeathersMenuPopup, FeathersSelect, OptionIndex};
@@ -18,7 +19,9 @@ use bevy::ui_widgets::{ScrollArea, ValueChange};
 
 use crate::icons::{Icon, icon_text};
 use crate::space;
+use crate::text::{Size, size};
 use crate::theme::{TextTone, Token, token};
+use crate::truncate::truncate_to_width;
 
 /// Which option of a select (or a [`super::button_group`]) was picked, triggered on the control's own entity.
 #[derive(EntityEvent, Debug, Clone, Copy)]
@@ -142,6 +145,7 @@ pub struct SelectTones(pub Vec<Option<Token>>);
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn style_select_captions(
     new_texts: Query<Entity, Added<Text>>,
+    chosen_icons: Query<(), With<ChosenIcon>>,
     newly_selected: Query<(Entity, &OptionIndex), (Added<Selected>, With<FeathersListRow>)>,
     selects: Query<(&SelectTones, &SelectIcons)>,
     buttons: Query<(), With<FeathersMenuButton>>,
@@ -159,6 +163,9 @@ pub(crate) fn style_select_captions(
         let Some(button) = in_button else { continue };
         let Some(select) = parents.iter_ancestors(button).find(|e| selects.contains(*e)) else { continue };
         commands.entity(text).insert(TextLayout { linebreak: LineBreak::NoWrap, ..default() });
+        if !parents.iter_ancestors(text).any(|e| chosen_icons.contains(e)) {
+            commands.entity(text).insert(CaptionFit::default());
+        }
         commands.entity(button).entry::<Node>().and_modify(|mut node| {
             node.min_width = px(0);
             node.overflow = Overflow::clip_x();
@@ -182,6 +189,57 @@ pub(crate) fn style_select_captions(
         let tone = tones.0.get(index.0).cloned().flatten().unwrap_or(token::TEXT);
         if texts.get(caption).ok().flatten().is_none_or(|t| t.0 != tone) {
             commands.entity(caption).insert(TextTone(tone));
+        }
+    }
+}
+
+/// The size feathers sets a select's caption at, which its cut is measured by.
+const CAPTION_SIZE: Size = size::CARD_TITLE;
+
+/// A select's caption, cut to the room its button leaves it. Feathers writes the chosen row's whole words into the
+/// caption's `Text` each time a row is selected, so this keeps what it last saw there (`full`) and what it left
+/// (`shown`): a `Text` that isn't `shown` was written by feathers and is the new `full`.
+#[derive(Component, Default, Debug)]
+pub(crate) struct CaptionFit {
+    full: String,
+    shown: String,
+}
+
+/// Ends each select's caption with an ellipsis where the select's width cuts it off.
+pub(crate) fn fit_select_captions(
+    mut captions: Query<(Entity, &mut CaptionFit, &mut Text)>,
+    parents: Query<&ChildOf>,
+    buttons: Query<(&ComputedNode, &Children), With<FeathersMenuButton>>,
+    nodes: Query<&ComputedNode>,
+) {
+    for (entity, mut fit, mut text) in &mut captions {
+        if text.0 != fit.shown {
+            fit.full = text.0.clone();
+        }
+        // The child of the button the caption sits in, which its siblings' widths are taken from.
+        let mut within = entity;
+        let mut button = None;
+        for ancestor in parents.iter_ancestors(entity) {
+            if let Ok(found) = buttons.get(ancestor) {
+                button = Some(found);
+                break;
+            }
+            within = ancestor;
+        }
+        let Some((room, kids)) = button else { continue };
+        if room.size.x <= 0.0 {
+            continue;
+        }
+        let inset = room.content_inset();
+        let siblings: f32 =
+            kids.iter().filter(|c| *c != within).filter_map(|c| nodes.get(c).ok()).map(|n| n.size.x).sum();
+        let width = (room.size.x - inset.min_inset.x - inset.max_inset.x - siblings) * room.inverse_scale_factor;
+        let wanted = truncate_to_width(&fit.full, width, CAPTION_SIZE);
+        if text.0 != wanted {
+            text.0.clone_from(&wanted);
+        }
+        if fit.shown != wanted {
+            fit.shown = wanted;
         }
     }
 }
@@ -342,7 +400,7 @@ mod tests {
             .init_asset::<Image>()
             .init_resource::<InputFocus>()
             .insert_resource(crate::theme::Theme::new().resource())
-            .add_systems(Update, (style_select_captions, show_chosen_icons).chain());
+            .add_systems(Update, (style_select_captions, show_chosen_icons, fit_select_captions).chain());
         app
     }
 
@@ -442,5 +500,31 @@ mod tests {
         app.world_mut().run_system_once(move |mut edit: SelectEdit| edit.set(select, &options, Some(1))).unwrap();
         settle(&mut app);
         assert_eq!(button_texts(&mut app)[..2], [Icon::Help.glyph(), "Question"]);
+    }
+
+    #[test]
+    fn a_caption_cut_off_at_the_selects_width_ends_with_an_ellipsis() {
+        let mut app = app();
+        let long = "factory/trail-1121-a2-with-a-long-name".to_string();
+        let options = vec![long.clone(), "all".to_string()];
+        let select = app.world_mut().commands().spawn_scene(select(options.clone(), Some(0), 8)).id();
+        settle(&mut app);
+        let set_width = |app: &mut App, width: f32| {
+            let world = app.world_mut();
+            let button = world.query_filtered::<Entity, With<FeathersMenuButton>>().single(world).unwrap();
+            world.entity_mut(button).insert(ComputedNode {
+                size: Vec2::new(width, 20.0),
+                inverse_scale_factor: 1.0,
+                ..default()
+            });
+        };
+        set_width(&mut app, 100.0);
+        settle(&mut app);
+        let cut = button_texts(&mut app).pop().unwrap();
+        assert!(cut.ends_with('\u{2026}') && cut.len() < long.len(), "{cut}");
+        // Feathers rewriting the caption on a pick doesn't leave it cut from the cut.
+        app.world_mut().run_system_once(move |mut edit: SelectEdit| edit.set(select, &options, Some(1))).unwrap();
+        settle(&mut app);
+        assert_eq!(button_texts(&mut app).pop().unwrap(), "all");
     }
 }
