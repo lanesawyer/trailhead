@@ -114,14 +114,16 @@ pub(super) fn sync_tree(
         .columns
         .iter()
         .filter_map(|column| {
-            let (cards, hidden) = visible(&column.cards, shown.limit(column.status));
+            let limit = shown.limit(column.status);
+            let (cards, hidden) = visible(&column.cards, limit);
             let mut items = Vec::new();
             if column.cards.is_empty() {
                 items.push((format!("empty/{}", column.status), Slot::Empty));
             }
             items.extend(cards.iter().map(|c| (c.id.clone(), Slot::Card(c.clone()))));
             if hidden > 0 {
-                let more = ColumnMore { status: column.status, next: hidden.min(PAGE) };
+                let next = next_page(&column.cards, limit);
+                let more = ColumnMore { status: column.status, next };
                 items.push((format!("more/{}", column.status), Slot::More(more)));
             }
             Some((*bodies.get(&column.status)?, items))
