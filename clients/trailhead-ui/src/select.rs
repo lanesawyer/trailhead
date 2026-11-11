@@ -203,13 +203,17 @@ const CAPTION_SIZE: Size = size::CARD_TITLE;
 ///
 /// The cut is made only when the words, laid out whole, are wider than the room (`full_px`, measured the frame after
 /// feathers writes them, while they are still uncut). A select that hugs its caption always has the room for it, so
-/// it is never cut, and a cut never narrows the room it is measured against.
+/// it is never cut. A cut is kept while it fits the room and the room hasn't grown past the one it was made at: a
+/// select whose width comes from its content (not from outside it) narrows to the cut, and the narrower room is no
+/// reason to cut again.
 #[derive(Component, Default, Debug)]
 pub(crate) struct CaptionFit {
     full: String,
     shown: String,
     /// The width the whole words lay out at, in logical pixels, once measured.
     full_px: Option<f32>,
+    /// The room, in logical pixels, the current cut was made at.
+    cut_room: f32,
 }
 
 /// The horizontal margins of a node, in logical pixels, which its computed size leaves out.
@@ -231,6 +235,7 @@ pub(crate) fn fit_select_captions(
             fit.full.clone_from(&text.0);
             fit.shown.clone_from(&text.0);
             fit.full_px = None;
+            fit.cut_room = 0.0;
             continue;
         }
         if fit.full_px.is_none() && info.size.x > 0.0 {
@@ -265,8 +270,17 @@ pub(crate) fn fit_select_captions(
             _ => 0.0,
         };
         let width = (room.size.x - inset.min_inset.x - inset.max_inset.x) * room.inverse_scale_factor - taken - gap;
-        let wanted =
-            if full_px <= width { fit.full.clone() } else { truncate_to_width(&fit.full, width, CAPTION_SIZE) };
+        let shown_px = info.size.x / info.scale_factor.max(f32::EPSILON);
+        let cut = fit.shown != fit.full;
+        if cut && shown_px <= width + 0.5 && width <= fit.cut_room + 0.5 {
+            continue;
+        }
+        let wanted = if full_px <= width {
+            fit.full.clone()
+        } else {
+            fit.cut_room = width;
+            truncate_to_width(&fit.full, width, CAPTION_SIZE)
+        };
         if text.0 != wanted {
             text.0.clone_from(&wanted);
         }
@@ -589,6 +603,26 @@ mod tests {
             lay_out(&mut app, 35.0 + inset, 35.0);
             settle(&mut app);
             assert_eq!(button_texts(&mut app).pop().unwrap(), "Debug");
+        }
+    }
+
+    #[test]
+    fn a_select_that_hugs_its_cut_caption_keeps_it_cut_and_does_not_cut_it_further() {
+        let mut app = app();
+        let long = "factory/trail-1121-a2-with-a-long-name".to_string();
+        app.world_mut().commands().spawn_scene(select(vec![long, "all".to_string()], Some(0), 8));
+        settle(&mut app);
+        lay_out(&mut app, 100.0, 300.0);
+        settle(&mut app);
+        let first = button_texts(&mut app).pop().unwrap();
+        assert!(first.ends_with('\u{2026}'), "{first}");
+        // From here the button is as wide as the caption it shows (the stand-in has no insets), as in a plain row.
+        let glyph = CAPTION_SIZE.px() * 0.58;
+        for _ in 0..6 {
+            let words = button_texts(&mut app).pop().unwrap().chars().count() as f32 * glyph;
+            lay_out(&mut app, words, words);
+            settle(&mut app);
+            assert_eq!(button_texts(&mut app).pop().unwrap(), first);
         }
     }
 }
