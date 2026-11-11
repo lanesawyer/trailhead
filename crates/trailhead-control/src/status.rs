@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use trailhead_factory::{
     ControlState, FactoryEvent, FactorySnapshot, Grade, RunPhase, RunStatus, Sandbox, SandboxState, SandboxStatus,
-    Sequenced, TargetSpend, TaskKey, Usd, label,
+    Sequenced, TargetSpend, TaskKey, UsageWindow, Usd, label,
 };
 
 use crate::timing::unix_now;
@@ -28,6 +28,7 @@ struct Inner {
     targets: Vec<TargetSpend>,
     human_grades: Vec<Grade>,
     queue: Vec<TaskKey>,
+    usage: Vec<UsageWindow>,
     seq: u64,
 }
 
@@ -49,6 +50,7 @@ impl Default for StatusBoard {
                 targets: Vec::new(),
                 human_grades: Vec::new(),
                 queue: Vec::new(),
+                usage: Vec::new(),
                 seq: 0,
             }),
             tx: broadcast::channel(BACKLOG).0,
@@ -98,6 +100,7 @@ fn snapshot_locked(inner: &Inner) -> FactorySnapshot {
         targets: inner.targets.clone(),
         human_grades: inner.human_grades.clone(),
         queue: inner.queue.clone(),
+        usage: inner.usage.clone(),
         seq: inner.seq,
     }
 }
@@ -141,6 +144,17 @@ impl StatusBoard {
             Some(FactoryEvent::Holding { holding })
         });
         changed
+    }
+
+    /// Sets the subscription's usage readings, publishing them when they changed.
+    pub fn usage(&self, usage: Vec<UsageWindow>) {
+        self.apply(|i| {
+            if i.usage == usage {
+                return None;
+            }
+            i.usage = usage.clone();
+            Some(FactoryEvent::Usage { usage })
+        });
     }
 
     /// Sets the spend of each capped target. It goes in the snapshot and not the stream, because it changes with the
@@ -403,6 +417,18 @@ mod tests {
         assert_eq!(board.snapshot().control, ControlState::Reconciling);
         board.control(ControlState::Up);
         assert_eq!(board.snapshot().control, ControlState::Reattaching { task: a });
+    }
+
+    #[test]
+    fn a_usage_reading_is_published_only_when_it_changes() {
+        let board = StatusBoard::new();
+        let (_, mut rx) = board.subscribe();
+        let usage = vec![UsageWindow { window: "five_hour".into(), used_percent: 40, resets_at: 9, pause_at: None }];
+        board.usage(usage.clone());
+        board.usage(usage.clone());
+        assert_eq!(rx.try_recv().unwrap().event, FactoryEvent::Usage { usage: usage.clone() });
+        assert!(rx.try_recv().is_err(), "the same reading again says nothing");
+        assert_eq!(board.snapshot().usage, usage);
     }
 
     #[test]

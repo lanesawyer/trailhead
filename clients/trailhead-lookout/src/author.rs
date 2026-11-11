@@ -970,6 +970,7 @@ mod tests {
             last_error: None,
             holding: None,
             human_grades: Vec::new(),
+            usage: Vec::new(),
             seq: 1,
         };
         factory.repos.insert("o/r".into(), state);
@@ -1243,6 +1244,7 @@ mod tests {
             last_error: None,
             holding: None,
             human_grades: Vec::new(),
+            usage: Vec::new(),
             seq: 1,
         };
         app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), state);
