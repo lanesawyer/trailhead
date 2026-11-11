@@ -162,8 +162,8 @@ pub struct Card {
     pub actions: Vec<CardAction>,
     /// Where a search matched this task when its key and title did not: "in description: …".
     pub found: Option<String>,
-    /// Its pull request, which a tool button opens in the browser. Boxed, as few cards have one.
-    pub pr: Option<Box<PrLink>>,
+    /// Its pull request, which a tool button opens in the browser.
+    pub pr: Option<PrLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,7 +356,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges,
             actions,
             found: found(t),
-            pr: pr_link(t).map(Box::new),
+            pr: pr_link(t),
         }
     };
 
