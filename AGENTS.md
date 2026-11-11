@@ -6,7 +6,7 @@ Read `docs/PLAN.md` before making design decisions. It is the source of truth fo
 
 The software factory being built into Trailhead is designed in `docs/factory/`. Start at `docs/factory/README.md`, which says which file covers what, and open only the one your work needs.
 
-Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). First the rough edges live runs hit, starting with TRAIL-140. The task engine's core is in `crates/trailhead-core`, its domain types in `crates/trailhead-model` (re-exported by core; anything that needs them without the store, Lookout included, uses this crate); its server, MCP and CLI are in `crates/trailhead-server` and `crates/trailhead`. The factory's crates, none of them published yet:
+Current phase: 5 (factory after the MVP; the MVP, TRAIL-75, closed 2026-10-28). First the rough edges live runs hit, starting with TRAIL-140. The task engine's core is in `crates/trailhead-core`, its domain types in `crates/trailhead-model` (re-exported by core; anything that needs them without the store, Lookout included, uses this crate); the log setup its binaries share (local-time stamps, env filter, optional file layer) is in `crates/trailhead-log`; its server, MCP and CLI are in `crates/trailhead-server` and `crates/trailhead`. The factory's crates, none of them published yet:
 
 - `trailhead-factory`: types, the five traits (compute, harness, provider, tracker, code host), the daemon protocol and the `[factory]` settings in `.trailhead.toml`.
 - `trailhead-control`: the control plane (run loop, budgets, reviews, reconcile, the sandbox pool).
@@ -25,6 +25,7 @@ Phase 6, Lookout, the factory's Bevy app (`docs/factory/ui.md`, epic TRAIL-685),
 - Commit subjects and PR titles are `type(scope): message [TRAIL-n]`: a type cliff.toml groups (feat, fix, perf, refactor, docs, test, chore, ci, build), the crate or area as scope, and the task key last in square brackets. Squash merges take the PR title, and cliff.toml drops unconventional commits from CHANGELOG.md. The factory titles its PRs this way too.
 - In `trailhead-control`, once a run has produced something (a verdict, spend, a breach), record it before any teardown. Once a sandbox or sub-agent exists, don't propagate errors with a bare `?`: route them through `infra_failed` or `review_infra_failed`, or log the error and carry on to the cleanup. Teardown failures are logged and left to reconcile, never allowed to skip a record or a park.
 - `cargo clippy --all-targets` and `cargo fmt --all` must be clean; touching `clients/*`, also `cargo clippy -p trailhead-lookout --all-targets`.
+- `cargo machete` must be clean too (CI fails on unused dependencies). Remove an unused dependency; for a false positive, allowlist it in the crate's `[package.metadata.cargo-machete]` `ignored` list with a comment explaining why.
 - Local secrets come from Bitwarden Secrets Manager through fnox (`fnox.toml`; needs `BWS_ACCESS_TOKEN`). Tests that hit real services are `#[ignore]`d and run as mise tasks, e.g. `mise run test-live-sprites`.
 - The docs in `docs/` build into an mdBook (`mise run docs`); list any new page in `docs/SUMMARY.md` or it is left out of the book.
 - Migrations are numbered `.sql` files in `crates/trailhead-core/migrations`, registered in `src/db.rs`. Never edit an applied migration; add a new one.
