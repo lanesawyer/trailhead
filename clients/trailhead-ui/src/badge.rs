@@ -15,7 +15,7 @@ pub fn badge(label: impl Into<String>, icon: Option<Icon>, tone: Option<Token>) 
             -- @text_toned(label, size::SMALL, tone)
         }),
         (Some(icon), None) => Box::new(bsn_list! {
-            @icon_text(icon)
+            @icon_text(icon) TextTone({ token::TEXT_DIM })
             -- @text_dim(label, size::SMALL)
         }),
         (None, Some(tone)) => Box::new(bsn_list! { @text_toned(label, size::SMALL, tone) }),

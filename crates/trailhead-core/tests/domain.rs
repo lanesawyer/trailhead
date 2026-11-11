@@ -993,6 +993,20 @@ async fn reviewers_cannot_approve_their_own_work() {
 }
 
 #[tokio::test]
+async fn a_reviewer_finishes_its_own_work_when_review_is_not_required() {
+    let env = Env::new().await;
+    let lead = env.agent("lead").await;
+    let patch = ProjectPatch { reviewers: Some(vec!["lead".into()]), ..Default::default() };
+    env.store.update_project(&env.human, "AUTH", patch, None).await.unwrap();
+
+    // Without require_review, a reviewer's own in-progress work can go straight to done.
+    let t = env.task("mine").await;
+    env.store.claim(&lead, &t.key, None).await.unwrap();
+    let done = env.store.update_task(&lead, &t.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(done.status, Status::Done);
+}
+
+#[tokio::test]
 async fn a_reviewer_approves_work_it_only_parked_in_an_earlier_round() {
     let env = Env::new().await;
     let factory = env.agent("factory").await;
@@ -1415,6 +1429,17 @@ async fn similar_tasks_counts_capitalized_two_letter_acronyms() {
 }
 
 #[tokio::test]
+async fn similar_tasks_ignores_two_letter_function_words_in_all_caps_titles() {
+    let env = Env::new().await;
+    env.task("MOVE DB TO PG").await;
+    // Shared function words (TO) are not enough to match.
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "SEND IT TO OR IN ON", None).await.unwrap().is_empty());
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "FIX BUG TO ON PG", None).await.unwrap().is_empty());
+    // Acronyms still count.
+    assert_eq!(env.store.similar_tasks(&env.human, "AUTH", "DB PG", None).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn listing_by_title_ignores_case_and_surrounding_space() {
     let env = Env::new().await;
     let wanted = env.task("Cover the edge").await;
@@ -1526,4 +1551,48 @@ async fn with_unfinished_blockers_names_only_tasks_held_up_by_open_blockers() {
     let ids = [held.id, freed.id, free.id];
     let blocked = env.store.with_unfinished_blockers(&ids).await.unwrap();
     assert_eq!(blocked, std::collections::HashSet::from([held.id]));
+}
+
+#[tokio::test]
+async fn a_lapsing_claim_returns_to_review_after_the_claim_is_undone_and_redone() {
+    let env = Env::new().await;
+    let s = &env.store;
+    let a = env.agent("a").await;
+    let t = env.task("reworked after undo").await;
+    s.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
+    s.add_comment(&env.human, &t.key, NewComment::review(Verdict::RequestChanges, "fix it")).await.unwrap();
+
+    // Claim, undo the claim (back to in_review), then undo that undo (claimed again).
+    let claim = a.next_batch();
+    s.claim(&claim, &t.key, Some(60)).await.unwrap();
+    let undo = env.human.next_batch();
+    s.undo_batch(&undo, claim.batch_id).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::InReview);
+    s.undo_batch(&env.human.next_batch(), undo.batch_id).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::InProgress);
+
+    // The lapsed lease still goes back to review.
+    env.advance(120);
+    s.reap_expired_claims(&env.human).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::InReview);
+}
+
+#[tokio::test]
+async fn a_lapsing_claim_ignores_an_undone_claim_from_review() {
+    let env = Env::new().await;
+    let s = &env.store;
+    let a = env.agent("a").await;
+    let t = env.task("claimed from open after an undone claim").await;
+    s.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
+    s.add_comment(&env.human, &t.key, NewComment::review(Verdict::RequestChanges, "fix it")).await.unwrap();
+
+    // Claim from review, undo it, send the task back to open, then claim it from there.
+    let claim = a.next_batch();
+    s.claim(&claim, &t.key, None).await.unwrap();
+    s.undo_batch(&env.human.next_batch(), claim.batch_id).await.unwrap();
+    s.update_task(&env.human, &t.key, status(Status::Open), None).await.unwrap();
+    s.claim(&a, &t.key, Some(60)).await.unwrap();
+    env.advance(120);
+    s.reap_expired_claims(&env.human).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::Open);
 }

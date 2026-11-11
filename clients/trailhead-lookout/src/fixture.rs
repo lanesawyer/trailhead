@@ -3,7 +3,7 @@
 //! ([`id`]), so a test can write `"parent_id": "t7"` and find the task by `id("t7")`.
 
 use serde_json::{Value, json};
-use trailhead_model::{Agent, Claim, Comment, Project, Task};
+use trailhead_model::{Agent, Claim, Comment, Project, Task, User};
 use uuid::Uuid;
 
 /// The UUID a short name stands for. A real UUID is itself.
@@ -115,6 +115,15 @@ pub fn agent_json(fields: Value) -> Value {
 
 pub fn agent(fields: Value) -> Agent {
     serde_json::from_value(agent_json(fields)).expect("a whole agent")
+}
+
+pub fn user_json(fields: Value) -> Value {
+    let defaults = json!({"id": "u1", "workspace_id": "w", "name": "user", "email": null, "created_at": AT});
+    whole(defaults, fields)
+}
+
+pub fn user(fields: Value) -> User {
+    serde_json::from_value(user_json(fields)).expect("a whole user")
 }
 
 /// A `created_at` from a small number (0 to 59), for tests that order comments: `1` is a second after [`AT`].

@@ -5,7 +5,9 @@ use std::sync::Arc;
 use trailhead_control::{Factory, Host};
 use trailhead_factory::HostConfig;
 use trailhead_factory::{Compute, FactoryConfig, Labels, Role, RunOutcome, SandboxSpec, TaskKey, VerdictKind, label};
-use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
+use trailhead_testkit::{
+    FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness, unix_now,
+};
 
 fn config(repo: &str, extra: &str) -> String {
     format!(
@@ -66,10 +68,6 @@ fn repo(name: &str, extra: &str, compute: &FakeCompute, host: &Arc<Host>) -> Rep
 /// A host pausing every repo at 80% of the five-hour window.
 fn pausing_host() -> Arc<Host> {
     Host::new(&HostConfig { pause_at: [("five_hour".to_string(), 80)].into(), ..Default::default() })
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
 fn changes() -> RunOutcome {

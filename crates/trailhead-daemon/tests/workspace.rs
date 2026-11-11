@@ -55,6 +55,7 @@ async fn prepare_clones_runs_setup_and_resets() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -107,6 +108,7 @@ async fn prepare_can_check_out_a_branchs_remote_head() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -131,6 +133,32 @@ async fn stack_env_reaches_checks_and_the_agent() {
     let result = ws.check(&check("test", "echo jobs=$CARGO_BUILD_JOBS")).await;
     assert_eq!(result.output.trim(), "jobs=2");
     assert_eq!(ws.agent_env().await["CARGO_BUILD_JOBS"], "2");
+}
+
+#[tokio::test]
+async fn prepare_runs_setup_and_trim_with_the_request_env() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        branch_if_present: false,
+        setup: Some(check("setup", "echo $CARGO_BUILD_JOBS > .setup-jobs")),
+        trim: Some(check("trim", "echo $CARGO_BUILD_JOBS > ../trim-jobs")),
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+        env: [("CARGO_BUILD_JOBS".to_string(), "3".to_string())].into(),
+    };
+    ws.prepare(&req).await.unwrap();
+    assert_eq!(std::fs::read_to_string(ws.dir().join(".setup-jobs")).unwrap().trim(), "3");
+    assert_eq!(std::fs::read_to_string(ws.dir().parent().unwrap().join("trim-jobs")).unwrap().trim(), "3");
+    assert_eq!(ws.agent_env().await["CARGO_BUILD_JOBS"], "3");
 }
 
 #[tokio::test]
@@ -220,6 +248,7 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -229,7 +258,8 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         env: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
-    assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "still at the PR head, merge uncommitted");
+    let start = ws.head().await.unwrap();
+    assert_eq!(start, rev(&src, "factory/w-1"), "still at the PR head, merge uncommitted");
     assert_eq!(ws.merge_head().await.unwrap().unwrap(), rev(&src, "main"));
     let readme = std::fs::read_to_string(ws.dir().join("README.md")).unwrap();
     assert!(readme.contains("<<<<<<<") && readme.contains("main") && readme.contains("branch"), "{readme}");
@@ -256,6 +286,11 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
     assert_eq!(ws.merge_head().await.unwrap(), None);
     assert!(ws.contains(&base).await.unwrap());
     assert!(ws.contains(&ws.head().await.unwrap()).await.unwrap());
+    let head = ws.head().await.unwrap();
+    assert_ne!(head, start, "the merge made a new commit");
+    assert_eq!(rev(&ws.dir(), &format!("{head}^1")), start);
+    assert_eq!(rev(&ws.dir(), &format!("{head}^2")), base, "a merge commit: the old tip and the base");
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), Some(base.clone()));
 
     // A later prepare, as from a warm checkpoint taken mid-merge, drops the merge.
     ws.prepare(&PrepareRequest { branch: None, merge_base: false, ..req }).await.unwrap();
@@ -286,6 +321,7 @@ async fn branch_behind_main(root: &Path) -> (GitWorkspace, String) {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -382,6 +418,7 @@ async fn prepare_installs_the_stack_with_mise_and_checks_run_under_it() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         setup: Some(check("setup", "echo \"pinned=$PINNED\" > .setup-env")),
         tools: [("node".to_string(), "26".to_string())].into(),
         tool_hosts: Default::default(),
@@ -430,6 +467,7 @@ async fn the_stack_install_is_retried_while_egress_opens() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         setup: None,
         tools: [("node".to_string(), "26".to_string())].into(),
         tool_hosts: Default::default(),
@@ -517,6 +555,7 @@ async fn prepare_resets_a_checkout_left_in_a_conflicted_merge() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -555,6 +594,7 @@ async fn prepare_runs_the_trim_check_after_setup_and_survives_its_failure() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         setup: Some(check("setup", "mkdir -p cache && touch cache/big")),
         trim: Some(check("trim", "rm -rf cache")),
         disk_warn_bytes: None,
@@ -581,6 +621,7 @@ async fn prepare_refuses_when_the_disk_is_over_the_limit() {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         setup: None,
         trim: None,
         disk_warn_bytes: Some(1),
@@ -606,6 +647,7 @@ async fn changed_files_lists_committed_uncommitted_and_new_files_against_the_bas
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -643,6 +685,7 @@ async fn unpublished_sees_uncommitted_and_unpushed_work_but_not_a_clean_checkout
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -689,6 +732,7 @@ async fn changed_files_leaves_out_base_changes_merged_in_by_a_rework() {
         base_branch: "main".into(),
         branch: Some("factory/w-1".into()),
         merge_base: true,
+        branch_if_present: false,
         trim: None,
         disk_warn_bytes: None,
         disk_limit_bytes: None,
@@ -701,4 +745,88 @@ async fn changed_files_leaves_out_base_changes_merged_in_by_a_rework() {
     assert!(ws.merge_head().await.unwrap().is_some());
     assert!(ws.dir().join("base.txt").exists(), "the merge brought the base change in");
     assert_eq!(ws.changed_files("main").await.unwrap(), ["pr.txt"]);
+}
+
+#[tokio::test]
+async fn a_branch_published_through_the_api_counts_as_published_and_a_resume_builds_on_it() {
+    let root = tempfile::tempdir().unwrap();
+    upstream(root.path());
+    let bare = root.path().join("remote/acme/widget.git");
+    let remote = format!("file://{}", root.path().join("remote").display());
+    let ws = GitWorkspace::with_remote(root.path().join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: Some("factory/trail-1".into()),
+        branch_if_present: true,
+        merge_base: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        setup: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+        env: Default::default(),
+    };
+    ws.prepare(&req).await.unwrap();
+    let dir = ws.dir();
+    assert_eq!(ws.head().await.unwrap(), rev(&dir, "origin/main"), "a branch the remote lacks leaves it on the base");
+    assert!(ws.unpublished("factory/trail-1").await.is_err(), "and there is nothing to compare with");
+
+    git(&dir, &["config", "user.email", "t@example.com"]);
+    git(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "new"]);
+    assert!(ws.unpublished("main").await.unwrap());
+
+    // The API makes its own commit for the same content, so the local one is no ancestor of the branch.
+    let tmp = root.path().join("api");
+    git(root.path(), &["clone", "--quiet", bare.to_str().unwrap(), tmp.to_str().unwrap()]);
+    git(&tmp, &["config", "user.email", "api@example.com"]);
+    git(&tmp, &["config", "user.name", "api"]);
+    std::fs::write(tmp.join("new.txt"), "new\n").unwrap();
+    git(&tmp, &["add", "."]);
+    git(&tmp, &["commit", "--quiet", "-m", "published"]);
+    git(&tmp, &["push", "--quiet", "origin", "HEAD:refs/heads/factory/trail-1"]);
+    assert!(!ws.unpublished("factory/trail-1").await.unwrap(), "the same content is on the branch");
+
+    std::fs::write(dir.join("new.txt"), "newer\n").unwrap();
+    git(&dir, &["commit", "--quiet", "-am", "more"]);
+    assert!(ws.unpublished("factory/trail-1").await.unwrap(), "different content isn't");
+
+    // A resume now builds on the pushed branch.
+    ws.prepare(&req).await.unwrap();
+    assert_eq!(ws.head().await.unwrap(), rev(&tmp, "HEAD"));
+}
+
+#[tokio::test]
+async fn merged_base_follows_a_fetch_that_moves_the_base_after_the_merge() {
+    let root = tempfile::tempdir().unwrap();
+    let (ws, start) = branch_behind_main(root.path()).await;
+    agent_git(&ws.dir(), &["merge", "--quiet", "--no-edit", "origin/main"]);
+    let merged = rev(&ws.dir(), "origin/main");
+    let src = root.path().join("src");
+    let bare = root.path().join("remote/acme/widget.git");
+    git(&src, &["checkout", "--quiet", "main"]);
+    std::fs::write(src.join("later.txt"), "later\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "--quiet", "-m", "later"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "main"]);
+    git(&ws.dir(), &["fetch", "--quiet", "origin"]);
+    assert_ne!(rev(&ws.dir(), "origin/main"), merged);
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), Some(merged));
+}
+
+#[tokio::test]
+async fn merged_base_sees_a_fast_forward_to_the_base() {
+    let root = tempfile::tempdir().unwrap();
+    let (ws, _) = branch_behind_main(root.path()).await;
+    let dir = ws.dir();
+    // A branch with nothing of its own, behind main, so the merge fast-forwards.
+    git(&dir, &["checkout", "--quiet", "--detach", "origin/main~1"]);
+    let start = ws.head().await.unwrap();
+    agent_git(&dir, &["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(ws.head().await.unwrap(), rev(&dir, "origin/main"));
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), Some(rev(&dir, "origin/main")));
 }
