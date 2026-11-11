@@ -13,7 +13,9 @@ use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use trailhead_model::{Claim, Comment, CommentKind, Grade, Priority, Status, Task, TaskDetail, TaskKey, Verdict};
+use trailhead_model::{
+    Claim, ClaimResult, Comment, CommentKind, Grade, HeldClaim, Priority, Status, Task, TaskDetail, TaskKey, Verdict,
+};
 use uuid::Uuid;
 
 use crate::ApiError;
@@ -155,24 +157,6 @@ impl NewComment {
     }
 }
 
-/// A claim the caller holds, as `GET /v1/claims` lists it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HeldClaim {
-    pub key: String,
-    pub title: String,
-    pub status: Status,
-    pub claim: Claim,
-}
-
-/// What `POST /v1/tasks/{task}/claim` returns.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClaimResult {
-    pub task: Task,
-    pub claim: Claim,
-    /// The last handoff left on the task.
-    pub handoff: Option<Comment>,
-}
-
 /// Starts the server again after a request couldn't connect; true if it did, and the request should be retried.
 pub type Reconnect = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
 
@@ -184,6 +168,8 @@ pub struct TaskQuery {
     pub status: Vec<Status>,
     pub parent: Option<TaskKey>,
     pub title: Option<String>,
+    /// `Some(true)` keeps only the in-review tasks waiting on a rework (`changes_requested=true`).
+    pub changes_requested: Option<bool>,
     /// Adds each task's live claim (`include=claim`).
     pub with_claim: bool,
     pub limit: Option<usize>,
@@ -221,6 +207,11 @@ impl Client {
     pub fn new(base: impl Into<String>, token: impl Into<String>) -> Client {
         let http = reqwest::Client::builder().timeout(Duration::from_secs(60)).build().expect("http client");
         Client { http, base: base.into().trim_end_matches('/').to_string(), token: token.into(), reconnect: None }
+    }
+
+    /// This client's connection pool and server, acting with `token` instead. Any reconnect hook is kept.
+    pub fn with_token(&self, token: impl Into<String>) -> Client {
+        Client { token: token.into(), ..self.clone() }
     }
 
     /// Calls `reconnect` when a request can't connect, and retries the request once if it returns true.
@@ -271,6 +262,9 @@ impl Client {
         }
         if let Some(t) = &q.title {
             query.push(("title", t.clone()));
+        }
+        if let Some(c) = q.changes_requested {
+            query.push(("changes_requested", c.to_string()));
         }
         if q.with_claim {
             query.push(("include", "claim".into()));
@@ -326,5 +320,19 @@ impl Client {
     /// `GET /v1/claims`: the live claims the token holds.
     pub async fn my_claims(&self) -> Result<Vec<HeldClaim>> {
         self.send(self.request(routes::MY_CLAIMS, None)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_token_swaps_only_the_token() {
+        let client = Client::new("http://127.0.0.1:1/", "a").with_reconnect(Arc::new(|| Box::pin(async { false })));
+        let other = client.with_token("b");
+        assert_eq!((other.base.as_str(), other.token.as_str()), ("http://127.0.0.1:1", "b"));
+        assert_eq!(client.token, "a");
+        assert!(other.reconnect.is_some());
     }
 }

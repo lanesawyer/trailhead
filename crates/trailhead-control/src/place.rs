@@ -107,7 +107,7 @@ impl Factory {
 
     /// The targets that have cost their daily cap today. Reaching the cap and leaving it (a new day, or a raised cap)
     /// are each logged once.
-    fn capped(&self) -> HashSet<String> {
+    pub(crate) fn capped(&self) -> HashSet<String> {
         let (now, today) = (Instant::now(), spend::today());
         let mut capped = HashSet::new();
         let mut board = Vec::new();
@@ -144,11 +144,13 @@ impl Factory {
                             holders.insert(TaskKey(task.clone()), p.target.name.clone());
                         }
                     }
+                    // A placement stands in only for sandboxes on its own target: an old one left on another
+                    // target still counts there.
                     let counted = held
                         .iter()
                         .filter(|s| {
                             let task = s.labels.get(label::TASK).cloned().unwrap_or_default();
-                            !placed.contains_key(&(TaskKey(task), role_of(s)))
+                            placed.get(&(TaskKey(task), role_of(s))) != Some(&p.target.name)
                         })
                         .count();
                     loads.insert(p.target.name.clone(), counted);
@@ -182,12 +184,24 @@ impl Factory {
     /// parked or reworked task, `docs/factory/targets.md`), else the first with room, as `place` chooses. The
     /// sandbox already counts in the target's load, so staying put takes no further room.
     pub(crate) fn place_task<'a>(&'a self, survey: &mut Survey, task: &Task) -> Option<&'a Placed> {
-        let stays = task.run.target.as_ref().filter(|t| survey.holders.get(&task.key) == Some(*t));
-        let kept = stays.and_then(|name| self.targets.iter().find(|p| p.target.name == *name));
-        match kept {
-            Some(p) if !survey.down.contains(&p.target.name) && !survey.capped.contains(&p.target.name) => Some(p),
-            _ => self.place(survey),
+        match self.kept_target(survey, task) {
+            Some(p) => Some(p),
+            None => self.place(survey),
         }
+    }
+
+    /// Whether `task` stays in the sandbox it holds, so starting it takes no room: its recorded target still holds
+    /// the sandbox and is neither down nor capped. A holder that doesn't stay gets a new sandbox like any other task.
+    pub(crate) fn stays_put(&self, survey: &Survey, task: &Task) -> bool {
+        self.kept_target(survey, task).is_some()
+    }
+
+    fn kept_target(&self, survey: &Survey, task: &Task) -> Option<&Placed> {
+        let stays = task.run.target.as_ref().filter(|t| survey.holders.get(&task.key) == Some(*t))?;
+        self.targets
+            .iter()
+            .find(|p| p.target.name == *stays)
+            .filter(|p| !survey.down.contains(&p.target.name) && !survey.capped.contains(&p.target.name))
     }
 
     /// Holds `task`'s place as `role` on `target` until the guard drops.
@@ -214,5 +228,126 @@ fn role_of(sandbox: &Sandbox) -> Role {
         Role::Reviewer
     } else {
         Role::Worker
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use trailhead_factory::{Compute, FactoryConfig, HostConfig, SandboxSpec, Target, Tracker};
+    use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, ScriptedHarness};
+
+    use super::*;
+    use crate::Host;
+
+    const CONFIG: &str = r#"
+[repo]
+owner = "lanesawyer"
+name = "trailhead"
+
+[checks]
+test = "cargo test"
+
+[profiles.worker]
+role = "worker"
+adapter = "claude-code"
+provider = "anthropic"
+model = "sonnet"
+budget = { usd = 5, minutes = 60, steps = 40 }
+
+[profiles.reviewer]
+role = "reviewer"
+adapter = "claude-code"
+provider = "anthropic"
+model = "opus"
+budget = { usd = 2, minutes = 20, steps = 20 }
+
+[targets.local]
+kind = "docker"
+priority = 1
+
+[targets.cloud]
+kind = "sprites"
+priority = 2
+"#;
+
+    #[tokio::test]
+    async fn a_placement_on_another_target_leaves_the_old_sandbox_counted() {
+        let config = FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap();
+        let tracker = FakeTracker::new("factory");
+        let codehost = FakeCodeHost::new();
+        let local = FakeCompute::new();
+        let mut placed = Vec::new();
+        for spec in config.target_specs() {
+            let compute = if spec.name == "local" { local.clone() } else { FakeCompute::new() };
+            placed.push(Placed {
+                target: Target::default().listed(&spec),
+                compute: Arc::new(compute),
+                daemon: Arc::new(LocalDaemon::new(
+                    Arc::new(ScriptedHarness::new()),
+                    Arc::new(codehost.clone()),
+                    tracker.clone(),
+                )),
+                provider: Arc::new(FakeProvider::new(1)),
+            });
+        }
+        let factory = Factory::with_targets(config, placed, Arc::new(tracker), Host::new(&HostConfig::default()));
+
+        // A busy worker sandbox left on local by a parked task, which is then answered and placed on the cloud.
+        let key = TaskKey("TRAIL-1".into());
+        let labels = Labels::from([
+            (label::FACTORY.into(), "trailhead".into()),
+            (label::REPO.into(), "lanesawyer/trailhead".into()),
+            (label::POOL.into(), "worker".into()),
+            (label::STATE.into(), label::BUSY.into()),
+            (label::TASK.into(), key.0.clone()),
+            (label::ROLE.into(), "worker".into()),
+            (label::TARGET.into(), "local".into()),
+        ]);
+        local.create(&SandboxSpec { name: "trailhead-w1".into(), labels, egress: Default::default() }).await.unwrap();
+        let cloud = &factory.targets()[1];
+        let _held = factory.hold(&key, Role::Worker, cloud);
+
+        let survey = factory.survey().await;
+        assert_eq!(survey.loads.get("local"), Some(&1), "the old sandbox still fills a place on local");
+        assert_eq!(survey.loads.get("cloud"), Some(&1), "and the placement fills one on the cloud");
+    }
+
+    #[tokio::test]
+    async fn a_holder_stays_put_only_while_its_target_is_up_and_uncapped() {
+        let config = FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap();
+        let tracker = FakeTracker::new("factory");
+        let codehost = FakeCodeHost::new();
+        let placed: Vec<Placed> = config
+            .target_specs()
+            .iter()
+            .map(|spec| Placed {
+                target: Target::default().listed(spec),
+                compute: Arc::new(FakeCompute::new()),
+                daemon: Arc::new(LocalDaemon::new(
+                    Arc::new(ScriptedHarness::new()),
+                    Arc::new(codehost.clone()),
+                    tracker.clone(),
+                )),
+                provider: Arc::new(FakeProvider::new(1)),
+            })
+            .collect();
+        let factory =
+            Factory::with_targets(config, placed, Arc::new(tracker.clone()), Host::new(&HostConfig::default()));
+
+        let key = tracker.add_task("TRAIL", "held", "");
+        tracker.set_run(&key, trailhead_factory::RunUpdate { target: Some("local".into()), ..Default::default() });
+        let task = tracker.show(&key).await.unwrap();
+        let mut survey = factory.survey().await;
+        survey.holders.insert(key.clone(), "local".into());
+        assert!(factory.stays_put(&survey, &task));
+
+        survey.down.insert("local".into());
+        assert!(!factory.stays_put(&survey, &task), "a down target can't take it back");
+        survey.down.clear();
+        survey.capped.insert("local".into());
+        assert!(!factory.stays_put(&survey, &task), "nor can a capped one");
+        survey.capped.clear();
+        survey.holders.insert(key, "cloud".into());
+        assert!(!factory.stays_put(&survey, &task), "nor one that isn't where its sandbox is");
     }
 }

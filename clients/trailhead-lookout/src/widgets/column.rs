@@ -83,7 +83,7 @@ pub fn column_empty() -> impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH};
+    use crate::widgets::{SCROLLBAR_GAP, SCROLLBAR_WIDTH};
 
     fn node_of(bundle: impl Bundle) -> Node {
         let mut world = World::new();
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn the_scrollbar_sits_centered_in_the_shell_padding_so_the_body_has_none_of_its_own() {
-        const { assert!(SCROLLBAR_EDGE + SCROLLBAR_WIDTH + SCROLLBAR_EDGE == space::PANEL_INSET) };
+        const { assert!(SCROLLBAR_GAP + SCROLLBAR_WIDTH + SCROLLBAR_GAP == space::PANEL_INSET) };
         assert_eq!(node_of(column_shell(Status::Open)).padding.right, px(space::PANEL_INSET));
         assert_eq!(node_of(column_body()).padding, UiRect::ZERO);
     }

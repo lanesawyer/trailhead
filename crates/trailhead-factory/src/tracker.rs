@@ -121,9 +121,20 @@ pub struct RunUpdate {
     /// reopened task counts from it (see `attempt_floor`), so a human only has to reopen it (TRAIL-308).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gave_up: Option<u32>,
+    /// The attempt that ended in a question. A give-up recorded in `failure` from before it isn't "the attempt
+    /// before" the next one for the backstop on repeated give-ups, though the next attempt is still told of it
+    /// (TRAIL-805).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked: Option<u32>,
     /// How the task's PR was merged, once it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
+    /// A person merged the PR without the approval core requires to finish the task, so the task is being parked for a
+    /// person to mark it done. Written before the park's reopen, claim and ask, so a pass that finds a task with it
+    /// outside `needs_input` finishes the park rather than closing the task (TRAIL-729). `merged` alone can't say
+    /// this: it is also recorded by a close that failed before the park.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unapproved_merge: Option<bool>,
     /// The PR's grade and what raised it above the task's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade: Option<PrGrade>,
@@ -189,6 +200,20 @@ pub struct MergeDecision {
     pub comment: Option<u64>,
     /// What was last said on the PR about this, so it's said once per change.
     pub message: String,
+    /// What the status comment has said, oldest first and capped at `HISTORY_LIMIT`, so the comment can list when
+    /// the decision changed.
+    #[serde(default)]
+    pub history: Vec<Said>,
+}
+
+/// How many statuses the merger's status comment lists in its History.
+pub const HISTORY_LIMIT: usize = 8;
+
+/// One status the merger said on the PR, and when (UTC, to the minute).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Said {
+    pub at: String,
+    pub message: String,
 }
 
 /// A merged PR: who merged it, which PR, and the commit it became.
@@ -224,6 +249,10 @@ pub struct ChangesRequested {
     /// host couldn't say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// A person has taken the request over: the task was parked on it and then answered or reopened, which settles
+    /// it whether or not they pushed. A settled request is kept for the record but is no longer pending.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settled: bool,
 }
 
 /// A reviewer that overran its budget, and whether the task was parked for it yet.
@@ -251,6 +280,10 @@ pub struct WorkerBreach {
     pub reason: String,
     #[serde(default)]
     pub parked: bool,
+    /// The sandbox couldn't be cut off or destroyed and is still live, so the park doesn't keep it: reconcile
+    /// retries the destroy even though the task is parked.
+    #[serde(default)]
+    pub stuck: bool,
 }
 
 impl RunUpdate {
@@ -276,7 +309,9 @@ impl RunUpdate {
             worker_breach,
             attempt_base,
             gave_up,
+            asked,
             merged,
+            unapproved_merge,
             grade,
             ungraded,
             reviewed_head,
@@ -305,7 +340,9 @@ impl RunUpdate {
         self.worker_breach = worker_breach.or(self.worker_breach.take());
         self.attempt_base = attempt_base.or(self.attempt_base.take());
         self.gave_up = gave_up.or(self.gave_up.take());
+        self.asked = asked.or(self.asked.take());
         self.merged = merged.or(self.merged.take());
+        self.unapproved_merge = unapproved_merge.or(self.unapproved_merge.take());
         self.grade = grade.or(self.grade.take());
         self.ungraded = ungraded.or(self.ungraded.take());
         self.reviewed_head = reviewed_head.or(self.reviewed_head.take());
@@ -315,10 +352,15 @@ impl RunUpdate {
         self.released = released.or(self.released.take());
     }
 
-    /// The review the next run has to address: the last one that asked for changes, unless a later review has
-    /// since finished on another attempt.
-    pub fn pending_changes(&self) -> Option<&ChangesRequested> {
+    /// The last request for changes, unless a later review has since finished on another attempt. It may be settled:
+    /// a worker that takes the task over after a person answered a park still needs to know it was a conflict.
+    pub fn last_changes(&self) -> Option<&ChangesRequested> {
         self.changes_requested.as_ref().filter(|c| self.reviewed.is_none_or(|r| r == c.attempt))
+    }
+
+    /// The request still waiting for a worker: the last one, unless a person settled it.
+    pub fn pending_changes(&self) -> Option<&ChangesRequested> {
+        self.last_changes().filter(|c| !c.settled)
     }
 
     /// The attempt `max_attempts` counts from: the last review that asked for changes, or the attempt the control

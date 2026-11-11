@@ -122,6 +122,11 @@ async fn agent_lifecycle_over_http() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
     assert_eq!(r.body["agent"]["name"], "claude/child");
 
+    let me = api.call(Some(&secret), "GET", "/v1/me", None, &[]).await;
+    assert_eq!(me.body["agent_id"], me.body["agent"]["id"]);
+    assert!(me.body["agent_id"].is_string());
+    assert!(api.as_human("GET", "/v1/me", None).await.body["agent_id"].is_null());
+
     let ready = api.call(Some(&secret), "GET", "/v1/ready?fields=key,title", None, &[]).await;
     assert_eq!(ready.body, json!([{"key": "AUTH-1", "title": "first"}]));
 

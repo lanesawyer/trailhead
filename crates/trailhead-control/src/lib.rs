@@ -54,10 +54,14 @@ pub const RELEASE_PATIENCE: Duration = Duration::from_secs(10 * 60);
 /// or found a conflict after answering.
 pub const UPDATE_PATIENCE: Duration = Duration::from_secs(10 * 60);
 
+/// How many times the merger asks for a branch update on one head before it gives up waiting and sends the PR to a
+/// rework: a host that keeps dropping the update has probably found a conflict.
+pub const UPDATE_ASKS: u32 = 3;
+
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
-/// Reads the current `[merge] mode`, or says why it can't.
+/// Reads the current `[factory.merge] mode`, or says why it can't.
 pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String> + Send + Sync>;
 
 /// State shared by every [`Factory`] on one host (one per repo): a usage reading from any repo's run pauses them all,
@@ -74,8 +78,10 @@ pub struct Host {
     pause_logged: Mutex<Option<i64>>,
     /// Every repo's queue task keys, so a factory can tell a run re-parented out of its own queue from another repo's.
     queues: Mutex<HashSet<String>>,
-    /// The stray runs already warned about, so each is logged once.
-    strays_logged: Mutex<HashSet<String>>,
+    /// The projects some repo works without a queue, i.e. whole: nothing in them can sit outside a queue.
+    queueless_projects: Mutex<HashSet<String>>,
+    /// Per project, the stray runs already warned about, so each is logged once per stretch outside the queues.
+    strays_logged: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl Host {
@@ -135,14 +141,16 @@ pub struct Factory {
     listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
     /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
     /// (a 202), so until the head moves the PR is still behind and asking again would only queue another, unless the
-    /// update never lands: after `UPDATE_PATIENCE` the merger asks again (TRAIL-490).
-    updating: Mutex<HashMap<TaskKey, (String, Instant)>>,
+    /// update never lands: after `UPDATE_PATIENCE` the merger asks again, up to `UPDATE_ASKS` times on one head, then
+    /// reworks (TRAIL-490, TRAIL-621). Each entry also counts the asks.
+    updating: Mutex<HashMap<TaskKey, (String, Instant, u32)>>,
     /// The person's PR with auto-merge on that the merger is holding its merges for (TRAIL-804).
     held: Mutex<Option<person::Held>>,
     /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
     host: Arc<Host>,
-    /// The ready tasks last reported as starved by parked sandboxes, so a poll says it once per change.
-    starved: Mutex<Option<Vec<TaskKey>>>,
+    /// The tasks holding the sandboxes last reported as starving ready ones, each with whether it is parked, so a
+    /// poll says it once per change.
+    starved: Mutex<Option<Vec<(TaskKey, bool)>>>,
     /// When each task holding a pooled sandbox was first seen parked, so `release_parked_after` counts from there. In
     /// memory: a restart starts the wait again (TRAIL-601).
     parked_since: Mutex<HashMap<TaskKey, Instant>>,
@@ -156,6 +164,8 @@ pub struct Factory {
     install_opened: Mutex<HashMap<SandboxId, Vec<String>>>,
     /// How long each pooled sandbox's last warm checkpoint took, to weigh against its next prepare (TRAIL-707).
     warm_cost: Mutex<HashMap<SandboxId, Duration>>,
+    /// Consecutive failed prepares of each pooled sandbox, cleared by a good one (TRAIL-561).
+    prepare_failures: Mutex<HashMap<SandboxId, u32>>,
     /// The target each worker or review being started has been placed on, until it ends. Its sandbox may not exist yet, so
     /// without this a target's limit would be passed by runs starting together.
     placed: Arc<Mutex<HashMap<(TaskKey, trailhead_factory::Role), String>>>,
@@ -211,6 +221,22 @@ pub struct Reconciled {
 }
 
 impl Factory {
+    /// Drops everything the merge path keeps per task (the PR file cache and the queued branch update), for a task that
+    /// has left it: merged, closed, cancelled or otherwise out of review (TRAIL-680). A new per-task map there is
+    /// cleared here too.
+    pub(crate) fn forget_merge_path(&self, task: &TaskKey) {
+        self.updating.lock().unwrap().remove(task);
+        self.listed.lock().unwrap().remove(task);
+    }
+
+    /// Drops the merge path's entries for every task not in `keep`, the in-review tasks of a successful listing. A
+    /// task that left review any way at all (cancelled, deleted, re-parented out of the queue, done by hand) is no
+    /// longer listed, so its entries go without each way out needing its own check (TRAIL-680).
+    pub(crate) fn retain_merge_path(&self, keep: &HashSet<&TaskKey>) {
+        self.updating.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.listed.lock().unwrap().retain(|k, _| keep.contains(k));
+    }
+
     /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).
     #[doc(hidden)]
     pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {
@@ -242,6 +268,9 @@ impl Factory {
         targets.sort_by(|a, b| (a.target.priority, &a.target.name).cmp(&(b.target.priority, &b.target.name)));
         assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
         host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
+        if config.repo.queue.is_empty() {
+            host.queueless_projects.lock().unwrap().insert(config.repo.project.clone());
+        }
         let merge_mode = Mutex::new(config.merge.mode);
         let status = StatusBoard::new();
         status.human_grades(human_grades(&config));
@@ -266,6 +295,7 @@ impl Factory {
             pool_pick: tokio::sync::Mutex::default(),
             install_opened: Mutex::default(),
             warm_cost: Mutex::default(),
+            prepare_failures: Mutex::default(),
             placed: Arc::default(),
             ledger: Arc::default(),
             capped: Mutex::default(),
@@ -369,6 +399,6 @@ impl Factory {
     }
 
     fn branch(task: &Task) -> String {
-        format!("factory/{}", task.key.0.to_ascii_lowercase())
+        format!("factory/{}", task.key.to_ascii_lowercase())
     }
 }

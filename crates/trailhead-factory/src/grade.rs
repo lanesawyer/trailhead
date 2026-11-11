@@ -27,7 +27,7 @@ pub struct ChangedFile {
     /// Where a renamed file was before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_path: Option<String>,
-    /// The file's unified diff, when the host gave one and the grader reads it (a `Cargo.lock`); none otherwise.
+    /// The file's unified diff, when the host gave one and the grader reads it ([`reads_patch`]); none otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch: Option<String>,
 }
@@ -86,7 +86,12 @@ impl PrGrade {
 /// Compiles a path glob: `*` and `?` stay within a segment, `**` spans segments (none included, so `**/Cargo.toml`
 /// matches the root's too), and `{a,b}` and `[ab]` work as in a shell.
 pub fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, globset::Error> {
-    Ok(globset::GlobBuilder::new(pattern).literal_separator(true).build()?.compile_matcher())
+    Ok(glob(pattern)?.compile_matcher())
+}
+
+/// The one place the matching rules are set, so [`compile_glob`] and [`compile_glob_set`] can't drift apart.
+fn glob(pattern: &str) -> Result<globset::Glob, globset::Error> {
+    globset::GlobBuilder::new(pattern).literal_separator(true).build()
 }
 
 /// Matches a `/`-separated path against a glob (see [`compile_glob`]). A pattern that doesn't compile matches nothing;
@@ -126,11 +131,14 @@ const CHECK_DEFINITIONS: &[&str] = &[
 fn compile_glob_set<'g>(patterns: impl IntoIterator<Item = &'g str>) -> globset::GlobSet {
     let mut set = globset::GlobSet::builder();
     for p in patterns {
-        if let Ok(g) = globset::GlobBuilder::new(p).literal_separator(true).build() {
+        if let Ok(g) = glob(p) {
             set.add(g);
         }
     }
-    set.build().unwrap_or_else(|_| globset::GlobSet::empty())
+    set.build().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "building the glob set failed; none of its globs will match");
+        globset::GlobSet::empty()
+    })
 }
 
 static CHECK_DEFINITION_SET: LazyLock<globset::GlobSet> =
@@ -138,6 +146,28 @@ static CHECK_DEFINITION_SET: LazyLock<globset::GlobSet> =
 
 pub fn is_check_definition(path: &str) -> bool {
     CHECK_DEFINITION_SET.is_match(path)
+}
+
+/// The files whose patch the grader reads: a `Cargo.lock`, and Rust sources. The code host keeps a patch only for these.
+pub fn reads_patch(path: &str) -> bool {
+    path.ends_with(".rs") || path.rsplit('/').next() == Some("Cargo.lock")
+}
+
+/// Whether a Rust file's patch only changes comments: every added or removed line is blank or starts with `//` (so
+/// `///` and `//!` docs too). A line of code with a comment after it counts as code, and so does a `/* */` comment. A
+/// line inside a multi-line string literal that happens to start with `//` reads as a comment; that is the one way this
+/// can pass a change in behaviour, and it is rare enough to accept. An empty patch is not comment-only.
+pub fn is_comment_only(patch: &str) -> bool {
+    let mut changed = 0;
+    for line in patch.lines() {
+        let Some(rest) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) else { continue };
+        changed += 1;
+        let rest = rest.trim();
+        if !(rest.is_empty() || rest.starts_with("//")) {
+            return false;
+        }
+    }
+    changed > 0
 }
 
 /// Whether a `Cargo.lock` patch only edits dependency lists: no package added or removed, no version, source or
@@ -190,7 +220,11 @@ impl Grader<'_> {
             let rule = rules.iter().filter(|(_, set)| set.is_match(&f.path)).map(|(grade, _)| *grade).max();
             let lock_edit = f.path.rsplit('/').next() == Some("Cargo.lock")
                 && f.patch.as_deref().is_some_and(is_dependency_list_only);
-            if let Some(grade) = rule.filter(|_| !lock_edit) {
+            // Only an edit in place: a renamed or added file can change what the code is, whatever its lines say.
+            let comment_edit = f.status == FileStatus::Modified
+                && f.path.ends_with(".rs")
+                && f.patch.as_deref().is_some_and(is_comment_only);
+            if let Some(grade) = rule.filter(|_| !lock_edit && !comment_edit) {
                 found.push((grade, format!("{} changed", f.path)));
             }
             let lost_test = |p: &str| is_test_path(p);
@@ -369,6 +403,41 @@ mod tests {
         }
         // No patch (too large for the host to show): treated as risky.
         assert_eq!(grader(&r).grade(Some(gr(1)), &[modified("Cargo.lock")]).grade, gr(3));
+    }
+
+    fn rust(path: &str, status: FileStatus, patch: &str) -> ChangedFile {
+        ChangedFile { patch: Some(patch.into()), ..file(path, status, 1) }
+    }
+
+    #[test]
+    fn a_rust_file_whose_diff_only_changes_comments_is_not_raised() {
+        let r = rules();
+        let modified = |patch| rust("crates/a/src/lib.rs", FileStatus::Modified, patch);
+        for ok in [
+            "@@ -1,3 +1,4 @@ mod a {\n /// Old.\n+/// And more.\n fn a() {}",
+            "@@ -1,2 +1,2 @@\n-//! Wrapped too\n+//! Wrapped\n+//! well.",
+            "@@ -5,3 +5,3 @@\n-    // TODO: x\n+    // x is fine\n+\n \\ No newline at end of file",
+        ] {
+            assert_eq!(grader(&r).grade(Some(gr(1)), &[modified(ok)]).grade, gr(1), "{ok}");
+        }
+        for code in [
+            "@@ -1,2 +1,2 @@\n-fn a() {}\n+fn a() {} // now with a note",
+            "@@ -1,2 +1,2 @@\n+/* a block comment counts as code */",
+            "@@ -1,2 +1,2 @@\n /// Docs.\n+#[doc(hidden)]",
+            "",
+        ] {
+            assert_eq!(grader(&r).grade(Some(gr(1)), &[modified(code)]).grade, gr(2), "{code}");
+        }
+        let comment = "@@ -1,1 +1,2 @@\n+// a note";
+        for status in [FileStatus::Added, FileStatus::Renamed] {
+            let f = rust("crates/a/src/lib.rs", status, comment);
+            assert_eq!(grader(&r).grade(Some(gr(1)), &[f]).grade, gr(2), "{status:?} isn't an edit in place");
+        }
+        let toml =
+            ChangedFile { patch: Some("@@ -1 +1 @@\n+// x".into()), ..file("a/Cargo.toml", FileStatus::Modified, 1) };
+        assert_eq!(grader(&r).grade(Some(gr(1)), &[toml]).grade, gr(3), "only Rust sources");
+        // No patch (too large for the host to show): matched as usual.
+        assert_eq!(grader(&r).grade(Some(gr(1)), &[file("crates/a/src/lib.rs", FileStatus::Modified, 1)]).grade, gr(2));
     }
 
     #[test]

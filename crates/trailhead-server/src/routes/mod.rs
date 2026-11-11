@@ -158,5 +158,5 @@ async fn me(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
         Some(id) => s.store.list_agents(&ctx).await?.into_iter().find(|a| a.id == id),
         None => None,
     };
-    Ok(Json(json!({ "workspace_id": ctx.workspace_id, "user": user, "agent": agent })))
+    Ok(Json(json!({ "workspace_id": ctx.workspace_id, "user": user, "agent_id": ctx.agent_id, "agent": agent })))
 }

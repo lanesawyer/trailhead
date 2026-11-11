@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use libsql::Connection;
 use uuid::Uuid;
@@ -19,13 +19,14 @@ pub(crate) async fn unfinished_blockers(conn: &Connection, task_id: Uuid) -> Res
         .query(
             &format!(
                 "SELECT {cols} FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
-                 WHERE d.blocked_id = ?1 AND b.deleted_at IS NULL AND b.status NOT IN ('done', 'cancelled')
-                 ORDER BY b.key"
+                 WHERE d.blocked_id = ?1 AND b.deleted_at IS NULL AND b.status NOT IN ('done', 'cancelled')"
             ),
             [task_id.to_string()],
         )
         .await?;
-    collect(rows, task_from_row).await
+    let mut tasks = collect(rows, task_from_row).await?;
+    tasks.sort_by(|a, b| trailhead_model::cmp_keys(&a.key, &b.key));
+    Ok(tasks)
 }
 
 /// Placeholder for a related task outside the caller's scope, so a scoped agent
@@ -150,21 +151,37 @@ impl Store {
         Ok(blockers)
     }
 
+    /// The ids among `task_ids` that have a blocker which isn't done or cancelled, in one query.
+    pub async fn with_unfinished_blockers(&self, task_ids: &[Uuid]) -> Result<HashSet<Uuid>> {
+        let conn = self.reader()?;
+        let rows = conn
+            .query(
+                "SELECT DISTINCT d.blocked_id FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
+                 WHERE b.deleted_at IS NULL AND b.status NOT IN ('done', 'cancelled')
+                   AND d.blocked_id IN (SELECT value FROM json_each(?1))",
+                [json_ids(task_ids)?],
+            )
+            .await?;
+        Ok(collect(rows, |row| get_uuid(row, 0)).await?.into_iter().collect())
+    }
+
     /// Every blocker of these tasks, finished or not, keyed by the blocked task's id; tasks without one are absent.
     /// Blockers outside the caller's scope, and deleted ones, are left out.
     pub async fn blockers_of(&self, ctx: &Ctx, task_ids: &[Uuid]) -> Result<HashMap<Uuid, Vec<Uuid>>> {
         let conn = self.reader()?;
         let rows = conn
             .query(
-                "SELECT d.blocked_id, d.blocker_id, b.project_id FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
-                 WHERE b.deleted_at IS NULL AND d.blocked_id IN (SELECT value FROM json_each(?1))
-                 ORDER BY b.key",
+                "SELECT d.blocked_id, d.blocker_id, b.project_id, b.key FROM dependencies d JOIN tasks b ON b.id = d.blocker_id
+                 WHERE b.deleted_at IS NULL AND d.blocked_id IN (SELECT value FROM json_each(?1))",
                 [json_ids(task_ids)?],
             )
             .await?;
-        let edges = collect(rows, |row| Ok((get_uuid(row, 0)?, get_uuid(row, 1)?, get_uuid(row, 2)?))).await?;
+        let mut edges =
+            collect(rows, |row| Ok((get_uuid(row, 0)?, get_uuid(row, 1)?, get_uuid(row, 2)?, row.get::<String>(3)?)))
+                .await?;
+        edges.sort_by(|a, b| trailhead_model::cmp_keys(&a.3, &b.3));
         let mut out: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-        for (blocked, blocker, project) in edges {
+        for (blocked, blocker, project, _) in edges {
             if ctx.in_scope(project) {
                 out.entry(blocked).or_default().push(blocker);
             }

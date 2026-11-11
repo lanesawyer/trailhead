@@ -583,6 +583,10 @@ async fn metadata_merges_and_filters() {
     let found = env.store.list_tasks(&env.human, filter).await.unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].key, t.key);
+    let exists = |p: &str| TaskFilter { metadata_exists: vec![p.into()], ..Default::default() };
+    assert_eq!(env.store.list_tasks(&env.human, exists("area.x")).await.unwrap().len(), 1);
+    assert_eq!(env.store.list_tasks(&env.human, exists("team")).await.unwrap().len(), 1);
+    assert!(env.store.list_tasks(&env.human, exists("size")).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -986,6 +990,20 @@ async fn reviewers_cannot_approve_their_own_work() {
         env.store.update_task(&lead, &w.key, status(Status::Done), None).await,
         Err(Error::ReviewRequired)
     ));
+}
+
+#[tokio::test]
+async fn a_reviewer_finishes_its_own_work_when_review_is_not_required() {
+    let env = Env::new().await;
+    let lead = env.agent("lead").await;
+    let patch = ProjectPatch { reviewers: Some(vec!["lead".into()]), ..Default::default() };
+    env.store.update_project(&env.human, "AUTH", patch, None).await.unwrap();
+
+    // Without require_review, a reviewer's own in-progress work can go straight to done.
+    let t = env.task("mine").await;
+    env.store.claim(&lead, &t.key, None).await.unwrap();
+    let done = env.store.update_task(&lead, &t.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(done.status, Status::Done);
 }
 
 #[tokio::test]
@@ -1411,6 +1429,17 @@ async fn similar_tasks_counts_capitalized_two_letter_acronyms() {
 }
 
 #[tokio::test]
+async fn similar_tasks_ignores_two_letter_function_words_in_all_caps_titles() {
+    let env = Env::new().await;
+    env.task("MOVE DB TO PG").await;
+    // Shared function words (TO) are not enough to match.
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "SEND IT TO OR IN ON", None).await.unwrap().is_empty());
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "FIX BUG TO ON PG", None).await.unwrap().is_empty());
+    // Acronyms still count.
+    assert_eq!(env.store.similar_tasks(&env.human, "AUTH", "DB PG", None).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn listing_by_title_ignores_case_and_surrounding_space() {
     let env = Env::new().await;
     let wanted = env.task("Cover the edge").await;
@@ -1472,4 +1501,98 @@ async fn changes_requested_is_computed_from_the_latest_verdict_and_handoff() {
     assert_eq!(s.task_detail(&env.human, &t.key).await.unwrap().changes_requested, None);
     s.claim(&a, &t.key, None).await.unwrap();
     assert_eq!(s.release(&a, &t.key).await.unwrap().status, Status::Open);
+}
+
+#[tokio::test]
+async fn revert_actor_skips_a_parent_cycle_and_still_reverts_the_rest() {
+    let env = Env::new().await;
+    let a = env.task("a").await;
+    let b = env.task("b").await;
+    let other = env.task("other").await;
+    let under = |p: Option<&str>| TaskPatch { parent: Some(p.map(str::to_string)), ..Default::default() };
+    env.store.update_task(&env.human, &a.key, under(Some(&b.key)), None).await.unwrap();
+    let agent = env.agent("rogue").await;
+    let since = env.now();
+    env.advance(1);
+    env.store.update_task(&agent.next_batch(), &a.key, under(None), None).await.unwrap();
+    env.store
+        .update_task(
+            &agent.next_batch(),
+            &other.key,
+            TaskPatch { title: Some("vandalised".into()), ..Default::default() },
+            None,
+        )
+        .await
+        .unwrap();
+    env.store.update_task(&env.human, &b.key, under(Some(&a.key)), None).await.unwrap();
+
+    // Restoring a under b would form a cycle with the human's move, so it's skipped, not fatal.
+    let report = env.store.revert_actor(&env.human.next_batch(), agent.actor_id(), since).await.unwrap();
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].entity_id, a.id.to_string());
+    assert_eq!(report.skipped[0].later_event, None);
+    assert!(report.skipped[0].reason.contains("can't become its parent"), "{}", report.skipped[0].reason);
+    assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().title, "other");
+    assert_eq!(env.store.get_task(&env.human, &a.key).await.unwrap().parent_id, None);
+}
+
+#[tokio::test]
+async fn with_unfinished_blockers_names_only_tasks_held_up_by_open_blockers() {
+    let env = Env::new().await;
+    let open = env.task("open").await;
+    let finished = env.task("finished").await;
+    let held = env.task("held").await;
+    let freed = env.task("freed").await;
+    let free = env.task("free").await;
+    env.store.add_dependency(&env.human, &open.key, &held.key).await.unwrap();
+    env.store.add_dependency(&env.human, &finished.key, &freed.key).await.unwrap();
+    env.store.update_task(&env.human, &finished.key, status(Status::Done), None).await.unwrap();
+
+    let ids = [held.id, freed.id, free.id];
+    let blocked = env.store.with_unfinished_blockers(&ids).await.unwrap();
+    assert_eq!(blocked, std::collections::HashSet::from([held.id]));
+}
+
+#[tokio::test]
+async fn a_lapsing_claim_returns_to_review_after_the_claim_is_undone_and_redone() {
+    let env = Env::new().await;
+    let s = &env.store;
+    let a = env.agent("a").await;
+    let t = env.task("reworked after undo").await;
+    s.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
+    s.add_comment(&env.human, &t.key, NewComment::review(Verdict::RequestChanges, "fix it")).await.unwrap();
+
+    // Claim, undo the claim (back to in_review), then undo that undo (claimed again).
+    let claim = a.next_batch();
+    s.claim(&claim, &t.key, Some(60)).await.unwrap();
+    let undo = env.human.next_batch();
+    s.undo_batch(&undo, claim.batch_id).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::InReview);
+    s.undo_batch(&env.human.next_batch(), undo.batch_id).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::InProgress);
+
+    // The lapsed lease still goes back to review.
+    env.advance(120);
+    s.reap_expired_claims(&env.human).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::InReview);
+}
+
+#[tokio::test]
+async fn a_lapsing_claim_ignores_an_undone_claim_from_review() {
+    let env = Env::new().await;
+    let s = &env.store;
+    let a = env.agent("a").await;
+    let t = env.task("claimed from open after an undone claim").await;
+    s.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
+    s.add_comment(&env.human, &t.key, NewComment::review(Verdict::RequestChanges, "fix it")).await.unwrap();
+
+    // Claim from review, undo it, send the task back to open, then claim it from there.
+    let claim = a.next_batch();
+    s.claim(&claim, &t.key, None).await.unwrap();
+    s.undo_batch(&env.human.next_batch(), claim.batch_id).await.unwrap();
+    s.update_task(&env.human, &t.key, status(Status::Open), None).await.unwrap();
+    s.claim(&a, &t.key, Some(60)).await.unwrap();
+    env.advance(120);
+    s.reap_expired_claims(&env.human).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::Open);
 }

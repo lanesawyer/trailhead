@@ -17,7 +17,10 @@ use crate::timing::unix_now;
 const BACKLOG: usize = 1024;
 
 struct Inner {
+    /// What the run loop is doing: never `Reattaching`, which is shown from `reattaching` while the loop is `Up`.
     control: ControlState,
+    /// The tasks whose runs are being followed again after a restart and haven't sent an event yet, oldest first.
+    reattaching: Vec<TaskKey>,
     last_error: Option<(i64, String)>,
     sandboxes: Vec<SandboxStatus>,
     runs: Vec<RunStatus>,
@@ -38,6 +41,7 @@ impl Default for StatusBoard {
         StatusBoard {
             inner: Mutex::new(Inner {
                 control: ControlState::Reconciling,
+                reattaching: Vec::new(),
                 last_error: None,
                 sandboxes: Vec::new(),
                 runs: Vec::new(),
@@ -72,13 +76,21 @@ pub fn sandbox_status(s: &Sandbox, paused: bool) -> SandboxStatus {
     }
 }
 
+/// The control state to show: the loop's, unless it is up and runs are being reattached.
+fn shown(inner: &Inner) -> ControlState {
+    match (&inner.control, inner.reattaching.first()) {
+        (ControlState::Up, Some(task)) => ControlState::Reattaching { task: task.clone() },
+        (control, _) => control.clone(),
+    }
+}
+
 fn snapshot_locked(inner: &Inner) -> FactorySnapshot {
     let mut sandboxes = inner.sandboxes.clone();
     sandboxes.sort_by(|a, b| a.name.cmp(&b.name));
     let mut runs = inner.runs.clone();
     runs.sort_by(|a, b| a.task.cmp(&b.task));
     FactorySnapshot {
-        control: inner.control.clone(),
+        control: shown(inner),
         last_error: inner.last_error.clone(),
         sandboxes,
         runs,
@@ -149,14 +161,34 @@ impl StatusBoard {
         self.inner.lock().unwrap().queue = queue;
     }
 
+    /// Sets what the run loop is doing. `Reattaching` isn't a loop state: use [`StatusBoard::reattaching`].
     pub fn control(&self, control: ControlState) {
+        debug_assert!(!matches!(control, ControlState::Reattaching { .. }));
+        self.apply(|i| Self::control_changed(i, |i| i.control = control));
+    }
+
+    /// A run is being followed again after a restart, until its first event or its end.
+    pub fn reattaching(&self, task: &TaskKey) {
         self.apply(|i| {
-            if i.control == control {
-                return None;
-            }
-            i.control = control.clone();
-            Some(FactoryEvent::Control { control })
+            Self::control_changed(i, |i| {
+                if !i.reattaching.contains(task) {
+                    i.reattaching.push(task.clone());
+                }
+            })
         });
+    }
+
+    /// The run sent an event, or ended: it is no longer reattaching.
+    pub fn reattached(&self, task: &TaskKey) {
+        self.apply(|i| Self::control_changed(i, |i| i.reattaching.retain(|t| t != task)));
+    }
+
+    /// Runs `change` and returns the event for the shown control state, if it differs from before.
+    fn control_changed(i: &mut Inner, change: impl FnOnce(&mut Inner)) -> Option<FactoryEvent> {
+        let before = shown(i);
+        change(i);
+        let control = shown(i);
+        (control != before).then_some(FactoryEvent::Control { control })
     }
 
     pub fn error(&self, message: String) {
@@ -242,6 +274,9 @@ impl StatusBoard {
             match i.runs.iter_mut().find(|r| r.task == *task) {
                 Some(r) if r.phase == phase && (sandbox.is_none() || r.sandbox.as_deref() == sandbox) => return None,
                 Some(r) => {
+                    if r.phase != phase {
+                        r.phase_started = unix_now();
+                    }
                     r.phase = phase;
                     if sandbox.is_some() {
                         r.sandbox = sandbox.map(String::from);
@@ -256,6 +291,7 @@ impl StatusBoard {
                     spend: Usd::ZERO,
                     last_tool: None,
                     started: unix_now(),
+                    phase_started: unix_now(),
                 }),
             }
             Some(FactoryEvent::RunPhase { task: task.clone(), phase })
@@ -269,6 +305,8 @@ impl StatusBoard {
     }
 
     pub fn run_ended(&self, task: &TaskKey) {
+        // A reattach that fails before any event ends here, so it can't leave the state stuck.
+        self.reattached(task);
         self.apply(|i| {
             let before = i.runs.len();
             i.runs.retain(|r| r.task != *task);
@@ -336,6 +374,35 @@ mod tests {
     fn sandbox(name: &str, labels: &[(&str, &str)]) -> Sandbox {
         let labels: Labels = labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         Sandbox { id: SandboxId(name.into()), name: name.into(), labels }
+    }
+
+    #[test]
+    fn reattaching_shows_the_oldest_run_still_reattaching() {
+        let board = StatusBoard::new();
+        let (a, b) = (TaskKey("TRAIL-1".into()), TaskKey("TRAIL-2".into()));
+        board.control(ControlState::Up);
+        board.reattaching(&a);
+        board.reattaching(&b);
+        assert_eq!(board.snapshot().control, ControlState::Reattaching { task: a.clone() });
+        board.control(ControlState::Reconciling);
+        assert_eq!(board.snapshot().control, ControlState::Reconciling);
+        board.control(ControlState::Up);
+        assert_eq!(board.snapshot().control, ControlState::Reattaching { task: a.clone() });
+        board.reattached(&a);
+        assert_eq!(board.snapshot().control, ControlState::Reattaching { task: b.clone() });
+        // A run that ends without an event clears itself.
+        board.run_ended(&b);
+        assert_eq!(board.snapshot().control, ControlState::Up);
+    }
+
+    #[test]
+    fn a_reattach_before_the_reconcile_ends_is_shown_once_it_is_up() {
+        let board = StatusBoard::new();
+        let a = TaskKey("TRAIL-1".into());
+        board.reattaching(&a);
+        assert_eq!(board.snapshot().control, ControlState::Reconciling);
+        board.control(ControlState::Up);
+        assert_eq!(board.snapshot().control, ControlState::Reattaching { task: a });
     }
 
     #[test]

@@ -126,6 +126,30 @@ impl TaskKey {
     }
 }
 
+/// Orders task keys by project key, then by number, so TRAIL-999 comes before TRAIL-1000.
+/// A key without a number sorts before its project's numbered ones; ties fall back to the whole string.
+pub fn cmp_keys(a: &str, b: &str) -> std::cmp::Ordering {
+    fn split(key: &str) -> (&str, Option<u64>) {
+        match key.rsplit_once('-') {
+            Some((project, n)) => (project, n.parse().ok()),
+            None => (key, None),
+        }
+    }
+    split(a).cmp(&split(b)).then_with(|| a.cmp(b))
+}
+
+#[cfg(test)]
+mod cmp_keys_tests {
+    use super::cmp_keys;
+
+    #[test]
+    fn orders_by_project_then_number() {
+        let mut keys = ["TRAIL-1000", "OPS-2", "TRAIL-999", "TRAIL-12", "OPS-10"];
+        keys.sort_by(|a, b| cmp_keys(a, b));
+        assert_eq!(keys, ["OPS-2", "OPS-10", "TRAIL-12", "TRAIL-999", "TRAIL-1000"]);
+    }
+}
+
 impl PartialEq<str> for TaskKey {
     fn eq(&self, other: &str) -> bool {
         self.0 == other
@@ -367,6 +391,26 @@ impl Claim {
     pub fn is_live(&self, now: Timestamp) -> bool {
         self.expires_at.is_none_or(|e| e > now)
     }
+}
+
+/// A claim the caller holds, with enough of the task to act on it, as `GET /v1/claims` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct HeldClaim {
+    pub key: String,
+    pub title: String,
+    pub status: Status,
+    pub claim: Claim,
+}
+
+/// What `POST /v1/tasks/{task}/claim` returns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ClaimResult {
+    pub task: Task,
+    pub claim: Claim,
+    /// The last handoff left on this task, so the next worker picks up where it stopped.
+    pub handoff: Option<Comment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
