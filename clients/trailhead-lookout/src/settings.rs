@@ -18,8 +18,8 @@ use crate::logs::{LogsUiPlugin, logs_page};
 use crate::mirror::{Mirrored, rows};
 use crate::net::NetCommand;
 use crate::widgets::{
-    Appearance, ButtonGroup, ButtonKind, Icon, Modal, ModalRoot, ModalSlots, Picked, ThemeChoice, button, button_group,
-    field, open_modal, row, set_text, size, space, tab, tab_strip, text, text_dim, tool_button,
+    Appearance, ButtonGroup, ButtonKind, Icon, Modal, ModalSlots, Picked, ThemeChoice, button, button_group, field,
+    open_modal, row, set_text, size, space, tab, tab_strip, text, text_dim, tool_button,
 };
 
 /// A page of the modal, in tab order.
@@ -315,7 +315,7 @@ fn on_tab(
 fn on_disconnect(
     activate: On<Activate>,
     acts: Query<&SettingsAct>,
-    modals: Query<Entity, With<ModalRoot>>,
+    modals: Query<Entity, With<SettingsModal>>,
     mut send: MessageWriter<SendNet>,
     mut commands: Commands,
 ) {
@@ -406,7 +406,7 @@ mod tests {
 
     use super::*;
     use crate::fixture::task_json;
-    use crate::widgets::ModalPlugin;
+    use crate::widgets::{ModalPlugin, ModalRoot};
 
     fn app() -> App {
         let mut app = App::new();
@@ -550,6 +550,24 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_leaves_other_modals_alone() {
+        let mut app = app();
+        open(&mut app);
+        let other = app.world_mut().spawn(ModalRoot).id();
+        let world = app.world_mut();
+        let button = world
+            .query::<(Entity, &SettingsAct)>()
+            .iter(world)
+            .find(|(_, a)| **a == SettingsAct::Disconnect)
+            .unwrap()
+            .0;
+        app.world_mut().trigger(Activate { entity: button });
+        settle(&mut app);
+        assert_eq!(modals(&mut app), 0);
+        assert!(app.world().get_entity(other).is_ok());
+    }
+
+    #[test]
     fn the_queue_line_counts_what_is_under_it() {
         let task = |id: &str, key: &str, status: &str, parent: Option<&str>| -> Task {
             serde_json::from_value(task_json(json!({"id": id, "key": key, "status": status, "parent_id": parent})))
@@ -574,6 +592,7 @@ mod tests {
                 queue: vec!["TRAIL-102".into(), "TRAIL-9".into()],
                 last_error: None,
                 human_grades: vec![],
+                holding: None,
                 seq: 0,
             },
         );
