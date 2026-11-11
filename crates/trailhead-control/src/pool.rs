@@ -276,6 +276,15 @@ impl Factory {
                 {
                     tracing::warn!(sandbox = %sandbox.name, checkpoint = %cp.0, error = %d, "couldn't delete the unused warm checkpoint");
                 }
+                // The cost recorded for the new checkpoint goes with it: release restores the old one, which that
+                // cost doesn't describe, and the next stale check would compare against the wrong figure.
+                if taken.is_some() {
+                    let mut costs = self.warm_cost.lock().unwrap();
+                    match cost {
+                        Some(cost) => costs.insert(sandbox.id.clone(), cost),
+                        None => costs.remove(&sandbox.id),
+                    };
+                }
                 // The old warm checkpoint (if any) is what release restores; a new sandbox has none and is destroyed.
                 self.give_back(&sandbox, &busy).await;
                 Err(e)
@@ -378,7 +387,7 @@ impl Factory {
                 done.released.push(name.clone());
             }
             Err(e) if self.failed(name) => {
-                self.abandon(sandbox, &e).await;
+                self.abandon(sandbox, &e, started.elapsed()).await;
                 done.abandoned.push(name.clone());
             }
             Err(e) => {
@@ -389,12 +398,13 @@ impl Factory {
 
     /// Takes a sandbox out of the pool for good: destroyed if the compute host allows it, otherwise labelled
     /// [`label::BROKEN`] without a role (so it loses connector access) and destroyed by a later reconcile.
-    async fn abandon(&self, sandbox: &Sandbox, error: &Error) {
+    async fn abandon(&self, sandbox: &Sandbox, error: &Error, took: Duration) {
         let p = self.target_of(sandbox);
         let name = &sandbox.name;
         tracing::error!(
             sandbox = %name,
             %error,
+            ?took,
             "giving up on a pooled sandbox that won't release; leaving it out of the pool and starting a new one"
         );
         if let Some(t) = self.troubled.lock().unwrap().get_mut(name) {

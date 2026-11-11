@@ -6,8 +6,8 @@ use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages::{self, BreachedSandbox};
 use trailhead_factory::{
-    Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase, RunReport,
-    RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
+    ChangesRequested, Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase,
+    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
     WorkerBreach, run_name,
 };
 
@@ -21,7 +21,7 @@ impl Factory {
     pub async fn run_task(&self, task: &Task) -> Result<Outcome> {
         let mut survey = self.survey().await;
         let Some(target) = self.place_task(&mut survey, task) else {
-            return Err(Error::Unavailable(messages::no_target_has_room(&task.key.0)));
+            return Err(Error::Unavailable(messages::no_target_has_room(&task.key)));
         };
         let place = self.hold(&task.key, Role::Worker, target);
         self.run_task_on(task, target, place).await
@@ -33,11 +33,22 @@ impl Factory {
         // A rework on a PR that has merged or closed since the task was queued would push to a branch nobody wants
         // (TRAIL-304). The sub-agent isn't made yet, so the factory's own identity holds the task while it's settled.
         if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) {
-            match codehost.pr_state(pr).await? {
-                PrState::Open { mergeable: Some(true), .. }
-                    if task.run.last_changes().is_some_and(|c| c.conflict && c.reviewer != CI_REVIEWER) =>
-                {
-                    tracing::info!(task = %task.key.0, pr = %pr.url, "the host no longer reports a conflict; back to review");
+            let conflict_rework = task.run.last_changes().is_some_and(|c| c.conflict && c.reviewer != CI_REVIEWER);
+            let mut state = codehost.pr_state(pr).await?;
+            // Right after the base moves the host may not have worked `mergeable` out yet. Ask again a few times
+            // before a worker is spent on a conflict that a clean local merge would leave nothing to fix (TRAIL-953).
+            if conflict_rework {
+                for wait in MERGEABLE_WAITS {
+                    if !matches!(state, PrState::Open { mergeable: None, .. }) {
+                        break;
+                    }
+                    tokio::time::sleep(wait).await;
+                    state = codehost.pr_state(pr).await?;
+                }
+            }
+            match state {
+                PrState::Open { mergeable: Some(true), .. } if conflict_rework => {
+                    tracing::info!(task = %task.key, pr = %pr.url, "the host no longer reports a conflict; back to review");
                     self.settle_gone_conflict(task, pr).await?;
                     return Ok(Outcome::Settled { reason: messages::settled_conflict_gone(&pr.url) });
                 }
@@ -70,7 +81,7 @@ impl Factory {
                 self.set_back_waiting(&task.key, held);
                 let update = RunUpdate { retries: Some(retries + 1), ..RunUpdate::default() };
                 if let Err(e) = self.tracker.report(&task.key, update).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't skip a used run name");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't skip a used run name");
                 }
                 return Err(e);
             }
@@ -79,7 +90,7 @@ impl Factory {
             Err(e) => {
                 // Parking and releasing need the claim, so take it as the factory's own identity first.
                 if let Err(claim) = self.tracker.claim(&task.key).await {
-                    tracing::warn!(task = %task.key.0, error = %claim, "couldn't claim the task to back it off");
+                    tracing::warn!(task = %task.key, error = %claim, "couldn't claim the task to back it off");
                 }
                 return Err(self.infra_failed(task, &self.tracker, &name, e, task.run.infra_failures, None).await);
             }
@@ -105,7 +116,7 @@ impl Factory {
             return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await);
         }
         let _run = self.status.begin(&task.key, RunPhase::Preparing { cold: false });
-        tracing::info!(task = %task.key.0, run = %name, "preparing a worker sandbox");
+        tracing::info!(task = %task.key, run = %name, "preparing a worker sandbox");
         // A task with a PR is a rework: the checkout starts from the PR branch's head, and the worker is told what the
         // review asked for.
         let rework = task.run.pr.is_some();
@@ -154,7 +165,7 @@ impl Factory {
             Ok(prepared) => prepared,
             Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, None).await),
         };
-        tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, "starting worker");
+        tracing::info!(task = %task.key, run = %name, sandbox = %sandbox.name, "starting worker");
         self.status.phase(&task.key, RunPhase::Agent, Some(&sandbox.name));
         let req = RunRequest {
             run: name.clone(),
@@ -187,7 +198,7 @@ impl Factory {
     /// when the run started. What the run comes to is handled as if this process had started it.
     pub async fn resume_run(&self, task: &Task, sandbox: &Sandbox) -> Result<Outcome> {
         let name =
-            task.run.sandbox.clone().ok_or_else(|| Error::Other(format!("{} has no run to resume", task.key.0)))?;
+            task.run.sandbox.clone().ok_or_else(|| Error::Other(format!("{} has no run to resume", task.key)))?;
         let attempt = task.run.attempt.unwrap_or(1);
         let sub = self.tracker.sub_agent(&name);
         let _run = self.status.begin(&task.key, RunPhase::Agent);
@@ -203,7 +214,7 @@ impl Factory {
             .run
             .started
             .map_or(Duration::ZERO, |t| Duration::from_secs(u64::try_from(unix_now() - t).unwrap_or(0)));
-        tracing::info!(task = %task.key.0, run = %name, sandbox = %sandbox.name, ?elapsed, "reattaching to a run in flight");
+        tracing::info!(task = %task.key, run = %name, sandbox = %sandbox.name, ?elapsed, "reattaching to a run in flight");
         let run = self.run_metered(sandbox, Begin::Attach(name.clone()), &task.key, &profile, prior, elapsed).await;
         self.conclude(task, &sub, sandbox, &name, attempt, run, None).await
     }
@@ -212,10 +223,10 @@ impl Factory {
     /// leaves a parked task's sandbox alone, so that loses the suspended state, which beats leaving it reachable.
     pub(crate) async fn cut_off_breached(&self, task: &Task, sandbox: &Sandbox) -> BreachedSandbox {
         let Err(e) = self.cut_off(sandbox).await else { return BreachedSandbox::Suspended };
-        tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
+        tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
         self.daemon_of(sandbox).forget(&sandbox.id).await;
         if let Err(e) = self.target_of(sandbox).compute.destroy(&sandbox.id).await {
-            tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile retries");
+            tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile retries");
             return BreachedSandbox::Stuck;
         }
         BreachedSandbox::Destroyed
@@ -238,11 +249,11 @@ impl Factory {
             ..RunUpdate::default()
         };
         if let Err(e) = sub.report(key, mark(true)).await {
-            tracing::warn!(task = %key.0, error = %e, "couldn't mark the breach parked; asking anyway");
+            tracing::warn!(task = %key, error = %e, "couldn't mark the breach parked; asking anyway");
         }
         if let Err(e) = sub.ask(key, question).await {
             if let Err(re) = sub.report(key, mark(false)).await {
-                tracing::warn!(task = %key.0, error = %re, "couldn't take back the breach's park mark");
+                tracing::warn!(task = %key, error = %re, "couldn't take back the breach's park mark");
             }
             return Err(e);
         }
@@ -278,7 +289,7 @@ impl Factory {
         // the agent's own API trouble, which gives the attempt back (TRAIL-172). A breach is the agent's doing too.
         let (report, spend) = match run {
             Run::Breach(reason, spend) => {
-                tracing::warn!(task = %task.key.0, %reason, "budget breached; parking");
+                tracing::warn!(task = %task.key, %reason, "budget breached; parking");
                 // The spend is recorded before any teardown. A record that fails doesn't skip the kill switch or the
                 // park; its error is returned after them. The report marks the run concluded and records the breach, so
                 // a restart before the park lands neither reattaches to the run and prices its replayed events a second
@@ -296,12 +307,12 @@ impl Factory {
                 };
                 let recorded = sub.report(&task.key, update).await;
                 if let Err(e) = &recorded {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't record the breach's spend; cutting off anyway");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't record the breach's spend; cutting off anyway");
                 }
                 if let Err(e) =
                     self.target_of(sandbox).compute.checkpoint(&sandbox.id, &format!("parked: {reason}")).await
                 {
-                    tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't checkpoint the breached sandbox");
+                    tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't checkpoint the breached sandbox");
                 }
                 let state = self.cut_off_breached(task, sandbox).await;
                 let breach =
@@ -317,7 +328,7 @@ impl Factory {
             Run::Lost(e, spend) => {
                 // What the run cost before it failed counts toward the budget across retries (TRAIL-447).
                 if let Err(re) = sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await {
-                    tracing::warn!(task = %task.key.0, error = %re, "couldn't record the failed run's spend");
+                    tracing::warn!(task = %task.key, error = %re, "couldn't record the failed run's spend");
                 }
                 return Err(self.infra_failed(task, sub, name, e, infra_prior, None).await);
             }
@@ -347,25 +358,25 @@ impl Factory {
                     // too. A request whose head the host couldn't say leaves the mark off; readings count as they come.
                     let update = RunUpdate { stale_head: Some(stale), ..RunUpdate::default() };
                     if let Err(e) = sub.report(&task.key, update).await {
-                        tracing::warn!(task = %task.key.0, error = %e, "couldn't record the head from before the push");
+                        tracing::warn!(task = %task.key, error = %e, "couldn't record the head from before the push");
                     }
                 }
                 // MVP: no suspend during review; requested changes leave the task in review as changes requested
                 // (`request_rework`) and a new run starts from the PR branch.
                 if let Err(e) = self.release_worker(sandbox).await {
-                    tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile retries");
+                    tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile retries");
                 }
                 // The worker is done with its target; the review takes its own place.
                 drop(place);
                 if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
                 }
                 if self.conflicts_on_publish(task, &pr).await {
                     return match self.rework_conflict(task, &pr, attempt).await {
                         Ok(()) => Ok(Outcome::Conflicted { pr }),
                         // Still in review and conflicting, so reconcile reworks it.
                         Err(e) => {
-                            tracing::warn!(task = %task.key.0, error = %e, "couldn't request a rework of the conflicting PR; reconcile retries");
+                            tracing::warn!(task = %task.key, error = %e, "couldn't request a rework of the conflicting PR; reconcile retries");
                             Ok(Outcome::AwaitingReview { pr })
                         }
                     };
@@ -374,25 +385,26 @@ impl Factory {
             }
             RunResult::NeedsInput(question) => {
                 // An attempt that asked a question didn't give up, so a give-up from before it isn't "the attempt
-                // before" the next one (TRAIL-727). An empty failure is how a recorded one is cleared.
+                // before" the next one (TRAIL-727). The failure stays, so the next attempt is still told of it;
+                // `asked` is what the backstop below goes by (TRAIL-805).
                 if task.run.failure.as_deref().is_some_and(|f| !f.is_empty()) {
-                    let clear = RunUpdate { failure: Some(String::new()), ..RunUpdate::default() };
-                    if let Err(e) = sub.report(&task.key, clear).await {
-                        tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the earlier failure");
+                    let mark = RunUpdate { asked: Some(attempt), ..RunUpdate::default() };
+                    if let Err(e) = sub.report(&task.key, mark).await {
+                        tracing::warn!(task = %task.key, error = %e, "couldn't record the attempt that asked");
                     }
                 }
                 self.status.paused(&sandbox.name);
                 Ok(Outcome::Parked { reason: question })
             }
             RunResult::Failed(reason) => {
-                tracing::warn!(task = %task.key.0, %reason, "attempt failed");
+                tracing::warn!(task = %task.key, %reason, "attempt failed");
                 match self.release_worker(sandbox).await {
                     Err(e) if api_trouble => {
                         return Err(self.infra_failed(task, sub, name, e, infra_prior, None).await);
                     }
                     // Any other failure to release leaves the sandbox to reconcile; the park below still happens.
                     Err(e) => {
-                        tracing::warn!(task = %task.key.0, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile retries");
+                        tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't release the worker's sandbox; reconcile retries");
                     }
                     Ok(()) => {}
                 }
@@ -415,7 +427,7 @@ impl Factory {
                 let last = match self.tracker.show(&task.key).await {
                     Ok(shown) => shown.run.failure.filter(|f| !f.is_empty()),
                     Err(e) => {
-                        tracing::warn!(task = %task.key.0, error = %e, "couldn't read the last failure; parking without it");
+                        tracing::warn!(task = %task.key, error = %e, "couldn't read the last failure; parking without it");
                         None
                     }
                 };
@@ -428,6 +440,8 @@ impl Factory {
                     .failure
                     .clone()
                     .filter(|before| messages::is_agent_gave_up(before))
+                    // The failure is from before a question when the attempt just before this one asked it.
+                    .filter(|_| task.run.asked != Some(attempt.saturating_sub(1)))
                     .filter(|_| failed >= 2 && last.as_deref().is_some_and(messages::is_agent_gave_up));
                 if failed >= max || repeated.is_some() {
                     // The daemon released the task; claiming it again as the sub-agent is how it gets parked.
@@ -448,18 +462,18 @@ impl Factory {
                         let restore =
                             RunUpdate { gave_up: Some(task.run.gave_up.unwrap_or(0)), ..RunUpdate::default() };
                         if let Err(re) = sub.report(&task.key, restore).await {
-                            tracing::warn!(task = %task.key.0, error = %re, "couldn't undo the gave-up marker after the park failed");
+                            tracing::warn!(task = %task.key, error = %re, "couldn't undo the gave-up marker after the park failed");
                         }
                         return Err(e);
                     }
                     if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-                        tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
+                        tracing::warn!(task = %task.key, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
                     }
                     self.status.paused(&sandbox.name);
                     return Ok(Outcome::Parked { reason });
                 }
                 if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
                 }
                 Ok(Outcome::Failed { reason })
             }
@@ -511,7 +525,7 @@ impl Factory {
         };
         let broken_base = setup_failures >= SETUP_FAILURES_TO_PARK;
         let park = rejected || broken_base || if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
-        tracing::warn!(task = %task.key.0, %error, failures, max, waiting, waits, "infrastructure failure; the attempt doesn't count");
+        tracing::warn!(task = %task.key, %error, failures, max, waiting, waits, "infrastructure failure; the attempt doesn't count");
         if park {
             // Parked below; the count starts again when Lane reopens it.
         } else if waiting {
@@ -537,7 +551,7 @@ impl Factory {
             ..RunUpdate::default()
         };
         if let Err(e) = sub.report(&task.key, update).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
+            tracing::warn!(task = %task.key, error = %e, "couldn't give the attempt back");
         }
         if park {
             let question = if broken_base {
@@ -556,7 +570,7 @@ impl Factory {
                     self.setup_failures.lock().unwrap().remove(&task.key);
                 }
                 Err(e) => {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't park the task; reconcile will requeue it");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't park the task; reconcile will requeue it");
                     // Not parked, so the count mustn't start again (the next failure tries to park once more), and
                     // the task needs its backoff, or reconcile requeues it to retry at once.
                     if waiting {
@@ -568,15 +582,15 @@ impl Factory {
                     let kept = if waiting { prior.unwrap_or(0) } else { failures };
                     let keep = RunUpdate { infra_failures: Some(kept), ..RunUpdate::default() };
                     if let Err(e) = sub.report(&task.key, keep).await {
-                        tracing::warn!(task = %task.key.0, error = %e, "couldn't keep the infrastructure failure count");
+                        tracing::warn!(task = %task.key, error = %e, "couldn't keep the infrastructure failure count");
                     }
                 }
             }
         } else if let Err(e) = sub.release(&task.key).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't release the task; reconcile retries");
+            tracing::warn!(task = %task.key, error = %e, "couldn't release the task; reconcile retries");
         }
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the run's sub-agent; reconcile retries");
+            tracing::warn!(task = %task.key, error = %e, "couldn't revoke the run's sub-agent; reconcile retries");
         }
         error
     }
@@ -590,7 +604,7 @@ impl Factory {
             ..RunUpdate::default()
         };
         if let Err(e) = sub.report(&task.key, update).await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't give the attempt back");
+            tracing::warn!(task = %task.key, error = %e, "couldn't give the attempt back");
         }
     }
 
@@ -742,9 +756,15 @@ impl Factory {
     /// back to review, where the gates look at the PR as it is. A CI failure's rework isn't one of these, since it
     /// wants the base merged in whether or not the PR conflicts.
     async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef) -> Result<()> {
-        // A fresh conflict count, which is how reconcile tells a request that was settled from one still to act on.
-        let settled = RunUpdate { conflict_reworks: Some(0), ..RunUpdate::default() };
-        self.tracker.report(&task.key, settled).await?;
+        // The request is marked settled, which is how reconcile tells it from one still to act on. The conflict count
+        // stays as it was, so reworks that really ran still count toward `max_conflict_reworks`.
+        if let Some(requested) = task.run.last_changes() {
+            let settled = RunUpdate {
+                changes_requested: Some(ChangesRequested { settled: true, ..requested.clone() }),
+                ..RunUpdate::default()
+            };
+            self.tracker.report(&task.key, settled).await?;
+        }
         self.tracker.claim(&task.key).await?;
         // The handoff answers the conflict request, so the task is no longer waiting on a rework.
         let handoff = messages::conflict_gone_note(&pr.url, &self.config.repo.base_branch);
@@ -777,7 +797,7 @@ impl Factory {
                 Ok(PrState::Open { .. }) => {}
                 Ok(_) => return false,
                 Err(e) => {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't ask whether the PR merges cleanly; reviewing it");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't ask whether the PR merges cleanly; reviewing it");
                     return false;
                 }
             }
@@ -845,20 +865,20 @@ impl Factory {
         let shown = match self.tracker.show(&task.key).await {
             Ok(shown) => shown,
             Err(e) => {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't read the task to check the opened PR was recorded");
+                tracing::warn!(task = %task.key, error = %e, "couldn't read the task to check the opened PR was recorded");
                 return;
             }
         };
         if shown.run.pr.as_ref() != Some(pr) {
             let update = RunUpdate { pr: Some(pr.clone()), ..RunUpdate::default() };
             if let Err(e) = sub.report(&task.key, update).await {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't record the opened PR");
+                tracing::warn!(task = %task.key, error = %e, "couldn't record the opened PR");
             }
         }
         if (shown.status != Status::InReview || shown.changes_requested)
             && let Err(e) = sub.request_review(&task.key, &messages::pushed_for_review_handoff(&pr.url)).await
         {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't move the task to review");
+            tracing::warn!(task = %task.key, error = %e, "couldn't move the task to review");
         }
     }
 }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trailhead_factory::{Compute, Role, RunOutcome, Status, TaskKey, label};
-use trailhead_testkit::Script;
+use trailhead_factory::{Compute, Role, RunOutcome, SandboxState, Status, TaskKey, label};
+use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
 
@@ -118,8 +118,6 @@ async fn reconcile_returns_a_busy_pooled_sandbox_to_idle() {
 
 #[tokio::test]
 async fn a_parked_tasks_pooled_sandbox_shows_paused_after_a_restart() {
-    use trailhead_factory::SandboxState;
-
     let mut r = rig();
     r.tracker.add_task("TRAIL", "Ambiguous", "");
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
@@ -134,6 +132,25 @@ async fn a_parked_tasks_pooled_sandbox_shows_paused_after_a_restart() {
     assert_eq!(snap.sandboxes.len(), 1, "{snap:?}");
     assert_eq!(snap.sandboxes[0].name, "trailhead-w1");
     assert_eq!(snap.sandboxes[0].state, SandboxState::Paused);
+}
+
+#[tokio::test]
+async fn a_pooled_sandbox_of_a_task_this_process_is_running_doesnt_show_paused() {
+    use std::collections::HashSet;
+    use trailhead_factory::SandboxState;
+
+    let mut r = rig();
+    let key = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+
+    restart(&mut r, CONFIG);
+    // The task is parked in the tracker, but this process is running it, so its sandbox isn't paused.
+    r.factory.reconcile_except(&HashSet::from([key])).await.unwrap();
+
+    let snap = r.factory.status().snapshot();
+    assert_eq!(snap.sandboxes.len(), 1, "{snap:?}");
+    assert_ne!(snap.sandboxes[0].state, SandboxState::Paused);
 }
 
 #[tokio::test]
@@ -365,6 +382,29 @@ async fn a_new_warm_checkpoint_is_deleted_when_recording_it_fails() {
     assert_eq!(w1.labels.get(label::WARM), Some(&warm), "the old warm checkpoint is kept");
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_failed_rewarm_leaves_the_old_checkpoints_cost_in_place() {
+    let r = rig_with(&CONFIG.replace("[checks]\n", "[checks]\nsetup = \"cargo build\"\n"));
+    r.daemon.prepare_takes(Duration::from_secs(300));
+    r.compute.checkpoint_takes(Duration::from_secs(200));
+    warm_one_sandbox(&r).await;
+
+    // The prepare is slower than the checkpoint, so a new, much slower one is taken; the agent egress then fails.
+    r.compute.checkpoint_takes(Duration::from_secs(1000));
+    let key = r.tracker.add_task("TRAIL", "Egress fails", "");
+    r.compute.fail_once_after("trailhead-w1", "set_egress", 1);
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert_eq!(r.compute.checkpoints("trailhead-w1"), ["warm"], "the unused checkpoint is gone");
+
+    // The old checkpoint cost 200s, so a 300s prepare from it is stale. Had the 1000s stuck, it would be kept.
+    r.compute.checkpoint_takes(Duration::from_secs(200));
+    r.tracker.add_task("TRAIL", "Next", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.compute.checkpoints("trailhead-w1"), ["warm", "warm"], "judged against the old cost, so refreshed");
+}
+
 #[tokio::test]
 async fn a_warm_sandbox_that_fails_after_prepare_goes_back_idle_with_its_old_checkpoint() {
     let r = rig();
@@ -589,7 +629,7 @@ async fn a_resource_wait_park_that_fails_adds_no_failure_and_keeps_the_backoff()
         r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
     }
     assert_eq!(r.tracker.task(&key).status, Status::Open, "still waiting");
-    r.tracker.fail_next("factory/trail-1-a1-11", "ask", 1);
+    r.tracker.fail_next("factory/trail-1-a1-11", TrackerOp::Ask, 1);
     r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::InProgress, "the park failed");

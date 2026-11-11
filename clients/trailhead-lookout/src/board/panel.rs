@@ -65,6 +65,11 @@ pub fn visible(cards: &[Card], limit: usize) -> (&[Card], usize) {
     (&cards[..shown], cards.len() - shown)
 }
 
+/// How many cards "Show more" adds to a column showing `limit`: what [`visible`] builds for a page more, less what is shown.
+pub fn next_page(cards: &[Card], limit: usize) -> usize {
+    visible(cards, limit + PAGE).0.len() - visible(cards, limit).0.len()
+}
+
 /// Where the board was scrolled to when the view last left it. The panel's nodes stay as they are while the board is
 /// showing, so this only brings the positions back after a trip to another view, which builds the panel anew.
 #[derive(Resource, Default)]
