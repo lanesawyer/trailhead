@@ -163,13 +163,8 @@ pub fn build(input: Input) -> MapModel {
     let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
     let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
     let on_behalf_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.on_behalf_of)).collect();
-    // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
-    // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
-    let holder_name = |holder: Uuid, key: &str| -> Option<String> {
-        match agent_name.get(&holder) {
-            Some(n) => Some(n.to_string()),
-            None => run_of.contains_key(key).then(|| format!("factory/{}", key.to_lowercase())),
-        }
+    let holder_name = |holder: Uuid, key: &str| {
+        crate::factory::holder_name(agent_name.get(&holder).copied(), key, run_of.contains_key(key))
     };
     let mut questions: HashMap<Uuid, usize> = HashMap::new();
     let mut handoffs: HashMap<Uuid, &Comment> = HashMap::new();
