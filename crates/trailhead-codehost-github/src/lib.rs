@@ -387,8 +387,8 @@ fn changed_file(f: &Value) -> ChangedFile {
     let count = |k: &str| u32::try_from(f[k].as_u64().unwrap_or_default()).unwrap_or(u32::MAX);
     let path = f["filename"].as_str().unwrap_or_default().to_string();
     ChangedFile {
-        // Only a lockfile's patch is kept: the grader reads it to tell a new package from an edited dependency list.
-        patch: f["patch"].as_str().filter(|_| path.ends_with("Cargo.lock")).map(str::to_string),
+        // Only the patches the grader reads are kept (a lockfile's, a Rust source's).
+        patch: f["patch"].as_str().filter(|_| trailhead_factory::grade::reads_patch(&path)).map(str::to_string),
         path,
         status,
         additions: count("additions"),
