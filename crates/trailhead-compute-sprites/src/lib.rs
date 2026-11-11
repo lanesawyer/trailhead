@@ -326,10 +326,12 @@ impl Compute for SpritesCompute {
         url.query_pairs_mut().append_pair("lines", "3000");
         let body = ok(send_idempotent(self.request(Method::GET, url)).await?).await?.text().await.map_err(http_err)?;
         let mut out = String::new();
-        for line in body.lines().filter(|l| !l.trim().is_empty()) {
-            match serde_json::from_str::<Value>(line) {
-                Ok(ev) if ev["data"].is_string() => out.push_str(ev["data"].as_str().unwrap_or_default()),
-                Ok(ev) => out.push_str(&format!("[{}]\n", ev["type"].as_str().unwrap_or("?"))),
+        for (line, event) in service_events(&body) {
+            match event {
+                Ok(ev) => match ev.data {
+                    Some(data) => out.push_str(&data),
+                    None => out.push_str(&format!("[{}]\n", ev.kind.as_deref().unwrap_or("?"))),
+                },
                 Err(_) => {
                     out.push_str(line);
                     out.push('\n');
@@ -340,17 +342,37 @@ impl Compute for SpritesCompute {
     }
 }
 
+/// One event of a service's NDJSON stream (start, stop and logs share this shape).
+struct ServiceEvent {
+    kind: Option<String>,
+    data: Option<String>,
+    exit_code: Value,
+}
+
+/// Walks a service NDJSON stream line by line, skipping blank lines and pairing each line with its parsed event, or
+/// the parse error for a line that isn't a JSON object, so each caller decides how strict to be.
+fn service_events(ndjson: &str) -> impl Iterator<Item = (&str, std::result::Result<ServiceEvent, serde_json::Error>)> {
+    ndjson.lines().filter(|l| !l.trim().is_empty()).map(|line| {
+        let event = serde_json::from_str::<Value>(line).map(|v| ServiceEvent {
+            kind: v["type"].as_str().map(str::to_string),
+            data: v["data"].as_str().map(str::to_string),
+            exit_code: v["exit_code"].clone(),
+        });
+        (line, event)
+    })
+}
+
 /// Reads a service start's NDJSON log: an `error` event or an `exit` fails it, with the output seen so far.
 fn service_started(name: &str, ndjson: &str) -> Result<()> {
     let mut output = String::new();
-    for line in ndjson.lines().filter(|l| !l.trim().is_empty()) {
-        let event: Value = serde_json::from_str(line).map_err(|e| Error::Other(format!("{e}: {line}")))?;
-        let data = event["data"].as_str().unwrap_or_default();
-        match event["type"].as_str().unwrap_or_default() {
+    for (line, event) in service_events(ndjson) {
+        let event = event.map_err(|e| Error::Other(format!("{e}: {line}")))?;
+        let data = event.data.as_deref().unwrap_or_default();
+        match event.kind.as_deref().unwrap_or_default() {
             "stdout" | "stderr" => output.push_str(data),
             "error" => return Err(Error::Other(format!("service {name}: {data}"))),
             "exit" => {
-                let code = &event["exit_code"];
+                let code = &event.exit_code;
                 return Err(Error::Other(format!("service {name} exited ({code}): {}", output.trim())));
             }
             _ => {}
@@ -362,8 +384,8 @@ fn service_started(name: &str, ndjson: &str) -> Result<()> {
 /// Reads a service stop's NDJSON log for the message of its first `error` event, which the API can report inside a 200.
 /// Lines that aren't JSON are skipped: the stop is best effort, so only a clear error event is worth a warning.
 fn service_stop_error(ndjson: &str) -> Option<String> {
-    ndjson.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|event| {
-        (event["type"].as_str() == Some("error")).then(|| event["data"].as_str().unwrap_or("unknown error").to_string())
+    service_events(ndjson).filter_map(|(_, event)| event.ok()).find_map(|event| {
+        (event.kind.as_deref() == Some("error")).then(|| event.data.unwrap_or_else(|| "unknown error".into()))
     })
 }
 
@@ -534,6 +556,19 @@ mod tests {
         let failed = "{\"type\":\"stopping\"}\nnot json\n{\"type\":\"error\",\"data\":\"no such process\"}\n{\"type\":\"error\",\"data\":\"later\"}\n";
         assert_eq!(service_stop_error(failed).as_deref(), Some("no such process"));
         assert_eq!(service_stop_error("{\"type\":\"error\"}").as_deref(), Some("unknown error"));
+    }
+
+    #[test]
+    fn service_events_share_one_shape() {
+        let ndjson = "{\"type\":\"stdout\",\"data\":\"hi\"}\n\nnot json\n{\"type\":\"exit\",\"exit_code\":3}\n";
+        let events: Vec<_> = service_events(ndjson).collect();
+        assert_eq!(events.len(), 3);
+        let first = events[0].1.as_ref().unwrap();
+        assert_eq!((first.kind.as_deref(), first.data.as_deref()), (Some("stdout"), Some("hi")));
+        assert!(events[1].1.is_err());
+        let exit = events[2].1.as_ref().unwrap();
+        assert_eq!((exit.kind.as_deref(), exit.exit_code.as_i64()), (Some("exit"), Some(3)));
+        assert!(service_started("svc", ndjson).is_err());
     }
 
     #[test]

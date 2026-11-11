@@ -51,10 +51,6 @@ struct State {
     queue_updates: bool,
     /// How many times `update_branch` was asked to do something.
     update_requests: usize,
-    /// How many times `files` was asked for a PR's file list.
-    file_listings: usize,
-    /// How many times `head` was asked for a PR's head.
-    head_lookups: usize,
     /// Whether `behind` fails, like a host that is down.
     fail_behind: bool,
     /// How many times each `CodeHost` method was called, by name.
@@ -162,19 +158,9 @@ impl FakeCodeHost {
         }
     }
 
-    /// How many times the host was asked to list a PR's files.
-    pub fn file_listings(&self) -> usize {
-        self.state.lock().unwrap().file_listings
-    }
-
     /// How many times `update_branch` was called on a PR that was behind.
     pub fn update_requests(&self) -> usize {
         self.state.lock().unwrap().update_requests
-    }
-
-    /// How many times the host was asked for a PR's head.
-    pub fn head_lookups(&self) -> usize {
-        self.state.lock().unwrap().head_lookups
     }
 
     /// How many times the `CodeHost` method of this name (`"pr_state"`, `"merge"`, ...) was called.
@@ -182,9 +168,15 @@ impl FakeCodeHost {
         self.state.lock().unwrap().calls.get(method).copied().unwrap_or(0)
     }
 
-    /// How many calls the host got in all, whatever the method.
+    /// How many calls the host got in all, whatever the method. A `ci` call counts once, as on GitHub: it reads
+    /// the head without calling `head`.
     pub fn total_calls(&self) -> usize {
         self.state.lock().unwrap().calls.values().sum()
+    }
+
+    /// The PR's head commit, without counting a call.
+    fn head_sha(&self, pr: &PrRef) -> Result<String> {
+        self.find(pr, |p, s| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default())
     }
 
     fn count(&self, method: &'static str) {
@@ -531,13 +523,13 @@ impl CodeHost for FakeCodeHost {
 
     async fn head(&self, pr: &PrRef) -> Result<String> {
         self.count("head");
-        self.state.lock().unwrap().head_lookups += 1;
-        self.find(pr, |p, s| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default())
+        self.head_sha(pr)
     }
 
     async fn ci(&self, pr: &PrRef) -> Result<Ci> {
         self.count("ci");
-        let head = CodeHost::head(self, pr).await?;
+        // Read the head directly: going through `head` would count a second host call.
+        let head = self.head_sha(pr)?;
         self.find(pr, |p, _| Ci { head, state: p.ci.clone() })
     }
 
@@ -560,7 +552,6 @@ impl CodeHost for FakeCodeHost {
 
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
         self.count("files");
-        self.state.lock().unwrap().file_listings += 1;
         self.find(pr, |p, s| {
             if let Some(files) = &p.files {
                 return files.clone();
