@@ -269,6 +269,25 @@ async fn logs_are_the_kept_lines_then_each_new_one() {
 }
 
 #[tokio::test]
+async fn a_logs_reader_that_falls_behind_is_told_how_many_lines_it_missed() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let client = r.client(key).await;
+    let mut stream = LogStream::open(dial_ui(&client, r.control.id).await.unwrap()).await.unwrap();
+    let mut next = async || tokio::time::timeout(Duration::from_secs(10), stream.next()).await.unwrap().unwrap();
+    assert!(matches!(next().await, Some(LogFrame::Backlog { .. })));
+
+    // The channel holds 16 and the runtime is single-threaded, so the server cannot receive during this
+    // loop: 17 sends push the oldest out.
+    for n in 0..17 {
+        r.logs.send(log_line(&format!("burst {n}"))).unwrap();
+    }
+    assert_eq!(next().await, Some(LogFrame::Skipped { count: 1 }));
+    assert_eq!(next().await, Some(LogFrame::Line(log_line("burst 1"))));
+}
+
+#[tokio::test]
 async fn status_is_refused_to_an_endpoint_that_is_not_allowed() {
     let r = Rig::new().await;
     r.allowed.add(SecretKey::generate().public()).unwrap();

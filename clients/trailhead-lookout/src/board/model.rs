@@ -822,6 +822,20 @@ mod tests {
         let (shown, hidden) = visible(&cards, PAGE - 1);
         assert_eq!((shown.len(), hidden), (PAGE - 1, 6));
     }
+
+    #[test]
+    fn a_very_long_run_of_subtasks_is_cut_at_a_page() {
+        let mut cards = many(4 * PAGE);
+        for card in &mut cards[PAGE..] {
+            card.depth = 1;
+        }
+        let (shown, hidden) = visible(&cards, PAGE);
+        assert_eq!((shown.len(), hidden), (2 * PAGE, 2 * PAGE));
+        // Asking for more carries on through the run.
+        let (shown, hidden) = visible(&cards, 2 * PAGE);
+        assert_eq!((shown.len(), hidden), (3 * PAGE, PAGE));
+    }
+
     #[test]
     fn show_more_counts_what_the_next_page_adds() {
         let mut cards = many(3 * PAGE);
