@@ -62,6 +62,12 @@ impl LogState {
         self.note.as_deref()
     }
 
+    /// Marks the stream as followed or not, as the Logs page does when it shows or hides: updates are dropped while it
+    /// isn't. For tests that drive the connection without the page.
+    pub fn set_streaming(&mut self, on: bool) {
+        self.streaming = on;
+    }
+
     /// The tasks seen in the lines, sorted.
     pub fn tasks(&self) -> impl Iterator<Item = &str> {
         self.tasks.iter().map(String::as_str)
@@ -94,9 +100,23 @@ impl LogState {
                 }
             }
             LogUpdate::Line(line) => self.push(line),
+            LogUpdate::Skipped(count) => self.push(gap(count)),
             LogUpdate::Dropped => {}
             LogUpdate::TooOld(why) => self.note = Some(why),
         }
+    }
+}
+
+/// The warning that marks where `count` lines were missed.
+fn gap(count: u64) -> LogLine {
+    let ts_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    LogLine {
+        ts_ms,
+        level: LogLevel::Warn,
+        target: "lookout".into(),
+        repo: None,
+        task: None,
+        message: format!("{count} log lines skipped: Lookout fell behind"),
     }
 }
 
@@ -210,6 +230,10 @@ impl Plugin for LogsPlugin {
 
 fn apply_items(mut items: MessageReader<LogItem>, mut state: ResMut<LogState>) {
     for LogItem(update) in items.read() {
+        // Updates still queued when the page closed would refill what `sync_stream` just cleared.
+        if !state.streaming {
+            continue;
+        }
         state.apply(update.clone());
     }
 }
@@ -492,6 +516,23 @@ mod tests {
     }
 
     #[test]
+    fn a_skip_leaves_a_warning_where_the_lines_were_missed() {
+        let mut state = open();
+        state.apply(LogUpdate::Line(line(1, LogLevel::Info, None)));
+        state.apply(LogUpdate::Skipped(7));
+        state.apply(LogUpdate::Line(line(2, LogLevel::Info, None)));
+        let entries: Vec<_> = state.entries().map(|e| (e.line.level, e.line.message.as_str())).collect();
+        assert_eq!(
+            entries,
+            [
+                (LogLevel::Info, "line 1"),
+                (LogLevel::Warn, "7 log lines skipped: Lookout fell behind"),
+                (LogLevel::Info, "line 2"),
+            ]
+        );
+    }
+
+    #[test]
     fn the_filters_pick_by_level_and_task() {
         let mut state = open();
         state.push(line(1, LogLevel::Info, Some("TRAIL-1")));
@@ -585,6 +626,22 @@ mod tests {
             app.world_mut().despawn(page);
             app.update();
             assert_eq!(sent(&mut app), [true, false]);
+        }
+
+        #[test]
+        fn updates_queued_after_the_page_closed_are_dropped() {
+            let mut app = app();
+            let page = app.world_mut().spawn((LogsPage, Node::default())).id();
+            app.update();
+            feed(&mut app, LogUpdate::Line(line(1, LogLevel::Info, None)));
+            app.update();
+            assert_eq!(app.world().resource::<LogState>().entries().count(), 1);
+            app.world_mut().get_mut::<Node>(page).unwrap().display = Display::None;
+            app.update();
+            assert_eq!(app.world().resource::<LogState>().entries().count(), 0);
+            feed(&mut app, LogUpdate::Line(line(2, LogLevel::Info, None)));
+            app.update();
+            assert_eq!(app.world().resource::<LogState>().entries().count(), 0);
         }
 
         #[test]

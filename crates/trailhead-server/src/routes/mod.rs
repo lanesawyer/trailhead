@@ -118,7 +118,17 @@ fn created(body: impl Serialize) -> Response {
 )]
 async fn health(State(s): S, headers: HeaderMap) -> Json<Value> {
     let mut v = json!(s.info);
-    v["ok"] = json!(true);
+    // A store that is locked or stuck can't serve claims, so say so rather than reporting up. The status stays 200:
+    // the CLI reads any other as no server running. The bound stays well under the CLI's 2s health timeout, or a slow
+    // store would read as no server. The ping takes the writer lock and an immediate transaction, so it queues behind
+    // real writes; this is unauthenticated and polled often, which a liveness check of the write path can afford.
+    let store = tokio::time::timeout(std::time::Duration::from_millis(750), s.store.ping()).await;
+    v["ok"] = json!(matches!(store, Ok(Ok(()))));
+    match store {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => v["store_error"] = json!(e.to_string()),
+        Err(_) => v["store_error"] = json!("the store did not answer in time"),
+    }
     if let Some(runs) = s.runs_in_flight.get() {
         v["runs_in_flight"] = json!(runs());
     }
@@ -148,5 +158,5 @@ async fn me(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
         Some(id) => s.store.list_agents(&ctx).await?.into_iter().find(|a| a.id == id),
         None => None,
     };
-    Ok(Json(json!({ "workspace_id": ctx.workspace_id, "user": user, "agent": agent })))
+    Ok(Json(json!({ "workspace_id": ctx.workspace_id, "user": user, "agent_id": ctx.agent_id, "agent": agent })))
 }

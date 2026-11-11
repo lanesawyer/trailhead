@@ -232,11 +232,11 @@ pub fn parent_suggestions<'a>(
 }
 
 /// What to tell the person about an answer that wasn't `Ok`.
-pub fn describe(outcome: &Outcome) -> String {
+pub fn describe(outcome: &Outcome, what: &str) -> String {
     match outcome {
         Outcome::Ok { .. } => String::new(),
         Outcome::Conflict { message, .. } => {
-            format!("The task changed since you opened it ({message}). Close this and open it again.")
+            format!("The {what} changed since you opened it ({message}). Close this and open it again.")
         }
         Outcome::Forbidden(m) => format!("Not allowed: {m}"),
         Outcome::RateLimited { retry_after, message } => match retry_after {
@@ -541,7 +541,7 @@ fn finish(
             form.close();
         } else {
             form.saving = false;
-            form.message = describe(&d.outcome);
+            form.message = describe(&d.outcome, "task");
         }
     }
 }
@@ -632,6 +632,21 @@ fn choice_field(
     commands.queue_spawn_scene(field(label.to_string(), control)).insert(ChildOf(parent)).id()
 }
 
+/// The queue dropdown's label for going under a parent that isn't a queue.
+const OTHER_PARENT: &str = "other…";
+
+/// The queue dropdown's rows for `queues`: each queue, then [`OTHER_PARENT`]; and the row the draft shows selected.
+fn queue_rows(queues: &[String], d: &Draft) -> (Vec<String>, Option<usize>) {
+    let at = if d.queued { queues.iter().position(|q| *q == d.queue) } else { Some(queues.len()) };
+    (queues.iter().cloned().chain([OTHER_PARENT.to_string()]).collect(), at)
+}
+
+/// What the queue dropdown's `rows` stand for: the queue's key, or nothing for [`OTHER_PARENT`].
+fn queue_keys_of(rows: &[String]) -> Vec<String> {
+    let queues = rows.len().saturating_sub(1);
+    rows.iter().enumerate().map(|(i, r)| if i == queues { String::new() } else { r.clone() }).collect()
+}
+
 /// Sets the draft from the dropdown that was used. A different project starts the parent and queue over.
 fn on_pick(
     picked: On<Picked>,
@@ -665,11 +680,13 @@ fn on_pick(
                 d.project = project;
             }
         }
-        FormChoice::Queue => {
-            if let Some(queue) = key {
-                d.queue = queue;
-            }
-        }
+        // The index is read through the keys the dropdown was drawn with. "other…" stands for the empty key and turns
+        // queueing off, which brings the parent search back.
+        FormChoice::Queue => match key {
+            Some(queue) if !queue.is_empty() => d.queue = queue,
+            Some(_) => d.queued = false,
+            None => {}
+        },
     }
 }
 
@@ -731,10 +748,10 @@ fn fill_form(
 
         c.spawn_scene(toggle_switch("Queue for the factory", d.queued, bsn! { QueueToggle }))
             .insert((FormPart::Queueing, ChildOf(body)));
-        let queues = queues_of(&d.project, &authoring, &factory);
-        let at = queues.iter().position(|q| *q == d.queue);
-        let plain = vec![None; queues.len()];
-        let queue = choice_field(c, body, "Queue task", FormChoice::Queue, (queues.clone(), plain), at, queues);
+        let (rows, at) = queue_rows(&queues_of(&d.project, &authoring, &factory), d);
+        let plain = vec![None; rows.len()];
+        let keys = queue_keys_of(&rows);
+        let queue = choice_field(c, body, "Queue task", FormChoice::Queue, (rows, plain), at, keys);
         c.entity(queue).insert(FormPart::QueuePick);
 
         // The parent: a search over the project's open tasks with what it found floating under it, or in its place
@@ -803,6 +820,7 @@ fn dress_form(
     mut parts: Query<(Entity, &FormPart, &mut Node)>,
     mut chosen: Query<&mut Truncated, With<ChosenParent>>,
     mut queue_keys: Query<(Entity, &mut ChoiceKeys, &FormChoice)>,
+    switches: Query<(Entity, Has<bevy::ui::Checked>), With<QueueToggle>>,
     mut edit: SelectEdit,
     mut suggestions: ResMut<Suggestions>,
     mut commands: Commands,
@@ -845,14 +863,23 @@ fn dress_form(
             shown.full = words;
         }
     }
-    // The queue dropdown lists the project's queues; it is rebuilt in place when the project changes.
-    for (select, mut keys, _) in queue_keys.iter_mut().filter(|(_, _, c)| **c == FormChoice::Queue) {
-        if keys.0 == queues {
-            continue;
+    // The switch follows the draft, which "other…" and a project without a queue turn off.
+    for (switch, on) in &switches {
+        if on != d.queued {
+            if d.queued {
+                commands.entity(switch).insert(bevy::ui::Checked);
+            } else {
+                commands.entity(switch).remove::<bevy::ui::Checked>();
+            }
         }
-        let at = queues.iter().position(|q| *q == d.queue);
-        if edit.set(select, &queues, at) {
-            keys.0 = queues.clone();
+    }
+    // The queue dropdown lists the project's queues and "other…"; it is rebuilt in place when the project changes.
+    let (rows, at) = queue_rows(&queues, d);
+    let wanted_keys = queue_keys_of(&rows);
+    for (select, mut keys, _) in queue_keys.iter_mut().filter(|(_, _, c)| **c == FormChoice::Queue) {
+        // The selection is set every pass: switching queueing back on must not leave "other…" showing.
+        if edit.set(select, &rows, at) && keys.0 != wanted_keys {
+            keys.0 = wanted_keys.clone();
         }
     }
     let Some(list) = list else { return };
@@ -968,6 +995,7 @@ mod tests {
             control: trailhead_factory::status::ControlState::Up,
             queue: vec!["TRAIL-102".into(), "TRAIL-685".into(), "OPS-3".into()],
             last_error: None,
+            holding: None,
             human_grades: Vec::new(),
             seq: 1,
         };
@@ -1082,6 +1110,25 @@ mod tests {
         app.world_mut().trigger(Picked { entity: select, index: 2 });
         let d = draft(&app);
         assert_eq!((d.queue.as_str(), d.queued), ("", false), "ZED has no queue, so it can't stay queued");
+    }
+
+    #[test]
+    fn the_queue_dropdown_can_pick_other_to_type_a_parent() {
+        let mut app = app();
+        open_new_form(&mut app);
+        app.world_mut().resource_mut::<Form>().open.as_mut().unwrap().draft.queued = true;
+        let keys = vec!["TRAIL-102".to_string(), "TRAIL-685".to_string(), String::new()];
+        let select = app.world_mut().spawn((FormChoice::Queue, ChoiceKeys(keys))).id();
+        app.world_mut().trigger(Picked { entity: select, index: 1 });
+        assert_eq!((draft(&app).queue.as_str(), draft(&app).queued), ("TRAIL-685", true));
+        app.world_mut().trigger(Picked { entity: select, index: 2 });
+        assert!(!draft(&app).queued, "other… leaves the queue, so the parent can be typed");
+        assert_eq!(draft(&app).queue, "TRAIL-685");
+        assert_eq!(
+            queue_rows(&["A-1".into(), "A-2".into()], &draft(&app)),
+            (vec!["A-1".to_string(), "A-2".to_string(), OTHER_PARENT.to_string()], Some(2))
+        );
+        assert_eq!(queue_keys_of(&["A-1".into(), OTHER_PARENT.into()]), ["A-1", ""]);
     }
 
     /// Picks `index` in the form's dropdown for `choice`, as a click on its row does.
@@ -1240,6 +1287,7 @@ mod tests {
             control: trailhead_factory::status::ControlState::Up,
             queue: queues.iter().map(|q| q.to_string()).collect(),
             last_error: None,
+            holding: None,
             human_grades: Vec::new(),
             seq: 1,
         };
@@ -1336,6 +1384,24 @@ mod tests {
     }
 
     #[test]
+    fn a_form_opens_with_the_keyboard_on_its_title() {
+        // Edit opens the inspector, not a form, so the forms are a new task and a new sub-task.
+        for subtask in [false, true] {
+            let mut app = ui_app();
+            settle(&mut app);
+            if subtask {
+                press(&mut app, Act::NewSubtask("TRAIL-7".into()));
+            } else {
+                press(&mut app, Act::New);
+            }
+            settle(&mut app);
+            let focused = app.world().resource::<bevy::input_focus::InputFocus>().get().unwrap();
+            let field = app.world().get::<Field>(focused);
+            assert_eq!(field.map(|f| f.0), Some(FieldKind::Title), "subtask: {subtask}");
+        }
+    }
+
+    #[test]
     fn the_form_shows_what_the_draft_needs_and_offers_parents_as_you_type() {
         let mut app = ui_app();
         report_queues(&mut app, &["TRAIL-102"]);
@@ -1401,5 +1467,12 @@ mod tests {
         app.world_mut().resource_mut::<Form>().saving = true;
         press(&mut app, Act::Cancel);
         assert!(app.world().resource::<Form>().open.is_some());
+    }
+
+    #[test]
+    fn a_conflict_names_what_changed() {
+        let conflict = Outcome::Conflict { current_version: Some(3), message: "stale".into() };
+        assert!(describe(&conflict, "task").starts_with("The task changed since you opened it"));
+        assert!(describe(&conflict, "project").starts_with("The project changed since you opened it"));
     }
 }
