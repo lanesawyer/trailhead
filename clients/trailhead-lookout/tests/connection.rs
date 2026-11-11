@@ -45,6 +45,7 @@ impl StatusFeed for TestFeed {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 1,
         };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
