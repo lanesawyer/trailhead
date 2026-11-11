@@ -177,6 +177,20 @@ async fn a_failed_park_after_giving_up_does_not_leave_the_gave_up_marker() {
     let task = r.tracker.task(&key);
     assert_ne!(task.status, Status::NeedsInput);
     assert_eq!(task.run.gave_up.unwrap_or(0), 0, "a task that wasn't parked doesn't get a fresh count");
+    assert!(r.tracker.is_revoked("factory/trail-1-a1"), "the sub-agent is revoked, not left to expire");
+}
+
+#[tokio::test]
+async fn a_park_that_cannot_claim_after_giving_up_revokes_the_sub_agent() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 1"));
+    let key = r.tracker.add_task("TRAIL", "Fails", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "no luck".into() }));
+    // The run's own claim goes through; the park's claim is the next one.
+    r.tracker.fail_after("factory/trail-1-a1", TrackerOp::Claim, 1, 1);
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    assert!(ran.is_err(), "{ran:?}");
+    assert!(r.tracker.is_revoked("factory/trail-1-a1"), "the sub-agent is revoked, not left to expire");
+    assert_eq!(r.tracker.task(&key).run.gave_up.unwrap_or(0), 0);
 }
 
 #[tokio::test]
