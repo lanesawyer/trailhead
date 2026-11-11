@@ -325,7 +325,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             && let Some(keys) = unfinished.get(&t.id)
         {
             let mut keys = keys.clone();
-            keys.sort_unstable();
+            keys.sort_unstable_by(|a, b| trailhead_model::cmp_keys(a, b));
             badges.push(Badge {
                 kind: BadgeKind::Blocked,
                 label: format!("blocked · {}", keys.len()),
