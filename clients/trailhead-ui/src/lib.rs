@@ -34,7 +34,8 @@
 //! - A message in a conversation, the reader's on the right and others' on the left: [`bubble`] on a [`Side`], headed by
 //!   [`bubble_head`].
 //! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
-//!   [`sidebar_footer`]; mark the page shown on its [`NavItem`]. Pages fill [`beside_sidebar`].
+//!   [`sidebar_footer`], with a [`sidebar_card`] above it for something to keep an eye on; mark the page shown on its
+//!   [`NavItem`]. Pages fill [`beside_sidebar`].
 //! - Colors: a meaning from [`token`], on a node as a [`BackgroundTone`], [`BorderTone`] or [`TextTone`]. A surface (a
 //!   panel, a card, a hint): a [`Surface`]. An app builds on [`Theme::new`]: [`Theme::alias`] a token of its own to a
 //!   meaning, [`Theme::paint`] only colors that encode data, and adds [`ThemePlugin`] with it beside [`UiPlugin`].
@@ -55,13 +56,14 @@
 //!   [`matches_search`]. A text field straight on a pane or menu goes in a [`field_well`] to be seen.
 //! - A detail modal's body, a main column beside a sidebar of facts: [`spawn_detail_panes`], in a modal
 //!   [`extent::DETAIL_WIDTH`] wide.
-//! - A button that opens a URL in the browser: [`link_button`].
+//! - A button that opens a URL in the browser: [`link_button`], or icon-only [`link_tool_button`].
 //! - A line saying how something went, with an icon for its [`Tone`]: [`notice`], then write a [`Notice`] onto it;
 //!   an empty message hides it.
 //! - Placeholder bars where content is on its way: [`skeleton`].
 //! - Rows of items under column headings, a row pressable as a whole: [`table_head`] and [`table_row`]s, by
 //!   [`TableColumn`].
-//! - How far along something is: [`progress_bar`]; set its [`Progress`].
+//! - How far along something is: [`progress_bar`]; set its [`Progress`], and its [`ProgressTone`] to recolor it. With
+//!   a label, a value and a note: [`meter`], updated through its [`MeterPart`]s.
 //! - A setting that is on or off: [`toggle_switch`]; observe `ValueChange<bool>` on it.
 //! - Writing a `Node` or `Text` only when it changes: [`patch_node`], [`set_display`], [`set_text`].
 //!
@@ -138,7 +140,7 @@ pub use inline::{
 };
 pub use input::{InitialText, text_input, text_input_sized};
 pub use keyed::Keyed;
-pub use link::{ExternalLink, link_button};
+pub use link::{ExternalLink, link_button, link_tool_button};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, menu_item, spawn_icon_menu};
 pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,
@@ -146,12 +148,12 @@ pub use modal::{
 };
 pub use nav::{
     BesideSidebar, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_sidebar, nav_heading, nav_heading_action,
-    nav_item, nav_item_noted, sidebar, sidebar_footer,
+    nav_item, nav_item_noted, sidebar, sidebar_card, sidebar_footer,
 };
 pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
-pub use progress::{Progress, progress_bar};
+pub use progress::{MeterPart, Progress, ProgressTone, meter, progress_bar};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_body_node, scroll_frame, scroll_frame_node};
 pub use scrollbar::{SCROLLBAR_GAP, SCROLLBAR_INSET, SCROLLBAR_WIDTH, scrollbar};
 pub use search::{
@@ -187,7 +189,7 @@ impl Plugin for UiPlugin {
             .add_observer(scroll::on_scroll)
             .add_observer(button_group::on_option)
             .add_observer(bevy::ui_widgets::slider_self_update)
-            .add_systems(Update, progress::fill_progress.in_set(UiPlace))
+            .add_systems(Update, (progress::fill_progress, progress::tone_progress).in_set(UiPlace))
             .add_systems(PostUpdate, scrollbar::show_scrollbars.after(bevy::ui::UiSystems::Layout))
             .add_systems(
                 Update,

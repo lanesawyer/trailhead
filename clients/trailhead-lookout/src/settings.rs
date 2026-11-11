@@ -593,6 +593,7 @@ mod tests {
                 last_error: None,
                 human_grades: vec![],
                 holding: None,
+                usage: Vec::new(),
                 seq: 0,
             },
         );

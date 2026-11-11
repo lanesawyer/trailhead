@@ -18,15 +18,15 @@ use uuid::Uuid;
 
 use crate::author::{Act, Authoring};
 use crate::connection::Connection;
-use crate::factory::{FactoryStatus, Run};
+use crate::factory::{FactoryStatus, PrLink, Run, pr_link};
 use crate::inspector::{Neighbours, Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::search::{Deep, DeepHit};
 use crate::widgets;
 use crate::widgets::{
     ButtonKind, Hint, Icon, Keyed, Picked, ScrollBoth, SelectEdit, Token, badge, button, card as card_shell,
-    card_found, card_row, card_title, card_under, field, grade_tone, priority_tone, select, space, status_label, token,
-    tool_button,
+    card_found, card_row, card_title, card_under, field, grade_tone, link_tool_button, priority_tone, select, space,
+    status_label, token, tool_button,
 };
 
 /// The views of the app: the task board, the trail map, and one project's page ([`crate::project`]).

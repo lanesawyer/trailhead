@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use bevy::prelude::*;
 use trailhead_factory::{
     ControlState, FactoryEvent, FactoryState, Grade, RunPhase, RunStatus, RunUpdate, SandboxStatus, Sequenced, TaskKey,
-    Usd,
+    UsageWindow, Usd,
 };
 use trailhead_wire::ui::RepoSnapshot;
 
@@ -94,6 +94,8 @@ pub struct RepoState {
     pub human_grades: Vec<Grade>,
     /// Why the merger is holding the repo's merges, when it is (a person's PR goes first).
     pub holding: Option<String>,
+    /// The subscription's usage windows, as this repo's control plane last heard them.
+    pub usage: Vec<UsageWindow>,
     /// The last event applied, or the snapshot's.
     pub seq: u64,
 }
@@ -154,6 +156,19 @@ impl FactoryStatus {
             .iter()
             .filter_map(|(repo, s)| s.holding.as_ref().map(|why| format!("{repo}: holding merges: {why}")))
             .collect()
+    }
+
+    /// The subscription's usage windows by name. The readings are host-wide, so every repo should carry the same; where
+    /// one lags, the reading for the latest reset wins, then the fuller one.
+    pub fn usage(&self) -> Vec<UsageWindow> {
+        let mut by_window: BTreeMap<&str, &UsageWindow> = BTreeMap::new();
+        for w in self.repos.values().flat_map(|r| &r.usage) {
+            let newer = |had: &&UsageWindow| (w.resets_at, w.used_percent) > (had.resets_at, had.used_percent);
+            if by_window.get(w.window.as_str()).is_none_or(newer) {
+                by_window.insert(&w.window, w);
+            }
+        }
+        by_window.into_values().cloned().collect()
     }
 
     /// The control plane's state for the map, repo by repo.
@@ -250,6 +265,7 @@ impl FactoryMirror {
                 last_error: snapshot.last_error,
                 human_grades: snapshot.human_grades,
                 holding: snapshot.holding,
+                usage: snapshot.usage,
                 queue: snapshot.queue.into_iter().map(|k| k.0).collect(),
                 seq: snapshot.seq,
             },
@@ -272,6 +288,7 @@ impl FactoryMirror {
             FactoryEvent::Control { control } => state.control = control,
             FactoryEvent::Error { message } => state.last_error = Some((unix_now(), message)),
             FactoryEvent::Holding { holding } => state.holding = holding,
+            FactoryEvent::Usage { usage } => state.usage = usage,
             FactoryEvent::Unknown => unreachable!("returned above"),
             FactoryEvent::SandboxChanged { sandbox } => self.set_campsite(commands, repo, sandbox),
             FactoryEvent::SandboxGone { name } => {
@@ -326,6 +343,23 @@ impl FactoryMirror {
 pub fn factory_ran(task: &trailhead_model::Task) -> bool {
     RunUpdate::of(task)
         .is_ok_and(|run| run.attempt.is_some() || run.sandbox.is_some() || run.retries.is_some() || run.pr.is_some())
+}
+
+/// A task's pull request, where its code host serves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrLink {
+    /// `owner/name#12`.
+    pub label: String,
+    /// The PR's page, as the code host gave it: Lookout never builds one, so any code host works.
+    pub url: String,
+}
+
+/// The PR the factory opened for `task` (the merged one once it merged), if it has one with a page.
+pub fn pr_link(task: &trailhead_model::Task) -> Option<PrLink> {
+    let run = RunUpdate::of(task).ok()?;
+    let pr = run.merged.map(|m| m.pr).or(run.pr)?;
+    (!pr.url.is_empty())
+        .then(|| PrLink { label: format!("{}/{}#{}", pr.repo.owner, pr.repo.name, pr.number), url: pr.url })
 }
 
 /// What to call the holder of a claim on the task keyed `task_key`: its name in the agent list if `known`, else, for a
@@ -410,6 +444,17 @@ mod tests {
 
     use super::*;
     #[test]
+    fn a_pr_link_is_the_code_hosts_own_url_and_the_merged_one_once_merged() {
+        let pr = |n: u64| serde_json::json!({"repo": {"owner": "o", "name": "r"}, "number": n, "url": format!("https://host/o/r/-/merge_requests/{n}")});
+        let with = |factory| crate::fixture::task(serde_json::json!({"metadata": {"factory": factory}}));
+        assert_eq!(pr_link(&with(serde_json::json!({"attempt": 1}))), None);
+        let open = pr_link(&with(serde_json::json!({"pr": pr(4)}))).unwrap();
+        assert_eq!(open, PrLink { label: "o/r#4".into(), url: "https://host/o/r/-/merge_requests/4".into() });
+        let merged = with(serde_json::json!({"pr": pr(4), "merged": {"by": "merger", "pr": pr(5)}}));
+        assert_eq!(pr_link(&merged).unwrap().label, "o/r#5");
+    }
+
+    #[test]
     fn a_holder_is_named_by_the_list_else_for_its_run() {
         assert_eq!(super::holder_name(Some("claude"), "TRAIL-7", true).as_deref(), Some("claude"));
         assert_eq!(super::holder_name(None, "TRAIL-7", true).as_deref(), Some("factory/trail-7"));
@@ -436,6 +481,7 @@ mod tests {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq,
         };
         FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])
