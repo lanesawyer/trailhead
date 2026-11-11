@@ -158,7 +158,9 @@ pub struct Health {
 pub struct Me {
     workspace_id: Uuid,
     user: trailhead_core::User,
-    /// Set when the token belongs to an agent.
+    /// Set when the token belongs to an agent, even if the agent can't be looked up.
+    agent_id: Option<Uuid>,
+    /// The agent itself, when `agent_id` resolves.
     agent: Option<trailhead_core::Agent>,
 }
 
