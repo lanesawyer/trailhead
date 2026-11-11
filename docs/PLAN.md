@@ -63,6 +63,8 @@ Remote machines reach the server through a tunnel (iroh via `dumbpipe`, Tailscal
 | Crate | Role | Key dependencies |
 | --- | --- | --- |
 | `trailhead-model` | Domain types (tasks, comments, claims, statuses, grades, priorities) and the rules on them that need no database; core re-exports it, and API clients use it without core | `serde`, `jiff` |
+| `trailhead-client` | What a client of the API shares: wire types, saved credentials (`creds`) and the text the CLI and MCP show; the typed HTTP client is behind the `http` feature, so the engine-only build has no `reqwest` | `serde`, `reqwest` (optional) |
+| `trailhead-log` | The log-subscriber setup the binaries share: local-time RFC 3339 stamps with the UTC offset, an env filter and an optional file layer | `tracing-subscriber` |
 | `trailhead-core` | Schema, domain logic, the `Store` API, event log | `libsql`, `serde` |
 | `trailhead-server` | REST, MCP, SSE, webhooks | `axum`, `tokio`, `utoipa`, `rmcp` |
 | `trailhead` (CLI) | REST client for people and shell-capable agents; auto-starts a local server | `clap`, `reqwest` |

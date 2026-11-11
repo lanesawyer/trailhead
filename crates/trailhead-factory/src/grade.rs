@@ -86,7 +86,12 @@ impl PrGrade {
 /// Compiles a path glob: `*` and `?` stay within a segment, `**` spans segments (none included, so `**/Cargo.toml`
 /// matches the root's too), and `{a,b}` and `[ab]` work as in a shell.
 pub fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, globset::Error> {
-    Ok(globset::GlobBuilder::new(pattern).literal_separator(true).build()?.compile_matcher())
+    Ok(glob(pattern)?.compile_matcher())
+}
+
+/// The one place the matching rules are set, so [`compile_glob`] and [`compile_glob_set`] can't drift apart.
+fn glob(pattern: &str) -> Result<globset::Glob, globset::Error> {
+    globset::GlobBuilder::new(pattern).literal_separator(true).build()
 }
 
 /// Matches a `/`-separated path against a glob (see [`compile_glob`]). A pattern that doesn't compile matches nothing;
@@ -126,11 +131,14 @@ const CHECK_DEFINITIONS: &[&str] = &[
 fn compile_glob_set<'g>(patterns: impl IntoIterator<Item = &'g str>) -> globset::GlobSet {
     let mut set = globset::GlobSet::builder();
     for p in patterns {
-        if let Ok(g) = globset::GlobBuilder::new(p).literal_separator(true).build() {
+        if let Ok(g) = glob(p) {
             set.add(g);
         }
     }
-    set.build().unwrap_or_else(|_| globset::GlobSet::empty())
+    set.build().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "building the glob set failed; none of its globs will match");
+        globset::GlobSet::empty()
+    })
 }
 
 static CHECK_DEFINITION_SET: LazyLock<globset::GlobSet> =
@@ -140,9 +148,14 @@ pub fn is_check_definition(path: &str) -> bool {
     CHECK_DEFINITION_SET.is_match(path)
 }
 
+/// Whether `name` is a lockfile whose patch is read for dependency-list-only edits.
+fn is_read_lockfile(name: &str) -> bool {
+    matches!(name, "Cargo.lock" | "uv.lock" | "package-lock.json")
+}
+
 /// The files whose patch the grader reads: a `Cargo.lock`, `uv.lock` or `package-lock.json`, and Rust sources. The code host keeps a patch only for these.
 pub fn reads_patch(path: &str) -> bool {
-    path.ends_with(".rs") || matches!(path.rsplit('/').next(), Some("Cargo.lock" | "uv.lock" | "package-lock.json"))
+    path.ends_with(".rs") || is_read_lockfile(path.rsplit('/').next().unwrap_or(path))
 }
 
 /// Whether a Rust file's patch only changes comments: every added or removed line is blank or starts with `//` (so
@@ -239,19 +252,31 @@ impl Grader<'_> {
         // (grade, reason) per finding.
         let mut found: Vec<(Grade, String)> = Vec::new();
         // Compiled once for all files, not per file and glob.
-        let rules: Vec<(Grade, globset::GlobSet)> = self
+        // Each rule twice: all its globs, and without the ones naming a lockfile read below, for a lock that only edits
+        // dependency lists. A broader glob that happens to cover it (`crates/**`) still counts.
+        let rules: Vec<(Grade, globset::GlobSet, globset::GlobSet)> = self
             .rules
             .iter()
-            .map(|(grade, globs)| (*grade, compile_glob_set(globs.iter().map(String::as_str))))
+            .map(|(grade, globs)| {
+                let all = compile_glob_set(globs.iter().map(String::as_str));
+                let rest = compile_glob_set(
+                    globs.iter().map(String::as_str).filter(|g| !is_read_lockfile(g.rsplit('/').next().unwrap_or(g))),
+                );
+                (*grade, all, rest)
+            })
             .collect();
         for f in files {
-            let rule = rules.iter().filter(|(_, set)| set.is_match(&f.path)).map(|(grade, _)| *grade).max();
             let lock_edit = f.patch.as_deref().is_some_and(|p| is_dependency_list_only(&f.path, p));
+            let rule = rules
+                .iter()
+                .filter(|(_, all, rest)| if lock_edit { rest } else { all }.is_match(&f.path))
+                .map(|(grade, ..)| *grade)
+                .max();
             // Only an edit in place: a renamed or added file can change what the code is, whatever its lines say.
             let comment_edit = f.status == FileStatus::Modified
                 && f.path.ends_with(".rs")
                 && f.patch.as_deref().is_some_and(is_comment_only);
-            if let Some(grade) = rule.filter(|_| !lock_edit && !comment_edit) {
+            if let Some(grade) = rule.filter(|_| !comment_edit) {
                 found.push((grade, format!("{} changed", f.path)));
             }
             let lost_test = |p: &str| is_test_path(p);
@@ -428,6 +453,10 @@ mod tests {
         ] {
             assert_eq!(grader(&r).grade(Some(gr(1)), &[lock(bad)]).grade, gr(3), "{bad}");
         }
+        // A broader glob covering the lock still applies to a dependency-list edit.
+        let broad = Rules { two: vec!["**".into()], three: vec!["Cargo.lock".into()], four: vec![] };
+        let g = grader(&broad).grade(Some(gr(1)), &[lock(dev)]);
+        assert_eq!(g.describe(), "Grade 2 (task was 1; Cargo.lock changed)");
         // No patch (too large for the host to show): treated as risky.
         assert_eq!(grader(&r).grade(Some(gr(1)), &[modified("Cargo.lock")]).grade, gr(3));
     }

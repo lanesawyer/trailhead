@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use bevy::prelude::*;
 use trailhead_factory::{
     ControlState, FactoryEvent, FactoryState, Grade, RunPhase, RunStatus, RunUpdate, SandboxStatus, Sequenced, TaskKey,
-    Usd,
+    UsageWindow, Usd,
 };
 use trailhead_wire::ui::RepoSnapshot;
 
@@ -92,6 +92,10 @@ pub struct RepoState {
     pub last_error: Option<(i64, String)>,
     /// The grades whose gate wants a person.
     pub human_grades: Vec<Grade>,
+    /// Why the merger is holding the repo's merges, when it is (a person's PR goes first).
+    pub holding: Option<String>,
+    /// The subscription's usage windows, as this repo's control plane last heard them.
+    pub usage: Vec<UsageWindow>,
     /// The last event applied, or the snapshot's.
     pub seq: u64,
 }
@@ -144,6 +148,27 @@ impl FactoryStatus {
             }
         }
         keys
+    }
+
+    /// Why each repo's merger is holding merges, for the repos that are.
+    pub fn holds(&self) -> Vec<String> {
+        self.repos
+            .iter()
+            .filter_map(|(repo, s)| s.holding.as_ref().map(|why| format!("{repo}: holding merges: {why}")))
+            .collect()
+    }
+
+    /// The subscription's usage windows by name. The readings are host-wide, so every repo should carry the same; where
+    /// one lags, the reading for the latest reset wins, then the fuller one.
+    pub fn usage(&self) -> Vec<UsageWindow> {
+        let mut by_window: BTreeMap<&str, &UsageWindow> = BTreeMap::new();
+        for w in self.repos.values().flat_map(|r| &r.usage) {
+            let newer = |had: &&UsageWindow| (w.resets_at, w.used_percent) > (had.resets_at, had.used_percent);
+            if by_window.get(w.window.as_str()).is_none_or(newer) {
+                by_window.insert(&w.window, w);
+            }
+        }
+        by_window.into_values().cloned().collect()
     }
 
     /// The control plane's state for the map, repo by repo.
@@ -239,6 +264,8 @@ impl FactoryMirror {
                 control: snapshot.control,
                 last_error: snapshot.last_error,
                 human_grades: snapshot.human_grades,
+                holding: snapshot.holding,
+                usage: snapshot.usage,
                 queue: snapshot.queue.into_iter().map(|k| k.0).collect(),
                 seq: snapshot.seq,
             },
@@ -252,12 +279,17 @@ impl FactoryMirror {
             return;
         }
         state.seq = event.seq;
+        // An event from a newer control plane says nothing worth logging; its number still counted above.
+        if matches!(event.event, FactoryEvent::Unknown) {
+            return;
+        }
         let line = event.event.line();
         match event.event {
             FactoryEvent::Control { control } => state.control = control,
             FactoryEvent::Error { message } => state.last_error = Some((unix_now(), message)),
-            // Shown in the activity log only for now.
-            FactoryEvent::Holding { .. } | FactoryEvent::Unknown => {}
+            FactoryEvent::Holding { holding } => state.holding = holding,
+            FactoryEvent::Usage { usage } => state.usage = usage,
+            FactoryEvent::Unknown => unreachable!("returned above"),
             FactoryEvent::SandboxChanged { sandbox } => self.set_campsite(commands, repo, sandbox),
             FactoryEvent::SandboxGone { name } => {
                 if let Some((entity, _)) = self.campsites.remove(&(repo.to_string(), name)) {
@@ -311,6 +343,16 @@ impl FactoryMirror {
 pub fn factory_ran(task: &trailhead_model::Task) -> bool {
     RunUpdate::of(task)
         .is_ok_and(|run| run.attempt.is_some() || run.sandbox.is_some() || run.retries.is_some() || run.pr.is_some())
+}
+
+/// What to call the holder of a claim on the task keyed `task_key`: its name in the agent list if `known`, else, for a
+/// task that has a run, `factory/<key>`. The agent list only changes with a sync snapshot, so a sub-agent made for a run
+/// after it isn't known yet; a holder of a task that has a run is a factory agent all the same. Board and map share it.
+pub fn holder_name(known: Option<&str>, task_key: &str, has_run: bool) -> Option<String> {
+    match known {
+        Some(n) => Some(n.to_string()),
+        None => has_run.then(|| format!("factory/{}", task_key.to_lowercase())),
+    }
 }
 
 fn unix_now() -> i64 {
@@ -384,6 +426,12 @@ mod tests {
     use trailhead_factory::{FactorySnapshot, SandboxState};
 
     use super::*;
+    #[test]
+    fn a_holder_is_named_by_the_list_else_for_its_run() {
+        assert_eq!(super::holder_name(Some("claude"), "TRAIL-7", true).as_deref(), Some("claude"));
+        assert_eq!(super::holder_name(None, "TRAIL-7", true).as_deref(), Some("factory/trail-7"));
+        assert_eq!(super::holder_name(None, "TRAIL-7", false), None);
+    }
 
     fn app() -> App {
         let mut app = App::new();
@@ -405,6 +453,7 @@ mod tests {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq,
         };
         FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])
@@ -459,6 +508,16 @@ mod tests {
     }
 
     #[test]
+    fn unknown_events_advance_the_sequence_but_stay_out_of_the_activity_log() {
+        let mut app = app();
+        send(&mut app, [snapshot(3, vec![])]);
+        send(&mut app, [event(4, FactoryEvent::Unknown)]);
+        let status = app.world().resource::<FactoryStatus>();
+        assert!(status.activity.is_empty());
+        assert_eq!(status.repos["o/r"].seq, 4);
+    }
+
+    #[test]
     fn a_run_goes_through_its_phases_and_shows_live_activity() {
         let mut app = app();
         let task = TaskKey("TRAIL-1".into());
@@ -485,8 +544,16 @@ mod tests {
         // The control plane restarted: the numbers start over, and the sandboxes are what its reconcile found.
         send(&mut app, [snapshot(1, vec![sandbox("b", SandboxState::Busy)])]);
         assert_eq!(campsites(&mut app), [("b".into(), SandboxState::Busy)]);
+        let hold = FactoryEvent::Holding { holding: Some("#306 has auto-merge on but CI failed".into()) };
+        send(&mut app, [event(2, hold)]);
+        assert_eq!(
+            app.world().resource::<FactoryStatus>().holds(),
+            ["o/r: holding merges: #306 has auto-merge on but CI failed"]
+        );
+        send(&mut app, [event(3, FactoryEvent::Holding { holding: None })]);
+        assert!(app.world().resource::<FactoryStatus>().holds().is_empty());
         let err = FactoryEvent::Error { message: "boom".into() };
-        send(&mut app, [event(2, err)]);
+        send(&mut app, [event(4, err)]);
         assert_eq!(app.world().resource::<FactoryStatus>().repos["o/r"].last_error.as_ref().unwrap().1, "boom");
     }
 

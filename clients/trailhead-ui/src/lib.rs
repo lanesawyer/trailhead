@@ -34,7 +34,8 @@
 //! - A message in a conversation, the reader's on the right and others' on the left: [`bubble`] on a [`Side`], headed by
 //!   [`bubble_head`].
 //! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
-//!   [`sidebar_footer`]; mark the page shown on its [`NavItem`]. Pages fill [`beside_sidebar`].
+//!   [`sidebar_footer`], with a [`sidebar_card`] above it for something to keep an eye on; mark the page shown on its
+//!   [`NavItem`]. Pages fill [`beside_sidebar`].
 //! - Colors: a meaning from [`token`], on a node as a [`BackgroundTone`], [`BorderTone`] or [`TextTone`]. A surface (a
 //!   panel, a card, a hint): a [`Surface`]. An app builds on [`Theme::new`]: [`Theme::alias`] a token of its own to a
 //!   meaning, [`Theme::paint`] only colors that encode data, and adds [`ThemePlugin`] with it beside [`UiPlugin`].
@@ -61,7 +62,8 @@
 //! - Placeholder bars where content is on its way: [`skeleton`].
 //! - Rows of items under column headings, a row pressable as a whole: [`table_head`] and [`table_row`]s, by
 //!   [`TableColumn`].
-//! - How far along something is: [`progress_bar`]; set its [`Progress`].
+//! - How far along something is: [`progress_bar`]; set its [`Progress`], and its [`ProgressTone`] to recolor it. With
+//!   a label, a value and a note: [`meter`], updated through its [`MeterPart`]s.
 //! - A setting that is on or off: [`toggle_switch`]; observe `ValueChange<bool>` on it.
 //! - Writing a `Node` or `Text` only when it changes: [`patch_node`], [`set_display`], [`set_text`].
 //!
@@ -146,14 +148,14 @@ pub use modal::{
 };
 pub use nav::{
     BesideSidebar, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_sidebar, nav_heading, nav_heading_action,
-    nav_item, nav_item_noted, sidebar, sidebar_footer,
+    nav_item, nav_item_noted, sidebar, sidebar_card, sidebar_footer,
 };
 pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
-pub use progress::{Progress, progress_bar};
+pub use progress::{MeterPart, Progress, ProgressTone, meter, progress_bar};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_frame};
-pub use scrollbar::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH, scrollbar};
+pub use scrollbar::{SCROLLBAR_GAP, SCROLLBAR_INSET, SCROLLBAR_WIDTH, scrollbar};
 pub use search::{
     ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
 };
@@ -187,7 +189,7 @@ impl Plugin for UiPlugin {
             .add_observer(scroll::on_scroll)
             .add_observer(button_group::on_option)
             .add_observer(bevy::ui_widgets::slider_self_update)
-            .add_systems(Update, progress::fill_progress.in_set(UiPlace))
+            .add_systems(Update, (progress::fill_progress, progress::tone_progress).in_set(UiPlace))
             .add_systems(PostUpdate, scrollbar::show_scrollbars.after(bevy::ui::UiSystems::Layout))
             .add_systems(
                 Update,

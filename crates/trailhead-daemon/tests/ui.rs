@@ -32,6 +32,7 @@ impl StatusFeed for TestFeed {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 7,
         };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
@@ -265,6 +266,25 @@ async fn logs_are_the_kept_lines_then_each_new_one() {
     // The receiver is made when the stream opens, so a send after the backlog is not missed.
     r.logs.send(log_line("three")).unwrap();
     assert_eq!(next().await, Some(LogFrame::Line(log_line("three"))));
+}
+
+#[tokio::test]
+async fn a_logs_reader_that_falls_behind_is_told_how_many_lines_it_missed() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let client = r.client(key).await;
+    let mut stream = LogStream::open(dial_ui(&client, r.control.id).await.unwrap()).await.unwrap();
+    let mut next = async || tokio::time::timeout(Duration::from_secs(10), stream.next()).await.unwrap().unwrap();
+    assert!(matches!(next().await, Some(LogFrame::Backlog { .. })));
+
+    // The channel holds 16 and the runtime is single-threaded, so the server cannot receive during this
+    // loop: 17 sends push the oldest out.
+    for n in 0..17 {
+        r.logs.send(log_line(&format!("burst {n}"))).unwrap();
+    }
+    assert_eq!(next().await, Some(LogFrame::Skipped { count: 1 }));
+    assert_eq!(next().await, Some(LogFrame::Line(log_line("burst 1"))));
 }
 
 #[tokio::test]

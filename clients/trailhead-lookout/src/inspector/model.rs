@@ -611,18 +611,48 @@ mod tests {
     #[test]
     fn the_status_line_shows_only_when_the_move_dropdown_does_not() {
         let f = fixture();
-        let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
-        let view = v;
-        let texts = |live: bool| -> Vec<String> {
-            let plan = layout(&view, live, "offline", 0, &|_| None);
+        let mut view = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
+        assert!(!view.lines.iter().any(|l| l.starts_with("status:")));
+        let shows_status = |view: &InspectorView, live: bool| -> bool {
+            let plan = layout(view, live, "offline", 0, &|_| None);
             plan.iter()
                 .flat_map(|(_, items)| items)
-                .filter_map(|(_, b)| if let Block::Text { text, .. } = b { Some(text.clone()) } else { None })
-                .collect()
+                .any(|(_, b)| matches!(b, Block::Text { text, .. } if text.starts_with("status:")))
         };
-        assert!(!view.lines.iter().any(|l| l.starts_with("status:")));
-        let moves = view.actions.iter().any(|a| matches!(a, Action::Status(_)));
-        assert_eq!(texts(true).iter().any(|t| t.starts_with("status:")), !moves);
+
+        view.actions.retain(|a| !matches!(a, Action::Status(_)));
+        assert!(shows_status(&view, true), "a live task with no status moves says its status");
+        assert!(shows_status(&view, false), "offline says its status");
+
+        view.actions.push(Action::Status(Status::Cancelled));
+        assert!(!shows_status(&view, true), "the move dropdown shows the status when it is drawn");
+        assert!(shows_status(&view, false), "offline has no dropdown, with moves or without");
+    }
+
+    #[test]
+    fn the_prs_grade_is_a_toned_badge_and_not_part_of_its_state_text() {
+        let f = fixture();
+        let view = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
+        let g = Grade::new(2).unwrap();
+        assert_eq!(view.pr.as_ref().unwrap().grade, Some(g));
+        let facts = view.task.clone().unwrap();
+        let (main, side) = layout_task(&view, &facts, true, "offline", &[], None, &|_| None);
+        let plans = [layout(&view, true, "offline", 0, &|_| None), main, side];
+        let mut seen = 0;
+        for plan in &plans {
+            let items: Vec<&(String, Block)> =
+                plan.iter().flat_map(|(_, items)| items).filter(|(k, _)| k.starts_with("pr/")).collect();
+            if items.is_empty() {
+                continue;
+            }
+            seen += 1;
+            let badge = format!("pr/grade/{g}");
+            assert!(items.iter().any(|(k, b)| *k == badge && matches!(b, Block::GradeBadge(x) if *x == g)));
+            let state = items.iter().find(|(k, _)| k == "pr/state").expect("pr/state");
+            let Block::Text { text, .. } = &state.1 else { panic!("pr/state is text") };
+            assert_eq!(text, "open");
+        }
+        assert_eq!(seen, 2, "both layouts show the PR");
     }
 
     #[test]
