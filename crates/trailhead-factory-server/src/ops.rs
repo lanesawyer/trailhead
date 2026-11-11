@@ -569,6 +569,9 @@ mod tests {
         let waiting = [task("TRAIL-3", Status::Open, Default::default())];
         let out = render_status(&rows(&boxes), &parked, &waiting, 2, false);
         assert!(out.contains("1 ready task waiting; all 2 sandboxes held by parked tasks"), "{out}");
+        let several = [waiting[0].clone(), task("TRAIL-4", Status::Open, Default::default())];
+        let out = render_status(&rows(&boxes), &parked, &several, 2, false);
+        assert!(out.contains("2 ready tasks waiting; all 2 sandboxes held by parked tasks"), "{out}");
         assert!(!render_status(&rows(&boxes), &parked, &[], 2, false).contains("waiting;"));
         assert!(!render_status(&rows(&boxes), &parked, &waiting, 3, false).contains("waiting;"));
     }
