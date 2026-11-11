@@ -14,6 +14,7 @@ description = "Trailhead factory: domain types, daemon contract, the five plugin
 workspace = true
 
 [dependencies]
+jiff.workspace = true
 trailhead-model.workspace = true
 async-trait.workspace = true
 bytes = { workspace = true, features = ["serde"] }
