@@ -23,7 +23,7 @@ pub(super) enum Block {
     Gates,
     /// An open question, with its answer and resolve buttons and what became of the last resolve.
     Question { key: String, id: String, body: String, live: bool, note: Option<Control> },
-    /// The grade dropdown (live only); the offline grade is a [`Block::Text`].
+    /// The grade dropdown (live only); the offline grade is a [`Block::GradeBadge`].
     Grade { grade: Option<Grade>, note: Option<Control> },
     /// The status dropdown: the task's own status first.
     Move { statuses: Vec<Status>, note: Option<Control> },
@@ -354,8 +354,9 @@ pub(super) fn layout_task(
         if let Some(p) = view.priority {
             fields.push((format!("s/fields/priority/{p}"), Block::Priority(p)));
         }
-        let words = view.grade.map_or_else(|| "none".to_string(), |g| format!("G{g}"));
-        fields.push(("s/fields/grade/text".to_string(), text_block(format!("Grade: {words}"), size::BODY, Tone::Body)));
+        if let Some(g) = view.grade {
+            fields.push((format!("s/fields/grade/{g}"), Block::GradeBadge(g)));
+        }
     }
     if let Some(g) = view.grade {
         let words = if human.contains(&g) {
@@ -707,7 +708,7 @@ pub(super) fn dress_note(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn dress(
     shown: Query<(&Shown, Option<&Parts>)>,
-    every: Query<Entity, With<Shown>>,
+    every: Query<(Entity, &Shown)>,
     factory: Res<FactoryStatus>,
     changed: Query<Entity, Changed<Shown>>,
     mut texts: Query<&mut Text>,
@@ -715,14 +716,20 @@ pub(super) fn dress(
     mut moves: Query<&mut StatusMove>,
     mut edit: SelectEdit,
     (mut inline, mut fields, mut edits): (Query<&mut InlineText>, Query<&mut InlineField>, Query<&mut Edits>),
-    mut again: Local<Vec<Entity>>,
+    (mut again, mut graded): (Local<Vec<Entity>>, Local<Option<Vec<Grade>>>),
     mut commands: Commands,
 ) {
     let mut todo: Vec<Entity> = std::mem::take(&mut *again);
     todo.extend(changed.iter());
+    // Only the grade pickers read the factory, and only the grades a human may give.
     if factory.is_changed() {
-        todo.extend(every.iter());
+        let grades = factory.human_grades();
+        if graded.as_ref() != Some(&grades) {
+            todo.extend(every.iter().filter(|(_, s)| matches!(s.0, Block::Grade { .. })).map(|(e, _)| e));
+            *graded = Some(grades);
+        }
     }
+    todo.sort();
     todo.dedup();
     for entity in todo {
         let Ok((Shown(block), parts)) = shown.get(entity) else { continue };

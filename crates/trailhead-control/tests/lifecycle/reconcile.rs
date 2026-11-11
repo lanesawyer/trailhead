@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use trailhead_control::{Outcome, Reconciled};
 use trailhead_factory::{CodeHost, Role, RunOutcome, Status, TaskKey, Tracker, Usd, label, run_name};
-use trailhead_testkit::Script;
+use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
 
@@ -82,7 +82,7 @@ async fn a_failed_sub_agent_revoke_still_requeues_an_interrupted_task() {
     sub.report(&crashed, update(1, &name)).await.unwrap();
     live(&r.compute, &name, &crashed, "worker").await;
 
-    r.tracker.fail_next("factory", "revoke_sub_agent", 1);
+    r.tracker.fail_next("factory", TrackerOp::RevokeSubAgent, 1);
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.requeued, std::slice::from_ref(&crashed.0));
     assert_eq!(r.tracker.task(&crashed).status, Status::Open, "released despite the failed revoke");
@@ -105,10 +105,34 @@ async fn a_failed_sub_agent_revoke_still_resumes_an_interrupted_review() {
 
     r.harness.push(Role::Reviewer, Script::new(approve()));
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
-    r.tracker.fail_next("factory", "revoke_sub_agent", 1);
+    r.tracker.fail_next("factory", TrackerOp::RevokeSubAgent, 1);
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
     assert_eq!(r.tracker.task(&key).run.review_rounds, Some(2), "the review ran despite the failed revoke");
+}
+
+#[tokio::test]
+async fn a_failed_sub_agent_revoke_still_leaves_an_open_task_due_its_rework() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    // Review asked for changes and the task went back to the queue, unclaimed, its PR still open.
+    r.tracker.set_status(&key, Status::Open);
+    let before = r.tracker.task(&key);
+    assert!(before.run.pending_changes().is_some(), "a rework is owed");
+
+    r.tracker.fail_next("factory", TrackerOp::RevokeSubAgent, 1);
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done, Reconciled::default(), "carried on without settling or failing");
+    // The sub-agent was already revoked when its review finished, so the fake can't show the failure in its state:
+    // the injected one being used up shows the arm tried (and shrugged off) the revoke.
+    assert!(r.tracker.revoke_sub_agent("trail-1-a1").await.is_ok(), "the revoke was attempted and failed");
+    let after = r.tracker.task(&key);
+    assert_eq!(after.status, Status::Open, "still waiting for its rework");
+    assert_eq!(after.run.pending_changes(), before.run.pending_changes(), "the request still stands");
 }
 
 #[tokio::test]
@@ -202,8 +226,8 @@ async fn a_run_that_concluded_while_still_in_progress_is_not_reattached_to() {
     r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
     // The daemon tries three times and the control plane's own record once more, so the task never reaches review.
     // The control plane stops there, before it revokes the sub-agent, which still holds the claim.
-    r.tracker.fail_next("factory", "revoke_sub_agent", 1);
-    r.tracker.fail_next("factory/trail-1-a1", "request_review", 4);
+    r.tracker.fail_next("factory", TrackerOp::RevokeSubAgent, 1);
+    r.tracker.fail_next("factory/trail-1-a1", TrackerOp::RequestReview, 4);
     r.compute.fail_after("trailhead-w1", "set_egress", 2);
 
     let ran = r.factory.run_task(&r.tracker.task(&key)).await;
@@ -325,7 +349,7 @@ async fn a_closed_pr_whose_claim_fails_leaves_the_task_in_review() {
     let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
     r.codehost.close(&pr);
 
-    r.tracker.fail_next("factory", "claim", 1);
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
     let _ = r.factory.reconcile().await;
     assert_eq!(r.tracker.task(&key).status, Status::InReview, "never open and unheld");
 }
@@ -342,7 +366,7 @@ async fn a_closed_pr_on_an_approved_task_whose_claim_fails_leaves_it_in_review()
     let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
     r.codehost.close(&pr);
 
-    r.tracker.fail_next("factory", "claim", 1);
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
     let _ = r.factory.reconcile().await;
     assert_eq!(r.tracker.task(&key).status, Status::InReview, "never open and unheld");
 

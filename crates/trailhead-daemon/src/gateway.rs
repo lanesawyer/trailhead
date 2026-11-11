@@ -63,7 +63,7 @@ struct Sandbox {
 #[derive(Default)]
 struct Inner {
     sandboxes: BTreeMap<String, Sandbox>,
-    unregistered: BTreeMap<String, u64>,
+    unregistered: BTreeMap<String, BTreeMap<String, u64>>,
     next_tunnel: u64,
     /// By provider and id. Held in memory only; `Debug` redacts the credentials.
     connections: BTreeMap<(String, String), GatewayConnection>,
@@ -125,10 +125,11 @@ impl Gateway {
     fn admit(self: &Arc<Self>, local: IpAddr, host: &str) -> Verdict {
         let mut inner = self.inner();
         let Some((name, sb)) = inner.sandboxes.iter_mut().find(|(_, s)| s.address == local) else {
-            let seen = inner.unregistered.entry(local.to_string()).or_insert(0);
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            let seen = inner.unregistered.entry(local.to_string()).or_default().entry(host.clone()).or_insert(0);
             *seen += 1;
             if *seen == 1 {
-                tracing::warn!(%local, host, "refused a request from a network with no registered sandbox");
+                tracing::warn!(%local, host, "refused a request from a network with no registered sandbox; further refusals of this host are counted, not logged");
             }
             return Verdict::Refused;
         };
@@ -933,7 +934,7 @@ mod tests {
         let (_s, status) = connect_via(proxy, "example.com:443").await;
         assert!(status.contains("403"), "{status}");
         let state = gw.state();
-        assert_eq!(state.unregistered_refusals["127.0.0.1"], 1);
+        assert_eq!(state.unregistered_refusals["127.0.0.1"]["example.com"], 1);
         assert_eq!(state.sandboxes[0].refused["127.0.0.1"], 2);
     }
 
