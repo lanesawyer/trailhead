@@ -21,7 +21,10 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
     let health = || client::health(&http, &base, token.as_deref());
     match cmd {
         ServerCmd::Status => match health().await {
-            Some(info) if json => print_json(&serde_json::to_value(&info)?),
+            Some(info) if json => {
+                let unit = local_scope(&paths, local, &info);
+                print_json(&status_json(serde_json::to_value(&info)?, unit.as_deref()))
+            }
             Some(info) => {
                 let mut parts = vec!["running".to_string()];
                 if let Some(pid) = info.pid {
@@ -45,10 +48,7 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                 if let Some(db) = &info.db {
                     println!("db {}", db.display());
                 }
-                if local
-                    && client::is_ours(&paths, &info)
-                    && let Some(unit) = info.pid.and_then(client::server_unit)
-                {
+                if let Some(unit) = local_scope(&paths, local, &info) {
                     println!("scope {unit}");
                     if client::is_app_scope(&unit) {
                         println!(
@@ -108,7 +108,20 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
     Ok(())
 }
 
-/// Replaces this process with the newly installed binary, same arguments, so the pid (and the scope the server runs
+/// The systemd unit the server runs in, when it is local, ours and this machine can say.
+fn local_scope(paths: &trailhead_server::Paths, local: bool, info: &client::Health) -> Option<String> {
+    if local && client::is_ours(paths, info) { info.pid.and_then(client::server_unit) } else { None }
+}
+
+/// The health document for `status --json`, plus `scope` and `shares_app_scope` when the scope is known.
+fn status_json(mut health: serde_json::Value, unit: Option<&str>) -> serde_json::Value {
+    if let (Some(unit), Some(obj)) = (unit, health.as_object_mut()) {
+        obj.insert("scope".into(), json!(unit));
+        obj.insert("shares_app_scope".into(), json!(client::is_app_scope(unit)));
+    }
+    health
+}
+
 /// in) stays.
 fn restart_onto_new_binary() -> Result<()> {
     use std::os::unix::process::CommandExt;
@@ -140,5 +153,20 @@ pub(crate) async fn serve(bind: &str, factory_on_terminal: bool, foreground: boo
     match trailhead_server::serve_local(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))? {
         trailhead_server::Exit::Stopped => Ok(()),
         trailhead_server::Exit::Restart => restart_onto_new_binary(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_json_adds_scope_and_app_scope_flag() {
+        let v = status_json(json!({ "pid": 1 }), Some("app-gnome-code-1.scope"));
+        assert_eq!(v["scope"], "app-gnome-code-1.scope");
+        assert_eq!(v["shares_app_scope"], true);
+        let v = status_json(json!({ "pid": 1 }), Some("trailhead-server-1.scope"));
+        assert_eq!(v["shares_app_scope"], false);
+        assert_eq!(status_json(json!({ "pid": 1 }), None), json!({ "pid": 1 }));
     }
 }
