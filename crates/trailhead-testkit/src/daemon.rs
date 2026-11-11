@@ -62,6 +62,8 @@ pub struct FakeWorkspace {
     /// Whether the checkout holds work that exists nowhere else, and the remote branches asked about.
     unpublished: AtomicBool,
     unpublished_asked: Mutex<Vec<String>>,
+    /// The remote branches that exist, when the test says; asking about any other is an error. None: all do.
+    remote_branches: Mutex<Option<Vec<String>>>,
     /// Install hosts `install_hosts` names on top of the real ones, as a confused or compromised daemon would.
     extra_install_hosts: Mutex<Vec<InstallHost>>,
     /// The `[factory.stack] env` the latest prepare or run request set, and what each check ran with.
@@ -147,6 +149,9 @@ impl Workspace for FakeWorkspace {
 
     async fn unpublished(&self, remote_branch: &str) -> Result<bool> {
         self.unpublished_asked.lock().unwrap().push(remote_branch.to_string());
+        if self.remote_branches.lock().unwrap().as_ref().is_some_and(|b| !b.iter().any(|b| b == remote_branch)) {
+            return Err(Error::Other(format!("no origin/{remote_branch}")));
+        }
         Ok(self.unpublished.load(Ordering::SeqCst))
     }
 
@@ -201,6 +206,7 @@ pub struct LocalDaemon {
     /// Runs that are going in a sandbox from before this control plane: their events so far, and how they end.
     ongoing: Mutex<HashMap<String, Ongoing>>,
     attached: Mutex<Vec<String>>,
+    forgotten: Mutex<Vec<SandboxId>>,
 }
 
 /// A run from before this control plane: its events so far, and its report, or `None` if it never ends by itself.
@@ -237,7 +243,13 @@ impl LocalDaemon {
             late_run_errors: Mutex::default(),
             ongoing: Mutex::default(),
             attached: Mutex::default(),
+            forgotten: Mutex::default(),
         }
+    }
+
+    /// The sandboxes the control plane has told the daemon to forget, in order.
+    pub fn forgotten(&self) -> Vec<SandboxId> {
+        self.forgotten.lock().unwrap().clone()
     }
 
     /// Has the daemon send a heartbeat this often instead of every 30 seconds.
@@ -320,6 +332,14 @@ impl LocalDaemon {
         }
     }
 
+    /// Makes the next `times` runs fail as a host short of a resource (its disk) would.
+    pub fn unavailable_runs(&self, times: usize, error: &str) {
+        let mut errors = self.run_errors.lock().unwrap();
+        for _ in 0..times {
+            errors.push_back(trailhead_factory::Error::Unavailable(error.to_string()));
+        }
+    }
+
     /// Makes the next `times` runs fail with this error right after the agent's first usage is reported, as a daemon
     /// lost partway through a run that has already spent money would.
     pub fn fail_runs_midway(&self, times: usize, error: &str) {
@@ -394,6 +414,11 @@ impl LocalDaemon {
         self.workspace.unpublished_asked.lock().unwrap().clone()
     }
 
+    /// Limits the remote branches the checkout can be compared with to `branches`; any other is an error, as in git.
+    pub fn set_remote_branches(&self, branches: &[&str]) {
+        *self.workspace.remote_branches.lock().unwrap() = Some(branches.iter().map(|b| b.to_string()).collect());
+    }
+
     /// Makes `install_hosts` also ask for `host` on behalf of `tool`, whether or not the control plane allows it.
     pub fn add_install_host(&self, host: &str, tool: &str) {
         let need = InstallHost { host: host.into(), tool: tool.into() };
@@ -440,6 +465,10 @@ impl Daemon for LocalDaemon {
         self.runner.unpublished(remote_branch).await
     }
 
+    async fn forget(&self, sandbox: &SandboxId) {
+        self.forgotten.lock().unwrap().push(sandbox.clone());
+    }
+
     async fn prepare(&self, sandbox: &SandboxId, req: PrepareRequest) -> Result<()> {
         self.runner.prepare(&req).await?;
         self.prepared.lock().unwrap().push((sandbox.clone(), req));
@@ -471,7 +500,17 @@ impl Daemon for LocalDaemon {
                     }
                     None => return run.await,
                 },
-                report = &mut run => return report,
+                report = &mut run => {
+                    // The runner can send its events and finish within one poll; forward what it left behind.
+                    while let Ok(event) = rx.try_recv() {
+                        let spent = matches!(event, RunEvent::Usage { .. });
+                        let _ = events.send(event);
+                        if spent {
+                            return Err(Error::Other(error));
+                        }
+                    }
+                    return report;
+                }
             }
         }
     }
@@ -525,6 +564,7 @@ mod tests {
             base_branch: "main".into(),
             branch: None,
             merge_base: false,
+            branch_if_present: false,
             setup: None,
             tools: Default::default(),
             tool_hosts: Default::default(),
@@ -538,5 +578,53 @@ mod tests {
             assert!(err.to_string().contains(want), "{err}");
         }
         ws.prepare(&req).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_run_errors_of_mixed_kinds_come_out_in_the_order_they_were_queued() {
+        use trailhead_factory::{Credential, Endpoint, ModelId, Role, TaskKey, TaskSpec};
+
+        use crate::{FakeCodeHost, ScriptedHarness};
+
+        let daemon = LocalDaemon::new(
+            Arc::new(ScriptedHarness::new()),
+            Arc::new(FakeCodeHost::new()),
+            FakeTracker::new("factory"),
+        );
+        daemon.reject_runs("no");
+        daemon.cancel_runs(1);
+        let sandbox = SandboxId("s1".into());
+        let request = || RunRequest {
+            grade: None,
+            run: "r1".into(),
+            role: Role::Worker,
+            task: TaskSpec {
+                key: TaskKey("TRAIL-1".into()),
+                title: "Add a greeting".into(),
+                description: String::new(),
+                previous_failure: None,
+                context: Default::default(),
+            },
+            repo: Repo { owner: "o".into(), name: "r".into() },
+            base_branch: "main".into(),
+            branch: "factory/r1".into(),
+            pr: None,
+            feedback: None,
+            model: ModelId("fake-sonnet".into()),
+            endpoint: Endpoint { base_url: "http://gateway.invalid".into() },
+            max_steps: 5,
+            required_checks: Vec::new(),
+            worker_checks: Vec::new(),
+            blocked_hosts: Vec::new(),
+            allowed_hosts: Vec::new(),
+            env: Default::default(),
+            credential: Credential { agent: "factory".into(), token: String::new() },
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let first = daemon.run(&sandbox, request(), tx.clone()).await.unwrap_err();
+        assert!(matches!(first, Error::Rejected(ref m) if m == "no"), "{first:?}");
+        let second = daemon.run(&sandbox, request(), tx).await.unwrap_err();
+        assert!(matches!(second, Error::Cancelled), "{second:?}");
     }
 }

@@ -248,6 +248,13 @@ impl Compute for FakeCompute {
         })
     }
 
+    async fn delete_checkpoint(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()> {
+        self.with(id, |l| {
+            l.checkpoints.retain(|(c, _)| c != cp);
+            Ok(())
+        })
+    }
+
     async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()> {
         self.check(id, "restore")?;
         self.with(id, |l| {

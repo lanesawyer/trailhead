@@ -40,8 +40,18 @@ pub struct Skipped {
     pub entity: Entity,
     pub entity_id: String,
     pub task_id: Option<Uuid>,
-    /// A later event by someone else that would be overwritten.
-    pub later_event: i64,
+    /// A later event by someone else that would be overwritten, if that is why it was skipped.
+    pub later_event: Option<i64>,
+    /// Why it was skipped.
+    pub reason: String,
+}
+
+/// What [`restore`] did.
+enum Restored {
+    /// Restored (the new event id), or already in that state (`None`).
+    Done(Option<i64>),
+    /// Left alone because restoring it would put a task under itself; nothing was written.
+    Cycle(String),
 }
 
 fn parse_uuid(s: &str) -> Result<Uuid> {
@@ -60,7 +70,7 @@ fn same_project(a: &Project, b: &Project) -> bool {
 
 /// Puts one entity back to `target` (`None` meaning it didn't exist) and logs the
 /// change. Returns the new event id, or `None` if it was already in that state.
-async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>, undoes: i64) -> Result<Option<i64>> {
+async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>, undoes: i64) -> Result<Restored> {
     let ws = tx.ctx.workspace_id;
     let (task_id, before, after): (Option<Uuid>, Option<Value>, Option<Value>) = match entity {
         Entity::Task => {
@@ -70,14 +80,17 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
                 Some(v) => serde_json::from_value(v)?,
             };
             if same_task(&cur, &want) {
-                return Ok(None);
+                return Ok(Restored::Done(None));
             }
             if want.parent_id != cur.parent_id
                 && want.deleted_at.is_none()
                 && let Some(pid) = want.parent_id
             {
                 let parent = load_task(&tx.conn, ws, &pid.to_string(), true).await?;
-                check_no_parent_cycle(&tx.conn, ws, &want, &parent).await?;
+                match check_no_parent_cycle(&tx.conn, ws, &want, &parent).await {
+                    Err(Error::Invalid(reason)) => return Ok(Restored::Cycle(reason)),
+                    other => other?,
+                }
             }
             let saved = save_task(tx, &cur, want).await?;
             (Some(cur.id), Some(serde_json::to_value(&cur)?), Some(serde_json::to_value(&saved)?))
@@ -89,7 +102,7 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
                 Some(v) => serde_json::from_value(v)?,
             };
             if same_project(&cur, &want) {
-                return Ok(None);
+                return Ok(Restored::Done(None));
             }
             check_review_settings(&tx.ctx, &cur, &want)?;
             let saved = save_project(tx, &cur, want).await?;
@@ -102,7 +115,7 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
                 Some(v) => serde_json::from_value(v)?,
             };
             if cur == want {
-                return Ok(None);
+                return Ok(Restored::Done(None));
             }
             let saved = save_comment(tx, &want).await?;
             (Some(cur.task_id), Some(serde_json::to_value(&cur)?), Some(serde_json::to_value(&saved)?))
@@ -118,7 +131,7 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
                 (None, Some(d)) => {
                     insert_dependency(tx, d).await?;
                 }
-                _ => return Ok(None),
+                _ => return Ok(Restored::Done(None)),
             }
             (Some(blocked), cur.map(serde_json::to_value).transpose()?, want.map(serde_json::to_value).transpose()?)
         }
@@ -127,7 +140,7 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
             let cur = any_claim(&tx.conn, task_id).await?;
             let want: Option<Claim> = target.map(serde_json::from_value).transpose()?;
             if cur == want {
-                return Ok(None);
+                return Ok(Restored::Done(None));
             }
             match &want {
                 Some(c) => put_claim(tx, c).await?,
@@ -151,12 +164,13 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
             actor: None,
         })
         .await?;
-    Ok(Some(id))
+    Ok(Restored::Done(Some(id)))
 }
 
 /// Reverts every entity touched by `events` to its state before the earliest of
 /// them. An entity that someone else changed afterwards is a conflict: `strict`
-/// fails the whole undo, otherwise it's skipped and reported. Reminders changed
+/// fails the whole undo, otherwise it's skipped and reported. A task restore that would form a parent cycle
+/// is skipped the same way (and fails the undo in `strict`). Reminders changed
 /// nothing, so they are neither reverted nor count as conflicts.
 async fn apply(tx: &Tx, events: Vec<Event>, strict: bool) -> Result<UndoReport> {
     let events: Vec<Event> = events.into_iter().filter(|e| !is_notification(&e.kind)).collect();
@@ -199,11 +213,25 @@ async fn apply(tx: &Tx, events: Vec<Event>, strict: bool) -> Result<UndoReport> 
                 entity: first.entity,
                 entity_id: first.entity_id.clone(),
                 task_id: first.task_id,
-                later_event,
+                later_event: Some(later_event),
+                reason: format!("changed later by event #{later_event}"),
             });
             continue;
         }
-        let event_id = restore(tx, first.entity, &first.entity_id, first.before.clone(), first.id).await?;
+        let event_id = match restore(tx, first.entity, &first.entity_id, first.before.clone(), first.id).await? {
+            Restored::Done(event_id) => event_id,
+            Restored::Cycle(reason) if strict => return Err(Error::Invalid(reason)),
+            Restored::Cycle(reason) => {
+                report.skipped.push(Skipped {
+                    entity: first.entity,
+                    entity_id: first.entity_id.clone(),
+                    task_id: first.task_id,
+                    later_event: None,
+                    reason,
+                });
+                continue;
+            }
+        };
         report.reverted.push(Reverted { entity: first.entity, entity_id: first.entity_id.clone(), event_id });
     }
     Ok(report)

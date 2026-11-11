@@ -109,6 +109,10 @@ pub trait Compute: Send + Sync {
     async fn list(&self, labels: &Labels) -> Result<Vec<Sandbox>>;
     async fn checkpoint(&self, id: &SandboxId, note: &str) -> Result<CheckpointId>;
     async fn restore(&self, id: &SandboxId, cp: &CheckpointId) -> Result<()>;
+    /// Removes a checkpoint nothing refers to. Computes that clean up their own checkpoints may leave this a no-op.
+    async fn delete_checkpoint(&self, _id: &SandboxId, _cp: &CheckpointId) -> Result<()> {
+        Ok(())
+    }
     /// Writes the program's files and starts it, replacing a program of the same name.
     async fn start(&self, id: &SandboxId, program: &Program) -> Result<()>;
     /// Resumes a sandbox that paused while idle, so its programs can be reached again. Waking a running sandbox is

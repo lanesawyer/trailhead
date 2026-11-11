@@ -30,7 +30,6 @@ use tracing::Instrument;
 use trailhead_client::creds::{Cred, CredStore};
 use trailhead_client::paths::{DEFAULT_BIND, Paths};
 use trailhead_codehost_github::GitHub;
-use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_factory::{
@@ -214,7 +213,7 @@ fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>,
     Ok((config_path, remote, config))
 }
 
-/// Whether `now` differs from the `started` config (whose `[merge]` is blanked, as it is re-read live) in a way that
+/// Whether `now` differs from the `started` config (whose `[factory.merge]` is blanked, as it is re-read live) in a way that
 /// needs a restart and wasn't already `warned` about, so an edit is reported once, not on every merge decision.
 fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: &mut Option<FactoryConfig>) -> bool {
     let now = FactoryConfig { merge: Default::default(), ..now };
@@ -229,7 +228,7 @@ fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: 
     true
 }
 
-/// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[merge]` blanked
+/// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[factory.merge]` blanked
 /// as it is re-read live. Take it before `wire` adds anything at runtime, which a re-read of the file never has.
 fn started_baseline(config: &FactoryConfig) -> FactoryConfig {
     FactoryConfig { merge: Default::default(), ..config.clone() }
@@ -300,8 +299,12 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
     let opts = &opts;
     let (harnesses, providers) = (harnesses(), providers());
     let mut harness_secrets = HarnessSecrets::new();
-    if let (Some(token), CLAUDE_CODE) = (&opts.claude_oauth_token, adapter.as_str()) {
-        harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+    if let Some(token) = &opts.claude_oauth_token {
+        if adapter == CLAUDE_CODE {
+            harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+        } else {
+            tracing::warn!(harness = %adapter, "a Claude subscription token is set but this harness can't use it; ignoring it");
+        }
     }
     let baselines: Vec<_> = specs.iter().map(|spec| started_baseline(&spec.config)).collect();
     for spec in &mut specs {
@@ -404,7 +407,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
                 if changed_without_restart(&started, config, &mut warned.lock().unwrap()) {
                     tracing::warn!(
                         path = %config_path.display(),
-                        "the factory settings changed in the file, but only [merge] mode is re-read live; restart the server to apply them"
+                        "the factory settings changed in the file, but only [factory.merge] mode is re-read live; restart the server to apply them"
                     );
                 }
                 Ok(mode)
@@ -499,20 +502,12 @@ fn compute(
     match config {
         ComputeConfig::Sprites => {
             let token = opts.sprites_token.clone().ok_or(Error::NoSpritesToken)?;
-            Ok((Arc::new(SpritesCompute::new(token).map_err(Error::backend)?), trailhead_compute_sprites::target()))
+            trailhead_compute_sprites::build(token).map_err(Error::backend)
         }
         #[cfg(feature = "docker")]
-        ComputeConfig::Docker { image, network, runtime, memory_mib } => {
-            use trailhead_compute_docker::{DockerCompute, DockerConfig};
+        ComputeConfig::Docker { .. } => {
+            use trailhead_compute_docker::DockerConfig;
             let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), binary);
-            if let Some(image) = image {
-                docker.image = image.clone();
-            }
-            if let Some(network) = network {
-                docker.network = network.clone();
-            }
-            docker.runtime = runtime.clone();
-            docker.memory_bytes = memory_mib.map(|m| m * 1024 * 1024);
             docker.connections = gateway_connections(login::github_writer_token(fnox, &paths.creds())?);
             if docker.connections.is_empty() {
                 tracing::warn!(
@@ -524,9 +519,7 @@ fn compute(
                     "no Claude subscription token: Docker sandboxes have no model access until the gateway holds a credential for it"
                 );
             }
-            let compute = if read_only { DockerCompute::read_only(docker) } else { DockerCompute::new(docker) }
-                .map_err(Error::backend)?;
-            Ok((Arc::new(compute), trailhead_compute_docker::target()))
+            trailhead_compute_docker::build(config, docker, read_only).map_err(Error::backend)
         }
         #[cfg(not(feature = "docker"))]
         ComputeConfig::Docker { .. } => Err(Error::DockerNotBuilt),
@@ -877,8 +870,8 @@ fn server_subscriber(
 pub enum Command {
     /// Report what the factory can see (queued tasks via the server, the compute, its endpoint), without running anything.
     Check(RunOpts),
-    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; asks the server.
-    Status(Opts),
+    /// Show the sandbox pool, what is running and how queued tasks have gone (the latest finished ones; `--all` for every one). Read-only; asks the server.
+    Status(ops::StatusOpts),
     /// Print the daemon's service log from a task's sandbox.
     Logs(ops::LogsOpts),
     /// Let a UI (Lookout) connect: add its endpoint id to the allowlist. Takes effect on a running control plane at once.

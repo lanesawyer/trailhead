@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use trailhead_control::{Host, Outcome};
 use trailhead_factory::{Compute, Role, RunOutcome, SandboxSpec, Status, TaskKey, Usd, label, run_name};
-use trailhead_testkit::Script;
+use trailhead_testkit::{Script, unix_now};
 
 use crate::common::*;
 
@@ -346,10 +346,6 @@ async fn run_loop_respects_the_sandbox_cap() {
     handle.await.unwrap().unwrap();
 }
 
-fn unix_now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
-}
-
 /// The test config on a host pausing at 80% of the five-hour window.
 fn pausing_rig() -> Rig {
     let pause_at = [("five_hour".to_string(), 80)].into();
@@ -373,7 +369,7 @@ async fn a_nearly_full_usage_window_pauses_new_runs() {
     assert!(r.factory.tick().await.unwrap().is_empty(), "paused until the window resets");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn runs_start_again_once_the_window_resets() {
     let r = pausing_rig();
     report_usage(&r, 95, 1).await;
@@ -381,11 +377,11 @@ async fn runs_start_again_once_the_window_resets() {
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     assert!(r.factory.tick().await.unwrap().is_empty());
-    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    tokio::time::advance(std::time::Duration::from_millis(2100)).await;
     assert_eq!(r.factory.tick().await.unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_run_loop_wakes_itself_when_the_window_resets() {
     let r = pausing_rig();
     report_usage(&r, 90, 1).await;
@@ -433,6 +429,10 @@ async fn held_reviews_land_after_the_window_resets(poll: std::time::Duration) {
     r.harness.push(Role::Reviewer, Script::new(approve()));
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
 
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
     let factory = Arc::new(r.factory);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(factory.run(Arc::new(tokio::sync::Notify::new()), poll, async {
@@ -441,6 +441,11 @@ async fn held_reviews_land_after_the_window_resets(poll: std::time::Duration) {
     let tracker = r.tracker.clone();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(tracker.task(&key).run.reviewed, None, "no reviewer starts while the window is paused");
+    let held = || logs.text().matches("holding due reviews back").count();
+    assert_eq!(held(), 1, "said once, naming the review: {}", logs.text());
+    assert!(logs.text().contains(&key.0), "{}", logs.text());
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(held(), 1, "not repeated on every poll");
     tokio::time::advance(std::time::Duration::from_secs(60)).await; // past the window's reset
     until("the review to land once the window resets", || tracker.task(&key).run.reviewed == Some(1)).await;
     stop.send(()).unwrap();
@@ -538,6 +543,7 @@ async fn parked_with_one_waiting(r: &Rig) -> (TaskKey, TaskKey) {
 #[tokio::test(start_paused = true)]
 async fn a_parked_task_with_no_changes_gives_its_sandbox_to_a_waiting_task_after_the_delay() {
     let r = releasing_after(1);
+    r.daemon.set_remote_branches(&["main"]);
     let (parked, waiting) = parked_with_one_waiting(&r).await;
     r.tracker.lapse_lease(&parked);
 
@@ -553,7 +559,11 @@ async fn a_parked_task_with_no_changes_gives_its_sandbox_to_a_waiting_task_after
     assert_eq!(task.status, Status::NeedsInput, "the question still stands");
     assert!(task.run.released.is_some_and(|at| at > 0), "the release is recorded");
     assert_eq!(r.compute.sandboxes().len(), 1, "the pool's one sandbox was reused");
-    assert_eq!(r.daemon.unpublished_asked(), ["main"], "asked against the base branch");
+    assert_eq!(
+        r.daemon.unpublished_asked(),
+        ["factory/trail-1", "main"],
+        "its branch isn't pushed, so the base branch"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -771,4 +781,123 @@ async fn a_parked_task_still_claimed_is_left_alone_without_waking_its_daemon() {
     assert!(r.daemon.unpublished_asked().is_empty(), "the daemon wasn't asked while the claim stood");
     assert_eq!(r.tracker.task(&waiting).status, Status::Open);
     assert_eq!(r.tracker.task(&parked).run.released, None);
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+    type Writer = Logs;
+    fn make_writer(&'a self) -> Logs {
+        self.clone()
+    }
+}
+
+impl Logs {
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+/// A worker sandbox another repo's factory holds, taking a place under the host's cap.
+async fn held_by_beta(compute: &trailhead_testkit::FakeCompute, name: &str) {
+    let labels = trailhead_factory::Labels::from([
+        (label::FACTORY.into(), "trailhead".into()),
+        (label::REPO.into(), "lanesawyer/beta".into()),
+        (label::TASK.into(), "TRAIL-99".into()),
+        (label::ROLE.into(), "worker".into()),
+    ]);
+    compute.create(&SandboxSpec { name: name.into(), labels, egress: Default::default() }).await.unwrap();
+}
+
+/// Runs the loop for a few polls, then stops it.
+async fn poll_a_while(factory: &Arc<trailhead_control::Factory>) {
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(factory.clone().run(
+        Arc::new(tokio::sync::Notify::new()),
+        std::time::Duration::from_millis(5),
+        async {
+            let _ = stopped.await;
+        },
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_host_cap_filled_by_another_repo_isnt_blamed_on_parked_tasks_but_the_repos_own_cap_is() {
+    let host = Host::new(&trailhead_factory::HostConfig { max_sandboxes: Some(3), ..Default::default() });
+    let r = rig_on(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 2"), host);
+    let park = || r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.tracker.add_task("TRAIL", "Parks", "");
+    park();
+    r.factory.tick().await.unwrap();
+    assert_eq!(busy(&r.compute).len(), 1, "one parked sandbox");
+
+    // Beta's two workers fill the host's cap; this repo is under its own, with a ready task waiting.
+    held_by_beta(&r.compute, "beta-1").await;
+    held_by_beta(&r.compute, "beta-2").await;
+    let waiting = r.tracker.add_task("TRAIL", "Waits", "");
+    let logs = Logs::default();
+    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+    let _guard = tracing::subscriber::set_default(sub);
+
+    let factory = Arc::new(r.factory);
+    poll_a_while(&factory).await;
+    assert_eq!(r.tracker.task(&waiting).status, Status::Open, "no place under the host's cap");
+    assert_eq!(r.compute.sandboxes().len(), 3, "nothing started");
+    assert!(!logs.text().contains("held by parked tasks"), "beta's runs will free the place: {}", logs.text());
+
+    // Beta gives a place back and this repo's own cap fills with parked sandboxes.
+    let beta = r.compute.sandboxes().into_iter().find(|s| s.name == "beta-1").unwrap();
+    r.compute.destroy(&beta.id).await.unwrap();
+    park();
+    assert_eq!(factory.tick().await.unwrap().len(), 1);
+    assert_eq!(r.tracker.task(&waiting).status, Status::NeedsInput, "the waiting task took the place and parked");
+    let next = r.tracker.add_task("TRAIL", "Still waits", "");
+    poll_a_while(&factory).await;
+    assert_eq!(r.tracker.task(&next).status, Status::Open, "both of the repo's places are parked");
+    assert!(logs.text().contains("held by parked tasks"), "{}", logs.text());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_parked_task_with_a_pushed_branch_and_no_pr_is_compared_with_its_branch() {
+    let r = releasing_after(1);
+    let (parked, waiting) = parked_with_one_waiting(&r).await;
+    r.tracker.lapse_lease(&parked);
+    // The branch was pushed; only the PR is missing.
+    r.daemon.set_remote_branches(&["main", "factory/trail-1"]);
+    assert!(r.factory.tick().await.unwrap().is_empty(), "not parked long enough yet");
+
+    tokio::time::advance(AFTER).await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == waiting), "the waiting task took the place");
+    assert!(r.tracker.task(&parked).run.released.is_some_and(|at| at > 0));
+    assert_eq!(r.daemon.unpublished_asked(), ["factory/trail-1"], "asked against its own branch only");
+
+    // Answered, it resumes from the branch it pushed, if the remote still has it.
+    r.tracker.answer(&parked, "Go on.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == parked), "the answered task started again");
+    let resumed = r
+        .daemon
+        .prepared()
+        .into_iter()
+        .any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1") && p.branch_if_present);
+    assert!(resumed, "a branch that was never pushed leaves it on the base");
 }
