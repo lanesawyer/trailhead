@@ -7,7 +7,7 @@ use trailhead_core::{Event, EventFilter, UndoReport};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::auth::{Auth, require_human};
+use crate::auth::Auth;
 use crate::error::{ApiResult, Json, Path, Query, invalid};
 use crate::openapi::{ErrorBody, TaskParam};
 use crate::params::{parse_opt_time, parse_time, split_list};
@@ -130,6 +130,5 @@ pub(crate) struct RevertBody {
     )
 )]
 pub(crate) async fn revert(State(s): S, Auth(ctx): Auth, Json(b): Json<RevertBody>) -> ApiResult<Json<Value>> {
-    require_human(&ctx)?;
     Ok(Json(json!(s.store.revert_actor(&ctx, b.actor_id, parse_time(&b.since)?).await?)))
 }

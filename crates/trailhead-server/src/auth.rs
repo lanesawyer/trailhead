@@ -65,7 +65,3 @@ pub async fn human_only(
         Err(e) => ApiError(e).into_response(),
     }
 }
-
-pub fn require_human(ctx: &Ctx) -> Result<(), ApiError> {
-    if ctx.is_human() { Ok(()) } else { Err(ApiError(Error::Forbidden("only a human can do this".into()))) }
-}

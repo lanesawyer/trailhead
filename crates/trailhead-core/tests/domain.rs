@@ -217,6 +217,52 @@ async fn review_requires_a_human() {
 }
 
 #[tokio::test]
+async fn an_agent_cannot_undo_its_way_past_review() {
+    let env = Env::new().await;
+    env.store
+        .update_project(&env.human, "AUTH", ProjectPatch { require_review: Some(true), ..Default::default() }, None)
+        .await
+        .unwrap();
+    let t = env.task("reopened").await;
+    let a = env.agent("a").await;
+    env.store.update_task(&env.human.next_batch(), &t.key, status(Status::Done), None).await.unwrap();
+    // A person reopens it. Undoing that would finish it again, which an agent can't do here.
+    let reopen = env.human.next_batch();
+    env.store.update_task(&reopen, &t.key, status(Status::Open), None).await.unwrap();
+    assert!(matches!(env.store.undo_batch(&a.next_batch(), reopen.batch_id).await, Err(Error::ReviewRequired)));
+    assert_eq!(env.store.get_task(&env.human, &t.key).await.unwrap().status, Status::Open);
+    env.store.undo_batch(&env.human.next_batch(), reopen.batch_id).await.unwrap();
+    assert_eq!(env.store.get_task(&env.human, &t.key).await.unwrap().status, Status::Done);
+}
+
+#[tokio::test]
+async fn an_agent_cannot_undo_around_another_agents_claim() {
+    let env = Env::new().await;
+    let t = env.task("held").await;
+    let (a, b) = (env.agent("a").await, env.agent("b").await);
+    let claim = b.next_batch();
+    env.store.claim(&claim, &t.key, None).await.unwrap();
+    // Undoing the claim would take the task from `b`.
+    assert!(matches!(env.store.undo_batch(&a.next_batch(), claim.batch_id).await, Err(Error::ClaimHeld { .. })));
+    // A person edits the task while `b` holds it. `a` can't edit it, so it can't undo the edit either.
+    let edit = env.human.next_batch();
+    let retitle = TaskPatch { title: Some("held, retitled".into()), ..Default::default() };
+    env.store.update_task(&edit, &t.key, retitle, None).await.unwrap();
+    assert!(matches!(env.store.undo_batch(&a.next_batch(), edit.batch_id).await, Err(Error::ClaimHeld { .. })));
+    let detail = env.store.task_detail(&env.human, &t.key).await.unwrap();
+    assert_eq!((detail.task.title.as_str(), detail.task.status), ("held, retitled", Status::InProgress));
+    assert_eq!(detail.claim.map(|c| c.holder_id), Some(b.actor_id()));
+    // The holder undoes its own edit under its claim.
+    let own = b.next_batch();
+    env.store
+        .update_task(&own, &t.key, TaskPatch { title: Some("mine".into()), ..Default::default() }, None)
+        .await
+        .unwrap();
+    env.store.undo_batch(&b.next_batch(), own.batch_id).await.unwrap();
+    assert_eq!(env.store.get_task(&env.human, &t.key).await.unwrap().title, "held, retitled");
+}
+
+#[tokio::test]
 async fn only_humans_can_loosen_review_or_archive() {
     let env = Env::new().await;
     let a = env.agent("a").await;
@@ -1344,7 +1390,7 @@ async fn agents_cannot_undo_or_revert_a_humans_grade_change() {
     env.store.undo_batch(&env.human.next_batch(), own.batch_id).await.unwrap();
     assert_eq!(env.store.get_task(&env.human, &task.key).await.unwrap().grade, Some(gr(3)));
 
-    // Reverting an agent's work: a human can, another agent's revert is refused with Forbidden, not skipped.
+    // Reverting an agent's work is for a person: another agent's revert is refused whole, not skipped.
     let b = env.agent("b").await;
     let other = env.task_with(NewTask { title: "other".into(), grade: Some(gr(2)), ..Default::default() }).await;
     let since = env.now() - jiff::SignedDuration::from_secs(60);
@@ -1357,7 +1403,7 @@ async fn agents_cannot_undo_or_revert_a_humans_grade_change() {
     env.store.update_task(&a.next_batch(), &other.key, patch(Some(gr(4))), None).await.unwrap();
     env.store.update_task(&a.next_batch(), &after.key, retitle("after, retitled"), None).await.unwrap();
     let report = env.store.revert_actor(&b.next_batch(), a.actor_id(), since).await;
-    assert!(matches!(report, Err(Error::Forbidden(_))), "lowering a grade aborts the whole revert: {report:?}");
+    assert!(matches!(report, Err(Error::Forbidden(_))), "an agent's revert is refused whole: {report:?}");
     assert_eq!(env.store.get_task(&env.human, &other.key).await.unwrap().grade, Some(gr(4)));
     // All or nothing: the agent's other changes are still in place after the refusal.
     assert_eq!(env.store.get_task(&env.human, &before.key).await.unwrap().title, "before, retitled");
