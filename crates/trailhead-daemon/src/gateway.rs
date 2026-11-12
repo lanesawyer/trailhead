@@ -24,6 +24,9 @@ mod policy;
 
 /// The longest request head the proxy reads.
 const MAX_HEAD: usize = 64 * 1024;
+/// How long, and how much, to drain from a client after a plain response before closing.
+const LINGER: std::time::Duration = std::time::Duration::from_secs(1);
+const LINGER_BYTES: usize = 1024 * 1024;
 
 /// How long a client has to send a whole request head. Only the request side is bounded: responses stream with no
 /// total timeout.
@@ -426,10 +429,34 @@ async fn pipe_plain(
         tokio::io::copy(&mut upstream_r, &mut client_w).await?;
         client_w.shutdown().await
     };
-    tokio::select! {
+    let done = tokio::select! {
         r = async { tokio::try_join!(upload, download).map(|_| ()) } => r,
-        _ = &mut lease.kill => Ok(()),
+        _ = &mut lease.kill => return Ok(()),
+    };
+    if done.is_ok() {
+        tokio::select! {
+            _ = linger(&mut client_r) => {}
+            _ = &mut lease.kill => {}
+        }
     }
+    done
+}
+
+/// Reads and discards what the client still sends (a pipelined request, say) for a moment, so
+/// closing the socket doesn't leave unread bytes behind and reset the connection before the
+/// client has read the response. Stops at EOF, after `LINGER_BYTES`, or at `LINGER`.
+async fn linger<R: AsyncRead + Unpin>(client: &mut R) {
+    let drain = async {
+        let mut chunk = [0u8; 8192];
+        let mut total = 0;
+        while total < LINGER_BYTES {
+            match client.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => total += n,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(LINGER, drain).await;
 }
 
 async fn respond(client: &mut TcpStream, status: u16, why: &str) -> std::io::Result<()> {
@@ -905,6 +932,12 @@ mod tests {
             parse_head(b"POST http://a/ HTTP/1.1\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n").is_err()
         );
     }
+    #[tokio::test]
+    async fn linger_drains_what_the_client_still_sends() {
+        let mut client = std::io::Cursor::new(vec![7u8; 20_000]);
+        linger(&mut client).await;
+        assert_eq!(client.position(), 20_000);
+    }
 
     #[tokio::test]
     async fn a_pipelined_second_request_never_reaches_the_upstream() {
@@ -997,6 +1030,26 @@ mod tests {
         // And new requests are refused at once.
         let (_s, status) = connect_via(proxy, &format!("127.0.0.1:{port}")).await;
         assert!(status.contains("403"), "{status}");
+    }
+
+    #[tokio::test]
+    async fn narrowing_does_not_wait_out_a_lingering_plain_request() {
+        let port = origin().await;
+        let (gw, proxy) = setup(&["127.0.0.1", "example.com"]).await;
+        let mut s = TcpStream::connect(proxy).await.unwrap();
+        s.write_all(format!("GET http://127.0.0.1:{port}/ HTTP/1.1\r\n\r\n").as_bytes()).await.unwrap();
+        // The gateway half-closes after the response; this client keeps its own side open.
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        assert_eq!(gw.state().sandboxes[0].open_tunnels, 1);
+
+        let started = std::time::Instant::now();
+        gw.handle(GatewayRequest::SetEgress { name: "a".into(), egress: Egress { domains: list(&["example.com"]) } })
+            .await;
+        assert!(started.elapsed() < LINGER / 2, "{:?}", started.elapsed());
+        assert_eq!(gw.state().sandboxes[0].open_tunnels, 0);
+        drop(s);
     }
 
     #[tokio::test]
