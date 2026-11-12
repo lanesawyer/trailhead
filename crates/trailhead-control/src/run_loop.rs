@@ -196,8 +196,10 @@ impl Factory {
         keys: &mut HashMap<task::Id, TaskKey>,
         reviewing: usize,
     ) -> Result<()> {
-        // Before any early return, so the status board's spend keeps moving while the factory is full or paused.
+        // Before any early return, so the status board's spend keeps moving while the factory is full or paused, and
+        // a usage reading another repo's run heard reaches this repo's board.
         self.capped();
+        self.status.usage(self.host.usage());
         if self.usage_paused() {
             return Ok(());
         }
@@ -217,7 +219,7 @@ impl Factory {
             .filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key))
             .collect();
         if room == 0 && !startable.iter().any(|t| others.contains(&t.key)) {
-            if keys.len() <= reviewing && parked_fill_repo_cap(others.len(), self.config.repo.max_sandboxes) {
+            if starvation_is_parked_tasks(keys.len(), reviewing, others.len(), self.config.repo.max_sandboxes) {
                 self.warn_if_starved(&others).await;
             } else {
                 // Workers running, or only the host's cap full with other repos' work: forget the last warning, so
@@ -399,11 +401,7 @@ impl Factory {
         }
         holders.sort();
         let mut last = self.starved.lock().unwrap();
-        if waiting == 0 {
-            *last = None;
-            return;
-        }
-        if last.as_ref() == Some(&holders) {
+        if !should_say_starved(&mut last, &holders, waiting) {
             return;
         }
         let parked: Vec<&str> = holders.iter().filter(|(_, p)| *p).map(|(k, _)| k.0.as_str()).collect();
@@ -610,6 +608,7 @@ impl Factory {
     /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
     pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
         self.capped();
+        self.status.usage(self.host.usage());
         if self.usage_paused() {
             return Ok(Vec::new());
         }
@@ -729,6 +728,22 @@ fn parked_fill_repo_cap(others: usize, max_sandboxes: usize) -> bool {
     others > 0 && others >= max_sandboxes
 }
 
+/// Whether, with no room, the queue waits on parked tasks: no workers running (reviews don't count, they free their
+/// places unaided) and the held sandboxes fill the repo's own cap.
+fn starvation_is_parked_tasks(running: usize, reviewing: usize, others: usize, max_sandboxes: usize) -> bool {
+    running <= reviewing && parked_fill_repo_cap(others, max_sandboxes)
+}
+
+/// Updates the last-said holders and returns whether the starvation is to be said now: not with nothing waiting
+/// (which forgets the last warning), and not again for the same holders.
+fn should_say_starved(last: &mut Option<Vec<(TaskKey, bool)>>, holders: &[(TaskKey, bool)], waiting: usize) -> bool {
+    if waiting == 0 {
+        *last = None;
+        return false;
+    }
+    last.as_deref() != Some(holders)
+}
+
 /// Puts the ready tasks in the order runs start: by priority, and within a priority a rework of a task whose PR is
 /// open (changes requested for a conflict, CI or a review) before fresh tasks, since it is nearly done and goes stale
 /// while it waits (TRAIL-868). The sort is stable, so the tracker's order (due date, age) holds among equals.
@@ -740,13 +755,46 @@ fn in_start_order(mut ready: Vec<Task>) -> Vec<Task> {
 
 #[cfg(test)]
 mod starvation_tests {
-    use super::parked_fill_repo_cap;
+    use super::{parked_fill_repo_cap, should_say_starved, starvation_is_parked_tasks};
+    use trailhead_factory::TaskKey;
+
+    fn holders(keys: &[(&str, bool)]) -> Vec<(TaskKey, bool)> {
+        keys.iter().map(|(k, p)| (TaskKey((*k).to_string()), *p)).collect()
+    }
 
     #[test]
     fn only_a_full_repo_cap_counts_as_starved_by_parked_tasks() {
         assert!(parked_fill_repo_cap(2, 2));
         assert!(!parked_fill_repo_cap(1, 2), "the host's cap is what's full, and other repos' runs will free it");
         assert!(!parked_fill_repo_cap(0, 2));
+    }
+
+    #[test]
+    fn the_warning_is_said_once_per_set_of_holders() {
+        let (a, ab) = (holders(&[("T-1", true)]), holders(&[("T-1", true), ("T-2", true)]));
+        let mut last = None;
+        assert!(should_say_starved(&mut last, &a, 1));
+        last = Some(a.clone());
+        assert!(!should_say_starved(&mut last, &a, 3), "the same holders aren't said again");
+        assert!(should_say_starved(&mut last, &ab, 1), "a new set of holders is");
+        assert!(should_say_starved(&mut last, &holders(&[("T-1", false)]), 1), "so is a holder no longer parked");
+    }
+
+    #[test]
+    fn nothing_waiting_forgets_the_last_warning() {
+        let a = holders(&[("T-1", true)]);
+        let mut last = Some(a.clone());
+        assert!(!should_say_starved(&mut last, &a, 0));
+        assert_eq!(last, None);
+        assert!(should_say_starved(&mut last, &a, 1), "the same holders starving again are said again");
+    }
+
+    #[test]
+    fn only_parked_tasks_filling_the_repo_cap_keep_the_warning() {
+        assert!(starvation_is_parked_tasks(0, 0, 2, 2));
+        assert!(starvation_is_parked_tasks(1, 1, 2, 2), "reviews aren't workers");
+        assert!(!starvation_is_parked_tasks(1, 0, 2, 2), "running workers reset it");
+        assert!(!starvation_is_parked_tasks(0, 0, 1, 2), "only the host cap full resets it (TRAIL-629)");
     }
 }
 

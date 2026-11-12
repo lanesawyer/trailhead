@@ -40,7 +40,8 @@ Decided: gates per grade are configurable per repo, in `.trailhead.toml`. The ta
 max_lines = 600          # bigger diffs are at least grade 3
 
 # A Cargo.lock whose patch only edits dependency lists (a member gaining a dependency that is already locked) does not
-# match its rule; a new [[package]], or a changed version, source or checksum, or a patch the host omits, does.
+# match the globs that name Cargo.lock; a broader glob covering it (say `crates/**`) still applies. A new [[package]],
+# or a changed version, source or checksum, or a patch the host omits, matches as usual.
 # Nor does a Rust file edited in place whose patch only changes comments (every changed line blank or starting with
 # //): a doc fix in src/ goes at the task's grade. A renamed or added file, or a patch the host omits, still matches.
 

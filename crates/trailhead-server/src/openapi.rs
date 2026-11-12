@@ -137,7 +137,9 @@ fn error_code() -> utoipa::openapi::Object {
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
 pub struct Health {
+    /// False when the server is up but its store can't serve requests (see `store_error`).
     ok: bool,
+    store_error: Option<String>,
     version: String,
     /// Identifies the server's data directory, so a client can tell its own
     /// machine's server from one reached through a tunnel.
