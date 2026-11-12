@@ -19,6 +19,7 @@ use axum::routing::get;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::watch;
 use trailhead_control::StatusBoard;
 use trailhead_factory::{FactorySnapshot, FactoryState, Sequenced};
 use trailhead_wire::ui::{RepoFeed, StatusFeed};
@@ -31,6 +32,8 @@ pub struct Feed(Arc<Inner>);
 struct Inner {
     state: Mutex<FactoryState>,
     boards: Mutex<Boards>,
+    /// Notified when the state or the boards change.
+    changed: watch::Sender<()>,
 }
 
 /// A repo's slug and its board.
@@ -38,11 +41,12 @@ type Boards = Vec<(String, Arc<StatusBoard>)>;
 
 impl Feed {
     pub fn new(state: FactoryState) -> Feed {
-        Feed(Arc::new(Inner { state: Mutex::new(state), boards: Mutex::default() }))
+        Feed(Arc::new(Inner { state: Mutex::new(state), boards: Mutex::default(), changed: watch::channel(()).0 }))
     }
 
     pub fn set_state(&self, state: FactoryState) {
         *self.0.state.lock().unwrap_or_else(|e| e.into_inner()) = state;
+        self.0.changed.send_modify(|_| {});
     }
 
     pub fn state(&self) -> FactoryState {
@@ -51,6 +55,7 @@ impl Feed {
 
     pub fn set_boards(&self, boards: Boards) {
         *self.0.boards.lock().unwrap_or_else(|e| e.into_inner()) = boards;
+        self.0.changed.send_modify(|_| {});
     }
 
     pub fn boards(&self) -> Boards {
@@ -81,6 +86,10 @@ impl StatusFeed for Feed {
 
     fn state(&self) -> Option<FactoryState> {
         Some(Feed::state(self))
+    }
+
+    fn changed(&self) -> Option<watch::Receiver<()>> {
+        Some(self.0.changed.subscribe())
     }
 }
 
