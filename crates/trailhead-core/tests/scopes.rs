@@ -196,12 +196,13 @@ async fn tokens_can_be_rescoped_without_reissuing() {
     let nope = TokenPatch { projects: Some(Some(vec!["NOPE".into()])), ..Default::default() };
     hidden(s.update_token(&env.human, token.id, nope).await);
 
-    // A scoped human token can't change tokens, and revoked tokens stay revoked.
+    // A scoped human token can't change or revoke tokens, and revoked tokens stay revoked.
     let me = Principal::User(env.human.user_id);
     let opts = TokenOptions { projects: Some(vec!["AUTH".into()]), ..Default::default() };
     let (_, secret) = s.create_token_with(&env.human, me, "narrow", opts).await.unwrap();
     let narrow = s.authenticate(&secret).await.unwrap();
     forbidden(s.update_token(&narrow, token.id, TokenPatch::default()).await);
+    forbidden(s.revoke_token(&narrow, token.id).await);
     s.revoke_token(&env.human, token.id).await.unwrap();
     hidden(s.update_token(&env.human, token.id, TokenPatch::default()).await);
 }

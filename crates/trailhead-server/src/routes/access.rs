@@ -119,6 +119,7 @@ pub(crate) async fn list_tokens(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<
     delete, path = "/v1/tokens/{id}", tag = "tokens", params(("id" = Uuid, Path, description = "Token id")),
     responses(
         (status = 200, description = "The revoked token", body = Token),
+        (status = 403, description = "`forbidden`: only an unscoped human token revokes tokens", body = ErrorBody),
         (status = 404, description = "`not_found`", body = ErrorBody),
     )
 )]
