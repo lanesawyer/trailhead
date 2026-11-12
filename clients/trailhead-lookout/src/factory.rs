@@ -356,6 +356,23 @@ pub fn factory_ran(task: &trailhead_model::Task) -> bool {
         .is_ok_and(|run| run.attempt.is_some() || run.sandbox.is_some() || run.retries.is_some() || run.pr.is_some())
 }
 
+/// A task's pull request, where its code host serves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrLink {
+    /// `owner/name#12`.
+    pub label: String,
+    /// The PR's page, as the code host gave it: Lookout never builds one, so any code host works.
+    pub url: String,
+}
+
+/// The PR the factory opened for `task` (the merged one once it merged), if it has one with a page.
+pub fn pr_link(task: &trailhead_model::Task) -> Option<PrLink> {
+    let run = RunUpdate::of(task).ok()?;
+    let pr = run.merged.map(|m| m.pr).or(run.pr)?;
+    (!pr.url.is_empty())
+        .then(|| PrLink { label: format!("{}/{}#{}", pr.repo.owner, pr.repo.name, pr.number), url: pr.url })
+}
+
 /// What to call the holder of a claim on the task keyed `task_key`: its name in the agent list if `known`, else, for a
 /// task that has a run, `factory/<key>`. The agent list only changes with a sync snapshot, so a sub-agent made for a run
 /// after it isn't known yet; a holder of a task that has a run is a factory agent all the same. Board and map share it.
@@ -437,6 +454,17 @@ mod tests {
     use trailhead_factory::{FactorySnapshot, SandboxState};
 
     use super::*;
+    #[test]
+    fn a_pr_link_is_the_code_hosts_own_url_and_the_merged_one_once_merged() {
+        let pr = |n: u64| serde_json::json!({"repo": {"owner": "o", "name": "r"}, "number": n, "url": format!("https://host/o/r/-/merge_requests/{n}")});
+        let with = |factory| crate::fixture::task(serde_json::json!({"metadata": {"factory": factory}}));
+        assert_eq!(pr_link(&with(serde_json::json!({"attempt": 1}))), None);
+        let open = pr_link(&with(serde_json::json!({"pr": pr(4)}))).unwrap();
+        assert_eq!(open, PrLink { label: "o/r#4".into(), url: "https://host/o/r/-/merge_requests/4".into() });
+        let merged = with(serde_json::json!({"pr": pr(4), "merged": {"by": "merger", "pr": pr(5)}}));
+        assert_eq!(pr_link(&merged).unwrap().label, "o/r#5");
+    }
+
     #[test]
     fn a_holder_is_named_by_the_list_else_for_its_run() {
         assert_eq!(super::holder_name(Some("claude"), "TRAIL-7", true).as_deref(), Some("claude"));

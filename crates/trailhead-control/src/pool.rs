@@ -133,8 +133,9 @@ impl Factory {
             // Built for another stack: reinstalling on top would keep the old tools, so start over.
             tracing::info!(sandbox = %s.name, "[stack] changed; destroying the pooled sandbox to reinstall");
             if let Err(e) = p.compute.destroy(&s.id).await {
-                // Left idle it would count toward `max_sandboxes` and be retried on every acquire; broken, it counts
-                // for nothing and reconcile destroys it.
+                // An idle one doesn't count toward `max_sandboxes` (only a role or a busy state does), but left as it
+                // is it would be retried on every acquire. Broken, it isn't retried and reconcile destroys it. If it
+                // is the task's own busy sandbox it did count, so this also frees that place.
                 tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack; labelling it broken");
                 self.mark_broken(&s).await;
             }

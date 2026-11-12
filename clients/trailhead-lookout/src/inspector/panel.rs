@@ -1,3 +1,5 @@
+//! The inspector panel: its shell, its controls, and sending a control's action as a command.
+
 use super::*;
 
 #[derive(Component)]

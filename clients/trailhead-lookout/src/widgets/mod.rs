@@ -10,7 +10,8 @@
 //! - A task's card: [`card`], with [`card_title`], [`card_under`], [`card_found`] and [`card_row`].
 //! - A board column: [`column_shell`], [`column_header`], [`column_frame`], [`column_body`], [`column_scrollbar`];
 //!   [`column_empty`] for none.
-//! - Colors: [`token`] (the kit's and Lookout's), a status column's: [`status_token`]; a status written as text: [`status_tone`]; a priority's: [`priority_tone`]; a grade's: [`grade_tone`].
+//! - Colors: [`token`] (the kit's and Lookout's), a status column's: [`status_token`]; a status written as text:
+//!   [`status_tone`]; a priority's: [`priority_tone`]; a grade's: [`grade_tone`].
 //! - A status in words: [`status_label`]; every view shows a status through it.
 
 mod card;
