@@ -205,7 +205,10 @@ const CAPTION_SIZE: Size = size::CARD_TITLE;
 /// feathers writes them, while they are still uncut). A select that hugs its caption always has the room for it, so
 /// it is never cut. A cut is kept while it fits the room and the room hasn't grown past the one it was made at: a
 /// select whose width comes from its content (not from outside it) narrows to the cut, and the narrower room is no
-/// reason to cut again.
+/// reason to cut again. (So a content-sized select, once cut, stays cut when its container widens: its own width
+/// hugs the cut and never grows past `cut_room`; only a new pick brings the whole words back.)
+///
+/// Both decisions allow half a pixel of slack, as layout rounds each node's edges to physical pixels on its own.
 #[derive(Component, Default, Debug)]
 pub(crate) struct CaptionFit {
     full: String,
@@ -275,7 +278,7 @@ pub(crate) fn fit_select_captions(
         if cut && shown_px <= width + 0.5 && width <= fit.cut_room + 0.5 {
             continue;
         }
-        let wanted = if full_px <= width {
+        let wanted = if full_px <= width + 0.5 {
             fit.full.clone()
         } else {
             fit.cut_room = width;
@@ -599,10 +602,13 @@ mod tests {
                 .map(|v| if let Val::Px(v) = v { v } else { 0.0 })
                 .sum::<f32>()
         };
-        for _ in 0..4 {
-            lay_out(&mut app, 35.0 + inset, 35.0);
-            settle(&mut app);
-            assert_eq!(button_texts(&mut app).pop().unwrap(), "Debug");
+        // Rounding can leave the button a fraction of a pixel narrower than the words.
+        for slack in [0.0, -0.3] {
+            for _ in 0..4 {
+                lay_out(&mut app, 35.0 + inset + slack, 35.0);
+                settle(&mut app);
+                assert_eq!(button_texts(&mut app).pop().unwrap(), "Debug");
+            }
         }
     }
 
