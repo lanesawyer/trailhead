@@ -71,6 +71,24 @@ pub const HOME: &str = "/home/trailhead";
 /// How many trailing lines of a program's log `logs` returns.
 const LOG_LINES: usize = 3000;
 
+/// The tail of `bytes` holding its last `lines` lines (a final line without a newline counts).
+fn last_lines(bytes: &[u8], lines: usize) -> &[u8] {
+    if lines == 0 {
+        return &[];
+    }
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let mut seen = 0;
+    for (i, b) in body.iter().enumerate().rev() {
+        if *b == b'\n' {
+            seen += 1;
+            if seen == lines {
+                return &bytes[i + 1..];
+            }
+        }
+    }
+    bytes
+}
+
 /// The last `lines` lines of the file in a `docker cp` archive of one file.
 fn log_from_archive(raw: &[u8], lines: usize) -> Result<String> {
     let bad = |e: std::io::Error| Error::Other(format!("log archive: {e}"));
@@ -80,10 +98,10 @@ fn log_from_archive(raw: &[u8], lines: usize) -> Result<String> {
         if !entry.header().entry_type().is_file() {
             continue;
         }
-        let mut text = String::new();
-        std::io::Read::read_to_string(&mut entry, &mut text).map_err(bad)?;
-        let skip = text.lines().count().saturating_sub(lines);
-        return Ok(text.split_inclusive('\n').skip(skip).collect());
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).map_err(bad)?;
+        // Trim on the bytes, then decode lossily as the exec path does, so a log with stray bytes still reads.
+        return Ok(String::from_utf8_lossy(last_lines(&bytes, lines)).into_owned());
     }
     Err(Error::NotFound("log archive holds no file".into()))
 }
@@ -1212,6 +1230,9 @@ mod tests {
         let raw = tar_of(&[("log", b"a\nb\nc\n", 0o644, 0, 0)], &[]).unwrap();
         assert_eq!(log_from_archive(&raw, 2).unwrap(), "b\nc\n");
         assert_eq!(log_from_archive(&raw, 10).unwrap(), "a\nb\nc\n");
+        assert_eq!(log_from_archive(&raw, 0).unwrap(), "");
+        let raw = tar_of(&[("log", b"a\nb\xff\xe2\x82", 0o644, 0, 0)], &[]).unwrap();
+        assert_eq!(log_from_archive(&raw, 1).unwrap(), "b\u{fffd}\u{fffd}");
         assert!(matches!(log_from_archive(&tar_of(&[], &["d"]).unwrap(), 2), Err(Error::NotFound(_))));
     }
 

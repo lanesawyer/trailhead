@@ -410,3 +410,20 @@ fn push_said(history: &mut Vec<Said>, message: &str) {
     let extra = history.len().saturating_sub(HISTORY_LIMIT);
     history.drain(..extra);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_keeps_only_the_latest_eight_oldest_first() {
+        let mut history = Vec::new();
+        for n in 1..=HISTORY_LIMIT + 3 {
+            push_said(&mut history, &format!("status {n}"));
+        }
+        let messages: Vec<&str> = history.iter().map(|s| s.message.as_str()).collect();
+        let expected: Vec<String> = (4..=HISTORY_LIMIT + 3).map(|n| format!("status {n}")).collect();
+        assert_eq!(history.len(), HISTORY_LIMIT);
+        assert_eq!(messages, expected);
+    }
+}
