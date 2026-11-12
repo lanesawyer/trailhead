@@ -68,6 +68,9 @@ pub(crate) enum Cmd {
         /// Only tasks with this grade: 1 to 4, graded or ungraded.
         #[arg(long)]
         grade: Option<String>,
+        /// Only tasks with exactly this title, ignoring case and surrounding space.
+        #[arg(long)]
+        title: Option<String>,
         #[arg(short = 'n', long)]
         limit: Option<i64>,
     },

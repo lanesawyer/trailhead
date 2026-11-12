@@ -5,7 +5,9 @@ use std::sync::Arc;
 use trailhead_control::{Factory, Host};
 use trailhead_factory::HostConfig;
 use trailhead_factory::{Compute, FactoryConfig, Labels, Role, RunOutcome, SandboxSpec, TaskKey, VerdictKind, label};
-use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
+use trailhead_testkit::{
+    FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness, unix_now,
+};
 
 fn config(repo: &str, extra: &str) -> String {
     format!(
@@ -68,10 +70,6 @@ fn pausing_host() -> Arc<Host> {
     Host::new(&HostConfig { pause_at: [("five_hour".to_string(), 80)].into(), ..Default::default() })
 }
 
-fn unix_now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
-}
-
 fn changes() -> RunOutcome {
     RunOutcome::Changes { commits: vec![], summary: "Nothing to see.".into() }
 }
@@ -111,6 +109,11 @@ async fn a_quota_reading_from_one_repo_pauses_both() {
     queue(&b);
     assert!(a.factory.tick().await.unwrap().is_empty(), "the reading's own repo is paused");
     assert!(b.factory.tick().await.unwrap().is_empty(), "so is the other repo");
+
+    let usage = b.factory.status().snapshot().usage;
+    assert_eq!(usage.len(), 1, "the other repo's board shows the reading too");
+    assert_eq!((usage[0].window.as_str(), usage[0].used_percent, usage[0].pause_at), ("five_hour", 85, Some(80)));
+    assert_eq!(a.factory.status().snapshot().usage, usage);
 }
 
 #[tokio::test]

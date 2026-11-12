@@ -2,8 +2,7 @@
 //!
 //! The X's top lines up with the title's top, so a title that wraps to a second line leaves the X in the corner.
 //! The header says nothing about what closing does: the X sends feathers' `RequestClose` from itself, which climbs
-//! to whatever owns the panel (the modal's root, the inspector) and is answered there. A panel that can't be closed
-//! passes `closable: false` and has the same title row without the X.
+//! to whatever owns the panel (the modal's root, the inspector) and is answered there.
 //!
 //! [`PanelTools`] holds the X; a panel puts its own header controls (a modal's arrows and menu) in it before the X.
 
@@ -44,5 +43,62 @@ pub fn panel_header(title: impl Into<String>) -> impl Scene {
             PanelTools
             Children [ {close} ]
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        app
+    }
+
+    fn settle(app: &mut App) {
+        app.world_mut().flush();
+        for _ in 0..3 {
+            app.update();
+        }
+    }
+
+    #[test]
+    fn the_header_has_a_title_and_a_tools_row_holding_the_x() {
+        let mut app = app();
+        let header = app.world_mut().commands().spawn_scene(panel_header("Inspector")).id();
+        settle(&mut app);
+        let world = app.world_mut();
+        let titles: Vec<String> =
+            world.query_filtered::<&Text, With<PanelTitle>>().iter(world).map(|t| t.0.clone()).collect();
+        assert_eq!(titles, ["Inspector"]);
+        let tools = world.query_filtered::<Entity, With<PanelTools>>().single(world).unwrap();
+        assert_eq!(world.get::<ChildOf>(tools).map(|c| c.parent()), Some(header));
+        assert_eq!(world.get::<Children>(tools).map_or(0, |c| c.len()), 1, "the X is the only tool");
+    }
+
+    #[test]
+    fn activating_the_x_sends_a_request_to_close_from_the_x_up_to_the_owner() {
+        let mut app = app();
+        let owner = app.world_mut().spawn_empty().id();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        app.world_mut().entity_mut(owner).observe(move |close: On<RequestClose>| {
+            sink.lock().unwrap().push((close.source, close.original_event_target()));
+        });
+        let header = app.world_mut().commands().spawn_scene(panel_header("Inspector")).insert(ChildOf(owner)).id();
+        settle(&mut app);
+        let world = app.world_mut();
+        let tools = world.query_filtered::<Entity, With<PanelTools>>().single(world).unwrap();
+        let x = world.get::<Children>(tools).unwrap()[0];
+        assert_ne!(x, header);
+        world.trigger(Activate { entity: x });
+        settle(&mut app);
+        assert_eq!(*seen.lock().unwrap(), [(owner, x)], "the owner hears a request that started at the X");
     }
 }
