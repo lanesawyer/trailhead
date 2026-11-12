@@ -56,7 +56,7 @@
 //!   [`matches_search`]. A text field straight on a pane or menu goes in a [`field_well`] to be seen.
 //! - A detail modal's body, a main column beside a sidebar of facts: [`spawn_detail_panes`], in a modal
 //!   [`extent::DETAIL_WIDTH`] wide.
-//! - A button that opens a URL in the browser: [`link_button`].
+//! - A button that opens a URL in the browser: [`link_button`], or icon-only [`link_tool_button`].
 //! - A line saying how something went, with an icon for its [`Tone`]: [`notice`], then write a [`Notice`] onto it;
 //!   an empty message hides it.
 //! - Placeholder bars where content is on its way: [`skeleton`].
@@ -140,7 +140,7 @@ pub use inline::{
 };
 pub use input::{InitialText, text_input, text_input_sized};
 pub use keyed::Keyed;
-pub use link::{ExternalLink, link_button};
+pub use link::{ExternalLink, link_button, link_tool_button};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, menu_item, spawn_icon_menu};
 pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,

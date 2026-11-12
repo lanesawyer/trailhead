@@ -451,20 +451,28 @@ impl Factory {
                         Some(before) if failed < max => messages::repeated_failure_question(before, &reason),
                         _ => messages::gave_up_question(failed, max, &reason, &last),
                     };
-                    sub.claim(&task.key).await?;
-                    // Recorded before the question, so a task that is parked has the marker; reopening it is all a
-                    // human has to do.
-                    sub.report(&task.key, RunUpdate { gave_up: Some(attempt), ..RunUpdate::default() }).await?;
-                    if let Err(e) = sub.ask(&task.key, &question).await {
-                        // Not parked, so the marker mustn't stand: when the claim lapses and the task runs again,
-                        // its count would restart from it. Put back what was there before (0 counts from nothing,
-                        // as `attempt_floor` takes the later of the two).
-                        let restore =
-                            RunUpdate { gave_up: Some(task.run.gave_up.unwrap_or(0)), ..RunUpdate::default() };
-                        if let Err(re) = sub.report(&task.key, restore).await {
-                            tracing::warn!(task = %task.key, error = %re, "couldn't undo the gave-up marker after the park failed");
+                    let parked = async {
+                        sub.claim(&task.key).await?;
+                        // Recorded before the question, so a task that is parked has the marker; reopening it is all
+                        // a human has to do.
+                        sub.report(&task.key, RunUpdate { gave_up: Some(attempt), ..RunUpdate::default() }).await?;
+                        if let Err(e) = sub.ask(&task.key, &question).await {
+                            // Not parked, so the marker mustn't stand: when the claim lapses and the task runs again,
+                            // its count would restart from it. Put back what was there before (0 counts from
+                            // nothing, as `attempt_floor` takes the later of the two).
+                            let restore =
+                                RunUpdate { gave_up: Some(task.run.gave_up.unwrap_or(0)), ..RunUpdate::default() };
+                            if let Err(re) = sub.report(&task.key, restore).await {
+                                tracing::warn!(task = %task.key, error = %re, "couldn't undo the gave-up marker after the park failed");
+                            }
+                            return Err(e);
                         }
-                        return Err(e);
+                        Ok(())
+                    };
+                    if let Err(e) = parked.await {
+                        // The sub-agent exists, so the failure goes through `infra_failed`: it backs the task off,
+                        // parks it after repeated failures, releases it and revokes the sub-agent.
+                        return Err(self.infra_failed(task, sub, name, e, infra_prior, None).await);
                     }
                     if let Err(e) = self.tracker.revoke_sub_agent(name).await {
                         tracing::warn!(task = %task.key, error = %e, "couldn't revoke the worker's sub-agent; its token will expire");
