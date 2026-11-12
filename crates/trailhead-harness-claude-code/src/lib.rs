@@ -46,13 +46,13 @@ impl Default for ClaudeCode {
 /// How the factory's registry builds this harness and which egress it needs (`trailhead-plugins` lists it).
 pub fn kind() -> trailhead_factory::HarnessKind {
     trailhead_factory::HarnessKind {
-        build: |setup| {
+        build: std::sync::Arc::new(|setup| {
             let claude = ClaudeCode::new(setup.executable.clone());
             std::sync::Arc::new(match setup.secrets.get(OAUTH_TOKEN) {
                 Some(token) => claude.with_oauth_token(token.clone()),
                 None => claude,
             })
-        },
+        }),
         egress: |secrets| if secrets.contains_key(OAUTH_TOKEN) { vec![API_HOST.into()] } else { Vec::new() },
     }
 }
@@ -278,11 +278,11 @@ pub fn schema(role: Role) -> Value {
 
 /// The most the human-context section of a prompt may take, in bytes.
 const HUMAN_CONTEXT_CAP: usize = 6000;
-/// How many open follow-ups a reviewer is shown.
-const FOLLOW_UPS_CAP: usize = 40;
-
 /// The most the answers may take of the human-context section, so notes keep the rest.
 const ANSWERS_CAP: usize = 4000;
+
+/// How many open follow-ups a reviewer is shown.
+const FOLLOW_UPS_CAP: usize = 40;
 
 /// The follow-ups earlier reviews of the task filed, so a reviewer doesn't file a reworded copy of one, or leave one
 /// open that the change has since fixed.
@@ -469,7 +469,9 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              Task:\n{desc}{human}\n\n\
              Work in this checkout and follow the repo's conventions (AGENTS.md). Make the change, add or update \
              tests, and run the repo's formatter, linter and tests. You don't need to commit or push; everything \
-             you change in the checkout is published as one commit and a PR. If only a human can answer something \
+             you change in the checkout is published as one commit and a PR. Don't create nested git repositories in \
+             the checkout (no `git init` or `git clone` inside it): the parent's `git add --all` warns about an \
+             embedded repository, or fails if it has no commit. If only a human can answer something \
              you need, stop and give needs_input with the question. A blocker in your environment (the network, a \
              missing tool, credentials) is needs_input, not failed: another attempt would meet the same blocker, \
              so say what is missing. If the task can't be done for another reason, give failed and say \
@@ -691,10 +693,11 @@ async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
 /// Reads one changed path into `changes`. Git lists a directory only as an embedded repository (a gitlink),
 /// so a directory is replaced by the files its own git tracks or would add, never `.git`. A symlink to a
 /// directory can't be expressed as a `FileChange`, and following it would read outside the worktree, so it
-/// fails the run naming the path.
+/// fails the run naming the path. A file the embedded repository lists but that is gone from disk (staged, then
+/// deleted) is skipped: the parent's base tree never had it, so publishing a deletion could be rejected.
 async fn read_change(dir: &Path, path: String, changes: &mut Vec<FileChange>) -> Result<()> {
-    let mut pending = vec![path];
-    while let Some(path) = pending.pop() {
+    let mut pending = vec![(path, false)];
+    while let Some((path, expanded)) = pending.pop() {
         let full = dir.join(&path);
         let fail = |e: std::io::Error| Error::Other(format!("{path}: {e}"));
         let meta = match tokio::fs::symlink_metadata(&full).await {
@@ -707,7 +710,7 @@ async fn read_change(dir: &Path, path: String, changes: &mut Vec<FileChange>) ->
             for name in listed.split(|b| *b == 0).filter(|n| !n.is_empty()) {
                 let name = String::from_utf8_lossy(name);
                 if name != ".git" && !name.starts_with(".git/") {
-                    pending.push(format!("{path}/{name}"));
+                    pending.push((format!("{path}/{name}"), true));
                 }
             }
             continue;
@@ -717,6 +720,7 @@ async fn read_change(dir: &Path, path: String, changes: &mut Vec<FileChange>) ->
         }
         let contents = match tokio::fs::read(&full).await {
             Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && expanded => continue,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(fail(e)),
         };
@@ -825,6 +829,21 @@ mod tests {
         paths.sort();
         let base = ".claude/skills/trailhead-ui";
         assert_eq!(paths, [".gitignore", "SKILL.md", "refs/b.md"].map(|p| format!("{base}/{p}")));
+    }
+
+    #[tokio::test]
+    async fn a_file_deleted_from_an_embedded_repository_is_not_published() {
+        let (dir, start) = started().await;
+        let inner = dir.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("keep"), "a").unwrap();
+        std::fs::write(inner.join("gone"), "b").unwrap();
+        run_git(&["init", "-q"], &inner);
+        run_git(&["add", "--all"], &inner);
+        run_git(&["commit", "-q", "-m", "inner"], &inner);
+        std::fs::remove_file(inner.join("gone")).unwrap();
+        let paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
+        assert_eq!(paths, ["inner/keep"]);
     }
 
     #[tokio::test]

@@ -53,7 +53,7 @@ pub struct FactoryConfig {
     pub merge: MergeConfig,
 }
 
-/// `[merge]`: what the merger does with a PR whose gates passed (`docs/factory/review.md#the-merger`).
+/// `[factory.merge]`: what the merger does with a PR whose gates passed (`docs/factory/review.md#the-merger`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeConfig {
@@ -75,7 +75,7 @@ pub enum MergeMode {
     On,
 }
 
-/// `[grades]`: path globs that raise a PR to at least grade 2, 3 or 4 (keyed by the grade), and the diff size over
+/// `[factory.grades]`: path globs that raise a PR to at least grade 2, 3 or 4 (keyed by the grade), and the diff size over
 /// which it is at least grade 3 (`docs/factory/review.md#grades`). Without the section, the defaults of the example
 /// there; with it, the rules it lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,7 +199,8 @@ pub enum ComputeConfig {
         /// more. Defaults to 10 GiB.
         min_free_bytes: Option<u64>,
         /// How many sandboxes may checkpoint at once, which the free-disk check reserves room for. Defaults to 2; set it
-        /// to the pool size (`max_sandboxes`) for a pool that is not two.
+        /// to the pool size (`max_sandboxes`) for a pool that is not two. At least 1.
+        #[serde(default, deserialize_with = "checkpoints_at_least_one")]
         concurrent_checkpoints: Option<u64>,
     },
 }
@@ -219,6 +220,19 @@ fn check_memory_mib(mib: Option<u64>) -> std::result::Result<Option<u64>, String
 
 fn memory_mib_at_least_min<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<u64>, D::Error> {
     check_memory_mib(Option::<u64>::deserialize(d)?).map_err(serde::de::Error::custom)
+}
+
+fn check_concurrent_checkpoints(n: Option<u64>) -> std::result::Result<Option<u64>, String> {
+    match n {
+        Some(0) => Err("`concurrent_checkpoints` is 0, which would turn off the disk reservation for checkpoints; \
+                        it must be at least 1 (omit it for the default)"
+            .into()),
+        other => Ok(other),
+    }
+}
+
+fn checkpoints_at_least_one<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<u64>, D::Error> {
+    check_concurrent_checkpoints(Option::<u64>::deserialize(d)?).map_err(serde::de::Error::custom)
 }
 
 /// `[factory.targets.<name>]`: one place sandboxes can run, with its compute's settings and its limits
@@ -280,7 +294,7 @@ impl TryFrom<RawTarget> for TargetConfig {
                 runtime: raw.runtime,
                 memory_mib: check_memory_mib(raw.memory_mib)?,
                 min_free_bytes: raw.min_free_bytes,
-                concurrent_checkpoints: raw.concurrent_checkpoints,
+                concurrent_checkpoints: check_concurrent_checkpoints(raw.concurrent_checkpoints)?,
             },
             other => return Err(format!("unknown kind `{other}`; the kinds are sprites and docker")),
         };
@@ -1060,10 +1074,11 @@ mod tests {
         assert!(config.prepare_request(Role::Reviewer, None).tool_hosts.is_empty());
         assert_eq!(config.prepare_request(Role::Worker, None).tools, config.stack.tools);
         let mut documented = GradesConfig::default();
-        documented.rules.get_mut("3").unwrap().push("clients/**".into());
+        documented.rules.get_mut("2").unwrap().push("clients/**".into());
+        documented.rules.get_mut("3").unwrap().push("clients/*/src/**".into());
         assert_eq!(
             config.grades, documented,
-            "this repo's rules are the documented example, plus clients/** (TRAIL-703)"
+            "this repo's rules are the documented example, plus clients/** at 2 and its src at 3 (TRAIL-1390)"
         );
         assert_eq!(config.merge.mode, MergeMode::On);
         assert!(config.gate(gr(1)).auto_merge);
@@ -1445,6 +1460,11 @@ require = ["checks", "agent_review", "human"]
             panic!("not docker")
         };
         assert_eq!(concurrent_checkpoints, Some(4));
+        for table in ["compute", "targets.t"] {
+            let zero = format!("{SAMPLE}\n[{table}]\nkind = \"docker\"\nconcurrent_checkpoints = 0\n");
+            let Err(Error::Config(m)) = parse(&zero) else { panic!("{table}: expected a config error") };
+            assert!(m.contains("concurrent_checkpoints"), "{m}");
+        }
         let sprites = format!("{SAMPLE}\n[targets.t]\nkind = \"sprites\"\nmin_free_bytes = 1\n");
         assert!(matches!(parse(&sprites), Err(Error::Config(_))));
         let least = format!("{SAMPLE}\n[compute]\nkind = \"docker\"\nmemory_mib = 512\n");

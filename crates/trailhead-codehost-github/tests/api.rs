@@ -13,8 +13,8 @@ use base64::Engine;
 use serde_json::{Value, json};
 use trailhead_codehost_github::{GitHub, Identity};
 use trailhead_factory::{
-    BranchUpdate, ChangedFile, CodeHost, Commit, Error, FileChange, FileStatus, MergeOutcome, NewPr, PrRef, PrState,
-    RateLimit, Repo,
+    BranchUpdate, ChangedFile, CiState, CodeHost, Commit, Error, FileChange, FileStatus, MergeOutcome, NewPr, PrRef,
+    PrState, RateLimit, Repo,
 };
 
 #[derive(Default)]
@@ -318,7 +318,11 @@ fn etagged(g: &mut Git, headers: &HeaderMap, body: Value) -> Response {
 
 async fn check_runs(State(g): State<Shared>, headers: HeaderMap) -> Response {
     let mut g = g.lock().unwrap();
-    let runs = json!({ "check_runs": [{ "name": "ci", "status": "completed", "conclusion": "success" }] });
+    // The second run is one GitHub left `in_progress` with a conclusion, which must not hold CI pending.
+    let runs = json!({ "check_runs": [
+        { "name": "ci", "status": "completed", "conclusion": "success" },
+        { "name": "machete", "status": "in_progress", "conclusion": "success" },
+    ] });
     etagged(&mut g, &headers, runs)
 }
 
@@ -862,6 +866,7 @@ async fn unchanged_pr_reads_are_conditional_and_answered_from_the_cache() {
 
     // CI on the same head: the first pass reads everything, the second only revalidates.
     let ci = gh.ci(&pr).await.unwrap();
+    assert_eq!(ci.state, CiState::Passed);
     assert_eq!(gh.ci(&pr).await.unwrap(), ci);
     {
         let g = git.lock().unwrap();
@@ -958,4 +963,36 @@ async fn open_prs_lists_a_base_oldest_first_with_auto_merge_paged_and_cached() {
         let g = git.lock().unwrap();
         assert_eq!((g.full_reads, g.not_modified), (2, 2));
     }
+}
+
+#[tokio::test]
+async fn open_prs_paging_at_a_full_page_and_at_the_cap() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let fill = |count: u64| {
+        let mut g = git.lock().unwrap();
+        g.prs.clear();
+        for n in 1..=count {
+            g.prs.push(json!({
+                "number": n, "html_url": format!("https://github.test/pull/{n}"), "head": format!("b{n}"),
+                "base": "main", "state": "open", "created_at": n, "auto_merge": null,
+            }));
+        }
+        g.full_reads = 0;
+        g.not_modified = 0;
+    };
+
+    // Exactly a hundred: the full page can't say it's the last, so the empty second page is read and ends it.
+    fill(100);
+    let open = gh.open_prs(&repo(), "main").await.unwrap();
+    assert_eq!(open.iter().map(|o| o.pr.number).collect::<Vec<_>>(), (1..=100u64).collect::<Vec<_>>());
+    assert_eq!(git.lock().unwrap().full_reads, 2);
+
+    // Past the cap (five pages of a hundred), paging stops: the first 500 come back and no sixth page is read.
+    fill(550);
+    let open = gh.open_prs(&repo(), "main").await.unwrap();
+    assert_eq!(open.iter().map(|o| o.pr.number).collect::<Vec<_>>(), (1..=500u64).collect::<Vec<_>>());
+    // (Page 1 is the same as the last call's, so it revalidates instead of reading in full.)
+    let g = git.lock().unwrap();
+    assert_eq!(g.full_reads + g.not_modified, 5);
 }
