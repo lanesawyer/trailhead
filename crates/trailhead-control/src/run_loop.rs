@@ -255,15 +255,12 @@ impl Factory {
 
     /// The sandboxes in the cap held for tasks this process isn't running: parked tasks', mostly.
     async fn held_by_others(&self, busy: &HashSet<TaskKey>) -> Result<Others> {
-        let mut seen = HashSet::new();
         let others = self
             .occupied_after_release(busy)
             .await?
             .iter()
             .map(|s| s.labels.get(label::TASK).map(|t| TaskKey(t.clone())))
             .filter(|t| t.as_ref().is_none_or(|t| !busy.contains(t)))
-            // A task holds one place however many sandboxes still carry its label (TRAIL-1185).
-            .filter(|t| t.as_ref().is_none_or(|t| seen.insert(t.clone())))
             .collect();
         Ok(Others(others))
     }
@@ -527,6 +524,8 @@ impl Factory {
     /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened, cancelled or finished are
     /// released. A parked task keeps its sandbox, so without this the place stays taken until the next reconcile
     /// (TRAIL-108, TRAIL-257). A reopened task's next attempt starts from a fresh checkout with the answer in its prompt.
+    /// A task holds one pooled sandbox: any other still labelled for it is left over from an earlier attempt and is
+    /// released too (TRAIL-1185).
     async fn occupied_after_release(&self, running: &HashSet<TaskKey>) -> Result<Vec<Sandbox>> {
         let held = self.occupied().await?;
         let candidates: Vec<&Sandbox> = held
@@ -554,7 +553,7 @@ impl Factory {
                 HashMap::new()
             }
         };
-        for sandbox in candidates {
+        for sandbox in candidates.iter().copied() {
             let Some(key) = sandbox.labels.get(label::TASK) else { continue };
             let found = match listed.get(&TaskKey(key.clone())) {
                 Some(task) => Ok(task.clone()),
@@ -570,6 +569,15 @@ impl Factory {
                         && matches!(task.status, Status::NeedsInput | Status::InProgress | Status::InReview) =>
                 {
                     tracing::info!(task = %task.key, sandbox = %sandbox.name, "a task left the factory queue; releasing its sandbox");
+                    let mut done = Reconciled::default();
+                    self.reconcile_pooled(sandbox, &mut done).await;
+                    if !done.released.is_empty() || !done.abandoned.is_empty() || !done.destroyed.is_empty() {
+                        released.push(sandbox.name.clone());
+                    }
+                    continue;
+                }
+                Ok(task) if !keeps(&task, sandbox, &candidates) => {
+                    tracing::info!(task = %task.key, sandbox = %sandbox.name, "a task holds another pooled sandbox; releasing this stale one");
                     let mut done = Reconciled::default();
                     self.reconcile_pooled(sandbox, &mut done).await;
                     if !done.released.is_empty() || !done.abandoned.is_empty() || !done.destroyed.is_empty() {
@@ -754,6 +762,22 @@ fn in_start_order(mut ready: Vec<Task>) -> Vec<Task> {
     let rework = |t: &Task| t.changes_requested || (t.run.pr.is_some() && t.run.pending_changes().is_some());
     ready.sort_by_key(|t| (t.priority, !rework(t)));
     ready
+}
+
+/// Whether `sandbox` is the one pooled sandbox `task` keeps among `candidates` labelled for it: the one it last ran
+/// on, as the tracker recorded it (the same choice `acquire_worker` makes), else the first by name.
+fn keeps(task: &Task, sandbox: &Sandbox, candidates: &[&Sandbox]) -> bool {
+    let mine: Vec<&str> = candidates
+        .iter()
+        .filter(|s| s.labels.get(label::TASK).is_some_and(|t| *t == task.key.0))
+        .map(|s| s.name.as_str())
+        .collect();
+    if mine.len() < 2 {
+        return true;
+    }
+    let recorded = task.run.host.as_deref().or(task.run.sandbox.as_deref());
+    let kept = recorded.filter(|r| mine.contains(r)).or_else(|| mine.iter().copied().min());
+    kept == Some(sandbox.name.as_str())
 }
 
 #[cfg(test)]

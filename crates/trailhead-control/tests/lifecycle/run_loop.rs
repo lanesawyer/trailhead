@@ -764,12 +764,15 @@ async fn a_task_holds_one_pooled_sandbox_so_a_stale_label_doesnt_fill_the_cap() 
     r.compute.create(&spec).await.unwrap();
     assert_eq!(r.compute.sandboxes().len(), 2);
 
-    // Both count as one place, so the other task still has room.
+    // The stale one is released, so the other task starts without a third sandbox past the cap.
     let next = r.tracker.add_task("TRAIL", "Next", "");
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let ran = r.factory.tick().await.unwrap();
     assert!(ran.iter().any(|(t, _)| t.key == next), "the other task started");
+    assert_eq!(r.compute.sandboxes().len(), 2, "no third sandbox");
+    let kept = r.compute.get("trailhead-w1").unwrap();
+    assert_eq!(kept.labels.get(label::TASK), Some(&key.0), "the parked task keeps the sandbox it ran on");
 }
 
 #[tokio::test]
