@@ -148,9 +148,14 @@ pub fn is_check_definition(path: &str) -> bool {
     CHECK_DEFINITION_SET.is_match(path)
 }
 
-/// The files whose patch the grader reads: a `Cargo.lock`, and Rust sources. The code host keeps a patch only for these.
+/// Whether `name` is a lockfile whose patch is read for dependency-list-only edits.
+fn is_read_lockfile(name: &str) -> bool {
+    matches!(name, "Cargo.lock" | "uv.lock" | "package-lock.json")
+}
+
+/// The files whose patch the grader reads: a `Cargo.lock`, `uv.lock` or `package-lock.json`, and Rust sources. The code host keeps a patch only for these.
 pub fn reads_patch(path: &str) -> bool {
-    path.ends_with(".rs") || path.rsplit('/').next() == Some("Cargo.lock")
+    path.ends_with(".rs") || is_read_lockfile(path.rsplit('/').next().unwrap_or(path))
 }
 
 /// Whether a Rust file's patch only changes comments: every added or removed line is blank or starts with `//` (so
@@ -170,21 +175,57 @@ pub fn is_comment_only(patch: &str) -> bool {
     changed > 0
 }
 
-/// Whether a `Cargo.lock` patch only edits dependency lists: no package added or removed, no version, source or
+/// Whether a lockfile's patch only edits dependency lists: no package added or removed, no version, source or
 /// checksum changed. That is a workspace member gaining or losing a dependency that is already locked, which brings in
-/// nothing new to fetch. Anything else (including a line it can't read) is not safe.
-pub fn is_dependency_list_only(patch: &str) -> bool {
+/// nothing new to fetch. Anything else (a lockfile it doesn't read, or a line it can't read) is not safe.
+///
+/// Read: `Cargo.lock`, `uv.lock` and `package-lock.json`. `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `go.sum` and
+/// `Gemfile.lock` put a dependency's version where a patch can't tell it from a new one, so they stay raised.
+pub fn is_dependency_list_only(path: &str, patch: &str) -> bool {
+    let line_ok: fn(&str) -> bool = match path.rsplit('/').next() {
+        Some("Cargo.lock") => cargo_line_ok,
+        Some("uv.lock") => uv_line_ok,
+        Some("package-lock.json") => npm_line_ok,
+        _ => return false,
+    };
     let mut changed = 0;
     for line in patch.lines() {
         let Some(rest) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) else { continue };
         changed += 1;
-        let rest = rest.trim();
-        let entry = rest.starts_with('"') && rest.ends_with("\",");
-        if !(entry || rest == "dependencies = [" || rest == "]") {
+        if !line_ok(rest.trim()) {
             return false;
         }
     }
     changed > 0
+}
+
+fn cargo_line_ok(line: &str) -> bool {
+    (line.starts_with('"') && line.ends_with("\",")) || line == "dependencies = [" || line == "]"
+}
+
+/// `uv.lock` lists a dependency as an inline table, `{ name = "x" },`, in `dependencies` and in the member's
+/// `requires-dist`. A table that says where to fetch from is a new source.
+fn uv_line_ok(line: &str) -> bool {
+    const SOURCES: [&str; 7] = ["url", "git", "path", "registry", "directory", "editable", "virtual"];
+    let entry = line.starts_with("{ name = \"")
+        && line.trim_end_matches(',').ends_with('}')
+        && !SOURCES.iter().any(|k| line.contains(&format!(", {k} = ")));
+    entry || matches!(line, "dependencies = [" | "[package.metadata]" | "requires-dist = [" | "]")
+}
+
+/// `package-lock.json` lists a dependency as `"name": "range"` inside a `dependencies` object. A `version` or
+/// `resolved` has the same shape, and a range that is a URL, path, git spec or alias fetches something new.
+fn npm_line_ok(line: &str) -> bool {
+    const OBJECTS: [&str; 4] =
+        ["\"dependencies\": {", "\"devDependencies\": {", "\"peerDependencies\": {", "\"optionalDependencies\": {"];
+    if OBJECTS.contains(&line) || line == "}" || line == "}," {
+        return true;
+    }
+    let Some((name, range)) = line.trim_end_matches(',').split_once("\": \"") else { return false };
+    let Some(range) = range.strip_suffix('"') else { return false };
+    let name = name.strip_prefix('"').unwrap_or_default();
+    let not_a_dependency = matches!(name, "version" | "resolved" | "integrity" | "name" | "license");
+    !not_a_dependency && !name.contains('"') && !range.contains(['"', ':', '/', '\\'])
 }
 
 /// Floor of a deleted or renamed test, or an edited check's definition: never grade 1.
@@ -211,7 +252,7 @@ impl Grader<'_> {
         // (grade, reason) per finding.
         let mut found: Vec<(Grade, String)> = Vec::new();
         // Compiled once for all files, not per file and glob.
-        // Each rule twice: all its globs, and without the ones naming `Cargo.lock` itself, for a lock that only edits
+        // Each rule twice: all its globs, and without the ones naming a lockfile read below, for a lock that only edits
         // dependency lists. A broader glob that happens to cover it (`crates/**`) still counts.
         let rules: Vec<(Grade, globset::GlobSet, globset::GlobSet)> = self
             .rules
@@ -219,14 +260,13 @@ impl Grader<'_> {
             .map(|(grade, globs)| {
                 let all = compile_glob_set(globs.iter().map(String::as_str));
                 let rest = compile_glob_set(
-                    globs.iter().map(String::as_str).filter(|g| g.rsplit('/').next() != Some("Cargo.lock")),
+                    globs.iter().map(String::as_str).filter(|g| !is_read_lockfile(g.rsplit('/').next().unwrap_or(g))),
                 );
                 (*grade, all, rest)
             })
             .collect();
         for f in files {
-            let lock_edit = f.path.rsplit('/').next() == Some("Cargo.lock")
-                && f.patch.as_deref().is_some_and(is_dependency_list_only);
+            let lock_edit = f.patch.as_deref().is_some_and(|p| is_dependency_list_only(&f.path, p));
             let rule = rules
                 .iter()
                 .filter(|(_, all, rest)| if lock_edit { rest } else { all }.is_match(&f.path))
@@ -456,6 +496,40 @@ mod tests {
         assert_eq!(grader(&r).grade(Some(gr(1)), &[file("crates/a/src/lib.rs", FileStatus::Modified, 1)]).grade, gr(2));
     }
 
+    #[test]
+    fn other_lockfiles_are_read_by_what_changed_too() {
+        let r = rules();
+        let r =
+            Rules { four: vec!["**/uv.lock".into(), "**/package-lock.json".into(), "**/pnpm-lock.yaml".into()], ..r };
+        let grade = |path: &str, patch: &str| {
+            let f = ChangedFile { patch: Some(patch.into()), ..modified(path) };
+            grader(&r).grade(Some(gr(1)), &[f]).grade
+        };
+        let uv = "@@ -9,6 +9,7 @@\n dependencies = [\n+    { name = \"requests\" },\n ]\n+requires-dist = [\n+    { name = \"requests\", specifier = \">=2\" },\n+]";
+        assert_eq!(grade("uv.lock", uv), gr(1));
+        for bad in [
+            "+    { name = \"x\", git = \"https://x\" },",
+            "+    { name = \"x\", url = \"https://x\" },",
+            "+version = \"1.0.0\"",
+            "+[[package]]",
+        ] {
+            assert_eq!(grade("py/uv.lock", bad), gr(4), "{bad}");
+        }
+        let npm = "@@ -5,6 +5,7 @@\n       \"dependencies\": {\n-        \"a\": \"^1.0.0\"\n+        \"a\": \"^1.0.0\",\n+        \"b\": \"~2.1.0\"\n       }";
+        assert_eq!(grade("web/package-lock.json", npm), gr(1));
+        for bad in [
+            "+        \"version\": \"1.0.0\"",
+            "+        \"resolved\": \"https://r/x.tgz\"",
+            "+        \"b\": \"github:evil/b\"",
+            "+        \"b\": \"file:../b\"",
+            "+    \"node_modules/b\": {",
+            "+        \"integrity\": \"sha512-aa\"",
+        ] {
+            assert_eq!(grade("package-lock.json", bad), gr(4), "{bad}");
+        }
+        // Their versions look like dependencies in a patch, so these stay raised.
+        assert_eq!(grade("pnpm-lock.yaml", "+      lodash:\n+        version: 4.17.21"), gr(4));
+    }
     #[test]
     fn many_reasons_are_counted() {
         let r = rules();
