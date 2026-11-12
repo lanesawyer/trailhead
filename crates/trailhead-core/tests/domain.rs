@@ -1429,6 +1429,17 @@ async fn similar_tasks_counts_capitalized_two_letter_acronyms() {
 }
 
 #[tokio::test]
+async fn similar_tasks_ignores_two_letter_function_words_in_all_caps_titles() {
+    let env = Env::new().await;
+    env.task("MOVE DB TO PG").await;
+    // Shared function words (TO) are not enough to match.
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "SEND IT TO OR IN ON", None).await.unwrap().is_empty());
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "FIX BUG TO ON PG", None).await.unwrap().is_empty());
+    // Acronyms still count.
+    assert_eq!(env.store.similar_tasks(&env.human, "AUTH", "DB PG", None).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn listing_by_title_ignores_case_and_surrounding_space() {
     let env = Env::new().await;
     let wanted = env.task("Cover the edge").await;
@@ -1540,4 +1551,81 @@ async fn with_unfinished_blockers_names_only_tasks_held_up_by_open_blockers() {
     let ids = [held.id, freed.id, free.id];
     let blocked = env.store.with_unfinished_blockers(&ids).await.unwrap();
     assert_eq!(blocked, std::collections::HashSet::from([held.id]));
+}
+
+#[tokio::test]
+async fn a_lapsing_claim_returns_to_review_after_the_claim_is_undone_and_redone() {
+    let env = Env::new().await;
+    let s = &env.store;
+    let a = env.agent("a").await;
+    let t = env.task("reworked after undo").await;
+    s.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
+    s.add_comment(&env.human, &t.key, NewComment::review(Verdict::RequestChanges, "fix it")).await.unwrap();
+
+    // Claim, undo the claim (back to in_review), then undo that undo (claimed again).
+    let claim = a.next_batch();
+    s.claim(&claim, &t.key, Some(60)).await.unwrap();
+    let undo = env.human.next_batch();
+    s.undo_batch(&undo, claim.batch_id).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::InReview);
+    s.undo_batch(&env.human.next_batch(), undo.batch_id).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::InProgress);
+
+    // The lapsed lease still goes back to review.
+    env.advance(120);
+    s.reap_expired_claims(&env.human).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::InReview);
+}
+
+#[tokio::test]
+async fn a_lapsing_claim_ignores_an_undone_claim_from_review() {
+    let env = Env::new().await;
+    let s = &env.store;
+    let a = env.agent("a").await;
+    let t = env.task("claimed from open after an undone claim").await;
+    s.update_task(&env.human, &t.key, status(Status::InReview), None).await.unwrap();
+    s.add_comment(&env.human, &t.key, NewComment::review(Verdict::RequestChanges, "fix it")).await.unwrap();
+
+    // Claim from review, undo it, send the task back to open, then claim it from there.
+    let claim = a.next_batch();
+    s.claim(&claim, &t.key, None).await.unwrap();
+    s.undo_batch(&env.human.next_batch(), claim.batch_id).await.unwrap();
+    s.update_task(&env.human, &t.key, status(Status::Open), None).await.unwrap();
+    s.claim(&a, &t.key, Some(60)).await.unwrap();
+    env.advance(120);
+    s.reap_expired_claims(&env.human).await.unwrap();
+    assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::Open);
+}
+
+#[tokio::test]
+async fn blocks_and_duplicates_sort_by_key_number() {
+    let env = Env::new().await;
+    let root = env.task("root").await;
+    let late = env.task("late").await;
+    let early = env.task("early").await;
+    // Keys only reach four digits after a long time, so rewrite them.
+    let prefix = root.key.0.rsplit_once('-').unwrap().0.to_string();
+    let conn = env.raw_conn().await;
+    for (task, n) in [(&late, 1000), (&early, 999)] {
+        conn.execute(
+            "UPDATE tasks SET key = ?1 WHERE id = ?2",
+            libsql::params![format!("{prefix}-{n}"), task.id.to_string()],
+        )
+        .await
+        .unwrap();
+    }
+    let keys = [format!("{prefix}-999"), format!("{prefix}-1000")];
+    for key in &keys {
+        env.store.add_dependency(&env.human, &root.key, key).await.unwrap();
+        let cancel = TaskPatch {
+            status: Some(Status::Cancelled),
+            duplicate_of: Some(Some(root.key.0.clone())),
+            ..Default::default()
+        };
+        env.store.update_task(&env.human, key, cancel, None).await.unwrap();
+    }
+    let d = env.store.task_detail(&env.human, &root.key).await.unwrap();
+    let got = |v: &[trailhead_core::TaskKey]| v.iter().map(|k| k.0.clone()).collect::<Vec<_>>();
+    assert_eq!(got(&d.blocks), keys);
+    assert_eq!(got(&d.duplicates), keys);
 }

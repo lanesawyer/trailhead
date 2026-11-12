@@ -150,6 +150,8 @@ pub enum LogUpdate {
     /// The lines the control plane has kept, replacing what was shown; first on every connection.
     Backlog(Vec<LogLine>),
     Line(LogLine),
+    /// This many lines were missed because Lookout fell behind.
+    Skipped(u64),
     /// The stream dropped; it is being retried.
     Dropped,
     /// The control plane doesn't serve logs, so it is older than this Lookout. Carries the message to show.
@@ -562,6 +564,7 @@ async fn follow_logs(
         let update = match frame {
             LogFrame::Backlog { lines } => LogUpdate::Backlog(lines),
             LogFrame::Line(line) => LogUpdate::Line(line),
+            LogFrame::Skipped { count } => LogUpdate::Skipped(count),
             LogFrame::Unsupported(_) => return Ok(Some(NO_LOGS.into())),
         };
         if events.send(NetEvent::Logs(update)).is_err() {
@@ -794,7 +797,7 @@ impl Net {
             Err(e) => return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string()))),
         };
         // The user token only: an agent's would let Lookout act as one.
-        if me["agent"]["name"].as_str().is_some() {
+        if !me["agent_id"].is_null() {
             self.token = None;
             self.resume.clear();
             return match pasted {
@@ -921,7 +924,7 @@ impl Net {
             let _ = events.send(NetEvent::Reply(Reply { id, attempt, result }));
         };
         let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
-            return reply(Err("not connected".into()));
+            return reply(Err(commands::NOT_CONNECTED.into()));
         };
         let (http, token) = (self.http.clone(), token.clone());
         tokio::spawn(async move { reply(commands::execute(&http, &base, &token, &request).await) });

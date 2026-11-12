@@ -1,3 +1,5 @@
+//! The task modal: the inspector for a task, opened over the board and closed to clear the selection.
+
 use super::*;
 
 /// The task modal: the inspector for a task, in the middle of the window, laid out as a main column and a sidebar
@@ -485,6 +487,26 @@ mod tests {
         let acts =
             app.world_mut().query::<&Shown>().iter(app.world()).filter(|s| matches!(s.0, Block::Act { .. })).count();
         assert_eq!(acts, 0);
+    }
+
+    #[test]
+    fn a_read_only_sidebar_shows_the_grade_as_a_badge_not_text() {
+        let mut app = app();
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 302, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
+            "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_review", "priority": 1,
+                      "grade": 2, "version": 5})),
+        })));
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Offline);
+        settle(&mut app);
+        let badges: Vec<Grade> = app
+            .world_mut()
+            .query::<&Shown>()
+            .iter(app.world())
+            .filter_map(|s| if let Block::GradeBadge(g) = s.0 { Some(g) } else { None })
+            .collect();
+        assert!(badges.contains(&Grade::new(2).unwrap()), "{badges:?}");
+        assert!(!texts(&mut app).iter().any(|t| t.starts_with("Grade:")));
     }
 
     fn arrow(app: &mut App, step: Step) -> Entity {

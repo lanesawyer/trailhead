@@ -1,3 +1,5 @@
+//! In-place editing of a task's fields from the modal.
+
 use super::*;
 
 /// A field of a task the modal edits in place.

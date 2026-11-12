@@ -71,6 +71,24 @@ pub const HOME: &str = "/home/trailhead";
 /// How many trailing lines of a program's log `logs` returns.
 const LOG_LINES: usize = 3000;
 
+/// The tail of `bytes` holding its last `lines` lines (a final line without a newline counts).
+fn last_lines(bytes: &[u8], lines: usize) -> &[u8] {
+    if lines == 0 {
+        return &[];
+    }
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let mut seen = 0;
+    for (i, b) in body.iter().enumerate().rev() {
+        if *b == b'\n' {
+            seen += 1;
+            if seen == lines {
+                return &bytes[i + 1..];
+            }
+        }
+    }
+    bytes
+}
+
 /// The last `lines` lines of the file in a `docker cp` archive of one file.
 fn log_from_archive(raw: &[u8], lines: usize) -> Result<String> {
     let bad = |e: std::io::Error| Error::Other(format!("log archive: {e}"));
@@ -80,10 +98,10 @@ fn log_from_archive(raw: &[u8], lines: usize) -> Result<String> {
         if !entry.header().entry_type().is_file() {
             continue;
         }
-        let mut text = String::new();
-        std::io::Read::read_to_string(&mut entry, &mut text).map_err(bad)?;
-        let skip = text.lines().count().saturating_sub(lines);
-        return Ok(text.split_inclusive('\n').skip(skip).collect());
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).map_err(bad)?;
+        // Trim on the bytes, then decode lossily as the exec path does, so a log with stray bytes still reads.
+        return Ok(String::from_utf8_lossy(last_lines(&bytes, lines)).into_owned());
     }
     Err(Error::NotFound("log archive holds no file".into()))
 }
@@ -454,21 +472,15 @@ impl DockerCompute {
 
     /// The size in bytes and the name of the checkpoint image that sets the sandbox's disk need: the largest of its own
     /// (a stale image of another sandbox must not hold its runs back), or, while it has none, the largest
-    /// `trailhead-checkpoint` image on the host. `None` if there is none or they can't be listed (the check then falls
-    /// back to the container's own size).
-    async fn largest_checkpoint(&self, id: &SandboxId) -> Option<(u64, String)> {
+    /// `trailhead-checkpoint` image on the host. `Ok(None)` if there is none; `Err` if they can't be listed (the check
+    /// then falls back to the container's own size).
+    async fn largest_checkpoint(&self, id: &SandboxId) -> Result<Option<(u64, String)>, bollard::errors::Error> {
         let filter = vec![CHECKPOINT_REPO.to_string()];
         let opts = ListImagesOptions {
             filters: Some(HashMap::from([("reference".to_string(), filter)])),
             ..Default::default()
         };
-        match self.docker.list_images(Some(opts)).await {
-            Ok(images) => checkpoint_of(&id.0, &images),
-            Err(e) => {
-                tracing::warn!(error = %e, "couldn't list checkpoint images to size the disk a run needs");
-                None
-            }
-        }
+        Ok(checkpoint_of(&id.0, &self.docker.list_images(Some(opts)).await?))
     }
 
     async fn sandbox(&self, name: &str) -> Result<Sandbox> {
@@ -711,11 +723,14 @@ impl Compute for DockerCompute {
         let fs = info.size_root_fs.unwrap_or(0).max(0) as u64;
         // A new sandbox's filesystem is small, but its checkpoint after prepare is not: size the need by its own
         // largest checkpoint image, or the host's largest while it has none.
-        let checkpoint = self.largest_checkpoint(id).await;
-        let (size, checkpoint) = disk_size(fs, checkpoint.as_ref());
+        let listed = self.largest_checkpoint(id).await;
+        if let Err(e) = &listed {
+            tracing::warn!(error = %e, "couldn't list checkpoint images to size the disk a run needs");
+        }
+        let (size, checkpoint) = disk_size(fs, listed.as_ref().ok().and_then(Option::as_ref));
         let need = disk_needed(self.config.min_free_bytes, self.config.concurrent_checkpoints, size);
         if free < need {
-            return Err(Error::Unavailable(disk_short(&id.0, free, need, fs, checkpoint)));
+            return Err(Error::Unavailable(disk_short(&id.0, free, need, fs, listed.is_ok(), checkpoint)));
         }
         Ok(())
     }
@@ -852,10 +867,22 @@ fn full_disk(msg: &str) -> bool {
 
 /// The message for a sandbox short of disk, naming both sizes the need could rest on so an operator knows what to
 /// free: the container's filesystem, or the largest checkpoint image (which `docker rmi` frees if it is stale).
-fn disk_short(sandbox: &str, free: u64, need: u64, fs: u64, checkpoint: Option<&(u64, String)>) -> String {
+///
+/// `listed` is whether the checkpoint images could be listed: if not, their size is unknown rather than absent.
+fn disk_short(
+    sandbox: &str,
+    free: u64,
+    need: u64,
+    fs: u64,
+    listed: bool,
+    checkpoint: Option<&(u64, String)>,
+) -> String {
     let checkpoint = match checkpoint {
-        Some((big, name)) => format!("largest checkpoint {} MiB, image {name}", big >> 20),
-        None => "no checkpoint image".to_string(),
+        Some((big, name)) => {
+            format!("largest checkpoint {} MiB, image {name}; `docker rmi {name}` frees it if it is stale", big >> 20)
+        }
+        None if listed => "no checkpoint image".to_string(),
+        None => "checkpoint size unknown, the images couldn't be listed".to_string(),
     };
     format!(
         "sandbox {sandbox}: only {} MiB of disk free, below the {} MiB a task and its checkpoint need (filesystem {} MiB, {checkpoint}); free up space on the Docker host (docker system df)",
@@ -1103,10 +1130,13 @@ mod tests {
     #[test]
     fn the_disk_short_message_names_the_filesystem_and_the_largest_checkpoint() {
         let mib = 1u64 << 20;
-        let both = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, Some(&(800 * mib, "cp:1".into())));
+        let both = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, true, Some(&(800 * mib, "cp:1".into())));
         assert!(both.contains("filesystem 300 MiB, largest checkpoint 800 MiB, image cp:1"), "{both}");
-        let none = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, None);
+        assert!(both.contains("`docker rmi cp:1`"), "{both}");
+        let none = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, true, None);
         assert!(none.contains("filesystem 300 MiB, no checkpoint image"), "{none}");
+        let unknown = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, false, None);
+        assert!(unknown.contains("filesystem 300 MiB, checkpoint size unknown"), "{unknown}");
     }
 
     #[test]
@@ -1200,6 +1230,9 @@ mod tests {
         let raw = tar_of(&[("log", b"a\nb\nc\n", 0o644, 0, 0)], &[]).unwrap();
         assert_eq!(log_from_archive(&raw, 2).unwrap(), "b\nc\n");
         assert_eq!(log_from_archive(&raw, 10).unwrap(), "a\nb\nc\n");
+        assert_eq!(log_from_archive(&raw, 0).unwrap(), "");
+        let raw = tar_of(&[("log", b"a\nb\xff\xe2\x82", 0o644, 0, 0)], &[]).unwrap();
+        assert_eq!(log_from_archive(&raw, 1).unwrap(), "b\u{fffd}\u{fffd}");
         assert!(matches!(log_from_archive(&tar_of(&[], &["d"]).unwrap(), 2), Err(Error::NotFound(_))));
     }
 

@@ -22,8 +22,10 @@ use crate::space;
 
 /// How thick a scrollbar is.
 pub const SCROLLBAR_WIDTH: f32 = 6.0;
-/// The gap either side of a scrollbar: between it and the area, and between it and the holder's edge.
-pub const SCROLLBAR_EDGE: f32 = (space::PANEL_INSET - SCROLLBAR_WIDTH) / 2.0;
+/// The gap between a vertical scrollbar and the area it scrolls.
+pub const SCROLLBAR_GAP: f32 = (space::PANEL_INSET - SCROLLBAR_WIDTH) / 2.0;
+/// How far a horizontal scrollbar is inset from the bottom edge of its holder.
+pub const SCROLLBAR_INSET: f32 = SCROLLBAR_GAP;
 
 /// How long a scrollbar takes to fade in, in seconds.
 pub const FADE_IN: f32 = 0.12;
@@ -51,7 +53,7 @@ fn placement(orientation: ControlOrientation) -> Node {
     let node = match orientation {
         ControlOrientation::Vertical => Node {
             position_type: PositionType::Absolute,
-            right: px(-(SCROLLBAR_WIDTH + SCROLLBAR_EDGE)),
+            right: px(-(SCROLLBAR_WIDTH + SCROLLBAR_GAP)),
             top: px(0),
             bottom: px(0),
             width: px(SCROLLBAR_WIDTH),
@@ -61,7 +63,7 @@ fn placement(orientation: ControlOrientation) -> Node {
             position_type: PositionType::Absolute,
             left: px(0),
             right: px(0),
-            bottom: px(SCROLLBAR_EDGE),
+            bottom: px(SCROLLBAR_INSET),
             height: px(SCROLLBAR_WIDTH),
             ..default()
         },
@@ -150,9 +152,10 @@ mod tests {
         let v = placement(ControlOrientation::Vertical);
         assert_eq!((v.width, v.top, v.bottom), (px(SCROLLBAR_WIDTH), px(0), px(0)));
         // Outside the area, in its holder's padding.
-        assert_eq!(v.right, px(-(SCROLLBAR_WIDTH + SCROLLBAR_EDGE)));
+        assert_eq!(v.right, px(-(SCROLLBAR_WIDTH + SCROLLBAR_GAP)));
         let h = placement(ControlOrientation::Horizontal);
         assert_eq!((h.height, h.left, h.right), (px(SCROLLBAR_WIDTH), px(0), px(0)));
+        assert_eq!(h.bottom, px(SCROLLBAR_INSET));
     }
 
     #[test]
@@ -163,11 +166,20 @@ mod tests {
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>();
         let target = app.world_mut().spawn_empty().id();
-        let bar = app.world_mut().commands().spawn_scene(scrollbar(target, ControlOrientation::Horizontal)).id();
-        app.world_mut().flush();
-        app.update();
-        let bar = app.world().get::<Scrollbar>(bar).expect("the scene is a scrollbar");
-        assert_eq!((bar.target, bar.orientation), (target, ControlOrientation::Horizontal));
+        for orientation in [ControlOrientation::Vertical, ControlOrientation::Horizontal] {
+            let bar = app.world_mut().commands().spawn_scene(scrollbar(target, orientation)).id();
+            app.world_mut().flush();
+            app.update();
+            let scrollbar = app.world().get::<Scrollbar>(bar).expect("the scene is a scrollbar");
+            assert_eq!((scrollbar.target, scrollbar.orientation), (target, orientation));
+            // The placement patch survives the feathers scrollbar's own node.
+            let node = app.world().get::<Node>(bar).expect("the scene has a node");
+            let want = placement(orientation);
+            assert_eq!(node.display, Display::None);
+            assert_eq!(node.position_type, PositionType::Absolute);
+            assert_eq!((node.left, node.right, node.top, node.bottom), (want.left, want.right, want.top, want.bottom));
+            assert_eq!((node.width, node.height), (want.width, want.height));
+        }
     }
 
     #[test]
