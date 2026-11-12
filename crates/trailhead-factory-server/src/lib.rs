@@ -449,6 +449,7 @@ async fn run_repo(
     poll: Duration,
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
+    feed: surface::Feed,
 ) -> bool {
     let wake = Arc::new(Notify::new());
     let project = entry.factory.config.repo.project.clone();
@@ -460,6 +461,7 @@ async fn run_repo(
         Ok(()) => false,
         Err(e) => {
             tracing::error!(error = %e, "this repo's loop stopped; the other repos carry on");
+            feed.set_stopped(&entry.slug, e.to_string());
             true
         }
     }
@@ -654,6 +656,7 @@ async fn run_loops(
     poll: Duration,
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
+    feed: surface::Feed,
 ) -> Result<()> {
     let Setup { repos, tunnel, store, ctx } = setup;
     let mut loops = tokio::task::JoinSet::new();
@@ -663,7 +666,7 @@ async fn run_loops(
         let (store, ctx, drain, cancel) = (store.clone(), ctx.clone(), drain.clone(), cancel.clone());
         let board = entry.factory.status().clone();
         let slug = entry.slug.clone();
-        let id = loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel).instrument(span)).id();
+        let id = loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel, feed.clone()).instrument(span)).id();
         boards.insert(id, (slug, board));
     }
     let mut failed = 0;
@@ -786,7 +789,7 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
             }
             wait = (wait * 2).min(RETRY_MAX);
         };
-        if let Err(e) = run_loops(setup, poll, drain, cancel).await {
+        if let Err(e) = run_loops(setup, poll, drain, cancel, shared.clone()).await {
             tracing::error!(error = %e, "the control plane stopped; the server keeps serving");
         }
         shared.set_state(FactoryState::Stopped);
