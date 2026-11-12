@@ -135,6 +135,7 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
             }
             (Some(blocked), cur.map(serde_json::to_value).transpose()?, want.map(serde_json::to_value).transpose()?)
         }
+        Entity::Agent => return Err(Error::Invalid("agents can't be undone; revoke them instead".into())),
         Entity::Claim => {
             let task_id = parse_uuid(entity_id)?;
             let cur = any_claim(&tx.conn, task_id).await?;
@@ -171,9 +172,10 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
 /// them. An entity that someone else changed afterwards is a conflict: `strict`
 /// fails the whole undo, otherwise it's skipped and reported. A task restore that would form a parent cycle
 /// is skipped the same way (and fails the undo in `strict`). Reminders changed
-/// nothing, so they are neither reverted nor count as conflicts.
+/// nothing, so they are neither reverted nor count as conflicts. Creating an agent isn't undone either (revoke it).
 async fn apply(tx: &Tx, events: Vec<Event>, strict: bool) -> Result<UndoReport> {
-    let events: Vec<Event> = events.into_iter().filter(|e| !is_notification(&e.kind)).collect();
+    let events: Vec<Event> =
+        events.into_iter().filter(|e| !is_notification(&e.kind) && e.entity != Entity::Agent).collect();
     let ids: HashSet<i64> = events.iter().map(|e| e.id).collect();
     let mut groups: BTreeMap<(String, String), Vec<Event>> = BTreeMap::new();
     for e in events {
