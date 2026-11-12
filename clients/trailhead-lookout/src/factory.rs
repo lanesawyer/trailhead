@@ -141,14 +141,20 @@ impl FactoryStatus {
     }
 
     /// [`Self::human_grades`] for a task in `project`: the repos whose queue tasks are in that project say, since its
-    /// tasks go to those repos' gates. When no repo works the project (or it isn't known), every repo's.
+    /// tasks go to those repos' gates. When none of them has said (or no repo works the project, or it isn't known),
+    /// every repo's.
     pub fn human_grades_for(&self, project: Option<&str>) -> Vec<Grade> {
         let in_project = |key: &String| key.rsplit_once('-').is_some_and(|(p, _)| Some(p) == project);
-        let own: Vec<&RepoState> = self.repos.values().filter(|r| r.queue.iter().any(in_project)).collect();
-        if own.is_empty() {
+        let said: Vec<&Vec<Grade>> = self
+            .repos
+            .values()
+            .filter(|r| r.queue.iter().any(in_project))
+            .filter_map(|r| r.human_grades.as_ref())
+            .collect();
+        if said.is_empty() {
             return self.human_grades();
         }
-        Grade::ALL.into_iter().filter(|g| own.iter().any(|r| r.human_grades.contains(g))).collect()
+        Grade::ALL.into_iter().filter(|g| said.iter().any(|r| r.contains(g))).collect()
     }
 
     /// The queue tasks the factory works, as its repos report them, each once.
@@ -586,6 +592,9 @@ mod tests {
         let g = |n| Grade::new(n).unwrap();
         assert_eq!(app.world().resource::<FactoryStatus>().human_grades(), [g(3), g(4)]);
         let FactoryUpdate::Snapshot(mut repos) = snapshot(1, vec![]) else { unreachable!() };
+        // A snapshot that doesn't say keeps the table.
+        assert_eq!(repos[0].snapshot.human_grades, None);
+        send(&mut app, [FactoryUpdate::Snapshot(repos.clone())]);
         assert_eq!(app.world().resource::<FactoryStatus>().human_grades(), [g(3), g(4)]);
         repos[0].snapshot.human_grades = Some(vec![g(2), g(4)]);
         send(&mut app, [FactoryUpdate::Snapshot(repos.clone())]);
@@ -603,7 +612,7 @@ mod tests {
             queue: vec![queue.into()],
             last_error: None,
             holding: None,
-            human_grades: human,
+            human_grades: Some(human),
             usage: Vec::new(),
             seq: 1,
         };
@@ -615,6 +624,9 @@ mod tests {
         // A project no repo works gets every repo's.
         assert_eq!(status.human_grades_for(Some("NONE")), [g(2), g(3), g(4)]);
         assert_eq!(status.human_grades_for(None), [g(2), g(3), g(4)]);
+        // A project whose repo hasn't said gets what the others say.
+        status.repos.get_mut("o/b").unwrap().human_grades = None;
+        assert_eq!(status.human_grades_for(Some("OTHER")), [g(3), g(4)]);
     }
 
     #[test]
