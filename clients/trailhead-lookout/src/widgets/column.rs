@@ -11,7 +11,10 @@ use bevy::ui_widgets::ControlOrientation;
 
 use trailhead_model::Status;
 
-use super::{BackgroundTone, ScrollDown, radius, scrollbar, size, space, status_label, status_token, text, text_dim};
+use super::{
+    BackgroundTone, ScrollDown, radius, scroll_body_node, scroll_frame_node, scrollbar, size, space, status_label,
+    status_token, text, text_dim,
+};
 
 /// How wide every column is.
 pub const COLUMN_WIDTH: f32 = 260.0;
@@ -39,22 +42,12 @@ pub fn column_shell(status: Status) -> impl Bundle {
 /// What holds a column's body and its scrollbar, so the bar's track is the body's and not the column's. It may shrink
 /// below its content so the body scrolls.
 pub fn column_frame() -> impl Bundle {
-    (Name::new("column frame"), Node { flex_direction: FlexDirection::Column, min_height: px(0), ..default() })
+    (Name::new("column frame"), scroll_frame_node(0.0))
 }
 
 /// The body of a column, which holds its cards and scrolls down on its own. Its scrollbar lies in the shell's padding.
 pub fn column_body() -> impl Bundle {
-    (
-        Name::new("column body"),
-        Node {
-            flex_direction: FlexDirection::Column,
-            min_height: px(0),
-            row_gap: px(space::CARDS),
-            overflow: Overflow::scroll_y(),
-            ..default()
-        },
-        ScrollDown,
-    )
+    (Name::new("column body"), scroll_body_node(space::CARDS, 0.0), ScrollDown)
 }
 
 /// Puts the body's scrollbar in `frame`, after the body.

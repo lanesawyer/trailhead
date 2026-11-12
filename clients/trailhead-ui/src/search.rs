@@ -8,6 +8,8 @@
 
 use bevy::feathers::controls::{ButtonVariant, FeathersTextInput, FeathersTextInputContainer, FeathersToolButton};
 use bevy::feathers::display::label_dim;
+use bevy::input::keyboard::KeyboardInput;
+use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
@@ -69,7 +71,7 @@ pub fn spawn_search_field_filling(commands: &mut Commands, hint: impl Into<Strin
 fn spawn_search(commands: &mut Commands, hint: String, width: Val) -> SearchField {
     // Spawned apart and parented by hand: feathers' container is a scene of its own, and the hint has to know the
     // field.
-    let field = commands.spawn_scene(bsn! { @FeathersTextInput }).id();
+    let field = commands.spawn_scene(bsn! { @FeathersTextInput on(on_escape_clears) }).id();
     let hint = commands
         .spawn_scene(bsn! {
             @label_dim(hint)
@@ -137,6 +139,21 @@ fn on_clear_search(activate: On<Activate>, clears: Query<&ClearSearch>, mut fiel
     }
 }
 
+/// Escape in a focused search field empties it, as the clear button does. Only the field's own press counts, not one
+/// bubbling up from something inside it.
+fn on_escape_clears(key: On<FocusedInput<KeyboardInput>>, mut fields: Query<&mut EditableText>) {
+    let pressed = &key.input;
+    if key.event_target() != key.original_event_target()
+        || pressed.key_code != KeyCode::Escape
+        || !pressed.state.is_pressed()
+    {
+        return;
+    }
+    if let Ok(mut text) = fields.get_mut(key.event_target()) {
+        text.clear();
+    }
+}
+
 /// Whether every word of `query` appears somewhere in `fields`, ignoring case.
 ///
 /// Words rather than the whole query, so "zarr mouse" finds an item whose kind says one and whose name says the
@@ -172,6 +189,35 @@ mod tests {
         app.world_mut().entity_mut(parts.field).insert(EditableText::new("deep"));
         app.update();
         assert_eq!(shown(&mut app), (Display::None, Display::Flex));
+    }
+
+    #[test]
+    fn escape_in_the_field_empties_it() {
+        use bevy::input::keyboard::Key;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let parts = spawn_search_field(&mut app.world_mut().commands(), "Search");
+        app.world_mut().flush();
+        app.update();
+        app.world_mut().entity_mut(parts.field).insert(EditableText::new("deep"));
+        let window = app.world_mut().spawn(Window::default()).id();
+        let press = |key_code, logical_key| KeyboardInput {
+            key_code,
+            logical_key,
+            state: bevy::input::ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window,
+        };
+        let value = |app: &App| app.world().get::<EditableText>(parts.field).unwrap().value().to_string();
+        let a = press(KeyCode::KeyA, Key::Character("a".into()));
+        app.world_mut().trigger(FocusedInput::new(parts.field, a, window));
+        assert_eq!(value(&app), "deep");
+        app.world_mut().trigger(FocusedInput::new(parts.field, press(KeyCode::Escape, Key::Escape), window));
+        assert_eq!(value(&app), "");
     }
 
     #[test]
