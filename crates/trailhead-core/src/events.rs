@@ -73,7 +73,7 @@ pub struct EventFilter {
     pub newest_first: bool,
     /// Also read `events_archive`. Ids are kept on archiving, so order is unchanged.
     pub include_archived: bool,
-    /// Leave out notifications such as `task.due_soon`, which change nothing.
+    /// Leave out notifications such as `task.due_soon`, which change nothing, and `agent.created`, which undo can't revert.
     pub changes_only: bool,
     /// Kind prefixes, e.g. `claim.` or `comment.created`; empty means every kind.
     pub kinds: Vec<String>,
@@ -106,7 +106,7 @@ impl Store {
                     "SELECT {EVENT_COLS} FROM {} WHERE workspace_id = ?1
                      AND (?2 IS NULL OR id > ?2) AND (?3 IS NULL OR task_id = ?3)
                      AND (?4 IS NULL OR actor_id = ?4) AND (?5 IS NULL OR batch_id = ?5)
-                     AND (?6 IS NULL OR at >= ?6) AND {} AND (?8 = 0 OR {})
+                     AND (?6 IS NULL OR at >= ?6) AND {} AND (?8 = 0 OR ({} AND entity != 'agent'))
                      AND (?9 IS NULL OR EXISTS (
                          SELECT 1 FROM json_each(?9) k WHERE substr(events.kind, 1, length(k.value)) = k.value))
                      AND (?10 IS NULL OR id < ?10)

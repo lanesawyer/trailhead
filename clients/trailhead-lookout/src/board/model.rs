@@ -189,8 +189,6 @@ pub struct Input<'a> {
     pub comments: &'a [Comment],
     pub agents: &'a [Agent],
     pub users: &'a [User],
-    /// The runs in flight, which name a holder the agent list hasn't caught up with.
-    pub runs: &'a [Run],
     /// The keys of the factory's queue tasks, whose subtasks the factory works.
     pub queues: &'a [String],
     /// What the server found for the filter's query, if it has answered it.
@@ -228,12 +226,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     // The claim is keyed by its task.
     let holder_of: HashMap<Uuid, Uuid> =
         input.claims.iter().filter(|c| c.is_live(input.now)).map(|c| (c.task_id, c.holder_id)).collect();
-    let running: HashSet<&str> = input.runs.iter().map(|r| r.status.task.0.as_str()).collect();
-    let holder_label = |task: Uuid, id: Uuid| {
-        let key = task_key.get(&task).copied().unwrap_or_default();
-        crate::factory::holder_name(holder_name.get(&id).copied(), key, running.contains(key))
-            .unwrap_or_else(|| short(id))
-    };
+    let holder_label = |id: Uuid| holder_name.get(&id).map_or_else(|| short(id), |n| n.to_string());
     // The blockers of each task that haven't finished, by the statuses mirrored now (the rule of core's `ready`), so
     // one finishing clears the badge with no fetch. A blocker the mirror lacks (deleted) doesn't count, but the nil id
     // stands for one outside the token's scope, unfinished as far as anyone can tell.
@@ -316,7 +309,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         if let Some(holder) = holder_of.get(&t.id) {
             badges.push(Badge {
                 kind: BadgeKind::Holder,
-                label: holder_badge(&holder_label(t.id, *holder)),
+                label: holder_badge(&holder_label(*holder)),
                 tone: None,
                 hint: None,
             });
@@ -410,14 +403,9 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     };
     // Likewise only the holders of its tasks.
     let holders = {
-        // A holder of several tasks is labelled for the lowest id, not whichever comes last.
-        let mut ids: BTreeMap<Uuid, Uuid> = BTreeMap::new();
-        for t in input.tasks.iter().filter(|t| in_project(t)) {
-            if let Some(h) = holder_of.get(&t.id) {
-                ids.entry(*h).and_modify(|first| *first = (*first).min(t.id)).or_insert(t.id);
-            }
-        }
-        let mut v: Vec<Choice> = ids.into_iter().map(|(id, t)| choice(&id.to_string(), holder_label(t, id))).collect();
+        let ids: BTreeSet<Uuid> =
+            input.tasks.iter().filter(|t| in_project(t)).filter_map(|t| holder_of.get(&t.id).copied()).collect();
+        let mut v: Vec<Choice> = ids.into_iter().map(|id| choice(&id.to_string(), holder_label(id))).collect();
         v.sort_by(|a, b| a.label.cmp(&b.label));
         v
     };
@@ -583,29 +571,6 @@ mod tests {
         assert_eq!(keys(&view, Status::InReview), [("TRAIL-1".into(), 0), ("TRAIL-2".into(), 0)]);
         assert!(flagged("TRAIL-1") && !flagged("TRAIL-2") && !flagged("TRAIL-3"));
     }
-    #[test]
-    fn a_holder_the_agent_list_lacks_is_named_for_its_run() {
-        use trailhead_factory::{RunPhase, RunStatus, TaskKey, Usd};
-        let runs = [Run {
-            repo: "o/r".into(),
-            status: RunStatus {
-                task: TaskKey("OPS-1".into()),
-                phase: RunPhase::Agent,
-                sandbox: None,
-                steps: 1,
-                tool_calls: 1,
-                spend: Usd::dollars(0.0),
-                last_tool: None,
-                started: 0,
-                phase_started: 0,
-            },
-        }];
-        let view = run_with(&Filter::default(), &runs);
-        assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, "ops-1")]);
-        let holders: Vec<&str> = view.options.holders.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(holders, ["factory/ops-1", "factory/trail-103-a1"]);
-    }
-
     #[test]
     fn badges_show_priority_grade_holder_and_the_open_question_count() {
         let view = run(&Filter::default());

@@ -252,6 +252,7 @@ impl Mirror {
             Some("task") => Kind::Task,
             Some("comment") => Kind::Comment,
             Some("claim") => Kind::Claim,
+            Some("agent") => Kind::Agent,
             Some("dependency") => Kind::Dependency,
             _ => return,
         };

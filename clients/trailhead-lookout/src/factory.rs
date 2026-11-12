@@ -373,16 +373,6 @@ pub fn pr_link(task: &trailhead_model::Task) -> Option<PrLink> {
         .then(|| PrLink { label: format!("{}/{}#{}", pr.repo.owner, pr.repo.name, pr.number), url: pr.url })
 }
 
-/// What to call the holder of a claim on the task keyed `task_key`: its name in the agent list if `known`, else, for a
-/// task that has a run, `factory/<key>`. The agent list only changes with a sync snapshot, so a sub-agent made for a run
-/// after it isn't known yet; a holder of a task that has a run is a factory agent all the same. Board and map share it.
-pub fn holder_name(known: Option<&str>, task_key: &str, has_run: bool) -> Option<String> {
-    match known {
-        Some(n) => Some(n.to_string()),
-        None => has_run.then(|| format!("factory/{}", task_key.to_lowercase())),
-    }
-}
-
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -463,13 +453,6 @@ mod tests {
         assert_eq!(open, PrLink { label: "o/r#4".into(), url: "https://host/o/r/-/merge_requests/4".into() });
         let merged = with(serde_json::json!({"pr": pr(4), "merged": {"by": "merger", "pr": pr(5)}}));
         assert_eq!(pr_link(&merged).unwrap().label, "o/r#5");
-    }
-
-    #[test]
-    fn a_holder_is_named_by_the_list_else_for_its_run() {
-        assert_eq!(super::holder_name(Some("claude"), "TRAIL-7", true).as_deref(), Some("claude"));
-        assert_eq!(super::holder_name(None, "TRAIL-7", true).as_deref(), Some("factory/trail-7"));
-        assert_eq!(super::holder_name(None, "TRAIL-7", false), None);
     }
 
     fn app() -> App {

@@ -6,7 +6,7 @@
 //! keeps a [`BoardView`] from the mirror and the [`Filter`]; [`BoardUiPlugin`] draws it with feathers, greyed out
 //! with the reason whenever the connection isn't [`Connection::Live`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::author::{Act, Authoring};
 use crate::connection::Connection;
-use crate::factory::{FactoryStatus, PrLink, Run, pr_link};
+use crate::factory::{FactoryStatus, PrLink, pr_link};
 use crate::inspector::{Neighbours, Selection, Subject};
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::search::{Deep, DeepHit};
