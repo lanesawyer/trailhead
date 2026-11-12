@@ -182,7 +182,8 @@ fn workspace(workdir: PathBuf, conns: &std::result::Result<Vec<serde_json::Value
 /// The secrets, with the [`build_id`] of the file they came from.
 fn read_secrets(path: &PathBuf) -> std::result::Result<(DaemonSecrets, String), String> {
     let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let secrets = serde_json::from_slice(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Not serde's error: it can quote the file, which holds the secret key.
+    let secrets = serde_json::from_slice(&raw).map_err(|_| format!("{}: malformed secrets file", path.display()))?;
     Ok((secrets, build_id(&raw)))
 }
 
@@ -248,7 +249,7 @@ async fn gateway_command(command: Command) -> std::process::ExitCode {
             Command::GatewayCtl { socket } => {
                 let mut input = String::new();
                 std::io::stdin().read_to_string(&mut input).map_err(|e| e.to_string())?;
-                let req: GatewayRequest = serde_json::from_str(&input).map_err(|e| format!("bad message: {e}"))?;
+                let req: GatewayRequest = gateway::parse_request(&input).map_err(str::to_string)?;
                 let resp = gateway::ctl(&socket, &req).await.map_err(|e| format!("{}: {e}", socket.display()))?;
                 println!("{}", serde_json::to_string(&resp).map_err(|e| e.to_string())?);
                 match resp {
@@ -320,7 +321,16 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::log_filter;
+    use super::{log_filter, read_secrets};
+
+    #[test]
+    fn malformed_secrets_error_does_not_echo_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        std::fs::write(&path, r#"{"secret_key":"hunter2-key","control_plane":["hunter2-key"]}"#).unwrap();
+        let err = read_secrets(&path).unwrap_err();
+        assert!(!err.contains("hunter2"), "{err}");
+    }
 
     #[test]
     fn invalid_log_flag_is_a_usage_error() {
@@ -413,7 +423,8 @@ mod tests {
         assert_eq!(super::workspace("w".into(), &failed_list().await).remote_base(), "https://github.com");
     }
 
-    #[tokio::test]
+    // Paused clock: the GitHub client's GET retries back off 0.5s, 1s and 2s, which would otherwise sleep for real.
+    #[tokio::test(start_paused = true)]
     async fn codehost_is_github_only_with_a_github_connection() {
         let with_github = conns(serde_json::json!([{"provider": "github", "gateway_base_url": "http://127.0.0.1:1"}]));
         let err = title_error(super::codehost(identity(), &with_github)).await;

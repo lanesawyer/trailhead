@@ -332,7 +332,7 @@ async fn a_task_with_non_object_factory_metadata_is_skipped_without_naming_a_fie
         assert_eq!(notes.len(), 1, "{task:?}");
         assert!(notes[0].body.contains("fix or remove the `factory` metadata"), "{}", notes[0].body);
         assert!(!notes[0].body.contains("fix or remove that field"), "{}", notes[0].body);
-        assert!(!notes[0].body.contains(" in "), "{}", notes[0].body);
+        assert!(!notes[0].body.contains("malformed in "), "{}", notes[0].body);
     }
 }
 

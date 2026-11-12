@@ -1,7 +1,7 @@
 //! Which repos one factory process runs, and the checks that they can share it: `--repo` (repeatable), else the user
 //! config's `[factory] repos`, else the repo found upward from the working directory.
 
-use crate::error::{Error, Result};
+use crate::error::{ConflictKind, Error, RepoConflict, RepoRef, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -79,42 +79,21 @@ pub fn validate(specs: &[RepoSpec]) -> Result<()> {
             .first()
             .filter(|f| f.config.target_specs() != spec.config.target_specs() || f.config.daemon != spec.config.daemon)
         {
-            return Err(Error::Conflict(format!(
-                "{} ({}) and {} ({}) differ in [factory.compute], [factory.targets] or [factory.daemon]; repos in one process share the sandbox providers and daemon launch",
-                first.dir.display(),
-                first.slug(),
-                spec.dir.display(),
-                spec.slug(),
-            )));
+            return Err(conflict(first, spec, ConflictKind::SharedConfigDiffers));
         }
         if let Some(first) =
             specs.first().filter(|f| f.config.plugins().map(|p| p.0) != spec.config.plugins().map(|p| p.0))
         {
-            return Err(Error::Conflict(format!(
-                "{} ({}) and {} ({}) use different profile adapters; repos in one process share the daemon launch, which builds one harness",
-                first.dir.display(),
-                first.slug(),
-                spec.dir.display(),
-                spec.slug(),
-            )));
+            return Err(conflict(first, spec, ConflictKind::DifferentAdapters));
         }
         let repo = &spec.config.repo;
         let slug = spec.slug();
         let keys = [
-            (slugs.insert(slug.clone(), spec), format!("the same repo, {slug}")),
-            (
-                names.insert(repo.name.to_lowercase(), spec),
-                format!("the same repo name, {} (pool sandboxes are named from it)", repo.name.to_lowercase()),
-            ),
+            (slugs.insert(slug.clone(), spec), ConflictKind::SameRepo { slug }),
+            (names.insert(repo.name.to_lowercase(), spec), ConflictKind::SameName { name: repo.name.to_lowercase() }),
         ];
-        if let Some((other, what)) = keys.into_iter().find_map(|(prev, what)| prev.map(|p| (p, what))) {
-            return Err(Error::Conflict(format!(
-                "{} ({}) and {} ({}) have {what}; they would collide, so run only one of them",
-                other.dir.display(),
-                other.slug(),
-                spec.dir.display(),
-                spec.slug(),
-            )));
+        if let Some((other, kind)) = keys.into_iter().find_map(|(prev, kind)| prev.map(|p| (p, kind))) {
+            return Err(conflict(other, spec, kind));
         }
         // Lists that share any queue task claim the same tasks (the same list is the common case).
         if let Some((other, shared)) = specs[..i].iter().find_map(|o| {
@@ -125,30 +104,25 @@ pub fn validate(specs: &[RepoSpec]) -> Result<()> {
             let shared = repo.queue.iter().find(|q| other.queue.contains(q))?;
             Some((o, shared))
         }) {
-            return Err(Error::Conflict(format!(
-                "{} ({}) and {} ({}) have the same project and queue, {} under {shared}; they would collide, so run only one of them",
-                other.dir.display(),
-                other.slug(),
-                spec.dir.display(),
-                spec.slug(),
-                repo.project,
-            )));
+            return Err(conflict(
+                other,
+                spec,
+                ConflictKind::SameQueue { project: repo.project.clone(), task: shared.to_string() },
+            ));
         }
         // A repo with no queue takes every ready task in its project, so it overlaps any other repo there.
         if let Some(other) = specs[..i].iter().find(|o| {
             o.config.repo.project == repo.project && (o.config.repo.queue.is_empty() || repo.queue.is_empty())
         }) {
-            return Err(Error::Conflict(format!(
-                "{} ({}) and {} ({}) share project {} and one has no queue, so it would take the other's tasks; give each a queue",
-                other.dir.display(),
-                other.slug(),
-                spec.dir.display(),
-                spec.slug(),
-                repo.project,
-            )));
+            return Err(conflict(other, spec, ConflictKind::NoQueue { project: repo.project.clone() }));
         }
     }
     Ok(())
+}
+
+fn conflict(first: &RepoSpec, second: &RepoSpec, kind: ConflictKind) -> Error {
+    let named = |s: &RepoSpec| RepoRef { dir: s.dir.clone(), slug: s.slug() };
+    Error::Conflict(Box::new(RepoConflict { first: named(first), second: named(second), kind }))
 }
 
 #[cfg(test)]

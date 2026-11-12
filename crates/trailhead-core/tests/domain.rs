@@ -1426,6 +1426,17 @@ async fn similar_tasks_counts_capitalized_two_letter_acronyms() {
 }
 
 #[tokio::test]
+async fn similar_tasks_ignores_two_letter_function_words_in_all_caps_titles() {
+    let env = Env::new().await;
+    env.task("MOVE DB TO PG").await;
+    // Shared function words (TO) are not enough to match.
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "SEND IT TO OR IN ON", None).await.unwrap().is_empty());
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "FIX BUG TO ON PG", None).await.unwrap().is_empty());
+    // Acronyms still count.
+    assert_eq!(env.store.similar_tasks(&env.human, "AUTH", "DB PG", None).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn listing_by_title_ignores_case_and_surrounding_space() {
     let env = Env::new().await;
     let wanted = env.task("Cover the edge").await;
@@ -1581,4 +1592,37 @@ async fn a_lapsing_claim_ignores_an_undone_claim_from_review() {
     env.advance(120);
     s.reap_expired_claims(&env.human).await.unwrap();
     assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::Open);
+}
+
+#[tokio::test]
+async fn blocks_and_duplicates_sort_by_key_number() {
+    let env = Env::new().await;
+    let root = env.task("root").await;
+    let late = env.task("late").await;
+    let early = env.task("early").await;
+    // Keys only reach four digits after a long time, so rewrite them.
+    let prefix = root.key.0.rsplit_once('-').unwrap().0.to_string();
+    let conn = env.raw_conn().await;
+    for (task, n) in [(&late, 1000), (&early, 999)] {
+        conn.execute(
+            "UPDATE tasks SET key = ?1 WHERE id = ?2",
+            libsql::params![format!("{prefix}-{n}"), task.id.to_string()],
+        )
+        .await
+        .unwrap();
+    }
+    let keys = [format!("{prefix}-999"), format!("{prefix}-1000")];
+    for key in &keys {
+        env.store.add_dependency(&env.human, &root.key, key).await.unwrap();
+        let cancel = TaskPatch {
+            status: Some(Status::Cancelled),
+            duplicate_of: Some(Some(root.key.0.clone())),
+            ..Default::default()
+        };
+        env.store.update_task(&env.human, key, cancel, None).await.unwrap();
+    }
+    let d = env.store.task_detail(&env.human, &root.key).await.unwrap();
+    let got = |v: &[trailhead_core::TaskKey]| v.iter().map(|k| k.0.clone()).collect::<Vec<_>>();
+    assert_eq!(got(&d.blocks), keys);
+    assert_eq!(got(&d.duplicates), keys);
 }

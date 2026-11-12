@@ -9,7 +9,7 @@ use crate::comments::latest_handoff;
 use crate::db::{collect, first, fmt_ts, get_enum, get_opt_ts, get_ts, get_uuid, json_ids, opt_ts_value};
 use crate::deps::{unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
-use crate::identity::load_workspace;
+use crate::identity::{is_descendant, load_workspace};
 use crate::projects::{load_project, validate_ttl};
 use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::{find_task, load_task, unclaimed_status, update_status};
@@ -352,14 +352,19 @@ impl Store {
     }
 
     /// Gives a task back. An `in_progress` task returns to `open`. Humans can release
-    /// anyone's claim.
+    /// anyone's claim, and an agent its sub-agents'.
     pub async fn release(&self, ctx: &Ctx, task: &str) -> Result<Task> {
         self.write(ctx, async |tx| {
             let task = find_task(&tx.conn, ctx, task, false).await?;
             let Some(claim) = live_claim(&tx.conn, task.id, tx.now).await? else {
                 return Err(Error::NotClaimHolder);
             };
-            if claim.holder_id != ctx.actor_id() && !ctx.is_human() {
+            // An agent can also give up a claim held by one of its sub-agents, which may have been revoked since.
+            let above_holder = match ctx.agent_id {
+                Some(me) if claim.holder_id != me => is_descendant(&tx.conn, me, claim.holder_id).await?,
+                _ => false,
+            };
+            if claim.holder_id != ctx.actor_id() && !ctx.is_human() && !above_holder {
                 return Err(Error::NotClaimHolder);
             }
             drop_claim(tx, &claim, "claim.released").await?;

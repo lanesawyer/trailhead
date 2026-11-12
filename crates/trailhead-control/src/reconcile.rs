@@ -34,13 +34,13 @@ impl Factory {
         let (mut done, due) = self.reconcile_deferring(running).await?;
         for (task, sandbox) in due.runs {
             if let Err(e) = self.resume_run(&task, &sandbox).await {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't finish a run picked up again");
+                tracing::warn!(task = %task.key, error = %e, "couldn't finish a run picked up again");
             }
         }
         for task in due.reviews {
             match self.resume_review(&task).await {
                 Ok(_) => done.reviewed.push(task.key.0.clone()),
-                Err(e) => tracing::warn!(task = %task.key.0, error = %e, "couldn't review; the next reconcile retries"),
+                Err(e) => tracing::warn!(task = %task.key, error = %e, "couldn't review; the next reconcile retries"),
             }
         }
         Ok(done)
@@ -65,7 +65,7 @@ impl Factory {
                 logged.retain(|k| strays.iter().any(|t| &t.key.0 == k));
                 for t in strays.iter().filter(|t| logged.insert(t.key.0.clone())) {
                     tracing::warn!(
-                        task = %t.key.0,
+                        task = %t.key,
                         "a factory task sits outside every configured queue, so reconcile can't see it; move it back under its queue or close it"
                     );
                 }
@@ -150,7 +150,7 @@ impl Factory {
         }
         for task in tasks.iter().filter(|t| !live_runs.iter().any(|(r, _)| r.key == t.key)) {
             if task.status == Status::InProgress && Self::on_unreachable(task, &down) {
-                tracing::warn!(task = %task.key.0, target = ?task.run.target, "its target can't be reached; leaving the run as it is");
+                tracing::warn!(task = %task.key, target = ?task.run.target, "its target can't be reached; leaving the run as it is");
                 done.unknown.push(task.key.0.clone());
                 continue;
             }
@@ -164,14 +164,14 @@ impl Factory {
                 && self.unparked_review_breach(task).is_none()
                 && let Some(resets_at) = self.code_host_pause()
             {
-                tracing::warn!(task = %task.key.0, resumes_in = ?until(resets_at), "code host rate limit nearly spent; leaving its PR alone");
+                tracing::warn!(task = %task.key, resumes_in = ?until(resets_at), "code host rate limit nearly spent; leaving its PR alone");
                 continue;
             }
             match self.reconcile_task(task, &mut done).await {
                 Ok(true) => due.reviews.push(task.clone()),
                 Ok(false) => {}
                 Err(e) => {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't reconcile a task; the next reconcile retries")
+                    tracing::warn!(task = %task.key, error = %e, "couldn't reconcile a task; the next reconcile retries")
                 }
             }
         }
@@ -193,10 +193,10 @@ impl Factory {
     async fn finish_worker_breach(&self, task: &Task, breach: &WorkerBreach, live: &[Sandbox], done: &mut Reconciled) {
         let reason = breach.reason.as_str();
         let (Some(name), Some(host)) = (&task.run.sandbox, task.run.host.as_ref()) else {
-            tracing::warn!(task = %task.key.0, %reason, sandbox = ?task.run.sandbox, host = ?task.run.host, "a worker's budget breach has no sandbox or host to finish the park with; leaving the task as it is");
+            tracing::warn!(task = %task.key, %reason, sandbox = ?task.run.sandbox, host = ?task.run.host, "a worker's budget breach has no sandbox or host to finish the park with; leaving the task as it is");
             return;
         };
-        tracing::warn!(task = %task.key.0, %reason, "finishing the park for a worker's budget breach");
+        tracing::warn!(task = %task.key, %reason, "finishing the park for a worker's budget breach");
         // A sandbox that's gone was destroyed after the breach, so there's nothing suspended to point at.
         let state = match live.iter().find(|s| s.name == *host) {
             Some(sandbox) => self.cut_off_breached(task, sandbox).await,
@@ -206,7 +206,7 @@ impl Factory {
         match self.park_worker_breach(&task.key, &self.tracker.sub_agent(name), breach, state, &question).await {
             Ok(()) => done.breached.push(task.key.0.clone()),
             Err(e) => {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't park the breached task; the next reconcile retries")
+                tracing::warn!(task = %task.key, error = %e, "couldn't park the breached task; the next reconcile retries")
             }
         }
     }
@@ -237,14 +237,14 @@ impl Factory {
         live.iter().find(|s| {
             s.name == *host
                 && s.labels.get(label::STATE).map(String::as_str) == Some(label::BUSY)
-                && s.labels.get(label::TASK).map(String::as_str) == Some(task.key.0.as_str())
+                && s.labels.get(label::TASK).map(String::as_str) == Some(task.key.as_str())
         })
     }
 
     /// Reviews a task whose PR was left unreviewed, retiring the sub-agent of the round that didn't finish.
     pub(crate) async fn resume_review(&self, task: &Task) -> Result<Outcome> {
         let attempt = task.run.attempt.unwrap_or(1);
-        let pr = task.run.pr.as_ref().ok_or_else(|| Error::Other(format!("{} has no PR to review", task.key.0)))?;
+        let pr = task.run.pr.as_ref().ok_or_else(|| Error::Other(format!("{} has no PR to review", task.key)))?;
         // The round the interrupted review was named for: one past the rounds counted before it, whether or not it counted.
         let after_conflict = task.run.last_changes().is_some_and(|c| c.conflict);
         let rounds = task.run.review_rounds.unwrap_or(0);
@@ -252,7 +252,7 @@ impl Factory {
             let retries = task.run.retries.unwrap_or(0);
             let name = reviewer_name(&task.key, attempt, round, retries);
             if let Err(e) = self.tracker.revoke_sub_agent(&name).await {
-                tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the interrupted reviewer's sub-agent; its token will expire");
+                tracing::warn!(task = %task.key, error = %e, "couldn't revoke the interrupted reviewer's sub-agent; its token will expire");
             }
         }
         self.review(task, pr, attempt, &[]).await
@@ -270,39 +270,60 @@ impl Factory {
             MergedBy::Merger => self.tracker.show(&task.key).await?.run.merge,
             MergedBy::Human => None,
         };
+        // A park made by the worker's sub-agent leaves the claim with it, and the factory's writes are refused until the
+        // lease runs out (TRAIL-403): give it up first. A failure is logged, and the writes below say if it mattered.
+        // The sub-agent is revoked by then, so the factory releases the claim as the agent above it.
+        if task.holder.as_deref().is_some_and(|h| h.starts_with(&format!("{}/", self.tracker.agent())))
+            && let Err(e) = self.tracker.release(&task.key).await
+        {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't release the sub-agent's claim before closing");
+        }
         let merged_by_human = merged.by == MergedBy::Human;
         let pr_url = merged.pr.url.clone();
         let handoff = messages::merged_handoff(merged.by, &merged.pr.url, merged.commit.as_deref(), decision.as_ref());
         self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
         // A parked task can't be finished without a claim: it is claimed where it is, never reopened first, so no other
         // agent can take it from open in between (TRAIL-402).
-        let mut claimed = false;
+        // A park cut short after the unapproved merge was found: finish it, don't try to finish the task (TRAIL-729).
+        if merged_by_human && task.run.unapproved_merge == Some(true) && task.status != Status::NeedsInput {
+            return self.park_unapproved_merge(task, &pr_url).await;
+        }
         if task.status == Status::NeedsInput {
             self.tracker.claim(&task.key).await?;
-            claimed = true;
         }
         match self.tracker.finish(&task.key, &handoff).await {
             // A person merged work nobody approved, and core won't let the factory that did it call it done. The merge
             // is recorded, so ask once for a person to mark it done rather than be refused again every pass (TRAIL-706).
             Err(Error::Forbidden(why)) if merged_by_human => {
-                tracing::warn!(task = %task.key.0, %why, "the PR was merged unapproved; parking for a person to finish it");
-                // Claimed as it stands, in review, never reopened first: a failed claim then leaves it as it was, not
-                // open and unheld (TRAIL-826).
-                if !claimed {
-                    self.tracker.claim(&task.key).await?;
-                }
-                return self.tracker.ask(&task.key, &messages::merged_unapproved_question(&pr_url)).await;
+                tracing::warn!(task = %task.key, %why, "the PR was merged unapproved; parking for a person to finish it");
+                self.tracker
+                    .report(&task.key, RunUpdate { unapproved_merge: Some(true), ..RunUpdate::default() })
+                    .await?;
+                return self.park_unapproved_merge(task, &pr_url).await;
             }
             finished => finished?,
         }
-        tracing::info!(task = %task.key.0, %handoff, "PR merged; task done");
+        tracing::info!(task = %task.key, %handoff, "PR merged; task done");
         Ok(())
+    }
+
+    /// Parks a task whose PR a person merged unapproved, from wherever a cut-short park left it: an approved task is
+    /// unapproved, one in review or open is claimed as it stands (never reopened first: a failed claim then leaves it
+    /// as it was, not open and unheld; TRAIL-826), then asked. A parked one is already claimed.
+    async fn park_unapproved_merge(&self, task: &Task, pr_url: &str) -> Result<()> {
+        if task.status == Status::Approved {
+            self.tracker.unapprove(&task.key).await?;
+        }
+        if matches!(task.status, Status::InReview | Status::Approved | Status::Open) {
+            self.tracker.claim(&task.key).await?;
+        }
+        self.tracker.ask(&task.key, &messages::merged_unapproved_question(pr_url)).await
     }
 
     /// A PR closed without merging: the task is parked with a question for a human, rather than reopened, since a
     /// rework would push to a PR nobody is going to merge. Reopening it after reopening the PR resumes as a rework.
     pub(crate) async fn park_closed(&self, task: &Task, pr: &PrRef) -> Result<()> {
-        tracing::warn!(task = %task.key.0, pr = %pr.url, "the PR was closed without merging; parking");
+        tracing::warn!(task = %task.key, pr = %pr.url, "the PR was closed without merging; parking");
         self.forget_merge_path(&task.key);
         // Claimed as it stands, whether open, in review or parked, never reopened first: if the claim then failed, an
         // open, unheld task could start a rework against this PR (TRAIL-216). An approved task can't be claimed, so it
@@ -323,7 +344,7 @@ impl Factory {
         self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
         let base = &self.config.repo.base_branch;
         let body = messages::conflict_feedback(&pr.url, base);
-        tracing::warn!(task = %task.key.0, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
+        tracing::warn!(task = %task.key, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
         let head = match &self.codehost {
             Some(codehost) => codehost.head(pr).await.ok(),
             None => None,
@@ -359,7 +380,7 @@ impl Factory {
                     Ok(CiState::Passed) => AfterUpdate::CiPassedBefore,
                     Ok(_) => AfterUpdate::CiUnconfirmed,
                     Err(e) => {
-                        tracing::warn!(task = %task.key.0, error = %e, "couldn't read CI on the reviewed head");
+                        tracing::warn!(task = %task.key, error = %e, "couldn't read CI on the reviewed head");
                         AfterUpdate::CiUnconfirmed
                     }
                 }
@@ -367,7 +388,7 @@ impl Factory {
             _ => AfterUpdate::No,
         };
         let logs = codehost.ci_logs(pr, checks).await.unwrap_or_else(|e| {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't read the logs of the failed checks");
+            tracing::warn!(task = %task.key, error = %e, "couldn't read the logs of the failed checks");
             Vec::new()
         });
         let base = &self.config.repo.base_branch;
@@ -377,7 +398,7 @@ impl Factory {
         }
         let round = task.run.conflict_reworks.unwrap_or(0) + 1;
         self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
-        tracing::warn!(task = %task.key.0, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
+        tracing::warn!(task = %task.key, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
         let head = Some(head.to_string());
         let requested =
             ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head, settled: false };
@@ -420,7 +441,7 @@ impl Factory {
                 }
                 let settled = RunUpdate { stale_head: Some(String::new()), ..RunUpdate::default() };
                 if let Err(e) = self.tracker.report(&task.key, settled).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the stale head; reading it again");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't clear the stale head; reading it again");
                 }
                 Ok(PrSettle::Open { mergeable, head })
             }
@@ -444,7 +465,7 @@ impl Factory {
         let Some(name) = &task.run.sandbox else { return Ok(false) };
         // A park for the reviewer's breach that was cut short: finish it rather than let a worker rerun the task.
         if let Some((breach, claim)) = self.unparked_review_breach(task) {
-            tracing::warn!(task = %task.key.0, "finishing the park for the reviewer's breach");
+            tracing::warn!(task = %task.key, "finishing the park for the reviewer's breach");
             self.park_review_breach(&task.key, breach.clone(), claim, task.run.retries.unwrap_or(0)).await?;
             done.breached.push(task.key.0.clone());
             return Ok(false);
@@ -456,7 +477,7 @@ impl Factory {
                     sub.release(&task.key).await?;
                 }
                 if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the sub-agent; its token will expire");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't revoke the sub-agent; its token will expire");
                 }
                 done.requeued.push(task.key.0.clone());
             }
@@ -466,15 +487,16 @@ impl Factory {
                     return Ok(false);
                 }
                 if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't revoke the sub-agent; its token will expire");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't revoke the sub-agent; its token will expire");
                 }
             }
             // Parked for a human, so a PR still open or closed stays as it is (a closed one was the question). A merge
             // by anyone finishes the task all the same, unless it is already recorded (merged by hand before approval,
             // parked for a person to mark it done): that one is skipped below.
             Status::NeedsInput => {
-                // One already recorded as merged by hand was parked for a person to finish: don't ask again.
-                if task.run.merged.is_none()
+                // One already parked for a merge by hand waits for a person to finish it: don't ask again. A `merged`
+                // record without the park is a close that failed before it, so it is retried (TRAIL-729).
+                if task.run.unapproved_merge != Some(true)
                     && let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost)
                     && let PrState::Merged { commit } = codehost.pr_state(pr).await?
                 {
@@ -490,7 +512,7 @@ impl Factory {
                         (task.run.review_rounds, self.config.repo.max_review_rounds)
                     };
                     if count.is_some_and(|n| n >= max) {
-                        tracing::warn!(task = %task.key.0, "finishing the park's settling of its changes request");
+                        tracing::warn!(task = %task.key, "finishing the park's settling of its changes request");
                         self.settle_parked_request(task, c, task.run.retries.unwrap_or(0)).await;
                     }
                 }
