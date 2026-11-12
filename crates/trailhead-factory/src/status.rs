@@ -177,8 +177,10 @@ pub struct FactorySnapshot {
     pub targets: Vec<TargetSpend>,
     /// The grades whose gate (`[factory.gates.N]`, or the default table) wants a person, so a UI can say where Treeline
     /// is without assuming the table. Not on the stream: it only changes with the config.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub human_grades: Vec<Grade>,
+    /// `None` is a factory that hasn't said (an older one, or before its config is read); `Some(vec![])` is one whose
+    /// gates need no person at any grade. A client falls back to the default table only for `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_grades: Option<Vec<Grade>>,
     /// The repo's queue tasks (`queue` in `[factory]`), whose subtasks the factory works. Lookout's Factory filter
     /// uses them to tell the factory's tasks from the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

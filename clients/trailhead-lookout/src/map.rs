@@ -729,7 +729,7 @@ mod tests {
             seq: 1,
             holding: None,
             targets: Vec::new(),
-            human_grades: Vec::new(),
+            human_grades: None,
             queue: Vec::new(),
             usage: Vec::new(),
         };
@@ -808,7 +808,7 @@ mod tests {
             control: ControlState::Up,
             queue: Vec::new(),
             last_error: None,
-            human_grades: Vec::new(),
+            human_grades: None,
             holding: Some("#306 has auto-merge on but CI failed".into()),
             usage: Vec::new(),
             seq: 1,
@@ -859,7 +859,7 @@ mod tests {
             seq: 1,
             holding: None,
             targets: Vec::new(),
-            human_grades: Vec::new(),
+            human_grades: None,
             queue: Vec::new(),
             usage: Vec::new(),
         };

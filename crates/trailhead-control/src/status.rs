@@ -26,7 +26,7 @@ struct Inner {
     runs: Vec<RunStatus>,
     holding: Option<String>,
     targets: Vec<TargetSpend>,
-    human_grades: Vec<Grade>,
+    human_grades: Option<Vec<Grade>>,
     queue: Vec<TaskKey>,
     usage: Vec<UsageWindow>,
     seq: u64,
@@ -48,7 +48,7 @@ impl Default for StatusBoard {
                 runs: Vec::new(),
                 holding: None,
                 targets: Vec::new(),
-                human_grades: Vec::new(),
+                human_grades: None,
                 queue: Vec::new(),
                 usage: Vec::new(),
                 seq: 0,
@@ -166,7 +166,7 @@ impl StatusBoard {
     /// Sets the grades whose gate wants a person. It goes in the snapshot and not the stream, because only the config
     /// changes it.
     pub fn human_grades(&self, grades: Vec<Grade>) {
-        self.inner.lock().unwrap().human_grades = grades;
+        self.inner.lock().unwrap().human_grades = Some(grades);
     }
 
     /// Sets the repo's queue tasks, which the snapshot carries. They come from the settings and don't change while
@@ -434,9 +434,11 @@ mod tests {
     #[test]
     fn the_snapshot_carries_the_grades_that_want_a_person() {
         let board = StatusBoard::new();
-        assert!(board.snapshot().human_grades.is_empty());
+        assert_eq!(board.snapshot().human_grades, None);
         board.human_grades(vec![Grade::ALL[1]]);
-        assert_eq!(board.subscribe().0.human_grades, [Grade::ALL[1]]);
+        assert_eq!(board.subscribe().0.human_grades, Some(vec![Grade::ALL[1]]));
+        board.human_grades(Vec::new());
+        assert_eq!(board.snapshot().human_grades, Some(Vec::new()));
     }
 
     #[test]

@@ -615,7 +615,7 @@ mod tests {
                 cap: Usd::dollars(5.0),
                 capped: true,
             }],
-            human_grades: Vec::new(),
+            human_grades: None,
             queue: Vec::new(),
             usage: Vec::new(),
             seq: 12,
