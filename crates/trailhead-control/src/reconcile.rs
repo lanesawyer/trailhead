@@ -270,6 +270,14 @@ impl Factory {
             MergedBy::Merger => self.tracker.show(&task.key).await?.run.merge,
             MergedBy::Human => None,
         };
+        // A park made by the worker's sub-agent leaves the claim with it, and the factory's writes are refused until the
+        // lease runs out (TRAIL-403): give it up first. A failure is logged, and the writes below say if it mattered.
+        // The sub-agent is revoked by then, so the factory releases the claim as the agent above it.
+        if task.holder.as_deref().is_some_and(|h| h.starts_with(&format!("{}/", self.tracker.agent())))
+            && let Err(e) = self.tracker.release(&task.key).await
+        {
+            tracing::warn!(task = %task.key.0, error = %e, "couldn't release the sub-agent's claim before closing");
+        }
         let merged_by_human = merged.by == MergedBy::Human;
         let pr_url = merged.pr.url.clone();
         let handoff = messages::merged_handoff(merged.by, &merged.pr.url, merged.commit.as_deref(), decision.as_ref());
