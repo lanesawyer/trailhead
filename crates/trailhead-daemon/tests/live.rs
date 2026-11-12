@@ -183,7 +183,7 @@ async fn daemon_in_a_sprite() {
                 assert!(matches!(report.result, RunResult::Failed(_)), "{:?}", report.result);
             }
 
-            let filter = EventFilter { task: Some(key.0.clone()), ..Default::default() };
+            let filter = EventFilter { task: Some(key.clone()), ..Default::default() };
             let kinds: Vec<String> =
                 store.list_events(&human, filter).await.unwrap().into_iter().map(|e| e.kind).collect();
             eprintln!("task events: {kinds:?}");

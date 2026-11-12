@@ -417,7 +417,7 @@ impl TrailheadMcp {
             scheduled_on,
             scheduled_at,
             scheduled_tz: a.scheduled_tz,
-            parent: a.parent,
+            parent: a.parent.map(Into::into),
             ..Default::default()
         };
         let store = &self.state.store;
@@ -601,14 +601,14 @@ impl TrailheadMcp {
             status,
             priority: attempt!(a.priority.map(Priority::try_from).transpose()),
             grade: attempt!(a.grade.as_deref().map(parse_grade).transpose()),
-            duplicate_of: attempt!(clearable(a.duplicate_of.as_deref(), |d| Ok(d.to_owned()))),
+            duplicate_of: attempt!(clearable(a.duplicate_of.as_deref(), |d| Ok(d.into()))),
             due_on: attempt!(clearable(a.due_on.as_deref(), parse_date)),
             due_at: attempt!(clearable(a.due_at.as_deref(), trailhead_core::parse_at)),
             due_tz: a.due_tz.map(Some),
             scheduled_on: attempt!(clearable(a.scheduled_on.as_deref(), parse_date)),
             scheduled_at: attempt!(clearable(a.scheduled_at.as_deref(), trailhead_core::parse_at)),
             scheduled_tz: a.scheduled_tz.map(Some),
-            parent: attempt!(clearable(a.parent.as_deref(), |p| Ok(p.to_owned()))),
+            parent: attempt!(clearable(a.parent.as_deref(), |p| Ok(p.into()))),
             metadata: a.metadata.map(serde_json::Value::Object),
         };
         let task = attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await);
