@@ -160,6 +160,9 @@ impl Gateway {
             }
         }
         body.truncate(length);
+        if let Err(why) = policy::check_body(provider, &labels, &req.method, &upstream_path, &body) {
+            return respond_with(client, 403, "text/plain", &why).await;
+        }
 
         let mut url = format!("{}{}", conn.upstream.trim_end_matches('/'), upstream_path);
         if let Some(q) = query {
@@ -318,7 +321,7 @@ mod tests {
     }
 
     fn worker() -> Labels {
-        labels(&[("role", "worker"), ("repo", "lane/trail")])
+        labels(&[("role", "worker"), ("repo", "lane/trail"), ("task", "TRAIL-7")])
     }
 
     fn reviewer() -> Labels {
@@ -582,6 +585,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_worker_creates_and_moves_only_its_own_tasks_branch() {
+        let (url, mut seen) = upstream().await;
+        let (gw, addr) = gateway(worker()).await;
+        connect(&gw, "github", "gh1", &url, AuthScheme::Bearer, "t").await;
+        let create = |path: &'static str, body: &'static str| async move {
+            call(addr, "POST", &format!("/v1/gateway/github/gh1{path}"), &[], body).await
+        };
+        let refs = "/repos/lane/trail/git/refs";
+
+        assert_eq!(create(refs, r#"{"ref":"refs/heads/factory/trail-7","sha":"abc"}"#).await.0, 201);
+        seen.recv().await.unwrap();
+        for (path, body) in [
+            (refs, r#"{"ref":"refs/heads/main","sha":"abc"}"#),
+            (refs, r#"{"ref":"refs/heads/factory/trail-8","sha":"abc"}"#),
+            (refs, r#"{"ref":"refs/heads/factory/trail-7/x","sha":"abc"}"#),
+            (refs, r#"{"ref":"refs/tags/v1","sha":"abc"}"#),
+            (refs, r#"{"sha":"abc"}"#),
+            (refs, "not json"),
+            (refs, ""),
+            // The same path spelled with empty segments is read the same way.
+            ("/repos/lane/trail/git/refs/", r#"{"ref":"refs/heads/main","sha":"abc"}"#),
+            ("/repos/lane/trail//git/refs", r#"{"ref":"refs/heads/main","sha":"abc"}"#),
+        ] {
+            let (status, why) = create(path, body).await;
+            assert_eq!(status, 403, "{path} {body}");
+            assert!(why.contains("refs/heads/factory/trail-7"), "{why}");
+        }
+
+        // Between tasks, or with a task label that isn't a key, a worker writes objects but no ref.
+        for task in [None, Some("../main"), Some("")] {
+            let mut labels = labels(&[("role", "worker"), ("repo", "lane/trail")]);
+            labels.extend(task.map(|t| ("task".to_string(), t.to_string())));
+            gw.handle(GatewayRequest::Register { name: "a".into(), address: "127.0.0.1".parse().unwrap(), labels })
+                .await;
+            assert_eq!(create("/repos/lane/trail/git/blobs", "{}").await.0, 201, "{task:?}");
+            seen.recv().await.unwrap();
+            assert_eq!(create(refs, r#"{"ref":"refs/heads/factory/trail-7","sha":"abc"}"#).await.0, 403, "{task:?}");
+            let patch = "/v1/gateway/github/gh1/repos/lane/trail/git/refs/heads/factory/trail-7";
+            assert_eq!(call(addr, "PATCH", patch, &[], "{}").await.0, 403, "{task:?}");
+        }
+        // Nothing refused reached the upstream.
+        assert!(seen.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn applies_the_path_policy() {
         let (url, mut seen) = upstream().await;
         let (gw, addr) = gateway(worker()).await;
@@ -592,8 +640,10 @@ mod tests {
 
         for (m, p) in [
             ("POST", "/repos/lane/trail/git/trees"),
-            ("PATCH", "/repos/lane/trail/git/refs/heads/x"),
-            ("GET", "/repos/lane/trail/git/ref/heads/x"),
+            ("POST", "/repos/lane/trail/git/blobs"),
+            ("POST", "/repos/lane/trail/git/commits"),
+            ("PATCH", "/repos/lane/trail/git/refs/heads/factory/trail-7"),
+            ("GET", "/repos/lane/trail/git/ref/heads/main"),
             ("POST", "/repos/lane/trail/pulls"),
             ("GET", "/repos/lane/trail/pulls/3/files"),
             ("POST", "/repos/lane/trail/issues/3/comments"),
@@ -603,7 +653,15 @@ mod tests {
         }
         for (m, p) in [
             ("PUT", "/repos/lane/trail/pulls/3/merge"),
-            ("DELETE", "/repos/lane/trail/git/refs/heads/x"),
+            ("DELETE", "/repos/lane/trail/git/refs/heads/factory/trail-7"),
+            // The writer token could move any ref; a worker moves only its own task's branch.
+            ("PATCH", "/repos/lane/trail/git/refs/heads/main"),
+            ("PATCH", "/repos/lane/trail/git/refs/heads/factory/trail-8"),
+            ("PATCH", "/repos/lane/trail/git/refs/heads/factory/trail-7/x"),
+            ("PATCH", "/repos/lane/trail/git/refs/tags/v1"),
+            ("PATCH", "/repos/lane/trail/git/refs"),
+            ("POST", "/repos/lane/trail/git/refs/heads/main"),
+            ("POST", "/repos/lane/trail/git/tags/x"),
             ("GET", "/repos/lane/other/git/trees"),
             ("GET", "/repos/lane/trail"),
             ("GET", "/repos/lane/trail-evil/pulls"),

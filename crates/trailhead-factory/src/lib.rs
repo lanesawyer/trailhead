@@ -118,6 +118,12 @@ pub fn run_name(task: &TaskKey, attempt: u32) -> String {
     format!("{}-a{attempt}", task.0.to_ascii_lowercase())
 }
 
+/// The branch a task's work is published on (`TRAIL-42` → `factory/trail-42`). One spelling, because the control
+/// plane names it and the gateway lets a worker write no other ref.
+pub fn task_branch(task: &TaskKey) -> String {
+    format!("factory/{}", task.0.to_ascii_lowercase())
+}
+
 /// The reviewer's sandbox and sub-agent for one review round of an attempt.
 pub fn review_name(task: &TaskKey, attempt: u32, round: u32) -> String {
     format!("{}-r{round}", run_name(task, attempt))
@@ -150,5 +156,6 @@ mod tests {
         let key = TaskKey("TRAIL-42".into());
         assert_eq!(run_name(&key, 1), "trail-42-a1");
         assert_eq!(review_name(&key, 2, 1), "trail-42-a2-r1");
+        assert_eq!(task_branch(&key), "factory/trail-42");
     }
 }
