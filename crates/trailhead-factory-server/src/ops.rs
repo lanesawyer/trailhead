@@ -14,7 +14,7 @@ use trailhead_factory::{
     Credential, FactorySnapshot, Labels, Sandbox, SandboxState, SandboxStatus, Status, Task, TaskKey, Tracker,
 };
 
-use crate::{Opts, computes, load_config, resolve_opts, saved_endpoint_id, surface};
+use crate::{Opts, computes, config_dir, load_config, resolve_opts, saved_endpoint_id, surface};
 
 /// The program the control plane starts the daemon as, whose service log `logs` prints.
 const DAEMON_PROGRAM: &str = "trailhead-daemon";
@@ -47,8 +47,8 @@ pub struct LogsOpts {
 pub async fn status(status: &StatusOpts) -> Result<()> {
     let opts = &status.opts;
     let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
-    let (opts, fnox) = resolve_opts(opts, &paths, &std::env::current_dir().map_err(Error::backend)?)?;
-    let (_, _, config) = load_config(&opts)?;
+    let (config_path, _, config) = load_config(opts)?;
+    let (opts, fnox) = resolve_opts(opts, &paths, &config_dir(&config_path))?;
     let tracker = api_tracker(&opts, &paths)?;
 
     // A running control plane knows its sandboxes and runs itself, so it is asked first; the compute is only read when
@@ -107,8 +107,8 @@ pub async fn status(status: &StatusOpts) -> Result<()> {
 
 pub async fn logs(logs: &LogsOpts) -> Result<()> {
     let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
-    let (opts, fnox) = resolve_opts(&logs.opts, &paths, &std::env::current_dir().map_err(Error::backend)?)?;
-    let (_, _, config) = load_config(&opts)?;
+    let (config_path, _, config) = load_config(&logs.opts)?;
+    let (opts, fnox) = resolve_opts(&logs.opts, &paths, &config_dir(&config_path))?;
 
     let tracker = api_tracker(&opts, &paths)?;
     let key = TaskKey(logs.task.to_ascii_uppercase());
@@ -575,6 +575,9 @@ mod tests {
         let waiting = [task("TRAIL-3", Status::Open, Default::default())];
         let out = render_status(&rows(&boxes), &parked, &waiting, 2, false);
         assert!(out.contains("1 ready task waiting; all 2 sandboxes held by parked tasks"), "{out}");
+        let several = [waiting[0].clone(), task("TRAIL-4", Status::Open, Default::default())];
+        let out = render_status(&rows(&boxes), &parked, &several, 2, false);
+        assert!(out.contains("2 ready tasks waiting; all 2 sandboxes held by parked tasks"), "{out}");
         assert!(!render_status(&rows(&boxes), &parked, &[], 2, false).contains("waiting;"));
         assert!(!render_status(&rows(&boxes), &parked, &waiting, 3, false).contains("waiting;"));
     }

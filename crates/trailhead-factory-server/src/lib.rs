@@ -200,6 +200,11 @@ fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::F
     Ok((resolved, fnox))
 }
 
+/// The directory of the repo whose config is at `config_path`.
+fn config_dir(config_path: &Path) -> PathBuf {
+    config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf()
+}
+
 /// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
 fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig)> {
     let config_path = match &opts.config {
@@ -207,7 +212,7 @@ fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>,
         None => find::config(&std::env::current_dir().map_err(Error::backend)?)?,
     };
     let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
-    let repo_dir = config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+    let repo_dir = config_dir(&config_path);
     let remote = find::remote(&repo_dir);
     let config = FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
     Ok((config_path, remote, config))
@@ -292,7 +297,7 @@ fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan> {
 }
 
 /// Reaches out from a [`Plan`]: secrets, the daemon binary, the store, the iroh endpoint and the
-/// computes. Fnox runs in `fnox_dir`. `store` is the server's own: the only process that opens the database.
+/// computes. Fnox runs in `fnox_dir`, the first repo's directory. `store` is the server's own: the only process that opens the database.
 async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, feed: surface::Feed) -> Result<Setup> {
     let Plan { opts, host_config, mut specs, adapter } = plan;
     let (opts, fnox) = resolve_opts(&opts, paths, fnox_dir)?;
@@ -575,8 +580,7 @@ fn check_result(failed: usize) -> Result<()> {
 pub async fn check(run: &RunOpts) -> Result<()> {
     let paths = Paths::from_env().ok_or(Error::NoDirs)?;
     let plan = plan(run, read_host_config(&paths)?)?;
-    let cwd = std::env::current_dir().map_err(Error::backend)?;
-    let (opts, fnox) = resolve_opts(&plan.opts, &paths, &cwd)?;
+    let (opts, fnox) = resolve_opts(&plan.opts, &paths, &plan.specs[0].dir)?;
     let tracker = ops::api_tracker(&opts, &paths)?;
     let mut failed = 0;
     for spec in &plan.specs {
