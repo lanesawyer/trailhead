@@ -16,11 +16,43 @@ impl Repo {
 }
 
 /// A file's new contents, or `None` to delete it. Commits are published through
-/// a REST API (GitHub's Git Data API), not `git push`.
+/// a REST API (GitHub's Git Data API), not `git push`. A symlink's contents are its target path, never the bytes of
+/// what it points to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileChange {
     pub path: String,
     pub contents: Option<Vec<u8>>,
+    /// Absent from a change sent by a build older than modes (TRAIL-1432), which published everything as regular.
+    #[serde(default)]
+    pub mode: FileMode,
+}
+
+impl FileChange {
+    /// A regular file's new contents, or its deletion.
+    pub fn new(path: impl Into<String>, contents: Option<Vec<u8>>) -> FileChange {
+        FileChange { path: path.into(), contents, mode: FileMode::Regular }
+    }
+}
+
+/// The git mode a changed file is published with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileMode {
+    #[default]
+    Regular,
+    Executable,
+    Symlink,
+}
+
+impl FileMode {
+    /// The mode as a git tree entry spells it.
+    pub fn git(self) -> &'static str {
+        match self {
+            FileMode::Regular => "100644",
+            FileMode::Executable => "100755",
+            FileMode::Symlink => "120000",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,5 +216,24 @@ pub trait CodeHost: Send + Sync {
     /// The rate limit as the host last reported it, or `None` when it doesn't say or hasn't been asked yet.
     fn rate_limit(&self) -> Option<RateLimit> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_change_from_a_build_without_modes_is_a_regular_file() {
+        let change: FileChange = serde_json::from_str(r#"{"path":"run.sh","contents":[104,105]}"#).unwrap();
+        assert_eq!(change, FileChange::new("run.sh", Some(b"hi".to_vec())));
+        assert_eq!(change.mode, FileMode::Regular);
+    }
+
+    #[test]
+    fn a_mode_survives_the_round_trip() {
+        let change = FileChange { path: "link".into(), contents: Some(b"target".to_vec()), mode: FileMode::Symlink };
+        let back: FileChange = serde_json::from_str(&serde_json::to_string(&change).unwrap()).unwrap();
+        assert_eq!(back, change);
     }
 }

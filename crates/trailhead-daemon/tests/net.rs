@@ -184,7 +184,7 @@ fn changes() -> RunOutcome {
     RunOutcome::Changes {
         commits: vec![Commit {
             message: "feat: greet".into(),
-            changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
             merges: vec![],
         }],
         summary: "Adds a greeting.".into(),

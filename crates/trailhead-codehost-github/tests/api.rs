@@ -13,8 +13,8 @@ use base64::Engine;
 use serde_json::{Value, json};
 use trailhead_codehost_github::{GitHub, Identity};
 use trailhead_factory::{
-    BranchUpdate, ChangedFile, CiState, CodeHost, Commit, Error, FileChange, FileStatus, MergeOutcome, NewPr, PrRef,
-    PrState, RateLimit, Repo,
+    BranchUpdate, ChangedFile, CiState, CodeHost, Commit, Error, FileChange, FileMode, FileStatus, MergeOutcome, NewPr,
+    PrRef, PrState, RateLimit, Repo,
 };
 
 #[derive(Default)]
@@ -22,6 +22,8 @@ struct Git {
     next: u64,
     blobs: BTreeMap<String, Vec<u8>>,
     trees: BTreeMap<String, BTreeMap<String, String>>,
+    /// The mode each tree request gave a path, last request wins.
+    modes: BTreeMap<String, String>,
     commits: BTreeMap<String, Value>,
     refs: BTreeMap<String, String>,
     prs: Vec<Value>,
@@ -162,6 +164,8 @@ async fn create_tree(State(g): State<Shared>, Json(b): Json<Value>) -> Response 
     let mut files = g.trees[b["base_tree"].as_str().unwrap()].clone();
     for e in b["tree"].as_array().unwrap() {
         let path = e["path"].as_str().unwrap().to_string();
+        assert_eq!(e["type"], "blob");
+        g.modes.insert(path.clone(), e["mode"].as_str().unwrap().to_string());
         match e["sha"].as_str() {
             Some(sha) => files.insert(path, sha.into()),
             None => files.remove(&path),
@@ -456,7 +460,7 @@ fn repo() -> Repo {
 }
 
 fn change(path: &str, contents: Option<&[u8]>) -> FileChange {
-    FileChange { path: path.into(), contents: contents.map(<[u8]>::to_vec) }
+    FileChange::new(path, contents.map(<[u8]>::to_vec))
 }
 
 /// The files at a branch's head, with their contents.
@@ -526,6 +530,29 @@ async fn publish_builds_commits_on_a_new_branch_then_on_top_of_it() {
 
     let missing = gh.publish(&repo(), "nope", "factory/trail-2", &[first]).await.unwrap_err();
     assert!(matches!(missing, Error::NotFound(_)), "{missing:?}");
+}
+
+#[tokio::test]
+async fn publish_gives_each_file_its_mode() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let commit = Commit {
+        message: "TRAIL-1: modes".into(),
+        changes: vec![
+            change("README.md", Some(b"v2\n")),
+            FileChange { path: "run.sh".into(), contents: Some(b"#!/bin/sh\n".to_vec()), mode: FileMode::Executable },
+            FileChange { path: "link".into(), contents: Some(b"README.md".to_vec()), mode: FileMode::Symlink },
+            change("old.txt", None),
+        ],
+        merges: vec![],
+    };
+    let main = head(&git, "main");
+    gh.publish(&repo(), &main, "factory/trail-1", &[commit]).await.unwrap();
+
+    let modes = git.lock().unwrap().modes.clone();
+    let modes: Vec<_> = modes.iter().map(|(p, m)| (p.as_str(), m.as_str())).collect();
+    assert_eq!(modes, [("README.md", "100644"), ("link", "120000"), ("old.txt", "100644"), ("run.sh", "100755")]);
+    assert_eq!(files(&git, "factory/trail-1")["link"], b"README.md", "a symlink's blob is its target path");
 }
 
 /// TRAIL-161: the checkout started at an older main, and main moved before publishing. The new branch is built on the

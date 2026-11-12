@@ -88,7 +88,7 @@ async fn a_worker_keeps_renewing_its_claim_while_publishing_retries() {
         Script::new(RunOutcome::Changes {
             commits: vec![Commit {
                 message: format!("feat: greet [{}]", key.0),
-                changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+                changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
                 merges: vec![],
             }],
             summary: "Adds a greeting.".into(),
@@ -133,7 +133,7 @@ async fn a_publish_that_landed_behind_a_5xx_is_not_a_conflict_on_retry() {
         Script::new(RunOutcome::Changes {
             commits: vec![Commit {
                 message: format!("feat: greet [{}]", key.0),
-                changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+                changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
                 merges: vec![],
             }],
             summary: "Adds a greeting.".into(),
@@ -178,7 +178,7 @@ async fn the_check_results_survive_an_error_recording_a_failed_check() {
         Script::new(RunOutcome::Changes {
             commits: vec![Commit {
                 message: format!("feat: greet [{}]", key.0),
-                changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+                changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
                 merges: vec![],
             }],
             summary: "Adds a greeting.".into(),
@@ -218,7 +218,7 @@ async fn a_failed_review_request_is_retried_without_reporting_the_pr_again() {
         Script::new(RunOutcome::Changes {
             commits: vec![Commit {
                 message: format!("feat: greet [{}]", key.0),
-                changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+                changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
                 merges: vec![],
             }],
             summary: "Adds a greeting.".into(),

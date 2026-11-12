@@ -115,7 +115,7 @@ pub fn changes() -> RunOutcome {
     RunOutcome::Changes {
         commits: vec![Commit {
             message: conventional_title(Some("feat(core): greet"), &TaskKey("TRAIL-1".into()), "").0,
-            changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
             merges: vec![],
         }],
         summary: "Adds a greeting.".into(),
@@ -242,7 +242,7 @@ pub fn changes_to(path: &str) -> RunOutcome {
     RunOutcome::Changes {
         commits: vec![Commit {
             message: "docs(docs): note it [TRAIL-2]".into(),
-            changes: vec![FileChange { path: path.into(), contents: Some(b"x".to_vec()) }],
+            changes: vec![FileChange::new(path, Some(b"x".to_vec()))],
             merges: vec![],
         }],
         summary: "Done.".into(),

@@ -19,7 +19,7 @@ async fn a_reviewer_gets_the_base_branch_and_pr_title_and_a_worker_gets_neither(
     let codehost = Arc::new(FakeCodeHost::new());
     let commit = Commit {
         message: "Add a greeting".into(),
-        changes: vec![FileChange { path: "hi.txt".into(), contents: Some(b"hi".to_vec()) }],
+        changes: vec![FileChange::new("hi.txt", Some(b"hi".to_vec()))],
         merges: Vec::new(),
     };
     codehost.publish(&repo, "base", "factory/r1", &[commit]).await.unwrap();

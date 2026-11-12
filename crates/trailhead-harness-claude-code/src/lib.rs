@@ -7,6 +7,8 @@
 //! into one commit for the daemon to publish.
 
 use std::collections::HashSet;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -16,8 +18,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use trailhead_factory::{
-    CheckResult, Commit, Error, EventSink, Feedback, FileChange, FollowUp, Harness, ModelId, Priority, RaiseGrade,
-    Result, Role, RunContext, RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
+    CheckResult, Commit, Error, EventSink, Feedback, FileChange, FileMode, FollowUp, Harness, ModelId, Priority,
+    RaiseGrade, Result, Role, RunContext, RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
 };
 
 /// The `adapter` name profiles use for this harness.
@@ -691,10 +693,11 @@ async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
 }
 
 /// Reads one changed path into `changes`. Git lists a directory only as an embedded repository (a gitlink),
-/// so a directory is replaced by the files its own git tracks or would add, never `.git`. A symlink to a
-/// directory can't be expressed as a `FileChange`, and following it would read outside the worktree, so it
-/// fails the run naming the path. A file the embedded repository lists but that is gone from disk (staged, then
-/// deleted) is skipped: the parent's base tree never had it, so publishing a deletion could be rejected.
+/// so a directory is replaced by the files its own git tracks or would add, never `.git`. A symlink is never
+/// followed: it's published as a link whose contents are its target path, wherever that points, so a link to a file
+/// outside the worktree can't copy that file into the commit. A file the embedded repository lists but that is gone
+/// from disk (staged, then deleted) is skipped: the parent's base tree never had it, so publishing a deletion could
+/// be rejected.
 async fn read_change(dir: &Path, path: String, changes: &mut Vec<FileChange>) -> Result<()> {
     let mut pending = vec![(path, false)];
     while let Some((path, expanded)) = pending.pop() {
@@ -715,8 +718,11 @@ async fn read_change(dir: &Path, path: String, changes: &mut Vec<FileChange>) ->
             }
             continue;
         }
-        if meta.as_ref().is_some_and(|m| m.is_symlink()) && tokio::fs::metadata(&full).await.is_ok_and(|m| m.is_dir()) {
-            return Err(Error::Other(format!("{path}: a symlink to a directory can't be published")));
+        if meta.as_ref().is_some_and(|m| m.is_symlink()) {
+            let target = tokio::fs::read_link(&full).await.map_err(fail)?;
+            let contents = Some(target.into_os_string().into_vec());
+            changes.push(FileChange { path, contents, mode: FileMode::Symlink });
+            continue;
         }
         let contents = match tokio::fs::read(&full).await {
             Ok(bytes) => Some(bytes),
@@ -724,7 +730,9 @@ async fn read_change(dir: &Path, path: String, changes: &mut Vec<FileChange>) ->
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(fail(e)),
         };
-        changes.push(FileChange { path, contents });
+        let executable = meta.is_some_and(|m| m.permissions().mode() & 0o111 != 0);
+        let mode = if executable { FileMode::Executable } else { FileMode::Regular };
+        changes.push(FileChange { path, contents, mode });
     }
     Ok(())
 }
@@ -846,13 +854,74 @@ mod tests {
         assert_eq!(paths, ["inner/keep"]);
     }
 
+    fn only(changes: Vec<FileChange>) -> FileChange {
+        let [change] = <[FileChange; 1]>::try_from(changes).unwrap_or_else(|c| panic!("{c:?}"));
+        change
+    }
+
     #[tokio::test]
-    async fn a_symlink_to_a_directory_is_not_followed() {
+    async fn an_executable_file_is_published_as_executable() {
+        let (dir, start) = started().await;
+        std::fs::write(dir.path().join("run.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(dir.path().join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "n").unwrap();
+        let mut changes = changes_since(dir.path(), &start).await.unwrap();
+        changes.sort_by(|a, b| a.path.cmp(&b.path));
+        let modes: Vec<_> = changes.iter().map(|c| (c.path.as_str(), c.mode)).collect();
+        assert_eq!(modes, [("notes.txt", FileMode::Regular), ("run.sh", FileMode::Executable)]);
+    }
+
+    #[tokio::test]
+    async fn making_a_file_executable_is_a_change() {
+        let (dir, _) = started().await;
+        std::fs::write(dir.path().join("run.sh"), "#!/bin/sh\n").unwrap();
+        run_git(&["add", "run.sh"], dir.path());
+        run_git(&["commit", "-q", "-m", "script"], dir.path());
+        let start = git_head(dir.path()).await.unwrap();
+        std::fs::set_permissions(dir.path().join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let change = only(changes_since(dir.path(), &start).await.unwrap());
+        assert_eq!(
+            change,
+            FileChange { path: "run.sh".into(), contents: Some(b"#!/bin/sh\n".to_vec()), mode: FileMode::Executable }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_symlink_to_a_file_is_published_as_the_link_not_its_target() {
+        let (dir, _) = started().await;
+        std::fs::write(dir.path().join("real.txt"), "contents").unwrap();
+        run_git(&["add", "real.txt"], dir.path());
+        run_git(&["commit", "-q", "-m", "real"], dir.path());
+        let start = git_head(dir.path()).await.unwrap();
+        std::os::unix::fs::symlink("real.txt", dir.path().join("link")).unwrap();
+        let change = only(changes_since(dir.path(), &start).await.unwrap());
+        assert_eq!(
+            change,
+            FileChange { path: "link".into(), contents: Some(b"real.txt".to_vec()), mode: FileMode::Symlink }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_symlink_out_of_the_worktree_is_published_as_a_link_not_a_copy() {
         let (dir, start) = started().await;
         let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("secret"), "s").unwrap();
-        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
-        let err = changes_since(dir.path(), &start).await.unwrap_err().to_string();
-        assert!(err.contains("link") && err.contains("symlink"), "{err}");
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, "s3cret").unwrap();
+        std::os::unix::fs::symlink(&secret, dir.path().join("file-link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("dir-link")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("nothing"), dir.path().join("dangling")).unwrap();
+        let mut changes = changes_since(dir.path(), &start).await.unwrap();
+        changes.sort_by(|a, b| a.path.cmp(&b.path));
+        let target = |p: &Path| Some(p.as_os_str().as_encoded_bytes().to_vec());
+        let link =
+            |path: &str, to: &Path| FileChange { path: path.into(), contents: target(to), mode: FileMode::Symlink };
+        assert_eq!(
+            changes,
+            [
+                link("dangling", &outside.path().join("nothing")),
+                link("dir-link", outside.path()),
+                link("file-link", &secret),
+            ]
+        );
     }
 }

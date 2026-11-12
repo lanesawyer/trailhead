@@ -20,8 +20,8 @@ pub mod target;
 pub mod tracker;
 
 pub use codehost::{
-    BranchUpdate, Ci, CiState, CodeHost, Commit, FileChange, MergeOutcome, NewPr, OpenPr, PrRef, PrState, RateLimit,
-    Repo,
+    BranchUpdate, Ci, CiState, CodeHost, Commit, FileChange, FileMode, MergeOutcome, NewPr, OpenPr, PrRef, PrState,
+    RateLimit, Repo,
 };
 pub use compute::{
     CheckpointId, Compute, Egress, IROH_DOMAINS, Labels, Program, Sandbox, SandboxFile, SandboxId, SandboxSpec, label,
