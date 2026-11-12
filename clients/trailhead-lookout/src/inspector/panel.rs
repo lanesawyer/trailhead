@@ -272,7 +272,7 @@ pub(super) fn sync_panel(
     let subject = &view.subject;
     let note =
         |action: &Action| controls.0.get(&(subject.clone(), action.clone())).and_then(|e| states.get(*e).ok()).cloned();
-    let human = factory.human_grades();
+    let human = factory.human_grades_for(view.task.as_ref().and_then(|t| t.project.as_deref()));
 
     let (title, root, wanted) = match &view.task {
         Some(facts) => {
@@ -290,7 +290,7 @@ pub(super) fn sync_panel(
             let root = *drawn.header.get_or_insert_with(|| {
                 commands.spawn_scene(panel_header(view.title.clone())).insert(ChildOf(*header)).id()
             });
-            let plan = layout(view, live, &offline, window.0, &note);
+            let plan = layout(view, live, &offline, window.0, &human, &note);
             let keys = plan.iter().map(|(k, _)| (k.clone(), ())).collect::<Vec<_>>();
             (view.title.clone(), root, (vec![(body, keys)], plan))
         }
@@ -315,7 +315,7 @@ pub(super) fn sync_panel(
     drawn.items.sync(
         &mut commands,
         &wanted,
-        |commands, _, block| spawn_block(commands, controls, subject, block, &human),
+        |commands, _, block| spawn_block(commands, controls, subject, block),
         |commands, entity, block| {
             commands.entity(entity).insert(Shown(block.clone()));
         },
