@@ -76,6 +76,7 @@ async fn health_is_open_and_everything_else_needs_a_token() {
     let health = api.call(None, "GET", "/v1/health", None, &[]).await;
     assert_eq!(health.status, StatusCode::OK);
     assert_eq!(health.body["ok"], true);
+    assert!(health.body.get("store_error").is_none(), "{}", health.body);
     assert!(health.body["version"].is_string());
     // The pid and paths name the local user, so they need a token.
     for k in ["pid", "exe", "exe_modified_ms", "db"] {
@@ -120,6 +121,11 @@ async fn agent_lifecycle_over_http() {
     let r = api.call(Some(&secret), "POST", "/v1/agents", Some(json!({"name": "child"})), &[]).await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
     assert_eq!(r.body["agent"]["name"], "claude/child");
+
+    let me = api.call(Some(&secret), "GET", "/v1/me", None, &[]).await;
+    assert_eq!(me.body["agent_id"], me.body["agent"]["id"]);
+    assert!(me.body["agent_id"].is_string());
+    assert!(api.as_human("GET", "/v1/me", None).await.body["agent_id"].is_null());
 
     let ready = api.call(Some(&secret), "GET", "/v1/ready?fields=key,title", None, &[]).await;
     assert_eq!(ready.body, json!([{"key": "AUTH-1", "title": "first"}]));
@@ -596,6 +602,7 @@ async fn task_list_can_include_every_blocker() {
     let items = r.body.as_array().unwrap();
     assert_eq!(items[2]["blocked_by"], json!([items[0]["id"], items[1]["id"]]));
     assert_eq!(items[0]["blocked_by"], json!([]));
+    assert_eq!(items[2]["blocked_by_hidden"], json!(0));
     assert_eq!(items[3]["blocked_by"], json!([]));
     let r = api.as_human("GET", "/v1/tasks?fields=key", None).await;
     assert!(r.body[0].get("blocked_by").is_none());
@@ -746,4 +753,23 @@ async fn task_list_can_include_the_last_review() {
     assert_eq!(items[0]["last_review"]["body"], "rebase");
     assert_eq!(items[0]["last_review"]["verdict"], "request_changes");
     assert!(items[1]["last_review"].is_null());
+}
+
+#[tokio::test]
+async fn health_reports_a_store_another_connection_has_locked() {
+    let api = Api::new().await;
+    let db = libsql::Builder::new_local(api._dir.path().join("t.db")).build().await.unwrap();
+    let other = db.connect().unwrap();
+    other.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let health = api.call(None, "GET", "/v1/health", None, &[]).await;
+    assert!(started.elapsed() < std::time::Duration::from_millis(1500), "{:?}", started.elapsed());
+    assert_eq!(health.status, StatusCode::OK);
+    assert_eq!(health.body["ok"], false);
+    assert!(health.body["store_error"].is_string(), "{}", health.body);
+
+    other.execute("ROLLBACK", ()).await.unwrap();
+    let health = api.call(None, "GET", "/v1/health", None, &[]).await;
+    assert_eq!(health.body["ok"], true);
 }

@@ -51,7 +51,7 @@ async fn reads_outside_scope_look_missing() {
     hidden(s.list_comments(&bot, &web).await);
     hidden(s.blockers(&bot, &web).await);
     hidden(s.get_project(&bot, "WEB").await);
-    hidden(s.list_events(&bot, EventFilter { task: Some(web.0.clone()), ..Default::default() }).await);
+    hidden(s.list_events(&bot, EventFilter { task: Some(web.clone()), ..Default::default() }).await);
     hidden(s.list_tasks(&bot, TaskFilter { project: Some("WEB".into()), ..Default::default() }).await);
     hidden(s.ready(&bot, Some("WEB"), None, GradeFilter::Any).await);
 
@@ -96,8 +96,7 @@ async fn writes_outside_scope_are_rejected() {
     forbidden(s.create_token_with(&bot, trailhead_core::Principal::Agent(kid.id), "k", wider).await);
 
     // Parents and dependencies can't reach out of scope either.
-    let child =
-        NewTask { project: "AUTH".into(), title: "c".into(), parent: Some(web.0.clone()), ..Default::default() };
+    let child = NewTask { project: "AUTH".into(), title: "c".into(), parent: Some(web.clone()), ..Default::default() };
     hidden(s.create_task(&bot, child).await);
     hidden(s.add_dependency(&bot, &web, &auth.key).await);
     hidden(s.add_dependency(&bot, &auth.key, &web).await);
@@ -117,8 +116,15 @@ async fn out_of_scope_blockers_are_redacted() {
     let detail = env.store.task_detail(&bot, &auth.key).await.unwrap();
     assert_eq!(detail.blocked_by, vec!["(out of scope)"]);
     assert!(env.store.blockers(&bot, &auth.key).await.unwrap().is_empty());
+    // The list leaves the blocker out but counts it, so a client can still show the task as blocked.
+    let listed = env.store.blockers_of(&bot, &[auth.id]).await.unwrap();
+    assert!(listed.visible.is_empty());
+    assert_eq!(listed.hidden.get(&auth.id), Some(&1));
+    let listed = env.store.blockers_of(&env.human, &[auth.id]).await.unwrap();
+    assert_eq!(listed.visible.get(&auth.id).map(Vec::len), Some(1));
+    assert!(listed.hidden.is_empty());
     match env.store.claim(&bot, &auth.key, None).await {
-        Err(Error::BlockedBy(keys)) => assert_eq!(keys, vec!["(out of scope)"]),
+        Err(Error::BlockedBy(keys)) => assert_eq!(keys, vec![TaskKey::from("(out of scope)")]),
         other => panic!("{other:?}"),
     }
     assert_eq!(env.store.task_detail(&env.human, &auth.key).await.unwrap().blocked_by, vec![web]);

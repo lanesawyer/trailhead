@@ -24,6 +24,7 @@ pub mod search;
 pub mod settings;
 pub mod sidebar;
 pub mod sync;
+pub mod usage;
 pub mod widgets;
 
 /// The app's systems and resources, without a window or renderer, so tests can run it headless.

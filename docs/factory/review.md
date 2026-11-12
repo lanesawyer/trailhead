@@ -39,8 +39,11 @@ Decided: gates per grade are configurable per repo, in `.trailhead.toml`. The ta
 4 = [".github/**", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE", "**/Cargo.lock", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/uv.lock", "**/poetry.lock", "**/go.sum", "**/Gemfile.lock"]
 max_lines = 600          # bigger diffs are at least grade 3
 
-# A Cargo.lock whose patch only edits dependency lists (a member gaining a dependency that is already locked) does not
-# match its rule; a new [[package]], or a changed version, source or checksum, or a patch the host omits, does.
+# A Cargo.lock, uv.lock or package-lock.json whose patch only edits dependency lists (a member gaining a dependency that
+# is already locked) does not match the globs that name it; a broader glob covering it (say `crates/**`) still applies.
+# A new package, or a changed version, source or checksum, or a patch the host omits, matches as usual.
+# Nor does a Rust file edited in place whose patch only changes comments (every changed line blank or starting with
+# //): a doc fix in src/ goes at the task's grade. A renamed or added file, or a patch the host omits, still matches.
 
 [factory.gates.1]
 require = ["checks", "ci"]

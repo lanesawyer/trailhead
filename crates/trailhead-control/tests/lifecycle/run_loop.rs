@@ -750,6 +750,32 @@ async fn reworks_that_hold_their_own_sandboxes_start_with_the_cap_full() {
 }
 
 #[tokio::test]
+async fn a_task_holds_one_pooled_sandbox_so_a_stale_label_doesnt_fill_the_cap() {
+    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 2");
+    let r = rig_with(&config);
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    // An earlier attempt's sandbox kept the label after the task moved on.
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.remove(label::WARM);
+    let spec = SandboxSpec { name: "trailhead-w2".into(), labels, egress: Default::default() };
+    r.compute.create(&spec).await.unwrap();
+    assert_eq!(r.compute.sandboxes().len(), 2);
+
+    // The stale one is released, so the other task starts without a third sandbox past the cap.
+    let next = r.tracker.add_task("TRAIL", "Next", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == next), "the other task started");
+    assert_eq!(r.compute.sandboxes().len(), 2, "no third sandbox");
+    let kept = r.compute.get("trailhead-w1").unwrap();
+    assert_eq!(kept.labels.get(label::TASK), Some(&key.0), "the parked task keeps the sandbox it ran on");
+}
+
+#[tokio::test]
 async fn taking_a_parked_task_off_its_queue_frees_its_place() {
     let (r, queue) = queued_rig();
     let key = r.tracker.add_subtask(&queue, "Ambiguous", "");
@@ -899,5 +925,5 @@ async fn a_parked_task_with_a_pushed_branch_and_no_pr_is_compared_with_its_branc
         .prepared()
         .into_iter()
         .any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1") && p.branch_if_present);
-    assert!(resumed, "a branch that was never pushed leaves it on the base");
+    assert!(resumed, "it resumes on the branch it pushed");
 }

@@ -338,8 +338,10 @@ impl Runner {
     /// Runs a code host call, asking again after a transient failure (a 5xx, a timeout) with a growing wait, until
     /// the waits add up to `PUBLISH_RETRY_FOR`. Anything else the host answers (a 403, a 422, a moved branch) is
     /// returned at once. Repeating is safe for what publishing does: blobs and trees are content-addressed, an
-    /// unreferenced commit is harmless, and the branch ref moves last, only from `start`. `open_pr` resolves a 422
-    /// for an existing PR to that PR, and a repeated comment at worst posts twice.
+    /// unreferenced commit is harmless, and the branch ref moves last, only from `start`. A retry after a ref write
+    /// that landed behind a 5xx finds the branch already at the new commits and is recognized as already published
+    /// (TRAIL-763), not rejected as a moved branch. `open_pr` resolves a 422 for an existing PR to that PR, and a
+    /// repeated comment at worst posts twice.
     async fn with_retries<T, F, Fut>(&self, req: &RunRequest, what: &str, mut call: F) -> Result<T>
     where
         F: FnMut() -> Fut,

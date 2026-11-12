@@ -271,7 +271,7 @@ pub struct NewTask {
     pub scheduled_at: Option<Zoned>,
     pub scheduled_tz: Option<String>,
     /// Parent task key or id.
-    pub parent: Option<String>,
+    pub parent: Option<TaskKey>,
     pub metadata: Option<Value>,
     pub source: Option<String>,
     pub external_id: Option<String>,
@@ -287,7 +287,7 @@ pub struct TaskPatch {
     pub grade: Option<Option<Grade>>,
     /// The task this one duplicates, which needs it cancelled (set `status` in the same patch).
     /// `Some(None)` clears it. Leaving `cancelled` clears it too.
-    pub duplicate_of: Option<Option<String>>,
+    pub duplicate_of: Option<Option<TaskKey>>,
     /// A new day drops any due time unless `due_at` comes with it; clearing it
     /// removes the deadline.
     pub due_on: Option<Option<Date>>,
@@ -300,7 +300,7 @@ pub struct TaskPatch {
     /// Clearing the time keeps the day.
     pub scheduled_at: Option<Option<Zoned>>,
     pub scheduled_tz: Option<Option<String>>,
-    pub parent: Option<Option<String>>,
+    pub parent: Option<Option<TaskKey>>,
     /// RFC 7386 merge patch: `null` removes a key.
     pub metadata: Option<Value>,
 }
@@ -722,13 +722,15 @@ impl Store {
             .query(
                 &format!(
                     "SELECT {} FROM dependencies d JOIN tasks t ON t.id = d.blocked_id
-                     WHERE d.blocker_id = ?1 AND t.deleted_at IS NULL ORDER BY t.key",
+                     WHERE d.blocker_id = ?1 AND t.deleted_at IS NULL",
                     prefixed_cols("t")
                 ),
                 [task.id.to_string()],
             )
             .await?;
-        let blocks = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
+        let mut blocks = collect(rows, task_from_row).await?;
+        blocks.sort_by(|a, b| trailhead_model::cmp_keys(&a.key, &b.key));
+        let blocks = blocks.iter().map(|t| visible_key(ctx, t)).collect();
         let comments = list_comments_for(&conn, task.id).await?;
         let changes_requested = trailhead_model::changes_requested(task.status, &comments);
         let duplicate_of = match task.duplicate_of {
@@ -741,13 +743,15 @@ impl Store {
         let rows = conn
             .query(
                 &format!(
-                    "SELECT {} FROM tasks t WHERE t.duplicate_of = ?1 AND t.deleted_at IS NULL ORDER BY t.key",
+                    "SELECT {} FROM tasks t WHERE t.duplicate_of = ?1 AND t.deleted_at IS NULL",
                     prefixed_cols("t")
                 ),
                 [task.id.to_string()],
             )
             .await?;
-        let duplicates = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
+        let mut duplicates = collect(rows, task_from_row).await?;
+        duplicates.sort_by(|a, b| trailhead_model::cmp_keys(&a.key, &b.key));
+        let duplicates = duplicates.iter().map(|t| visible_key(ctx, t)).collect();
         Ok(TaskDetail { task, claim, blocked_by, changes_requested, blocks, comments, duplicate_of, duplicates })
     }
 
@@ -991,8 +995,11 @@ impl Store {
     }
 }
 
-const STOP_WORDS: &[&str] =
-    &["the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use"];
+const STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use",
+    // Two-letter function words, which pass the length check when a title is written in capitals.
+    "to", "in", "of", "on", "or", "an", "at", "by", "is", "it", "as", "be", "if", "so", "do", "no", "up",
+];
 
 /// The lowercase words of a title that say what it's about. Words under three characters are
 /// dropped, except two-letter acronyms written in capitals (CI, UI, DB).

@@ -48,13 +48,17 @@ pub struct ListedTask {
     /// With `include=claim`: the live claim, or `null` if the task is unclaimed.
     claim: Option<trailhead_core::NamedClaim>,
     /// With `include=open_questions`: unresolved `question` comments, oldest first.
+    #[schema(nullable = false)]
     open_questions: Option<Vec<trailhead_core::Comment>>,
     /// With `include=last_handoff`: the newest `handoff` comment, or `null`.
     last_handoff: Option<trailhead_core::Comment>,
     /// With `include=last_review`: the newest `review` comment with a verdict, or `null`.
     last_review: Option<trailhead_core::Comment>,
     /// With `include=blocked_by`: the ids of every task blocking this one, finished or not (empty if none).
+    #[schema(nullable = false)]
     blocked_by: Option<Vec<uuid::Uuid>>,
+    /// With `include=blocked_by`: how many unfinished blockers outside the token's scope this task has, which `blocked_by` leaves out.
+    blocked_by_hidden: Option<u32>,
 }
 
 /// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.
@@ -64,6 +68,7 @@ pub struct CreatedTask {
     #[serde(flatten)]
     task: trailhead_core::Task,
     /// Keys of open tasks with a close title; absent when there are none. A warning, not an error.
+    #[schema(nullable = false)]
     possible_duplicates: Option<Vec<String>>,
 }
 
@@ -134,7 +139,9 @@ fn error_code() -> utoipa::openapi::Object {
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
 pub struct Health {
+    /// False when the server is up but its store can't serve requests (see `store_error`).
     ok: bool,
+    store_error: Option<String>,
     version: String,
     /// Identifies the server's data directory, so a client can tell its own
     /// machine's server from one reached through a tunnel.
@@ -155,7 +162,9 @@ pub struct Health {
 pub struct Me {
     workspace_id: Uuid,
     user: trailhead_core::User,
-    /// Set when the token belongs to an agent.
+    /// Set when the token belongs to an agent, even if the agent can't be looked up.
+    agent_id: Option<Uuid>,
+    /// The agent itself, when `agent_id` resolves.
     agent: Option<trailhead_core::Agent>,
 }
 

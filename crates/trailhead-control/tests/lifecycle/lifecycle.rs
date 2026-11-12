@@ -11,6 +11,20 @@ use trailhead_testkit::{FAKE_BASE, Script, TrackerOp};
 use crate::common::*;
 
 #[tokio::test]
+async fn a_profile_selects_the_scripted_harness_by_adapter_name() {
+    let config = CONFIG.replace("claude-code", trailhead_testkit::SCRIPTED);
+    let r = rig_selecting(&config);
+    r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+
+    let ran = r.factory.tick().await.unwrap();
+    let Outcome::Reviewed { verdict, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+    assert_eq!(verdict.kind, VerdictKind::Approve);
+    assert_eq!(r.codehost.prs().len(), 1);
+}
+
+#[tokio::test]
 async fn spec_to_reviewed_pr_then_human_merge() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
@@ -177,6 +191,20 @@ async fn a_failed_park_after_giving_up_does_not_leave_the_gave_up_marker() {
     let task = r.tracker.task(&key);
     assert_ne!(task.status, Status::NeedsInput);
     assert_eq!(task.run.gave_up.unwrap_or(0), 0, "a task that wasn't parked doesn't get a fresh count");
+    assert!(r.tracker.is_revoked("factory/trail-1-a1"), "the sub-agent is revoked, not left to expire");
+}
+
+#[tokio::test]
+async fn a_park_that_cannot_claim_after_giving_up_revokes_the_sub_agent() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 1"));
+    let key = r.tracker.add_task("TRAIL", "Fails", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "no luck".into() }));
+    // The run's own claim goes through; the park's claim is the next one.
+    r.tracker.fail_after("factory/trail-1-a1", TrackerOp::Claim, 1, 1);
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    assert!(ran.is_err(), "{ran:?}");
+    assert!(r.tracker.is_revoked("factory/trail-1-a1"), "the sub-agent is revoked, not left to expire");
+    assert_eq!(r.tracker.task(&key).run.gave_up.unwrap_or(0), 0);
 }
 
 #[tokio::test]
