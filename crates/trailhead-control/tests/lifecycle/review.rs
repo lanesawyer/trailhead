@@ -1089,3 +1089,67 @@ async fn a_breach_park_bumps_the_retries_the_reviewer_was_named_from_not_the_cal
     assert!(matches!(outcome, Outcome::Parked { .. }), "{outcome:?}");
     assert_eq!(r.tracker.task(&key).run.retries, Some(3), "the bump lands on the count the reviewer's name used");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_review_that_cant_be_recorded_gives_its_round_back_and_is_run_again() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Unrecorded review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let reviewer = format!("factory/{}", trailhead_factory::review_name(&key, 1, 1));
+    r.tracker.fail_next(&reviewer, TrackerOp::Report, 1);
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await;
+    assert!(ran.is_err(), "{ran:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.review_rounds.unwrap_or(0), 0, "the round is given back");
+    assert_eq!(task.run.reviewed, None, "an unrecorded verdict isn't acted on");
+    assert_eq!(task.run.infra_failures, Some(1));
+    assert!(r.compute.sandboxes().iter().all(|s| !s.name.contains("-r1")), "the reviewer's sandbox is gone");
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed.len(), 1, "{done:?}");
+    assert_eq!(r.tracker.task(&key).run.review_rounds, Some(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_refused_for_good_parks_at_once() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Refused review", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let rounds = r.tracker.task(&key).run.review_rounds;
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.daemon.reject_runs("400 Bad Request: no such model");
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "not retried up to max_infra_failures");
+    assert_eq!(task.run.review_rounds, rounds);
+    let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].body.contains("refused a request") && questions[0].body.contains("no such model"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_review_whose_park_failed_waits_out_its_backoff_before_the_next_try() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 1"));
+    let key = r.tracker.add_task("TRAIL", "Unparked", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.tracker.fail_next("factory", TrackerOp::Reopen, 1);
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview, "the park failed");
+
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reviewed.is_empty(), "not reviewed again at once: {done:?}");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed.len(), 1, "{done:?}");
+}
