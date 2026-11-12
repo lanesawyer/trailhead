@@ -21,7 +21,10 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
     let health = || client::health(&http, &base, token.as_deref());
     match cmd {
         ServerCmd::Status => match health().await {
-            Some(info) if json => print_json(&serde_json::to_value(&info)?),
+            Some(info) if json => {
+                let unit = local_scope(&paths, local, &info);
+                print_json(&status_json(serde_json::to_value(&info)?, unit.as_deref()))
+            }
             Some(info) => {
                 let mut parts = vec!["running".to_string()];
                 if let Some(pid) = info.pid {
@@ -39,20 +42,20 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                     parts.push(format!("up {}h {}m (since {since})", up.as_hours(), up.as_mins() % 60));
                 }
                 println!("{}", parts.join(" · "));
+                if info.ok == Some(false) {
+                    println!("store can't serve requests: {}", info.store_error.as_deref().unwrap_or("unknown error"));
+                }
                 if let Some(exe) = &info.exe {
                     println!("binary {}", exe.display());
                 }
                 if let Some(db) = &info.db {
                     println!("db {}", db.display());
                 }
-                if local
-                    && client::is_ours(&paths, &info)
-                    && let Some(unit) = info.pid.and_then(client::server_unit)
-                {
+                if let Some(unit) = local_scope(&paths, local, &info) {
                     println!("scope {unit}");
-                    if client::is_app_scope(&unit) {
+                    if client::is_shared_scope(&unit) {
                         println!(
-                            "warning: the server shares an app's scope; killing that app would stop it (`trailhead server restart` starts it in its own)"
+                            "warning: the server shares a scope with an app, terminal or login session; ending it would stop the server (`trailhead server restart` starts it in its own)"
                         );
                     }
                 }
@@ -108,6 +111,20 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
     Ok(())
 }
 
+/// The systemd unit the server runs in, when it is local, ours and this machine can say.
+fn local_scope(paths: &trailhead_server::Paths, local: bool, info: &client::Health) -> Option<String> {
+    if local && client::is_ours(paths, info) { info.pid.and_then(client::server_unit) } else { None }
+}
+
+/// The health document for `status --json`, plus `scope` and `shared_scope` when the scope is known.
+fn status_json(mut health: serde_json::Value, unit: Option<&str>) -> serde_json::Value {
+    if let (Some(unit), Some(obj)) = (unit, health.as_object_mut()) {
+        obj.insert("scope".into(), json!(unit));
+        obj.insert("shared_scope".into(), json!(client::is_shared_scope(unit)));
+    }
+    health
+}
+
 /// Replaces this process with the newly installed binary, same arguments, so the pid (and the scope the server runs
 /// in) stays.
 fn restart_onto_new_binary() -> Result<()> {
@@ -140,5 +157,22 @@ pub(crate) async fn serve(bind: &str, factory_on_terminal: bool, foreground: boo
     match trailhead_server::serve_local(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))? {
         trailhead_server::Exit::Stopped => Ok(()),
         trailhead_server::Exit::Restart => restart_onto_new_binary(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_json_adds_scope_and_shared_scope_flag() {
+        let v = status_json(json!({ "pid": 1 }), Some("app-gnome-code-1.scope"));
+        assert_eq!(v["scope"], "app-gnome-code-1.scope");
+        assert_eq!(v["shared_scope"], true);
+        let v = status_json(json!({ "pid": 1 }), Some("vte-spawn-0a1b.scope"));
+        assert_eq!(v["shared_scope"], true);
+        let v = status_json(json!({ "pid": 1 }), Some("trailhead-server-1.scope"));
+        assert_eq!(v["shared_scope"], false);
+        assert_eq!(status_json(json!({ "pid": 1 }), None), json!({ "pid": 1 }));
     }
 }

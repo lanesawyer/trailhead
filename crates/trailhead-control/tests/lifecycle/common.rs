@@ -60,15 +60,34 @@ pub fn rig_with(config: &str) -> Rig {
 
 /// [`rig_with`] on `host`, for the host-wide settings in the user config.
 pub fn rig_on(config: &str, host: Arc<Host>) -> Rig {
+    rig_built(config, host, |harness, codehost, tracker| {
+        let heads = codehost.clone();
+        LocalDaemon::new(harness, Arc::new(codehost), tracker).with_heads(move |repo, branch| heads.head(repo, branch))
+    })
+}
+
+/// [`rig_with`] with the daemon's harness picked by the worker profile's `adapter` from the testkit's registry, as
+/// the real daemon picks its own, instead of handed over.
+pub fn rig_selecting(config: &str) -> Rig {
+    let adapter = FactoryConfig::parse_table(config, "TRAIL", None).unwrap().plugins().unwrap().0.to_string();
+    rig_built(config, Host::new(&HostConfig::default()), move |harness, codehost, tracker| {
+        let heads = codehost.clone();
+        LocalDaemon::from_registry(&trailhead_testkit::harnesses(harness), &adapter, Arc::new(codehost), tracker)
+            .unwrap()
+            .with_heads(move |repo, branch| heads.head(repo, branch))
+    })
+}
+
+fn rig_built(
+    config: &str,
+    host: Arc<Host>,
+    daemon: impl FnOnce(Arc<ScriptedHarness>, FakeCodeHost, FakeTracker) -> LocalDaemon,
+) -> Rig {
     let tracker = FakeTracker::new("factory");
     let compute = FakeCompute::new();
     let codehost = FakeCodeHost::new();
     let harness = Arc::new(ScriptedHarness::new());
-    let heads = codehost.clone();
-    let daemon = Arc::new(
-        LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone())
-            .with_heads(move |repo, branch| heads.head(repo, branch)),
-    );
+    let daemon = Arc::new(daemon(harness.clone(), codehost.clone(), tracker.clone()));
     let factory = Factory::new(
         FactoryConfig::parse_table(config, "TRAIL", None).unwrap(),
         Arc::new(compute.clone()),
@@ -245,6 +264,12 @@ pub async fn reviewed(r: &Rig, queue: &TaskKey, grade: u8, path: &str) -> (TaskK
     (key, pr)
 }
 
+/// What the PR's comments after the first say, without the History the merger's status comment ends with.
 pub fn said(r: &Rig) -> Vec<String> {
-    r.codehost.prs()[0].comments.iter().skip(1).cloned().collect()
+    r.codehost.prs()[0]
+        .comments
+        .iter()
+        .skip(1)
+        .map(|c| c.split("\n\nHistory:\n").next().unwrap_or(c).to_string())
+        .collect()
 }

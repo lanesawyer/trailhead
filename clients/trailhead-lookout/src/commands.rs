@@ -7,7 +7,9 @@
 //! A control sends [`Submit`] and reads [`CommandDone`]. The [`Outbox`] keeps every command until it has an answer.
 //! Commands go out only while the connection is `Live`. One in flight when the link drops goes back in the queue and
 //! is sent again, with the same key, once `Live` returns, so a retry the server already applied gets that answer
-//! back instead of running twice. After [`MAX_ATTEMPTS`] it is reported failed rather than tried forever.
+//! back instead of running twice. A `RateLimited` answer is retried the same way, with the same key, once its
+//! `Retry-After` has passed (capped at [`MAX_RETRY_AFTER`]). After [`MAX_ATTEMPTS`] it is reported failed (a rate
+//! limit is handed back as `RateLimited`) rather than tried forever.
 
 use std::time::{Duration, Instant};
 
@@ -20,6 +22,13 @@ use crate::net::NetCommand;
 
 /// How many times a command is sent before it is reported failed.
 pub const MAX_ATTEMPTS: u32 = 5;
+
+/// The longest the outbox waits on a `Retry-After` before sending again.
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// The net thread's answer when a request reached it before it was `Live`. Nothing was sent, so it isn't a failed
+/// attempt and doesn't count toward [`MAX_ATTEMPTS`].
+pub const NOT_CONNECTED: &str = "not connected";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(pub u64);
@@ -107,7 +116,11 @@ struct Pending {
     source: Entity,
     request: Request,
     stage: Stage,
+    /// Sends so far; tags each one so a stale answer can be told from the latest.
     attempts: u32,
+    /// Attempts that really failed. A resend after the link dropped, or a send the net thread refused for want of a
+    /// connection, isn't one.
+    failures: u32,
     not_before: Option<Instant>,
 }
 
@@ -116,7 +129,7 @@ struct Pending {
 pub struct Outbox {
     pending: Vec<Pending>,
     next: u64,
-    /// Wait before sending again after a failed attempt, times the attempts so far.
+    /// Wait before sending again after a failed attempt, times the failures so far.
     pub backoff: Duration,
 }
 
@@ -176,6 +189,7 @@ fn accept(
             request: request.clone(),
             stage: Stage::Queued,
             attempts: 0,
+            failures: 0,
             not_before: None,
         });
     }
@@ -186,6 +200,13 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
     for reply in replies.read() {
         let Some(at) = outbox.pending.iter().position(|p| p.id == reply.id) else { continue };
         match &reply.result {
+            // Rate limited: wait out `Retry-After`, then send again with the same key, until attempts run out.
+            Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].attempts < MAX_ATTEMPTS => {
+                let p = &mut outbox.pending[at];
+                let wait = retry_after.map_or(backoff * p.attempts, |after| after.min(MAX_RETRY_AFTER));
+                p.stage = Stage::Queued;
+                p.not_before = Some(Instant::now() + wait);
+            }
             // An answer to any attempt settles it: the key means they are all the same request.
             Ok(outcome) => {
                 let p = outbox.pending.remove(at);
@@ -194,13 +215,16 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
             Err(_) if outbox.pending[at].attempts != reply.attempt => {}
             Err(why) => {
                 let p = &mut outbox.pending[at];
-                if p.attempts >= MAX_ATTEMPTS {
+                if why != NOT_CONNECTED {
+                    p.failures += 1;
+                }
+                if p.failures >= MAX_ATTEMPTS {
                     let p = outbox.pending.remove(at);
                     let message = format!("no answer after {MAX_ATTEMPTS} tries: {why}");
                     done.write(CommandDone { source: p.source, id: p.id, outcome: Outcome::Failed(message) });
                 } else {
                     p.stage = Stage::Queued;
-                    p.not_before = Some(Instant::now() + backoff * p.attempts);
+                    p.not_before = Some(Instant::now() + backoff * p.failures.max(1));
                 }
             }
         }
@@ -247,8 +271,7 @@ pub async fn execute(api: &Client, request: &Request) -> Result<Outcome, String>
     }
     let error = &body["error"];
     let code = error["code"].as_str().unwrap_or("");
-    let message =
-        error["message"].as_str().map_or_else(|| format!("the server answered {}", status.as_u16()), str::to_string);
+    let message = error["message"].as_str().map_or_else(|| format!("the server answered {status}"), str::to_string);
     Ok(match (status.as_u16(), code) {
         (_, "idempotency_key_in_flight") => return Err(message),
         (500..=599, _) => return Err(message),

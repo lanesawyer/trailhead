@@ -27,7 +27,10 @@ use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, ModalDialog, RequestClose};
 
-use super::{HintBounds, PanelTitle, PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
+use super::{
+    HintBounds, PanelTitle, PanelTools, ScrollDown, extent, layer, panel_header, scroll_body_node, scroll_frame_node,
+    scrollbar, space,
+};
 
 /// How much of the window's height the modal may take, with the barrier's margin around it.
 pub const MAX_HEIGHT_VH: f32 = 80.0;
@@ -126,16 +129,10 @@ fn frame(title: String, width: Val, tall: bool) -> Box<dyn SceneList> {
             --
             // The body's box may shrink below its content, so the body scrolls and the footer keeps its place, and grows
             // into a tall modal's height.
-            Node { flex_direction: FlexDirection::Column, min_height: px(0), flex_shrink: 1.0, flex_grow: 1.0 }
+            ~{ scroll_frame_node(1.0) }
             Children [
                 // Grows into a tall modal's height too, so content can fill it (the settings Logs page's list).
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    flex_grow: 1.0,
-                    min_height: px(0),
-                    row_gap: { px(space::ROWS) },
-                    overflow: { Overflow::scroll_y() },
-                }
+                ~{ scroll_body_node(space::ROWS, 1.0) }
                 ModalBody
                 ScrollDown
             ]
@@ -347,7 +344,8 @@ mod tests {
             repeat: false,
             window: from,
         };
-        let window = app.world_mut().spawn_empty().id();
+        // Spawning a real window registers `Window`, which the press needs to bubble up the hierarchy.
+        let window = app.world_mut().spawn(Window::default()).id();
         app.world_mut().trigger(FocusedInput::new(from, input, window));
         app.update();
     }
@@ -378,6 +376,51 @@ mod tests {
         escape(&mut app, slots.body);
         // Feathers' barrier isn't in this app, so the modal stays: the kit sent nothing of its own.
         assert_eq!(count(&mut app), 1);
+    }
+
+    /// An app with feathers' own dialog observers, which turn Escape and a click on the backdrop into `RequestClose`.
+    fn feathers_app() -> App {
+        let mut app = app();
+        // A real window registers `Window`, without which events can't bubble up the hierarchy.
+        app.world_mut().spawn(Window::default());
+        app.init_resource::<bevy::input_focus::InputFocusVisible>().add_plugins(bevy::ui_widgets::ModalDialogPlugin);
+        app
+    }
+
+    fn press(app: &mut App, on: Entity) {
+        use bevy::camera::NormalizedRenderTarget;
+        use bevy::picking::backend::HitData;
+        use bevy::picking::events::{Pointer, PointerPress};
+        use bevy::picking::pointer::{Location, PointerButton, PointerId};
+        let location = Location { target: NormalizedRenderTarget::None { width: 1, height: 1 }, position: Vec2::ZERO };
+        app.world_mut().trigger(PointerPress {
+            entity: on,
+            pointer: Pointer::new(PointerId::Mouse, location),
+            button: PointerButton::Primary,
+            hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            count: 1,
+        });
+        app.update();
+    }
+
+    #[test]
+    fn feathers_closes_the_modal_on_escape_with_the_dialog_focused() {
+        let mut app = feathers_app();
+        let modal = open(&mut app);
+        let focused = app.world().resource::<InputFocus>().get().expect("the modal focuses its title");
+        escape(&mut app, focused);
+        assert!(app.world().get_entity(modal).is_err());
+    }
+
+    #[test]
+    fn feathers_closes_the_modal_on_a_click_on_the_backdrop_but_not_in_the_dialog() {
+        let mut app = feathers_app();
+        let modal = open(&mut app);
+        let slots = *app.world().get::<ModalSlots>(modal).unwrap();
+        press(&mut app, slots.body);
+        assert_eq!(count(&mut app), 1, "a click inside the dialog leaves it open");
+        press(&mut app, modal);
+        assert_eq!(count(&mut app), 0);
     }
 
     #[test]
@@ -426,6 +469,7 @@ mod tests {
         open(&mut app);
         let dialog = app.world_mut().query_filtered::<&Node, With<ModalDialog>>().single(app.world()).unwrap();
         assert_eq!(dialog.padding, UiRect::all(px(space::PANEL_INSET)));
+        assert!(crate::has_scrollbar_room(dialog));
     }
 
     #[derive(Component)]

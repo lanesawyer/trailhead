@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use trailhead_control::Outcome;
 use trailhead_factory::{CiState, FollowUp, PrRef, Role, RunOutcome, Status, TaskKey, Tracker, VerdictKind, run_name};
-use trailhead_testkit::Script;
+use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
 
@@ -363,8 +363,40 @@ async fn a_parked_request_a_person_settled_is_not_reworked_by_reconcile() {
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    let run = r.tracker.task(&key).run;
+    assert!(run.changes_requested.as_ref().is_some_and(|c| c.settled), "parking settles the request");
+    assert_eq!(run.pending_changes(), None);
 
     // A person fixes the PR by hand and moves the task back to review.
+    r.tracker.set_status(&key, Status::InReview);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.reworked.is_empty(), "{done:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::InReview);
+}
+
+#[tokio::test]
+async fn a_park_whose_settling_write_was_lost_is_finished_before_a_person_answers() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 1"));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    // The factory's reports in this tick: the review's round and the park's own, which settles the request and resets
+    // the counts, is the third (`fail_after` skips the first two); when that order changes, change the count.
+    r.tracker.fail_after("factory", TrackerOp::Report, 2, 1);
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(task.run.review_rounds, Some(1), "the reset was lost with the settling");
+    assert!(task.run.changes_requested.as_ref().is_some_and(|c| !c.settled));
+
+    // Reconcile finishes it while the task waits, so a person who answers without pushing isn't second-guessed.
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(0));
+    assert!(task.run.changes_requested.as_ref().is_some_and(|c| c.settled));
+    assert_eq!(task.run.pending_changes(), None);
+
+    // Reopened with nothing pushed: no rework.
     r.tracker.set_status(&key, Status::InReview);
     let done = r.factory.reconcile().await.unwrap();
     assert!(done.reworked.is_empty(), "{done:?}");
@@ -527,6 +559,7 @@ async fn the_reviewers_infrastructure_failures_keep_counting_across_a_control_pl
     r.factory.reconcile().await.unwrap();
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::NeedsInput, "parked at max_infra_failures");
+    assert_eq!(task.run.infra_failures.unwrap_or(0), 0, "parking resets the count, so a reopened task starts again");
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task"), "{}", questions[0].body);
@@ -661,6 +694,25 @@ async fn a_review_backed_off_after_an_infrastructure_failure_is_not_skipped_by_a
     assert_eq!(r.tracker.task(&key).run.reviewed, Some(1), "the review ran once the backoff was over");
 }
 
+#[tokio::test(start_paused = true)]
+async fn failed_ci_is_reworked_while_a_review_is_backed_off() {
+    let (r, queue) = queued_rig_with(NO_REVIEW_GATE);
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 1);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/a.md")));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    r.factory.tick().await.unwrap();
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+
+    // Still inside the backoff: the failure is sent back for rework, and nothing is approved.
+    r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true));
+    assert!(task.run.changes_requested.expect("told why").body.contains("test"));
+    assert!(task.run.merge.is_none_or(|d| d.approved_head.is_none()), "nothing was approved");
+}
+
 #[tokio::test]
 async fn a_reviewer_is_shown_the_open_follow_ups_earlier_reviews_filed() {
     let r = rig();
@@ -690,7 +742,7 @@ async fn a_breach_park_cut_short_is_finished_by_reconcile_without_a_rerun() {
 
     // The tracker fails to ask after the task was reopened and claimed.
     r.harness.push(Role::Reviewer, Script::new(approve()).steps(50, 1));
-    r.tracker.fail_next("factory", "ask", 1);
+    r.tracker.fail_next("factory", TrackerOp::Ask, 1);
     let _ = r.factory.reconcile().await;
     let task = r.tracker.task(&key);
     assert_ne!(task.status, Status::NeedsInput);
@@ -756,7 +808,7 @@ async fn a_reviewer_breach_park_a_person_fixed_gets_a_fresh_review_under_a_new_n
 async fn a_breach_park_finished_from_open_claims_the_task_first() {
     let (r, key, _) = breaching_rig().await;
     // The claim fails after the reopen: the task is left Open.
-    r.tracker.fail_next("factory", "claim", 1);
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
     let _ = r.factory.reconcile().await;
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::Open);
@@ -772,7 +824,7 @@ async fn a_breach_park_finished_from_open_claims_the_task_first() {
 #[tokio::test(start_paused = true)]
 async fn a_breach_park_is_finished_while_the_code_host_is_paused() {
     let (r, key, _) = breaching_rig().await;
-    r.tracker.fail_next("factory", "claim", 1);
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
     let _ = r.factory.reconcile().await;
     assert_eq!(r.tracker.task(&key).status, Status::Open);
 
@@ -787,7 +839,7 @@ async fn a_breach_park_is_finished_while_the_code_host_is_paused() {
 #[tokio::test(start_paused = true)]
 async fn a_breach_whose_reopen_failed_is_settled_by_the_next_review() {
     let (r, key, _) = breaching_rig().await;
-    r.tracker.fail_next("factory", "reopen", 1);
+    r.tracker.fail_next("factory", TrackerOp::Reopen, 1);
     let _ = r.factory.reconcile().await;
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::InReview);
@@ -809,7 +861,7 @@ async fn a_breach_whose_reopen_failed_is_settled_by_the_next_review() {
 async fn an_answered_breach_question_is_not_asked_again_after_a_failed_ask() {
     let (r, key, _) = breaching_rig().await;
     // The mark is written before the ask, so no later report is left to fail; the ask is what fails here.
-    r.tracker.fail_next("factory", "ask", 1);
+    r.tracker.fail_next("factory", TrackerOp::Ask, 1);
     let _ = r.factory.reconcile().await;
     let breach = r.tracker.task(&key).run.review_breach.unwrap();
     assert!(!breach.parked, "taken back when the ask failed");
@@ -844,10 +896,12 @@ async fn a_request_from_an_earlier_attempt_costs_no_host_call() {
     assert!(task.run.pending_changes().is_some_and(|c| c.attempt == 1), "{:?}", task.run);
 
     r.tracker.set_status(&key, Status::InReview);
-    let before = r.codehost.head_lookups();
+    let (heads, cis) = (r.codehost.calls("head"), r.codehost.calls("ci"));
     r.factory.reconcile().await.unwrap();
-    // Asked only for the review's staleness check, not for the old request's recorded head.
-    assert!(r.codehost.head_lookups() <= before + 1, "{} lookups", r.codehost.head_lookups() - before);
+    // Asked only for the review's staleness check (one `head`) and the CI state (`ci`, once to see a failed CI and
+    // once to evaluate), not for the old request's recorded head.
+    assert!(r.codehost.calls("head") <= heads + 1, "{} head lookups", r.codehost.calls("head") - heads);
+    assert!(r.codehost.calls("ci") <= cis + 2, "{} ci lookups", r.codehost.calls("ci") - cis);
 }
 
 #[tokio::test(start_paused = true)]
@@ -876,4 +930,162 @@ async fn a_reviewer_lost_after_spending_records_the_spend_and_counts_an_infrastr
         task.run.spend
     );
     assert_eq!(task.run.infra_failures, Some(2));
+}
+
+/// A task in review whose conflict rework has run and whose reviewer asked for changes, with the one write that
+/// counts that round (`request_rework`'s report) failing (TRAIL-322). It is the factory's third report in the tick
+/// (`fail_after` skips the first two); when that order changes, change the count.
+async fn interrupted_request_for_changes(r: &Rig, key: &TaskKey) {
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/b.md")));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.tracker.fail_after("factory", TrackerOp::Report, 2, 1);
+    r.factory.tick().await.unwrap_err();
+    let task = r.tracker.task(key);
+    assert_eq!(task.run.review_rounds, Some(1), "the interrupted round isn't counted");
+    assert!(task.run.pending_changes().is_some_and(|c| c.conflict), "the conflict's changes are still pending");
+}
+
+async fn conflicted_in_review() -> Rig {
+    let (r, queue) = queued_rig();
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    assert_eq!(r.tracker.task(&key).run.review_rounds, Some(1));
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.task(&key).run.pending_changes().is_some_and(|c| c.conflict));
+    r
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_interrupted_request_for_changes_after_a_conflict_rework_leaves_the_round_uncounted() {
+    let r = conflicted_in_review().await;
+    let key = TaskKey("TRAIL-2".into());
+    interrupted_request_for_changes(&r, &key).await;
+    let reviewers = r.harness.contexts().iter().filter(|c| c.role == Role::Reviewer).count();
+    assert_eq!(reviewers, 2, "the round-2 reviewer ran");
+}
+
+/// The resumed review reuses the interrupted reviewer's name (the round and retries are the same), but `request_rework`
+/// runs after that sub-agent was revoked for good, so creating it fails: one spurious infrastructure failure and a
+/// backoff, after which the review runs under the next retry's name and counts the round once. The wasted failure is a
+/// bug (with `max_infra_failures = 1` it would park the task), pinned here so it isn't mistaken for intended.
+#[tokio::test(start_paused = true)]
+async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_round_once_when_resumed() {
+    let r = conflicted_in_review().await;
+    let key = TaskKey("TRAIL-2".into());
+    interrupted_request_for_changes(&r, &key).await;
+    assert!(r.tracker.is_revoked("factory/trail-2-a2-r2"), "the interrupted reviewer's sub-agent");
+
+    // The tick settles the conflict rework the worker already did, then reconcile owes the review, which can't take
+    // the revoked sub-agent's name again.
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.infra_failures, Some(1), "the revoked name cost an infrastructure failure");
+    assert_eq!(task.run.review_rounds, Some(1), "the round was given back");
+    assert!(task.run.last_changes().is_some_and(|c| c.conflict && c.settled), "the conflict request, settled");
+
+    tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the first infrastructure backoff
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.reviewed, std::slice::from_ref(&key.0));
+    assert!(r.tracker.is_revoked("factory/trail-2-a2-r2-1"), "the retry's reviewer, under the next name");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.review_rounds, Some(2), "the first review and this one, not a third");
+    assert!(task.run.pending_changes().is_some_and(|c| !c.conflict), "the review's changes are now pending");
+}
+
+#[tokio::test]
+async fn reconciling_a_reviewed_task_at_its_reviewed_head_looks_up_the_head_once() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    r.tracker.set_status(&key, Status::InReview);
+
+    let (heads, cis, verdict_checks) =
+        (r.codehost.calls("head"), r.codehost.calls("ci"), r.codehost.calls("carries_verdict"));
+    r.factory.reconcile().await.unwrap();
+    // The head the PR's state showed is the reviewed one, so the staleness check asks nothing more; the one lookup
+    // left is inside `ci`, as on GitHub (the fake counts it as a `ci` call, not a `head` call).
+    assert_eq!(r.codehost.calls("carries_verdict"), verdict_checks);
+    assert_eq!(r.codehost.calls("head"), heads);
+    assert_eq!(r.codehost.calls("ci"), cis + 1);
+}
+
+#[tokio::test]
+async fn a_request_for_changes_still_pending_is_checked_against_the_head_the_pr_state_showed() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    let pending = task.run.pending_changes().expect("the request is recorded");
+    assert!(pending.attempt == task.run.attempt.unwrap_or(1) && pending.head.is_some(), "{:?}", task.run);
+    r.tracker.set_status(&key, Status::InReview);
+
+    let before = r.codehost.calls("head");
+    r.factory.reconcile().await.unwrap();
+    // The pending-change check reuses the head from the PR's state, so nothing is looked up for it.
+    assert_eq!(r.codehost.calls("head"), before);
+}
+
+#[tokio::test]
+async fn failed_ci_does_not_hold_back_a_review_while_a_request_is_pending_on_this_attempt() {
+    let mut r = rig();
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let _key = r.tracker.add_task("TRAIL", "Add a greeting", "Acceptance: `hi()` exists.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
+    let ran = r.factory.tick().await.unwrap();
+    let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+
+    // A person pushes before the worker answers, and CI fails on their head. The request for this attempt is still
+    // recorded, so no rework is asked for: the review is owed and runs.
+    r.codehost.push_to(pr);
+    r.codehost.set_ci(pr, CiState::Failed { checks: vec!["test".into()] });
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.reconcile().await.unwrap();
+    let reviews = r.harness.contexts().into_iter().filter(|c| c.role == Role::Reviewer).count();
+    assert_eq!(reviews, 2, "the review ran again on the person's head");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_sandbox_short_of_room_is_waited_out_not_counted() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
+    let key = r.tracker.add_task("TRAIL", "Waits for room", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let rounds = r.tracker.task(&key).run.review_rounds;
+
+    r.daemon.unavailable_runs(3, "out of disk");
+    let secs = std::time::Duration::from_secs;
+    for n in 1..=3 {
+        r.factory.reconcile().await.unwrap();
+        let task = r.tracker.task(&key);
+        assert_eq!(task.status, Status::InReview, "wait {n} doesn't park, though max_infra_failures is 2");
+        assert_eq!(task.run.infra_failures, Some(1), "a wait adds nothing to the count the first failure left");
+        assert_eq!(task.run.review_rounds, rounds, "the round is given back");
+        tokio::time::advance(secs(3600)).await;
+    }
+    assert!(r.tracker.comments(&key).iter().all(|c| c.kind != "question"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_breach_park_bumps_the_retries_the_reviewer_was_named_from_not_the_callers_snapshot() {
+    let (r, key, pr) = breaching_rig().await;
+    // The caller's snapshot is older than the tracker's: the reviewer is named from the tracker's count.
+    let stale = r.tracker.task(&key);
+    let update = trailhead_factory::RunUpdate { retries: Some(2), ..Default::default() };
+    r.tracker.report(&key, update).await.unwrap();
+
+    let attempt = stale.run.attempt.unwrap_or(1);
+    let outcome = r.factory.review(&stale, &pr, attempt, &[]).await.unwrap();
+    assert!(matches!(outcome, Outcome::Parked { .. }), "{outcome:?}");
+    assert_eq!(r.tracker.task(&key).run.retries, Some(3), "the bump lands on the count the reviewer's name used");
 }

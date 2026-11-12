@@ -111,6 +111,7 @@ async fn daemon_in_a_sprite() {
                 repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
                 base_branch: "main".into(),
                 merge_base: false,
+                branch_if_present: false,
                 trim: None,
                 disk_warn_bytes: None,
                 disk_limit_bytes: None,
@@ -182,7 +183,7 @@ async fn daemon_in_a_sprite() {
                 assert!(matches!(report.result, RunResult::Failed(_)), "{:?}", report.result);
             }
 
-            let filter = EventFilter { task: Some(key.0.clone()), ..Default::default() };
+            let filter = EventFilter { task: Some(key.clone()), ..Default::default() };
             let kinds: Vec<String> =
                 store.list_events(&human, filter).await.unwrap().into_iter().map(|e| e.kind).collect();
             eprintln!("task events: {kinds:?}");

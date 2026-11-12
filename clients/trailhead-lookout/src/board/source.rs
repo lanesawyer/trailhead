@@ -6,7 +6,6 @@ pub struct Sources<'w, 's> {
     mirror: Res<'w, Mirror>,
     changed: Query<'w, 's, (), Changed<Rev>>,
     removed: RemovedComponents<'w, 's, Rev>,
-    removed_runs: RemovedComponents<'w, 's, Run>,
     projects: Query<'w, 's, &'static Mirrored<Project>>,
     tasks: Query<'w, 's, &'static Mirrored<Task>>,
     claims: Query<'w, 's, &'static Mirrored<Claim>>,
@@ -14,8 +13,6 @@ pub struct Sources<'w, 's> {
     comments: Query<'w, 's, &'static Mirrored<Comment>>,
     agents: Query<'w, 's, &'static Mirrored<Agent>>,
     users: Query<'w, 's, &'static Mirrored<User>>,
-    runs: Query<'w, 's, &'static Run>,
-    runs_changed: Query<'w, 's, (), Changed<Run>>,
     authoring: Res<'w, Authoring>,
     factory: Option<Res<'w, FactoryStatus>>,
 }
@@ -23,12 +20,11 @@ pub struct Sources<'w, 's> {
 impl Sources<'_, '_> {
     /// Whether anything changed since the system using this last ran. It reads the removals, so call it on every run.
     pub fn changed(&mut self) -> bool {
-        let gone = self.removed.read().count() + self.removed_runs.read().count() > 0;
+        let gone = self.removed.read().count() > 0;
         gone || self.mirror.is_changed()
             || self.authoring.is_changed()
             || self.factory.as_ref().is_some_and(|f| f.is_changed())
             || !self.changed.is_empty()
-            || !self.runs_changed.is_empty()
     }
 
     /// The rows, copied out of the mirror for [`Rows::input`].
@@ -41,7 +37,6 @@ impl Sources<'_, '_> {
             comments: rows(&self.comments),
             agents: rows(&self.agents),
             users: rows(&self.users),
-            runs: self.runs.iter().cloned().collect(),
             queues: queue_keys(&self.authoring, self.factory.as_deref()),
         }
     }
@@ -56,7 +51,6 @@ pub struct Rows {
     pub comments: Vec<Comment>,
     pub agents: Vec<Agent>,
     pub users: Vec<User>,
-    pub runs: Vec<Run>,
     pub queues: Vec<String>,
 }
 
@@ -70,7 +64,6 @@ impl Rows {
             comments: &self.comments,
             agents: &self.agents,
             users: &self.users,
-            runs: &self.runs,
             queues: &self.queues,
             deep,
             now,
@@ -179,7 +172,6 @@ mod tests {
                 comments: &comments,
                 agents: &agents,
                 users: &[],
-                runs: &[],
                 queues: &[],
                 deep: &[],
                 now: at_now(),

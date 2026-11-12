@@ -11,7 +11,10 @@ use bevy::ui_widgets::ControlOrientation;
 
 use trailhead_model::Status;
 
-use super::{BackgroundTone, ScrollDown, radius, scrollbar, size, space, status_label, status_token, text, text_dim};
+use super::{
+    BackgroundTone, ScrollDown, radius, scroll_body_node, scroll_frame_node, scrollbar, size, space, status_label,
+    status_token, text, text_dim,
+};
 
 /// How wide every column is.
 pub const COLUMN_WIDTH: f32 = 260.0;
@@ -39,22 +42,12 @@ pub fn column_shell(status: Status) -> impl Bundle {
 /// What holds a column's body and its scrollbar, so the bar's track is the body's and not the column's. It may shrink
 /// below its content so the body scrolls.
 pub fn column_frame() -> impl Bundle {
-    (Name::new("column frame"), Node { flex_direction: FlexDirection::Column, min_height: px(0), ..default() })
+    (Name::new("column frame"), scroll_frame_node(0.0))
 }
 
 /// The body of a column, which holds its cards and scrolls down on its own. Its scrollbar lies in the shell's padding.
 pub fn column_body() -> impl Bundle {
-    (
-        Name::new("column body"),
-        Node {
-            flex_direction: FlexDirection::Column,
-            min_height: px(0),
-            row_gap: px(space::CARDS),
-            overflow: Overflow::scroll_y(),
-            ..default()
-        },
-        ScrollDown,
-    )
+    (Name::new("column body"), scroll_body_node(space::CARDS, 0.0), ScrollDown)
 }
 
 /// Puts the body's scrollbar in `frame`, after the body.
@@ -83,7 +76,7 @@ pub fn column_empty() -> impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::{SCROLLBAR_EDGE, SCROLLBAR_WIDTH};
+    use crate::widgets::{SCROLLBAR_GAP, SCROLLBAR_WIDTH};
 
     fn node_of(bundle: impl Bundle) -> Node {
         let mut world = World::new();
@@ -93,8 +86,9 @@ mod tests {
 
     #[test]
     fn the_scrollbar_sits_centered_in_the_shell_padding_so_the_body_has_none_of_its_own() {
-        const { assert!(SCROLLBAR_EDGE + SCROLLBAR_WIDTH + SCROLLBAR_EDGE == space::PANEL_INSET) };
+        const { assert!(SCROLLBAR_GAP + SCROLLBAR_WIDTH + SCROLLBAR_GAP == space::PANEL_INSET) };
         assert_eq!(node_of(column_shell(Status::Open)).padding.right, px(space::PANEL_INSET));
+        assert!(crate::widgets::has_scrollbar_room(&node_of(column_shell(Status::Open))));
         assert_eq!(node_of(column_body()).padding, UiRect::ZERO);
     }
 

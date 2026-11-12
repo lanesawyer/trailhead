@@ -30,7 +30,6 @@ use tracing::Instrument;
 use trailhead_client::creds::{Cred, CredStore};
 use trailhead_client::paths::{DEFAULT_BIND, Paths};
 use trailhead_codehost_github::GitHub;
-use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_factory::{
@@ -201,6 +200,11 @@ fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::F
     Ok((resolved, fnox))
 }
 
+/// The directory of the repo whose config is at `config_path`.
+fn config_dir(config_path: &Path) -> PathBuf {
+    config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf()
+}
+
 /// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
 fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig)> {
     let config_path = match &opts.config {
@@ -208,10 +212,31 @@ fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>,
         None => find::config(&std::env::current_dir().map_err(Error::backend)?)?,
     };
     let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
-    let repo_dir = config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+    let repo_dir = config_dir(&config_path);
     let remote = find::remote(&repo_dir);
     let config = FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
     Ok((config_path, remote, config))
+}
+
+/// Whether `now` differs from the `started` config (whose `[factory.merge]` is blanked, as it is re-read live) in a way that
+/// needs a restart and wasn't already `warned` about, so an edit is reported once, not on every merge decision.
+fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: &mut Option<FactoryConfig>) -> bool {
+    let now = FactoryConfig { merge: Default::default(), ..now };
+    if now == *started {
+        *warned = None;
+        return false;
+    }
+    if warned.as_ref() == Some(&now) {
+        return false;
+    }
+    *warned = Some(now);
+    true
+}
+
+/// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[factory.merge]` blanked
+/// as it is re-read live. Take it before `wire` adds anything at runtime, which a re-read of the file never has.
+fn started_baseline(config: &FactoryConfig) -> FactoryConfig {
+    FactoryConfig { merge: Default::default(), ..config.clone() }
 }
 
 /// One repo's factory, ready to run.
@@ -272,16 +297,21 @@ fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan> {
 }
 
 /// Reaches out from a [`Plan`]: secrets, the daemon binary, the store, the iroh endpoint and the
-/// computes. Fnox runs in `fnox_dir`. `store` is the server's own: the only process that opens the database.
+/// computes. Fnox runs in `fnox_dir`, the first repo's directory. `store` is the server's own: the only process that opens the database.
 async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, feed: surface::Feed) -> Result<Setup> {
     let Plan { opts, host_config, mut specs, adapter } = plan;
     let (opts, fnox) = resolve_opts(&opts, paths, fnox_dir)?;
     let opts = &opts;
     let (harnesses, providers) = (harnesses(), providers());
     let mut harness_secrets = HarnessSecrets::new();
-    if let (Some(token), CLAUDE_CODE) = (&opts.claude_oauth_token, adapter.as_str()) {
-        harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+    if let Some(token) = &opts.claude_oauth_token {
+        if adapter == CLAUDE_CODE {
+            harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+        } else {
+            tracing::warn!(harness = %adapter, "a Claude subscription token is set but this harness can't use it; ignoring it");
+        }
     }
+    let baselines: Vec<_> = specs.iter().map(|spec| started_baseline(&spec.config)).collect();
     for spec in &mut specs {
         if !harness_secrets.is_empty() {
             tracing::warn!(repo = %spec.slug(), harness = %adapter, "subscription mode: sandboxes hold the harness's credential and can reach its API");
@@ -355,7 +385,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
 
     let host = Host::new(&host_config);
     let mut repos = Vec::new();
-    for spec in specs {
+    for (spec, started) in specs.into_iter().zip(baselines) {
         let slug = spec.slug();
         let repos::RepoSpec { config_path, remote, config, .. } = spec;
         let (_, provider_name) = config.plugins().ok_or(Error::NoWorkerProfile)?;
@@ -369,6 +399,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
                 provider: provider(target.model_endpoint(&opts.model_endpoint).to_string()),
             })
             .collect();
+        let warned = std::sync::Mutex::new(None::<FactoryConfig>);
         let mut factory = Factory::with_targets(config, placed, tracker.clone(), host.clone())
             .with_spend_file(paths.data_dir.join("factory").join(format!("spend-{}.json", slug.replace('/', "-"))));
         factory = factory.with_merge_mode_source(Box::new(move || {
@@ -377,7 +408,14 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
                 let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
                 let config =
                     FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
-                Ok(config.merge.mode)
+                let mode = config.merge.mode;
+                if changed_without_restart(&started, config, &mut warned.lock().unwrap()) {
+                    tracing::warn!(
+                        path = %config_path.display(),
+                        "the factory settings changed in the file, but only [factory.merge] mode is re-read live; restart the server to apply them"
+                    );
+                }
+                Ok(mode)
             };
             read().map_err(|e| e.to_string())
         }));
@@ -411,6 +449,7 @@ async fn run_repo(
     poll: Duration,
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
+    feed: surface::Feed,
 ) -> bool {
     let wake = Arc::new(Notify::new());
     let project = entry.factory.config.repo.project.clone();
@@ -422,6 +461,7 @@ async fn run_repo(
         Ok(()) => false,
         Err(e) => {
             tracing::error!(error = %e, "this repo's loop stopped; the other repos carry on");
+            feed.set_stopped(&entry.slug, e.to_string());
             true
         }
     }
@@ -469,20 +509,12 @@ fn compute(
     match config {
         ComputeConfig::Sprites => {
             let token = opts.sprites_token.clone().ok_or(Error::NoSpritesToken)?;
-            Ok((Arc::new(SpritesCompute::new(token).map_err(Error::backend)?), trailhead_compute_sprites::target()))
+            trailhead_compute_sprites::build(token).map_err(Error::backend)
         }
         #[cfg(feature = "docker")]
-        ComputeConfig::Docker { image, network, runtime, memory_mib } => {
-            use trailhead_compute_docker::{DockerCompute, DockerConfig};
+        ComputeConfig::Docker { .. } => {
+            use trailhead_compute_docker::DockerConfig;
             let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), binary);
-            if let Some(image) = image {
-                docker.image = image.clone();
-            }
-            if let Some(network) = network {
-                docker.network = network.clone();
-            }
-            docker.runtime = runtime.clone();
-            docker.memory_bytes = memory_mib.map(|m| m * 1024 * 1024);
             docker.connections = gateway_connections(login::github_writer_token(fnox, &paths.creds())?);
             if docker.connections.is_empty() {
                 tracing::warn!(
@@ -494,9 +526,7 @@ fn compute(
                     "no Claude subscription token: Docker sandboxes have no model access until the gateway holds a credential for it"
                 );
             }
-            let compute = if read_only { DockerCompute::read_only(docker) } else { DockerCompute::new(docker) }
-                .map_err(Error::backend)?;
-            Ok((Arc::new(compute), trailhead_compute_docker::target()))
+            trailhead_compute_docker::build(config, docker, read_only).map_err(Error::backend)
         }
         #[cfg(not(feature = "docker"))]
         ComputeConfig::Docker { .. } => Err(Error::DockerNotBuilt),
@@ -550,8 +580,7 @@ fn check_result(failed: usize) -> Result<()> {
 pub async fn check(run: &RunOpts) -> Result<()> {
     let paths = Paths::from_env().ok_or(Error::NoDirs)?;
     let plan = plan(run, read_host_config(&paths)?)?;
-    let cwd = std::env::current_dir().map_err(Error::backend)?;
-    let (opts, fnox) = resolve_opts(&plan.opts, &paths, &cwd)?;
+    let (opts, fnox) = resolve_opts(&plan.opts, &paths, &plan.specs[0].dir)?;
     let tracker = ops::api_tracker(&opts, &paths)?;
     let mut failed = 0;
     for spec in &plan.specs {
@@ -609,19 +638,36 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     check_result(failed)
 }
 
+/// Logs a repo loop that panicked and marks it stopped on its status board, since the loop never got to say so itself.
+fn loop_panicked(
+    e: &tokio::task::JoinError,
+    boards: &std::collections::HashMap<tokio::task::Id, (String, Arc<trailhead_control::StatusBoard>)>,
+) {
+    let repo = boards.get(&e.id()).map(|(slug, board)| {
+        board.control(trailhead_factory::ControlState::Stopped);
+        slug.as_str()
+    });
+    tracing::error!(error = %e, ?repo, "a repo's loop panicked; the other repos carry on");
+}
+
 /// Runs every repo's loop until `drain` lets the runs finish or `cancel` stops them.
 async fn run_loops(
     setup: Setup,
     poll: Duration,
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
+    feed: surface::Feed,
 ) -> Result<()> {
     let Setup { repos, tunnel, store, ctx } = setup;
     let mut loops = tokio::task::JoinSet::new();
+    let mut boards = std::collections::HashMap::new();
     for entry in repos {
         let span = tracing::info_span!("repo", repo = %entry.slug);
         let (store, ctx, drain, cancel) = (store.clone(), ctx.clone(), drain.clone(), cancel.clone());
-        loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel).instrument(span));
+        let board = entry.factory.status().clone();
+        let slug = entry.slug.clone();
+        let id = loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel, feed.clone()).instrument(span)).id();
+        boards.insert(id, (slug, board));
     }
     let mut failed = 0;
     while let Some(joined) = loops.join_next().await {
@@ -630,7 +676,7 @@ async fn run_loops(
             Ok(true) => failed += 1,
             Err(e) => {
                 failed += 1;
-                tracing::error!(error = %e, "a repo's loop panicked; the other repos carry on");
+                loop_panicked(&e, &boards);
             }
         }
     }
@@ -743,7 +789,7 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
             }
             wait = (wait * 2).min(RETRY_MAX);
         };
-        if let Err(e) = run_loops(setup, poll, drain, cancel).await {
+        if let Err(e) = run_loops(setup, poll, drain, cancel, shared.clone()).await {
             tracing::error!(error = %e, "the control plane stopped; the server keeps serving");
         }
         shared.set_state(FactoryState::Stopped);
@@ -847,8 +893,8 @@ fn server_subscriber(
 pub enum Command {
     /// Report what the factory can see (queued tasks via the server, the compute, its endpoint), without running anything.
     Check(RunOpts),
-    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; asks the server.
-    Status(Opts),
+    /// Show the sandbox pool, what is running and how queued tasks have gone (the latest finished ones; `--all` for every one). Read-only; asks the server.
+    Status(ops::StatusOpts),
     /// Print the daemon's service log from a task's sandbox.
     Logs(ops::LogsOpts),
     /// Let a UI (Lookout) connect: add its endpoint id to the allowlist. Takes effect on a running control plane at once.
@@ -916,6 +962,53 @@ impl trailhead_wire::ui::LogFeed for LogsFeed {
 #[cfg(test)]
 mod tests {
     use super::check_result;
+
+    #[test]
+    fn a_changed_setting_other_than_merge_mode_warns_once() {
+        use trailhead_factory::FactoryConfig;
+        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+        let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
+        let base = parse("");
+        let started = super::started_baseline(&base);
+        let mut warned = None;
+        // A mode change is applied live, so it isn't a reason to restart.
+        assert!(!super::changed_without_restart(&started, parse("[merge]\nmode = \"on\""), &mut warned));
+        let edited = parse("[checks]\nfmt = \"cargo fmt\"");
+        assert!(super::changed_without_restart(&started, edited.clone(), &mut warned));
+        assert!(!super::changed_without_restart(&started, edited, &mut warned));
+        assert!(!super::changed_without_restart(&started, base, &mut warned));
+    }
+
+    #[test]
+    fn egress_added_at_runtime_is_not_a_change_to_the_file() {
+        use trailhead_factory::FactoryConfig;
+        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+        let mut config = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
+        let started = super::started_baseline(&config);
+        // What `wire` does in subscription mode, after the baseline is taken.
+        config.egress.always.push("api.anthropic.com".into());
+        let reread = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
+        assert!(!super::changed_without_restart(&started, reread, &mut None));
+        assert_ne!(started.egress, config.egress);
+    }
+
+    #[tokio::test]
+    async fn a_panicked_loop_is_marked_stopped_on_its_board() {
+        use trailhead_factory::ControlState;
+        let (up, other) = (trailhead_control::StatusBoard::new(), trailhead_control::StatusBoard::new());
+        up.control(ControlState::Up);
+        other.control(ControlState::Up);
+        let mut loops = tokio::task::JoinSet::new();
+        let mut boards = std::collections::HashMap::new();
+        let id = loops.spawn(async { panic!("boom") }).id();
+        boards.insert(id, ("o/n".to_string(), up.clone()));
+        let id = loops.spawn(std::future::pending::<()>()).id();
+        boards.insert(id, ("o/m".to_string(), other.clone()));
+        let e = loops.join_next().await.unwrap().unwrap_err();
+        super::loop_panicked(&e, &boards);
+        assert_eq!(up.snapshot().control, ControlState::Stopped);
+        assert_eq!(other.snapshot().control, ControlState::Up);
+    }
 
     /// Paths under `dir`, and a store in it.
     async fn instance(

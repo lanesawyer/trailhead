@@ -171,6 +171,11 @@ pub trait CodeHost: Send + Sync {
     /// The repo's CI on the PR's current head: its check runs and commit statuses, which are pending until every one
     /// has finished and at least one exists, and failed with the names of those that failed as soon as any has.
     async fn ci(&self, pr: &PrRef) -> Result<Ci>;
+    /// The repo's CI on `sha`, a head the PR has now or had earlier, read as `ci` reads the current one. Pending when
+    /// the host can't say, which is the default for a host that only reports the current head.
+    async fn ci_at(&self, _pr: &PrRef, _sha: &str) -> Result<CiState> {
+        Ok(CiState::Pending)
+    }
     /// The end of the log of each of the named failed checks on the PR's current head, as (check, log), for the
     /// checks the host keeps a log of; a check without one is left out. Best effort: a host with no logs says none.
     async fn ci_logs(&self, _pr: &PrRef, _checks: &[String]) -> Result<Vec<(String, String)>> {

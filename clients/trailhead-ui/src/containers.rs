@@ -104,3 +104,21 @@ pub fn dropdown_item(caption: impl Into<String>) -> impl Scene {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panel_has_room_for_a_scrollbar_in_its_padding() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let id = app.world_mut().commands().spawn_scene(panel()).id();
+        app.world_mut().flush();
+        app.update();
+        assert!(crate::has_scrollbar_room(app.world().get::<Node>(id).unwrap()));
+    }
+}

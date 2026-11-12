@@ -90,6 +90,8 @@ pub mod routes {
 pub enum Error {
     /// The request didn't complete, or the body wasn't readable.
     Transport(reqwest::Error),
+    /// The server answered 2xx but the body didn't deserialize: a schema mismatch between client and server, not a network failure.
+    Decode { status: u16, source: reqwest::Error },
     /// The server answered with an error: its HTTP status and the stable code and message.
     Api { status: u16, error: ApiError },
 }
@@ -99,13 +101,13 @@ impl Error {
     pub fn code(&self) -> Option<&str> {
         match self {
             Error::Api { error, .. } => Some(&error.code),
-            Error::Transport(_) => None,
+            Error::Transport(_) | Error::Decode { .. } => None,
         }
     }
 
     pub fn status(&self) -> Option<u16> {
         match self {
-            Error::Api { status, .. } => Some(*status),
+            Error::Api { status, .. } | Error::Decode { status, .. } => Some(*status),
             Error::Transport(_) => None,
         }
     }
@@ -115,12 +117,20 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Transport(e) => write!(f, "{e}"),
+            Error::Decode { status, source } => write!(f, "{status} response body didn't decode: {source}"),
             Error::Api { status, error } => write!(f, "{status} {error}"),
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Transport(e) | Error::Decode { source: e, .. } => Some(e),
+            Error::Api { .. } => None,
+        }
+    }
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -351,6 +361,11 @@ impl Client {
         Client { http, base: base.into().trim_end_matches('/').to_string(), token: token.into(), reconnect: None }
     }
 
+    /// This client's connection pool and server, acting with `token` instead. Any reconnect hook is kept.
+    pub fn with_token(&self, token: impl Into<String>) -> Client {
+        Client { token: token.into(), ..self.clone() }
+    }
+
     /// Calls `reconnect` when a request can't connect, and retries the request once if it returns true.
     pub fn with_reconnect(mut self, reconnect: Reconnect) -> Client {
         self.reconnect = Some(reconnect);
@@ -384,7 +399,11 @@ impl Client {
         };
         let status = res.status();
         if status.is_success() {
-            return res.json().await.map_err(Error::Transport);
+            return match res.json().await {
+                Ok(v) => Ok(v),
+                Err(e) if e.is_decode() => Err(Error::Decode { status: status.as_u16(), source: e }),
+                Err(e) => Err(Error::Transport(e)),
+            };
         }
         let body: Value = res.json().await.unwrap_or(Value::Null);
         Err(Error::Api { status: status.as_u16(), error: ApiError::from_body(&body) })
@@ -473,6 +492,48 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    /// Serves one canned response on a local port and returns its base URL.
+    fn serve_once(response: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn an_undecodable_success_body_is_a_decode_error_not_transport() {
+        let base = serve_once(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 7\r\nconnection: close\r\n\r\n{\"x\":1}",
+        );
+        let err = Client::new(base, "t").ready("TRAIL", 1).await.unwrap_err();
+        assert!(matches!(err, Error::Decode { status: 200, .. }), "{err}");
+        assert_eq!(err.status(), Some(200));
+        assert!(std::error::Error::source(&err).is_some_and(|s| s.is::<reqwest::Error>()));
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_stays_transport() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let err = Client::new(format!("http://127.0.0.1:{port}"), "t").ready("TRAIL", 1).await.unwrap_err();
+        assert!(matches!(err, Error::Transport(_)), "{err}");
+        assert!(std::error::Error::source(&err).is_some_and(|s| s.is::<reqwest::Error>()));
+    }
+
+    #[test]
+    fn with_token_swaps_only_the_token() {
+        let client = Client::new("http://127.0.0.1:1/", "a").with_reconnect(Arc::new(|| Box::pin(async { false })));
+        let other = client.with_token("b");
+        assert_eq!((other.base.as_str(), other.token.as_str()), ("http://127.0.0.1:1", "b"));
+        assert_eq!(client.token, "a");
+        assert!(other.reconnect.is_some());
+    }
 
     #[test]
     fn a_call_names_its_endpoint_and_body() {

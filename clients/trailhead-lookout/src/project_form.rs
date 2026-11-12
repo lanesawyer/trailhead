@@ -387,7 +387,7 @@ fn finish(
             form.close();
         } else {
             form.saving = false;
-            form.message = describe(&d.outcome);
+            form.message = describe(&d.outcome, "project");
         }
     }
 }

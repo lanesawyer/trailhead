@@ -1,3 +1,5 @@
+//! The task modal: the inspector for a task, opened over the board and closed to clear the selection.
+
 use super::*;
 
 /// The task modal: the inspector for a task, in the middle of the window, laid out as a main column and a sidebar
@@ -284,6 +286,23 @@ pub(super) fn on_open_project(
     }
 }
 
+/// The "Logs for this task" button in the modal: closes it and opens the settings Logs tab on the task.
+#[derive(Component)]
+pub(super) struct OpensLogs(pub(super) String);
+
+/// The logs button was pressed: close the modal and show the task's log lines.
+pub(super) fn on_open_logs(
+    activate: On<Activate>,
+    buttons: Query<&OpensLogs>,
+    mut selection: ResMut<Selection>,
+    mut commands: Commands,
+) {
+    if let Ok(OpensLogs(key)) = buttons.get(activate.entity) {
+        selection.0 = None;
+        commands.trigger(OpenLogs(key.clone()));
+    }
+}
+
 /// A subtask's or the parent's row was pressed: show that task instead.
 pub(super) fn on_open_task(activate: On<Activate>, rows: Query<&OpensTask>, mut selection: ResMut<Selection>) {
     if let Ok(OpensTask(id)) = rows.get(activate.entity) {
@@ -383,6 +402,20 @@ mod tests {
         assert!(texts(&mut app).iter().any(|t| t == "do it"));
     }
 
+    #[test]
+    fn the_logs_button_closes_the_modal_and_opens_the_logs_of_the_task() {
+        let mut app = app();
+        #[derive(Resource, Default)]
+        struct Opened(Vec<String>);
+        app.init_resource::<Opened>()
+            .add_observer(|open: On<OpenLogs>, mut opened: ResMut<Opened>| opened.0.push(open.0.clone()));
+        let button = app.world_mut().query_filtered::<Entity, With<OpensLogs>>().single(app.world()).unwrap();
+        app.world_mut().trigger(Activate { entity: button });
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Opened>().0, ["TRAIL-7"]);
+        assert_eq!(app.world().resource::<Selection>().0, None);
+        assert_eq!(modal_count(&mut app), 0);
+    }
     #[test]
     fn the_project_closes_the_modal_and_opens_its_page() {
         let mut app = app();
@@ -485,6 +518,26 @@ mod tests {
         let acts =
             app.world_mut().query::<&Shown>().iter(app.world()).filter(|s| matches!(s.0, Block::Act { .. })).count();
         assert_eq!(acts, 0);
+    }
+
+    #[test]
+    fn a_read_only_sidebar_shows_the_grade_as_a_badge_not_text() {
+        let mut app = app();
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 302, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
+            "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_review", "priority": 1,
+                      "grade": 2, "version": 5})),
+        })));
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Offline);
+        settle(&mut app);
+        let badges: Vec<Grade> = app
+            .world_mut()
+            .query::<&Shown>()
+            .iter(app.world())
+            .filter_map(|s| if let Block::GradeBadge(g) = s.0 { Some(g) } else { None })
+            .collect();
+        assert!(badges.contains(&Grade::new(2).unwrap()), "{badges:?}");
+        assert!(!texts(&mut app).iter().any(|t| t.starts_with("Grade:")));
     }
 
     fn arrow(app: &mut App, step: Step) -> Entity {
