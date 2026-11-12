@@ -792,6 +792,47 @@ mod tests {
     }
 
     #[test]
+    fn the_mergers_hold_is_drawn_in_warn_and_gone_once_cleared() {
+        use crate::factory::{FactoryStatus, RepoState};
+        use trailhead_factory::ControlState;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_resource::<FactoryStatus>()
+            .init_asset::<bevy::text::Font>()
+            .add_systems(Update, redraw);
+        app.world_mut().spawn(MapPanel);
+        app.insert_resource(TrailMap(world().model()));
+        let repo = RepoState {
+            control: ControlState::Up,
+            queue: Vec::new(),
+            last_error: None,
+            human_grades: Vec::new(),
+            holding: Some("#306 has auto-merge on but CI failed".into()),
+            usage: Vec::new(),
+            seq: 1,
+        };
+        app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), repo);
+        let line = "o/r: holding merges: #306 has auto-merge on but CI failed";
+        let hold_tones = |app: &mut App| {
+            let mut q = app.world_mut().query::<(&Text, &widgets::TextTone)>();
+            q.iter(app.world()).filter(|(t, _)| t.0 == line).map(|(_, tone)| tone.0.clone()).collect::<Vec<_>>()
+        };
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(hold_tones(&mut app), [token::STATUS_WARN]);
+
+        // Clearing the hold redraws the map without it, though nothing else changed.
+        app.world_mut().resource_mut::<FactoryStatus>().repos.get_mut("o/r").unwrap().holding = None;
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(hold_tones(&mut app).is_empty());
+    }
+
+    #[test]
     fn the_map_follows_the_mirrors() {
         use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate};
         use crate::mirror::MirrorPlugin;
