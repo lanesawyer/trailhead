@@ -116,15 +116,16 @@ fn local_scope(paths: &trailhead_server::Paths, local: bool, info: &client::Heal
     if local && client::is_ours(paths, info) { info.pid.and_then(client::server_unit) } else { None }
 }
 
-/// The health document for `status --json`, plus `scope` and `shares_app_scope` when the scope is known.
+/// The health document for `status --json`, plus `scope` and `shared_scope` when the scope is known.
 fn status_json(mut health: serde_json::Value, unit: Option<&str>) -> serde_json::Value {
     if let (Some(unit), Some(obj)) = (unit, health.as_object_mut()) {
         obj.insert("scope".into(), json!(unit));
-        obj.insert("shares_app_scope".into(), json!(client::is_app_scope(unit)));
+        obj.insert("shared_scope".into(), json!(client::is_shared_scope(unit)));
     }
     health
 }
 
+/// Replaces this process with the newly installed binary, same arguments, so the pid (and the scope the server runs
 /// in) stays.
 fn restart_onto_new_binary() -> Result<()> {
     use std::os::unix::process::CommandExt;
@@ -164,12 +165,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_json_adds_scope_and_app_scope_flag() {
+    fn status_json_adds_scope_and_shared_scope_flag() {
         let v = status_json(json!({ "pid": 1 }), Some("app-gnome-code-1.scope"));
         assert_eq!(v["scope"], "app-gnome-code-1.scope");
-        assert_eq!(v["shares_app_scope"], true);
+        assert_eq!(v["shared_scope"], true);
+        let v = status_json(json!({ "pid": 1 }), Some("vte-spawn-0a1b.scope"));
+        assert_eq!(v["shared_scope"], true);
         let v = status_json(json!({ "pid": 1 }), Some("trailhead-server-1.scope"));
-        assert_eq!(v["shares_app_scope"], false);
+        assert_eq!(v["shared_scope"], false);
         assert_eq!(status_json(json!({ "pid": 1 }), None), json!({ "pid": 1 }));
     }
 }
