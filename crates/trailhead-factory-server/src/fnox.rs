@@ -28,22 +28,24 @@ enum Names {
 pub struct Fnox {
     /// The program and the directory to run it in; `None` when fnox isn't used.
     run: Option<(String, PathBuf)>,
+    /// Whether a config fnox would read was found; when not, fnox is still run, but a failure means nothing is defined.
+    configured: bool,
     names: Mutex<Names>,
 }
 
 impl Fnox {
     /// Nothing defined: fnox isn't used.
     pub fn none() -> Self {
-        Fnox { run: None, names: Mutex::new(Names::NoBinary) }
+        Fnox { run: None, configured: false, names: Mutex::new(Names::NoBinary) }
     }
 
-    /// Looks names up with `program` run in `dir`. Nothing is defined when no config exists (`fnox.toml` or
-    /// `fnox.local.toml` in `dir` or above, or `global`). Runs nothing until [`Fnox::get`].
+    /// Looks names up with `program` run in `dir`, the directory of the repo whose config is loaded. Fnox is run
+    /// whenever it's installed, as its own discovery is the authority; `dir`, `global` and the environment are only
+    /// checked for a config it would read, to tell a failing fnox from one with nothing to read. Runs nothing until
+    /// [`Fnox::get`].
     pub fn new(program: &str, dir: &Path, global: Option<&Path>) -> Self {
-        if !has_config(dir, global) {
-            return Fnox::none();
-        }
-        Fnox { run: Some((program.to_string(), dir.to_path_buf())), names: Mutex::new(Names::Unread) }
+        let configured = has_config(dir, global);
+        Fnox { run: Some((program.to_string(), dir.to_path_buf())), configured, names: Mutex::new(Names::Unread) }
     }
 
     /// `Ok(None)` when `program` isn't installed; `Err` (naming fnox) when it runs and fails.
@@ -68,7 +70,17 @@ impl Fnox {
         };
         let mut names = self.names.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(*names, Names::Unread) {
-            *names = match Self::command(program, dir, &["list", "--complete"])? {
+            let listed = match Self::command(program, dir, &["list", "--complete"]) {
+                Err(e) if !self.configured => {
+                    tracing::debug!("fnox is on PATH but found no config from {}: {e}", dir.display());
+                    Ok(None)
+                }
+                listed => listed,
+            }?;
+            if !self.configured && listed.is_some() {
+                tracing::debug!("fnox is on PATH but no config was found from {}", dir.display());
+            }
+            *names = match listed {
                 None => Names::NoBinary,
                 Some(out) => Names::Defined(
                     String::from_utf8_lossy(&out.stdout)
@@ -107,9 +119,15 @@ pub fn global_config() -> Option<PathBuf> {
     Some(base.join("fnox").join("config.toml"))
 }
 
+/// Whether a config fnox would read exists: `FNOX_CONFIG`, the global config, or a config file in `dir` or above.
 fn has_config(dir: &Path, global: Option<&Path>) -> bool {
-    global.is_some_and(Path::is_file)
-        || dir.ancestors().any(|d| d.join("fnox.toml").is_file() || d.join("fnox.local.toml").is_file())
+    let mut names = vec!["fnox.toml".to_string(), ".fnox.toml".into(), "fnox.local.toml".into()];
+    if let Some(profile) = std::env::var("FNOX_PROFILE").ok().filter(|p| !p.is_empty()) {
+        names.push(format!("fnox.{profile}.toml"));
+    }
+    std::env::var_os("FNOX_CONFIG").is_some_and(|c| !c.is_empty())
+        || global.is_some_and(Path::is_file)
+        || dir.ancestors().any(|d| names.iter().any(|n| d.join(n).is_file()))
 }
 
 /// Tests that spawn a process, or write a script to spawn, take this: a fork briefly shares its parent's open files,
