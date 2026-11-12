@@ -8,7 +8,7 @@ use crate::buttons::ButtonKind;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 
-use crate::buttons::button_text;
+use crate::buttons::{button_text, tool_button};
 use crate::icons::{Icon, button_icon};
 use crate::spacing::space;
 
@@ -28,6 +28,16 @@ pub fn link_button(icon: Icon, text: impl Into<String>, url: impl Into<String>, 
             @caption: { bsn_list! {@button_icon(icon) -- @button_text(text)} }
         }
         Node { column_gap: { px(space::ICON_LABEL) } }
+        ExternalLink { url: { url } }
+        on(on_link_pressed)
+    }
+}
+
+/// A link drawn as an icon-only [`tool_button`], with `hint` under the pointer: for a row of tools, a card's say.
+pub fn link_tool_button(icon: Icon, hint: impl Into<String>, url: impl Into<String>, kind: ButtonKind) -> impl Scene {
+    let url = url.into();
+    bsn! {
+        @tool_button(icon, hint, kind)
         ExternalLink { url: { url } }
         on(on_link_pressed)
     }

@@ -47,7 +47,7 @@ pub struct ProjectMore(pub usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Slot {
-    Card(Card),
+    Card(Box<Card>),
     Empty,
     More(usize),
 }
@@ -152,7 +152,8 @@ fn sync_grid(
     }
     let Some(root) = root else { return };
     let (cards, hidden) = view.cards.split_at(shown.0.min(view.cards.len()));
-    let mut items: Vec<(String, Slot)> = cards.iter().map(|c| (c.id.clone(), Slot::Card(c.clone()))).collect();
+    let mut items: Vec<(String, Slot)> =
+        cards.iter().map(|c| (c.id.clone(), Slot::Card(Box::new(c.clone())))).collect();
     if view.cards.is_empty() {
         items.push(("empty".into(), Slot::Empty));
     }
@@ -163,13 +164,13 @@ fn sync_grid(
         &mut commands,
         &[(root, items)],
         |commands, _, slot| match slot {
-            Slot::Card(card) => commands.spawn(BoardCard(card.clone())).id(),
+            Slot::Card(card) => commands.spawn(BoardCard((**card).clone())).id(),
             Slot::Empty => commands.spawn(ProjectEmpty).id(),
             Slot::More(next) => commands.spawn(ProjectMore(*next)).id(),
         },
         |commands, entity, slot| match slot {
             Slot::Card(card) => {
-                commands.entity(entity).insert(BoardCard(card.clone()));
+                commands.entity(entity).insert(BoardCard((**card).clone()));
             }
             Slot::More(next) => {
                 commands.entity(entity).insert(ProjectMore(*next));
