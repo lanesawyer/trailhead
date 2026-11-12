@@ -26,7 +26,7 @@ pub(super) enum Block {
     /// An open question, with its answer and resolve buttons and what became of the last resolve.
     Question { key: String, id: String, body: String, live: bool, note: Option<Control> },
     /// The grade dropdown (live only); the offline grade is a [`Block::GradeBadge`].
-    Grade { grade: Option<Grade>, note: Option<Control> },
+    Grade { grade: Option<Grade>, human: Vec<Grade>, note: Option<Control> },
     /// The status dropdown: the task's own status first.
     Move { statuses: Vec<Status>, note: Option<Control> },
     /// A button for `action` (a revert has its window's dropdown, `window` hours).
@@ -100,6 +100,7 @@ pub(super) fn layout(
     live: bool,
     offline: &str,
     window: i64,
+    human: &[Grade],
     note: &dyn Fn(&Action) -> Option<Control>,
 ) -> Plan {
     let mut plan: Plan = Vec::new();
@@ -133,7 +134,10 @@ pub(super) fn layout(
         if key == "status" && view.status.is_some() {
             if live {
                 let note = note(&Action::Grade(None));
-                items.push(("status/grade".to_string(), Block::Grade { grade: view.grade, note }));
+                items.push((
+                    "status/grade".to_string(),
+                    Block::Grade { grade: view.grade, human: human.to_vec(), note },
+                ));
             } else {
                 let grade = view.grade.map_or_else(|| "none".to_string(), |g| g.to_string());
                 items.push((
@@ -448,7 +452,6 @@ pub(super) fn spawn_block(
     controls: &mut Controls,
     subject: &Subject,
     block: &Block,
-    human: &[Grade],
 ) -> Entity {
     let item = match block {
         Block::Text { text: words, size, tone } => {
@@ -500,7 +503,7 @@ pub(super) fn spawn_block(
             });
             item
         }
-        Block::Grade { grade, note } => {
+        Block::Grade { grade, human, note } => {
             let line = commands.spawn_scene(bsn! { @row() }).id();
             commands.spawn_scene(text_dim("Grade", size::SECONDARY)).insert(ChildOf(line));
             let source = control(controls, commands, subject, &Action::Grade(None));
@@ -804,9 +807,9 @@ pub(super) fn dress(
                     dress_note(&mut commands, &mut texts, &mut nodes, n, note);
                 }
             }
-            Block::Grade { grade, note } => {
+            Block::Grade { grade, human, note } => {
                 if let Some(picker) = parts.select
-                    && !edit.set(picker, &grade_options(&factory.human_grades()), grade_index(*grade))
+                    && !edit.set(picker, &grade_options(human), grade_index(*grade))
                 {
                     again.push(entity);
                 }
