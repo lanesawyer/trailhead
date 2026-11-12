@@ -1616,7 +1616,7 @@ async fn blocks_and_duplicates_sort_by_key_number() {
         env.store.add_dependency(&env.human, &root.key, key).await.unwrap();
         let cancel = TaskPatch {
             status: Some(Status::Cancelled),
-            duplicate_of: Some(Some(root.key.0.clone())),
+            duplicate_of: Some(Some(root.key.clone())),
             ..Default::default()
         };
         env.store.update_task(&env.human, key, cancel, None).await.unwrap();
