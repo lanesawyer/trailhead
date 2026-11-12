@@ -7,7 +7,9 @@
 //! A control sends [`Submit`] and reads [`CommandDone`]. The [`Outbox`] keeps every command until it has an answer.
 //! Commands go out only while the connection is `Live`. One in flight when the link drops goes back in the queue and
 //! is sent again, with the same key, once `Live` returns, so a retry the server already applied gets that answer
-//! back instead of running twice. After [`MAX_ATTEMPTS`] it is reported failed rather than tried forever.
+//! back instead of running twice. A `RateLimited` answer is retried the same way, with the same key, once its
+//! `Retry-After` has passed (capped at [`MAX_RETRY_AFTER`]). After [`MAX_ATTEMPTS`] it is reported failed (a rate
+//! limit is handed back as `RateLimited`) rather than tried forever.
 
 use std::time::{Duration, Instant};
 
@@ -20,6 +22,9 @@ use crate::net::NetCommand;
 
 /// How many times a command is sent before it is reported failed.
 pub const MAX_ATTEMPTS: u32 = 5;
+
+/// The longest the outbox waits on a `Retry-After` before sending again.
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// The net thread's answer when a request reached it before it was `Live`. Nothing was sent, so it isn't a failed
 /// attempt and doesn't count toward [`MAX_ATTEMPTS`].
@@ -197,6 +202,13 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
     for reply in replies.read() {
         let Some(at) = outbox.pending.iter().position(|p| p.id == reply.id) else { continue };
         match &reply.result {
+            // Rate limited: wait out `Retry-After`, then send again with the same key, until attempts run out.
+            Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].attempts < MAX_ATTEMPTS => {
+                let p = &mut outbox.pending[at];
+                let wait = retry_after.map_or(backoff * p.attempts, |after| after.min(MAX_RETRY_AFTER));
+                p.stage = Stage::Queued;
+                p.not_before = Some(Instant::now() + wait);
+            }
             // An answer to any attempt settles it: the key means they are all the same request.
             Ok(outcome) => {
                 let p = outbox.pending.remove(at);

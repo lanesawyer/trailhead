@@ -116,6 +116,13 @@ async fn out_of_scope_blockers_are_redacted() {
     let detail = env.store.task_detail(&bot, &auth.key).await.unwrap();
     assert_eq!(detail.blocked_by, vec!["(out of scope)"]);
     assert!(env.store.blockers(&bot, &auth.key).await.unwrap().is_empty());
+    // The list leaves the blocker out but counts it, so a client can still show the task as blocked.
+    let listed = env.store.blockers_of(&bot, &[auth.id]).await.unwrap();
+    assert!(listed.visible.is_empty());
+    assert_eq!(listed.hidden.get(&auth.id), Some(&1));
+    let listed = env.store.blockers_of(&env.human, &[auth.id]).await.unwrap();
+    assert_eq!(listed.visible.get(&auth.id).map(Vec::len), Some(1));
+    assert!(listed.hidden.is_empty());
     match env.store.claim(&bot, &auth.key, None).await {
         Err(Error::BlockedBy(keys)) => assert_eq!(keys, vec![TaskKey::from("(out of scope)")]),
         other => panic!("{other:?}"),

@@ -57,6 +57,8 @@ pub struct ListedTask {
     /// With `include=blocked_by`: the ids of every task blocking this one, finished or not (empty if none).
     #[schema(nullable = false)]
     blocked_by: Option<Vec<uuid::Uuid>>,
+    /// With `include=blocked_by`: how many unfinished blockers outside the token's scope this task has, which `blocked_by` leaves out.
+    blocked_by_hidden: Option<u32>,
 }
 
 /// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.

@@ -109,7 +109,8 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
     if let Value::Array(items) = &mut out {
         for (item, task) in items.iter_mut().zip(&tasks) {
             if let Some(b) = &mut blockers {
-                item["blocked_by"] = json!(b.remove(&task.id).unwrap_or_default());
+                item["blocked_by"] = json!(b.visible.remove(&task.id).unwrap_or_default());
+                item["blocked_by_hidden"] = json!(b.hidden.remove(&task.id).unwrap_or(0));
             }
             if let Some(c) = &mut claims {
                 item["claim"] = json!(c.remove(&task.id));
