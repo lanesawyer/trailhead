@@ -2,6 +2,7 @@
 //! endpoint, dials the control plane's `trailhead/ui/0`, serves the forwarded API on a local port, signs in, and
 //! reports to Bevy over channels. Bevy sends [`NetCommand`]s and reads [`NetEvent`]s; neither side blocks the other.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -124,6 +125,9 @@ pub enum NetEvent {
     /// Lookout's own endpoint id, for `trailhead factory allow`.
     Endpoint(String),
     State(Link, Option<Reason>),
+    /// The control plane the net thread is holding, as its parsed endpoint id; `None` once it has none (a failed
+    /// Connect, or a disconnect). Sent on every Connect that parses and opens, so it never depends on a state change.
+    Dialed(Option<String>),
     /// Signed in: where the forwarded API listens and who the user is. The token is the user's.
     Access(ApiAccess),
     /// The snapshot and then each event, for the mirror.
@@ -270,6 +274,14 @@ impl NetHandle {
         let _ = self.commands.send(command);
     }
 
+    /// A handle with no thread, whose events the test sends itself.
+    #[cfg(test)]
+    pub fn detached() -> (NetHandle, mpsc::Sender<NetEvent>) {
+        let (commands, _) = tokio_mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel();
+        (NetHandle { commands, events: Mutex::new(rx), thread: None }, tx)
+    }
+
     /// Everything the net thread has reported since the last call.
     pub fn drain(&self) -> Vec<NetEvent> {
         let rx = self.events.lock().expect("net events lock");
@@ -292,8 +304,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Target {
     id: EndpointId,
-    /// Held so replacing or dropping the target closes its tunnel.
-    api: UiTunnel,
+    /// Where the API answers: the tunnel's loopback address.
+    api: SocketAddr,
+    /// Held so replacing or dropping the target closes its tunnel (`None` for a test's stub).
+    _tunnel: Option<UiTunnel>,
 }
 
 /// The default [`NetConfig::status_retry`].
@@ -621,7 +635,7 @@ impl Net {
         };
         if self.target.as_ref().is_none_or(|t| t.id != id) {
             match open_ui_tunnel(self.endpoint.clone(), id).await {
-                Ok(api) => self.target = Some(Target { id, api }),
+                Ok(tunnel) => self.target = Some(Target { id, api: tunnel.addr(), _tunnel: Some(tunnel) }),
                 Err(e) => {
                     self.drop_target();
                     return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string())));
@@ -634,6 +648,7 @@ impl Net {
             self.stop_sync();
             self.resume.clear();
         }
+        let _ = self.events.send(NetEvent::Dialed(Some(id.to_string())));
         if std::fs::create_dir_all(&self.config.config_dir).is_ok()
             && let Err(e) = std::fs::write(self.config.target_file(), format!("{id}\n"))
         {
@@ -678,6 +693,7 @@ impl Net {
     /// Forgets the control plane a failed Connect was meant to replace, so the probe doesn't go back to it and bury
     /// the error.
     fn drop_target(&mut self) {
+        let _ = self.events.send(NetEvent::Dialed(None));
         self.target = None;
         self.stop_status();
         self.stop_sync();
@@ -695,7 +711,7 @@ impl Net {
             }
             return;
         };
-        let (id, tunnel) = (target.id, format!("http://{}", target.api.addr()));
+        let (id, tunnel) = (target.id, format!("http://{}", target.api));
         // Signed in: live, or still loading the board or reconnecting its feed.
         let live =
             matches!(self.state, Some((Link::Live, _) | (Link::Syncing, Some(Reason::Loading | Reason::Reconnecting))))
@@ -812,7 +828,7 @@ impl Net {
 
     /// Where the Trailhead API is reached right now.
     fn api_base(&self) -> Option<String> {
-        self.target.as_ref().map(|t| format!("http://{}", t.api.addr()))
+        self.target.as_ref().map(|t| format!("http://{}", t.api))
     }
 
     /// Follows the control plane's status stream on its own connection, and says when it can't be reached.
@@ -1066,7 +1082,7 @@ mod tests {
         let (reports, _) = tokio_mpsc::unbounded_channel();
         let net = Net {
             probe_backoff: Backoff::new(config.status_retry),
-            target: Some(Target { id: endpoint.id(), api }),
+            target: Some(Target { id: endpoint.id(), api, _tunnel: None }),
             config,
             endpoint,
             http: reqwest::Client::new(),
