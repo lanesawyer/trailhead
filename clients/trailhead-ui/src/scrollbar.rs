@@ -172,11 +172,20 @@ mod tests {
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>();
         let target = app.world_mut().spawn_empty().id();
-        let bar = app.world_mut().commands().spawn_scene(scrollbar(target, ControlOrientation::Horizontal)).id();
-        app.world_mut().flush();
-        app.update();
-        let bar = app.world().get::<Scrollbar>(bar).expect("the scene is a scrollbar");
-        assert_eq!((bar.target, bar.orientation), (target, ControlOrientation::Horizontal));
+        for orientation in [ControlOrientation::Vertical, ControlOrientation::Horizontal] {
+            let bar = app.world_mut().commands().spawn_scene(scrollbar(target, orientation)).id();
+            app.world_mut().flush();
+            app.update();
+            let scrollbar = app.world().get::<Scrollbar>(bar).expect("the scene is a scrollbar");
+            assert_eq!((scrollbar.target, scrollbar.orientation), (target, orientation));
+            // The placement patch survives the feathers scrollbar's own node.
+            let node = app.world().get::<Node>(bar).expect("the scene has a node");
+            let want = placement(orientation);
+            assert_eq!(node.display, Display::None);
+            assert_eq!(node.position_type, PositionType::Absolute);
+            assert_eq!((node.left, node.right, node.top, node.bottom), (want.left, want.right, want.top, want.bottom));
+            assert_eq!((node.width, node.height), (want.width, want.height));
+        }
     }
 
     #[test]

@@ -1,3 +1,5 @@
+//! The task modal: the inspector for a task, opened over the board and closed to clear the selection.
+
 use super::*;
 
 /// The task modal: the inspector for a task, in the middle of the window, laid out as a main column and a sidebar

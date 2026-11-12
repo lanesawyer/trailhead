@@ -383,11 +383,7 @@ mod tests {
     fn deleted_entities_are_despawned_and_undo_restores_them() {
         let mut app = app();
         send(&mut app, [snapshot(10, 1, "a"), comment_event(11, false, false)]);
-        let after = task_json(json!({"id": "t1", "title": "a", "version": 2, "deleted_at": "2026-01-01T00:00:00Z"}));
-        let gone = SyncItem::Event(
-            json!({"id": 12, "entity": "task", "entity_id": sid("t1"), "kind": "task.deleted", "after": after}),
-        );
-        send(&mut app, [gone]);
+        send(&mut app, [deleted_task_event(12, 2)]);
         assert!(data_of::<Task>(&mut app).is_empty());
         assert!(data_of::<Comment>(&mut app).is_empty(), "the task's comments go with it");
         send(&mut app, [task_event(14, 3, "back"), comment_event(15, false, false)]);

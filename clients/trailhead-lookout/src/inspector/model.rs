@@ -1,3 +1,5 @@
+//! The inspector's data: what a view holds, the actions it offers, and building it from fetched facts.
+
 use super::*;
 
 /// One thing the inspector can do.
@@ -52,6 +54,8 @@ pub struct Question {
 pub struct PrPanel {
     pub url: String,
     pub number: u64,
+    /// `owner/name#12`, the caption of the link that opens it.
+    pub label: String,
     /// `open`, or `merged by a person` / `merged by the merger` with the commit.
     pub state: String,
     pub grade: Option<Grade>,
@@ -172,6 +176,7 @@ pub fn pr_panel(run: &RunUpdate) -> Option<PrPanel> {
     Some(PrPanel {
         url: pr.url.clone(),
         number: pr.number,
+        label: format!("{}/{}#{}", pr.repo.owner, pr.repo.name, pr.number),
         state,
         grade: run.grade.as_ref().map(|g| g.grade).or(decision.map(|d| d.grade)),
         passed: gates(|d| &d.passed),
